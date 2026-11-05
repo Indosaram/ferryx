@@ -85,6 +85,19 @@ impl PromptChangeFilter {
     }
 }
 
+/// The backend session a history frame names, for the same exposure check as prompt pushes.
+///
+/// A frame that is not the contract object has no session. Callers that must hide machine-only
+/// sessions treat that as not exposed.
+pub fn reference_history_frame_session(frame: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(frame).ok()?;
+    let session = value.get("target")?.get("backendSessionId")?.as_str()?;
+    if session.is_empty() {
+        return None;
+    }
+    Some(session.to_string())
+}
+
 /// How many observations the log retains. Older cursors come back as a gap.
 pub const AGENT_EVENT_RETAIN: usize = 256;
 
@@ -269,6 +282,8 @@ pub struct AgentEventBus {
     log: Mutex<Log>,
     stamp_sink: Mutex<Option<StampSink>>,
     tx: broadcast::Sender<AgentObservation>,
+    /// Advisory `referenceHistoryChanged` frames. A relay forwards these bytes opaquely.
+    history_tx: broadcast::Sender<String>,
     machine_events: Mutex<Option<Arc<crate::remote::machine_events::MachineEvents>>>,
     local_sequence: Mutex<u64>,
     inputs: Mutex<InputLedger>,
@@ -319,6 +334,7 @@ impl AgentEventBus {
     fn with_clock(capacity: usize, now_ms: Box<dyn Fn() -> i64 + Send + Sync>) -> Self {
         let capacity = capacity.max(1);
         let (tx, _) = broadcast::channel(capacity);
+        let (history_tx, _) = broadcast::channel(64);
         Self {
             log: Mutex::new(Log {
                 revision: 0,
@@ -330,6 +346,7 @@ impl AgentEventBus {
             }),
             stamp_sink: Mutex::new(None),
             tx,
+            history_tx,
             machine_events: Mutex::new(None),
             local_sequence: Mutex::new(0),
             inputs: Mutex::new(InputLedger::default()),
@@ -354,6 +371,23 @@ impl AgentEventBus {
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentObservation> {
         self.tx.subscribe()
+    }
+
+    /// Subscribe before a history frame is published. A lagged receiver only loses hints.
+    pub fn subscribe_history(&self) -> broadcast::Receiver<String> {
+        self.history_tx.subscribe()
+    }
+
+    /// Emit the contract frame unchanged. No path, content, or model is added here, and a
+    /// relay is not asked to interpret it: both event sockets send these bytes as-is.
+    pub fn publish_reference_history(
+        &self,
+        event: &crate::remote::reference_chat::types::ReferenceHistoryEvent,
+    ) {
+        let Ok(frame) = serde_json::to_string(event) else {
+            return;
+        };
+        let _ = self.history_tx.send(frame);
     }
 
     pub fn latest(&self, session_id: &str) -> Option<AgentObservation> {
@@ -1197,5 +1231,37 @@ mod tests {
         assert_eq!(batch.len(), 2);
         assert_eq!(batch["a"].screen_revision.as_deref(), Some("r2"));
         assert!(next_stamp_batch(&updates, Duration::from_secs(5)).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_that_subscribed_first_receives_one_history_frame_without_a_path() {
+        use crate::remote::reference_chat::types::{ReferenceHistoryEvent, ReferenceTargetRef};
+        use crate::scoped_contracts::{Epoch, TargetRef};
+
+        let bus = AgentEventBus::new(4);
+        let mut frames = bus.subscribe_history();
+        let event = ReferenceHistoryEvent::ReferenceHistoryChanged {
+            target: ReferenceTargetRef::without_provider_session(TargetRef {
+                host_id: "host".into(),
+                owner_id: "owner".into(),
+                epoch: Epoch(3),
+                backend_session_id: "sess".into(),
+            }),
+            change_seq: "7".into(),
+        };
+        bus.publish_reference_history(&event);
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
+            .await
+            .expect("bounded")
+            .expect("frame");
+        assert_eq!(frame, serde_json::to_string(&event).expect("opaque frame"));
+        assert!(!frame.contains("path"));
+        assert!(!frame.contains("/tmp"));
+        assert_eq!(reference_history_frame_session(&frame).as_deref(), Some("sess"));
+        let value: serde_json::Value = serde_json::from_str(&frame).expect("json");
+        assert_eq!(value["type"], "referenceHistoryChanged");
+        assert_eq!(value["changeSeq"], "7");
+        assert!(value.get("path").is_none());
+        assert!(value["target"].get("model").is_none());
     }
 }

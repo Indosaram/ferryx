@@ -168,6 +168,17 @@ type DeleteWorktreeRequest = WorktreeStatusRequest & {
   deleteBranch?: boolean | null;
 };
 
+/** Host-built continuation. The client names a mode; it never names argv. */
+export type AgentContinueMode = "fork" | "resume";
+
+/** The only continuation startup DTO. Reference-chat aliases this type; it does not redefine it. */
+export type AgentContinueStartup = {
+  readonly kind: "agentContinue";
+  readonly agentType: string;
+  readonly providerSession: AgentProviderSession;
+  readonly mode: AgentContinueMode;
+};
+
 export type SpawnTerminalRequest = {
   workspaceId: string;
   worktree: WorktreeIdentity | null;
@@ -182,7 +193,7 @@ export type SpawnTerminalRequest = {
     kind: "agentResume";
     agentType: string;
     providerSession: AgentProviderSession;
-  } | {
+  } | AgentContinueStartup | {
     kind: "pairedDaemon";
     hostId: string;
     remoteWorkspaceId: string;
@@ -696,6 +707,27 @@ function sanitizeSpawnStartup(startup: SpawnTerminalRequest["startup"]): SpawnTe
       kind: "agentLaunch",
       command: String(startup.command ?? ""),
       args: Array.isArray(startup.args) ? startup.args.map(String) : [],
+    };
+  }
+  if (startup.kind === "agentContinue") {
+    if (startup.mode !== "fork" && startup.mode !== "resume") return null;
+    const providerSession = startup.providerSession as
+      | { key?: unknown; id?: unknown; transcriptPath?: unknown; launcher?: "mhc" }
+      | null
+      | undefined;
+    if (!providerSession || typeof providerSession.id !== "string") return null;
+    const key = providerSession.key === "conversation_id" ? "conversation_id" : "session_id";
+    const transcriptPath = typeof providerSession.transcriptPath === "string" ? providerSession.transcriptPath : undefined;
+    return {
+      kind: "agentContinue",
+      agentType: String(startup.agentType ?? ""),
+      mode: startup.mode,
+      providerSession: {
+        key,
+        id: providerSession.id,
+        ...(providerSession.launcher !== undefined ? { launcher: providerSession.launcher } : {}),
+        ...(transcriptPath !== undefined ? { transcriptPath } : {}),
+      },
     };
   }
   if (startup.kind !== "agentResume") return null;
@@ -1850,6 +1882,15 @@ export type RemoteTerminalTabInfo = {
   worktreeSlug?: string;
   worktreeLabel?: string;
   sessionId?: string;
+  /** Absent for a live pane. False only when the desktop pane has exited and has no live backend. */
+  running?: boolean;
+  /** Normalized provider session, same shape as a sessions-list row. Only an exited agent pane publishes one. */
+  providerSession?: {
+    key: "session_id" | "conversation_id";
+    id: string;
+    transcriptPath?: string;
+    launcher?: "mhc";
+  };
 };
 
 export type FocusedTerminalPayload = {

@@ -13,6 +13,8 @@
  * `src-tauri/src/remote/reference_chat/types.rs`; a wire field added here must be
  * added there in the same change.
  *
+ * Revision 3 (§10) is additive. Absent rev3 fields stay absent so a rev2 page is unchanged.
+ *
  * Identity, error, result and delivery-receipt types are **reused** from
  * `scopedContracts`, never duplicated here.
  */
@@ -38,6 +40,18 @@ export const REFERENCE_SUBMIT_MAX_CHARS = 20_000;
 
 /** The error code meaning the mutation may have happened and cannot be confirmed. */
 export const REFERENCE_OUTCOME_UNKNOWN_CODE = "OPERATION_OUTCOME_UNKNOWN";
+
+/** Rev3 capability: the history route accepts `after` and may return a replacement delta. */
+export const REFERENCE_HISTORY_DELTA_V1 = "referenceHistoryDeltaV1";
+
+/** Rev3 capability: the owning host serves a bounded payload for an opaque output or diff ref. */
+export const REFERENCE_PAYLOAD_V1 = "referencePayloadV1";
+
+/** Rev3 capability: the host accepts `agentContinue` startup for a new pane. */
+export const TERMINAL_CONTINUE_V1 = "terminalContinueV1";
+
+/** `cursor` together with `after` is refused as this existing error code. */
+export const REFERENCE_HISTORY_CURSOR_AND_AFTER = "INVALID_REQUEST";
 
 /** A reference-chat target: the scoped `TargetRef` plus the provider session where known. */
 export interface ReferenceTargetRef {
@@ -101,7 +115,8 @@ export type ReferencePartKind =
   | "image"
   | "compact"
   | "notice"
-  | "taskResult";
+  | "taskResult"
+  | "diff";
 
 export type ReferenceTextPhase = "commentary" | "finalAnswer";
 
@@ -115,7 +130,10 @@ export interface ReferenceSkillActivity {
   readonly path?: string | null;
 }
 
-export type ReferenceTaskStatus = "completed" | "failed" | "cancelled";
+export type ReferenceTaskStatus = "running" | "completed" | "failed" | "cancelled" | "unverifiable";
+
+/** Lifecycle of a tool call. Absent on a rev2 part. `cancelled` is a recorded native cancel. */
+export type ReferenceToolStatus = "running" | "completed" | "failed" | "cancelled" | "unverifiable";
 
 export interface ReferenceTaskResult {
   readonly id: string;
@@ -129,6 +147,31 @@ export interface ReferenceTaskResult {
   readonly tokens?: number | null;
   readonly result: string;
   readonly resultCut?: boolean | null;
+  /** Native parent call id, when the provider recorded one. */
+  readonly parentCallId?: string | null;
+}
+
+/** Provider-attributed token counts. A count is omitted when the provider did not record it. */
+export interface ReferenceTokenUsage {
+  readonly inputTokens?: number | null;
+  readonly outputTokens?: number | null;
+  readonly cacheReadTokens?: number | null;
+  readonly cacheWriteTokens?: number | null;
+}
+
+/** Turn metadata a rev3 native reader may attach. Absent means the reader recorded neither a model nor usage. */
+export interface ReferenceTurnMeta {
+  readonly provider: ReferenceNativeHistoryKind;
+  readonly model?: string | null;
+  readonly usage?: ReferenceTokenUsage | null;
+}
+
+/** Opaque bounded payload. `ref` names no host path; the owning host binds it. */
+export interface ReferencePayloadRef {
+  readonly ref: string;
+  readonly byteLength: number;
+  readonly digest: string;
+  readonly truncated: boolean;
 }
 
 /** An opaque image reference, fetched through the owning host. */
@@ -139,14 +182,14 @@ export interface ReferenceImageRef {
 
 /** One part of a turn: the upstream `ConversationPart` union, ported field-for-field. */
 export type ReferencePart =
-  | { readonly kind: "text"; readonly text: string; readonly phase?: ReferenceTextPhase | null }
-  | { readonly kind: "thinking"; readonly text: string }
+  | { readonly kind: "text"; readonly text: string; readonly phase?: ReferenceTextPhase | null; readonly id?: string | null }
+  | { readonly kind: "thinking"; readonly text: string; readonly id?: string | null }
   /**
    * A skill the transcript recorded on its own, beside the text it was invoked with
    * (`transcript-records.ts:259`, `codex.ts:241,275`). Drawn by the turn's skill list, never
    * inside the inline part list (`ChatView.tsx:322`).
    */
-  | { readonly kind: "skill"; readonly skill: ReferenceSkillActivity }
+  | { readonly kind: "skill"; readonly skill: ReferenceSkillActivity; readonly id?: string | null }
   | {
       readonly kind: "tool";
       readonly name: string;
@@ -159,11 +202,26 @@ export type ReferencePart =
       readonly outputRef?: string | null;
       readonly outputSize?: number | null;
       readonly images?: readonly ReferenceImageRef[];
+      readonly id?: string | null;
+      readonly callId?: string | null;
+      readonly status?: ReferenceToolStatus | null;
+      /** Rev3 bounded output ref. `outputRef` remains the rev2 opaque ref. */
+      readonly outputPayload?: ReferencePayloadRef | null;
     }
-  | { readonly kind: "image"; readonly mediaType: string; readonly ref: string }
-  | { readonly kind: "compact"; readonly text: string }
-  | { readonly kind: "notice"; readonly text: string; readonly source?: string | null }
-  | { readonly kind: "taskResult"; readonly tasks: readonly ReferenceTaskResult[] };
+  | { readonly kind: "image"; readonly mediaType: string; readonly ref: string; readonly id?: string | null }
+  | { readonly kind: "compact"; readonly text: string; readonly id?: string | null }
+  | { readonly kind: "notice"; readonly text: string; readonly source?: string | null; readonly id?: string | null }
+  | { readonly kind: "taskResult"; readonly tasks: readonly ReferenceTaskResult[]; readonly id?: string | null }
+  | {
+      readonly kind: "diff";
+      readonly patch: ReferencePayloadRef;
+      readonly id?: string | null;
+      /**
+       * Present only when a reader inlined a small patch. Current readers omit it and
+       * keep the payload ref. The UI never invents this text.
+       */
+      readonly body?: string | null;
+    };
 
 /** Turns a `/tree` walked away from; disclosed rather than dropped in silence. */
 export interface ReferenceAbandonedBranch {
@@ -180,6 +238,9 @@ export interface ReferenceTurn {
   readonly source?: ReferenceTurnSource | null;
   readonly parts: readonly ReferencePart[];
   readonly abandoned?: ReferenceAbandonedBranch | null;
+  /** Generation-scoped turn id. Omitted when the read is unaligned. */
+  readonly id?: string | null;
+  readonly meta?: ReferenceTurnMeta | null;
 }
 
 /** A position in a transcript stream: which stream, and where inside it. */
@@ -201,7 +262,103 @@ export interface ReferenceHistoryPage {
   readonly generation: string;
   /** Required when `availability` is not `native`. */
   readonly unavailableReason?: string | null;
+  /** Rev3 composer controls. Absent hides every composer control. */
+  readonly composer?: ReferenceComposerCapabilities | null;
 }
+
+export type ReferenceComposerModelApply = "command" | "agent-picker";
+export type ReferenceComposerOptionApply = "command" | "agent-picker" | "start-only";
+
+export interface ReferenceComposerModelChoice {
+  readonly id: string;
+  readonly label: string;
+  readonly efforts: readonly string[];
+}
+
+export interface ReferenceComposerModels {
+  readonly current: string | null;
+  readonly choices: readonly ReferenceComposerModelChoice[];
+  readonly apply: ReferenceComposerModelApply;
+}
+
+export interface ReferenceComposerOption {
+  readonly id: string;
+  readonly label: string;
+  readonly values: readonly string[];
+  readonly current: string | null;
+  readonly apply: ReferenceComposerOptionApply;
+}
+
+export interface ReferenceSlashCommand {
+  readonly name: string;
+  readonly description: string | null;
+}
+
+export interface ReferenceFollowUpCapabilities {
+  readonly queue: boolean;
+  readonly steer: boolean;
+}
+
+/** Per-target composer controls. Missing models, options, or slash entries hide that UI. */
+export interface ReferenceComposerCapabilities {
+  readonly models: ReferenceComposerModels | null;
+  readonly options: readonly ReferenceComposerOption[];
+  readonly slashCommands: readonly ReferenceSlashCommand[];
+  readonly followUp: ReferenceFollowUpCapabilities;
+}
+
+/**
+ * Anchor for a rev3 `after` query and for `nextAnchor`.
+ * `previousTurnFingerprint` is null when the anchor is the first turn the client holds.
+ */
+export interface ReferenceHistoryAnchor {
+  readonly streamId: string;
+  readonly generation: string;
+  readonly anchorTurnId: string;
+  readonly previousTurnFingerprint: string | null;
+}
+
+export type ReferenceHistoryResetReason =
+  | "generationChanged"
+  | "anchorOutsideWindow"
+  | "anchorNotTurnStart"
+  | "anchorPrevMismatch"
+  | "tooFarBehind"
+  | "unalignedTurns"
+  | "notNative"
+  | "unsupportedProjection";
+
+export type ReferenceHistoryDeltaResponse =
+  | {
+      readonly mode: "delta";
+      readonly source: ReferenceHistorySource;
+      readonly generation: string;
+      readonly replaceFromTurnId: string;
+      readonly turns: readonly ReferenceTurn[];
+      readonly nextAnchor: ReferenceHistoryAnchor;
+      readonly tailOpen: boolean;
+    }
+  | {
+      readonly mode: "reset";
+      readonly reason: ReferenceHistoryResetReason;
+      readonly page: ReferenceHistoryPage;
+    };
+
+/** Advisory frame. It carries no path, stream content, model, or transcript payload. */
+export interface ReferenceHistoryChanged {
+  readonly type: "referenceHistoryChanged";
+  readonly target: ReferenceTargetRef;
+  readonly changeSeq: string;
+}
+
+/**
+ * Host-validated startup for a new pane. Not a mutation of the source pane.
+ * Alias of the transport DTO so the wire shape has one definition.
+ */
+export type {
+  AgentContinueMode as ReferenceContinueMode,
+  AgentContinueStartup as ReferenceAgentContinueStartup,
+} from "../../lib/tauri";
 
 /** A bounded, VT-aware snapshot of the original pane. Reading never emits input. */
 export interface ReferenceScreenSnapshot {

@@ -19,6 +19,10 @@ import {
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { getEventCoordinates } from "@dnd-kit/utilities";
 import { Columns2, Copy, Rows2, X } from "lucide-react";
+import { continuationOutcomeUnknown, continuationUnknownHeld } from "../lib/agentResume";
+import { getContinuationAffordance } from "../lib/agentResumeAffordance";
+import type { AgentContinueMode, SpawnTerminalRequest } from "../lib/tauri";
+import { ContinueInNewPaneButtons } from "./ContinueInNewPaneButtons";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { clearPaneFlash, usePaneFlashToken } from "../lib/paneFlash";
 
@@ -74,7 +78,8 @@ import {
   type WorkspaceDropData,
 } from "./tab-dnd/tabDragTypes";
 import { TerminalPane } from "./TerminalPane";
-import { actingSessionIds, useSupervisor } from "../lib/supervisor";
+import { SUPERVISOR_PANE_BAR_PX, SupervisorPaneBarView } from "./supervisor/SupervisorPaneBar";
+import { actingSessionIds, paneSupervision, useSupervisor } from "../lib/supervisor";
 import { IconButton } from "./ui/IconButton";
 
 const MIN_PANE_SIZE_PX = 80;
@@ -174,7 +179,10 @@ export function createWorkspaceCollisionDetection(
   };
 }
 
-type SplitPaneOptions = { position?: "first" | "second" };
+type SplitPaneOptions = {
+  position?: "first" | "second";
+  startup?: SpawnTerminalRequest["startup"];
+};
 
 type TerminalSplitViewProps = {
   layout: LayoutState;
@@ -1136,6 +1144,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
 }: PaneLeafViewProps) {
   const [isHoveredTop, setIsHoveredTop] = React.useState(false);
   const [isFocusedWithin, setIsFocusedWithin] = React.useState(false);
+  const [continuationHeld, setContinuationHeld] = React.useState(false);
   const leafRef = React.useRef<HTMLDivElement | null>(null);
   const focusFrameRef = React.useRef<number | null>(null);
   const focusTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1191,6 +1200,38 @@ const PaneLeafView = React.memo(function PaneLeafView({
   );
   const flashSessionId = content.kind === "terminal" ? session.id : null;
   const flashToken = usePaneFlashToken(flashSessionId);
+  const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
+  const supervision =
+    content.kind === "terminal"
+      ? paneSupervision(supervisor, session?.backendSessionId, supervisorNow, activity?.state === "waiting")
+      : null;
+  const toolbarTop = supervision ? SUPERVISOR_PANE_BAR_PX : 0;
+  const continuation = content.kind === "terminal"
+    ? getContinuationAffordance(session, {
+        sessions,
+        activityState: activity?.state,
+        terminalContinueV1: isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)
+          ? undefined
+          : true,
+      })
+    : null;
+  const continueInNewPane = (mode: AgentContinueMode) => {
+    if (!continuation || continuationHeld) return;
+    const startup = continuation.startup(mode);
+    if (!startup || continuationUnknownHeld(startup)) {
+      setContinuationHeld(true);
+      return;
+    }
+    const pending = onSplitPane(tab.id, leafId, "horizontal", { startup });
+    void Promise.resolve(pending).then(
+      () => {
+        if (continuationUnknownHeld(startup)) setContinuationHeld(true);
+      },
+      (error: unknown) => {
+        if (continuationOutcomeUnknown(error) || continuationUnknownHeld(startup)) setContinuationHeld(true);
+      },
+    );
+  };
 
   return (
     <NativeTerminalVisibilityProvider visible={tabVisible} occluded={showsDropFeedback}>
@@ -1221,7 +1262,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
       }}
       onMouseMove={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
-        const relativeY = event.clientY - rect.top;
+        const relativeY = event.clientY - rect.top - toolbarTop;
         if (relativeY >= 0 && relativeY <= 20) {
           if (!isHoveredTop) setIsHoveredTop(true);
         } else {
@@ -1272,6 +1313,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
       ) : null}
       <div
         className="absolute inset-x-0 top-0 z-20 h-5 pointer-events-none"
+        style={{ top: toolbarTop }}
         data-testid="pane-toolbar-hotspot"
         onMouseEnter={() => setIsHoveredTop(true)}
         onMouseLeave={(event) => {
@@ -1287,6 +1329,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         className={`absolute inset-x-0 top-0 z-30 flex h-5 items-center justify-between overflow-visible border-b border-border/30 bg-background/85 px-2 text-[11px] text-muted-foreground transition-opacity duration-150 select-none cursor-grab touch-none active:cursor-grabbing ${
           isHoveredTop || isFocusedWithin ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
         } ${draggable.isDragging ? "opacity-30" : ""}`}
+        style={{ top: toolbarTop }}
         data-testid="pane-toolbar"
         data-dnd-type="pane"
         onPointerDown={(event) => {
@@ -1328,6 +1371,12 @@ const PaneLeafView = React.memo(function PaneLeafView({
           ) : null}
         </div>
         <div className="ml-auto flex items-center gap-0.5">
+          <ContinueInNewPaneButtons
+            modes={continuation?.availableModes}
+            onContinue={continueInNewPane}
+            held={continuationHeld}
+            compact
+          />
           <IconButton
             label="Split pane right"
             data-shortcut={tab.kind === "terminal" || tab.kind === undefined ? "terminal.splitRight" : undefined}
@@ -1372,6 +1421,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
         </div>
       </div>
 
+      {supervision ? <SupervisorPaneBarView state={supervision} now={supervisorNow} onTakeOver={focusPaneInput} /> : null}
       {/* Browser panes keep their own toolbar at the top; clear the h-5 hover overlay off it. */}
       <div
         className={`h-full w-full min-h-0 flex-1 overflow-hidden ${content.kind === "browser" ? "pt-5" : ""}`}
@@ -1411,6 +1461,9 @@ const PaneLeafView = React.memo(function PaneLeafView({
                   onRefreshSessionIdentity={onRefreshSessionIdentity}
                   onOpenNewShell={onOpenNewShell}
                   onBackendSessionUnavailable={onBackendSessionUnavailable}
+                  continuationModes={continuation?.availableModes}
+                  onContinueInNewPane={continueInNewPane}
+                  continuationHeld={continuationHeld}
                 />
               );
             }

@@ -160,6 +160,13 @@ pub enum Startup {
         #[serde(deserialize_with = "provider")]
         provider_session: crate::daemon::protocol::AgentProviderSession,
     },
+    AgentContinue {
+        #[serde(deserialize_with = "required")]
+        agent_type: String,
+        #[serde(deserialize_with = "provider")]
+        provider_session: crate::daemon::protocol::AgentProviderSession,
+        mode: crate::daemon::protocol::ContinueMode,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

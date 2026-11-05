@@ -1364,6 +1364,31 @@ export function seedIsolatedRemoteConfig(profile) {
 }
 
 /**
+ * Agent control is off until `<data>/remote/agent-control.json` says enabled
+ * (agent_control/policy.rs AgentControlPolicy::load). A missing file stays off
+ * unless a machine Control device already exists at boot. This profile has none
+ * yet, so the file is written before the daemon starts, and only inside this
+ * throwaway data dir (beside remote-auth.json, the identity dir).
+ */
+export function seedIsolatedAgentControl(profile) {
+  const path = join(profile.paths.data, "remote", "agent-control.json");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify({ enabled: true }) + "\n", { mode: 0o600 });
+  return path;
+}
+
+/**
+ * One directory per pane, under the registered workspace root. history.rs
+ * refuses a cwd shared by another live session, and resume_cwd.rs matches the
+ * transcript cwd to the continuation request cwd. The child stays inside the
+ * workspace so the daemon's allowed-path check can accept it.
+ */
+export function isolatedPaneCwd(repoRoot, sessionId) {
+  const id = String(sessionId || "pane").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || "pane";
+  return join(repoRoot, ".ferryx-qa-panes", id);
+}
+
+/**
  * Pre-flight: is the port the product forces free on loopback?
  *
  * The probe only OBSERVES. A port held by anything else is a refusal, never something to
@@ -1924,6 +1949,7 @@ export async function launchIsolatedGateway(options) {
 
   const profile = setupIsolatedProfile(settings.label || "gateway");
   const configPath = seedIsolatedRemoteConfig(profile);
+  seedIsolatedAgentControl(profile);
   const transport = daemonControlTransport(profile);
   const env = { ...profile.env };
   if (settings.uiDist) env.FERRYX_UI_DIST_DIR = resolve(settings.uiDist);

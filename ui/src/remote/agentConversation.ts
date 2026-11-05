@@ -12,14 +12,28 @@ import {
   type ReferenceHistoryCursor,
   type ReferenceHistoryPage,
   type ReferenceHistorySource,
+  type ReferenceAgentContinueStartup,
+  type ReferenceComposerCapabilities,
+  type ReferenceComposerModelApply,
+  type ReferenceComposerOptionApply,
+  type ReferenceContinueMode,
+  type ReferenceHistoryAnchor,
+  type ReferenceHistoryChanged,
+  type ReferenceHistoryDeltaResponse,
+  type ReferenceHistoryResetReason,
+  type ReferenceNativeHistoryKind,
+  type ReferencePayloadRef,
   type ReferencePart,
   type ReferencePartKind,
   type ReferenceTargetRef,
   type ReferenceTextPhase,
+  type ReferenceToolStatus,
   type ReferenceTurn,
+  type ReferenceTurnMeta,
   type ReferenceTurnRole,
   type ReferenceTurnSource,
 } from "./chat/referenceTypes";
+import type { AgentProviderSession } from "../lib/types";
 import type { TunnelResponse, TunnelTransport } from "./attachTunnel";
 
 /** A tool call made by an assistant record; its result arrives as a later `toolResult` record. */
@@ -781,6 +795,8 @@ export interface ReferenceHistoryQueryArgs {
   readonly target: ReferenceTargetRef;
   readonly limit?: number;
   readonly cursor?: ReferenceHistoryCursor | null;
+  /** Rev3 replacement anchor. Never sent together with `cursor`. */
+  readonly after?: ReferenceHistoryAnchor | null;
 }
 
 /**
@@ -799,11 +815,33 @@ export function referenceHistoryQuery(args: ReferenceHistoryQueryArgs): string {
     params.set("providerSessionId", providerSessionId);
   }
   params.set("limit", String(args.limit ?? REFERENCE_HISTORY_PAGE_LIMIT));
-  if (args.cursor) {
+  if (args.after) {
+    params.set("after", encodeReferenceHistoryAfter(args.after));
+  } else if (args.cursor) {
     params.set("cursor", String(args.cursor.offset));
     params.set("cursorStream", args.cursor.streamId);
   }
   return params.toString();
+}
+
+/** The `after` query value, with the contract's field order. */
+export function encodeReferenceHistoryAfter(anchor: ReferenceHistoryAnchor): string {
+  return JSON.stringify({
+    streamId: anchor.streamId,
+    generation: anchor.generation,
+    anchorTurnId: anchor.anchorTurnId,
+    previousTurnFingerprint: anchor.previousTurnFingerprint,
+  });
+}
+
+/** A history body is either a rev2 page or a rev3 delta/reset. This does not apply it. */
+export function classifyReferenceHistoryBody(body: unknown):
+  | { readonly kind: "page"; readonly page: ReferenceHistoryPage }
+  | { readonly kind: "negotiated"; readonly response: ReferenceHistoryDeltaResponse } {
+  if (isRecord(body) && (body.mode === "delta" || body.mode === "reset")) {
+    return { kind: "negotiated", response: parseReferenceHistoryDeltaResponse(body) };
+  }
+  return { kind: "page", page: parseReferenceHistoryPage(body) };
 }
 
 function malformed(detail: string): never {
@@ -934,11 +972,75 @@ const REFERENCE_PART_KINDS: readonly ReferencePartKind[] = [
   "compact",
   "notice",
   "taskResult",
+  "diff",
 ];
 const REFERENCE_TEXT_PHASES: readonly ReferenceTextPhase[] = ["commentary", "finalAnswer"];
 const REFERENCE_SKILL_EVIDENCES = ["invocation", "instructions"] as const;
 const REFERENCE_SKILL_STATUSES = ["requested", "loaded", "failed"] as const;
-const REFERENCE_TASK_STATUSES = ["completed", "failed", "cancelled"] as const;
+const REFERENCE_TASK_STATUSES = ["running", "completed", "failed", "cancelled", "unverifiable"] as const;
+const REFERENCE_TOOL_STATUSES: readonly ReferenceToolStatus[] = ["running", "completed", "failed", "cancelled", "unverifiable"];
+const REFERENCE_NATIVE_KINDS: readonly ReferenceNativeHistoryKind[] = [
+  "claude",
+  "codex",
+  "omp",
+  "omo",
+  "gjc",
+  "pi",
+  "copilot",
+  "antigravity",
+  "kimi",
+  "grok",
+  "cline",
+  "opencode",
+  "cursor",
+  "crush",
+  "unavailable",
+];
+const REFERENCE_MODEL_APPLIES: readonly ReferenceComposerModelApply[] = ["command", "agent-picker"];
+const REFERENCE_OPTION_APPLIES: readonly ReferenceComposerOptionApply[] = ["command", "agent-picker", "start-only"];
+const REFERENCE_RESET_REASONS: readonly ReferenceHistoryResetReason[] = [
+  "generationChanged",
+  "anchorOutsideWindow",
+  "anchorNotTurnStart",
+  "anchorPrevMismatch",
+  "tooFarBehind",
+  "unalignedTurns",
+  "notNative",
+  "unsupportedProjection",
+];
+const REFERENCE_CONTINUE_MODES: readonly ReferenceContinueMode[] = ["fork", "resume"];
+
+function optionalCount(
+  entry: Record<string, unknown>,
+  key: string,
+  detail: string,
+): number | null | undefined {
+  const value = entry[key];
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    malformed(`${detail}.${key} is not a non-negative integer or null`);
+  }
+  return value;
+}
+
+function requireCount(entry: Record<string, unknown>, key: string, detail: string): number {
+  const value = entry[key];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    malformed(`${detail}.${key} is not a non-negative integer`);
+  }
+  return value;
+}
+
+function toReferencePayloadRef(raw: unknown, detail: string): ReferencePayloadRef {
+  const entry = requireRecord(raw, detail);
+  return {
+    ref: requireString(entry, "ref", detail),
+    byteLength: requireCount(entry, "byteLength", detail),
+    digest: requireString(entry, "digest", detail),
+    truncated: requireBoolean(entry, "truncated", detail),
+  };
+}
 
 function toReferenceImageRef(raw: unknown, detail: string): { mediaType: string; ref: string } {
   const entry = requireRecord(raw, detail);
@@ -968,6 +1070,7 @@ function toReferenceTaskResult(raw: unknown, detail: string) {
   const toolCalls = optionalNumber(entry, "toolCalls", detail);
   const tokens = optionalNumber(entry, "tokens", detail);
   const resultCut = optionalBoolean(entry, "resultCut", detail);
+  const parentCallId = optionalString(entry, "parentCallId", detail);
   return {
     id: requireString(entry, "id", detail),
     title: requireString(entry, "title", detail),
@@ -980,7 +1083,13 @@ function toReferenceTaskResult(raw: unknown, detail: string) {
     ...(toolCalls !== undefined ? { toolCalls } : {}),
     ...(tokens !== undefined ? { tokens } : {}),
     ...(resultCut !== undefined ? { resultCut } : {}),
+    ...(parentCallId !== undefined ? { parentCallId } : {}),
   };
+}
+
+function optionalPartId(entry: Record<string, unknown>, detail: string) {
+  const id = optionalString(entry, "id", detail);
+  return id !== undefined ? { id } : {};
 }
 
 function toReferencePart(raw: unknown, detail: string): ReferencePart {
@@ -993,19 +1102,33 @@ function toReferencePart(raw: unknown, detail: string): ReferencePart {
         kind: "text",
         text: requireString(entry, "text", detail),
         ...(phase !== undefined ? { phase } : {}),
+        ...optionalPartId(entry, detail),
       };
     }
     case "thinking":
-      return { kind: "thinking", text: requireString(entry, "text", detail) };
+      return {
+        kind: "thinking",
+        text: requireString(entry, "text", detail),
+        ...optionalPartId(entry, detail),
+      };
     case "skill":
       return {
         kind: "skill",
         skill: toReferenceSkillActivity(entry.skill, `${detail}.skill`),
+        ...optionalPartId(entry, detail),
       };
     case "tool": {
       const error = optionalBoolean(entry, "error", detail);
       const outputRef = optionalString(entry, "outputRef", detail);
       const outputSize = optionalNumber(entry, "outputSize", detail);
+      const callId = optionalString(entry, "callId", detail);
+      const status = optionalEnum(entry, "status", REFERENCE_TOOL_STATUSES, detail);
+      const outputPayload =
+        entry.outputPayload === undefined
+          ? undefined
+          : entry.outputPayload === null
+            ? null
+            : toReferencePayloadRef(entry.outputPayload, `${detail}.outputPayload`);
       const skill =
         entry.skill === undefined || entry.skill === null
           ? (entry.skill as null | undefined)
@@ -1026,6 +1149,10 @@ function toReferencePart(raw: unknown, detail: string): ReferencePart {
         ...(outputRef !== undefined ? { outputRef } : {}),
         ...(outputSize !== undefined ? { outputSize } : {}),
         ...(images !== undefined ? { images } : {}),
+        ...optionalPartId(entry, detail),
+        ...(callId !== undefined ? { callId } : {}),
+        ...(status !== undefined ? { status } : {}),
+        ...(outputPayload !== undefined ? { outputPayload } : {}),
       };
     }
     case "image":
@@ -1033,15 +1160,21 @@ function toReferencePart(raw: unknown, detail: string): ReferencePart {
         kind: "image",
         mediaType: requireString(entry, "mediaType", detail),
         ref: requireString(entry, "ref", detail),
+        ...optionalPartId(entry, detail),
       };
     case "compact":
-      return { kind: "compact", text: requireString(entry, "text", detail) };
+      return {
+        kind: "compact",
+        text: requireString(entry, "text", detail),
+        ...optionalPartId(entry, detail),
+      };
     case "notice": {
       const source = optionalString(entry, "source", detail);
       return {
         kind: "notice",
         text: requireString(entry, "text", detail),
         ...(source !== undefined ? { source } : {}),
+        ...optionalPartId(entry, detail),
       };
     }
     case "taskResult": {
@@ -1051,6 +1184,16 @@ function toReferencePart(raw: unknown, detail: string): ReferencePart {
         tasks: entry.tasks.map((task, index) =>
           toReferenceTaskResult(task, `${detail}.tasks[${index}]`),
         ),
+        ...optionalPartId(entry, detail),
+      };
+    }
+    case "diff": {
+      const body = optionalString(entry, "body", detail);
+      return {
+        kind: "diff",
+        patch: toReferencePayloadRef(entry.patch, `${detail}.patch`),
+        ...optionalPartId(entry, detail),
+        ...(body !== undefined ? { body } : {}),
       };
     }
   }
@@ -1061,6 +1204,8 @@ function toReferenceTurn(raw: unknown, detail: string): ReferenceTurn {
   const startedAt = optionalString(entry, "startedAt", detail);
   const endedAt = optionalString(entry, "endedAt", detail);
   const source = optionalEnum(entry, "source", REFERENCE_TURN_SOURCES, detail);
+  const id = optionalString(entry, "id", detail);
+  const meta = toReferenceTurnMeta(entry.meta, `${detail}.meta`);
   if (!Array.isArray(entry.parts)) malformed(`${detail}.parts is not an array`);
   let abandoned: ReferenceTurn["abandoned"];
   if (entry.abandoned === undefined || entry.abandoned === null) {
@@ -1081,6 +1226,38 @@ function toReferenceTurn(raw: unknown, detail: string): ReferenceTurn {
     ...(endedAt !== undefined ? { endedAt } : {}),
     ...(source !== undefined ? { source } : {}),
     ...(abandoned !== undefined ? { abandoned } : {}),
+    ...(id !== undefined ? { id } : {}),
+    ...(meta !== undefined ? { meta } : {}),
+  };
+}
+
+function toReferenceTurnMeta(raw: unknown, detail: string): ReferenceTurnMeta | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const entry = requireRecord(raw, detail);
+  const model = optionalString(entry, "model", detail);
+  let usage: ReferenceTurnMeta["usage"];
+  if (entry.usage === undefined) {
+    usage = undefined;
+  } else if (entry.usage === null) {
+    usage = null;
+  } else {
+    const counts = requireRecord(entry.usage, `${detail}.usage`);
+    const inputTokens = optionalCount(counts, "inputTokens", `${detail}.usage`);
+    const outputTokens = optionalCount(counts, "outputTokens", `${detail}.usage`);
+    const cacheReadTokens = optionalCount(counts, "cacheReadTokens", `${detail}.usage`);
+    const cacheWriteTokens = optionalCount(counts, "cacheWriteTokens", `${detail}.usage`);
+    usage = {
+      ...(inputTokens !== undefined ? { inputTokens } : {}),
+      ...(outputTokens !== undefined ? { outputTokens } : {}),
+      ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+      ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+    };
+  }
+  return {
+    provider: requireEnum(entry, "provider", REFERENCE_NATIVE_KINDS, detail),
+    ...(model !== undefined ? { model } : {}),
+    ...(usage !== undefined ? { usage } : {}),
   };
 }
 
@@ -1116,6 +1293,7 @@ export function parseReferenceHistoryPage(body: unknown): ReferenceHistoryPage {
   if (availability !== "native" && unavailableReason === undefined) {
     malformed("Reference history response.unavailableReason is required when availability is not native");
   }
+  const composer = toReferenceComposer(entry.composer, "Reference history response.composer");
   return {
     source,
     availability,
@@ -1126,6 +1304,172 @@ export function parseReferenceHistoryPage(body: unknown): ReferenceHistoryPage {
     generation,
     ...(cursor !== undefined ? { cursor } : {}),
     ...(unavailableReason !== undefined ? { unavailableReason } : {}),
+    ...(composer !== undefined ? { composer } : {}),
+  };
+}
+
+function toReferenceComposer(raw: unknown, detail: string): ReferenceComposerCapabilities | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const entry = requireRecord(raw, detail);
+  let models: ReferenceComposerCapabilities["models"];
+  if (entry.models === undefined) malformed(`${detail}.models is required`);
+  if (entry.models === null) {
+    models = null;
+  } else {
+    const model = requireRecord(entry.models, `${detail}.models`);
+    if (!Array.isArray(model.choices)) malformed(`${detail}.models.choices is not an array`);
+    models = {
+      current: entryHasNullOrString(model, "current", `${detail}.models`),
+      choices: model.choices.map((choice, index) => {
+        const item = requireRecord(choice, `${detail}.models.choices[${index}]`);
+        if (!Array.isArray(item.efforts) || item.efforts.some((effort) => typeof effort !== "string")) {
+          malformed(`${detail}.models.choices[${index}].efforts is not an array of strings`);
+        }
+        return {
+          id: requireString(item, "id", `${detail}.models.choices[${index}]`),
+          label: requireString(item, "label", `${detail}.models.choices[${index}]`),
+          efforts: item.efforts as string[],
+        };
+      }),
+      apply: requireEnum(model, "apply", REFERENCE_MODEL_APPLIES, `${detail}.models`),
+    };
+  }
+  if (!Array.isArray(entry.options)) malformed(`${detail}.options is not an array`);
+  if (!Array.isArray(entry.slashCommands)) malformed(`${detail}.slashCommands is not an array`);
+  const followUp = requireRecord(entry.followUp, `${detail}.followUp`);
+  return {
+    models,
+    options: entry.options.map((option, index) => {
+      const item = requireRecord(option, `${detail}.options[${index}]`);
+      if (!Array.isArray(item.values) || item.values.some((value) => typeof value !== "string")) {
+        malformed(`${detail}.options[${index}].values is not an array of strings`);
+      }
+      return {
+        id: requireString(item, "id", `${detail}.options[${index}]`),
+        label: requireString(item, "label", `${detail}.options[${index}]`),
+        values: item.values as string[],
+        current: entryHasNullOrString(item, "current", `${detail}.options[${index}]`),
+        apply: requireEnum(item, "apply", REFERENCE_OPTION_APPLIES, `${detail}.options[${index}]`),
+      };
+    }),
+    slashCommands: entry.slashCommands.map((command, index) => {
+      const item = requireRecord(command, `${detail}.slashCommands[${index}]`);
+      return {
+        name: requireString(item, "name", `${detail}.slashCommands[${index}]`),
+        description: entryHasNullOrString(item, "description", `${detail}.slashCommands[${index}]`),
+      };
+    }),
+    followUp: {
+      queue: requireBoolean(followUp, "queue", `${detail}.followUp`),
+      steer: requireBoolean(followUp, "steer", `${detail}.followUp`),
+    },
+  };
+}
+
+function entryHasNullOrString(entry: Record<string, unknown>, key: string, detail: string): string | null {
+  const value = entry[key];
+  if (value === null) return null;
+  if (typeof value !== "string") malformed(`${detail}.${key} is not a string or null`);
+  return value;
+}
+
+function toWireTarget(raw: unknown, detail: string): ReferenceTargetRef {
+  const entry = requireRecord(raw, detail);
+  const providerSessionId = optionalString(entry, "providerSessionId", detail);
+  return {
+    target: {
+      hostId: requireString(entry, "hostId", detail),
+      ownerId: requireString(entry, "ownerId", detail),
+      epoch: requireString(entry, "epoch", detail),
+      backendSessionId: requireString(entry, "backendSessionId", detail),
+    },
+    ...(providerSessionId !== undefined ? { providerSessionId } : {}),
+  };
+}
+
+function toHistoryAnchor(raw: unknown, detail: string): ReferenceHistoryAnchor {
+  const entry = requireRecord(raw, detail);
+  if (!Object.prototype.hasOwnProperty.call(entry, "previousTurnFingerprint")) {
+    malformed(`${detail}.previousTurnFingerprint is required`);
+  }
+  const previous = entry.previousTurnFingerprint;
+  if (previous !== null && typeof previous !== "string") {
+    malformed(`${detail}.previousTurnFingerprint is not a string or null`);
+  }
+  return {
+    streamId: requireString(entry, "streamId", detail),
+    generation: requireString(entry, "generation", detail),
+    anchorTurnId: requireString(entry, "anchorTurnId", detail),
+    previousTurnFingerprint: previous,
+  };
+}
+
+/** Parse a rev3 advisory frame. A path or payload on the object is ignored, never read. */
+export function parseReferenceHistoryChanged(body: unknown): ReferenceHistoryChanged {
+  const entry = requireRecord(body, "Reference history changed frame");
+  if (entry.type !== "referenceHistoryChanged") {
+    malformed("Reference history changed frame.type is not referenceHistoryChanged");
+  }
+  return {
+    type: "referenceHistoryChanged",
+    target: toWireTarget(entry.target, "Reference history changed frame.target"),
+    changeSeq: requireString(entry, "changeSeq", "Reference history changed frame"),
+  };
+}
+
+/** Parse a rev3 delta or inline reset. This does not apply the delta. */
+export function parseReferenceHistoryDeltaResponse(body: unknown): ReferenceHistoryDeltaResponse {
+  const entry = requireRecord(body, "Reference history delta response");
+  const mode = entry.mode;
+  if (mode === "delta") {
+    if (!Array.isArray(entry.turns)) malformed("Reference history delta response.turns is not an array");
+    return {
+      mode: "delta",
+      source: requireEnum(entry, "source", REFERENCE_HISTORY_SOURCES, "Reference history delta response"),
+      generation: requireString(entry, "generation", "Reference history delta response"),
+      replaceFromTurnId: requireString(entry, "replaceFromTurnId", "Reference history delta response"),
+      turns: entry.turns.map((turn, index) =>
+        toReferenceTurn(turn, `Reference history delta response.turns[${index}]`),
+      ),
+      nextAnchor: toHistoryAnchor(entry.nextAnchor, "Reference history delta response.nextAnchor"),
+      tailOpen: requireBoolean(entry, "tailOpen", "Reference history delta response"),
+    };
+  }
+  if (mode === "reset") {
+    return {
+      mode: "reset",
+      reason: requireEnum(entry, "reason", REFERENCE_RESET_REASONS, "Reference history delta response"),
+      page: parseReferenceHistoryPage(entry.page),
+    };
+  }
+  malformed("Reference history delta response.mode is not delta or reset");
+}
+
+function toProviderSession(raw: unknown, detail: string): AgentProviderSession {
+  const entry = requireRecord(raw, detail);
+  const key = requireEnum(entry, "key", ["session_id", "conversation_id"] as const, detail);
+  const transcriptPath = optionalString(entry, "transcriptPath", detail);
+  const launcher = optionalEnum(entry, "launcher", ["mhc"] as const, detail);
+  return {
+    key,
+    id: requireString(entry, "id", detail),
+    ...(typeof transcriptPath === "string" ? { transcriptPath } : {}),
+    ...(launcher === "mhc" ? { launcher } : {}),
+  };
+}
+
+/** Parse host-validated continuation startup. This does not spawn a pane. */
+export function parseReferenceAgentContinueStartup(body: unknown): ReferenceAgentContinueStartup {
+  const entry = requireRecord(body, "Reference agent continue startup");
+  if (entry.kind !== "agentContinue") {
+    malformed("Reference agent continue startup.kind is not agentContinue");
+  }
+  return {
+    kind: "agentContinue",
+    agentType: requireString(entry, "agentType", "Reference agent continue startup"),
+    providerSession: toProviderSession(entry.providerSession, "Reference agent continue startup.providerSession"),
+    mode: requireEnum(entry, "mode", REFERENCE_CONTINUE_MODES, "Reference agent continue startup"),
   };
 }
 
@@ -1167,6 +1511,7 @@ export async function fetchReferenceHistory(args: {
   target: ReferenceTargetRef;
   limit?: number;
   cursor?: ReferenceHistoryCursor | null;
+  after?: ReferenceHistoryAnchor | null;
   signal?: AbortSignal;
 }): Promise<ReferenceHistoryRead> {
   const { baseUrl, sessionId, token, signal } = args;
@@ -1174,6 +1519,7 @@ export async function fetchReferenceHistory(args: {
     target: args.target,
     limit: args.limit,
     cursor: args.cursor,
+    after: args.after,
   });
   const path = `${referenceChatRoute(sessionId, "history")}?${query}`;
   let response: Response;
@@ -1226,4 +1572,95 @@ export async function fetchReferenceHistory(args: {
     referenceHistoryStatusErrorCode(response.status),
     `Reference history request failed with status ${response.status}`,
   );
+}
+
+export type ReferenceHistoryNegotiatedRead =
+  | { readonly kind: "page"; readonly page: ReferenceHistoryPage; readonly fence: ReferenceHistoryFence }
+  | {
+      readonly kind: "delta";
+      readonly delta: Extract<ReferenceHistoryDeltaResponse, { mode: "delta" }>;
+      readonly fence: ReferenceHistoryFence;
+    }
+  | {
+      readonly kind: "reset";
+      readonly reason: ReferenceHistoryResetReason;
+      readonly page: ReferenceHistoryPage;
+      readonly fence: ReferenceHistoryFence;
+    };
+
+/**
+ * One history read that may be a rev2 page or a rev3 delta/reset.
+ * `cursor` is omitted when `after` is set. A rev2 body stays a page.
+ */
+export async function fetchReferenceHistoryNegotiated(args: {
+  baseUrl: string;
+  sessionId: string;
+  token: string;
+  target: ReferenceTargetRef;
+  limit?: number;
+  cursor?: ReferenceHistoryCursor | null;
+  after?: ReferenceHistoryAnchor | null;
+  signal?: AbortSignal;
+}): Promise<ReferenceHistoryNegotiatedRead> {
+  const { baseUrl, sessionId, token, signal } = args;
+  const query = referenceHistoryQuery({
+    target: args.target,
+    limit: args.limit,
+    cursor: args.after ? null : args.cursor,
+    after: args.after,
+  });
+  const path = `${referenceChatRoute(sessionId, "history")}?${query}`;
+  let response: Response;
+  try {
+    response = await remoteFetch(baseUrl, path, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    });
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new ReferenceHistoryFetchError(
+      "NETWORK_ERROR",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (!response.ok) {
+    let errorCode: string | null = null;
+    try {
+      const text = await response.text();
+      const parsed: unknown = JSON.parse(text);
+      if (isRecord(parsed)) {
+        if (isRecord(parsed.error) && typeof parsed.error.code === "string") errorCode = parsed.error.code;
+        else if (typeof parsed.error === "string") errorCode = parsed.error;
+      }
+    } catch {
+      errorCode = null;
+    }
+    throw new ReferenceHistoryFetchError(
+      errorCode ?? referenceHistoryStatusErrorCode(response.status),
+      `Reference history request failed with status ${response.status}`,
+    );
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new ReferenceHistoryFetchError("MALFORMED_RESPONSE", "Reference history response body is not valid JSON");
+  }
+  const classified = classifyReferenceHistoryBody(body);
+  if (classified.kind === "page") {
+    return { kind: "page", page: classified.page, fence: referenceHistoryFence(sessionId, args.target, classified.page.generation) };
+  }
+  if (classified.response.mode === "delta") {
+    return {
+      kind: "delta",
+      delta: classified.response,
+      fence: referenceHistoryFence(sessionId, args.target, classified.response.generation),
+    };
+  }
+  return {
+    kind: "reset",
+    reason: classified.response.reason,
+    page: classified.response.page,
+    fence: referenceHistoryFence(sessionId, args.target, classified.response.page.generation),
+  };
 }

@@ -20,12 +20,13 @@ import {
   useSleepingSessionIds,
   getDaemonSuspension,
 } from "../lib/sessionLifecycle";
-import { toIpcError } from "../lib/tauri";
+import { toIpcError, type AgentContinueMode } from "../lib/tauri";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import { TERMINAL_SEARCH_DOCK_HEIGHT } from "../lib/terminalSearchLayout";
 import type { TerminalSession } from "../lib/types";
 import type { LocalRecoveryAdmissionResult } from "../state/workspaceStore";
 import { NativeTerminalPane } from "./NativeTerminalPane";
+import { ContinueInNewPaneButtons } from "./ContinueInNewPaneButtons";
 import { CompatibilityTerminal } from "./CompatibilityTerminal";
 import { isNativeRendererUnavailable, subscribeNativeRendererAvailability } from "../lib/nativeTerminalLifecycle";
 import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
@@ -50,6 +51,9 @@ type TerminalPaneProps = {
     reason: string,
     bindingKey?: string | null,
   ) => void;
+  continuationModes?: readonly AgentContinueMode[];
+  onContinueInNewPane?: (mode: AgentContinueMode) => void;
+  continuationHeld?: boolean;
 };
 
 function friendlyAgentName(agentType: string | null | undefined): string {
@@ -107,6 +111,9 @@ export function TerminalPane({
   onRefreshSessionIdentity,
   onOpenNewShell,
   onBackendSessionUnavailable,
+  continuationModes,
+  onContinueInNewPane,
+  continuationHeld = false,
 }: TerminalPaneProps) {
   const [pendingLocal, setPendingLocal] = useState(false);
   // Linux/Windows native children stack above the webview. Keep search in a
@@ -874,6 +881,11 @@ export function TerminalPane({
                 )}
               </div>
             )}
+            <ContinueInNewPaneButtons
+              modes={continuationModes}
+              onContinue={onContinueInNewPane}
+              held={continuationHeld}
+            />
           </div>
         </div>
       ) : null}

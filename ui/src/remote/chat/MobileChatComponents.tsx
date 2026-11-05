@@ -37,9 +37,26 @@ import {
   type ReferenceHistoryPage,
   type ReferenceImageRef,
   type ReferencePart,
+  type ReferencePayloadRef,
   type ReferenceSkillActivity,
   type ReferenceTaskResult,
 } from "./referenceTypes";
+import {
+  ReferenceDiffPart,
+  ReferenceStatusBadge,
+  ReferenceWorkGroup,
+  groupReferenceWorkParts,
+  nestedTasksForTool,
+  planReferenceWorkNesting,
+  referencePartKey,
+  referenceWorkGroupCompleted,
+  referenceWorkGroupLabel,
+  referenceWorkGroupNeedsChrome,
+  referenceWorkGroupRunning,
+  referenceWorkGroupSharedStatus,
+  type ReferenceWorkMember,
+  type ReferenceWorkNesting,
+} from "./referenceWorkGroup";
 
 export type ActivityState = "thinking" | "running_tool" | "waiting_for_input" | "idle";
 
@@ -191,6 +208,8 @@ export interface WorkRowProps {
   className?: string;
   containerTestId?: string;
   expandedContent?: React.ReactNode;
+  trailing?: React.ReactNode;
+  partKey?: string;
 }
 
 export const WorkRow: React.FC<WorkRowProps> = ({
@@ -204,6 +223,8 @@ export const WorkRow: React.FC<WorkRowProps> = ({
   className,
   containerTestId,
   expandedContent,
+  trailing,
+  partKey,
 }) => {
   const rowContent = (
     <>
@@ -221,13 +242,14 @@ export const WorkRow: React.FC<WorkRowProps> = ({
       >
         {label}
       </div>
+      {trailing}
       {isError && <span className="sr-only">Failed</span>}
       {isRunning && <span className="sr-only">Running</span>}
     </>
   );
 
   return (
-    <div data-testid={containerTestId} className={cn("w-full", className)}>
+    <div data-testid={containerTestId} data-part-key={partKey} className={cn("w-full", className)}>
       {canExpand ? (
         <button
           type="button"
@@ -538,6 +560,13 @@ export interface ReferencePartRenderContext {
   onRequestWholeOutput?: (outputRef: string) => void;
   /** The output ref a fetch is in flight for, so its button reads as busy. */
   loadingOutputRef?: string | null;
+  /**
+   * Ask the owning host for a rev3 payload. This component does not fetch.
+   * RemoteApp sets this on `chatPartContext`; the workspace already forwards the context.
+   */
+  onLoadPayload?: (payload: ReferencePayloadRef) => void;
+  /** The payload ref a load is in flight for, so its button reads as busy. */
+  loadingPayloadRef?: string | null;
 }
 
 /** A turn's own timestamp, as the chat prints it: ISO string, epoch millis, or as given. */
@@ -600,9 +629,11 @@ export function referenceSkillDetail(skill: ReferenceSkillActivity): string {
 }
 
 const REFERENCE_TASK_STATUS_WORDS: Record<ReferenceTaskResult["status"], string> = {
+  running: "running",
   completed: "done",
   failed: "failed",
   cancelled: "cancelled",
+  unverifiable: "unverifiable",
 };
 
 export function referenceTaskStatusWord(status: ReferenceTaskResult["status"]): string {
@@ -651,7 +682,13 @@ export function referenceOlderControlLabel(state: ReferenceOlderState): string {
 const REFERENCE_TASK_STATUS_ICONS: Record<
   ReferenceTaskResult["status"],
   React.ComponentType<{ className?: string; "aria-hidden"?: boolean | "true" | "false" }>
-> = { completed: CircleCheck, failed: CircleX, cancelled: CircleSlash };
+> = {
+  running: Loader2,
+  completed: CircleCheck,
+  failed: CircleX,
+  cancelled: CircleSlash,
+  unverifiable: AlertCircle,
+};
 
 /** Only an image the page already holds (data:/blob:) is drawn inline; nothing is fetched for it. */
 const INLINE_MARKDOWN_IMAGE = /^(?:data:image\/|blob:)/i;
@@ -1094,15 +1131,21 @@ export const ReferenceTaskResultRow: React.FC<{
             "size-3.5 shrink-0",
             task.status === "failed"
               ? "text-chat-danger"
-              : task.status === "cancelled"
+              : task.status === "cancelled" || task.status === "unverifiable"
                 ? "text-chat-foreground-tertiary"
-                : "text-status-success",
+                : task.status === "running"
+                  ? "text-chat-foreground-secondary"
+                  : "text-status-success",
           )}
         />
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline gap-2">
             <span className="min-w-0 flex-1 truncate text-chat-foreground">{task.title}</span>
-            <span className="shrink-0 text-xs text-chat-foreground-secondary">
+            <span
+              data-testid="reference-status-badge"
+              data-status={task.status}
+              className="shrink-0 text-xs text-chat-foreground-secondary"
+            >
               {referenceTaskStatusWord(task.status)}
             </span>
           </span>
@@ -1134,7 +1177,8 @@ export const ReferenceTaskResultRow: React.FC<{
 export const ReferenceTaskResultsBlock: React.FC<{
   part: ReferenceTaskResultsPart;
   className?: string;
-}> = ({ part, className }) => {
+  partKey?: string;
+}> = ({ part, className, partKey }) => {
   if (part.tasks.length === 0) return null;
   const heading =
     part.tasks.length === 1
@@ -1143,6 +1187,7 @@ export const ReferenceTaskResultsBlock: React.FC<{
   return (
     <section
       data-testid="reference-task-results"
+      data-part-key={partKey}
       aria-label={heading}
       className={cn("my-1.5 space-y-1.5", className)}
     >
@@ -1213,13 +1258,21 @@ export const ReferenceToolPartCard: React.FC<{
   part: ReferenceToolPart;
   context?: ReferencePartRenderContext;
   className?: string;
-}> = ({ part, context, className }) => {
+  partKey?: string;
+}> = ({ part, context, className, partKey }) => {
   const [expanded, setExpanded] = useState(false);
   const images = part.images ?? [];
   const outputRef = part.outputRef ?? null;
   const onRequestWholeOutput = context?.onRequestWholeOutput;
   const canRequestWholeOutput = outputRef !== null && onRequestWholeOutput !== undefined;
-  const canExpand = Boolean(part.input || part.output || images.length > 0 || canRequestWholeOutput);
+  const payloadRef = part.outputPayload ?? null;
+  const onLoadPayload = context?.onLoadPayload;
+  const canLoadPayload = payloadRef !== null && onLoadPayload !== undefined;
+  const loadingPayload = payloadRef !== null && context?.loadingPayloadRef === payloadRef.ref;
+  const status = part.status ?? null;
+  const canExpand = Boolean(
+    part.input || part.output || images.length > 0 || canRequestWholeOutput || canLoadPayload,
+  );
   const loading = outputRef !== null && context?.loadingOutputRef === outputRef;
   const firstLine = part.input.trim().split("\n")[0] ?? "";
 
@@ -1281,6 +1334,20 @@ export const ReferenceToolPartCard: React.FC<{
             : `Show the whole output${part.outputSize !== undefined && part.outputSize !== null ? ` (${part.outputSize} characters)` : ""}`}
         </button>
       )}
+      {canLoadPayload && payloadRef !== null && (
+        <button
+          type="button"
+          data-testid="reference-load-payload"
+          aria-busy={loadingPayload || undefined}
+          disabled={loadingPayload}
+          onClick={() => {
+            if (payloadRef !== null && onLoadPayload) onLoadPayload(payloadRef);
+          }}
+          className="min-h-11 rounded-md border border-chat-border bg-chat-surface-raised px-3 text-sm text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:opacity-60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          {loadingPayload ? "Loading details…" : "Load details"}
+        </button>
+      )}
     </div>
   );
 
@@ -1291,7 +1358,7 @@ export const ReferenceToolPartCard: React.FC<{
       label={
         <>
           {labelNode}
-          {part.error && (
+          {part.error && status == null && (
             <>
               {" "}
               <span className="text-chat-danger">failed</span>
@@ -1299,12 +1366,14 @@ export const ReferenceToolPartCard: React.FC<{
           )}
         </>
       }
+      trailing={status != null ? <ReferenceStatusBadge status={status} /> : undefined}
       canExpand={canExpand}
       expanded={expanded}
       onToggle={() => setExpanded((prev) => !prev)}
-      isError={Boolean(part.error)}
-      isRunning={false}
+      isError={Boolean(part.error) || status === "failed"}
+      isRunning={status === "running"}
       className={className}
+      partKey={partKey}
       expandedContent={expandedPanel}
     />
   );
@@ -1395,34 +1464,124 @@ export const ReferencePartView: React.FC<{
       );
     case "taskResult":
       return <ReferenceTaskResultsBlock part={part} className={className} />;
+    case "diff":
+      return <ReferenceDiffPart part={part} context={context} className={className} />;
     default:
       return null;
   }
 };
 
+function referenceMemberHidden(part: ReferencePart, hideWork: boolean): boolean {
+  return hideWork && (part.kind === "tool" || part.kind === "thinking" || part.kind === "diff");
+}
+
+function renderReferenceWorkMember(
+  member: ReferenceWorkMember,
+  nesting: ReferenceWorkNesting,
+  context: ReferencePartRenderContext | undefined,
+): React.ReactNode {
+  const { part, index } = member;
+  const key = referencePartKey(part, index);
+  if (part.kind === "tool") {
+    const nested = nestedTasksForTool(part, nesting);
+    return (
+      <div key={key} className="flex flex-col gap-1">
+        <ReferenceToolPartCard part={part} context={context} partKey={key} />
+        {nested.length > 0 && (
+          <div data-testid="reference-nested-tasks" className="ml-7 flex flex-col gap-1">
+            {nested.map((nestedTask) => (
+              <ReferenceTaskResultRow key={nestedTask.id} task={nestedTask} />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (part.kind === "diff") {
+    return <ReferenceDiffPart key={key} part={part} context={context} partKey={key} />;
+  }
+  if (part.kind === "taskResult") {
+    const local = nesting.localTasks.get(index) ?? part.tasks;
+    if (local.length === 0) return null;
+    return (
+      <ReferenceTaskResultsBlock
+        key={key}
+        part={local === part.tasks ? part : { ...part, tasks: local }}
+        partKey={key}
+      />
+    );
+  }
+  return null;
+}
+
 /** Every part of one turn, in the order the transcript recorded them. */
 export const ReferencePartList: React.FC<{
   parts: readonly ReferencePart[];
-  /** Skip tool and thinking parts; keys keep each part's index in `parts` so the rest never remount. */
+  /** Skip tool, thinking, and diff parts; keys stay on the original index so the rest never remount. */
   hideWork?: boolean;
   context?: ReferencePartRenderContext;
   timestamp?: string | number | null;
   className?: string;
 }> = ({ parts, hideWork = false, context, timestamp, className }) => {
-  const shown = hideWork ? parts.filter((part) => part.kind !== "tool" && part.kind !== "thinking") : parts;
-  if (shown.length === 0) return null;
+  const nesting = planReferenceWorkNesting(parts);
+  const segments = groupReferenceWorkParts(parts);
+  const anyVisible = segments.some((segment) => {
+    if (segment.kind === "part") return !referenceMemberHidden(segment.part, hideWork);
+    return segment.members.some((member) => {
+      if (referenceMemberHidden(member.part, hideWork)) return false;
+      if (member.part.kind === "taskResult") {
+        return (nesting.localTasks.get(member.index) ?? member.part.tasks).length > 0;
+      }
+      return true;
+    });
+  });
+  if (!anyVisible) return null;
   return (
     <div data-testid="reference-parts" className={cn("w-full flex flex-col gap-1.5", className)}>
-      {parts.map((part, index) =>
-        hideWork && (part.kind === "tool" || part.kind === "thinking") ? null : (
-          <ReferencePartView
-            key={`${part.kind}-${index}`}
-            part={part}
-            context={context}
-            timestamp={timestamp}
-          />
-        ),
-      )}
+      {segments.map((segment) => {
+        if (segment.kind === "part") {
+          if (referenceMemberHidden(segment.part, hideWork)) return null;
+          return (
+            <ReferencePartView
+              key={referencePartKey(segment.part, segment.index)}
+              part={segment.part}
+              context={context}
+              timestamp={timestamp}
+            />
+          );
+        }
+        const visible = segment.members.filter((member) => !referenceMemberHidden(member.part, hideWork));
+        const diffs = visible.filter((member) => member.part.kind === "diff");
+        const rows = visible.filter((member) => member.part.kind !== "diff");
+        const diffNodes = diffs
+          .map((member) => renderReferenceWorkMember(member, nesting, context))
+          .filter((node) => node !== null);
+        const rowNodes = rows
+          .map((member) => renderReferenceWorkMember(member, nesting, context))
+          .filter((node) => node !== null);
+        if (diffNodes.length + rowNodes.length === 0) return null;
+        if (!referenceWorkGroupNeedsChrome(segment.members) || rowNodes.length === 0) {
+          return (
+            <React.Fragment key={segment.key}>
+              {diffNodes}
+              {rowNodes}
+            </React.Fragment>
+          );
+        }
+        return (
+          <ReferenceWorkGroup
+            key={segment.key}
+            groupKey={segment.key}
+            label={referenceWorkGroupLabel(segment.members, nesting)}
+            running={referenceWorkGroupRunning(segment.members)}
+            completed={referenceWorkGroupCompleted(segment.members)}
+            status={referenceWorkGroupSharedStatus(segment.members)}
+            pinned={diffNodes}
+          >
+            {rowNodes}
+          </ReferenceWorkGroup>
+        );
+      })}
     </div>
   );
 };

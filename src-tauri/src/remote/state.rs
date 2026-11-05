@@ -792,6 +792,10 @@ pub struct RemoteGatewayState {
     pub machine_services: Option<Arc<crate::daemon::MachineServices>>,
     /// Observer readings a supervisor waits on. The sequence matches machine events once attached.
     pub agent_events: Arc<crate::agent_control::events::AgentEventBus>,
+    /// Owning-host transcript metadata watches. Advisory frames only; the relay does not build them.
+    pub history_watch: Arc<crate::remote::reference_chat::watch::ReferenceHistoryWatch>,
+    /// Dropped with the gateway so the watch poller stops. Not held by the poller.
+    _history_watch_stop: crate::remote::reference_chat::watch::HistoryWatchStop,
     /// Output-driven per-session observer. Installed by the daemon after the gateway exists.
     pub agent_observers: Arc<crate::daemon::agent_observer::AgentObserverHub>,
     /// Machine switch on top of the machine Control grant, plus excluded devices. Off on a fresh
@@ -1047,6 +1051,10 @@ impl RemoteGatewayState {
         let agent_events = Arc::new(crate::agent_control::events::AgentEventBus::new(
             crate::agent_control::events::AGENT_EVENT_RETAIN,
         ));
+        let (history_watch, history_watch_stop) =
+            crate::remote::reference_chat::watch::ReferenceHistoryWatch::new(Arc::clone(
+                &agent_events,
+            ));
         let agent_observers = Arc::new(crate::daemon::agent_observer::AgentObserverHub::new(
             Arc::clone(&terminal_service),
             Arc::clone(&agent_events),
@@ -1137,6 +1145,8 @@ impl RemoteGatewayState {
             workspace_registry,
             machine_services: None,
             agent_events,
+            history_watch,
+            _history_watch_stop: history_watch_stop,
             agent_observers,
             agent_control_policy,
             agent_control_path,

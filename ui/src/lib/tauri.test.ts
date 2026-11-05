@@ -487,6 +487,29 @@ describe("Tauri IPC wrapper contract", () => {
     });
   });
 
+  it("forwards agentContinue without client argv", async () => {
+    core.invoke.mockResolvedValue({ sessionId: "backend-continue-1" });
+    const { spawnTerminalDetailed } = await import("./tauri");
+    await spawnTerminalDetailed({
+      workspaceId: "workspace-main",
+      worktree: null,
+      startup: {
+        kind: "agentContinue",
+        agentType: "claude",
+        mode: "fork",
+        providerSession: { key: "session_id", id: "sess-1" },
+        args: ["--dangerously-skip-permissions"],
+      } as never,
+    });
+    const call = core.invoke.mock.calls.at(-1)?.[1] as { request: { startup: unknown } };
+    expect(call.request.startup).toEqual({
+      kind: "agentContinue",
+      agentType: "claude",
+      mode: "fork",
+      providerSession: { key: "session_id", id: "sess-1" },
+    });
+  });
+
   it("sends worktree create DTOs in camelCase", async () => {
     core.invoke.mockResolvedValue({});
 

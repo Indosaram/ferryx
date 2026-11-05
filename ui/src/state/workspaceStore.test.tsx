@@ -427,6 +427,107 @@ describe("useWorkspaceStore terminal ownership", () => {
     expect(newSession.cwd).toBe("/repo/main/packages/api");
   });
 
+  it("forwards continuation startup into a new selected pane and leaves the source unchanged", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    await act(async () => {
+      await result.current.openTab(worktree);
+    });
+    (services.splitCreate as ReturnType<typeof vi.fn>).mockClear();
+    (services.closeTerminal as ReturnType<typeof vi.fn>).mockClear();
+
+    const tabId = result.current.state.layout.activeTabId!;
+    const tabLayout = result.current.state.layout.layoutsByTabId[tabId];
+    const sourceLeaf = tabLayout.activeLeafId!;
+    const sourceId = tabLayout.sessionIdsByLeafId[sourceLeaf];
+    const sourceBefore = { ...result.current.state.sessions[sourceId] };
+    const startup = {
+      kind: "agentContinue" as const,
+      agentType: "claude",
+      mode: "fork" as const,
+      providerSession: { key: "session_id" as const, id: "continue-ok-1" },
+    };
+
+    await act(async () => {
+      await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
+    });
+
+    expect(services.splitCreate).toHaveBeenCalledTimes(1);
+    expect(services.splitCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ startup }),
+      expect.anything(),
+    );
+    expect(services.closeTerminal).not.toHaveBeenCalledWith(sourceBefore.backendSessionId);
+    expect(result.current.state.sessions[sourceId]).toEqual(sourceBefore);
+    const updated = result.current.state.layout.layoutsByTabId[tabId];
+    expect(updated.sessionIdsByLeafId[sourceLeaf]).toBe(sourceId);
+    expect(updated.activeLeafId).not.toBe(sourceLeaf);
+    const selectedId = updated.sessionIdsByLeafId[updated.activeLeafId!];
+    expect(selectedId).not.toBe(sourceId);
+    expect(result.current.state.sessions[selectedId].workspaceId).toBe(sourceBefore.workspaceId);
+    expect(result.current.state.sessions[selectedId].worktree).toEqual(sourceBefore.worktree);
+    expect(result.current.state.sessions[selectedId].providerSession).toBeUndefined();
+  });
+
+  it("does not retry an unknown continuation create", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    await act(async () => {
+      await result.current.openTab(worktree);
+    });
+    let creates = 0;
+    (services.splitCreate as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      creates += 1;
+      throw { code: "UNKNOWN", message: "outcome unknown" };
+    });
+    const tabId = result.current.state.layout.activeTabId!;
+    const sourceLeaf = result.current.state.layout.layoutsByTabId[tabId].activeLeafId!;
+    const startup = {
+      kind: "agentContinue" as const,
+      agentType: "claude",
+      mode: "resume" as const,
+      providerSession: { key: "session_id" as const, id: "continue-unknown-local-1" },
+    };
+
+    await act(async () => {
+      await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
+      await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
+    });
+
+    expect(creates).toBe(1);
+  });
+
+  it("does not replay an unknown remote continuation spawn", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    const restored = restoredSplitState();
+    restored.sessions["session-1"] = { ...restored.sessions["session-1"], workspaceId: "ssh:host-1" };
+    act(() => result.current.restoreWorkspace(restored));
+    let spawns = 0;
+    (services.spawnTerminal as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      spawns += 1;
+      throw { code: "OPERATION_OUTCOME_UNKNOWN", message: "outcome unknown" };
+    });
+    const startup = {
+      kind: "agentContinue" as const,
+      agentType: "codex",
+      mode: "resume" as const,
+      providerSession: { key: "session_id" as const, id: "continue-unknown-remote-1" },
+    };
+    let thrown: unknown;
+    await act(async () => {
+      try {
+        await result.current.splitPane("tab-primary", "leaf-1", "horizontal", { startup });
+      } catch (error) {
+        thrown = error;
+      }
+      await result.current.splitPane("tab-primary", "leaf-1", "horizontal", { startup });
+    });
+    expect(thrown).toMatchObject({ code: "OPERATION_OUTCOME_UNKNOWN" });
+    expect(spawns).toBe(1);
+    expect(services.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({ startup }));
+  });
+
   it("dispatches split layout immediately while deferred spawn is unresolved, then rebinds when spawn resolves", async () => {
     let resolveDeferredSpawn!: (backendId: string) => void;
     const deferredSpawnPromise = new Promise<string>((resolve) => {

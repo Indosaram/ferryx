@@ -1085,12 +1085,12 @@ mod tests {
 
         #[test]
         fn bounds_a_hung_gh_with_the_deadline() {
-            let dir = tempfile::tempdir().unwrap();
-            let gh = write_script(dir.path(), "gh", "exec sleep 30");
+            // An installed binary, not a script written and exec'd in the same instant: a
+            // parallel test's fork can still hold the write fd, so exec gets ETXTBSY.
             let started = Instant::now();
             let error = run_gh(
-                &gh,
-                &["issue".to_string()],
+                std::path::Path::new("/bin/sleep"),
+                &["30".to_string()],
                 Duration::from_millis(300),
                 GH_MAX_STDOUT_BYTES,
             )

@@ -64,6 +64,7 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
@@ -72,7 +73,8 @@ use crate::scoped_contracts::{CanonicalProvider, ScopeError, ScopeErrorCode};
 
 use super::types::{
     ReferenceHistoryAvailability, ReferenceHistoryCursor, ReferenceHistoryPage,
-    ReferenceHistorySource, ReferenceNativeHistoryKind, ReferenceTargetRef, ReferenceTurn,
+    ReferenceHistorySource, ReferenceNativeHistoryKind, ReferencePart, ReferenceTargetRef,
+    ReferenceTextPhase, ReferenceToolStatus, ReferenceTurn, ReferenceTurnRole,
     REFERENCE_SCROLLBACK_DISCLOSURE,
 };
 
@@ -127,6 +129,10 @@ pub struct ReferenceHistoryIdentity {
     /// The agent's own session id for this pane, when the daemon knows it (a handover daemon
     /// knows no agent's conversation until that agent next changes state).
     pub agent_session_id: Option<String>,
+    /// The owning host's `describe_session` running bit: the backend session is alive and its
+    /// agent process is still running. Absent or unknown stays false, so a tail read after
+    /// exit, crash, or restart cannot invent `running`.
+    pub agent_running: bool,
 }
 
 impl ReferenceHistoryIdentity {
@@ -138,6 +144,7 @@ impl ReferenceHistoryIdentity {
             cwd: None,
             provider_transcript_path: None,
             agent_session_id: None,
+            agent_running: false,
         }
     }
 
@@ -156,6 +163,12 @@ impl ReferenceHistoryIdentity {
     /// The identity of a pane whose agent session id the daemon knows.
     pub fn with_agent_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.agent_session_id = Some(session_id.into());
+        self
+    }
+
+    /// Record that the owning host verified this backend session's agent process is running.
+    pub fn with_agent_running(mut self, running: bool) -> Self {
+        self.agent_running = running;
         self
     }
 
@@ -1121,7 +1134,10 @@ fn parse_reference_history_turns(
 }
 
 /// The stable fingerprint of one turn, over its canonical wire JSON.
-fn reference_turn_fingerprint(turn: &ReferenceTurn) -> String {
+///
+/// Rev3 `previousTurnFingerprint` is this digest. The delta anchor compares it with the turn
+/// before `anchorTurnId`, so the inputs of this digest are part of the anchor contract.
+pub(crate) fn reference_turn_fingerprint(turn: &ReferenceTurn) -> String {
     let mut hasher = Sha256::new();
     match serde_json::to_vec(turn) {
         Ok(json) => hasher.update(&json),
@@ -1176,6 +1192,14 @@ fn reference_history_head_shifted(previous: &[String], current: &[String]) -> bo
         let closed = kept.len() - 1;
         current.len() >= kept.len() && current[..closed] == kept[..closed]
     })
+}
+
+static REFERENCE_HISTORY_NEXT_INCARNATION: AtomicU64 = AtomicU64::new(1);
+
+/// The next generation incarnation. A new tracker and an evicted stream both take this, so neither
+/// reissues `inc-1`.
+pub fn next_reference_history_incarnation() -> u64 {
+    REFERENCE_HISTORY_NEXT_INCARNATION.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Tracks a stream's incarnation so `generation` changes exactly when the answer could have.
@@ -1245,7 +1269,7 @@ impl ReferenceHistoryGenerationTracker {
                     streams.remove(&oldest);
                 }
             }
-            let incarnation = 1;
+            let incarnation = next_reference_history_incarnation();
             streams.insert(
                 stream_id.to_string(),
                 ReferenceStreamState {
@@ -1264,7 +1288,7 @@ impl ReferenceHistoryGenerationTracker {
             state.provider_session_id = provider_session_id.map(str::to_string);
             state.fingerprints = fingerprints;
             state.window_start = window_start;
-            state.incarnation += 1;
+            state.incarnation = next_reference_history_incarnation();
             return format!("{stream_id}:inc-{}", state.incarnation);
         }
 
@@ -1281,7 +1305,7 @@ impl ReferenceHistoryGenerationTracker {
         let head_moved = window_start > state.window_start
             && reference_history_head_shifted(&state.fingerprints, &fingerprints);
         if (truncated || rewritten) && !head_moved {
-            state.incarnation += 1;
+            state.incarnation = next_reference_history_incarnation();
         }
         state.fingerprints = fingerprints;
         state.window_start = window_start;
@@ -1346,6 +1370,219 @@ fn reference_history_window_generation(
         window_start,
         turns,
     )
+}
+
+/// Append-only JSONL readers may attach turn ids. Pi/tree, regenerated projections and
+/// non-append-only stores omit them.
+pub fn reference_history_reader_may_align(kind: ReferenceNativeHistoryKind) -> bool {
+    !matches!(
+        kind,
+        ReferenceNativeHistoryKind::Pi
+            | ReferenceNativeHistoryKind::Cursor
+            | ReferenceNativeHistoryKind::Opencode
+            | ReferenceNativeHistoryKind::Crush
+            | ReferenceNativeHistoryKind::Cline
+            | ReferenceNativeHistoryKind::Unavailable
+    )
+}
+
+/// Parsed turns align with source segments when each turn-opening record is one user turn.
+pub fn reference_history_turns_align(
+    kind: ReferenceNativeHistoryKind,
+    bytes: &[u8],
+    turns: &[ReferenceTurn],
+) -> bool {
+    if !reference_history_reader_may_align(kind) {
+        return false;
+    }
+    let users = turns
+        .iter()
+        .filter(|turn| turn.role == ReferenceTurnRole::User)
+        .count();
+    reference_history_turn_starts(kind, bytes).len() == users
+}
+
+/// Turns with an unanswered call, open commentary, or still-growing tail text.
+pub fn reference_history_open_turn_indexes(turns: &[ReferenceTurn]) -> Vec<usize> {
+    let last = turns.len().saturating_sub(1);
+    turns
+        .iter()
+        .enumerate()
+        .filter(|(index, turn)| reference_turn_is_open(turn, *index == last && !turns.is_empty()))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// A turn is open when it has an unanswered call id, commentary that never became a final
+/// answer, or — if it is the newest assistant turn — prose that can still grow. A user turn
+/// whose text was already submitted is closed, even when it is the newest turn.
+pub fn reference_turn_is_open(turn: &ReferenceTurn, newest: bool) -> bool {
+    let unanswered = turn.parts.iter().any(|part| match part {
+        ReferencePart::Tool {
+            call_id,
+            output,
+            status,
+            error,
+            ..
+        } => {
+            matches!(status, Some(ReferenceToolStatus::Running))
+                || (call_id.is_some()
+                    && output.is_empty()
+                    && *error != Some(true)
+                    && !matches!(
+                        status,
+                        Some(
+                            ReferenceToolStatus::Completed
+                                | ReferenceToolStatus::Failed
+                                | ReferenceToolStatus::Cancelled
+                                | ReferenceToolStatus::Unverifiable
+                        )
+                    ))
+        }
+        _ => false,
+    });
+    let open_commentary = turn.parts.iter().any(|part| {
+        matches!(
+            part,
+            ReferencePart::Text {
+                phase: Some(ReferenceTextPhase::Commentary),
+                ..
+            }
+        )
+    }) && !turn.parts.iter().any(|part| {
+        matches!(
+            part,
+            ReferencePart::Text {
+                phase: Some(ReferenceTextPhase::FinalAnswer),
+                ..
+            }
+        )
+    });
+    let tail_text = newest
+        && turn.role != ReferenceTurnRole::User
+        && turn.parts.iter().any(|part| {
+            matches!(
+                part,
+                ReferencePart::Text { .. } | ReferencePart::Thinking { .. }
+            )
+        });
+    unanswered || open_commentary || tail_text
+}
+
+/// Attach generation-scoped turn and part ids when the read aligns. Returns whether it did.
+/// Unaligned readers omit ids. `call_id` is left as the parser recorded it.
+/// Reader-provided `meta` is preserved. The assembler owns ids, not model or usage, and does
+/// not invent `meta` for a turn the reader left without it.
+pub fn attach_reference_history_identity(
+    kind: ReferenceNativeHistoryKind,
+    generation: &str,
+    base_offset: u64,
+    bytes: &[u8],
+    turns: &mut [ReferenceTurn],
+) -> bool {
+    if !reference_history_turns_align(kind, bytes, turns) {
+        clear_reference_anchor_ids(turns);
+        return false;
+    }
+    let starts = reference_history_turn_starts(kind, bytes);
+    let mut opener = 0usize;
+    let mut segment_offset = 0u64;
+    let mut local = 0usize;
+    let mut seen_user = false;
+    for turn in turns.iter_mut() {
+        if turn.role == ReferenceTurnRole::User {
+            segment_offset = starts.get(opener).copied().unwrap_or(0) as u64;
+            opener += 1;
+            local = 0;
+            seen_user = true;
+        } else if !seen_user {
+            segment_offset = 0;
+        }
+        let absolute = base_offset + segment_offset;
+        let native = if local == 0 {
+            line_at(bytes, segment_offset as usize).and_then(|line| native_opening_id(kind, line))
+        } else {
+            None
+        };
+        turn.id = Some(native.unwrap_or_else(|| format!("{generation}:{absolute}:{local}")));
+        for (part_index, part) in turn.parts.iter_mut().enumerate() {
+            let id = part_call_id(part)
+                .unwrap_or_else(|| format!("{generation}:{absolute}:{local}:{part_index}"));
+            set_part_id(part, id);
+        }
+        local += 1;
+    }
+    true
+}
+
+fn clear_reference_anchor_ids(turns: &mut [ReferenceTurn]) {
+    for turn in turns {
+        turn.id = None;
+        for part in &mut turn.parts {
+            clear_part_id(part);
+        }
+    }
+}
+
+fn line_at(bytes: &[u8], offset: usize) -> Option<&str> {
+    let line = bytes.get(offset..)?;
+    let end = line.iter().position(|byte| *byte == b'\n').unwrap_or(line.len());
+    let mut line = &line[..end];
+    if line.last() == Some(&b'\r') {
+        line = &line[..line.len() - 1];
+    }
+    std::str::from_utf8(line).ok()
+}
+
+fn native_opening_id(kind: ReferenceNativeHistoryKind, line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let id = match kind {
+        ReferenceNativeHistoryKind::Claude => value.get("uuid").and_then(serde_json::Value::as_str),
+        ReferenceNativeHistoryKind::Codex => value
+            .pointer("/payload/turn_id")
+            .and_then(serde_json::Value::as_str),
+        ReferenceNativeHistoryKind::Copilot => value.get("id").and_then(serde_json::Value::as_str),
+        ReferenceNativeHistoryKind::Omo
+        | ReferenceNativeHistoryKind::Omp
+        | ReferenceNativeHistoryKind::Gjc => value.get("id").and_then(serde_json::Value::as_str),
+        _ => None,
+    };
+    id.filter(|id| !id.is_empty()).map(str::to_string)
+}
+
+fn part_call_id(part: &ReferencePart) -> Option<String> {
+    match part {
+        ReferencePart::Tool {
+            call_id: Some(call_id),
+            ..
+        } if !call_id.is_empty() => Some(call_id.clone()),
+        _ => None,
+    }
+}
+
+fn set_part_id(part: &mut ReferencePart, id: String) {
+    let slot = part_id_slot(part);
+    if slot.is_none() {
+        *slot = Some(id);
+    }
+}
+
+fn clear_part_id(part: &mut ReferencePart) {
+    *part_id_slot(part) = None;
+}
+
+fn part_id_slot(part: &mut ReferencePart) -> &mut Option<String> {
+    match part {
+        ReferencePart::Text { id, .. }
+        | ReferencePart::Thinking { id, .. }
+        | ReferencePart::Skill { id, .. }
+        | ReferencePart::Tool { id, .. }
+        | ReferencePart::Image { id, .. }
+        | ReferencePart::Compact { id, .. }
+        | ReferencePart::Notice { id, .. }
+        | ReferencePart::TaskResult { id, .. }
+        | ReferencePart::Diff { id, .. } => id,
+    }
 }
 
 /// The byte offset just past the last reset in a stream, if any: an omp-shaped `context_clear`
@@ -1421,6 +1658,26 @@ pub fn normalize_reference_history_limit(limit: usize) -> Result<usize, ScopeErr
     Ok(limit.min(REFERENCE_HISTORY_MAX_LIMIT))
 }
 
+/// A cursor names one stream. A foreign cursor is `TARGET_EXPIRED`, never an empty or unreadable page.
+fn ensure_history_cursor_stream(
+    stream: &ReferenceHistoryStream,
+    cursor: Option<&ReferenceHistoryCursor>,
+) -> Result<(), ScopeError> {
+    let Some(cursor) = cursor else {
+        return Ok(());
+    };
+    if cursor.matches_stream(&stream.stream_id) {
+        return Ok(());
+    }
+    Err(history_error(
+        ScopeErrorCode::TargetExpired,
+        format!(
+            "the cursor belongs to stream `{}`, not `{}`",
+            cursor.stream_id, stream.stream_id
+        ),
+    ))
+}
+
 /// Serve one page from a store whose bytes are already in hand.
 ///
 /// `window_start` is the stream offset `bytes` begins at (`0` for a whole-store read); a cursor
@@ -1436,6 +1693,12 @@ pub fn reference_history_page_from_window(
     ensure_reference_history_owner(stream, identity)?;
 
     let limit = normalize_reference_history_limit(limit)?;
+
+    // A cursor names one stream. Not-started and scrollback pages used to return before this
+    // check, so a foreign cursor was answered as an empty page instead of TARGET_EXPIRED.
+    // A cursor-less read still falls through to those pages. The unreadable-page returns that
+    // never reach this function run the same check.
+    ensure_history_cursor_stream(stream, cursor)?;
 
     match stream.availability {
         ReferenceHistoryAvailability::Scrollback => return Ok(scrollback_page(stream)),
@@ -1473,15 +1736,7 @@ pub fn reference_history_page_from_window(
 
     let end = match cursor {
         Some(cursor) => {
-            if !cursor.matches_stream(&stream.stream_id) {
-                return Err(history_error(
-                    ScopeErrorCode::TargetExpired,
-                    format!(
-                        "the cursor belongs to stream `{}`, not `{}`",
-                        cursor.stream_id, stream.stream_id
-                    ),
-                ));
-            }
+            ensure_history_cursor_stream(stream, Some(cursor))?;
             if let Some(segments) = &pi_segments {
                 let mapped = cursor
                     .offset
@@ -1548,7 +1803,7 @@ pub fn reference_history_page_from_window(
     } else {
         &[]
     };
-    let turns = match stream.kind {
+    let mut turns = match stream.kind {
         // A task's title is recorded where it was started; a page that only holds its result
         // inherits the titles every older byte named.
         ReferenceNativeHistoryKind::Omo | ReferenceNativeHistoryKind::Omp
@@ -1565,6 +1820,11 @@ pub fn reference_history_page_from_window(
         _ => parse_reference_history_turns(stream.kind, page_bytes)?,
     };
 
+    // Running needs both: this page reaches the stream tail, and the owning host verified
+    // the agent process is still running. A file tail after exit or restart is not enough.
+    let page_holds_live_tail = identity.agent_running && end == stream_length;
+    super::history_parse::reference_finalize_work_status(&mut turns, page_holds_live_tail);
+
     // The generation is computed over the whole stream, never the page: asking for an older page
     // must not look like a change to the client's fence.
     // A tail window begins mid-stream, so what precedes its first boundary is a torn piece of an
@@ -1574,13 +1834,24 @@ pub fn reference_history_page_from_window(
     } else {
         0
     };
-    let whole = parse_reference_history_turns(stream.kind, &view[whole_from..])?;
+    let mut whole = parse_reference_history_turns(stream.kind, &view[whole_from..])?;
+    // The window ends at the file end this read holds. That tail is live only when the
+    // owning host verified the agent is still running; unknown stays unverifiable.
+    super::history_parse::reference_finalize_work_status(&mut whole, identity.agent_running);
     let generation = reference_history_window_generation(
         &stream.stream_id,
         identity.provider_session_id(),
         window_start,
         &whole,
     );
+    attach_reference_history_identity(
+        stream.kind,
+        &generation,
+        window_start + page_start as u64,
+        page_bytes,
+        &mut turns,
+    );
+    super::payload::bind_reference_payload_refs(&generation, page_bytes, &mut turns);
 
     let next_cursor = (start_index > 0).then(|| ReferenceHistoryCursor {
         stream_id: stream.stream_id.clone(),
@@ -1608,6 +1879,8 @@ pub fn reference_history_page_from_window(
         has_more: start_index > 0,
         generation,
         unavailable_reason,
+    
+        composer: None,
     })
 }
 
@@ -1691,6 +1964,7 @@ pub async fn read_reference_history_page(
                     if kind == ReferenceNativeHistoryKind::Pi
                         && error.code == ScopeErrorCode::PayloadTooLarge =>
                 {
+                    ensure_history_cursor_stream(&stream, cursor.as_ref())?;
                     return Ok(unreadable_page(&stream, super::history_pi::PI_BRANCH_UNREADABLE));
                 }
                 other => other?,
@@ -1758,7 +2032,10 @@ where
                 limit,
                 cursor.as_ref(),
             ),
-            Err(reason) => Ok(unreadable_page(&stream, &reason)),
+            Err(reason) => {
+                ensure_history_cursor_stream(&stream, cursor.as_ref())
+                    .map(|()| unreadable_page(&stream, &reason))
+            }
         };
         Ok::<_, crate::ipc::error::IpcError>(page)
     })
@@ -1786,6 +2063,8 @@ fn scrollback_page(stream: &ReferenceHistoryStream) -> ReferenceHistoryPage {
                 .clone()
                 .unwrap_or_else(|| REFERENCE_SCROLLBACK_DISCLOSURE.to_string()),
         ),
+    
+        composer: None,
     }
 }
 
@@ -1803,6 +2082,8 @@ fn not_started_page(stream: &ReferenceHistoryStream) -> ReferenceHistoryPage {
                 .clone()
                 .unwrap_or_else(|| REFERENCE_SCROLLBACK_DISCLOSURE.to_string()),
         ),
+    
+        composer: None,
     }
 }
 
@@ -1817,6 +2098,8 @@ fn unreadable_page(stream: &ReferenceHistoryStream, reason: &str) -> ReferenceHi
         unavailable_reason: Some(format!(
             "{REFERENCE_HISTORY_UNREADABLE_REASON} ({reason}); showing this pane's own output"
         )),
+    
+        composer: None,
     }
 }
 
@@ -2187,7 +2470,7 @@ mod tests {
         assert_eq!(page.availability, ReferenceHistoryAvailability::Native);
         assert_eq!(
             page.turns.first().map(|turn| turn.parts.clone()),
-            Some(vec![ReferencePart::Text { text: "SLOW please answer".into(), phase: None }])
+            Some(vec![ReferencePart::Text { text: "SLOW please answer".into(), phase: None , id: None}])
         );
         let missing = resolve_reference_history_stream(home.path(), &bound_identity("crush", "sess-1", "gone"), &[])
             .expect("an unwritten session resolves");
@@ -2213,7 +2496,7 @@ mod tests {
         assert_eq!(page.turns.first().map(|turn| turn.role), Some(ReferenceTurnRole::User));
         assert_eq!(
             page.turns.last().and_then(|turn| turn.parts.last()),
-            Some(&ReferencePart::Text { text: "OK".into(), phase: None })
+            Some(&ReferencePart::Text { text: "OK".into(), phase: None , id: None})
         );
         let older = read_reference_history_page(&stream, &identity, 10, page.cursor.as_ref())
             .await
@@ -2225,6 +2508,34 @@ mod tests {
         let torn = read_reference_history_page(&stream, &identity, 2, None).await.expect("disclosed");
         assert_eq!(torn.availability, ReferenceHistoryAvailability::Scrollback);
         assert!(torn.turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_foreign_cursor_on_an_unreadable_projection_is_refused_before_the_unreadable_page() {
+        let home = TempHome::new();
+        let id = "1792653340197_ys4yu";
+        write_store(
+            &home,
+            &format!(".cline/data/sessions/{id}/{id}.messages.json"),
+            "{\"messages\": [",
+        );
+        let identity = bound_identity("cline", "sess-1", id);
+        let stream = resolve_reference_history_stream(home.path(), &identity, &[]).expect("resolves");
+        let bare = read_reference_history_page(&stream, &identity, 2, None)
+            .await
+            .expect("a cursor-less unreadable projection is disclosed");
+        assert_eq!(bare.availability, ReferenceHistoryAvailability::Scrollback);
+        assert!(bare.turns.is_empty());
+
+        let foreign = ReferenceHistoryCursor {
+            stream_id: "foreign-stream-not-this-session".into(),
+            offset: 0,
+        };
+        let refusal = read_reference_history_page(&stream, &identity, 2, Some(&foreign))
+            .await
+            .expect_err("a foreign cursor is refused before the unreadable page");
+        assert_eq!(refusal.code, ScopeErrorCode::TargetExpired);
+        assert!(refusal.message.contains("foreign-stream-not-this-session"));
     }
 
     #[test]
@@ -2325,6 +2636,93 @@ mod tests {
         assert!(!newest.turns.is_empty(), "the live turn the window read must be shown: {:?}", newest.turns);
         assert!(newest.cursor.is_none());
         assert!(newest.unavailable_reason.as_deref().is_some_and(|reason| reason.contains("read cap")));
+    }
+
+    #[test]
+    fn live_owning_tail_promotes_an_open_tool_and_a_stale_page_does_not() {
+        let home = TempHome::new();
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let identity = bound_identity("omo", "sess-1", "aaa");
+        let stream = omo_stream(&home, &identity);
+        let identity = identity.with_agent_running(true);
+        let open = concat!(
+            r#"{"type":"session","id":"sess-a","cwd":"/w","timestamp":"2026-10-06T09:00:00.000Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"m1","timestamp":"2026-10-06T09:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"m2","timestamp":"2026-10-06T09:00:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c-open","name":"bash","arguments":{"command":"sleep"}}]}}"#,
+            "\n",
+        );
+        let stored = super::super::history_omo::parse_omo_transcript(
+            open,
+            usize::MAX,
+            false,
+            &mut std::collections::HashMap::new(),
+        );
+        let stored_status = stored.iter().find_map(|turn| {
+            turn.parts.iter().find_map(|part| match part {
+                ReferencePart::Tool { status, .. } => *status,
+                _ => None,
+            })
+        });
+        assert_eq!(
+            stored_status,
+            Some(ReferenceToolStatus::Unverifiable),
+            "a reader without a live owning tail does not invent running"
+        );
+        let page = reference_history_page_from_bytes(&stream, &identity, open.as_bytes(), 10, None)
+            .expect("the owning tail page");
+        let live_status = page.turns.iter().find_map(|turn| {
+            turn.parts.iter().find_map(|part| match part {
+                ReferencePart::Tool { status, .. } => *status,
+                _ => None,
+            })
+        });
+        assert_eq!(live_status, Some(ReferenceToolStatus::Running));
+
+        let stale = format!(
+            "{open}{{\"type\":\"message\",\"id\":\"m3\",\"timestamp\":\"2026-10-06T09:00:03.000Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"later\"}}]}}}}\n"
+        );
+        let later = stale.find(r#"{"type":"message","id":"m3""#).expect("later turn");
+        let cursor = ReferenceHistoryCursor {
+            stream_id: stream.stream_id.clone(),
+            offset: later as u64,
+        };
+        let older = reference_history_page_from_bytes(&stream, &identity, stale.as_bytes(), 10, Some(&cursor))
+            .expect("the page that ends before the tail");
+        let stale_status = older.turns.iter().find_map(|turn| {
+            turn.parts.iter().find_map(|part| match part {
+                ReferencePart::Tool { status, .. } => *status,
+                _ => None,
+            })
+        });
+        assert_eq!(stale_status, Some(ReferenceToolStatus::Unverifiable));
+    }
+
+    #[test]
+    fn tail_page_without_a_live_agent_stays_unverifiable() {
+        let home = TempHome::new();
+        home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
+        let identity = bound_identity("omo", "sess-1", "aaa");
+        assert!(!identity.agent_running, "an unknown or exited agent is not live");
+        let stream = omo_stream(&home, &identity);
+        let open = concat!(
+            r#"{"type":"session","id":"sess-a","cwd":"/w","timestamp":"2026-10-06T09:00:00.000Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"m1","timestamp":"2026-10-06T09:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"m2","timestamp":"2026-10-06T09:00:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c-open","name":"bash","arguments":{"command":"sleep"}}]}}"#,
+            "\n",
+        );
+        let page = reference_history_page_from_bytes(&stream, &identity, open.as_bytes(), 10, None)
+            .expect("the tail page of an exited session");
+        let status = page.turns.iter().find_map(|turn| {
+            turn.parts.iter().find_map(|part| match part {
+                ReferencePart::Tool { status, .. } => *status,
+                _ => None,
+            })
+        });
+        assert_eq!(status, Some(ReferenceToolStatus::Unverifiable));
     }
 
     #[test]
@@ -2595,7 +2993,10 @@ mod tests {
         }
 
         assert_eq!(pages, 3, "one page per human turn");
-        assert_eq!(collected, full_turns(), "no turn is duplicated and none is dropped");
+        clear_reference_anchor_ids(&mut collected);
+        let mut expected = full_turns();
+        clear_reference_anchor_ids(&mut expected);
+        assert_eq!(collected, expected, "no turn is duplicated and none is dropped");
     }
 
     #[test]
@@ -2616,6 +3017,28 @@ mod tests {
         .expect_err("a cursor from another stream is never re-anchored");
         assert_eq!(refusal.code, ScopeErrorCode::TargetExpired);
         assert!(refusal.message.contains(&stream.stream_id));
+    }
+
+    #[test]
+    fn a_foreign_cursor_on_a_not_started_stream_is_refused_before_the_empty_page() {
+        let home = TempHome::new();
+        let unwritten = bound_identity("omo", "sess-1", "sess-never-written");
+        let stream = omo_stream(&home, &unwritten);
+        assert_eq!(stream.availability, ReferenceHistoryAvailability::NotStarted);
+
+        let bare = reference_history_page_from_bytes(&stream, &unwritten, b"", 20, None)
+            .expect("a cursor-less not-started read is the not-started page");
+        assert_eq!(bare.availability, ReferenceHistoryAvailability::NotStarted);
+        assert!(bare.turns.is_empty());
+
+        let foreign = ReferenceHistoryCursor {
+            stream_id: "foreign-stream-not-this-session".into(),
+            offset: 0,
+        };
+        let refusal = reference_history_page_from_bytes(&stream, &unwritten, b"", 20, Some(&foreign))
+            .expect_err("a cursor from another stream is never answered as not-started");
+        assert_eq!(refusal.code, ScopeErrorCode::TargetExpired);
+        assert!(refusal.message.contains("foreign-stream-not-this-session"));
     }
 
     #[test]
@@ -2863,39 +3286,63 @@ mod tests {
             ReferenceHistoryGenerationTracker::new().observe(stream_id, Some("provider-1"), &turns);
 
         let mut rewritten = turns.clone();
-        rewritten[1].parts = vec![ReferencePart::Text { text: "rewritten".into(), phase: None }];
+        rewritten[1].parts = vec![ReferencePart::Text { text: "rewritten".into(), phase: None , id: None}];
         let rewrite = ReferenceHistoryGenerationTracker::new();
-        assert_eq!(rewrite.observe(stream_id, Some("provider-1"), &turns), base);
+        let rewrite_base = rewrite.observe(stream_id, Some("provider-1"), &turns);
+        assert_ne!(rewrite_base, base, "a new tracker takes the next incarnation and does not reuse one");
+        assert_eq!(
+            rewrite.observe(stream_id, Some("provider-1"), &turns),
+            rewrite_base,
+            "observing the same stream again is not a change"
+        );
         assert_ne!(
             rewrite.observe(stream_id, Some("provider-1"), &rewritten),
-            base,
+            rewrite_base,
             "a rewritten existing turn rotates"
         );
 
         let mut truncated = turns.clone();
         truncated.pop();
         let truncation = ReferenceHistoryGenerationTracker::new();
-        assert_eq!(truncation.observe(stream_id, Some("provider-1"), &turns), base);
+        let truncation_base = truncation.observe(stream_id, Some("provider-1"), &turns);
+        assert_ne!(truncation_base, rewrite_base, "a new tracker does not reuse an incarnation");
+        assert_eq!(
+            truncation.observe(stream_id, Some("provider-1"), &turns),
+            truncation_base,
+            "observing the same stream again is not a change"
+        );
         assert_ne!(
             truncation.observe(stream_id, Some("provider-1"), &truncated),
-            base,
+            truncation_base,
             "a shorter stream rotates"
         );
 
         let without_head = turns[1..].to_vec();
         let head_removal = ReferenceHistoryGenerationTracker::new();
-        assert_eq!(head_removal.observe(stream_id, Some("provider-1"), &turns), base);
+        let head_base = head_removal.observe(stream_id, Some("provider-1"), &turns);
+        assert_ne!(head_base, truncation_base, "a new tracker does not reuse an incarnation");
+        assert_eq!(
+            head_removal.observe(stream_id, Some("provider-1"), &turns),
+            head_base,
+            "observing the same stream again is not a change"
+        );
         assert_ne!(
             head_removal.observe(stream_id, Some("provider-1"), &without_head),
-            base,
+            head_base,
             "dropping the first turn shifts the chain and rotates"
         );
 
         let provider_change = ReferenceHistoryGenerationTracker::new();
-        assert_eq!(provider_change.observe(stream_id, Some("provider-1"), &turns), base);
+        let provider_base = provider_change.observe(stream_id, Some("provider-1"), &turns);
+        assert_ne!(provider_base, head_base, "a new tracker does not reuse an incarnation");
+        assert_eq!(
+            provider_change.observe(stream_id, Some("provider-1"), &turns),
+            provider_base,
+            "observing the same stream again is not a change"
+        );
         assert_ne!(
             provider_change.observe(stream_id, Some("provider-2"), &turns),
-            base,
+            provider_base,
             "another provider session is another conversation"
         );
     }
@@ -2908,7 +3355,7 @@ mod tests {
         assert_eq!(genesis, reference_history_genesis_generation(stream_id, turns.first()));
         assert!(genesis.starts_with(stream_id));
 
-        let rewritten = ReferencePart::Text { text: "different".into(), phase: None };
+        let rewritten = ReferencePart::Text { text: "different".into(), phase: None , id: None};
         let mut other = turns[0].clone();
         other.parts = vec![rewritten];
         assert_ne!(genesis, reference_history_genesis_generation(stream_id, Some(&other)));
@@ -3107,10 +3554,24 @@ mod tests {
             tracker.tracked_stream_count()
         );
         let newest = format!("omo:{:016x}", 9_999u32);
+        let kept = tracker.observe(&newest, Some("provider-1"), &[]);
         assert_eq!(
             tracker.observe(&newest, Some("provider-1"), &[]),
-            format!("{newest}:inc-1"),
+            kept,
             "the most recently observed stream is still tracked"
+        );
+        let evicted = "omo:evicted-stream";
+        let first = tracker.observe(evicted, Some("provider-1"), &[]);
+        for index in 0..REFERENCE_HISTORY_MAX_TRACKED_STREAMS + 8 {
+            tracker.observe(&format!("omo:evict-{index:016x}"), Some("provider-1"), &[]);
+        }
+        let again = tracker.observe(evicted, Some("provider-1"), &[]);
+        assert_ne!(again, first, "eviction must not reissue the generation");
+        let restarted = ReferenceHistoryGenerationTracker::new();
+        assert_ne!(
+            restarted.observe(evicted, Some("provider-1"), &[]),
+            first,
+            "a restarted tracker must not reissue a generation"
         );
     }
 
@@ -3266,7 +3727,7 @@ mod tests {
                 .iter()
                 .flat_map(|turn| turn.parts.iter())
                 .find_map(|part| match part {
-                    ReferencePart::TaskResult { tasks } => Some(tasks[0].title.clone()),
+                    ReferencePart::TaskResult { tasks , ..} => Some(tasks[0].title.clone()),
                     _ => None,
                 })
                 .expect("the wake is on the newest page");
@@ -3495,6 +3956,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_foreign_cursor_on_an_oversized_pi_store_is_refused_before_the_unreadable_page() {
+        let home = TempHome::new();
+        let path = home.write_session("--w--", "2026-10-06_aaa.jsonl", "");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_len(REFERENCE_HISTORY_MAX_PI_BYTES as u64 + 1))
+            .expect("a sparse oversized store is creatable");
+        let identity = bound_identity("pi", "sess-1", "aaa");
+        let stream = omo_stream(&home, &identity);
+
+        let bare = read_reference_history_page(&stream, &identity, 10, None)
+            .await
+            .expect("a cursor-less oversized pi store is disclosed");
+        assert_eq!(bare.availability, ReferenceHistoryAvailability::Scrollback);
+        assert!(
+            bare.unavailable_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(super::super::history_pi::PI_BRANCH_UNREADABLE)),
+            "{:?}",
+            bare.unavailable_reason
+        );
+
+        let foreign = ReferenceHistoryCursor {
+            stream_id: "foreign-stream-not-this-session".into(),
+            offset: 0,
+        };
+        let refusal = read_reference_history_page(&stream, &identity, 10, Some(&foreign))
+            .await
+            .expect_err("a foreign cursor is refused before the unreadable page");
+        assert_eq!(refusal.code, ScopeErrorCode::TargetExpired);
+        assert!(refusal.message.contains("foreign-stream-not-this-session"));
+    }
+
+    #[tokio::test]
     async fn a_stream_read_off_the_reactor_matches_the_byte_reader() {
         let home = TempHome::new();
         let path = home.write_session("--w--", "2026-10-06_aaa.jsonl", THREE_TURNS);
@@ -3509,5 +4005,248 @@ mod tests {
             reference_history_page_from_bytes(&stream, &identity, THREE_TURNS.as_bytes(), 2, None)
                 .expect("the same page from bytes");
         assert_eq!(from_file, from_bytes);
+    }
+
+    #[test]
+    fn rev2_wire_omits_unfilled_identity_fields() {
+        let turn = ReferenceTurn {
+            role: ReferenceTurnRole::User,
+            started_at: None,
+            ended_at: None,
+            source: None,
+            parts: vec![ReferencePart::Text {
+                text: "same".into(),
+                phase: None,
+                id: None,
+            }],
+            abandoned: None,
+            id: None,
+            meta: None,
+        };
+        let rendered = serde_json::to_string(&turn).expect("serializes");
+        assert!(!rendered.contains("\"id\""));
+        assert!(!rendered.contains("callId"));
+        assert!(!rendered.contains("meta"));
+        assert!(!rendered.contains("status"));
+    }
+
+    #[test]
+    fn repeated_identical_turns_stay_distinct_and_survive_a_window_slide() {
+        let bytes = b"{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"same\"}]}}\n{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"same\"}]}}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"same\"}]}}\n{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"same\"}]}}\n";
+        let mut turns = super::super::history_omo::parse_omo_transcript(
+            &String::from_utf8_lossy(bytes),
+            usize::MAX,
+            false,
+            &mut std::collections::HashMap::new(),
+        );
+        assert!(attach_reference_history_identity(
+            ReferenceNativeHistoryKind::Omo,
+            "gen-a",
+            0,
+            bytes,
+            &mut turns,
+        ));
+        let ids: Vec<_> = turns.iter().map(|turn| turn.id.clone().unwrap()).collect();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+        let second = bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+        let third = bytes[second..].iter().position(|byte| *byte == b'\n').unwrap() + second + 1;
+        let mut slid = super::super::history_omo::parse_omo_transcript(
+            &String::from_utf8_lossy(&bytes[third..]),
+            usize::MAX,
+            false,
+            &mut std::collections::HashMap::new(),
+        );
+        assert!(attach_reference_history_identity(
+            ReferenceNativeHistoryKind::Omo,
+            "gen-a",
+            third as u64,
+            &bytes[third..],
+            &mut slid,
+        ));
+        assert_eq!(slid[0].id, turns[2].id);
+        assert_eq!(slid[1].id, turns[3].id);
+    }
+
+    #[test]
+    fn an_earlier_unanswered_call_is_in_the_open_set() {
+        let open_call = ReferencePart::Tool {
+            name: "read".into(),
+            summary: String::new(),
+            input: String::new(),
+            output: String::new(),
+            error: None,
+            skill: None,
+            output_ref: None,
+            output_size: None,
+            images: Vec::new(),
+            id: None,
+            call_id: Some("call-early".into()),
+            status: Some(ReferenceToolStatus::Running),
+            output_payload: Box::new(None),
+        };
+        let closed = ReferencePart::Text {
+            text: "done".into(),
+            phase: None,
+            id: None,
+        };
+        let turns = vec![
+            ReferenceTurn {
+                role: ReferenceTurnRole::Assistant,
+                started_at: None,
+                ended_at: None,
+                source: None,
+                parts: vec![open_call],
+                abandoned: None,
+                id: None,
+                meta: None,
+            },
+            ReferenceTurn {
+                role: ReferenceTurnRole::User,
+                started_at: None,
+                ended_at: None,
+                source: None,
+                parts: vec![closed],
+                abandoned: None,
+                id: None,
+                meta: None,
+            },
+        ];
+        let open = reference_history_open_turn_indexes(&turns);
+        assert!(open.contains(&0), "the earlier unanswered call is open: {open:?}");
+        assert!(!open.contains(&1), "a closed user turn is not open: {open:?}");
+    }
+
+    #[test]
+    fn unaligned_readers_omit_ids() {
+        let mut turns = vec![ReferenceTurn {
+            role: ReferenceTurnRole::User,
+            started_at: None,
+            ended_at: None,
+            source: None,
+            parts: vec![ReferencePart::Text {
+                text: "x".into(),
+                phase: None,
+                id: Some("stale".into()),
+            }],
+            abandoned: None,
+            id: Some("stale".into()),
+            meta: None,
+        }];
+        assert!(!attach_reference_history_identity(
+            ReferenceNativeHistoryKind::Pi,
+            "gen",
+            0,
+            b"{}",
+            &mut turns,
+        ));
+        assert!(turns[0].id.is_none());
+        assert!(matches!(turns[0].parts[0], ReferencePart::Text { id: None, .. }));
+        assert!(!attach_reference_history_identity(
+            ReferenceNativeHistoryKind::Cursor,
+            "gen",
+            0,
+            b"{}",
+            &mut turns,
+        ));
+        assert!(!reference_history_reader_may_align(ReferenceNativeHistoryKind::Opencode));
+        assert!(!reference_history_reader_may_align(ReferenceNativeHistoryKind::Crush));
+        assert!(!reference_history_reader_may_align(ReferenceNativeHistoryKind::Cline));
+    }
+
+    /// Page assembly must not replace reader meta with a provider-only stamp, and must not
+    /// invent meta. A turn the reader left without meta keeps the rev2 wire (no `meta` key).
+    #[test]
+    fn page_assembly_preserves_reader_meta_and_leaves_absent_meta_off_the_wire() {
+        let claude = concat!(
+            r#"{"type":"user","timestamp":"2026-10-06T13:00:00.000Z","message":{"role":"user","content":"plain prompt"}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-06T13:00:01.000Z","message":{"role":"assistant","model":"claude-opus","usage":{"input_tokens":2,"output_tokens":3},"content":[{"type":"text","text":"done"}]}}"#,
+            "\n",
+        );
+        let claude_identity = bound_identity("claude", "sess-meta", "native-meta");
+        let claude_stream = native_stream(
+            &claude_identity,
+            ReferenceNativeHistoryKind::Claude,
+            Path::new("/tmp/claude-meta.jsonl"),
+        );
+        let claude_parsed = super::super::history_parse::dispatch_reference_history(
+            ReferenceNativeHistoryKind::Claude,
+            claude.as_bytes(),
+        )
+        .expect("claude fixture parses");
+        let claude_page = reference_history_page_from_bytes(
+            &claude_stream,
+            &claude_identity,
+            claude.as_bytes(),
+            50,
+            None,
+        )
+        .expect("claude page");
+        assert!(claude_page.turns[0].meta.is_none(), "a prompt with no recorded model or usage stays without meta");
+        let claude_user = serde_json::to_string(&claude_page.turns[0]).expect("user turn serializes");
+        assert!(!claude_user.contains("\"meta\""), "rev2 bytes must not gain meta: {claude_user}");
+        let mut stripped = claude_page.turns[0].clone();
+        stripped.id = None;
+        for part in &mut stripped.parts {
+            clear_part_id(part);
+        }
+        assert_eq!(stripped, claude_parsed[0], "identity attachment must not add meta or other reader fields");
+        assert_eq!(
+            serde_json::to_string(&stripped).expect("stripped user"),
+            serde_json::to_string(&claude_parsed[0]).expect("parsed user"),
+            "rev2 bytes of a turn without meta are unchanged once assembler-owned ids are removed"
+        );
+        let kept = claude_page.turns[1].meta.as_ref().expect("assistant meta survives assembly");
+        let reader = claude_parsed[1].meta.as_ref().expect("reader attached meta");
+        assert_eq!(kept.model.as_deref(), Some("claude-opus"));
+        assert_eq!(kept.usage, reader.usage);
+        assert_eq!(kept, reader);
+
+        let cline = concat!(
+            r#"{"role":"user","content":[{"type":"text","text":"<user_input>plain</user_input>"}]}"#,
+            "\n",
+            r#"{"role":"assistant","model":"cline-model","usage":{"input_tokens":4,"output_tokens":5},"content":[{"type":"text","text":"done"}]}"#,
+            "\n",
+        );
+        let cline_identity = bound_identity("cline", "sess-meta", "native-meta");
+        let cline_stream = native_stream(
+            &cline_identity,
+            ReferenceNativeHistoryKind::Cline,
+            Path::new("/tmp/cline-meta.jsonl"),
+        );
+        let cline_parsed = super::super::history_parse::dispatch_reference_history(
+            ReferenceNativeHistoryKind::Cline,
+            cline.as_bytes(),
+        )
+        .expect("cline fixture parses");
+        let cline_page = reference_history_page_from_bytes(
+            &cline_stream,
+            &cline_identity,
+            cline.as_bytes(),
+            50,
+            None,
+        )
+        .expect("cline page");
+        assert!(cline_page.turns[0].meta.is_none());
+        assert_eq!(
+            serde_json::to_string(&cline_page.turns[0]).expect("unaligned user"),
+            serde_json::to_string(&cline_parsed[0]).expect("parsed user"),
+            "an unaligned turn without meta keeps rev2 bytes"
+        );
+        assert!(!serde_json::to_string(&cline_page.turns[0]).expect("wire").contains("\"meta\""));
+        assert_eq!(cline_page.turns[1].meta, cline_parsed[1].meta);
+        assert_eq!(
+            cline_page.turns[1].meta.as_ref().and_then(|meta| meta.model.as_deref()),
+            Some("cline-model")
+        );
+        assert_eq!(
+            cline_page.turns[1]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.usage.as_ref())
+                .and_then(|usage| usage.output_tokens),
+            Some(5)
+        );
     }
 }

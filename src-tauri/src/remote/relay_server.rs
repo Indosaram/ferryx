@@ -285,7 +285,7 @@ fn reference_chat_mutation(method: &Method, path: &str) -> bool {
                 .strip_prefix("/api/v1/")
                 .map(|route| route.split('/').collect::<Vec<_>>())
                 .as_deref(),
-            Some(["reference-chat", _, "submit" | "stop" | "answer"])
+            Some(["reference-chat", _, "submit" | "stop" | "answer" | "control"])
         )
 }
 
@@ -3579,7 +3579,8 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             // the machine's own gateway authenticates, fences the target and enforces the
             // read-only policy, exactly as it does for a direct caller.
             | ("GET", ["reference-chat", _, "history" | "screen" | "prompt" | "files"])
-            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files" | "acknowledge-outcome"])
+            | ("GET", ["reference-chat", _, "payload"])
+            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files" | "acknowledge-outcome" | "control"])
             | ("GET" | "DELETE", ["reference-chat", _, "files", _])
             // Agent control. Reads and mutations are separate paths so a dropped mutation
             // reply is outcome-unknown and a dropped wait stays a timeout.
@@ -3726,6 +3727,7 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         "limit",
         "cursor",
         "cursorStream",
+        "after",
     ];
     let allowed: &[&str] = match path.split('/').collect::<Vec<_>>().as_slice() {
         ["fs", "directories"] => &["path", "includeHidden"],
@@ -3746,6 +3748,16 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         // `ReferenceChatReadQuery`, so they admit exactly its fields. A mutation's target
         // travels in its own envelope body, so its query must stay empty.
         ["reference-chat", _, "history" | "screen" | "prompt" | "acknowledge-outcome"] => reference_chat_read_fields,
+        // The payload handler reads the target fence and `ref`. Paging fields are history-only.
+        ["reference-chat", _, "payload"] => &[
+            "hostId",
+            "ownerId",
+            "epoch",
+            "backendSessionId",
+            "providerSessionId",
+            "registryId",
+            "ref",
+        ],
         ["reference-chat", _, "files"] => reference_chat_read_fields,
         ["reference-chat", _, "files", _] => reference_chat_read_fields,
         ["agent-control", "events"] => &["after"],
@@ -6607,7 +6619,7 @@ mod tests {
 
     #[tokio::test]
     async fn r23_truncated_reference_chat_mutations_report_outcome_unknown() {
-        for suffix in ["submit", "stop", "answer"] {
+        for suffix in ["submit", "stop", "answer", "control"] {
             for partial in [
                 b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n".as_slice(),
                 b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"ok\":true".as_slice(),
@@ -9625,6 +9637,23 @@ mod tests {
             assert!(
                 validate_http_query(&path, Some("repoPath=/etc/passwd")).is_err(),
                 "{path} must still refuse a field the contract does not define"
+            );
+        }
+    }
+
+    #[test]
+    fn the_payload_allowlist_admits_only_the_fields_the_handler_reads() {
+        let path = "reference-chat/session-1/payload";
+        let identity = "hostId=local&ownerId=owner&epoch=1&backendSessionId=s&providerSessionId=p&registryId=codex&ref=payload-ref";
+        assert!(
+            validate_http_query(path, Some(identity)).is_ok(),
+            "the payload handler reads the target fence and ref"
+        );
+        for extra in ["limit=50", "cursor=3", "cursorStream=codex-transcript:abc", "after=%7B%7D"] {
+            let query = format!("{identity}&{extra}");
+            assert!(
+                validate_http_query(path, Some(&query)).is_err(),
+                "{extra} is not read by the payload handler"
             );
         }
     }

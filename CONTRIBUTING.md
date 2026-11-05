@@ -24,7 +24,13 @@ On Linux, install the GTK 3, WebKitGTK 4.1, and other system libraries required 
 [Tauri](https://v2.tauri.app/start/prerequisites/) before compiling the desktop binary, plus the
 remote desktop headers listed in the README's Linux prerequisites. The headless binaries
 (`ferryx-cli`, `ferryx-relay`, `ferryx-account`) build with `--no-default-features` and need
-neither.
+neither; they do need the three hub features enabled until `hub_runtime::seed` gates its
+`omo_client` call, so use
+`--no-default-features --features hub-slack,hub-discord,hub-voice`.
+
+Building on a throwaway Linux sandbox (Manus task VM over Tailscale, crates.io unreachable) is
+covered in [docs/MANUS_SANDBOX_BUILD.md](docs/MANUS_SANDBOX_BUILD.md): machine spec, the Zig and
+Ghostty prerequisites, the `cargo vendor` transfer, and the disk budget.
 
 Clone and install:
 

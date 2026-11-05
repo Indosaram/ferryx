@@ -4554,6 +4554,14 @@ impl DaemonClient {
         )
     }
 
+    pub async fn supports_terminal_continue(&self) -> bool {
+        matches!(
+            self.send_request(DaemonRequest::GetCapabilities).await,
+            Ok(DaemonResponse::CapabilitiesOk { capabilities })
+                if capabilities.iter().any(|c| c == crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY)
+        )
+    }
+
     /// Opens a cancellable paste on a local session and returns its id for `PasteWrite` chunks.
     /// Same local-control gate as `write_terminal`.
     pub async fn begin_paste(&self, session_id: &str) -> Result<String, IpcError> {

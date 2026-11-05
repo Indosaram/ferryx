@@ -1,0 +1,43 @@
+{
+  "schema": "herdr-reference-chat/qa12-frames/1",
+  "valid": {
+    "type": "referenceHistoryChanged",
+    "target": {
+      "hostId": "host-1",
+      "ownerId": "owner-1",
+      "epoch": "7",
+      "backendSessionId": "sess-1"
+    },
+    "changeSeq": "4"
+  },
+  "delta": {
+    "mode": "delta",
+    "source": "claude",
+    "generation": "gen-2",
+    "replaceFromTurnId": "turn-1",
+    "turns": [
+      {
+        "id": "turn-1",
+        "role": "assistant",
+        "parts": []
+      }
+    ],
+    "nextAnchor": {
+      "turnId": "turn-1",
+      "fingerprint": "fp-1"
+    },
+    "tailOpen": false
+  },
+  "reset": {
+    "mode": "reset",
+    "reason": "anchorOutsideWindow",
+    "page": {
+      "source": "claude",
+      "availability": "native",
+      "turns": [],
+      "hasMore": false,
+      "generation": "gen-3"
+    }
+  }
+}
+

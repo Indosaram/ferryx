@@ -124,6 +124,15 @@ describe("paired desktop operation boundary", () => {
     await expect(a.createSession({ requestId, workspaceId: "project-a", worktree: null, cols: 80, rows: 24, cwdRelative: null, inheritFromSessionId: null, startup: { kind: "shell" } })).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
     expect(invoke).toHaveBeenCalledTimes(1);
   });
+  it("refuses agentContinue when terminalContinueV1 is not advertised", async () => {
+    const s = setup();
+    const invoke = vi.fn(async () => ({ hostId: s.hosts[0].hostId, generation: "7", result: { kind: "capabilities",
+      data: { ...fixture("capabilities"), capabilities: ["terminalCreateV1", "terminalStreamV1"] } } }));
+    const a = createPairedDaemonProjectAdapter(s.hosts[0], { store: s.store, invoke, isNative: () => true });
+    await a.capabilities();
+    await expect(a.createSession({ requestId, workspaceId: "project-a", worktree: null, cols: 80, rows: 24, cwdRelative: null, inheritFromSessionId: null, startup: { kind: "agentContinue", agentType: "claude", mode: "fork", providerSession: { key: "session_id", id: "sess-1" } } })).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
   it.each(["", "../project", "daemon:" + "a".repeat(64), "project/a", "project\0a"])("rejects invalid remote ID %j before dispatch", async id => {
     const s = setup(); await s.adapters[0].capabilities();
     await expect(s.adapters[0].worktrees(id)).rejects.toMatchObject({ code: "INVALID_REMOTE_WORKSPACE_ID" });

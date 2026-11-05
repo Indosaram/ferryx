@@ -58,8 +58,10 @@ use sha2::{Digest, Sha256};
 
 use super::types::{
     ReferenceHistoryParser, ReferenceImageRef, ReferenceNativeHistoryKind, ReferencePart,
-    ReferenceSkillActivity, ReferenceSkillEvidence, ReferenceSkillStatus, ReferenceTextPhase,
-    ReferenceTurn, ReferenceTurnRole,
+    ReferencePayloadRef, ReferenceSkillActivity, ReferenceSkillEvidence, ReferenceSkillStatus,
+    ReferenceTaskStatus, ReferenceTextPhase, ReferenceTokenUsage, ReferenceToolStatus,
+    ReferenceTurn, ReferenceTurnMeta,
+    ReferenceTurnRole,
 };
 
 // ---------------------------------------------------------------------------------------
@@ -114,6 +116,400 @@ pub fn dispatch_reference_history(
 }
 
 // ---------------------------------------------------------------------------------------
+// Native work fields (T13). Filled only from provider records, never from prose.
+// ---------------------------------------------------------------------------------------
+
+/// A native patch body longer than this is not inlined. The diff part keeps a payload ref only.
+pub(crate) const REFERENCE_NATIVE_DIFF_LIMIT: usize = 8 * 1024;
+
+pub(crate) const REFERENCE_PATCH_OMITTED: &str = "[native patch omitted; see diff payload ref]";
+
+/// Map a provider's own lifecycle word. An unknown word is omitted, never guessed.
+///
+/// A recorded cancel, abort, or interrupt is `cancelled`, never `failed` and never `unverifiable`.
+/// An in-progress word is provisional `running` until [`reference_finalize_work_status`] sees
+/// whether this read's owning tail is live.
+pub(crate) fn reference_native_tool_status(raw: &str) -> Option<ReferenceToolStatus> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "running" | "in_progress" | "in-progress" | "pending" | "started" | "executing" => {
+            Some(ReferenceToolStatus::Running)
+        }
+        "completed" | "complete" | "success" | "succeeded" | "done" => Some(ReferenceToolStatus::Completed),
+        "failed" | "failure" | "error" | "errored" => Some(ReferenceToolStatus::Failed),
+        "cancelled" | "canceled" | "aborted" | "interrupted" => Some(ReferenceToolStatus::Cancelled),
+        _ => None,
+    }
+}
+
+/// Map a recorded task lifecycle word.
+///
+/// A known terminal word is that word. An in-progress word is `unverifiable` until
+/// [`reference_finalize_work_status`] sees a live owning tail. An unknown word is omitted:
+/// it is not failed, and it is not a status.
+pub(crate) fn reference_native_task_status(raw: &str) -> Option<ReferenceTaskStatus> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "completed" | "complete" | "success" | "succeeded" | "done" => Some(ReferenceTaskStatus::Completed),
+        "failed" | "failure" | "error" | "errored" => Some(ReferenceTaskStatus::Failed),
+        "cancelled" | "canceled" | "aborted" | "interrupted" => Some(ReferenceTaskStatus::Cancelled),
+        "running" | "in_progress" | "in-progress" | "pending" | "started" | "executing" => {
+            Some(ReferenceTaskStatus::Unverifiable)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn reference_apply_native_tool_status(part: &mut ReferencePart, raw: &str) {
+    let ReferencePart::Tool { status: slot, .. } = part else {
+        return;
+    };
+    match reference_native_tool_status(raw) {
+        Some(status) => *slot = Some(status),
+        // An unknown word is refused. It must not keep a stamped `running`, and it must
+        // not erase a recorded terminal status.
+        None => {
+            if matches!(slot, None | Some(ReferenceToolStatus::Running)) {
+                *slot = None;
+            }
+        }
+    }
+}
+
+fn reference_part_is_open_tail(parts: &[ReferencePart], index: usize) -> bool {
+    parts[index + 1..].iter().all(|part| match part {
+        ReferencePart::Tool {
+            output,
+            error,
+            status,
+            ..
+        } => {
+            output.is_empty()
+                && error.is_none()
+                && matches!(
+                    status,
+                    None | Some(ReferenceToolStatus::Running | ReferenceToolStatus::Unverifiable)
+                )
+        }
+        ReferencePart::TaskResult { tasks, .. } => tasks.iter().all(|task| {
+            matches!(
+                task.status,
+                ReferenceTaskStatus::Running | ReferenceTaskStatus::Unverifiable
+            )
+        }),
+        _ => false,
+    })
+}
+
+/// Settle provisional work statuses once the caller knows whether this slice's end is the
+/// live owning tail.
+///
+/// A reader that cannot verify a live owning session passes `false`: unfinished work is
+/// `unverifiable`, never failed and never running. `true` promotes only an unanswered call
+/// or in-progress task that is still the open tail. Recorded completed, failed, and
+/// cancelled statuses stay. An omitted unknown word stays absent.
+pub(crate) fn reference_finalize_work_status(turns: &mut [ReferenceTurn], live_owning_tail: bool) {
+    let last_turn = turns.len().saturating_sub(1);
+    for (turn_index, turn) in turns.iter_mut().enumerate() {
+        let on_tail_turn = live_owning_tail && turn_index == last_turn;
+        for part_index in 0..turn.parts.len() {
+            let open_tail = on_tail_turn && reference_part_is_open_tail(&turn.parts, part_index);
+            match &mut turn.parts[part_index] {
+                ReferencePart::Tool {
+                    output,
+                    error,
+                    status,
+                    ..
+                } => {
+                    if !matches!(
+                        status,
+                        Some(ReferenceToolStatus::Running | ReferenceToolStatus::Unverifiable)
+                    ) {
+                        continue;
+                    }
+                    if !output.is_empty() || error.is_some() {
+                        continue;
+                    }
+                    *status = Some(if open_tail {
+                        ReferenceToolStatus::Running
+                    } else {
+                        ReferenceToolStatus::Unverifiable
+                    });
+                }
+                ReferencePart::TaskResult { tasks, .. } => {
+                    for task in tasks.iter_mut() {
+                        if matches!(
+                            task.status,
+                            ReferenceTaskStatus::Running | ReferenceTaskStatus::Unverifiable
+                        ) {
+                            task.status = if open_tail {
+                                ReferenceTaskStatus::Running
+                            } else {
+                                ReferenceTaskStatus::Unverifiable
+                            };
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// A result settles a call that is still open. A recorded cancel is left as cancelled.
+pub(crate) fn reference_assign_result_status(slot: &mut Option<ReferenceToolStatus>, is_error: bool) {
+    if matches!(
+        slot,
+        Some(ReferenceToolStatus::Cancelled | ReferenceToolStatus::Unverifiable)
+    ) {
+        return;
+    }
+    *slot = Some(if is_error {
+        ReferenceToolStatus::Failed
+    } else {
+        ReferenceToolStatus::Completed
+    });
+}
+
+fn reference_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64().or_else(|| {
+            let float = number.as_f64()?;
+            (float.is_finite() && float >= 0.0).then_some(float as u64)
+        }),
+        _ => None,
+    }
+}
+
+fn reference_first_u64(object: &Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| object.get(*key).and_then(reference_u64))
+}
+
+fn reference_usage_if_any(
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+) -> Option<ReferenceTokenUsage> {
+    if input_tokens.is_none() && output_tokens.is_none() && cache_read_tokens.is_none() && cache_write_tokens.is_none()
+    {
+        return None;
+    }
+    Some(ReferenceTokenUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+    })
+}
+
+/// Token counts from a usage object the provider wrote. Absent keys stay absent.
+pub(crate) fn reference_usage_from_object(value: &Value) -> Option<ReferenceTokenUsage> {
+    let object = value.as_object()?;
+    let cache = object.get("cache").and_then(Value::as_object);
+    reference_usage_if_any(
+        reference_first_u64(object, &["input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "input"]),
+        reference_first_u64(
+            object,
+            &["output_tokens", "outputTokens", "completion_tokens", "completionTokens", "output"],
+        ),
+        reference_first_u64(
+            object,
+            &[
+                "cache_read_input_tokens",
+                "cache_read_tokens",
+                "cacheReadTokens",
+                "cached_input_tokens",
+                "cacheRead",
+                "cache_read",
+            ],
+        )
+        .or_else(|| cache.and_then(|cache| reference_first_u64(cache, &["read", "cache_read"]))),
+        reference_first_u64(
+            object,
+            &[
+                "cache_creation_input_tokens",
+                "cache_write_tokens",
+                "cacheWriteTokens",
+                "cacheWrite",
+                "cache_write",
+            ],
+        )
+        .or_else(|| cache.and_then(|cache| reference_first_u64(cache, &["write", "cache_write"]))),
+    )
+}
+
+/// Sibling token fields, each included only when that key was present.
+pub(crate) fn reference_usage_counts(
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+) -> Option<ReferenceTokenUsage> {
+    reference_usage_if_any(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+}
+
+pub(crate) fn reference_field_u64(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(reference_u64)
+}
+
+fn reference_sum_count(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+    }
+}
+
+pub(crate) fn reference_add_usage(slot: &mut Option<ReferenceTokenUsage>, next: ReferenceTokenUsage) {
+    let Some(held) = slot.as_mut() else {
+        *slot = Some(next);
+        return;
+    };
+    held.input_tokens = reference_sum_count(held.input_tokens, next.input_tokens);
+    held.output_tokens = reference_sum_count(held.output_tokens, next.output_tokens);
+    held.cache_read_tokens = reference_sum_count(held.cache_read_tokens, next.cache_read_tokens);
+    held.cache_write_tokens = reference_sum_count(held.cache_write_tokens, next.cache_write_tokens);
+}
+
+pub(crate) fn reference_native_model(value: Option<&Value>) -> Option<&str> {
+    value.and_then(Value::as_str).map(str::trim).filter(|model| !model.is_empty())
+}
+
+/// Attach model and usage the provider recorded on this turn. Empty model and absent usage add nothing.
+pub(crate) fn reference_note_turn_meta(
+    turn: &mut ReferenceTurn,
+    provider: ReferenceNativeHistoryKind,
+    model: Option<&str>,
+    usage: Option<ReferenceTokenUsage>,
+) {
+    let model = model.map(str::trim).filter(|model| !model.is_empty()).map(str::to_string);
+    if model.is_none() && usage.is_none() {
+        return;
+    }
+    let meta = turn.meta.get_or_insert(ReferenceTurnMeta {
+        provider,
+        model: None,
+        usage: None,
+    });
+    meta.provider = provider;
+    if let Some(model) = model {
+        meta.model = Some(model);
+    }
+    if let Some(usage) = usage {
+        reference_add_usage(&mut meta.usage, usage);
+    }
+}
+
+pub(crate) fn reference_is_native_edit_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "edit" | "multiedit" | "multi_edit" | "strreplace" | "str_replace" | "search_replace" | "apply_patch" | "patch"
+    )
+}
+
+fn reference_patch_shaped(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.contains("*** Begin Patch")
+        || trimmed.starts_with("diff ")
+        || trimmed.starts_with("--- ")
+        || trimmed.starts_with("*** Update File")
+        || trimmed.starts_with("*** Add File")
+}
+
+/// The patch body a native edit/patch tool recorded. A tool name alone is not a diff.
+pub(crate) fn reference_native_patch_body(name: &str, payload: &Value) -> Option<String> {
+    if !reference_is_native_edit_tool(name) {
+        return None;
+    }
+    if let Some(text) = payload.as_str() {
+        return reference_patch_shaped(text).then(|| text.to_string());
+    }
+    let object = payload.as_object()?;
+    if let Some(text) = object.get("patch").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+        return Some(text.to_string());
+    }
+    if let Some(text) = object.get("diff").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+        return Some(text.to_string());
+    }
+    if let Some(text) = object
+        .get("input")
+        .and_then(Value::as_str)
+        .filter(|text| reference_patch_shaped(text))
+    {
+        return Some(text.to_string());
+    }
+    if let Some(edits) = object.get("edits").filter(|edits| edits.is_array()) {
+        return serde_json::to_string(edits).ok();
+    }
+    let old = object
+        .get("old_string")
+        .or_else(|| object.get("oldString"))
+        .and_then(Value::as_str);
+    let new = object
+        .get("new_string")
+        .or_else(|| object.get("newString"))
+        .and_then(Value::as_str);
+    if old.is_none() && new.is_none() {
+        return None;
+    }
+    serde_json::to_string(&serde_json::json!({
+        "old_string": old.unwrap_or(""),
+        "new_string": new.unwrap_or(""),
+    }))
+    .ok()
+}
+
+pub(crate) fn reference_diff_inline_allowed(body: &str) -> bool {
+    body.len() <= REFERENCE_NATIVE_DIFF_LIMIT
+}
+
+fn reference_sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// A diff part whose body is never inlined. Oversized payloads set `truncated` and carry no text.
+pub(crate) fn reference_diff_part(body: &str) -> ReferencePart {
+    let digest = reference_sha256_hex(body.as_bytes());
+    ReferencePart::Diff {
+        patch: ReferencePayloadRef {
+            r#ref: format!("payload:diff:{digest}"),
+            byte_length: body.len() as u64,
+            digest,
+            truncated: !reference_diff_inline_allowed(body),
+        },
+        id: None,
+    }
+}
+
+pub(crate) fn reference_bounded_tool_input(name: &str, payload: &Value, rendered: String) -> String {
+    match reference_native_patch_body(name, payload) {
+        Some(body) if !reference_diff_inline_allowed(&body) => REFERENCE_PATCH_OMITTED.to_string(),
+        _ => rendered,
+    }
+}
+
+/// Native parent call id on a subagent/task record. Absent keys stay absent.
+pub(crate) fn reference_parent_call_id(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    [
+        "parent_call_id",
+        "parentCallId",
+        "parent_tool_use_id",
+        "parentToolUseId",
+        "parent_tool_call_id",
+        "parentToolCallId",
+    ]
+    .iter()
+    .find_map(|key| {
+        object
+            .get(*key)
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    })
+}
+
+// ---------------------------------------------------------------------------------------
 // Shared turn assembly for the readers with no upstream port
 // ---------------------------------------------------------------------------------------
 
@@ -144,6 +540,8 @@ impl ReferenceTurnLog {
             source,
             parts,
             abandoned: None,
+        
+            id: None, meta: None,
         });
     }
 
@@ -159,7 +557,7 @@ impl ReferenceTurnLog {
                 return;
             }
         }
-        self.user(at, None, vec![ReferencePart::Text { text: text.to_string(), phase: None }]);
+        self.user(at, None, vec![ReferencePart::Text { text: text.to_string(), phase: None , id: None}]);
     }
 
     /// The assistant turn the next part lands in, opened when the newest turn is not one.
@@ -176,6 +574,8 @@ impl ReferenceTurnLog {
                 source: None,
                 parts: Vec::new(),
                 abandoned: None,
+            
+                id: None, meta: None,
             });
         }
         let index = self.turns.len() - 1;
@@ -201,7 +601,7 @@ impl ReferenceTurnLog {
         let parts = &mut self.turns[index].parts;
         let merged = match (parts.last_mut(), thinking) {
             (Some(ReferencePart::Text { text: held, .. }), false)
-            | (Some(ReferencePart::Thinking { text: held }), true) => {
+            | (Some(ReferencePart::Thinking { text: held , ..}), true) => {
                 held.push_str(text);
                 true
             }
@@ -209,9 +609,9 @@ impl ReferenceTurnLog {
         };
         if !merged {
             parts.push(if thinking {
-                ReferencePart::Thinking { text: text.to_string() }
+                ReferencePart::Thinking { text: text.to_string() , id: None}
             } else {
-                ReferencePart::Text { text: text.to_string(), phase: None }
+                ReferencePart::Text { text: text.to_string(), phase: None , id: None}
             });
         }
     }
@@ -229,17 +629,25 @@ impl ReferenceTurnLog {
             output_ref: None,
             output_size: None,
             images: Vec::new(),
+            id: None,
+            call_id: None,
+            status: None,
+            output_payload: Box::new(None),
         });
+        if let Some(part) = self.turns[index].parts.last_mut() {
+            reference_stamp_tool_call(part, key);
+        }
         if !key.is_empty() {
             self.tools
                 .insert(key.to_string(), (index, self.turns[index].parts.len() - 1));
         }
     }
 
-    /// Fold a result into the call it answers. A result whose call is not in the log (it was
-    /// before the page) is skipped, never shown as a call of its own.
+    /// Fold a result into the call with the same native id. A result whose call is not in the log
+    /// stays an explicit orphan part; it is never paired by text or position.
     pub(crate) fn tool_output(&mut self, at: Option<&str>, key: &str, output: String, is_error: bool) {
         let Some(&(turn, part)) = self.tools.get(key) else {
+            reference_push_orphan_result(&mut self.turns, at, key, output, is_error);
             return;
         };
         if let Some(at) = at {
@@ -248,6 +656,53 @@ impl ReferenceTurnLog {
         if let Some(part) = self.turns[turn].parts.get_mut(part) {
             fold_reference_tool_output(part, output, key, is_error);
         }
+    }
+
+    /// Apply a lifecycle word the provider recorded on this call. Unknown words are ignored.
+    pub(crate) fn tool_status(&mut self, key: &str, raw: &str) {
+        let Some(&(turn, part)) = self.tools.get(key) else {
+            return;
+        };
+        if let Some(part) = self.turns[turn].parts.get_mut(part) {
+            reference_apply_native_tool_status(part, raw);
+        }
+    }
+
+    /// Model and usage recorded on the newest turn. Nothing is opened just to hold metadata.
+    pub(crate) fn annotate(
+        &mut self,
+        kind: ReferenceNativeHistoryKind,
+        model: Option<&str>,
+        usage: Option<ReferenceTokenUsage>,
+    ) {
+        let Some(turn) = self.turns.last_mut() else {
+            return;
+        };
+        reference_note_turn_meta(turn, kind, model, usage);
+    }
+
+    /// Like [`Self::annotate`], but only when the newest turn has this role.
+    pub(crate) fn annotate_role(
+        &mut self,
+        role: ReferenceTurnRole,
+        kind: ReferenceNativeHistoryKind,
+        model: Option<&str>,
+        usage: Option<ReferenceTokenUsage>,
+    ) {
+        let Some(turn) = self.turns.last_mut().filter(|turn| turn.role == role) else {
+            return;
+        };
+        reference_note_turn_meta(turn, kind, model, usage);
+    }
+
+    /// A native patch body. Oversized bodies are a payload ref only; the tool input must already
+    /// have been replaced by the caller.
+    pub(crate) fn push_diff(&mut self, at: Option<&str>, body: &str) {
+        if body.is_empty() {
+            return;
+        }
+        let index = self.assistant(at);
+        self.turns[index].parts.push(reference_diff_part(body));
     }
 
     /// The assembled turns; a turn with no parts is dropped.
@@ -290,6 +745,97 @@ pub(crate) fn fold_reference_tool_output(part: &mut ReferencePart, output: Strin
     if is_error {
         *error = Some(true);
     }
+}
+
+/// Record the native call id. A missing lifecycle word is provisional `running` until
+/// [`reference_finalize_work_status`]; a closed or stale read demotes that to `unverifiable`.
+pub(crate) fn reference_stamp_tool_call(part: &mut ReferencePart, call_id: &str) {
+    let ReferencePart::Tool {
+        call_id: slot,
+        status,
+        ..
+    } = part
+    else {
+        return;
+    };
+    if !call_id.is_empty() {
+        *slot = Some(call_id.to_string());
+    }
+    if status.is_none() {
+        *status = Some(ReferenceToolStatus::Running);
+    }
+}
+
+/// A folded result settles the part. The call id is kept when the call already carried it.
+pub(crate) fn reference_stamp_tool_result(part: &mut ReferencePart, call_id: &str, is_error: bool) {
+    let ReferencePart::Tool {
+        call_id: slot,
+        status,
+        ..
+    } = part
+    else {
+        return;
+    };
+    if slot.is_none() && !call_id.is_empty() {
+        *slot = Some(call_id.to_string());
+    }
+    reference_assign_result_status(status, is_error);
+}
+
+/// A result whose native call id is not in this read. It is its own part, never folded by text
+/// or by array position.
+pub(crate) fn reference_orphan_tool_result(call_id: &str, output: String, is_error: bool) -> ReferencePart {
+    ReferencePart::Tool {
+        name: "tool_result".to_string(),
+        summary: String::new(),
+        input: String::new(),
+        output,
+        error: is_error.then_some(true),
+        skill: None,
+        output_ref: None,
+        output_size: None,
+        images: Vec::new(),
+        id: None,
+        call_id: (!call_id.is_empty()).then(|| call_id.to_string()),
+        status: Some(if is_error {
+            ReferenceToolStatus::Failed
+        } else {
+            ReferenceToolStatus::Completed
+        }),
+        output_payload: Box::new(None),
+    }
+}
+
+/// Append an orphan result to the open assistant turn, or open one when the newest turn is not
+/// an assistant turn.
+pub(crate) fn reference_push_orphan_result(
+    turns: &mut Vec<ReferenceTurn>,
+    at: Option<&str>,
+    call_id: &str,
+    output: String,
+    is_error: bool,
+) {
+    let part = reference_orphan_tool_result(call_id, output, is_error);
+    if let Some(turn) = turns
+        .last_mut()
+        .filter(|turn| turn.role == ReferenceTurnRole::Assistant)
+    {
+        if let Some(at) = at {
+            turn.ended_at = Some(at.to_string());
+        }
+        turn.parts.push(part);
+        return;
+    }
+    turns.push(ReferenceTurn {
+        role: ReferenceTurnRole::Assistant,
+        started_at: at.map(str::to_string),
+        ended_at: at.map(str::to_string),
+        source: None,
+        parts: vec![part],
+        abandoned: None,
+        id: None,
+        meta: None,
+    });
 }
 
 /// A tool call's arguments as the page shows them: pretty JSON, or nothing for no arguments.
@@ -736,6 +1282,8 @@ struct CodexParser {
     turns: Vec<ReferenceTurn>,
     /// A tool call's part, by `call_id`, until its output arrives.
     tools: HashMap<String, (usize, usize)>,
+    /// The same index after the output arrives, so a later native status can still find the part.
+    settled_tools: HashMap<String, (usize, usize)>,
     messages: Vec<CodexMessage>,
     /// When the running task started, so the assistant turn it opens is dated by the task and not
     /// by the first record that happened to arrive.
@@ -764,6 +1312,8 @@ impl CodexParser {
                 source: None,
                 parts: Vec::new(),
                 abandoned: None,
+            
+                id: None, meta: None,
             });
             self.turns.len() - 1
         };
@@ -835,7 +1385,7 @@ impl CodexParser {
             ReferenceTurnRole::User => {
                 let mut parts: Vec<ReferencePart> = images.into_iter().map(image_part).collect();
                 if !body.trim().is_empty() {
-                    parts.push(ReferencePart::Text { text: body.clone(), phase });
+                    parts.push(ReferencePart::Text { text: body.clone(), phase , id: None});
                 }
                 self.turns.push(ReferenceTurn {
                     role,
@@ -844,12 +1394,14 @@ impl CodexParser {
                     source: None,
                     parts,
                     abandoned: None,
+                
+                    id: None, meta: None,
                 });
                 self.turns.len() - 1
             }
             ReferenceTurnRole::Assistant => {
                 let at = self.assistant(ts);
-                self.turns[at].parts.push(ReferencePart::Text { text: body.clone(), phase });
+                self.turns[at].parts.push(ReferencePart::Text { text: body.clone(), phase , id: None});
                 at
             }
         };
@@ -865,6 +1417,46 @@ impl CodexParser {
         });
         if self.messages.len() > REFERENCE_CODEX_MESSAGE_WINDOW {
             self.messages.remove(0);
+        }
+    }
+
+    fn note_codex(&mut self, model: Option<&str>, usage: Option<ReferenceTokenUsage>) {
+        if model.is_none() && usage.is_none() {
+            return;
+        }
+        let index = self
+            .turns
+            .iter()
+            .rposition(|turn| turn.role == ReferenceTurnRole::Assistant)
+            .or_else(|| self.turns.len().checked_sub(1));
+        let Some(index) = index else {
+            return;
+        };
+        reference_note_turn_meta(
+            &mut self.turns[index],
+            ReferenceNativeHistoryKind::Codex,
+            model,
+            usage,
+        );
+    }
+
+    fn apply_codex_item_status(&mut self, item: &Value) {
+        let Some(raw) = item.get("status").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(id) = item
+            .get("call_id")
+            .or_else(|| item.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return;
+        };
+        let Some(&(turn, part)) = self.tools.get(id).or_else(|| self.settled_tools.get(id)) else {
+            return;
+        };
+        if let Some(part) = self.turns.get_mut(turn).and_then(|turn| turn.parts.get_mut(part)) {
+            reference_apply_native_tool_status(part, raw);
         }
     }
 
@@ -885,6 +1477,15 @@ impl CodexParser {
             match entry.get("type").and_then(Value::as_str).unwrap_or("") {
                 "event_msg" => self.write_event(entry, ts),
                 "response_item" => self.write_response(entry, ts),
+                "turn_context" => {
+                    let model = entry
+                        .get("payload")
+                        .and_then(|payload| payload.get("model"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| entry.get("model").and_then(Value::as_str).map(str::to_string));
+                    self.note_codex(model.as_deref(), None);
+                }
                 _ => {}
             }
         }
@@ -893,11 +1494,14 @@ impl CodexParser {
     /// The turns a page carries: every turn that has a part, in order
     /// (`codex.ts`: `turns.filter((turn) => turn.parts.length > 0)`).
     fn snapshot(&self) -> Vec<ReferenceTurn> {
-        self.turns
+        let mut turns = self
+            .turns
             .iter()
             .filter(|turn| !turn.parts.is_empty())
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        reference_finalize_work_status(&mut turns, false);
+        turns
     }
 
     /// A display event: the turn boundary, the user's message, the agent's answer, and the skill
@@ -917,6 +1521,9 @@ impl CodexParser {
                     return;
                 }
                 let item = payload.get("item");
+                if let Some(item) = item {
+                    self.apply_codex_item_status(item);
+                }
                 let id = item
                     .and_then(|item| item.get("id"))
                     .and_then(Value::as_str)
@@ -949,9 +1556,20 @@ impl CodexParser {
                                 held.status = skill.status;
                             }
                         }
-                        None => self.turns[at].parts.push(ReferencePart::Skill { skill }),
+                        None => self.turns[at].parts.push(ReferencePart::Skill { skill, id: None }),
                     }
                 }
+            }
+            "token_count" => {
+                // last_token_usage is this record. total_token_usage is cumulative and is not summed.
+                let usage = payload
+                    .get("info")
+                    .and_then(|info| info.get("last_token_usage"))
+                    .and_then(reference_usage_from_object);
+                self.note_codex(None, usage);
+            }
+            "turn_context" => {
+                self.note_codex(reference_native_model(payload.get("model")), None);
             }
             "task_started" => {
                 let started = payload
@@ -1025,11 +1643,11 @@ impl CodexParser {
                     for skill in codex_selected_skills(payload.get("content")) {
                         let at = self.assistant(ts);
                         let held = self.turns[at].parts.iter().any(|part| {
-                            matches!(part, ReferencePart::Skill { skill: existing }
+                            matches!(part, ReferencePart::Skill { skill: existing , ..}
                                 if existing.name == skill.name && existing.path == skill.path)
                         });
                         if !held {
-                            self.turns[at].parts.push(ReferencePart::Skill { skill });
+                            self.turns[at].parts.push(ReferencePart::Skill { skill, id: None });
                         }
                     }
                 }
@@ -1038,7 +1656,7 @@ impl CodexParser {
                     if payload.get("channel").and_then(Value::as_str) == Some("analysis") {
                         if !body.trim().is_empty() {
                             let at = self.assistant(ts);
-                            self.turns[at].parts.push(ReferencePart::Thinking { text: body });
+                            self.turns[at].parts.push(ReferencePart::Thinking { text: body , id: None});
                         }
                     } else {
                         let recipient = payload
@@ -1063,7 +1681,7 @@ impl CodexParser {
                 let body = content_text(payload.get("summary"), false);
                 if !body.trim().is_empty() {
                     let at = self.assistant(ts);
-                    self.turns[at].parts.push(ReferencePart::Thinking { text: body });
+                    self.turns[at].parts.push(ReferencePart::Thinking { text: body , id: None});
                 }
             }
             "function_call" | "custom_tool_call" => {
@@ -1104,12 +1722,15 @@ impl CodexParser {
                 };
                 let summary = if summary.is_empty() { name.to_string() } else { summary };
                 let summary: String = summary.chars().take(REFERENCE_CODEX_SUMMARY_CHARS).collect();
-                let input = if args.is_empty() {
+                let rendered = if args.is_empty() {
                     raw.and_then(Value::as_str).unwrap_or("").to_string()
                 } else {
                     serde_json::to_string_pretty(&Value::Object(args.clone()))
                         .unwrap_or_else(|_| "{}".to_string())
                 };
+                let payload_value = raw.cloned().unwrap_or(Value::Null);
+                let patch_body = reference_native_patch_body(name, &payload_value);
+                let input = reference_bounded_tool_input(name, &payload_value, rendered);
                 let skill = codex_read_call(name, &args);
                 let at = self.assistant(ts);
                 let part = self.turns[at].parts.len();
@@ -1123,9 +1744,25 @@ impl CodexParser {
                     output_ref: None,
                     output_size: None,
                     images: Vec::new(),
+                    id: None,
+                    call_id: None,
+                    status: None,
+                    output_payload: Box::new(None),
                 });
-                if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
+                let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
+                if let Some(part) = self.turns[at].parts.last_mut() {
+                    reference_stamp_tool_call(part, call_id);
+                }
+                if !call_id.is_empty() {
                     self.tools.insert(call_id.to_string(), (at, part));
+                }
+                if let Some(body) = patch_body {
+                    self.turns[at].parts.push(reference_diff_part(&body));
+                }
+                if let Some(raw_status) = payload.get("status").and_then(Value::as_str) {
+                    if let Some(part) = self.turns[at].parts.get_mut(part) {
+                        reference_apply_native_tool_status(part, raw_status);
+                    }
                 }
             }
             "function_call_output" | "custom_tool_call_output" => {
@@ -1133,8 +1770,17 @@ impl CodexParser {
                     .get("call_id")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                // A result for a call this page never saw is ignored, never a row of its own.
-                let Some((turn, part)) = self.tools.remove(call_id) else {
+                // A result for a call this page never saw stays explicit. It is not paired by text
+                // or by position onto another call.
+                let Some((turn, part)) = self.tools.remove(call_id).map(|(turn, part)| {
+                    if !call_id.is_empty() {
+                        self.settled_tools.insert(call_id.to_string(), (turn, part));
+                    }
+                    (turn, part)
+                }) else {
+                    let output = content_text(payload.get("output"), false);
+                    let failed = codex_call_failed(&output);
+                    reference_push_orphan_result(&mut self.turns, ts, call_id, output, failed);
                     return;
                 };
                 let output = content_text(payload.get("output"), false);
@@ -1146,6 +1792,7 @@ impl CodexParser {
                     skill,
                     output_ref,
                     output_size,
+                    status,
                     ..
                 }) = self.turns[turn].parts.get_mut(part)
                 else {
@@ -1166,6 +1813,12 @@ impl CodexParser {
                 }
                 if failed {
                     *error = Some(true);
+                }
+                reference_assign_result_status(status, failed);
+                if let Some(raw) = payload.get("status").and_then(Value::as_str) {
+                    if let Some(mapped) = reference_native_tool_status(raw) {
+                        *status = Some(mapped);
+                    }
                 }
                 if let Some(skill) = skill {
                     skill.status = if failed {
@@ -1441,6 +2094,8 @@ fn image_part(image: ReferenceImageRef) -> ReferencePart {
     ReferencePart::Image {
         media_type: image.media_type,
         r#ref: image.r#ref,
+    
+        id: None,
     }
 }
 
@@ -2325,7 +2980,7 @@ mod tests {
         assert_eq!(turns[0].started_at.as_deref(), Some("2026-10-06T09:00:01.100Z"));
         assert_eq!(
             turns[0].parts,
-            vec![ReferencePart::Text { text: "터미널 주소좀 줘봐".into(), phase: None }]
+            vec![ReferencePart::Text { text: "터미널 주소좀 줘봐".into(), phase: None , id: None}]
         );
         // the assistant turn is dated by the task's own start, and ended by the last recorded
         // activity — the completion event, not the next user's timestamp
@@ -2334,13 +2989,13 @@ mod tests {
         assert_eq!(turns[1].parts.len(), 4);
         assert_eq!(
             turns[1].parts[0],
-            ReferencePart::Text { text: "확인해볼게.".into(), phase: Some(ReferenceTextPhase::Commentary) }
+            ReferencePart::Text { text: "확인해볼게.".into(), phase: Some(ReferenceTextPhase::Commentary) , id: None}
         );
         assert_eq!(
             turns[1].parts[1],
-            ReferencePart::Thinking { text: "read the hosts file first".into() }
+            ReferencePart::Thinking { text: "read the hosts file first".into() , id: None}
         );
-        let ReferencePart::Tool { name, summary, input, output, error, output_ref, output_size, skill, images } =
+        let ReferencePart::Tool { name, summary, input, output, error, output_ref, output_size, skill, images , ..} =
             tool_part(&turns[1], "exec_command")
         else {
             unreachable!("matched above")
@@ -2358,7 +3013,9 @@ mod tests {
             turns[1].parts[3],
             ReferencePart::Text {
                 text: "http://100.123.228.51:7317".into(),
-                phase: Some(ReferenceTextPhase::FinalAnswer)
+                phase: Some(ReferenceTextPhase::FinalAnswer),
+            
+                id: None,
             }
         );
         // the session header is chrome, not a turn
@@ -2431,7 +3088,11 @@ mod tests {
         assert_eq!(*error, Some(true));
         assert_eq!(*output_ref, None, "a short output keeps no fetch ref");
         let rendered = serde_json::to_string(&turns).expect("turns serialize");
-        assert!(!rendered.contains("orphan output"), "an unmatched result is dropped");
+        assert!(rendered.contains("orphan output"), "an unmatched result stays explicit");
+        assert!(turns.iter().any(|turn| turn.parts.iter().any(|part| matches!(
+            part,
+            ReferencePart::Tool { call_id: Some(id), .. } if id == "gone-call"
+        ))));
     }
 
     #[test]
@@ -2552,19 +3213,19 @@ mod tests {
         let turns = parse(CODEX_IMAGES);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].parts.len(), 3, "two images then the prompt");
-        let ReferencePart::Image { media_type, r#ref } = &turns[0].parts[0] else {
+        let ReferencePart::Image { media_type, r#ref , ..} = &turns[0].parts[0] else {
             unreachable!("the first part is the local image")
         };
         assert_eq!(media_type, "image/png");
         assert!(is_codex_image_ref(r#ref), "the ref is a codex image ref");
-        let ReferencePart::Image { media_type: inline, r#ref: inline_ref } = &turns[0].parts[1] else {
+        let ReferencePart::Image { media_type: inline, r#ref: inline_ref , ..} = &turns[0].parts[1] else {
             unreachable!("the second part is the inline image")
         };
         assert_eq!(inline, "image/png");
         assert_ne!(r#ref, inline_ref, "different sources keep different refs");
         assert_eq!(
             turns[0].parts[2],
-            ReferencePart::Text { text: "what is this?".into(), phase: None }
+            ReferencePart::Text { text: "what is this?".into(), phase: None , id: None}
         );
         let rendered = serde_json::to_string(&turns).expect("turns serialize");
         assert!(!rendered.contains("shot.png"));
@@ -2604,7 +3265,7 @@ mod tests {
         // the user's own words are the request, not the envelope it arrived in
         assert_eq!(
             turns[0].parts,
-            vec![ReferencePart::Text { text: "make the card nicer".into(), phase: None }]
+            vec![ReferencePart::Text { text: "make the card nicer".into(), phase: None , id: None}]
         );
         let rendered = serde_json::to_string(&turns).expect("turns serialize");
         assert!(!rendered.contains("<skill>"), "the envelope is not the user's text");
@@ -2630,7 +3291,7 @@ mod tests {
         assert_eq!(turns.len(), 1, "the chip opens the assistant turn the reference gives it");
         assert_eq!(turns[0].role, ReferenceTurnRole::Assistant);
         assert_eq!(turns[0].parts.len(), 1, "the repeated item id is applied once");
-        let ReferencePart::Skill { skill } = &turns[0].parts[0] else {
+        let ReferencePart::Skill { skill , id: None} = &turns[0].parts[0] else {
             panic!("the part is a standalone skill, got {:?}", turns[0].parts[0].kind());
         };
         assert_eq!(skill.name, "lonely");
@@ -2706,7 +3367,7 @@ mod tests {
             .expect("the prompt is a user turn");
         assert_eq!(
             user.parts,
-            vec![ReferencePart::Text { text: "style the badge".into(), phase: None }],
+            vec![ReferencePart::Text { text: "style the badge".into(), phase: None , id: None}],
             "the envelope is not the user's text"
         );
         let chips: Vec<&ReferencePart> = turns
@@ -2715,7 +3376,7 @@ mod tests {
             .filter(|part| matches!(part, ReferencePart::Skill { .. }))
             .collect();
         assert_eq!(chips.len(), 1, "one chip per skill, however many envelopes named it");
-        let ReferencePart::Skill { skill } = chips[0] else {
+        let ReferencePart::Skill { skill , id: None} = chips[0] else {
             unreachable!("matched above")
         };
         assert_eq!(skill.name, "frontend");
@@ -2736,7 +3397,7 @@ mod tests {
         );
         assert_eq!(
             turns[0].parts,
-            vec![ReferencePart::Text { text: "still reads".into(), phase: None }]
+            vec![ReferencePart::Text { text: "still reads".into(), phase: None , id: None}]
         );
         let rendered = serde_json::to_string(&turns).expect("turns serialize");
         assert!(!rendered.contains("torn tail has no newline"));
@@ -2760,11 +3421,11 @@ mod tests {
         assert_eq!(newest.len(), 2);
         assert_eq!(
             newest[0].parts,
-            vec![ReferencePart::Text { text: "prompt 1".into(), phase: None }]
+            vec![ReferencePart::Text { text: "prompt 1".into(), phase: None , id: None}]
         );
         assert_eq!(
             newest[1].parts,
-            vec![ReferencePart::Text { text: "prompt 2".into(), phase: None }]
+            vec![ReferencePart::Text { text: "prompt 2".into(), phase: None , id: None}]
         );
         assert_eq!(
             parse_codex_history(ReferenceNativeHistoryKind::Codex, &text)
@@ -2897,5 +3558,183 @@ mod tests {
             "the read_file spelling reads the path"
         );
         assert!(codex_read_call("write_file", read_file.as_object().expect("an object")).is_none());
+    }
+
+    #[test]
+    fn native_work_codex_maps_status_usage_and_bounded_diffs() {
+        let small = concat!(
+            r#"{"timestamp":"2026-10-06T12:00:01.000Z","type":"event_msg","payload":{"type":"user_message","kind":"plain","message":"status: failed usage input_tokens 99 model opus"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-06T12:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"p1","input":"*** Begin Patch\n*** Update File: a.rs\n*** End Patch"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-06T12:00:02.500Z","type":"turn_context","payload":{"model":"gpt-5.1"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-06T12:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"output_tokens":1000},"last_token_usage":{"input_tokens":3,"output_tokens":4,"cached_input_tokens":1}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-06T12:00:04.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":2,"output_tokens":5,"cache_creation_input_tokens":7}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-06T12:00:05.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"id":"p1","status":"failed"}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-06T12:00:06.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c-cancel","arguments":"{\"cmd\":\"sleep\"}","status":"cancelled"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-10-06T12:00:07.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c-unknown","arguments":"{\"cmd\":\"echo\"}","status":"mystery"}}"#,
+            "\n",
+        );
+        let turns = parse_codex_transcript(small);
+        let user = turns.iter().find(|turn| turn.role == ReferenceTurnRole::User).expect("user");
+        assert!(user.meta.as_ref().and_then(|meta| meta.usage.as_ref()).is_none());
+        assert!(user.meta.as_ref().and_then(|meta| meta.model.as_ref()).is_none(), "prose is not a model");
+        let assistant = turns.iter().find(|turn| turn.role == ReferenceTurnRole::Assistant).expect("assistant");
+        let meta = assistant.meta.as_ref().expect("turn meta");
+        assert_eq!(meta.model.as_deref(), Some("gpt-5.1"));
+        assert_eq!(meta.provider, ReferenceNativeHistoryKind::Codex);
+        let usage = meta.usage.as_ref().expect("summed usage");
+        assert_eq!(usage.input_tokens, Some(5), "last_token_usage is summed; the cumulative total is not");
+        assert_eq!(usage.output_tokens, Some(9));
+        assert_eq!(usage.cache_read_tokens, Some(1));
+        assert_eq!(usage.cache_write_tokens, Some(7));
+        let ReferencePart::Tool { status, input, .. } = assistant
+            .parts
+            .iter()
+            .find(|part| matches!(part, ReferencePart::Tool { name, .. } if name == "apply_patch"))
+            .expect("patch tool")
+        else {
+            unreachable!()
+        };
+        assert_eq!(*status, Some(ReferenceToolStatus::Failed));
+        assert!(input.starts_with("*** Begin Patch"));
+        let ReferencePart::Diff { patch, .. } = assistant
+            .parts
+            .iter()
+            .find(|part| matches!(part, ReferencePart::Diff { .. }))
+            .expect("diff")
+        else {
+            unreachable!()
+        };
+        assert!(!patch.truncated);
+        assert!(patch.byte_length > 0);
+        assert!(!patch.r#ref.contains('/'));
+        let ReferencePart::Tool { status, .. } = assistant
+            .parts
+            .iter()
+            .find(|part| matches!(part, ReferencePart::Tool { call_id: Some(id), .. } if id == "c-cancel"))
+            .expect("cancelled call")
+        else {
+            unreachable!()
+        };
+        assert_eq!(*status, Some(ReferenceToolStatus::Cancelled));
+        let ReferencePart::Tool { status, .. } = assistant
+            .parts
+            .iter()
+            .find(|part| matches!(part, ReferencePart::Tool { call_id: Some(id), .. } if id == "c-unknown"))
+            .expect("unknown status")
+        else {
+            unreachable!()
+        };
+        assert_eq!(*status, None, "an unknown native word is omitted, not failed and not running");
+
+        let huge = "x".repeat(REFERENCE_NATIVE_DIFF_LIMIT + 4);
+        let body = format!("*** Begin Patch\n{huge}\n*** End Patch");
+        let line = format!(
+            r#"{{"timestamp":"2026-10-06T12:01:00.000Z","type":"response_item","payload":{{"type":"custom_tool_call","name":"apply_patch","call_id":"big","input":{}}}}}"#,
+            serde_json::to_string(&body).expect("json")
+        );
+        let turns = parse_codex_transcript(&line);
+        let assistant = turns.iter().find(|turn| turn.role == ReferenceTurnRole::Assistant).expect("assistant");
+        let ReferencePart::Tool { input, .. } = assistant
+            .parts
+            .iter()
+            .find(|part| matches!(part, ReferencePart::Tool { .. }))
+            .expect("tool")
+        else {
+            unreachable!()
+        };
+        assert_eq!(input, REFERENCE_PATCH_OMITTED);
+        assert!(!input.contains(&huge));
+        let ReferencePart::Diff { patch, .. } = assistant
+            .parts
+            .iter()
+            .find(|part| matches!(part, ReferencePart::Diff { .. }))
+            .expect("oversized diff")
+        else {
+            unreachable!()
+        };
+        assert!(patch.truncated);
+        assert!(patch.byte_length > REFERENCE_NATIVE_DIFF_LIMIT as u64);
+        assert_eq!(patch.digest.len(), 64);
+        assert!(reference_native_tool_status("nope").is_none());
+        assert!(reference_native_patch_body("Bash", &serde_json::json!({"old_string":"a","new_string":"b"})).is_none());
+    }
+
+    fn codex_call(status: &str) -> String {
+        let line = serde_json::json!({
+            "timestamp": "2026-10-06T12:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "c-life",
+                "arguments": "{\"cmd\":\"sleep\"}",
+                "status": status,
+            }
+        });
+        format!("{line}\n")
+    }
+
+    fn codex_tool_status(turns: &[ReferenceTurn]) -> Option<ReferenceToolStatus> {
+        turns.iter().find_map(|turn| {
+            turn.parts.iter().find_map(|part| match part {
+                ReferencePart::Tool { status, .. } => *status,
+                _ => None,
+            })
+        })
+    }
+
+    #[test]
+    fn codex_unknown_tool_word_is_omitted_not_failed() {
+        let turns = parse_codex_transcript(&codex_call("mystery"));
+        assert_eq!(codex_tool_status(&turns), None);
+        assert!(reference_native_tool_status("mystery").is_none());
+        assert!(reference_native_task_status("mystery").is_none());
+    }
+
+    #[test]
+    fn codex_unfinished_tool_in_a_closed_stream_is_unverifiable() {
+        let later = concat!(
+            r#"{"timestamp":"2026-10-06T12:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"later"}]}}"#,
+            "\n",
+        );
+        let turns = parse_codex_transcript(&format!("{}{later}", codex_call("running")));
+        assert_eq!(codex_tool_status(&turns), Some(ReferenceToolStatus::Unverifiable));
+    }
+
+    #[test]
+    fn codex_open_tail_tool_is_running_only_on_a_live_owning_tail() {
+        let mut turns = parse_codex_transcript(&codex_call("running"));
+        assert_eq!(
+            codex_tool_status(&turns),
+            Some(ReferenceToolStatus::Unverifiable),
+            "a stored tail is not running until a live owning read verifies it"
+        );
+        reference_finalize_work_status(&mut turns, true);
+        assert_eq!(codex_tool_status(&turns), Some(ReferenceToolStatus::Running));
+        reference_finalize_work_status(&mut turns, false);
+        assert_eq!(codex_tool_status(&turns), Some(ReferenceToolStatus::Unverifiable));
+    }
+
+    #[test]
+    fn codex_recorded_failure_stays_failed() {
+        let mut turns = parse_codex_transcript(&codex_call("failed"));
+        assert_eq!(codex_tool_status(&turns), Some(ReferenceToolStatus::Failed));
+        reference_finalize_work_status(&mut turns, true);
+        assert_eq!(codex_tool_status(&turns), Some(ReferenceToolStatus::Failed));
+    }
+
+    #[test]
+    fn codex_recorded_cancel_stays_cancelled() {
+        let mut turns = parse_codex_transcript(&codex_call("cancelled"));
+        assert_eq!(codex_tool_status(&turns), Some(ReferenceToolStatus::Cancelled));
+        reference_finalize_work_status(&mut turns, true);
+        assert_eq!(codex_tool_status(&turns), Some(ReferenceToolStatus::Cancelled));
     }
 }

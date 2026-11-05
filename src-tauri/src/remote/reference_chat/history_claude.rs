@@ -33,6 +33,12 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::{Map, Value};
 
+use super::history_parse::{
+    reference_apply_native_tool_status, reference_diff_part,
+    reference_finalize_work_status, reference_native_model, reference_native_patch_body,
+    reference_note_turn_meta, reference_push_orphan_result, reference_stamp_tool_call,
+    reference_stamp_tool_result, reference_usage_from_object,
+};
 use super::types::{
     ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceSkillActivity,
     ReferenceSkillEvidence, ReferenceSkillStatus, ReferenceTurn, ReferenceTurnRole,
@@ -154,8 +160,10 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                 started_at: timestamp,
                 ended_at: None,
                 source: None,
-                parts: vec![ReferencePart::Compact { text: summary }],
+                parts: vec![ReferencePart::Compact { text: summary, id: None }],
                 abandoned: None,
+                id: None,
+                meta: None,
             });
             continue;
         }
@@ -185,6 +193,7 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                             vec![ReferencePart::Text {
                                 text: unwrap_claude_pastes(prompt),
                                 phase: None,
+                                id: None,
                             }],
                         ));
                     }
@@ -204,6 +213,7 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                         vec![ReferencePart::Text {
                             text: unwrap_claude_pastes(content),
                             phase: None,
+                            id: None,
                         }],
                     ));
                     continue;
@@ -237,6 +247,15 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                             .iter()
                             .rposition(|(key, _, _)| key == tool_use_id)
                         else {
+                            let output = claude_result_text(block.get("content").unwrap_or(&Value::Null));
+                            let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
+                            reference_push_orphan_result(
+                                &mut turns,
+                                timestamp.as_deref(),
+                                tool_use_id,
+                                output,
+                                is_error,
+                            );
                             continue;
                         };
                         let (_, turn_index, part_index) = pending.remove(index);
@@ -250,6 +269,10 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                             .and_then(|turn| turn.parts.get_mut(part_index))
                         {
                             fold_claude_tool_result(part, output, tool_use_id, is_error);
+                            reference_stamp_tool_result(part, tool_use_id, is_error);
+                            if let Some(raw) = block.get("status").and_then(Value::as_str) {
+                                reference_apply_native_tool_status(part, raw);
+                            }
                         }
                     }
 
@@ -276,6 +299,7 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                                 Some(ReferencePart::Image {
                                     media_type: media_type.to_string(),
                                     r#ref: format!("{uuid}:{index}"),
+                                    id: None,
                                 })
                             })
                             .collect(),
@@ -287,6 +311,7 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                             parts.push(ReferencePart::Text {
                                 text: unwrap_claude_pastes(&prompt),
                                 phase: None,
+                                id: None,
                             });
                         }
                         turns.push(user_turn(timestamp, parts));
@@ -301,11 +326,25 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
             let Some(Value::Array(blocks)) = content else {
                 continue;
             };
+            // An assistant record with no blocks is bookkeeping, not activity: it must not
+            // open a turn or move the previous turn's end.
+            if blocks.is_empty() {
+                continue;
+            }
             let turn_index = assistant_turn(&mut turns, timestamp.as_deref());
             if let Some(timestamp) = timestamp.as_deref() {
                 if let Some(turn) = turns.get_mut(turn_index) {
                     turn.ended_at = Some(timestamp.to_string());
                 }
+            }
+            if let Some(turn) = turns.get_mut(turn_index) {
+                let message = entry.get("message");
+                reference_note_turn_meta(
+                    turn,
+                    ReferenceNativeHistoryKind::Claude,
+                    reference_native_model(message.and_then(|message| message.get("model"))),
+                    message.and_then(|message| message.get("usage")).and_then(reference_usage_from_object),
+                );
             }
             for block in blocks {
                 let Some(block) = block.as_object() else {
@@ -321,6 +360,7 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                                     ReferencePart::Text {
                                         text: text.to_string(),
                                         phase: None,
+                                        id: None,
                                     },
                                 );
                             }
@@ -338,6 +378,7 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                                 turn_index,
                                 ReferencePart::Thinking {
                                     text: thinking.to_string(),
+                                    id: None,
                                 },
                             );
                         }
@@ -358,6 +399,10 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                             output_ref: None,
                             output_size: None,
                             images: Vec::new(),
+                            id: None,
+                            call_id: None,
+                            status: None,
+                            output_payload: Box::new(None),
                         };
                         if let Some(skill) = invoked_skill(name, &input) {
                             if let ReferencePart::Tool {
@@ -370,12 +415,21 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
                                 *slot = Some(skill);
                             }
                         }
+                        let call_key = claude_tool_key(block.get("id"));
+                        reference_stamp_tool_call(&mut part, &call_key);
+                        if let Some(raw) = block.get("status").and_then(Value::as_str) {
+                            reference_apply_native_tool_status(&mut part, raw);
+                        }
                         push_part(&mut turns, turn_index, part);
                         let part_index = turns
                             .get(turn_index)
                             .map(|turn| turn.parts.len().saturating_sub(1))
                             .unwrap_or(0);
-                        pending.push((claude_tool_key(block.get("id")), turn_index, part_index));
+                        let patch_body = reference_native_patch_body(name, &raw_input);
+                        if let Some(body) = patch_body {
+                            push_part(&mut turns, turn_index, reference_diff_part(&body));
+                        }
+                        pending.push((call_key, turn_index, part_index));
                     }
                     _ => {}
                 }
@@ -384,6 +438,7 @@ pub fn parse_claude_transcript_with_limit(text: &str, max_turns: usize) -> Vec<R
     }
 
     turns.retain(|turn| !turn.parts.is_empty());
+    reference_finalize_work_status(&mut turns, false);
     if max_turns > 0 && turns.len() > max_turns {
         return turns.split_off(turns.len() - max_turns);
     }
@@ -525,6 +580,8 @@ fn user_turn(started_at: Option<String>, parts: Vec<ReferencePart>) -> Reference
         source: None,
         parts,
         abandoned: None,
+        id: None,
+        meta: None,
     }
 }
 
@@ -543,6 +600,8 @@ fn assistant_turn(turns: &mut Vec<ReferenceTurn>, started_at: Option<&str>) -> u
         source: None,
         parts: Vec::new(),
         abandoned: None,
+        id: None,
+        meta: None,
     });
     turns.len() - 1
 }
@@ -813,6 +872,7 @@ fn write_json_string(text: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::types::{ReferenceToolStatus, ReferenceTurnMeta};
     use serde_json::json;
 
     const NORMAL: &str = include_str!("fixtures/claude/normal.jsonl");
@@ -825,38 +885,77 @@ mod tests {
         ReferencePart::Text {
             text: value.to_string(),
             phase: None,
+            id: None,
         }
     }
 
     fn thinking(value: &str) -> ReferencePart {
         ReferencePart::Thinking {
             text: value.to_string(),
+            id: None,
         }
     }
 
-    fn tool(
+    struct ExpectedTool<'a> {
+        name: &'a str,
+        summary: &'a str,
+        input: &'a str,
+        output: &'a str,
+        error: Option<bool>,
+        skill: Option<ReferenceSkillActivity>,
+        call_id: Option<&'a str>,
+        status: ReferenceToolStatus,
+    }
+
+    fn tool(spec: ExpectedTool<'_>) -> ReferencePart {
+        ReferencePart::Tool {
+            name: spec.name.to_string(),
+            summary: spec.summary.to_string(),
+            input: spec.input.to_string(),
+            output: spec.output.to_string(),
+            error: spec.error,
+            skill: spec.skill,
+            output_ref: None,
+            output_size: None,
+            images: Vec::new(),
+            id: None,
+            call_id: spec.call_id.map(str::to_string),
+            status: Some(spec.status),
+            output_payload: Box::new(None),
+        }
+    }
+
+    fn plain_tool(
         name: &str,
         summary: &str,
         input: &str,
         output: &str,
-        error: Option<bool>,
-        skill: Option<ReferenceSkillActivity>,
+        call_id: Option<&str>,
+        status: ReferenceToolStatus,
     ) -> ReferencePart {
-        ReferencePart::Tool {
-            name: name.to_string(),
-            summary: summary.to_string(),
-            input: input.to_string(),
-            output: output.to_string(),
-            error,
-            skill,
-            output_ref: None,
-            output_size: None,
-            images: Vec::new(),
-        }
+        tool(ExpectedTool {
+            name,
+            summary,
+            input,
+            output,
+            error: None,
+            skill: None,
+            call_id,
+            status,
+        })
     }
 
-    fn plain_tool(name: &str, summary: &str, input: &str, output: &str) -> ReferencePart {
-        tool(name, summary, input, output, None, None)
+    fn orphan_result(call_id: &str, output: &str) -> ReferencePart {
+        tool(ExpectedTool {
+            name: "tool_result",
+            summary: "",
+            input: "",
+            output,
+            error: None,
+            skill: None,
+            call_id: Some(call_id),
+            status: ReferenceToolStatus::Completed,
+        })
     }
 
     fn user_turn_of(started_at: Option<&str>, parts: Vec<ReferencePart>) -> ReferenceTurn {
@@ -867,6 +966,8 @@ mod tests {
             source: None,
             parts,
             abandoned: None,
+            id: None,
+            meta: None,
         }
     }
 
@@ -882,7 +983,18 @@ mod tests {
             source: None,
             parts,
             abandoned: None,
+            id: None,
+            meta: None,
         }
+    }
+
+    fn with_model(mut turn: ReferenceTurn, model: &str) -> ReferenceTurn {
+        turn.meta = Some(ReferenceTurnMeta {
+            provider: ReferenceNativeHistoryKind::Claude,
+            model: Some(model.to_string()),
+            usage: None,
+        });
+        turn
     }
 
     fn loaded_skill(name: &str) -> ReferenceSkillActivity {
@@ -907,7 +1019,7 @@ mod tests {
                     Some("2026-10-06T09:00:00.000Z"),
                     vec![text("Add a health endpoint to the API.")]
                 ),
-                assistant_turn_of(
+                with_model(assistant_turn_of(
                     Some("2026-10-06T09:00:02.000Z"),
                     Some("2026-10-06T09:00:22.000Z"),
                     vec![
@@ -920,38 +1032,51 @@ mod tests {
                             "/Users/dev/project/src/api.rs",
                             "{\n  \"file_path\": \"/Users/dev/project/src/api.rs\",\n  \"limit\": 120\n}",
                             "use axum::{Router, routing::get};\n\npub fn router() -> Router {\n    Router::new().route(\"/health\", get(health))\n}\n",
+                            Some("toolu_01"),
+                            ReferenceToolStatus::Completed,
                         ),
                         tool(
-                            "Bash",
-                            "cargo test --lib api::health",
-                            "{\n  \"command\": \"cargo test --lib api::health\",\n  \"description\": \"Run the health test\"\n}",
-                            "test result: FAILED. 0 passed; 1 failed",
-                            Some(true),
-                            None,
+                            ExpectedTool {
+                                name: "Bash",
+                                summary: "cargo test --lib api::health",
+                                input: "{\n  \"command\": \"cargo test --lib api::health\",\n  \"description\": \"Run the health test\"\n}",
+                                output: "test result: FAILED. 0 passed; 1 failed",
+                                error: Some(true),
+                                skill: None,
+                                call_id: Some("toolu_02"),
+                                status: ReferenceToolStatus::Failed,
+                            }
                         ),
                         plain_tool(
                             "Task",
                             "Task",
                             "{\n  \"tasks\": [\n    {\n      \"description\": \"Port omp history\"\n    },\n    {\n      \"task_summary\": \"Port claude history\"\n    }\n  ]\n}",
                             "Task 1 completed.",
+                            Some("toolu_03"),
+                            ReferenceToolStatus::Completed,
                         ),
                         tool(
-                            "Skill",
-                            "frontend",
-                            "{\n  \"skill\": \"frontend\"\n}",
-                            "Loaded skill: frontend",
-                            None,
-                            Some(loaded_skill("frontend")),
+                            ExpectedTool {
+                                name: "Skill",
+                                summary: "frontend",
+                                input: "{\n  \"skill\": \"frontend\"\n}",
+                                output: "Loaded skill: frontend",
+                                error: None,
+                                skill: Some(loaded_skill("frontend")),
+                                call_id: Some("toolu_04"),
+                                status: ReferenceToolStatus::Completed,
+                            }
                         ),
                         text("The test failed because the route is not registered yet. Let me fix that."),
                     ],
-                ),
+                ), "claude-sonnet-4-5"),
                 user_turn_of(
                     Some("2026-10-06T09:01:00.000Z"),
                     vec![
                         ReferencePart::Image {
                             media_type: "image/png".to_string(),
                             r#ref: "9c1b0f4a-0000-4000-8000-000000000013:1".to_string(),
+                            id: None,
                         },
                         text("Also paste the diff."),
                     ],
@@ -959,6 +1084,11 @@ mod tests {
                 user_turn_of(
                     Some("2026-10-06T09:01:30.000Z"),
                     vec![text("And bump the version to 1.2.0.")]
+                ),
+                assistant_turn_of(
+                    Some("2026-10-06T09:01:40.000Z"),
+                    Some("2026-10-06T09:01:40.000Z"),
+                    vec![orphan_result("toolu_unknown", "orphan")],
                 ),
             ]
         );
@@ -1008,6 +1138,11 @@ mod tests {
         assert_eq!(
             turns,
             vec![
+                assistant_turn_of(
+                    Some("2026-10-06T09:10:11.000Z"),
+                    Some("2026-10-06T09:10:11.000Z"),
+                    vec![orphan_result("toolu_10", "stale result from before the clear")],
+                ),
                 user_turn_of(
                     Some("2026-10-06T09:10:20.000Z"),
                     vec![text("What is the branch state now?")]
@@ -1036,6 +1171,7 @@ mod tests {
                     Some("2026-10-06T09:10:50.000Z"),
                     vec![ReferencePart::Compact {
                         text: "Summary of the folded conversation: the health endpoint was added.\nSecond summary line.".to_string(),
+                        id: None,
                     }],
                 ),
                 assistant_turn_of(
@@ -1066,20 +1202,33 @@ mod tests {
                 assistant_turn_of(
                     None,
                     None,
-                    vec![plain_tool(
-                        "Bash",
-                        "ls -la",
-                        "{\n  \"command\": \"ls -la\"\n}",
-                        "total 0",
-                    )],
+                    vec![
+                        orphan_result("toolu_99", "orphan result"),
+                        plain_tool(
+                            "Bash",
+                            "ls -la",
+                            "{\n  \"command\": \"ls -la\"\n}",
+                            "total 0",
+                            None,
+                            ReferenceToolStatus::Completed,
+                        ),
+                    ],
                 ),
                 user_turn_of(None, vec![text("Real question.")]),
                 assistant_turn_of(
                     None,
                     None,
-                    vec![plain_tool("Bash", "Bash", "{}", "")],
+                    vec![plain_tool(
+                        "Bash",
+                        "Bash",
+                        "{}",
+                        "",
+                        Some("toolu_20"),
+                        ReferenceToolStatus::Unverifiable,
+                    )],
                 ),
-                user_turn_of(None, vec![ReferencePart::Compact { text: String::new() }]),
+                user_turn_of(None, vec![ReferencePart::Compact { text: String::new(),
+ id: None, }]),
             ]
         );
     }
@@ -1101,17 +1250,28 @@ mod tests {
                 Some("2026-10-06T10:00:13.000Z"),
                 vec![
                     thinking("Thinking via the text field."),
-                    plain_tool("Bash", "Bash", "{}", "ok"),
-                    plain_tool("Write", "Write", "{}", "empty-key result"),
+                    plain_tool("Bash", "Bash", "{}", "ok", Some("toolu_50"), ReferenceToolStatus::Completed),
+                    plain_tool("Write", "Write", "{}", "empty-key result", None, ReferenceToolStatus::Completed),
                     tool(
-                        "Skill",
-                        "padded",
-                        "{\n  \"skill\": \"   padded   \"\n}",
-                        "part one part two",
-                        Some(true),
-                        Some(failed_skill),
+                        ExpectedTool {
+                            name: "Skill",
+                            summary: "padded",
+                            input: "{\n  \"skill\": \"   padded   \"\n}",
+                            output: "part one part two",
+                            error: Some(true),
+                            skill: Some(failed_skill),
+                            call_id: Some("toolu_51"),
+                            status: ReferenceToolStatus::Failed,
+                        }
                     ),
-                    plain_tool("Skill", "Skill", "{\n  \"skill\": \"a\\nb\"\n}", ""),
+                    plain_tool(
+                        "Skill",
+                        "Skill",
+                        "{\n  \"skill\": \"a\\nb\"\n}",
+                        "",
+                        Some("toolu_52"),
+                        ReferenceToolStatus::Unverifiable,
+                    ),
                     text("Final answer."),
                 ],
             )]
@@ -1254,6 +1414,8 @@ mod tests {
                 "input": "{\n  \"command\": \"cargo test --lib api::health\",\n  \"description\": \"Run the health test\"\n}",
                 "output": "test result: FAILED. 0 passed; 1 failed",
                 "error": true,
+                "callId": "toolu_02",
+                "status": "failed",
             })
         );
         assert_eq!(
@@ -1434,5 +1596,98 @@ mod tests {
     fn an_empty_transcript_is_an_empty_conversation() {
         assert!(parse_claude_transcript("").expect("empty parses").is_empty());
         assert!(parse_claude_transcript("\n\n   \n").expect("blank parses").is_empty());
+    }
+
+    #[test]
+    fn native_work_claude_sums_usage_and_bounds_edit_diffs() {
+        let text = concat!(
+            r#"{"type":"user","timestamp":"2026-10-06T13:00:00.000Z","message":{"role":"user","content":"status failed usage input_tokens 9 model opus"}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-06T13:00:01.000Z","message":{"role":"assistant","model":"claude-opus","usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":4},"content":[{"type":"tool_use","id":"toolu_e","name":"Edit","input":{"old_string":"a","new_string":"b"}}]}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-06T13:00:02.000Z","message":{"role":"assistant","usage":{"input_tokens":5,"output_tokens":6,"cache_creation_input_tokens":1},"content":[{"type":"text","text":"next"}]}}"#,
+            "\n",
+            r#"{"type":"user","timestamp":"2026-10-06T13:00:03.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_e","status":"cancelled","content":"stopped"}]}}"#,
+            "\n",
+        );
+        let turns = parse_claude_transcript(text).expect("parses");
+        assert!(turns[0].meta.is_none(), "prose does not create usage or a model");
+        let meta = turns[1].meta.as_ref().expect("assistant meta");
+        assert_eq!(meta.model.as_deref(), Some("claude-opus"));
+        assert_eq!(meta.usage.as_ref().unwrap().input_tokens, Some(7));
+        assert_eq!(meta.usage.as_ref().unwrap().output_tokens, Some(9));
+        assert_eq!(meta.usage.as_ref().unwrap().cache_read_tokens, Some(4));
+        assert_eq!(meta.usage.as_ref().unwrap().cache_write_tokens, Some(1));
+        let ReferencePart::Tool { status, .. } = turns[1].parts.iter().find(|part| matches!(part, ReferencePart::Tool { name, .. } if name == "Edit")).unwrap() else { unreachable!() };
+        assert_eq!(*status, Some(ReferenceToolStatus::Cancelled));
+        assert!(turns[1].parts.iter().any(|part| matches!(part, ReferencePart::Diff { patch, .. } if !patch.truncated)));
+    }
+
+    fn claude_tool_line(status: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-10-06T11:00:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_life",
+                        "name": "Bash",
+                        "input": { "command": "sleep" },
+                        "status": status
+                    }]
+                }
+            })
+        )
+    }
+
+    fn claude_tool_status(text: &str) -> Option<ReferenceToolStatus> {
+        let turns = parse_claude_transcript(text).expect("claude");
+        turns.into_iter().find_map(|turn| {
+            turn.parts.into_iter().find_map(|part| match part {
+                ReferencePart::Tool { status, .. } => Some(status),
+                _ => None,
+            })
+        }).flatten()
+    }
+
+    #[test]
+    fn claude_unknown_tool_word_is_omitted_not_failed() {
+        assert_eq!(claude_tool_status(&claude_tool_line("mystery")), None);
+    }
+
+    #[test]
+    fn claude_unfinished_tool_in_a_closed_stream_is_unverifiable() {
+        let later = format!(
+            "{}{}\n",
+            claude_tool_line("running"),
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": "later" }
+            })
+        );
+        assert_eq!(claude_tool_status(&later), Some(ReferenceToolStatus::Unverifiable));
+    }
+
+    #[test]
+    fn claude_open_tail_tool_is_running_only_on_a_live_owning_tail() {
+        let text = claude_tool_line("running");
+        assert_eq!(claude_tool_status(&text), Some(ReferenceToolStatus::Unverifiable));
+        let mut turns = parse_claude_transcript(&text).expect("claude");
+        reference_finalize_work_status(&mut turns, true);
+        let ReferencePart::Tool { status, .. } = &turns[0].parts[0] else { panic!("{:?}", turns) };
+        assert_eq!(*status, Some(ReferenceToolStatus::Running));
+    }
+
+    #[test]
+    fn claude_recorded_failure_stays_failed() {
+        assert_eq!(claude_tool_status(&claude_tool_line("failed")), Some(ReferenceToolStatus::Failed));
+    }
+
+    #[test]
+    fn claude_recorded_cancel_stays_cancelled() {
+        assert_eq!(claude_tool_status(&claude_tool_line("cancelled")), Some(ReferenceToolStatus::Cancelled));
     }
 }

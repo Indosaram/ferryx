@@ -162,6 +162,7 @@ import {
   type FocusedTerminalPayload,
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
+  type SpawnTerminalRequest,
 } from "./lib/tauri";
 import { dagRemoteWatchTargets, useDagWatchLifecycle } from "./lib/useDagWatchLifecycle";
 import { getCachedSshHosts } from "./lib/sshHosts";
@@ -175,7 +176,7 @@ import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
 import { findSessionByBackendId, localBackendSessionId } from "./components/supervisorPanel/findSession";
-import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
+import { extractNormalizedProviderSession, getAgentReconnectAffordance, isExitedContinuationSource } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { reconnectLocalSession, replaceExitedShellSession } from "./lib/shellReplacement";
@@ -625,7 +626,7 @@ export function deriveFocusedTerminal(
         ownerLayout.tabs.filter(isTerminalTab).flatMap((tab) => [...getTabSessionIds(snapshot, tab.id)].flatMap((sessionId) => {
           const activity = snapshot.activityBySessionId?.[sessionId];
           const paneSession = snapshot.sessions[sessionId];
-          const backendSessionId = paneSession?.backendSessionId;
+          const backendSessionId = publishableBackendSessionId(paneSession?.backendSessionId);
           if (!backendSessionId || !activity || activity.seen || (activity.state !== "waiting" && activity.state !== "done")) return [];
           const panePath = paneSession.worktreePath ?? paneSession.cwd;
           const paneWorktree = panePath ? snapshot.worktrees.find((wt) => wt.path === panePath) : undefined;
@@ -684,7 +685,6 @@ export function deriveFocusedTerminal(
 
     return paneSessionIds.map(({ leafId, sessionId }, index) => {
       const paneSession = sessionId ? state.sessions[sessionId] : undefined;
-      const backendSessionId = paneSession?.backendSessionId;
       const panePath = paneSession?.worktreePath ?? paneSession?.cwd;
       // Each pane carries its own worktree so the remote can select across worktrees instead of
       // guessing from whichever context is currently mirrored.
@@ -696,14 +696,20 @@ export function deriveFocusedTerminal(
 
       const activity = sessionId ? state.activityBySessionId?.[sessionId] : undefined;
       const baseLabel = remoteTabLabel(staticTabLabel(tab));
+      const exited = paneSession ? isExitedContinuationSource(paneSession) : false;
+      const providerSession = paneSession && exited ? extractNormalizedProviderSession(paneSession) : null;
+      const agentType = activity?.agentType ?? (exited ? paneSession?.agentType ?? undefined : undefined);
+      const publishedSessionId = publishedPaneSessionId(paneSession, exited);
       return {
         id: remotePaneId(tab.id, multiPane ? leafId : null),
         label: multiPane ? `${baseLabel} (${index + 1})` : baseLabel,
         ...(activity && (activity.state === "working" || !activity.seen) ? { activityState: activity.state } : {}),
-        ...(activity?.agentType ? { agentType: activity.agentType } : {}),
+        ...(agentType ? { agentType } : {}),
         ...(paneSlug ? { worktreeSlug: paneSlug } : {}),
         ...(paneLabel ? { worktreeLabel: paneLabel } : {}),
-        ...(backendSessionId ? { sessionId: backendSessionId } : {}),
+        ...(publishedSessionId ? { sessionId: publishedSessionId } : {}),
+        ...(exited ? { running: false as const } : {}),
+        ...(providerSession ? { providerSession } : {}),
       };
     });
   }));
@@ -722,12 +728,26 @@ export function deriveFocusedTerminal(
     ...(sessionAttention.length > 0 ? { sessionAttention } : {}),
     worktreeSlug: worktreeSlug ?? null,
     worktreeLabel: worktreeLabel ?? null,
-    backendSessionId: session?.backendSessionId ?? null,
+    backendSessionId: publishableBackendSessionId(session?.backendSessionId) ?? null,
     activeTabId: focusedEntryId,
     tabId: focusedEntryId,
     tabs: terminalTabs,
     terminalTabs,
   };
+}
+
+function publishableBackendSessionId(id: string | null | undefined): string | undefined {
+  if (!id || isStandbyBackendSessionId(id)) return undefined;
+  return id;
+}
+
+/** Live backend id, or the retained real id of an exited agent pane. Never a standby id. */
+function publishedPaneSessionId(session: TerminalSession | undefined, exited: boolean): string | undefined {
+  if (!session) return undefined;
+  const live = publishableBackendSessionId(session.backendSessionId);
+  if (live) return live;
+  if (!exited || !(session.agentType || session.providerSession || session.agentSessionId)) return undefined;
+  return publishableBackendSessionId(session.lastBackendSessionId);
 }
 
 /** Remote entries address a pane, not just a tab, so a split tab exposes each PTY separately. */
@@ -3693,7 +3713,7 @@ function WorkspaceApp({
   );
 
   const handleSplitPane = useCallback(
-    (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second" }) => {
+    (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second"; startup?: SpawnTerminalRequest["startup"] }) => {
       if (activeRemoteHostRef.current) return;
       if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
       if (
@@ -3702,7 +3722,9 @@ function WorkspaceApp({
       ) {
         return;
       }
-      void splitPane(tabId, leafId, direction, options).catch(reportRuntimeError);
+      const pending = splitPane(tabId, leafId, direction, options);
+      if (options?.startup?.kind === "agentContinue") return pending;
+      void pending.catch(reportRuntimeError);
     },
     [reportRuntimeError, splitPane],
   );

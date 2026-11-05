@@ -14,8 +14,14 @@
 
 use serde_json::Value;
 
-use super::history_parse::{reference_tool_input, reference_tool_summary, ReferenceTurnLog};
-use super::types::{ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn};
+use super::history_parse::{
+    reference_bounded_tool_input, reference_native_model, reference_native_patch_body,
+    reference_finalize_work_status, reference_tool_input, reference_tool_summary,
+    reference_usage_from_object, ReferenceTurnLog,
+};
+use super::types::{
+    ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn, ReferenceTurnRole,
+};
 
 /// The lane's parser: copilot-transcript only; any other kind is refused.
 pub fn parse_reference_copilot_history(
@@ -58,12 +64,12 @@ pub fn parse_copilot_transcript(text: &str) -> Vec<ReferenceTurn> {
                 log.user(
                     at.map(str::to_string),
                     None,
-                    vec![ReferencePart::Text { text: content.to_string(), phase: None }],
+                    vec![ReferencePart::Text { text: content.to_string(), phase: None , id: None}],
                 );
             }
             Some("assistant.message") => {
                 if let Some(content) = field(data, "content").filter(|content| !content.is_empty()) {
-                    log.part(at, ReferencePart::Text { text: content.to_string(), phase: None });
+                    log.part(at, ReferencePart::Text { text: content.to_string(), phase: None , id: None});
                 }
                 let requests = data.and_then(|data| data.get("toolRequests")).and_then(Value::as_array);
                 for request in requests.into_iter().flatten() {
@@ -72,14 +78,33 @@ pub fn parse_copilot_transcript(text: &str) -> Vec<ReferenceTurn> {
                     };
                     let key = request.get("toolCallId").and_then(Value::as_str).unwrap_or("");
                     let arguments = request.get("arguments");
+                    let payload = arguments.cloned().unwrap_or(Value::Null);
                     let summary = arguments
                         .and_then(|arguments| arguments.get("description"))
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|description| !description.is_empty())
                         .map_or_else(|| reference_tool_summary(arguments), str::to_string);
-                    log.tool(at, key, name, summary, reference_tool_input(arguments));
+                    log.tool(
+                        at,
+                        key,
+                        name,
+                        summary,
+                        reference_bounded_tool_input(name, &payload, reference_tool_input(arguments)),
+                    );
+                    if let Some(raw) = request.get("status").and_then(Value::as_str) {
+                        log.tool_status(key, raw);
+                    }
+                    if let Some(body) = reference_native_patch_body(name, &payload) {
+                        log.push_diff(at, &body);
+                    }
                 }
+                log.annotate_role(
+                    ReferenceTurnRole::Assistant,
+                    ReferenceNativeHistoryKind::Copilot,
+                    reference_native_model(data.and_then(|data| data.get("model"))),
+                    data.and_then(|data| data.get("usage")).and_then(reference_usage_from_object),
+                );
             }
             Some("tool.execution_complete") => {
                 let Some(key) = field(data, "toolCallId") else {
@@ -90,21 +115,30 @@ pub fn parse_copilot_transcript(text: &str) -> Vec<ReferenceTurn> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let failed = data.and_then(|data| data.get("success")).and_then(Value::as_bool) == Some(false);
+                let success = data.and_then(|data| data.get("success")).and_then(Value::as_bool);
+                let failed = success == Some(false);
                 log.tool_output(at, key, output, failed);
+                if let Some(success) = success {
+                    log.tool_status(key, if success { "completed" } else { "failed" });
+                }
+                if let Some(raw) = field(data, "status") {
+                    log.tool_status(key, raw);
+                }
             }
             Some("session.error") => {
                 if let Some(message) = field(data, "message").filter(|message| !message.trim().is_empty()) {
                     log.part(
                         at,
-                        ReferencePart::Notice { text: message.to_string(), source: Some("session.error".to_string()) },
+                        ReferencePart::Notice { text: message.to_string(), source: Some("session.error".to_string()) , id: None},
                     );
                 }
             }
             _ => {}
         }
     }
-    log.finish()
+    let mut turns = log.finish();
+    reference_finalize_work_status(&mut turns, false);
+    turns
 }
 
 fn field<'a>(data: Option<&'a Value>, key: &str) -> Option<&'a str> {
@@ -134,11 +168,11 @@ mod tests {
                 ReferenceTurnRole::User,
             ]
         );
-        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "run ls".into(), phase: None }]);
+        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "run ls".into(), phase: None , id: None}]);
         assert_eq!(turns[0].started_at.as_deref(), Some("2026-10-22T07:03:32.080Z"));
         assert!(matches!(
             &turns[1].parts[..],
-            [ReferencePart::Notice { text, source: Some(source) }]
+            [ReferencePart::Notice { text, source: Some(source) , ..}]
                 if text.starts_with("Model call failed") && source == "session.error"
         ));
         let ReferencePart::Tool { name, summary, input, output, error, .. } = &turns[3].parts[0] else {
@@ -151,11 +185,11 @@ mod tests {
         assert_eq!(*error, None);
         assert_eq!(
             turns[3].parts[1],
-            ReferencePart::Text { text: "README.md is the only file in the current directory.".into(), phase: None }
+            ReferencePart::Text { text: "README.md is the only file in the current directory.".into(), phase: None , id: None}
         );
         assert_eq!(
             turns[4].parts,
-            [ReferencePart::Text { text: "run the shell command: touch probe.txt".into(), phase: None }]
+            [ReferencePart::Text { text: "run the shell command: touch probe.txt".into(), phase: None , id: None}]
         );
     }
 
@@ -170,5 +204,101 @@ mod tests {
     fn copilot_parser_refuses_another_family() {
         assert!(parse_reference_copilot_history(ReferenceNativeHistoryKind::Claude, SESSION).is_err());
         assert!(parse_reference_copilot_history(ReferenceNativeHistoryKind::Unavailable, "").is_err());
+    }
+
+    #[test]
+    fn native_work_copilot_maps_success_and_cancelled() {
+        let text = concat!(
+            r#"{"type":"user.message","timestamp":"2026-10-22T07:00:00.000Z","data":{"content":"status failed usage 9"}}"#,
+            "\n",
+            r#"{"type":"assistant.message","timestamp":"2026-10-22T07:00:01.000Z","data":{"model":"copilot-model","usage":{"input_tokens":1,"output_tokens":2},"toolRequests":[{"toolCallId":"c1","name":"bash","arguments":{"command":"ls"}}]}}"#,
+            "\n",
+            r#"{"type":"tool.execution_complete","timestamp":"2026-10-22T07:00:02.000Z","data":{"toolCallId":"c1","success":false,"status":"cancelled","result":{"content":"stopped"}}}"#,
+            "\n",
+        );
+        let turns = parse_copilot_transcript(text);
+        assert!(turns[0].meta.is_none());
+        assert_eq!(turns[1].meta.as_ref().unwrap().model.as_deref(), Some("copilot-model"));
+        assert_eq!(turns[1].meta.as_ref().unwrap().usage.as_ref().unwrap().input_tokens, Some(1));
+        let ReferencePart::Tool { status, .. } = &turns[1].parts[0] else { panic!("{:?}", turns[1].parts) };
+        assert_eq!(*status, Some(crate::remote::reference_chat::types::ReferenceToolStatus::Cancelled));
+    }
+
+    fn copilot_call(status: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant.message",
+                "timestamp": "2026-10-22T07:00:01.000Z",
+                "data": {
+                    "toolRequests": [{
+                        "toolCallId": "c-life",
+                        "name": "bash",
+                        "arguments": { "command": "sleep" },
+                        "status": status
+                    }]
+                }
+            })
+        )
+    }
+
+    fn copilot_status(text: &str) -> Option<crate::remote::reference_chat::types::ReferenceToolStatus> {
+        parse_copilot_transcript(text).into_iter().find_map(|turn| {
+            turn.parts.into_iter().find_map(|part| match part {
+                ReferencePart::Tool { status, .. } => status,
+                _ => None,
+            })
+        })
+    }
+
+    #[test]
+    fn copilot_unknown_tool_word_is_omitted_not_failed() {
+        assert_eq!(copilot_status(&copilot_call("mystery")), None);
+    }
+
+    #[test]
+    fn copilot_unfinished_tool_in_a_closed_stream_is_unverifiable() {
+        let later = format!(
+            "{}{}\n",
+            copilot_call("running"),
+            serde_json::json!({
+                "type": "user.message",
+                "timestamp": "2026-10-22T07:00:02.000Z",
+                "data": { "content": "later" }
+            })
+        );
+        assert_eq!(
+            copilot_status(&later),
+            Some(crate::remote::reference_chat::types::ReferenceToolStatus::Unverifiable)
+        );
+    }
+
+    #[test]
+    fn copilot_open_tail_tool_is_running_only_on_a_live_owning_tail() {
+        let text = copilot_call("running");
+        assert_eq!(
+            copilot_status(&text),
+            Some(crate::remote::reference_chat::types::ReferenceToolStatus::Unverifiable)
+        );
+        let mut turns = parse_copilot_transcript(&text);
+        reference_finalize_work_status(&mut turns, true);
+        let ReferencePart::Tool { status, .. } = &turns[0].parts[0] else { panic!("{:?}", turns) };
+        assert_eq!(*status, Some(crate::remote::reference_chat::types::ReferenceToolStatus::Running));
+    }
+
+    #[test]
+    fn copilot_recorded_failure_stays_failed() {
+        assert_eq!(
+            copilot_status(&copilot_call("failed")),
+            Some(crate::remote::reference_chat::types::ReferenceToolStatus::Failed)
+        );
+    }
+
+    #[test]
+    fn copilot_recorded_cancel_stays_cancelled() {
+        assert_eq!(
+            copilot_status(&copilot_call("cancelled")),
+            Some(crate::remote::reference_chat::types::ReferenceToolStatus::Cancelled)
+        );
     }
 }

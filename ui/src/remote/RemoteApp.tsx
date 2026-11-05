@@ -23,6 +23,7 @@ import {
   RemoteWorkspaceMirror,
   useRemoteDesktopSidebar,
   type RemoteContextOption,
+  type RemoteTerminalItem,
   type RemoteTerminalTabInfo,
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
@@ -34,6 +35,9 @@ import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
 import { MobileSheet } from "./chat/MobileSheet";
 import { PhoneAlertsSettings } from "../components/settings/NotificationsSection";
 import { muteSessionPush, type PushRequest } from "../lib/pushSubscription";
+import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
+import { remoteInboxEntries, useRemoteInbox, type RemoteInboxTransport } from "./remoteInbox";
+import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { DecisionFocusContext, useDecisionDeepLink, type DecisionFocus } from "./decisionDeepLink";
 import { usePanelPresence } from "./panelPresence";
@@ -41,7 +45,8 @@ import { SessionMuteContext, type SessionMute } from "./sessionMute";
 import { capRetainedMessages } from "./agentConversation";
 import {
   ReferenceHistoryFetchError,
-  parseReferenceHistoryPage,
+  classifyReferenceHistoryBody,
+  encodeReferenceHistoryAfter,
   referenceHistoryCursorForStream,
   referenceHistoryErrorIsIdentity,
   referenceHistoryFence,
@@ -50,8 +55,19 @@ import {
 } from "./agentConversation";
 import type { MobileChatMessageProps } from "./chat/MobileChatMessage";
 import type { MobileChatComposerHandle } from "./chat/MobileChatComposer";
+import type { ComposerControlChange, ComposerControlNotice } from "./chat/MobileChatComposer";
+import { applyReferenceControl } from "./chat/referenceControl";
 import { referenceDrafts } from "./chat/referenceDraft";
 import { referenceQueues, type HeldMessage } from "./chat/referenceQueue";
+import { FOLLOW_UP_DROPPED_NOTICE, referenceFollowUps, type FollowUpMessage } from "./chat/referenceFollowUp";
+import {
+  advanceFollowUpIdleClock,
+  followUpIdleMayDeliver,
+  followUpHistoryAnswerKey,
+  followUpNewestTurnKey,
+  referenceChatObservedIdle,
+  type FollowUpIdleClock,
+} from "./chat/referenceFollowUpIdle";
 import { ReferencePromptCard } from "./chat/ReferencePromptCard";
 import {
   ReferenceFileError,
@@ -69,6 +85,9 @@ import {
 import {
   REFERENCE_OUTCOME_UNKNOWN_CODE,
   REFERENCE_SUBMIT_MAX_CHARS,
+  REFERENCE_HISTORY_DELTA_V1,
+  REFERENCE_PAYLOAD_V1,
+  TERMINAL_CONTINUE_V1,
   referenceAnswerIsSingleChoice,
   referenceChatRoute,
   referenceIsOutcomeUnknown,
@@ -79,9 +98,11 @@ import {
   sameReferenceTarget,
   referenceTargetKey,
   type ReferenceFileReceipt,
+  type ReferenceHistoryAnchor,
   type ReferenceHistoryCursor,
   type ReferenceHistoryPage,
   type ReferenceImageRef,
+  type ReferencePayloadRef,
   type ReferencePrompt,
   type ReferencePromptAnswer,
   type ReferencePromptAnswerPayload,
@@ -91,6 +112,24 @@ import {
   type ReferenceTargetRef,
   type ReferenceTurn,
 } from "./chat/referenceTypes";
+import { bindReferencePayloadRoute, loadReferencePayload } from "./chat/referencePayload";
+import {
+  createReferenceHistorySync,
+  referenceHistoryTurnFingerprints,
+  type HistoryReadReason,
+  type HistoryReadTicket,
+  type ReferenceHistorySync,
+} from "./chat/referenceHistorySync";
+import {
+  continuationOutcomeUnknown,
+  continuationUnknownHeld,
+  holdContinuationUnknown,
+  normalizeAgentProviderSession,
+  providerSessionKeyForAgent,
+} from "../lib/agentResume";
+import { getContinuationAffordance } from "../lib/agentResumeAffordance";
+import type { AgentContinueMode } from "../lib/tauri";
+import type { AgentProviderSession, TerminalLifecycle, TerminalSession } from "../lib/types";
 import {
   formatReferenceDuration,
   type ReferencePartRenderContext,
@@ -166,7 +205,7 @@ import { DIRECT_SIDEBAR_MACHINE, useRemoteSidebarMachines } from "./useRemoteSid
 import { directSidebarInventory } from "./directSidebarInventory";
 import { useRemoteSidebarModel } from "./useRemoteSidebarModel";
 import { AccountButton } from "./home/AccountButton";
-import { optionForSession } from "./home/phoneHomeModel";
+import { buildInboxRows, optionForSession, type InboxRow } from "./home/phoneHomeModel";
 import { PhoneHomeView } from "./home/PhoneHomeView";
 import { SupervisorSessionStrip } from "./home/SupervisorSessionStrip";
 import { usePhoneNavigation } from "./home/usePhoneNavigation";
@@ -659,6 +698,8 @@ export interface ChatGatewayIdentity {
   readonly referenceHostId: string | null;
   readonly referenceOwnerId: string | null;
   readonly machineId: string | null;
+  /** Advertised host capabilities. Empty when the payload omits the list. */
+  readonly capabilities: readonly string[];
 }
 
 /** Field names a gateway may publish its reference host id under. */
@@ -703,7 +744,172 @@ export function parseChatGatewayIdentity(raw: unknown): ChatGatewayIdentity | nu
     referenceHostId,
     referenceOwnerId: chatText(body[CHAT_OWNER_ID_FIELD]),
     machineId: chatText(body.machineId),
+    capabilities: chatCapabilityList(body.capabilities),
   };
+}
+
+function chatCapabilityList(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+/**
+ * The provider session the host published for this pane.
+ * A non-wire key is not invented: the published id is kept only when this agent
+ * has one verified key. Two disagreeing rows stay unknown.
+ */
+export function chatProviderSessionFromRows(
+  rows: readonly unknown[],
+  sessionId: string,
+  agentType: string | null,
+): AgentProviderSession | null {
+  const found: AgentProviderSession[] = [];
+  for (const raw of rows) {
+    const row = chatRecord(raw);
+    if (row === null) continue;
+    const target = chatRecord(row.target);
+    const rowSessionId = chatText(row.sessionId) ?? (target === null ? null : chatText(target.sessionId));
+    if (rowSessionId !== sessionId) continue;
+    const provider = chatRecord(row.providerSession);
+    if (provider === null) continue;
+    const normalized = normalizeAgentProviderSession(provider);
+    if (normalized) {
+      found.push(normalized);
+      continue;
+    }
+    const id = chatText(provider.id);
+    const key = providerSessionKeyForAgent(agentType ?? "");
+    if (!id || key !== "session_id") continue;
+    const built = normalizeAgentProviderSession({ key: "session_id", id });
+    if (built) found.push(built);
+  }
+  const first = found[0];
+  if (!first) return null;
+  if (found.some((item) => item.key !== first.key || item.id !== first.id)) return null;
+  return first;
+}
+
+function publishedProviderSession(id: string | null, agentType: string | null): AgentProviderSession | null {
+  if (!id || providerSessionKeyForAgent(agentType ?? "") !== "session_id") return null;
+  return normalizeAgentProviderSession({ key: "session_id", id });
+}
+
+function providerSessionFromPublishedTab(
+  tab: { providerSession?: unknown; agentType?: string } | undefined,
+  agentType: string | null,
+): AgentProviderSession | null {
+  if (!tab) return null;
+  const normalized = normalizeAgentProviderSession(tab.providerSession);
+  if (normalized) return normalized;
+  const provider = chatRecord(tab.providerSession);
+  if (provider === null) return null;
+  return publishedProviderSession(chatText(provider.id), agentType ?? tab.agentType ?? null);
+}
+
+function remoteContinuationSession(args: {
+  sessionId: string;
+  workspaceId: string;
+  agentType: string | null;
+  running: boolean;
+  activity: string | null;
+  providerSession: AgentProviderSession | null;
+}): TerminalSession {
+  const lifecycle: TerminalLifecycle = args.activity === "working"
+    ? "working"
+    : args.activity === "waiting"
+      ? "waiting"
+      : args.running
+        ? "running"
+        : "exited";
+  return {
+    id: args.sessionId,
+    cwd: "",
+    workspaceId: args.workspaceId,
+    worktree: null,
+    backendSessionId: lifecycle === "exited" ? null : args.sessionId,
+    lifecycle,
+    agentType: args.agentType,
+    providerSession: args.providerSession,
+  };
+}
+
+function remoteContinuationSessions(
+  rows: readonly unknown[],
+  tabs: readonly { sessionId?: string; agentType?: string; workspaceId?: string | null; activityState?: string; running?: boolean; providerSession?: unknown }[] | undefined,
+  fallbackWorkspaceId: string,
+): TerminalSession[] {
+  const sessions: TerminalSession[] = [];
+  for (const raw of rows) {
+    const row = chatRecord(raw);
+    if (row === null) continue;
+    const target = chatRecord(row.target);
+    const sessionId = chatText(row.sessionId) ?? (target === null ? null : chatText(target.sessionId));
+    if (sessionId === null) continue;
+    const tab = tabs?.find((item) => item.sessionId === sessionId);
+    const agentType = tab?.agentType ?? chatText(row.agentType);
+    const workspaceId = chatText(row.workspaceId) ?? tab?.workspaceId ?? fallbackWorkspaceId;
+    if (!workspaceId) continue;
+    // A sessions row that is still running is registry-live and wins over a published flag.
+    const running = row.running !== false;
+    sessions.push(remoteContinuationSession({
+      sessionId,
+      workspaceId,
+      agentType,
+      running,
+      activity: tab?.activityState ?? null,
+      providerSession: chatProviderSessionFromRows(rows, sessionId, agentType)
+        ?? providerSessionFromPublishedTab(tab, agentType),
+    }));
+  }
+  return sessions;
+}
+
+function createdSessionIdentity(body: unknown): { sessionId: string; daemonEpoch: string | null } | null {
+  const record = chatRecord(body);
+  if (record === null) return null;
+  const data = chatRecord(record.data);
+  const target = chatRecord(record.target) ?? (data === null ? null : chatRecord(data.target));
+  const sessionId = chatText(record.sessionId)
+    ?? (data === null ? null : chatText(data.sessionId))
+    ?? (target === null ? null : chatText(target.sessionId));
+  if (Array.isArray(record.sessions) && sessionId === null) return null;
+  if (sessionId === null) return null;
+  return {
+    sessionId,
+    daemonEpoch: chatText(record.daemonEpoch)
+      ?? (data === null ? null : chatText(data.daemonEpoch))
+      ?? (target === null ? null : chatText(target.daemonEpoch)),
+  };
+}
+
+/** How a continuation create answered. Unknown is held and is not posted again. */
+export type ContinuationCreateDisposition = "created" | "unknown" | "rejected";
+
+/** Machine error code from `{ error: { code } }`. A message that merely mentions a code is not one. */
+function continuationMachineErrorCode(body: unknown): string | null {
+  const error = chatRecord(chatRecord(body)?.error);
+  return error === null ? null : chatText(error.code);
+}
+
+/**
+ * Classify a continuation create response.
+ *
+ * A 2xx with a session identity is created. Anything else whose structured code is
+ * OPERATION_OUTCOME_UNKNOWN is unknown, including the host's 409, and is not a rejection.
+ */
+export function continuationCreateDisposition(status: number, body: unknown): ContinuationCreateDisposition {
+  if (status >= 200 && status < 300) {
+    return createdSessionIdentity(body) === null ? "unknown" : "created";
+  }
+  if (
+    continuationMachineErrorCode(body) === "OPERATION_OUTCOME_UNKNOWN"
+    || status < 400
+    || status === 408
+    || status >= 500
+  ) {
+    return "unknown";
+  }
+  return "rejected";
 }
 
 /** The bearer and host an identity was answered for; any other pair has none until it answers. */
@@ -819,7 +1025,7 @@ const CHAT_SEND_FAILED_WARNING = "That message was not delivered. It is back in 
 const CHAT_VIEW_ONLY_WARNING =
   "This phone can only view this session, so that message wasn't sent. It is back in the message box.";
 const CHAT_OUTCOME_UNKNOWN_WARNING =
-  "That message may have reached the session, but your computer didn't confirm it. It is back in the message box and won't be sent again on its own.";
+  "That message may have reached the session, but your computer didn't confirm it. It is back in the message box, held read-only, and won't be sent again on its own.";
 const CHAT_STOP_REFUSED_WARNING =
   "Stop isn't available for this agent here, so nothing was sent. Open the terminal and press Ctrl-C to interrupt it.";
 const CHAT_STOP_FAILED_WARNING = "The stop request was not delivered.";
@@ -862,6 +1068,7 @@ function chatTurnSignature(message: MobileChatMessageProps): string {
       message.referenceSource ?? null,
       message.referenceAbandoned ?? null,
       message.referenceParts ?? null,
+      message.referenceMeta ?? null,
     ]);
     chatTurnSignatures.set(message, signature);
   }
@@ -939,17 +1146,23 @@ function mapReferenceTurns(page: ReferenceHistoryPage): MobileChatMessageProps[]
       .filter((part): part is string => part !== null)
       .join("\n\n");
     return {
-      id: chatTurnId(seed),
+      id: typeof turn.id === "string" && turn.id.length > 0 ? turn.id : chatTurnId(seed),
       role: turn.role,
       content: text,
       timestamp: turn.startedAt ?? undefined,
       referenceParts: turn.parts,
       referenceSource: turn.source ?? null,
       referenceAbandoned: turn.abandoned ?? null,
+      referenceMeta: turn.meta ?? null,
       durationLabel:
         turn.role === "assistant" ? chatTurnDuration(turn.startedAt, turn.endedAt) : undefined,
     };
   });
+}
+
+/** Turn text and meta, so a replacement or a meta-only update does not keep the previous page. */
+function chatNewestTurnsStamp(page: ReferenceHistoryPage): string {
+  return page.turns.map((turn) => `${turn.id ?? ""}\0${JSON.stringify(turn.parts)}\0${JSON.stringify(turn.meta ?? null)}`).join("\n");
 }
 
 /** A typed refusal from the prompt lane; the card reads `code` to tell a moved screen apart. */
@@ -1136,6 +1349,7 @@ function referenceChatReadQuery(
   registryId: string,
   limit?: number,
   cursor?: ReferenceHistoryCursor | null,
+  after?: ReferenceHistoryAnchor | null,
 ): string {
   const { ownerId, epoch, backendSessionId } = target.target;
   const params = new URLSearchParams();
@@ -1153,7 +1367,9 @@ function referenceChatReadQuery(
     params.set("providerSessionId", providerSessionId);
   }
   if (limit !== undefined) params.set("limit", String(limit));
-  if (cursor) {
+  if (after) {
+    params.set("after", encodeReferenceHistoryAfter(after));
+  } else if (cursor) {
     params.set("cursor", String(cursor.offset));
     params.set("cursorStream", cursor.streamId);
   }
@@ -1183,14 +1399,20 @@ async function readChatHistory(args: {
   registryId: string;
   limit: number;
   cursor?: ReferenceHistoryCursor | null;
+  after?: ReferenceHistoryAnchor | null;
   signal?: AbortSignal;
   transport?: Pick<TunnelTransport, "fetchLike"> | null;
-}): Promise<{ page: ReferenceHistoryPage; fence: ReferenceHistoryFence }> {
+}): Promise<
+  | { kind: "page"; page: ReferenceHistoryPage; fence: ReferenceHistoryFence; fingerprints: readonly (string | null)[] }
+  | { kind: "delta"; delta: Extract<import("./chat/referenceTypes").ReferenceHistoryDeltaResponse, { mode: "delta" }>; fence: ReferenceHistoryFence }
+  | { kind: "reset"; reason: import("./chat/referenceTypes").ReferenceHistoryResetReason; page: ReferenceHistoryPage; fence: ReferenceHistoryFence }
+> {
   const path = `${referenceChatRoute(args.sessionId, "history")}?${referenceChatReadQuery(
     args.target,
     args.registryId,
     args.limit,
     args.cursor,
+    args.after,
   )}`;
   let response: Response;
   try {
@@ -1221,16 +1443,39 @@ async function readChatHistory(args: {
     );
   }
   let body: unknown;
+  let text = "";
   try {
-    body = await response.json();
+    text = await response.text();
+    body = JSON.parse(text);
   } catch {
     throw new ReferenceHistoryFetchError(
       "MALFORMED_RESPONSE",
       "Reference history response body is not valid JSON",
     );
   }
-  const page = parseReferenceHistoryPage(body);
-  return { page, fence: referenceHistoryFence(args.sessionId, args.target, page.generation) };
+  const classified = classifyReferenceHistoryBody(body);
+  if (classified.kind === "negotiated") {
+    if (classified.response.mode === "delta") {
+      return {
+        kind: "delta",
+        delta: classified.response,
+        fence: referenceHistoryFence(args.sessionId, args.target, classified.response.generation),
+      };
+    }
+    return {
+      kind: "reset",
+      reason: classified.response.reason,
+      page: classified.response.page,
+      fence: referenceHistoryFence(args.sessionId, args.target, classified.response.page.generation),
+    };
+  }
+  const page = classified.page;
+  return {
+    kind: "page",
+    page,
+    fence: referenceHistoryFence(args.sessionId, args.target, page.generation),
+    fingerprints: referenceHistoryTurnFingerprints(text, page.turns),
+  };
 }
 
 export const RemoteApp: React.FC = () => {
@@ -1400,6 +1645,8 @@ export const RemoteHostConnection: React.FC<{
   }), [hostId]);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const modelRef = useRef(model);
+  /** The session the phone opened on its own from the Inbox, kept over desktop refreshes. */
+  const localSessionRef = useRef<{ workspaceId: string; tabId: string; terminal: RemoteTerminalItem } | null>(null);
   const modelMachineIdRef = useRef<string | null>(null);
   // Set by every user-driven selection that names a session or tab: the read-only
   // desktop-context sync must never replace an independently chosen session.
@@ -1453,6 +1700,21 @@ export const RemoteHostConnection: React.FC<{
   // re-enables the first, and a settled row never re-enables one still in flight.
   const [chatHeldSendingIds, setChatHeldSendingIds] = useState<readonly string[]>([]);
   const chatHeldSendingRef = useRef<Set<string>>(new Set());
+  const [chatQueued, setChatQueued] = useState<readonly FollowUpMessage[]>([]);
+  const followUpDrainRef = useRef(false);
+  const followUpDrainAgainRef = useRef(false);
+  const followUpMuteRef = useRef(0);
+  const chatFollowUpIdleRef = useRef(false);
+  const followUpIdleClockRef = useRef<FollowUpIdleClock>({ seq: 0, wasIdle: false, targetKey: null, answeredKey: null });
+  const followUpIdleConsumedRef = useRef(0);
+  const followUpIdleDeliveredTurnRef = useRef<string | null>(null);
+  const chatFollowUpQueueRef = useRef(false);
+  const chatActivityRef = useRef<string | null>(null);
+  const chatPromptRef = useRef<ReferencePrompt | null>(null);
+  const chatPageRef = useRef<ReferenceHistoryPage | null>(null);
+  const sendChatMessageRef = useRef<
+    ((text: string, heldId?: string, followUp?: { id: string; requestId: string }) => Promise<boolean>) | null
+  >(null);
   // Older pages, kept apart from the newest page so the newest-page poll never overwrites them.
   const [chatOlderMessages, setChatOlderMessages] = useState<MobileChatMessageProps[]>([]);
   const [chatOlderLoading, setChatOlderLoading] = useState(false);
@@ -1472,11 +1734,25 @@ export const RemoteHostConnection: React.FC<{
   // started under another generation joins nothing on screen and is dropped when it lands.
   const chatOlderGenerationRef = useRef(0);
   const [chatPrompt, setChatPrompt] = useState<ReferencePrompt | null>(null);
+  // False until this pane's prompt read settles. A null card before that is not an observation.
+  const [chatPromptKnown, setChatPromptKnown] = useState(false);
   const chatPromptIdRef = useRef<string | null>(null);
   const chatPromptRevisionRef = useRef<string | null>(null);
   const chatPromptGenerationRef = useRef(0);
   /** Set by the prompt lane: a pushed `agentPromptChanged` frame for a session re-reads its card. */
   const chatPromptPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
+  /** A matching `referenceHistoryChanged` frame for the visible pane. */
+  const chatHistoryPushRef = useRef<((raw: unknown) => void) | null>(null);
+  /** A reconnected events socket forces one history read. The first open does not. */
+  const chatHistoryReconnectRef = useRef<(() => void) | null>(null);
+  const historySyncRef = useRef<ReferenceHistorySync | null>(null);
+  const chatDeltaCapableRef = useRef(false);
+  const payloadFlightRef = useRef<string | null>(null);
+  const [loadingPayloadRef, setLoadingPayloadRef] = useState<string | null>(null);
+  /** The phone Inbox's handlers for the same push, and for a reconnected events socket. */
+  const inboxPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
+  const inboxRefreshRef = useRef<(() => void) | null>(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
   const [chatScreenRevision, setChatScreenRevision] = useState<string | null>(null);
   const [chatTypedAnswer, setChatTypedAnswer] = useState<ReferencePromptAnswer | null>(null);
@@ -1486,6 +1762,13 @@ export const RemoteHostConnection: React.FC<{
   const [chatGatewayAnswer, setChatGatewayAnswer] = useState<{ scope: string; identity: ChatGatewayIdentity } | null>(null);
   /** The provider session id the host published for THIS pane; null means unknown, never guessed. */
   const [chatProviderSession, setChatProviderSession] = useState<string | null>(null);
+  /** The host's session rows, used only for continuation identity. Empty until that read lands. */
+  const [chatSessionRows, setChatSessionRows] = useState<readonly unknown[]>([]);
+  const [chatControlNotice, setChatControlNotice] = useState<ComposerControlNotice | null>(null);
+  const [continuationBusy, setContinuationBusy] = useState(false);
+  const controlFlightRef = useRef<string | null>(null);
+  const controlUnknownRef = useRef(new Set<string>());
+  const continuationFlightRef = useRef(false);
   /** Bumped when a history read is refused TARGET_EXPIRED, so the pane's session rows are re-read. */
   const [chatSessionRowsTick, setChatSessionRowsTick] = useState(0);
   const [chatComposerNotice, setChatComposerNotice] = useState<string | null>(null);
@@ -2249,8 +2532,18 @@ export const RemoteHostConnection: React.FC<{
     const refreshVersion = workspaceRefreshVersionRef.current;
     const next = await loadWorkspace();
     if (!next || workspaceRefreshVersionRef.current !== refreshVersion) return null;
-    setModel(next);
-    return next;
+    // A session the phone opened on its own (from the Inbox) stays on screen while it is listed:
+    // a desktop refresh updates the mirror around it, never takes it back.
+    const local = localSessionRef.current;
+    const localTab = local && next.context.workspaceId === local.workspaceId
+      ? next.context.terminalTabs?.find((tab) => tab.id === local.tabId && tab.sessionId === local.terminal.sessionId)
+      : undefined;
+    if (local && !localTab) localSessionRef.current = null;
+    const shown = localTab && local
+      ? { ...next, context: { ...next.context, activeTabId: local.tabId, activeTerminal: local.terminal } }
+      : next;
+    setModel(shown);
+    return shown;
   }, [loadWorkspace]);
 
   /* An inventory boundary can arrive in bursts (a busy watched tree republishes several
@@ -2426,6 +2719,7 @@ export const RemoteHostConnection: React.FC<{
     let attempt = 0;
     let disposed = false;
     let connecting = false;
+    let eventsOpened = false;
     const abort = new AbortController();
     const onMessage = (raw: any) => {
       const text = typeof raw === "string"
@@ -2437,6 +2731,14 @@ export const RemoteHostConnection: React.FC<{
       const promptChange = parseAgentPromptChange(text);
       if (promptChange) {
         chatPromptPushRef.current?.(promptChange);
+        inboxPushRef.current?.(promptChange);
+        if (activeTunnelConnection) supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
+        else supervisorBus.emit(DIRECT_SIDEBAR_MACHINE, text);
+        return;
+      }
+
+      if (text.includes('"referenceHistoryChanged"')) {
+        chatHistoryPushRef.current?.(text);
         if (activeTunnelConnection) supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
         else supervisorBus.emit(DIRECT_SIDEBAR_MACHINE, text);
         return;
@@ -2534,6 +2836,10 @@ export const RemoteHostConnection: React.FC<{
         attempt = 0;
         setEventsDownSince(null);
         workspaceRefreshVersionRef.current += 1;
+        // Pushes missed while the socket was down: every Inbox row reads its card again.
+        inboxRefreshRef.current?.();
+        if (eventsOpened) chatHistoryReconnectRef.current?.();
+        eventsOpened = true;
         const pendingSelection = pendingSelectionRef.current;
         if (pendingSelection) void confirmSelection(pendingSelection);
         else void refreshWorkspace();
@@ -2614,6 +2920,7 @@ export const RemoteHostConnection: React.FC<{
     // A user selection naming a session (or an explicit tab) is an independent choice:
     // the read-only desktop-context sync must never replace it afterwards.
     independentSessionRef.current = Boolean(requestedOption.sessionId || requestedOption.tabId);
+    localSessionRef.current = null;
     if (!token || pendingSelectionRef.current) return false;
     // A picker can reuse an option object; each attempt needs its own identity.
     const option = { ...requestedOption };
@@ -3244,7 +3551,7 @@ export const RemoteHostConnection: React.FC<{
   /* The worktree drawer, host drawer and Account sheet own their entries through useOverlayHistory;
      counting them here too would push twice and pop twice on a button close. */
   const overlayOpen = !desktopSidebar
-    && (switcherOpen || menuOpen || phoneAlertsOpen);
+    && (switcherOpen || menuOpen || phoneAlertsOpen || inboxOpen);
   const overlayEntryRef = useRef(false);
   useEffect(() => {
     if (!overlayOpen) {
@@ -3265,6 +3572,7 @@ export const RemoteHostConnection: React.FC<{
       setSwitcherOpen(false);
       setMenuOpen(false);
       setPhoneAlertsOpen(false);
+      setInboxOpen(false);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -3272,6 +3580,7 @@ export const RemoteHostConnection: React.FC<{
   /** The worktree a phone tap is opening while its tunnel is acquired; shown at once on the Session screen. */
   const [phoneOpening, setPhoneOpening] = useState<string | null>(null);
   const openPhoneSessionRef = useRef<(option: AccountWorktreeOption) => void>(() => {});
+  const [unopenableRowIds, setUnopenableRowIds] = useState<ReadonlySet<string>>(() => new Set());
   const openPanelSessionRef = useRef<(sessionRef: string) => void>(() => {});
   const phoneSessionLost = phoneHome && phoneNav.screen.kind === "session" && !token && !initialAccountTarget && phoneOpening === null;
   useEffect(() => {
@@ -3397,7 +3706,23 @@ export const RemoteHostConnection: React.FC<{
   );
   // The pane's own liveness signal, as the workspace mirror publishes it. Nothing here invents
   // a turn: a running pane simply offers Stop instead of Send.
+  // The desktop omits activityState once a turn is seen and not working. A published pane with
+  // no working mark is that idle observation; a missing pane, or a prompt not yet read, is not.
+  // waiting (daemon blocked) and any other explicit mark are not idle.
   const chatIsRunning = chatActivity === "working" || chatPrompt !== null;
+  const chatObservedIdle = referenceChatObservedIdle({
+    tabPresent: activeObservedTab != null,
+    activity: chatActivity,
+    promptPresent: chatPrompt !== null,
+    promptKnown: chatPromptKnown,
+  });
+  const chatFollowUpQueue = chatPage?.composer?.followUp.queue === true;
+  chatFollowUpIdleRef.current = chatObservedIdle;
+  chatFollowUpQueueRef.current = chatFollowUpQueue;
+  chatActivityRef.current = chatActivity;
+  chatPromptRef.current = chatPrompt;
+  chatPageRef.current = chatPage;
+  chatDeltaCapableRef.current = chatGateway?.capabilities.includes(REFERENCE_HISTORY_DELTA_V1) === true;
 
   const chatReferenceTarget = useMemo<ReferenceTargetRef | null>(() => {
     // The owner is the authority the gateway PUBLISHED, on the same instance lifetime as the
@@ -3422,6 +3747,106 @@ export const RemoteHostConnection: React.FC<{
     };
   }, [chatDaemonEpoch, chatGateway, chatProviderSession, effectiveSessionId]);
   const chatTargetKey = chatReferenceTarget === null ? null : referenceTargetKey(chatReferenceTarget);
+  const historyAnswerKey = followUpHistoryAnswerKey(chatPage?.turns);
+  const freshHistoryAnswerKey =
+    historyAnswerKey !== null && historyAnswerKey !== followUpIdleDeliveredTurnRef.current
+      ? historyAnswerKey
+      : null;
+  followUpIdleClockRef.current = advanceFollowUpIdleClock(
+    followUpIdleClockRef.current,
+    chatObservedIdle,
+    chatTargetKey,
+    freshHistoryAnswerKey,
+  );
+  const followUpIdleSeq = followUpIdleClockRef.current.seq;
+
+  /* The phone's Inbox reads and answers each waiting session's card through the same prompt
+     routes, bound to that session's own target. Nothing here selects a pane on the desktop. */
+  const inboxTargetFor = useCallback(
+    (sessionId: string): ReferenceTargetRef | null => {
+      const ownerId = chatGateway?.referenceOwnerId ?? null;
+      const epoch =
+        chatGateway?.daemonEpoch ?? sessionEpochs[sessionId] ?? sessionEpochsRef.current.get(sessionId) ?? null;
+      if (!ownerId || !epoch) return null;
+      return {
+        target: {
+          hostId: chatGateway?.referenceHostId ?? REFERENCE_CHAT_DEFAULT_HOST_ID,
+          ownerId,
+          epoch,
+          backendSessionId: sessionId,
+        },
+      };
+    },
+    [chatGateway, sessionEpochs],
+  );
+  const inboxTransport = useMemo<RemoteInboxTransport>(
+    () => ({
+      read: async (sessionId, registryId) => {
+        const target = inboxTargetFor(sessionId);
+        if (!target || !token) return null;
+        const path = `${referenceChatRoute(sessionId, "prompt")}?${referenceChatReadQuery(target, registryId)}`;
+        const response = await remoteFetch(transportBaseUrl, path, { headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok) throw new ReferencePromptRefused(await readChatErrorCode(response), "prompt read failed");
+        const body: unknown = await response.json();
+        const prompt = parseChatPrompt(body);
+        return { prompt, screenRevision: prompt === null ? null : parseChatScreenRevision(body) };
+      },
+      answer: async (sessionId, registryId, payload) => {
+        const target = inboxTargetFor(sessionId);
+        if (!target || !token) return { ok: false, code: "UNAUTHORIZED", message: CHAT_NO_SESSION_WARNING };
+        const outcome = await postChatMutation(transportBaseUrl, sessionId, token, "answer", {
+          requestId: newChatRequestId(),
+          target: target.target,
+          registryId,
+          params: payload,
+        });
+        return outcome.ok ? { ok: true } : { ok: false, code: outcome.code, message: outcome.message };
+      },
+    }),
+    [inboxTargetFor, token, transportBaseUrl],
+  );
+  /* One Inbox for the whole host: every waiting or finished session of every worktree, project
+     and (account mode) machine, not only the desktop's active selection. The phone home and the
+     session sheet both render these rows. */
+  const accountInboxRows: InboxRow[] = isAccountMode
+    ? buildInboxRows({
+        options: accountDiscovery.accountOptions,
+        inventories: accountDiscovery.sessionInventories,
+        lanes: phoneSupervisor.lanes,
+      })
+    : [];
+  const inboxEntries = remoteInboxEntries({
+    model: effectiveModel,
+    machineId: activeMachineId,
+    accountRows: accountInboxRows,
+  });
+  const remoteInbox = useRemoteInbox({ entries: inboxEntries, transport: inboxTransport });
+  inboxPushRef.current = remoteInbox.push;
+  /* Opening an Inbox row moves only this phone's own view to that session, the way the read-only
+     desktop follow applies a session: no /workspace/select, so the desktop's focus never moves.
+     The pick counts as the user's own, so the desktop follow does not take it back. */
+  const showSessionLocally = useCallback((tab: RemoteTerminalTabInfo) => {
+    const sessionId = tab.sessionId;
+    const workspaceId = modelRef.current.context.workspaceId;
+    if (!sessionId || !workspaceId) return;
+    independentSessionRef.current = true;
+    const active: RemoteTerminalItem = {
+      sessionId,
+      running: true,
+      title: tab.label,
+      workspaceId,
+      worktreeLabel: tab.worktreeLabel ?? modelRef.current.context.worktreeLabel ?? null,
+      ...(tab.daemonEpoch !== null && tab.daemonEpoch !== undefined ? { daemonEpoch: tab.daemonEpoch } : {}),
+    };
+    localSessionRef.current = { workspaceId, tabId: tab.id, terminal: active };
+    const apply = (prev: RemoteWorkspaceModel): RemoteWorkspaceModel =>
+      prev.context.workspaceId !== workspaceId
+        ? prev
+        : { ...prev, context: { ...prev.context, activeTabId: tab.id, activeTerminal: active } };
+    modelRef.current = apply(modelRef.current);
+    setModel(apply);
+  }, []);
+  inboxRefreshRef.current = remoteInbox.refreshAll;
 
   // Read through refs so a poll closure never runs against a pane it was not started for.
   const chatTargetRef = useRef<ReferenceTargetRef | null>(null);
@@ -3622,6 +4047,9 @@ export const RemoteHostConnection: React.FC<{
   // ambiguous, and both stay unknown rather than being guessed.
   useEffect(() => {
     setChatProviderSession(null);
+    setChatSessionRows([]);
+    setChatControlNotice(null);
+    setContinuationBusy(false);
   }, [activeTunnelConnection, effectiveSessionId, token, transportBaseUrl]);
   // A refresh tick re-reads the same pane's rows without first forgetting its provider session, so
   // a rotated session (e.g. after /new) replaces the old one in place.
@@ -3647,6 +4075,7 @@ export const RemoteHostConnection: React.FC<{
           );
         }
         setChatProviderSession(chatProviderSessionId(rows, effectiveSessionId));
+        setChatSessionRows(rows);
       })
       .catch(() => {
         /* the terminal path resolves the epoch for itself; this lane simply stays idle */
@@ -3711,6 +4140,7 @@ export const RemoteHostConnection: React.FC<{
     chatOlderGenerationRef.current += 1;
     chatPromptGenerationRef.current += 1;
     setChatPrompt(null);
+    setChatPromptKnown(false);
     chatPromptIdRef.current = null;
     chatPromptRevisionRef.current = null;
     setChatScreenRevision(null);
@@ -3724,6 +4154,9 @@ export const RemoteHostConnection: React.FC<{
   const resetChatLane = useCallback(() => {
     chatLaneAbortRef.current.abort();
     chatLaneAbortRef.current = new AbortController();
+    payloadFlightRef.current = null;
+    setLoadingPayloadRef(null);
+    bindReferencePayloadRoute(null);
     const previous = chatLaneTargetRef.current;
     if (previous !== null) {
       const released = chatStagedFilesRef.current.filter(
@@ -3775,6 +4208,10 @@ export const RemoteHostConnection: React.FC<{
     referenceQueues.refresh(chatReferenceTarget);
     setChatDraftText(referenceDrafts.read(chatReferenceTarget).text);
     setChatHeld([...referenceQueues.read(chatReferenceTarget)]);
+    referenceFollowUps.refresh(chatReferenceTarget);
+    const droppedFollowUps = referenceFollowUps.dropStale(chatReferenceTarget);
+    setChatQueued([...referenceFollowUps.read(chatReferenceTarget)]);
+    if (droppedFollowUps.length > 0) setChatComposerNotice(FOLLOW_UP_DROPPED_NOTICE);
     // Files the owning host still holds staged for this pane - an upload whose response was lost
     // to an abort, or a reload - come back into the lane, so they can be seen and released
     // instead of holding the per-turn slots until the host's TTL.
@@ -3837,30 +4274,61 @@ export const RemoteHostConnection: React.FC<{
       return;
     }
     const registryId = chatAgentType;
+    const sync = historySyncRef.current ??= createReferenceHistorySync();
+    sync.setDeltaEnabled(chatDeltaCapableRef.current);
+    sync.bind(target);
     let cancelled = false;
-    let fetching = false;
+    let pendingFollowUp: HistoryReadTicket | null = null;
+    let activeTicket: HistoryReadTicket | null = null;
     const controller = new AbortController();
 
-    const readNewest = async () => {
-      if (cancelled || fetching) return;
-      if (typeof document !== "undefined" && document.hidden) return;
-      fetching = true;
+    const readNewest = async (reason: HistoryReadReason, preset?: HistoryReadTicket): Promise<void> => {
+      if (cancelled) return;
+      if (!preset && reason === "poll" && typeof document !== "undefined" && document.hidden) return;
+      sync.setDeltaEnabled(chatDeltaCapableRef.current);
+      const ticket = preset ?? sync.begin(reason);
+      if (!ticket) return;
+      activeTicket = ticket;
       try {
-        const read = await readChatHistory({
+        const body = await readChatHistory({
           baseUrl: transportBaseUrl,
           sessionId,
           token,
           target,
           registryId,
           limit: CHAT_HISTORY_PAGE_LIMIT,
+          after: ticket.after,
           signal: controller.signal,
           transport: activeTunnelConnection?.transport,
         });
-        if (cancelled) return;
-        // The pane is the fence: an answer for a target that is no longer current is dropped,
-        // and the generation it came from is recorded with it for the cursor check below.
+        if (cancelled) {
+          sync.settle(ticket, { kind: "dropped" });
+          return;
+        }
         const liveTarget = chatTargetRef.current;
-        if (liveTarget === null || !sameReferenceTarget(liveTarget, read.fence.target)) return;
+        if (liveTarget === null || referenceTargetKey(liveTarget) !== ticket.targetKey) {
+          sync.settle(ticket, { kind: "dropped" });
+          return;
+        }
+        const settled = sync.settle(ticket, body.kind === "page"
+          ? { kind: "page", page: body.page, fingerprints: body.fingerprints }
+          : body.kind === "delta"
+            ? { kind: "delta", delta: body.delta }
+            : { kind: "reset" });
+        if (cancelled || settled.kind === "stale") return;
+        if (settled.kind === "full") {
+          await readNewest("full", settled.ticket);
+          return;
+        }
+        if (settled.kind !== "page") {
+          if (settled.followUp && !cancelled) await readNewest("frame", settled.followUp);
+          return;
+        }
+        const read = {
+          page: settled.page,
+          fence: referenceHistoryFence(sessionId, target, settled.page.generation),
+        };
+        pendingFollowUp = settled.followUp;
         chatFenceRef.current = read.fence;
         // An unchanged page keeps its object, so the disclosure derived from it is not recomputed.
         setChatPage((prev) =>
@@ -3872,7 +4340,8 @@ export const RemoteHostConnection: React.FC<{
           (prev.unavailableReason ?? null) === (read.page.unavailableReason ?? null) &&
           prev.turns.length === read.page.turns.length &&
           (prev.cursor?.streamId ?? null) === (read.page.cursor?.streamId ?? null) &&
-          (prev.cursor?.offset ?? null) === (read.page.cursor?.offset ?? null)
+          (prev.cursor?.offset ?? null) === (read.page.cursor?.offset ?? null) &&
+          chatNewestTurnsStamp(prev) === chatNewestTurnsStamp(read.page)
             ? prev
             : read.page,
         );
@@ -3973,9 +4442,32 @@ export const RemoteHostConnection: React.FC<{
             : cleared;
           return next.length === prev.length && next.every((warning, index) => warning === prev[index]) ? prev : next;
         });
+        if (pendingFollowUp && !cancelled) {
+          const next = pendingFollowUp;
+          pendingFollowUp = null;
+          await readNewest("frame", next);
+        }
       } catch (error) {
         if (cancelled) return;
+        const ticket = activeTicket;
+        if (ticket?.after && error instanceof ReferenceHistoryFetchError && error.code === "MALFORMED_RESPONSE") {
+          const settled = sync.settle(ticket, { kind: "malformed" });
+          if (settled.kind === "full" && !cancelled) {
+            await readNewest("full", settled.ticket);
+            return;
+          }
+        } else if (ticket) {
+          const failed = sync.settle(ticket, { kind: "failed" });
+          if (
+            failed.kind === "idle" &&
+            failed.followUp &&
+            !(error instanceof ReferenceHistoryFetchError && referenceHistoryErrorIsIdentity(error.code))
+          ) {
+            await readNewest("frame", failed.followUp);
+          }
+        }
         if (error instanceof ReferenceHistoryFetchError && referenceHistoryErrorIsIdentity(error.code)) {
+          sync.noteCleared();
           // A refusal is an answer, not permission to look somewhere else. A stale incarnation or
           // a superseded owner authority is the one refusal that can be repaired: re-read the
           // host's identity and let the next poll speak to the incarnation that is live now.
@@ -3995,21 +4487,35 @@ export const RemoteHostConnection: React.FC<{
           return;
         }
         setChatWarnings((prev) => withChatWarning(prev, CHAT_REFRESH_WARNING));
-      } finally {
-        fetching = false;
       }
     };
 
-    void readNewest();
+    void readNewest("poll");
     const timer = setInterval(() => {
-      void readNewest();
+      void readNewest("poll");
     }, 3000);
     const onVisible = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "visible") void readNewest();
+      if (typeof document !== "undefined" && document.visibilityState === "visible") void readNewest("visibility");
+    };
+    chatHistoryPushRef.current = (raw: unknown) => {
+      if (cancelled) return;
+      sync.setDeltaEnabled(chatDeltaCapableRef.current);
+      if (typeof document !== "undefined" && document.hidden) {
+        if (sync.acceptsFrame(raw)) sync.noteDeferred();
+        return;
+      }
+      const ticket = sync.onFrame(raw);
+      if (ticket) void readNewest("frame", ticket);
+    };
+    chatHistoryReconnectRef.current = () => {
+      if (!cancelled) void readNewest("reconnect");
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
+      sync.invalidateFlight();
+      chatHistoryPushRef.current = null;
+      chatHistoryReconnectRef.current = null;
       controller.abort();
       clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
@@ -4029,6 +4535,7 @@ export const RemoteHostConnection: React.FC<{
       chatPromptRevisionRef.current = null;
       setChatPrompt(null);
       setChatScreenRevision(null);
+      setChatPromptKnown(true);
       return;
     }
     let cancelled = false;
@@ -4078,6 +4585,7 @@ export const RemoteHostConnection: React.FC<{
         chatPromptRevisionRef.current = revision;
         if (!promptUnchanged) setChatPrompt(prompt);
         setChatScreenRevision(revision);
+        setChatPromptKnown(true);
         setChatWarnings((prev) => {
           const next = prev.filter((warning) => warning !== CHAT_HELD_WARNING);
           return next.length === prev.length ? prev : next;
@@ -4146,6 +4654,11 @@ export const RemoteHostConnection: React.FC<{
       });
       // A page for a pane that is no longer current belongs to nobody on screen.
       if (signal.aborted || !chatTargetIsCurrent(target)) return;
+      if (read.kind !== "page") {
+        setChatOlderFailed(true);
+        setChatWarnings((prev) => withChatWarning(prev, CHAT_OLDER_FAILED_WARNING));
+        return;
+      }
       // The newest page re-anchored while this read was out: its turns end before the old anchor
       // and would join the new page with a silent gap, so the chain restarts from the new anchor.
       if (superseded()) return;
@@ -4201,22 +4714,31 @@ export const RemoteHostConnection: React.FC<{
    * assistant turn — and a send that was not accepted puts the text back in the box.
    */
   const sendChatMessage = useCallback(
-    async (rawText: string, heldId?: string): Promise<boolean> => {
+    async (rawText: string, heldId?: string, followUp?: { id: string; requestId: string }): Promise<boolean> => {
       const target = chatTargetRef.current;
       const sessionId = chatSessionIdRef.current;
       const bearer = chatTokenRef.current;
       const text = rawText.trim();
-      if (!text) return false;
+      const releaseFollowUpLock = (): void => {
+        if (followUp === undefined || !target) return;
+        if (referenceDrafts.read(target).sending) referenceDrafts.end(target);
+      };
+      if (!text) {
+        releaseFollowUpLock();
+        return false;
+      }
       if (!target || !sessionId || !bearer) {
+        releaseFollowUpLock();
         setChatWarnings((prev) => withChatWarning(prev, CHAT_NO_SESSION_WARNING));
         return false;
       }
       if (text.length > REFERENCE_SUBMIT_MAX_CHARS) {
+        releaseFollowUpLock();
         setChatWarnings((prev) => withChatWarning(prev, CHAT_SUBMIT_TOO_LONG_WARNING));
         return false;
       }
-      if (heldId === undefined) referenceDrafts.begin(target, text);
-      else {
+      if (heldId !== undefined) {
+        if (chatHeldSendingRef.current.has(heldId)) return false;
         chatHeldSendingRef.current.add(heldId);
         setChatHeldSendingIds([...chatHeldSendingRef.current]);
       }
@@ -4224,8 +4746,10 @@ export const RemoteHostConnection: React.FC<{
         if (heldId === undefined || !chatHeldSendingRef.current.delete(heldId)) return;
         setChatHeldSendingIds([...chatHeldSendingRef.current]);
       };
+      // One id for the echo and the POST. A queued follow-up reuses the id its begin allocated.
+      const requestId = followUp?.requestId ?? newChatRequestId();
       const pending: MobileChatMessageProps = {
-        id: `pending-${newChatRequestId()}`,
+        id: `pending-${requestId}`,
         role: "user",
         content: text,
         timestamp: Date.now(),
@@ -4260,13 +4784,12 @@ export const RemoteHostConnection: React.FC<{
         entry.pending += 1;
         chatSubmittedFilesRef.current.set(key, entry);
       }
-      const outcome = await postChatMutation(
-        route.baseUrl,
-        sessionId,
-        bearer,
-        "submit",
-        chatMutationBody(target, payload),
-      );
+      const outcome = await postChatMutation(route.baseUrl, sessionId, bearer, "submit", {
+        requestId,
+        target: target.target,
+        ...(chatAgentTypeRef.current ? { registryId: chatAgentTypeRef.current } : {}),
+        params: payload,
+      });
       const stillCurrent = chatTargetIsCurrent(target);
       const unsent: ReferenceFileReceipt[] = [];
       for (const [key] of submitted) {
@@ -4312,11 +4835,17 @@ export const RemoteHostConnection: React.FC<{
           );
         }
         if (heldId === undefined) {
+          if (followUp !== undefined) {
+            referenceFollowUps.complete(target, followUp.id);
+            referenceDrafts.end(target);
+            if (stillCurrent) setChatQueued([...referenceFollowUps.read(target)]);
+          } else {
           // the acknowledgement settles the SENT PREFIX only: an edit made while it was in
           // flight survives, and so does everything typed after it
           const settled = referenceDrafts.settle(target, text);
           referenceDrafts.end(target, text);
           if (stillCurrent) setChatDraftText(settled.text);
+          }
         } else {
           referenceQueues.remove(target, heldId);
           endHeldSend();
@@ -4326,13 +4855,44 @@ export const RemoteHostConnection: React.FC<{
         if (stillCurrent) setChatComposerNotice(null);
         return true;
       }
+      const unknown = referenceIsOutcomeUnknown(outcome.code);
+      // Unknown stays held on the durable draft: do not end it, or a later begin would mint a
+      // new operation. A settled rejection ends so an explicit retry can. A queued follow-up
+      // holds its own row instead, so a later idle observation cannot post it again.
+      if (unknown && heldId === undefined && followUp === undefined) referenceDrafts.holdUnknown(target);
+      if (followUp !== undefined) {
+        if (unknown) referenceFollowUps.holdUnknown(target, followUp.id);
+        else referenceFollowUps.complete(target, followUp.id);
+        referenceDrafts.end(target);
+        if (stillCurrent) {
+          setChatQueued([...referenceFollowUps.read(target)]);
+          setChatMessages((prev) => prev.filter((message) => message.id !== pending.id));
+          if (!unknown) {
+            const current = referenceDrafts.read(target).text;
+            if (current.length === 0) referenceDrafts.set(target, text);
+            else if (!current.startsWith(text)) referenceDrafts.set(target, `${text}\n${current}`);
+            setChatDraftText(referenceDrafts.read(target).text);
+          }
+          const refusal = unknown
+            ? "A queued message may have reached the session, but your computer didn't confirm it. It will not be sent again on its own."
+            : outcome.code === "FORBIDDEN"
+              ? CHAT_VIEW_ONLY_WARNING
+              : CHAT_SEND_FAILED_WARNING;
+          setChatComposerNotice(refusal);
+          setChatWarnings((prev) => withChatWarning(prev, refusal));
+        }
+        return false;
+      }
+      const restoreUnsentDraft = (): void => {
+        const current = referenceDrafts.read(target).text;
+        if (current.length === 0) referenceDrafts.set(target, text);
+        else if (!current.startsWith(text)) referenceDrafts.set(target, `${text}\n${current}`);
+      };
       if (!stillCurrent) {
-        endHeldSend();
+        if (!unknown) endHeldSend();
         if (heldId === undefined) {
-          const current = referenceDrafts.read(target).text;
-          if (current.length === 0) referenceDrafts.set(target, text);
-          else if (!current.startsWith(text)) referenceDrafts.set(target, `${text}\n${current}`);
-          referenceDrafts.end(target, text);
+          restoreUnsentDraft();
+          if (!unknown) referenceDrafts.end(target, text);
         }
         return false;
       }
@@ -4341,25 +4901,22 @@ export const RemoteHostConnection: React.FC<{
       const refusal =
         outcome.code === "FORBIDDEN"
           ? CHAT_VIEW_ONLY_WARNING
-          : referenceIsOutcomeUnknown(outcome.code)
+          : unknown
             ? CHAT_OUTCOME_UNKNOWN_WARNING
             : CHAT_SEND_FAILED_WARNING;
       setChatComposerNotice(refusal);
       setChatMessages((prev) => prev.filter((message) => message.id !== pending.id));
       if (heldId === undefined) {
-        const current = referenceDrafts.read(target).text;
-        // the failed text comes back in front of whatever the user typed while it was in flight
-        if (current.length === 0) referenceDrafts.set(target, text);
-        else if (!current.startsWith(text)) referenceDrafts.set(target, `${text}\n${current}`);
-        referenceDrafts.end(target, text);
+        restoreUnsentDraft();
+        if (!unknown) referenceDrafts.end(target, text);
         setChatDraftText(referenceDrafts.read(target).text);
-      } else {
+      } else if (!unknown) {
         endHeldSend();
       }
       setChatWarnings((prev) => withChatWarning(prev, refusal));
       return false;
     },
-    [chatMutationBody, chatTargetIsCurrent, releaseStagedChatFiles],
+    [chatTargetIsCurrent, releaseStagedChatFiles],
   );
 
   /**
@@ -4732,14 +5289,134 @@ export const RemoteHostConnection: React.FC<{
         setChatWarnings((prev) => withChatWarning(prev, CHAT_SUBMIT_TOO_LONG_WARNING));
         return false;
       }
+      const target = chatTargetRef.current;
+      // Honor the atomic begin: a second click or Enter before this send settles gets false
+      // and must not allocate a request id or POST. An outcome-unknown hold refuses too.
+      if (!target || !referenceDrafts.begin(target, trimmed)) return false;
       void sendChatMessage(text);
       return true;
     },
     [answerChatPrompt, chatPrompt, chatScreenRevision, chatTargetIsCurrent, holdChatMessage, sendChatMessage],
   );
+  sendChatMessageRef.current = sendChatMessage;
+
+  const queueChatFollowUp = useCallback((text: string): boolean => {
+    const target = chatTargetRef.current;
+    const trimmed = text.trim();
+    if (!target || !trimmed) return false;
+    if (chatPageRef.current?.composer?.followUp.queue !== true) return false;
+    if (chatActivityRef.current !== "working" || chatPromptRef.current !== null) return false;
+    referenceFollowUps.admit(target, trimmed);
+    referenceDrafts.set(target, "");
+    setChatDraftText("");
+    setChatQueued([...referenceFollowUps.read(target)]);
+    return true;
+  }, []);
+
+  const steerChatMessage = useCallback((text: string): boolean => {
+    if (chatPageRef.current?.composer?.followUp.steer !== true) return false;
+    if (chatActivityRef.current !== "working" || chatPromptRef.current !== null) return false;
+    return handleChatComposerSend(text);
+  }, [handleChatComposerSend]);
+
+  const cancelChatFollowUp = useCallback((id: string) => {
+    const target = chatTargetRef.current;
+    if (!target) return;
+    if (!referenceFollowUps.cancel(target, id)) return;
+    setChatQueued([...referenceFollowUps.read(target)]);
+  }, []);
+
+  useEffect(() => referenceFollowUps.subscribe(() => {
+    const target = chatTargetRef.current;
+    if (!target) return;
+    setChatQueued([...referenceFollowUps.read(target)]);
+  }), []);
+
+  useEffect(() => {
+    const target = chatReferenceTarget;
+    if (!target || !chatObservedIdle || !chatFollowUpQueue) return;
+    const observation = followUpIdleSeq;
+    let stopped = false;
+    const drain = async () => {
+      if (followUpDrainRef.current) {
+        followUpDrainAgainRef.current = true;
+        return;
+      }
+      followUpDrainRef.current = true;
+      try {
+        while (!stopped && chatTargetIsCurrent(target) && chatFollowUpIdleRef.current && chatFollowUpQueueRef.current) {
+          const observedAt = followUpIdleClockRef.current.seq;
+          if (observedAt < observation) break;
+          if (!followUpIdleMayDeliver(observedAt, followUpIdleConsumedRef.current, chatFollowUpIdleRef.current)) break;
+          if (referenceFollowUps.heldUnknown(target) || referenceDrafts.isUnknownHeld(target)) break;
+          followUpMuteRef.current += 1;
+          const locked = referenceDrafts.begin(target);
+          followUpMuteRef.current -= 1;
+          if (!locked) break;
+          followUpMuteRef.current += 1;
+          const item = referenceFollowUps.beginDelivery(target, newChatRequestId);
+          followUpMuteRef.current -= 1;
+          if (!item?.requestId) {
+            followUpMuteRef.current += 1;
+            referenceDrafts.end(target);
+            followUpMuteRef.current -= 1;
+            break;
+          }
+          const send = sendChatMessageRef.current;
+          const turns = chatPageRef.current?.turns;
+          const deliveredTurnKey = followUpNewestTurnKey(turns?.[turns.length - 1] ?? null);
+          const ok = send === null
+            ? false
+            : await send(item.text, undefined, { id: item.id, requestId: item.requestId });
+          if (referenceDrafts.read(target).sending) referenceDrafts.end(target);
+          // Any attempted send consumes this observation. A settled rejection returns its row to
+          // the draft, and the next row must not overtake it on the same observation.
+          followUpIdleConsumedRef.current = Math.max(followUpIdleConsumedRef.current, observedAt);
+          if (ok) followUpIdleDeliveredTurnRef.current = deliveredTurnKey;
+          // One row per idle observation. A later row waits for a newer observation than this delivery.
+          break;
+        }
+      } finally {
+        followUpDrainRef.current = false;
+        if (followUpDrainAgainRef.current && !stopped) {
+          followUpDrainAgainRef.current = false;
+          void drain();
+        }
+      }
+    };
+    const kick = () => {
+      if (stopped || followUpMuteRef.current > 0) return;
+      void drain();
+    };
+    kick();
+    const stopDraft = referenceDrafts.subscribe(() => {
+      if (referenceDrafts.read(target).sending) return;
+      kick();
+    });
+    const stopQueue = referenceFollowUps.subscribe(kick);
+    return () => {
+      stopped = true;
+      stopDraft();
+      stopQueue();
+    };
+  }, [chatFollowUpQueue, chatObservedIdle, chatReferenceTarget, chatTargetIsCurrent, followUpIdleSeq]);
+
+  const payloadCapable = chatGateway?.capabilities.includes(REFERENCE_PAYLOAD_V1) === true;
+  useEffect(() => {
+    if (viewMode !== "chat" || !token || !chatAgentType || !payloadCapable) {
+      bindReferencePayloadRoute(null);
+      return;
+    }
+    bindReferencePayloadRoute({
+      baseUrl: transportBaseUrl,
+      token,
+      registryId: chatAgentType,
+    });
+    return () => bindReferencePayloadRoute(null);
+  }, [chatAgentType, chatTargetKey, payloadCapable, token, transportBaseUrl, viewMode]);
 
   const chatPartContext = useMemo<ReferencePartRenderContext>(
-    () => ({
+    () => payloadCapable ? ({
       resolveImageUrl: (_image: ReferenceImageRef) => {
         // An <img src> cannot carry the bearer header, and the server rejects URL-borne device
         // tokens (they leak through logs, history and Referer). The old bare relative path was
@@ -4747,8 +5424,24 @@ export const RemoteHostConnection: React.FC<{
         // fetched with the bearer header into blob URLs.
         return null;
       },
+      onLoadPayload: (payload: ReferencePayloadRef) => {
+        const live = chatTargetRef.current;
+        const sessionId = chatSessionIdRef.current;
+        const signal = chatLaneAbortRef.current.signal;
+        if (!live || !sessionId || signal.aborted) return;
+        if (payloadFlightRef.current === payload.ref) return;
+        payloadFlightRef.current = payload.ref;
+        setLoadingPayloadRef(payload.ref);
+        void loadReferencePayload(sessionId, live, payload, signal).finally(() => {
+          if (payloadFlightRef.current === payload.ref) payloadFlightRef.current = null;
+          setLoadingPayloadRef((current) => (current === payload.ref ? null : current));
+        });
+      },
+      loadingPayloadRef,
+    }) : ({
+      resolveImageUrl: (_image: ReferenceImageRef) => null,
     }),
-    [],
+    [loadingPayloadRef, payloadCapable],
   );
 
   /** The disclosure for this page's source; null when the page is a native transcript. */
@@ -4756,6 +5449,53 @@ export const RemoteHostConnection: React.FC<{
     () => (chatPage === null ? null : referenceHistoryNotice(chatPage)),
     [chatPage],
   );
+
+  const continuationAffordance = useMemo(() => {
+    if (!effectiveSessionId || !chatAgentType || !model.context.workspaceId) return null;
+    const tabs = effectiveModel.context.terminalTabs;
+    const publishedTab = tabs?.find((tab) => tab.sessionId === effectiveSessionId);
+    const fromRows = remoteContinuationSessions(chatSessionRows, tabs, model.context.workspaceId);
+    const rowSelected = fromRows.find((session) => session.id === effectiveSessionId);
+    const tabProvider = providerSessionFromPublishedTab(publishedTab, chatAgentType);
+    const selected = rowSelected
+      ? (rowSelected.providerSession
+        ? rowSelected
+        : { ...rowSelected, providerSession: tabProvider ?? publishedProviderSession(chatProviderSession, chatAgentType) })
+      : remoteContinuationSession({
+      sessionId: effectiveSessionId,
+      workspaceId: model.context.workspaceId,
+      agentType: chatAgentType,
+      running: typeof publishedTab?.running === "boolean"
+        ? publishedTab.running
+        : model.context.activeTerminal?.running !== false,
+      activity: activeObservedTab?.activityState ?? null,
+      providerSession: chatProviderSessionFromRows(chatSessionRows, effectiveSessionId, chatAgentType)
+        ?? tabProvider
+        ?? publishedProviderSession(chatProviderSession, chatAgentType),
+    });
+    const others = fromRows.some((session) => session.id === selected.id) ? fromRows : [...fromRows, selected];
+    return getContinuationAffordance(selected, {
+      sessions: others,
+      remoteOwner: true,
+      terminalContinueV1: chatGateway?.capabilities.includes(TERMINAL_CONTINUE_V1) === true,
+      ...(chatPage === null ? {} : { nativeHistory: chatPage.availability === "native" }),
+      ...(chatActivity === "working" || chatActivity === "waiting" || chatActivity === "done"
+        ? { activityState: chatActivity }
+        : {}),
+    });
+  }, [
+    activeObservedTab?.activityState,
+    chatActivity,
+    chatAgentType,
+    chatGateway?.capabilities,
+    chatPage,
+    chatProviderSession,
+    chatSessionRows,
+    effectiveModel.context.terminalTabs,
+    effectiveSessionId,
+    model.context.activeTerminal?.running,
+    model.context.workspaceId,
+  ]);
 
   const chatDraftUnsaved =
     chatReferenceTarget === null ? false : referenceDrafts.isUnsaved(chatReferenceTarget);
@@ -4768,6 +5508,171 @@ export const RemoteHostConnection: React.FC<{
     setChatDraftText(text);
     if (target !== null) referenceDrafts.set(target, text);
   }, []);
+
+  const applyChatControl = useCallback((change: ComposerControlChange) => {
+    const target = chatTargetRef.current;
+    const sessionId = chatSessionIdRef.current;
+    const bearer = chatTokenRef.current;
+    const registryId = chatAgentTypeRef.current;
+    if (!target || !sessionId || !bearer || !registryId) return;
+    const holdKey = `${referenceTargetKey(target)}\u0000${change.controlId}`;
+    if (change.apply === "command" && controlUnknownRef.current.has(holdKey)) {
+      setChatControlNotice({ status: "unknown", message: "Unverified. This control was not applied again." });
+      return;
+    }
+    if (change.apply === "command" && controlFlightRef.current !== null) return;
+    if (change.apply === "command") controlFlightRef.current = referenceTargetKey(target);
+    const requestId = newChatRequestId();
+    void applyReferenceControl({
+      sessionId,
+      apply: change.apply,
+      body: {
+        requestId,
+        target: target.target,
+        registryId,
+        controlId: change.controlId,
+        valueId: change.valueId,
+      },
+      post: (path, init) => remoteFetch(chatBaseUrlRef.current, path, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+        body: init.body,
+        signal: init.signal,
+      }),
+    }).then((result) => {
+      if (change.apply === "command" && controlFlightRef.current === referenceTargetKey(target)) {
+        controlFlightRef.current = null;
+      }
+      if (!chatTargetIsCurrent(target)) return;
+      if (result.status === "picker") {
+        const prompt = chatPrompt;
+        const revision = chatScreenRevision;
+        const index = prompt?.options.findIndex((option) => option.label === change.label || option.label === change.valueId) ?? -1;
+        if (prompt && revision && index >= 0) {
+          void answerChatPrompt({
+            promptId: prompt.id,
+            screenRevision: revision,
+            answer: { optionIndex: index },
+          }).catch(() => {
+            if (chatTargetIsCurrent(target)) {
+              setChatControlNotice({ status: "rejected", message: "The agent prompt did not take that choice." });
+            }
+          });
+          return;
+        }
+        setChatControlNotice({ status: "picker", message: "Answer the agent prompt to apply this." });
+        return;
+      }
+      if (result.status === "unknown") {
+        controlUnknownRef.current.add(holdKey);
+        setChatControlNotice({ status: "unknown", message: "Unverified. This control was not applied again." });
+        return;
+      }
+      if (result.status === "rejected") {
+        setChatControlNotice({ status: "rejected", message: result.message ?? "Rejected." });
+        return;
+      }
+      setChatControlNotice({ status: "applied", message: "Applied." });
+    });
+  }, [answerChatPrompt, chatPrompt, chatScreenRevision, chatTargetIsCurrent]);
+
+  const continueInNewPane = useCallback((mode: AgentContinueMode) => {
+    const affordance = continuationAffordance;
+    const startup = affordance?.startup(mode) ?? null;
+    const sourceSessionId = chatSessionIdRef.current;
+    const workspaceId = modelRef.current.context.workspaceId;
+    const bearer = chatTokenRef.current;
+    if (!startup || !sourceSessionId || !workspaceId || !bearer) return;
+    if (continuationUnknownHeld(startup) || continuationFlightRef.current) return;
+    if (chatGateway?.capabilities.includes(TERMINAL_CONTINUE_V1) !== true) return;
+    const requestId = newChatRequestId();
+    continuationFlightRef.current = true;
+    setContinuationBusy(true);
+    const worktreeSlug = modelRef.current.context.worktreeSlug;
+    const payload = {
+      requestId,
+      workspaceId,
+      worktree: worktreeSlug ? { wsId: workspaceId, slug: worktreeSlug } : null,
+      cols: 80,
+      rows: 24,
+      inheritFromSessionId: null,
+      cwdRelative: null,
+      startup,
+    };
+    const post = activeTunnelConnection
+      ? activeTunnelConnection.transport.fetchLike("/api/v1/sessions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).then((response) => ({
+          status: response.status,
+          body: JSON.parse(new TextDecoder().decode(response.body)) as unknown,
+        }))
+      : remoteFetch(chatBaseUrlRef.current, "/api/v1/sessions", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).then(async (response) => ({ status: response.status, body: await response.json() as unknown }));
+    void post.then(
+      (response) => {
+        const disposition = continuationCreateDisposition(response.status, response.body);
+        if (disposition === "unknown") {
+          holdContinuationUnknown(startup);
+          setChatControlNotice({ status: "unknown", message: "Continuation was not confirmed. It will not be started again." });
+          return;
+        }
+        if (disposition === "rejected") {
+          setChatControlNotice({ status: "rejected", message: "Continuation was rejected." });
+          return;
+        }
+        const created = createdSessionIdentity(response.body);
+        if (created === null) return;
+        if (created.daemonEpoch) {
+          sessionEpochsRef.current.set(created.sessionId, created.daemonEpoch);
+          setSessionEpochs((prev) => ({ ...prev, [created.sessionId]: created.daemonEpoch as string }));
+        }
+        const tabId = `continue-${created.sessionId}`;
+        const active: RemoteTerminalItem = {
+          sessionId: created.sessionId,
+          running: true,
+          title: "Continued",
+          workspaceId,
+          worktreeLabel: modelRef.current.context.worktreeLabel,
+          ...(created.daemonEpoch ? { daemonEpoch: created.daemonEpoch } : {}),
+        };
+        independentSessionRef.current = true;
+        localSessionRef.current = { workspaceId, tabId, terminal: active };
+        const apply = (prev: RemoteWorkspaceModel): RemoteWorkspaceModel => {
+          if (prev.context.workspaceId !== workspaceId) return prev;
+          const tabs = prev.context.terminalTabs ?? [];
+          const nextTab: RemoteTerminalTabInfo = {
+            id: tabId,
+            sessionId: created.sessionId,
+            label: "Continued",
+            ...(chatAgentTypeRef.current ? { agentType: chatAgentTypeRef.current } : {}),
+            ...(created.daemonEpoch ? { daemonEpoch: created.daemonEpoch } : {}),
+          };
+          const terminalTabs = tabs.some((tab) => tab.sessionId === created.sessionId)
+            ? tabs.map((tab) => tab.sessionId === created.sessionId ? { ...tab, ...nextTab } : tab)
+            : [...tabs, nextTab];
+          return {
+            ...prev,
+            context: { ...prev.context, activeTabId: tabId, activeTerminal: active, terminalTabs },
+          };
+        };
+        modelRef.current = apply(modelRef.current);
+        setModel(apply);
+      },
+      (error: unknown) => {
+        if (continuationOutcomeUnknown(error)) holdContinuationUnknown(startup);
+        else holdContinuationUnknown(startup);
+        setChatControlNotice({ status: "unknown", message: "Continuation was not confirmed. It will not be started again." });
+      },
+    ).finally(() => {
+      continuationFlightRef.current = false;
+      setContinuationBusy(false);
+    });
+  }, [activeTunnelConnection, chatGateway?.capabilities, continuationAffordance]);
 
   /** The card the original pane is waiting on. Its press and focus rules are the card's own. */
   const chatPromptCard = useMemo(() => {
@@ -5294,6 +6199,46 @@ export const RemoteHostConnection: React.FC<{
     else void selectAccountOption(option);
   };
   openPanelSessionRef.current = openPanelSession;
+  /* Opening an Inbox row never moves the desktop's focus: a pane already mirrored is shown on this
+     phone only, and any other account session opens through the read-only account selection. */
+  const openInboxRow = (row: AttentionRow): boolean => {
+    const entry = inboxEntries.find((candidate) => candidate.key === row.id);
+    if (!entry) return false;
+    const tab = entry.tabId ? terminalTabs.find((candidate) => candidate.id === entry.tabId) : undefined;
+    if (tab) {
+      showSessionLocally(tab);
+      if (phoneHome) phoneNav.openSession();
+      return true;
+    }
+    const option = entry.machineId
+      ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId)
+      : null;
+    if (!option) {
+      setUnopenableRowIds((previous) => new Set(previous).add(row.id));
+      toast.error("This session can't be opened from here right now", {
+        description: entry.machineId
+          ? "Its computer is offline or has not listed it yet."
+          : "Answer it here, or pick its worktree to open it.",
+      });
+      return false;
+    }
+    openPhoneSession(option);
+    return true;
+  };
+  /* Rows whose computer cannot open them here say so on the row before any tap; the model already
+     knows: no mirrored tab and no account option for that machine's session. */
+  const inboxRows = remoteInbox.rows.map((row) => {
+    const entry = inboxEntries.find((candidate) => candidate.key === row.id);
+    if (!entry) return row;
+    const openable = (entry.tabId && terminalTabs.some((candidate) => candidate.id === entry.tabId))
+      || (entry.machineId ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId) !== null : false);
+    if (openable && !unopenableRowIds.has(row.id)) return row;
+    if (!entry.machineId && !unopenableRowIds.has(row.id)) return row;
+    // The reason rides on `unavailable`, not on `text`: the Inbox re-reads a row's prompt when its
+    // text changes, so marking a row must not send a request.
+    const note = entry.machineId ? "Computer offline. Can't open it from here right now." : "Answer it here, or pick its worktree to open it.";
+    return { ...row, unavailable: note };
+  });
   const activeSupervisorSnapshot = phoneHome && activeMachineId
     ? phoneSupervisor.machines.find((machine) => machine.machineId === activeMachineId)?.snapshot ?? null
     : null;
@@ -5510,6 +6455,7 @@ export const RemoteHostConnection: React.FC<{
           viewMode={viewMode === "browser" ? "chat" : viewMode}
           onViewModeChange={setViewMode}
           sessionCount={terminalTabs.length >= 1 ? terminalTabs.length : undefined}
+          inbox={{ count: remoteInbox.needsYou, open: inboxOpen, onOpen: () => setInboxOpen(true) }}
           switcherOpen={switcherOpen}
           onOpenSwitcher={() => setSwitcherOpen(true)}
           menuOpen={menuOpen}
@@ -5713,6 +6659,14 @@ export const RemoteHostConnection: React.FC<{
                 onSendMessage={handleChatComposerSend}
                 onStopExecution={() => void stopChatExecution()}
                 onOpenTerminal={() => setViewMode("terminal")}
+                continuationOffers={continuationAffordance?.modes}
+                onContinueInNewPane={continuationAffordance ? continueInNewPane : undefined}
+                continuationHeld={
+                  continuationBusy || (continuationAffordance?.availableModes.some((mode) => {
+                    const startup = continuationAffordance.startup(mode);
+                    return startup !== null && continuationUnknownHeld(startup);
+                  }) ?? false)
+                }
                 pageDisclosure={chatPageDisclosure}
                 hasOlderPage={chatHasOlder}
                 loadedOlder={chatLoadedOlder}
@@ -5729,6 +6683,10 @@ export const RemoteHostConnection: React.FC<{
                 heldMessages={chatHeld}
                 heldSendingIds={chatHeldSendingIds}
                 heldUnsaved={chatHeldUnsaved}
+                queuedMessages={chatQueued}
+                onCancelQueued={cancelChatFollowUp}
+                onQueueMessage={queueChatFollowUp}
+                onSteerMessage={steerChatMessage}
                 onEditHeld={editChatHeld}
                 onSendHeld={(id) => {
                   // A row already on its way is not sent again.
@@ -5739,10 +6697,24 @@ export const RemoteHostConnection: React.FC<{
                 onRemoveHeld={removeChatHeld}
                 promptCard={chatPromptCard}
                 composerHandleRef={chatComposerRef}
-                composerWarning={chatComposerNotice}
+                composerWarning={
+                  chatReferenceTarget !== null && referenceDrafts.isUnknownHeld(chatReferenceTarget)
+                    ? CHAT_OUTCOME_UNKNOWN_WARNING
+                    : chatComposerNotice
+                }
                 composerWarningAction={chatComposerNotice === CHAT_HELD_REMOVED_NOTICE ? chatComposerNoticeAction : null}
                 composerPlaceholder={chatComposerPlaceholder}
+                composerCapabilities={chatPage?.composer ?? null}
+                onApplyControl={applyChatControl}
+                controlNotice={chatControlNotice}
+                dictationFence={chatTargetKey ?? ""}
+                dictationSuspended={viewMode !== "chat"}
                 referenceContext={chatPartContext}
+                disabled={
+                  chatReferenceTarget !== null &&
+                  chatPrompt === null &&
+                  referenceDrafts.isUnknownHeld(chatReferenceTarget)
+                }
               />
             </div>
           ) : viewMode === "browser" ? renderLazy(
@@ -5865,6 +6837,23 @@ export const RemoteHostConnection: React.FC<{
           );
         }}
       />
+
+      <MobileSheet
+        open={inboxOpen}
+        onOpenChange={setInboxOpen}
+        title="Inbox"
+        ariaLabel="Inbox"
+        testId="mobile-inbox-sheet"
+      >
+        <AttentionInbox
+          compact
+          rows={inboxRows}
+          prompts={remoteInbox.prompts}
+          onOpen={(row) => {
+            if (openInboxRow(row)) setInboxOpen(false);
+          }}
+        />
+      </MobileSheet>
 
       <MobileOverflowSheet
         open={menuOpen}

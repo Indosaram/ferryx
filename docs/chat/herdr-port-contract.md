@@ -14,7 +14,7 @@ re-shape a wire field without a new revision of this file.
 | TS DTO source | [`ui/src/remote/chat/referenceTypes.ts`](../../ui/src/remote/chat/referenceTypes.ts) |
 | Reused Ferryx contracts | `src-tauri/src/scoped_contracts.rs`, `ui/src/lib/scopedContracts.ts` |
 | Plan | `.omo/plans/herdr-reference-chat-parity.md` (task 1) |
-| Revision | **2** — task 27 restores the pinned standalone `skill` part (§4) and binds the two upstream parser files it reads (§7). Revision 1 is everything else. |
+| Revision | **3** — additive, negotiated. Revision 2 remains valid. A rev2 client keeps polling full pages; a rev2 host never receives delta, control, payload, or continuation requests from a rev3 client. Wire shapes are §10. What the current host fills, and what is still pending, is §11. |
 
 Everything in this file that is not a *port obligation* is a *port boundary*: a fact
 about the reference that later tasks must not silently exceed.
@@ -70,6 +70,11 @@ where the reference actually has them. This matrix is the normative coverage rec
 "none" is a **boundary**, not a permanent denial: `NativeHistoryKind::Unavailable` means
 *this agent has no native reader today*. A later task that verifies a real reader adds it
 here with evidence; it never guesses a transcript path from the agent's label.
+
+The table above is the original Herdr six. `ReferenceNativeHistoryKind` now also has
+native readers for copilot, antigravity, kimi, grok, cline, opencode, cursor, and crush.
+That inventory, and what those readers actually emit, is §11. This table is not the
+rev3 support matrix.
 
 ---
 
@@ -570,4 +575,366 @@ Remaining integration needs, each owned by the task that owns the file:
   prompts.
 * No user desktop manipulation, no production daemon restart, no unrecorded-process
   cleanup.
-* Voice/microphone stays user-deferred and visibly unavailable; no fake voice pass.
+* Dictation is a client probe of `SpeechRecognition` / `webkitSpeechRecognition`
+  (`ui/src/remote/chat/referenceDictation.ts`). The mic is hidden when the constructor
+  is missing or not constructible. It does not add a native audio permission, a native
+  speech engine, or a hosted transcription service, and it never auto-sends.
+
+---
+
+## 10. Revision 3 — additive wire contract
+
+Rev2 pages, routes, and clients stay valid. Rev3 fields are optional on the wire.
+When they are absent, a rev3 encoder omits them, so a rev2 page is byte-identical to
+the revision-2 document. A rev2 client does not send `after`, does not ask for a
+payload or continuation, and keeps the existing three-second poll plus reconnect read.
+A rev2 host does not advertise `referenceHistoryDeltaV1` or `terminalContinueV1` and
+does not emit `referenceHistoryChanged`, a delta, or a composer document. Correctness
+never depends on the advisory frame.
+
+The shapes below are the wire contract. §11 records which of them the current host
+fills. A rev2 read (no `after`) still returns a bare `ReferenceHistoryPage`, not a
+`{ mode }` envelope.
+
+### 10.1 Identity and metadata
+
+Optional on the wire. A rev3 native-aligned reader fills them only from provider
+records. Unaligned turns omit ids and must not be used as a delta anchor.
+
+```ts
+ReferenceTurn.id?: string
+ReferenceTurn.meta?: {
+  provider: ReferenceNativeHistoryKind
+  model?: string
+  usage?: {
+    inputTokens?: number
+    outputTokens?: number
+    cacheReadTokens?: number
+    cacheWriteTokens?: number
+  }
+}
+ReferencePart.id?: string
+ReferencePart.Tool.callId?: string
+ReferencePart.Tool.status?: "running" | "completed" | "failed" | "cancelled" | "unverifiable"
+```
+
+Ids are generation-scoped. A generation reset invalidates every prior id. Tool results
+fold into the part with the same native call id. Orphan results stay explicit. Turn
+ids are attached only when parsed turns align with source segments.
+
+A recorded native cancel, abort, or interrupt is `cancelled`. It is not `failed`.
+`unverifiable` remains unfinished work after restart or reopen, never a synonym for
+cancel. Page assembly keeps reader-provided turn `meta` and does not add `meta` to a
+turn the reader left without it, so those rev2 bytes stay unchanged.
+
+### 10.2 Advisory history-change frame
+
+```ts
+{
+  type: "referenceHistoryChanged"
+  target: ReferenceTargetRef   // flattened wire target
+  changeSeq: string
+}
+```
+
+The frame contains no path, stream content, model, or transcript payload. It means
+only that the owning host observed a possibly relevant storage-metadata change.
+
+### 10.3 Replacement delta
+
+Capability `referenceHistoryDeltaV1`. The existing history route accepts this query
+object as `after`. `cursor` together with `after` is `INVALID_REQUEST`
+(`REFERENCE_HISTORY_CURSOR_AND_AFTER`). A foreign stream or provider rotation remains
+`TARGET_EXPIRED`.
+
+```ts
+after: {
+  streamId: string
+  generation: string
+  anchorTurnId: string
+  previousTurnFingerprint: string | null
+}
+```
+
+```ts
+{ mode: "delta", source, generation, replaceFromTurnId, turns, nextAnchor, tailOpen }
+{ mode: "reset", reason, page }
+```
+
+`reason` is one of `generationChanged`, `anchorOutsideWindow`, `anchorNotTurnStart`,
+`anchorPrevMismatch`, `tooFarBehind`, `unalignedTurns`, `notNative`,
+`unsupportedProjection`. A reset carries a complete newest page. `nextAnchor` has the
+same shape as `after`.
+
+### 10.4 Composer capabilities
+
+Optional `composer` on the native history page. Absent hides every composer control.
+
+```ts
+ReferenceComposerCapabilities {
+  models: {
+    current: string | null
+    choices: { id: string, label: string, efforts: string[] }[]
+    apply: "command" | "agent-picker"
+  } | null
+  options: {
+    id: string
+    label: string
+    values: string[]
+    current: string | null
+    apply: "command" | "agent-picker" | "start-only"
+  }[]
+  slashCommands: { name: string, description: string | null }[]
+  followUp: { queue: boolean, steer: boolean }
+}
+```
+
+### 10.5 Work visualization
+
+`ReferenceTaskStatus` includes `running`, `cancelled`, and `unverifiable` on the wire.
+No current reader emits `running` or `unverifiable`. OmO and OMP map a recorded
+`cancelled` / `canceled` / `aborted` to `cancelled`, `completed` to `completed`, and
+any other task word to `failed`. That last mapping is not an unverifiable rule; see
+§11. `parentCallId` is set only when an OmO or OMP task record has a parent-call key.
+`id` remains the task id.
+
+```ts
+ReferencePayloadRef { ref: string, byteLength: number, digest: string, truncated: boolean }
+{ kind: "diff", id?: string, patch: ReferencePayloadRef }
+```
+
+`ref` is opaque. It is not a host path. Tool `outputRef` / `outputSize` stay the rev2
+fields. Rev3 may also set `outputPayload` to a `ReferencePayloadRef`. Readers that see
+a native patch body emit a `diff` part. They do not set `outputPayload`. The payload
+route is not registered (§11).
+
+### 10.6 Continuation startup
+
+Capability `terminalContinueV1`. The client never sends argv.
+
+```ts
+startup: {
+  kind: "agentContinue"
+  agentType: string          // registry agent id
+  providerSession: AgentProviderSession
+  mode: "fork" | "resume"
+}
+```
+
+`AgentProviderSession` is the existing daemon session object (`key`, `id`, optional
+`transcriptPath`, optional `launcher`). On the machine create boundary only `key` and
+`id` are accepted. The owning host builds argv and does not stop the source pane (§11).
+
+---
+
+## 11. Landed rev3 behavior
+
+Read against the worktree sources named below, not against the adoption plan. An item
+in §11.7 is a wire field, route, or behavior that is not implemented.
+
+### 11.1 Negotiation
+
+Rev2 remains valid. Omitting `after` returns the rev2 page object. Optional rev3 fields
+serialize only when set, so an unfilled turn keeps its rev2 bytes.
+
+A rev3 client may send `after` on the existing history route. The value is one JSON
+object in the `after` query string (`streamId`, `generation`, `anchorTurnId`,
+`previousTurnFingerprint`). It is not a set of repeated query keys. `cursor` together
+with `after` is `INVALID_REQUEST` before the read. A foreign `after.streamId` is
+`TARGET_EXPIRED`. Provider rotation on the pane is the route's existing
+`TARGET_EXPIRED`.
+
+The host re-reads the newest page of the same bounded window and runs
+`reference_history_negotiate`. It does not parse an unchecked tail. A delta replaces
+from the oldest open turn at or before the client's anchor, or from the anchor when
+none of those turns is open, and resends that turn whole plus every later turn.
+`tailOpen` is whether the newest turn is open. `nextAnchor` is the oldest open turn,
+or the newest turn when none is open.
+
+Reset check order, then `tooFarBehind` if the replacement exceeds 1000 turns or 4 MiB:
+
+| Reason | When |
+|---|---|
+| `notNative` | availability is not native |
+| `unsupportedProjection` | pi, cursor, opencode, crush, cline |
+| `unalignedTurns` | an otherwise alignable read has a turn with no id |
+| `generationChanged` | `after.generation` is not the page generation |
+| `anchorOutsideWindow` | anchor id is absent and the page has `hasMore`, an older cursor, or `unavailableReason` |
+| `anchorNotTurnStart` | anchor id is absent on a complete newest page |
+| `anchorPrevMismatch` | `previousTurnFingerprint` does not match the turn before the anchor (`null` only when the anchor is first) |
+| `tooFarBehind` | the replacement is over the turn or byte cap |
+
+A reset includes the complete newest page. No partial timeline is returned.
+
+Capability `referenceHistoryDeltaV1` is on the daemon capability list and on the
+machine gateway document when the terminal is ready. A Mirror Control device sees
+it too: that device can already read history, and the desktop pairing code the
+phone exchanges is Mirror. It does not see machine powers. A View device on either scope is told `referenceHistoryDeltaV1` and `referencePayloadV1` when the terminal is ready, and is not told composer control. The relay forwards history GETs.
+It does not rewrite frames. A missed frame changes nothing: the client still polls and
+re-reads.
+
+### 11.2 Identity, generation, open set
+
+Generation for a native window read is `{streamId}:inc-{n}`. `n` comes from a
+process-wide counter (`next_reference_history_incarnation`, starts at 1). A new
+tracker, a first observation, a provider-session change, a prefix rewrite, and a
+truncation each take the next value. Eviction of the least-recently observed stream
+(cap 1024) also takes a new value, so `inc-1` is not reused. An append, including
+growth of the newest open turn and a window whose head slid forward past the read cap,
+keeps the token. Ids are generation-scoped; a new incarnation invalidates them.
+
+`attach_reference_history_identity` attaches ids only when the user-turn count equals
+the number of turn-opening records. Otherwise it clears turn and part ids and delta is
+unavailable for that read. `callId` is left as the parser recorded it.
+
+| Provider | Turn id | Part id |
+|---|---|---|
+| claude | opening user record `uuid`, else `{generation}:{offset}:{local}` | native `callId` if stamped, else `{generation}:{offset}:{local}:{partIndex}` |
+| codex | opening user record `payload.turn_id`, else derived as above | same |
+| copilot, omo, omp, gjc | opening user record `id`, else derived | same |
+| antigravity, kimi, grok | derived only; no native opening id is read | same |
+| pi, cursor, opencode, crush, cline | omitted | omitted |
+| unavailable / scrollback | omitted | omitted |
+
+Assistant turns after the opening user record are derived even when the provider has a
+native opening id. The assembler does not overwrite a part id the parser already set,
+and it does not invent `meta`.
+
+A turn is open when it has an unanswered call (`running`, or a `callId` with empty
+output that is not an error and not `completed` / `failed` / `cancelled` /
+`unverifiable`), or commentary that never became a final answer, or — only if it is
+the newest turn — assistant text or thinking that may still grow. A submitted user turn is
+never open. The open set is every such turn, not only the tail.
+
+### 11.3 Advisory frame
+
+`referenceHistoryChanged` is `{ type, target, changeSeq }`. `changeSeq` is a decimal
+counter on that host's watch registry. The frame has no path, stream content, model,
+or transcript. The watch stats the resolved transcript, or a `.db` file plus its
+`-wal` sibling, for length, mtime, and inode. Content is not read. Stats go through
+the blocking boundary.
+
+| Bound | Value |
+|---|---|
+| registrations | 64; a new read evicts the soonest expiry |
+| TTL | 60s, refreshed by a history read on this host |
+| coalesce | 1s per target; a change inside the window stays pending |
+| poll | 1s |
+
+A paired owner emits its own frame. This gateway does not watch a foreign host or a
+paired session, and it drops a watch when the stream is scrollback or not started.
+Relay forwarding stays opaque.
+
+### 11.4 Composer
+
+`ReferenceHistoryPage.composer` is set only after a successful probe. A miss, timeout,
+oversize, parse failure, or custom launch omits the document. The history read still
+succeeds. Other providers are not probed.
+
+Probes are fixed argv on the owning host, 15s, stdout cap 256 KiB. The client does
+not supply a program or a template. A launch program is probed only when its basename
+is the provider CLI and that file can be stat'd. A wrapper, a relative custom command,
+or a CLI that cannot be resolved disables discovery. Nothing is guessed.
+
+| Provider | Probe | Apply |
+|---|---|---|
+| claude | `claude -p` stream-json `control_request` / `list_models` | command: host types `/model {valueId}` or `/effort {valueId}` |
+| codex | `codex` app-server `model/list` | `agent-picker`: host types `/model` and answers the native menu. Never `/model {valueId}`. |
+| grok | `grok models`; header `Available models:` is required | command, same `/model` and `/effort` lines |
+
+Effort choices are the discovered levels of the model the probe marked current. The
+published effort `current` is always null; the host does not read the pane's selected
+effort. Model `current` is only the probe's own marker. Cache key is owning host,
+provider, pane place, and the verified CLI path, mtime, and size. Place is the pane
+cwd, or the host home when cwd is unknown. TTL is 5 minutes. A different CLI file
+does not reuse the catalog.
+
+`POST /api/v1/reference-chat/{sessionId}/control` body is flat:
+`{ requestId, target, registryId, controlId, valueId }`, plus optional
+`providerSessionId`. Control ids are `model` and `effort`. The value must be one token
+in the cached document. Applies share the per-pane input queue.
+
+| Outcome | Wire | Retry |
+|---|---|---|
+| confirmed screen delta | `{ outcome: "applied" }` | no |
+| provider rejection text, unknown id, ledger full, or a picker row that is not offered | `{ outcome: "rejected", code, message }` | no; a new user action is a new request id |
+| write, screen, or an unobserved Codex picker | `{ outcome: "unknown", code: "OPERATION_OUTCOME_UNKNOWN" }` | no; the same request id replays and does not type again |
+| another apply in flight | `CONTROL_CONFLICT` | not ledgered |
+
+`followUp.queue` is true for Claude, Codex, and Grok, whose idle submit route already
+types into the pane. `followUp.steer` is false: that submit, posted while a turn is
+running, is not a documented mid-turn steer. `slashCommands` is filled only from a
+Claude stream-json init `slash_commands` record the probe saw. Codex and Grok stay
+empty. There is no hardcoded catalog.
+
+`referenceComposerControlV1` is on that document for a Machine Control device and
+for a Mirror Control device when the terminal is ready. A View device, Mirror or
+Machine, is told `referenceHistoryDeltaV1` and `referencePayloadV1` when the
+terminal is ready, and is not told composer control. `referenceComposerControlV1` is not on
+the daemon `GetCapabilities` list. The relay allowlist
+includes `POST .../control`.
+
+Dictation is client-only. Partial and final text insert at the caret. A target change,
+unmount, terminal mode, or `discard` drops a late result. OS keyboard dictation remains
+the baseline.
+
+### 11.5 Work visualization
+
+Tool `status` is set only from a recorded word: `running` (also `in_progress`,
+`pending`, `started`, `executing`), `completed`, `failed`, `cancelled` (also
+`canceled`, `aborted`, `interrupted`). An unknown word is omitted. A result settles an
+open call to `completed` or `failed` and does not overwrite `cancelled`.
+
+Turn `meta.model` and `meta.usage` are attached only from provider fields the reader
+found. Absent counts stay absent. Page assembly does not add `meta`.
+
+A native patch body becomes a `diff` part. The ref is `payload:diff:{sha256}` with
+`byteLength` and `truncated` (body longer than 8 KiB). The patch text is not inlined
+in the part. A tool name alone is not a diff. An oversized patch tool input is replaced
+with the fixed omission string, not a reconstructed git diff.
+
+`parentCallId` is read from OmO and OMP task records (`parent_call_id`,
+`parentCallId`, `parent_tool_use_id`, `parentToolUseId`, `parent_tool_call_id`,
+`parentToolCallId`). Other readers do not set it.
+
+### 11.6 Continuation
+
+Startup `kind: "agentContinue"` carries `agentType`, `providerSession`, and
+`mode: "fork" | "resume"`. Unknown keys, including any client `argv` or `args`, are
+`INVALID_REQUEST` on machine create. The host builds argv in
+`resolve_agent_continue_plan`. Extra keys on a local startup object are not copied
+into that argv.
+
+| Agent | Fork | Resume |
+|---|---|---|
+| claude | `claude --resume ID --fork-session` | `claude --resume ID` |
+| codex | `codex fork ID` | `codex resume ID` |
+| any other verified resume builder | not offered; `AGENT_CONTINUE_UNSUPPORTED` | that builder's existing argv (`grok --resume ID`, and the other resume plans in `shell.rs`) |
+
+Resume is refused while any pane owning that provider session is running. Fork is
+refused while a pane owning it is running and working. An exited source is admitted
+for both. Neither check stops or signals the source. The new session is a different
+pane. The source pane, its draft, and its held rows are not rebound.
+
+| Code | HTTP | When |
+|---|---|---|
+| `AGENT_CONTINUE_UNSUPPORTED` | 422 | capability absent, fork of a non-claude/codex agent, machine agent not in the resume admission list (copilot is in that list but has no cwd proof, so it is not admitted), machine `providerSession.transcriptPath` present, or terminal not ready |
+| `AGENT_CONTINUE_CONFLICT` | 409 | live claim for resume, or working source for fork |
+
+`terminalContinueV1` is on the daemon capability list and on the machine gateway
+document for a Machine-scope Control device when the terminal is ready. A Mirror
+device is not told it and must not send `agentContinue`: creating a pane stays
+Machine scope. An unknown create outcome is not retried automatically.
+
+### 11.7 Pending
+
+* **Payload route.** No `GET` under `/api/v1/reference-chat/...` serves a payload ref.
+  The relay allowlist has no payload suffix. Diff refs are minted and cannot be
+  fetched. Tool `outputPayload` is never set; `outputRef` remains the rev2 field and
+  is not this route.
+* **Task `running` and `unverifiable`.** Both are legal wire values. No reader emits
+  them. OmO and OMP still map an unrecognized task word to `failed`.
+* **Follow-up steer.** `followUp.steer` stays false. No provider path here delivers
+  typed input as a mid-turn steer. Queue is advertised for Claude, Codex, and Grok.
+* **Slash catalog.** Only Claude init `slash_commands` seen by the probe. Other
+  providers stay empty.

@@ -16,9 +16,13 @@
 use serde_json::Value;
 
 use super::history_parse::{
-    reference_timestamp, reference_tool_input, reference_tool_summary, ReferenceTurnLog,
+    reference_bounded_tool_input, reference_native_model, reference_native_patch_body,
+    reference_timestamp, reference_tool_input, reference_tool_summary, reference_usage_from_object,
+    ReferenceTurnLog,
 };
-use super::types::{ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn};
+use super::types::{
+    ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn, ReferenceTurnRole,
+};
 
 /// The lane's parser: cline-transcript only; any other kind is refused.
 pub fn parse_reference_cline_history(
@@ -82,15 +86,21 @@ pub fn parse_cline_messages(text: &str) -> Vec<ReferenceTurn> {
                     log.user(
                         at.map(str::to_string),
                         None,
-                        vec![ReferencePart::Text { text: prompt.join("\n"), phase: None }],
+                        vec![ReferencePart::Text { text: prompt.join("\n"), phase: None , id: None}],
                     );
                 }
                 for block in blocks(&message).filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result")) {
                     let Some(key) = block.get("tool_use_id").and_then(Value::as_str) else {
                         continue;
                     };
-                    let (output, failed) = tool_result(block.get("content"));
+                    let (output, failed, recorded) = tool_result(block.get("content"));
                     log.tool_output(at, key, output, failed);
+                    if recorded {
+                        log.tool_status(key, if failed { "failed" } else { "completed" });
+                    }
+                    if let Some(raw) = block.get("status").and_then(Value::as_str) {
+                        log.tool_status(key, raw);
+                    }
                 }
             }
             Some("assistant") => {
@@ -98,7 +108,7 @@ pub fn parse_cline_messages(text: &str) -> Vec<ReferenceTurn> {
                     match block.get("type").and_then(Value::as_str) {
                         Some("thinking") => {
                             if let Some(text) = block.get("thinking").and_then(Value::as_str).filter(|text| !text.is_empty()) {
-                                log.part(at, ReferencePart::Thinking { text: text.to_string() });
+                                log.part(at, ReferencePart::Thinking { text: text.to_string() , id: None});
                             }
                         }
                         Some("text") => {
@@ -108,9 +118,9 @@ pub fn parse_cline_messages(text: &str) -> Vec<ReferenceTurn> {
                             log.part(
                                 at,
                                 if is_error {
-                                    ReferencePart::Notice { text: text.to_string(), source: Some("error".to_string()) }
+                                    ReferencePart::Notice { text: text.to_string(), source: Some("error".to_string()) , id: None}
                                 } else {
-                                    ReferencePart::Text { text: text.to_string(), phase: None }
+                                    ReferencePart::Text { text: text.to_string(), phase: None , id: None}
                                 },
                             );
                         }
@@ -120,11 +130,30 @@ pub fn parse_cline_messages(text: &str) -> Vec<ReferenceTurn> {
                             };
                             let key = block.get("id").and_then(Value::as_str).unwrap_or("");
                             let input = block.get("input");
-                            log.tool(at, key, name, reference_tool_summary(input), reference_tool_input(input));
+                            let payload = input.cloned().unwrap_or(Value::Null);
+                            log.tool(
+                                at,
+                                key,
+                                name,
+                                reference_tool_summary(input),
+                                reference_bounded_tool_input(name, &payload, reference_tool_input(input)),
+                            );
+                            if let Some(raw) = block.get("status").and_then(Value::as_str) {
+                                log.tool_status(key, raw);
+                            }
+                            if let Some(body) = reference_native_patch_body(name, &payload) {
+                                log.push_diff(at, &body);
+                            }
                         }
                         _ => {}
                     }
                 }
+                log.annotate_role(
+                    ReferenceTurnRole::Assistant,
+                    ReferenceNativeHistoryKind::Cline,
+                    reference_native_model(message.get("model")),
+                    message.get("usage").and_then(reference_usage_from_object),
+                );
             }
             _ => {}
         }
@@ -150,19 +179,20 @@ fn user_input(text: &str) -> String {
 
 /// A `tool_result`'s output: the `result` of each entry (or a plain string), and whether any
 /// entry reported `success: false`.
-fn tool_result(content: Option<&Value>) -> (String, bool) {
+fn tool_result(content: Option<&Value>) -> (String, bool, bool) {
     match content {
-        Some(Value::String(text)) => (text.clone(), false),
+        Some(Value::String(text)) => (text.clone(), false, false),
         Some(Value::Array(entries)) => {
+            let recorded = entries.iter().any(|entry| entry.get("success").and_then(Value::as_bool).is_some());
             let failed = entries.iter().any(|entry| entry.get("success").and_then(Value::as_bool) == Some(false));
             let output = entries
                 .iter()
                 .filter_map(|entry| entry.get("result").and_then(Value::as_str))
                 .collect::<Vec<_>>()
                 .join("\n");
-            (output, failed)
+            (output, failed, recorded)
         }
-        _ => (String::new(), false),
+        _ => (String::new(), false, false),
     }
 }
 
@@ -187,12 +217,12 @@ mod tests {
         assert_eq!(turns[0].role, ReferenceTurnRole::User);
         assert_eq!(
             turns[0].parts,
-            [ReferencePart::Text { text: "run the shell command: touch probe.txt".into(), phase: None }]
+            [ReferencePart::Text { text: "run the shell command: touch probe.txt".into(), phase: None , id: None}]
         );
         assert_eq!(turns[0].started_at.as_deref(), Some("2026-10-22T07:16:01.395Z"));
         assert_eq!(
             turns[1].parts,
-            [ReferencePart::Notice { text: "model not found".into(), source: Some("error".into()) }]
+            [ReferencePart::Notice { text: "model not found".into(), source: Some("error".into()) , id: None}]
         );
         let answer = &turns[3];
         assert_eq!(answer.role, ReferenceTurnRole::Assistant);
@@ -220,7 +250,7 @@ mod tests {
         ));
         assert_eq!(
             turns.last().map(|turn| turn.parts.last().cloned()),
-            Some(Some(ReferencePart::Text { text: "OK".into(), phase: None }))
+            Some(Some(ReferencePart::Text { text: "OK".into(), phase: None , id: None}))
         );
     }
 
@@ -236,5 +266,24 @@ mod tests {
     fn cline_parser_refuses_another_family() {
         assert!(parse_reference_cline_history(ReferenceNativeHistoryKind::Cursor, "").is_err());
         assert!(parse_reference_cline_history(ReferenceNativeHistoryKind::Unavailable, "").is_err());
+    }
+
+    #[test]
+    fn native_work_cline_maps_success_and_ignores_prose() {
+        let text = concat!(
+            r#"{"role":"user","content":[{"type":"text","text":"<user_input>status failed usage 9</user_input>"}]}"#,
+            "\n",
+            r#"{"role":"assistant","model":"cline-model","usage":{"input_tokens":4,"output_tokens":5},"content":[{"type":"tool_use","id":"c1","name":"Edit","input":{"old_string":"a","new_string":"b"}}]}"#,
+            "\n",
+            r#"{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":[{"result":"stopped","success":false}]}]}"#,
+            "\n",
+        );
+        let turns = parse_cline_messages(text);
+        assert!(turns[0].meta.is_none());
+        assert_eq!(turns[1].meta.as_ref().unwrap().model.as_deref(), Some("cline-model"));
+        assert_eq!(turns[1].meta.as_ref().unwrap().usage.as_ref().unwrap().output_tokens, Some(5));
+        let ReferencePart::Tool { status, .. } = turns[1].parts.iter().find(|part| matches!(part, ReferencePart::Tool { .. })).unwrap() else { unreachable!() };
+        assert_eq!(*status, Some(crate::remote::reference_chat::types::ReferenceToolStatus::Failed));
+        assert!(turns[1].parts.iter().any(|part| matches!(part, ReferencePart::Diff { .. })));
     }
 }

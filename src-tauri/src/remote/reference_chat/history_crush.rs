@@ -18,7 +18,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use super::history_parse::{reference_timestamp, reference_tool_input, reference_tool_summary, ReferenceTurnLog};
+use super::history_parse::{
+    reference_bounded_tool_input, reference_native_model, reference_native_patch_body,
+    reference_timestamp, reference_tool_input, reference_tool_summary, reference_usage_from_object,
+    ReferenceTurnLog,
+};
 use super::types::{ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn};
 
 /// The lane's parser: crush-transcript only; any other kind is refused.
@@ -145,7 +149,7 @@ pub fn parse_crush_projection(text: &str) -> Vec<ReferenceTurn> {
                     log.user(
                         at.map(str::to_string),
                         None,
-                        vec![ReferencePart::Text { text: prompt.join("\n"), phase: None }],
+                        vec![ReferencePart::Text { text: prompt.join("\n"), phase: None , id: None}],
                     );
                 }
             }
@@ -160,13 +164,21 @@ pub fn parse_crush_projection(text: &str) -> Vec<ReferenceTurn> {
                                 continue;
                             }
                             let input = serde_json::from_str::<Value>(string(data, "input")).ok();
+                            let payload = input.clone().unwrap_or(Value::Null);
+                            let key = string(data, "id");
                             log.tool(
                                 at,
-                                string(data, "id"),
+                                key,
                                 name,
                                 reference_tool_summary(input.as_ref()),
-                                reference_tool_input(input.as_ref()),
+                                reference_bounded_tool_input(name, &payload, reference_tool_input(input.as_ref())),
                             );
+                            if let Some(raw) = data.get("status").and_then(Value::as_str) {
+                                log.tool_status(key, raw);
+                            }
+                            if let Some(body) = reference_native_patch_body(name, &payload) {
+                                log.push_diff(at, &body);
+                            }
                         }
                         _ => {}
                     }
@@ -175,8 +187,23 @@ pub fn parse_crush_projection(text: &str) -> Vec<ReferenceTurn> {
             Some("tool") => {
                 for (kind, data) in parts(&message) {
                     if kind == "tool_result" {
-                        let failed = data.get("is_error").and_then(Value::as_bool) == Some(true);
-                        log.tool_output(at, string(data, "tool_call_id"), string(data, "content").to_string(), failed);
+                        let recorded_error = data.get("is_error").and_then(Value::as_bool);
+                        let failed = recorded_error == Some(true);
+                        let key = string(data, "tool_call_id");
+                        log.tool_output(at, key, string(data, "content").to_string(), failed);
+                        if let Some(is_error) = recorded_error {
+                            log.tool_status(key, if is_error { "failed" } else { "completed" });
+                        }
+                        if let Some(raw) = data.get("status").and_then(Value::as_str) {
+                            log.tool_status(key, raw);
+                        }
+                    }
+                    if kind == "finish" {
+                        log.annotate(
+                            ReferenceNativeHistoryKind::Crush,
+                            reference_native_model(data.get("model")),
+                            data.get("tokens").or_else(|| data.get("usage")).and_then(reference_usage_from_object),
+                        );
                     }
                 }
             }
@@ -241,10 +268,10 @@ mod tests {
             roles,
             [ReferenceTurnRole::User, ReferenceTurnRole::Assistant, ReferenceTurnRole::User, ReferenceTurnRole::Assistant]
         );
-        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "SLOW please answer".into(), phase: None }]);
+        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "SLOW please answer".into(), phase: None , id: None}]);
         assert_eq!(turns[0].started_at.as_deref(), Some("2026-10-22T07:06:02.000Z"));
-        assert_eq!(turns[1].parts, [ReferencePart::Text { text: "Mock reply done.".into(), phase: None }]);
-        assert_eq!(turns[2].parts, [ReferencePart::Text { text: "RUNCMD create the probe file".into(), phase: None }]);
+        assert_eq!(turns[1].parts, [ReferencePart::Text { text: "Mock reply done.".into(), phase: None , id: None}]);
+        assert_eq!(turns[2].parts, [ReferencePart::Text { text: "RUNCMD create the probe file".into(), phase: None , id: None}]);
         let ReferencePart::Tool { name, input, output, error, .. } = &turns[3].parts[0] else {
             panic!("the call comes first: {:?}", turns[3].parts);
         };
@@ -252,7 +279,7 @@ mod tests {
         assert!(input.contains("touch parity-probe.txt"), "{input}");
         assert_eq!(output, "no output");
         assert_eq!(*error, None);
-        assert_eq!(turns[3].parts[1], ReferencePart::Text { text: "Mock reply done.".into(), phase: None });
+        assert_eq!(turns[3].parts[1], ReferencePart::Text { text: "Mock reply done.".into(), phase: None , id: None});
     }
 
     #[test]
@@ -317,5 +344,22 @@ mod tests {
     fn crush_parser_refuses_another_family() {
         assert!(parse_reference_crush_history(ReferenceNativeHistoryKind::Opencode, "").is_err());
         assert!(parse_reference_crush_history(ReferenceNativeHistoryKind::Unavailable, "").is_err());
+    }
+
+    #[test]
+    fn native_work_crush_maps_is_error_and_ignores_prose() {
+        let text = concat!(
+            r#"{"created_at":1,"role":"user","parts":[{"type":"text","data":{"text":"status failed usage 9"}}]}"#,
+            "\n",
+            r#"{"created_at":2,"role":"assistant","parts":[{"type":"tool_call","data":{"id":"c1","name":"edit","input":"{\"old_string\":\"a\",\"new_string\":\"b\"}"}}]}"#,
+            "\n",
+            r#"{"created_at":3,"role":"tool","parts":[{"type":"tool_result","data":{"tool_call_id":"c1","content":"no","is_error":true,"status":"cancelled"}}]}"#,
+            "\n",
+        );
+        let turns = parse_crush_projection(text);
+        assert!(turns[0].meta.is_none());
+        let ReferencePart::Tool { status, .. } = &turns[1].parts[0] else { panic!("{:?}", turns[1].parts) };
+        assert_eq!(*status, Some(crate::remote::reference_chat::types::ReferenceToolStatus::Cancelled));
+        assert!(turns[1].parts.iter().any(|part| matches!(part, ReferencePart::Diff { .. })));
     }
 }

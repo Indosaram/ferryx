@@ -1807,6 +1807,67 @@ describe("Remote UI Components", () => {
     expect(invalidOpt?.attention).toBeUndefined();
   });
 
+  it("keeps running false for a declared exited terminal and its published tab", () => {
+    const model = normalizeRemoteWorkspaceState({
+      activeWorkspaceId: "project-1",
+      activeContext: {
+        workspaceId: "project-1",
+        sessionId: "pty-exited",
+        tabId: "tab-exited",
+        terminalTabs: [{
+          id: "tab-exited",
+          label: "claude",
+          sessionId: "pty-exited",
+          agentType: "claude",
+          running: false,
+          providerSession: { key: "session_id", id: "prov-exited" },
+        }],
+      },
+      sessions: [],
+    });
+    expect(model.context.activeTerminal).toEqual({
+      sessionId: "pty-exited",
+      running: false,
+    });
+    expect(model.context.terminalTabs?.[0]).toMatchObject({
+      id: "tab-exited",
+      sessionId: "pty-exited",
+      running: false,
+      providerSession: { key: "session_id", id: "prov-exited" },
+    });
+  });
+
+  it("binds an exited focused tab when the selection session id is absent and ignores a standby id", () => {
+    const bound = normalizeRemoteWorkspaceState({
+      activeContext: {
+        workspaceId: "project-1",
+        sessionId: null,
+        tabId: "tab-exited",
+        terminalTabs: [{
+          id: "tab-exited",
+          label: "claude",
+          sessionId: "pty-real",
+          running: false,
+        }],
+      },
+    });
+    expect(bound.context.activeTerminal).toEqual({ sessionId: "pty-real", running: false });
+    const standby = normalizeRemoteWorkspaceState({
+      activeContext: {
+        workspaceId: "project-1",
+        sessionId: "standby:tab-exited",
+        tabId: "tab-exited",
+        terminalTabs: [{
+          id: "tab-exited",
+          label: "claude",
+          sessionId: "standby:tab-exited",
+          running: false,
+        }],
+      },
+    });
+    expect(standby.context.activeTerminal).toBeNull();
+  });
+
   it("tab strip renders state indicators for waiting and working tabs discoverable by accessible name", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithActivity = {

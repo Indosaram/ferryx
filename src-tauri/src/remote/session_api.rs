@@ -28,8 +28,11 @@ pub(super) fn failure(code: &str, request: &str) -> Response {
         | "SESSION_OWNERSHIP_CHANGED"
         | "CONTROL_CONFLICT"
         | "PARENT_SESSION_MISMATCH"
-        | "AGENT_SESSION_CONFLICT" => 409,
-        "AGENT_RESUME_UNSUPPORTED" | "MACHINE_OWNER_UNSUPPORTED" => 422,
+        | "AGENT_SESSION_CONFLICT"
+        | "AGENT_CONTINUE_CONFLICT" => 409,
+        "AGENT_RESUME_UNSUPPORTED"
+        | "AGENT_CONTINUE_UNSUPPORTED"
+        | "MACHINE_OWNER_UNSUPPORTED" => 422,
         "CAPACITY_EXCEEDED" => 429,
         "MACHINE_SERVICE_UNAVAILABLE" | "HOST_UNAVAILABLE" => 503,
         "TIMEOUT" => 504,
@@ -114,14 +117,19 @@ fn decode_create(body: &[u8]) -> Result<CreateSessionRequest, String> {
     if !value["worktree"].is_null() {
         keys(&value["worktree"], &["wsId", "slug"])?;
     }
-    match value["startup"]["kind"].as_str() {
-        Some("shell") => keys(&value["startup"], &["kind"])?,
-        Some("agentResume") => {
-            keys(&value["startup"], &["kind", "agentType", "providerSession"])?;
-            // A client may name an authoritative provider ID, never a transcript pathname.
-            keys(&value["startup"]["providerSession"], &["key", "id"])?;
-        }
-        _ => return Err("INVALID_REQUEST".into()),
+    super::machine_protocol::validate_create_startup(&value["startup"])?;
+    if value["startup"]["kind"] == "agentContinue" {
+        let mode = match value["startup"]["mode"].as_str() {
+            Some("fork") => crate::daemon::protocol::ContinueMode::Fork,
+            _ => crate::daemon::protocol::ContinueMode::Resume,
+        };
+        crate::terminal::continue_startup::continue_supported(
+            &[crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY],
+            value["startup"]["agentType"].as_str().unwrap_or(""),
+            mode,
+            crate::terminal::continue_startup::ContinueSurface::Machine,
+        )
+        .map_err(str::to_string)?;
     }
     let request: CreateSessionRequest =
         serde_json::from_value(value).map_err(|_| "INVALID_REQUEST")?;
@@ -224,7 +232,13 @@ async fn mutation(
             "createSession"
         };
         let create = if close_id.is_none() {
-            Some(decode_create(&body).map_err(|e| failure(&e, &id))?)
+            let decoded = decode_create(&body).map_err(|e| failure(&e, &id))?;
+            if matches!(decoded.startup, Startup::AgentContinue { .. })
+                && !super::server::machine_terminal_ready(&state)
+            {
+                return Err(failure("AGENT_CONTINUE_UNSUPPORTED", &id));
+            }
+            Some(decoded)
         } else {
             None
         };
@@ -449,5 +463,84 @@ async fn read(
             Ok(Err(_)) => Err(failure("MACHINE_SERVICE_UNAVAILABLE", &id).into()),
             Err(_) => Err(failure("TIMEOUT", &id).into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(startup: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4",
+            "workspaceId": "project-a",
+            "worktree": null,
+            "cols": 80,
+            "rows": 24,
+            "inheritFromSessionId": null,
+            "cwdRelative": null,
+            "startup": startup
+        }))
+        .expect("body")
+    }
+
+    #[test]
+    fn agent_continue_rejects_unknown_keys_client_argv_and_unverified_fork() {
+        let ok = decode_create(&body(serde_json::json!({
+            "kind": "agentContinue",
+            "agentType": "claude",
+            "providerSession": {"key": "session_id", "id": "sess-1"},
+            "mode": "resume"
+        })))
+        .expect("claude resume");
+        assert!(matches!(ok.startup, Startup::AgentContinue { mode: crate::daemon::protocol::ContinueMode::Resume, .. }));
+
+        let fork = decode_create(&body(serde_json::json!({
+            "kind": "agentContinue",
+            "agentType": "codex",
+            "providerSession": {"key": "session_id", "id": "sess-2"},
+            "mode": "fork"
+        })))
+        .expect("codex fork");
+        assert!(matches!(fork.startup, Startup::AgentContinue { mode: crate::daemon::protocol::ContinueMode::Fork, .. }));
+
+        for extra in ["argv", "args", "command"] {
+            let mut startup = serde_json::json!({
+                "kind": "agentContinue",
+                "agentType": "claude",
+                "providerSession": {"key": "session_id", "id": "sess-1"},
+                "mode": "fork"
+            });
+            startup[extra] = serde_json::json!(["rm", "-rf", "/"]);
+            assert_eq!(decode_create(&body(startup)).unwrap_err(), "INVALID_REQUEST", "{extra}");
+        }
+        assert_eq!(
+            decode_create(&body(serde_json::json!({
+                "kind": "agentContinue",
+                "agentType": "grok",
+                "providerSession": {"key": "session_id", "id": "sess-1"},
+                "mode": "fork"
+            })))
+            .unwrap_err(),
+            "AGENT_CONTINUE_UNSUPPORTED"
+        );
+        assert_eq!(
+            decode_create(&body(serde_json::json!({
+                "kind": "agentContinue",
+                "agentType": "grok",
+                "providerSession": {"key": "session_id", "id": "sess-1"},
+                "mode": "resume"
+            })))
+            .unwrap()
+            .startup,
+            decode_create(&body(serde_json::json!({
+                "kind": "agentContinue",
+                "agentType": "grok",
+                "providerSession": {"key": "session_id", "id": "sess-1"},
+                "mode": "resume"
+            })))
+            .unwrap()
+            .startup
+        );
     }
 }

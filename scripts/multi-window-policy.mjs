@@ -46,7 +46,9 @@ export function scanMultiWindowPolicy(root = DEFAULT_ROOT) {
       if (LOOKUP.test(line)) violations.push(`${rel}:${index + 1}: ${line.trim()}`);
     });
   }
-  return violations;
+  // readdir order follows the filesystem, so an unsorted report names the same violations in a
+  // different order on ext4 than on APFS. The verdict is a set; publish it in one order.
+  return violations.sort();
 }
 
 if (import.meta.main) {

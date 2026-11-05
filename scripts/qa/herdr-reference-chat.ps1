@@ -28,7 +28,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("QA-01", "QA-02", "QA-03", "QA-04", "QA-05", "QA-06", "QA-07", "QA-08", "QA-09", "QA-10", "QA-11", "ALL")]
+    [ValidateSet("QA-01", "QA-02", "QA-03", "QA-04", "QA-05", "QA-06", "QA-07", "QA-08", "QA-09", "QA-10", "QA-11", "QA-12", "QA-13", "QA-14", "QA-15", "QA-16", "ALL")]
     [string]$Scenario,
 
     [Parameter(Mandatory = $true)]

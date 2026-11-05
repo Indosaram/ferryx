@@ -1,4 +1,5 @@
 import type { RunTarget } from "./scopedContracts";
+import type { AgentContinueStartup } from "./tauri";
 
 export class MachineDecodeError extends Error {
   constructor(readonly code: "INVALID_REQUEST" | "PAYLOAD_TOO_LARGE") {
@@ -41,6 +42,15 @@ function startup(value: unknown) {
   switch (v.kind) {
     case "shell": return { kind: "shell" };
     case "agentResume": return { kind: "agentResume", agentType: text(v.agentType), providerSession: provider(v.providerSession) };
+    case "agentContinue": {
+      const parsed: AgentContinueStartup = {
+        kind: "agentContinue",
+        agentType: text(v.agentType),
+        providerSession: provider(v.providerSession),
+        mode: choice(v.mode, ["fork", "resume"]),
+      };
+      return parsed;
+    }
     default: return invalid();
   }
 }

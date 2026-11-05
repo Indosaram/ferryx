@@ -1,5 +1,5 @@
 import { useId } from "react";
-import { ChevronLeft, Ellipsis, MessageSquare, Server, SquareTerminal } from "lucide-react";
+import { ChevronLeft, Ellipsis, Inbox, MessageSquare, Server, SquareTerminal } from "lucide-react";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../../lib/agentIcon";
 import { cn } from "../../lib/cn";
 
@@ -33,6 +33,13 @@ export interface MobileTopBarAttention {
   readonly onPress: () => void;
 }
 
+/** The Inbox entry: `count` is the sessions waiting on the user, the badge it shows. */
+export interface MobileTopBarInbox {
+  readonly count: number;
+  readonly open: boolean;
+  readonly onOpen: () => void;
+}
+
 export interface MobileTopBarProps {
   readonly title: string;
   readonly agentType?: string | null;
@@ -45,6 +52,7 @@ export interface MobileTopBarProps {
   readonly viewMode: "chat" | "terminal";
   readonly onViewModeChange: (mode: "chat" | "terminal") => void;
   readonly sessionCount?: number | null;
+  readonly inbox?: MobileTopBarInbox | null;
   readonly switcherOpen?: boolean;
   readonly onOpenSwitcher?: () => void;
   readonly menuOpen?: boolean;
@@ -66,6 +74,7 @@ export function MobileTopBar({
   viewMode,
   onViewModeChange,
   sessionCount = null,
+  inbox = null,
   switcherOpen = false,
   onOpenSwitcher,
   menuOpen = false,
@@ -201,6 +210,29 @@ export function MobileTopBar({
                 <span className="flex h-5 min-w-5 items-center justify-center rounded border border-chat-foreground-secondary px-1 text-xs font-medium tabular-nums">
                   {sessionCount}
                 </span>
+              </button>
+            ) : null}
+
+            {inbox ? (
+              <button
+                type="button"
+                data-testid="mobile-inbox-button"
+                aria-label={inbox.count > 0 ? `Inbox (${inbox.count} waiting)` : "Inbox"}
+                title="Inbox"
+                aria-haspopup="dialog"
+                aria-expanded={inbox.open}
+                onClick={inbox.onOpen}
+                className={cn(ICON_BUTTON, "text-chat-foreground-secondary hover:text-chat-foreground")}
+              >
+                <Inbox aria-hidden="true" className="size-4" />
+                {inbox.count > 0 ? (
+                  <span
+                    data-testid="mobile-inbox-badge"
+                    className="absolute right-0.5 top-0.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-status-warning px-1 text-xs font-semibold tabular-nums text-chat-screen"
+                  >
+                    {inbox.count}
+                  </span>
+                ) : null}
               </button>
             ) : null}
 

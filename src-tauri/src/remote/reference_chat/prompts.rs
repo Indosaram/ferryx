@@ -84,7 +84,7 @@ use super::input::{
 use super::prompt_claude::{parse_claude_prompt, plan_claude_answer, ClaudePrompt};
 use super::prompt_codex::{
     codex_model_row_key, parse_reference_codex_prompt, plan_reference_codex_answer,
-    ReferenceCodexAnswerStep, ReferenceCodexPrompt,
+    ReferenceCodexAnswerStep, ReferenceCodexPrompt, ReferenceCodexResponder,
 };
 use super::prompt_omo::{
     omo_card_for_screen, omo_form_is_trusted, omo_form_on_screen, omo_reads_forms, open_omo_asks,
@@ -855,6 +855,30 @@ pub fn reference_answer_keys(
 ) -> Result<Vec<ReferenceKeyStep>, ScopeErrorCode> {
     let card = reference_prompt_card(&prompt.id).ok_or(ScopeErrorCode::InvalidRequest)?;
     plan_answer_keys(&card, prompt, answer, None)
+}
+
+/// Plan the keys that answer the Codex `/model` menu currently on `screen`.
+///
+/// This is the same planner [ReferencePromptAnswers::answer] uses for a Codex card:
+/// [plan_reference_codex_answer], then the row key the screen names. A screen that is
+/// not that menu is refused. Nothing is typed here.
+pub fn plan_codex_model_menu_answer(
+    screen: &str,
+    option_index: u32,
+) -> Result<Vec<ReferenceKeyStep>, ScopeErrorCode> {
+    let Some(parsed) = parse_reference_codex_prompt(screen) else {
+        return Err(ScopeErrorCode::RequestConflict);
+    };
+    if parsed.responder != ReferenceCodexResponder::Model {
+        return Err(ScopeErrorCode::RequestConflict);
+    }
+    let card = ReferencePromptCard::Codex(parsed);
+    let prompt = card.prompt().clone();
+    let answer = ReferencePromptAnswer {
+        option_index: Some(option_index),
+        ..ReferencePromptAnswer::default()
+    };
+    plan_answer_keys(&card, &prompt, &answer, Some(screen))
 }
 
 /// The keys for one card, planned from the card itself.
@@ -2206,6 +2230,27 @@ mod tests {
         assert!(planned[..planned.len() - 1]
             .iter()
             .all(|step| step.keys == vec!["down".to_string()] || step.keys == vec!["up".to_string()]));
+    }
+
+    #[test]
+    fn plan_codex_model_menu_answer_uses_the_existing_row_key_plan() {
+        let steps = plan_codex_model_menu_answer(CODEX_MODEL_LIST, 3).expect("model menu");
+        assert_eq!(steps.last().map(keys_of), Some(vec!["enter".to_string()]));
+        assert!(steps[..steps.len() - 1]
+            .iter()
+            .all(|step| step.keys == vec!["down".to_string()] || step.keys == vec!["up".to_string()]));
+        let levels = include_str!("fixtures/codex/model-levels.txt");
+        let level = plan_codex_model_menu_answer(levels, 1).expect("level menu");
+        assert_eq!(level.last().map(|step| step.text.clone()), Some(Some("s".to_string())));
+        assert!(level.iter().all(|step| step.keys != vec!["enter".to_string()]));
+    }
+
+    #[test]
+    fn plan_codex_model_menu_answer_refuses_a_screen_that_is_not_the_model_menu() {
+        assert_eq!(
+            plan_codex_model_menu_answer("hello\n", 0),
+            Err(ScopeErrorCode::RequestConflict)
+        );
     }
 
     #[test]

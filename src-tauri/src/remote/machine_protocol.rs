@@ -22,6 +22,43 @@ pub enum DecodeError {
     InvalidRequest(#[from] serde_json::Error),
 }
 
+/// Create-session startup objects. Unknown keys, including any client argv, are refused.
+/// Provider sessions on this boundary name an id, never a transcript path or a client command.
+pub fn validate_create_startup(value: &serde_json::Value) -> Result<(), &'static str> {
+    let Some(obj) = value.as_object() else {
+        return Err("INVALID_REQUEST");
+    };
+    let Some(kind) = obj.get("kind").and_then(|item| item.as_str()) else {
+        return Err("INVALID_REQUEST");
+    };
+    let allowed: &[&str] = match kind {
+        "shell" => &["kind"],
+        "agentResume" => &["kind", "agentType", "providerSession"],
+        "agentContinue" => &["kind", "agentType", "providerSession", "mode"],
+        _ => return Err("INVALID_REQUEST"),
+    };
+    if obj.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err("INVALID_REQUEST");
+    }
+    if matches!(kind, "agentResume" | "agentContinue") {
+        let Some(provider) = obj.get("providerSession").and_then(|item| item.as_object()) else {
+            return Err("INVALID_REQUEST");
+        };
+        if provider.keys().any(|key| !matches!(key.as_str(), "key" | "id")) {
+            return Err("INVALID_REQUEST");
+        }
+    }
+    if kind == "agentContinue"
+        && !matches!(
+            obj.get("mode").and_then(|item| item.as_str()),
+            Some("fork" | "resume")
+        )
+    {
+        return Err("INVALID_REQUEST");
+    }
+    Ok(())
+}
+
 pub fn decode_json<T: serde::de::DeserializeOwned>(
     bytes: &[u8],
     limit: usize,

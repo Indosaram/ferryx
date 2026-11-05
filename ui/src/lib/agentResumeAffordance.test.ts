@@ -4,6 +4,7 @@ import type { TerminalSession } from "./types";
 import {
   collectResumableAgentPanes,
   getAgentReconnectAffordance,
+  getContinuationAffordance,
   resumableAgentPane,
   type AgentReconnectAffordance,
   type ResumableAgentPane,
@@ -382,5 +383,59 @@ describe("getAgentReconnectAffordance", () => {
       expect(session?.reconnectError).toBeNull();
       expect(session?.cwd).toBe("/repo/workspace/rebound");
     });
+  });
+});
+
+describe("continuation affordance", () => {
+  function reason(session: TerminalSession, mode: "fork" | "resume", context?: Parameters<typeof getContinuationAffordance>[1]) {
+    return getContinuationAffordance(session, context).modes.find((offer) => offer.mode === mode)?.reason ?? null;
+  }
+
+  it("offers fork and resume for an exited Claude or Codex pane and resume only for other verified builders", () => {
+    const claude = createSession({ lifecycle: "exited", agentType: "claude" });
+    expect(getContinuationAffordance(claude).availableModes).toEqual(["fork", "resume"]);
+    const codex = createSession({ lifecycle: "exited", agentType: "codex", providerSession: { key: "session_id", id: "codex-1" } });
+    expect(getContinuationAffordance(codex).availableModes).toEqual(["fork", "resume"]);
+    const grok = createSession({ lifecycle: "exited", agentType: "grok", providerSession: { key: "session_id", id: "grok-1" } });
+    expect(getContinuationAffordance(grok).availableModes).toEqual(["resume"]);
+    expect(reason(grok, "fork")).toBe("providerUnsupported");
+    expect(reason(createSession({ agentType: "aider", providerSession: { key: "session_id", id: "nope" } }), "resume")).toBe("providerUnsupported");
+    expect(getContinuationAffordance(claude).startup("fork")).toEqual({
+      kind: "agentContinue",
+      agentType: "claude",
+      providerSession: { key: "session_id", id: "claude-uuid-123" },
+      mode: "fork",
+    });
+    expect(getContinuationAffordance(claude)).not.toHaveProperty("stop");
+  });
+
+  it("names each unavailable reason and never offers a stop", () => {
+    const working = createSession({ lifecycle: "working", backendSessionId: "pty-live" });
+    expect(reason(working, "fork")).toBe("sourceWorking");
+    expect(reason(working, "resume")).toBe("sourceWorking");
+    expect(reason(createSession({ lifecycle: "starting" }), "fork", { activityState: "working" })).toBe("sourceWorking");
+
+    const idle = createSession({ lifecycle: "running", backendSessionId: "pty-idle" });
+    expect(reason(idle, "resume")).toBe("liveClaim");
+    expect(reason(idle, "fork")).toBeNull();
+
+    const source = createSession({ id: "source", lifecycle: "exited" });
+    const liveOther = createSession({
+      id: "other",
+      lifecycle: "running",
+      backendSessionId: "pty-other",
+      providerSession: source.providerSession,
+    });
+    expect(reason(source, "resume", { sessions: [source, liveOther] })).toBe("liveClaim");
+    expect(reason(source, "fork", { sessions: [source, { ...liveOther, lifecycle: "working" }] })).toBe("liveClaim");
+
+    expect(reason(createSession({ providerSession: null, agentSessionId: null }), "resume")).toBe("missingNativeHistory");
+    expect(reason(createSession(), "fork", { nativeHistory: false })).toBe("missingNativeHistory");
+    expect(reason(createSession({ agentType: "pi", providerSession: { key: "session_id", id: "pi-1" } }), "resume")).toBe("missingNativeHistory");
+
+    const remote = createSession({ workspaceId: "ssh:host-1", lifecycle: "exited" });
+    expect(reason(remote, "fork")).toBe("remoteCapabilityAbsent");
+    expect(reason(remote, "resume", { terminalContinueV1: false })).toBe("remoteCapabilityAbsent");
+    expect(getContinuationAffordance(remote, { terminalContinueV1: true }).availableModes).toEqual(["fork", "resume"]);
   });
 });

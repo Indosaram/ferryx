@@ -18,6 +18,10 @@ async fn followthrough_prune_partial_replays_after_restart() {
         move || {
             std::fs::create_dir(&repo).unwrap();
             crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
+            // A reaped `git commit` otherwise detaches `gc --auto`, which keeps
+            // index.lock after the parent is waited. Admission then reports 409.
+            crate::worktree::run_git(&repo, &["config", "gc.auto", "0"]).unwrap();
+            crate::worktree::run_git(&repo, &["config", "maintenance.auto", "0"]).unwrap();
             crate::worktree::run_git(
                 &repo,
                 &[
@@ -118,6 +122,11 @@ async fn followthrough_write_failures_non_head_and_prunable_preview() {
             move || {
                 std::fs::create_dir(&repo).unwrap();
                 crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
+                // A reaped `git commit` otherwise detaches `gc --auto`, which keeps
+                // index.lock after the parent is waited. Admission then reports 409
+                // and never reaches the publication/journal probe.
+                crate::worktree::run_git(&repo, &["config", "gc.auto", "0"]).unwrap();
+                crate::worktree::run_git(&repo, &["config", "maintenance.auto", "0"]).unwrap();
                 for message in ["base", "head"] {
                     crate::worktree::run_git(
                         &repo,
@@ -175,7 +184,10 @@ async fn followthrough_write_failures_non_head_and_prunable_preview() {
             // Receipt acquisition refreshes the journal; obstruct only completion
             // for the post-catalog failure, not that earlier admission read.
             let injection_phase = if journal_failure { "worktreeJournalCompletion" } else { "worktreePublication" };
+            let probe_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let fired = Arc::clone(&probe_fired);
             *service.transaction_probe.write() = Some(Arc::new(move |phase| if phase == injection_phase {
+                fired.store(true, std::sync::atomic::Ordering::SeqCst);
                 std::fs::rename(&injected_path, &injected_backup).unwrap();
                 std::fs::create_dir(&injected_path).unwrap();
             }));
@@ -187,12 +199,39 @@ async fn followthrough_write_failures_non_head_and_prunable_preview() {
             *service.transaction_probe.write() = None;
             let status = response.status().as_u16();
             let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
-            let (head, path, durable) = tokio::task::spawn_blocking({ let service = service.clone(); let workspace = workspace.clone(); move || {
+            let body_text = String::from_utf8_lossy(&bytes);
+            assert_eq!(
+                status,
+                if journal_failure { 503 } else { 409 },
+                "publication store failure status; body={body_text}"
+            );
+            assert!(
+                probe_fired.load(std::sync::atomic::Ordering::SeqCst),
+                "transaction probe {injection_phase} never fired, so failure_path was not obstructed; status={status} body={body_text}"
+            );
+            let reported = body_text.into_owned();
+            let (head, path, durable) = tokio::task::spawn_blocking({
+                let service = service.clone();
+                let workspace = workspace.clone();
+                let reported = reported.clone();
+                move || {
                 // Catalog may be fenced: inspect the actual private Git target directly.
                 let catalog = crate::remote::workspace_catalog::load(if journal_failure { &service.catalog_path } else { &backup }).unwrap();
                 let repo = &catalog.workspaces[&workspace].repo_root;
                 let path = repo.join(".ferryx-worktrees").join(&workspace).join("write-failure");
-                let head = crate::worktree::run_git(&path, &["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+                assert!(
+                    path.is_dir(),
+                    "Git side effect missing at {} after status={status} body={reported}",
+                    path.display()
+                );
+                let head = crate::worktree::run_git(&path, &["rev-parse", "HEAD"]).unwrap_or_else(|error| {
+                    panic!("worktree HEAD at {} failed after status={status} body={reported}: {error}", path.display())
+                }).trim().to_owned();
+                assert!(
+                    failure_path.is_dir(),
+                    "probe {injection_phase} did not leave a directory at {}; status={status} body={reported}",
+                    failure_path.display()
+                );
                 std::fs::remove_dir(&failure_path).unwrap();
                 std::fs::rename(backup, failure_path).unwrap();
                 (head, path, catalog)
@@ -200,7 +239,6 @@ async fn followthrough_write_failures_non_head_and_prunable_preview() {
             // Then: disk publication, event identity and restart replay agree.
             eprintln!("A08 publication journal_failure={journal_failure} baseline={} durable={} receipt={:?}", baseline.revision.0, durable.revision.0, durable.transaction.as_ref().map(|receipt| &receipt.request_id));
             assert_eq!(head, base, "successful explicit non-HEAD Git side effect");
-            assert_eq!(status, if journal_failure {503} else {409}, "{}", String::from_utf8_lossy(&bytes));
             let committed = events.try_recv();
             assert_eq!(committed.is_ok(), journal_failure, "only durable catalog publication emits an event");
             if let Ok(event) = committed {
@@ -262,6 +300,9 @@ async fn followthrough_delete_publication_blocks_spawn() {
             let repo = root.join("repo");
             std::fs::create_dir(&repo).unwrap();
             crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
+            // Same detached `gc --auto` index.lock race as followthrough_prune_partial.
+            crate::worktree::run_git(&repo, &["config", "gc.auto", "0"]).unwrap();
+            crate::worktree::run_git(&repo, &["config", "maintenance.auto", "0"]).unwrap();
             crate::worktree::run_git(
                 &repo,
                 &[
@@ -423,6 +464,9 @@ async fn local_worktree_errors_survive_owner_wire_and_native_adapter() {
         let repo = root.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
+        // Same detached `gc --auto` index.lock race as followthrough_prune_partial.
+        crate::worktree::run_git(&repo, &["config", "gc.auto", "0"]).unwrap();
+        crate::worktree::run_git(&repo, &["config", "maintenance.auto", "0"]).unwrap();
         crate::worktree::run_git(
             &repo,
             &[
@@ -524,6 +568,9 @@ async fn typed_owner_repair_private_uds_and_native_adapter() {
             let repo = root.join("repo");
             std::fs::create_dir(&repo).unwrap();
             crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
+            // Same detached `gc --auto` index.lock race as followthrough_prune_partial.
+            crate::worktree::run_git(&repo, &["config", "gc.auto", "0"]).unwrap();
+            crate::worktree::run_git(&repo, &["config", "maintenance.auto", "0"]).unwrap();
             crate::worktree::run_git(
                 &repo,
                 &[
@@ -863,6 +910,9 @@ async fn owner_http_gate_and_eight_admissions() {
         let repo = root.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
+        // Same detached `gc --auto` index.lock race as followthrough_prune_partial.
+        crate::worktree::run_git(&repo, &["config", "gc.auto", "0"]).unwrap();
+        crate::worktree::run_git(&repo, &["config", "maintenance.auto", "0"]).unwrap();
         crate::worktree::run_git(
             &repo,
             &[
@@ -1111,8 +1161,11 @@ fn interrupted_worktree_owner_child() {
         let result = std::panic::AssertUnwindSafe(async {
             let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(40)).build().unwrap();
             let response = client.post(format!("http://{address}/api/v1/workspace/worktrees")).bearer_auth(token).body(serde_json::json!({"requestId":request,"workspaceId":workspace,"worktree":{"wsId":workspace,"slug":"interrupted"}}).to_string()).send().await.unwrap();
-            assert!(replay); assert_eq!(response.status().as_u16(), 409);
-            let body: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+            let status = response.status().as_u16();
+            let raw = response.bytes().await.unwrap();
+            assert!(replay, "the first owner answered before the publication barrier: {status} {}", String::from_utf8_lossy(&raw));
+            assert_eq!(status, 409);
+            let body: serde_json::Value = serde_json::from_slice(&raw).unwrap();
             assert_eq!(body["error"]["code"], "OPERATION_OUTCOME_UNKNOWN");
             let service = state.machine_services.as_ref().unwrap().workspaces.clone();
             let listed = tokio::task::spawn_blocking(move || rows(&workspace, &service.worktree_manager(&workspace, false).unwrap()).unwrap()).await.unwrap();
@@ -1140,6 +1193,9 @@ async fn interrupted_fixture(active: bool) {
         let repo = root.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         crate::worktree::run_git(&repo, &["init", "--quiet"]).unwrap();
+        // Same detached `gc --auto` index.lock race as followthrough_prune_partial.
+        crate::worktree::run_git(&repo, &["config", "gc.auto", "0"]).unwrap();
+        crate::worktree::run_git(&repo, &["config", "maintenance.auto", "0"]).unwrap();
         crate::worktree::run_git(
             &repo,
             &[

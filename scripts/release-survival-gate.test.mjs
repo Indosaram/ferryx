@@ -191,12 +191,28 @@ const publishArgs = (runDir, gh, extra = {}) => ({
   lsRemoteFn: () => `${COMMIT}\trefs/tags/v2026.1024.1\n`, ...extra,
 });
 
+/**
+ * publishRelease refuses to run when CI or GITHUB_ACTIONS is set, so a suite that exercises it must
+ * clear the markers first; hosted runners always set them and a developer machine usually does not.
+ */
+async function withoutCIMarkers(fn) {
+  const saved = { CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  try {
+    return await fn();
+  } finally {
+    if (saved.CI !== undefined) process.env.CI = saved.CI;
+    if (saved.GITHUB_ACTIONS !== undefined) process.env.GITHUB_ACTIONS = saved.GITHUB_ACTIONS;
+  }
+}
+
 test("drafting refuses a FAIL fixture before any gh call", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "ferryx-survival-publish-"));
   try {
     const { runDir, gh, callLog } = assembledRun(tmp);
     writeSurvivalFixture(runDir, COMMIT, { mutate: (s, p) => { if (p === "windows") s.scenarios.find((x) => x.id === "Q01").status = "FAIL"; } });
-    await assert.rejects(() => publishRelease(publishArgs(runDir, gh)), (error) => error.code === "SURVIVAL_FAIL");
+    await assert.rejects(() => withoutCIMarkers(() => publishRelease(publishArgs(runDir, gh))), (error) => error.code === "SURVIVAL_FAIL");
     assert.equal(existsSync(callLog), false);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -208,7 +224,7 @@ test("drafting with a waiver puts the report and the waiver in the release body"
   try {
     const { runDir, gh, notesCopy } = assembledRun(tmp);
     writeSurvivalFixture(runDir, COMMIT, { footprint: false });
-    const result = await publishRelease(publishArgs(runDir, gh, { survivalWaiver: "footprint pending todo 17" }));
+    const result = await withoutCIMarkers(() => publishRelease(publishArgs(runDir, gh, { survivalWaiver: "footprint pending todo 17" })));
     assert.equal(result.published, true);
     assert.equal(result.survivalWaiver, "footprint pending todo 17");
     const body = readFileSync(notesCopy, "utf8");

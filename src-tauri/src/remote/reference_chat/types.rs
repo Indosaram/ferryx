@@ -14,6 +14,9 @@
 //! Frozen contract: `docs/chat/herdr-port-contract.md`. Do not add, rename or re-shape a
 //! wire field without a new revision of that file.
 //!
+//! Revision 3 is additive (§10 of that contract). Absent rev3 fields are omitted so a rev2
+//! page stays byte-identical. This module still opens no socket and reads no file.
+//!
 //! Identity, error, result and delivery-receipt types are **reused** from
 //! [`crate::scoped_contracts`], never duplicated here.
 
@@ -275,6 +278,7 @@ pub enum ReferencePartKind {
     Compact,
     Notice,
     TaskResult,
+    Diff,
 }
 
 /// Evidence of skill activity, not a claim that the skill's workflow completed.
@@ -328,14 +332,72 @@ pub struct ReferenceTaskResult {
     /// Set when `result` was cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_cut: Option<bool>,
+    /// Native parent call id, when the provider recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ReferenceTaskStatus {
+    Running,
     Completed,
     Failed,
     Cancelled,
+    /// Unfinished work after restart or reopen. Never inferred as failed.
+    Unverifiable,
+}
+
+/// Lifecycle of a tool call. Absent on a rev2 part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReferenceToolStatus {
+    Running,
+    Completed,
+    Failed,
+    /// A recorded native cancel, abort, or interrupt. Not failed, and not unverifiable.
+    Cancelled,
+    Unverifiable,
+}
+
+/// Provider-attributed token counts. Every count is omitted when the provider did not record it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceTokenUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+}
+
+/// Turn metadata a rev3 native reader may attach from provider records.
+/// Absent means the reader recorded neither a model nor usage. Page assembly does not invent it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceTurnMeta {
+    pub provider: ReferenceNativeHistoryKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ReferenceTokenUsage>,
+}
+
+/// Opaque bounded payload. The ref names no host path; the owning host binds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferencePayloadRef {
+    pub r#ref: String,
+    pub byte_length: u64,
+    pub digest: String,
+    pub truncated: bool,
+}
+
+fn reference_boxed_option_is_none<T, B: std::ops::Deref<Target = Option<T>>>(value: &B) -> bool {
+    value.is_none()
 }
 
 /// One part of a turn. The reference's `ConversationPart` union, ported field-for-field.
@@ -347,9 +409,16 @@ pub enum ReferencePart {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         phase: Option<ReferenceTextPhase>,
+        /// Generation-scoped part id. Omitted on a rev2 part.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     /// The agent's reasoning block; the client folds it and shows it only on request.
-    Thinking { text: String },
+    Thinking {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
     /// A skill the transcript recorded on its own, beside the text it was invoked with.
     ///
     /// The pinned readers push it in three places: the shared omp/omo/gjc/pi record loop pushes
@@ -360,7 +429,11 @@ pub enum ReferencePart {
     ///
     /// The turn's skill list draws it; the inline part list does not, because the reference
     /// filters `skill` out of the parts it renders in order (`ChatView.tsx:322`).
-    Skill { skill: ReferenceSkillActivity },
+    Skill {
+        skill: ReferenceSkillActivity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
     /// A tool call. `output_ref`/`output_size` are set when `output` was cut, so the whole
     /// output can be fetched on demand.
     Tool {
@@ -378,20 +451,51 @@ pub enum ReferencePart {
         output_size: Option<u64>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ReferenceImageRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Native call id. Results fold into the part with the same id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<ReferenceToolStatus>,
+        /// Rev3 bounded output ref. `output_ref` remains the rev2 opaque ref.
+        #[serde(default, skip_serializing_if = "reference_boxed_option_is_none")]
+        output_payload: Box<Option<ReferencePayloadRef>>,
     },
     /// A native user image, addressed by an opaque ref and fetched on demand.
-    Image { media_type: String, r#ref: String },
+    Image {
+        media_type: String,
+        r#ref: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
     /// The summary a compaction left; the conversation before it is what it sums up.
-    Compact { text: String },
+    Compact {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
     /// A message the agent's runtime put in the user's seat. `source` is the runtime's own
     /// name for it.
     Notice {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     /// OmO's background tasks that ended.
-    TaskResult { tasks: Vec<ReferenceTaskResult> },
+    TaskResult {
+        tasks: Vec<ReferenceTaskResult>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    /// A native patch. The payload ref is opaque; it is not a host path.
+    Diff {
+        patch: ReferencePayloadRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
 }
 
 impl ReferencePart {
@@ -406,6 +510,7 @@ impl ReferencePart {
             Self::Compact { .. } => ReferencePartKind::Compact,
             Self::Notice { .. } => ReferencePartKind::Notice,
             Self::TaskResult { .. } => ReferencePartKind::TaskResult,
+            Self::Diff { .. } => ReferencePartKind::Diff,
         }
     }
 
@@ -456,6 +561,11 @@ pub struct ReferenceTurn {
     pub parts: Vec<ReferencePart>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abandoned: Option<ReferenceAbandonedBranch>,
+    /// Generation-scoped turn id. Omitted when the read is unaligned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ReferenceTurnMeta>,
 }
 
 /// A position in a transcript stream: which stream, and where inside it.
@@ -493,6 +603,9 @@ pub struct ReferenceHistoryPage {
     /// Required when `availability` is not `native`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
+    /// Rev3 composer controls for this target. Absent hides every composer control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer: Option<ReferenceComposerCapabilities>,
 }
 
 impl ReferenceHistoryPage {
@@ -520,6 +633,179 @@ impl ReferenceHistoryPage {
     pub fn can_reach_provider_read(&self, target: &ReferenceTargetRef) -> bool {
         self.is_native() && target.has_provider_session()
     }
+}
+
+/// How a discovered model or option is applied. The client never sends a command template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReferenceComposerModelApply {
+    #[serde(rename = "command")]
+    Command,
+    #[serde(rename = "agent-picker")]
+    AgentPicker,
+}
+
+/// How a discovered option is applied. `start-only` cannot change a live pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReferenceComposerOptionApply {
+    #[serde(rename = "command")]
+    Command,
+    #[serde(rename = "agent-picker")]
+    AgentPicker,
+    #[serde(rename = "start-only")]
+    StartOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceComposerModelChoice {
+    pub id: String,
+    pub label: String,
+    pub efforts: Vec<String>,
+}
+
+/// Model controls for one target. `null` on the parent document hides them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceComposerModels {
+    pub current: Option<String>,
+    pub choices: Vec<ReferenceComposerModelChoice>,
+    pub apply: ReferenceComposerModelApply,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceComposerOption {
+    pub id: String,
+    pub label: String,
+    pub values: Vec<String>,
+    pub current: Option<String>,
+    pub apply: ReferenceComposerOptionApply,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceSlashCommand {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceFollowUpCapabilities {
+    pub queue: bool,
+    pub steer: bool,
+}
+
+/// Per-target composer controls. Missing models, options, or slash entries hide that UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceComposerCapabilities {
+    pub models: Option<ReferenceComposerModels>,
+    pub options: Vec<ReferenceComposerOption>,
+    pub slash_commands: Vec<ReferenceSlashCommand>,
+    pub follow_up: ReferenceFollowUpCapabilities,
+}
+
+/// Anchor for a rev3 `after` query and for `nextAnchor`. `previousTurnFingerprint` is required
+/// on the wire (`string | null`) and null when the anchor is the first turn the client holds.
+/// Omitting it is not the same as null.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceHistoryAnchor {
+    pub stream_id: String,
+    pub generation: String,
+    pub anchor_turn_id: String,
+    pub previous_turn_fingerprint: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ReferenceHistoryAnchor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            stream_id: String,
+            generation: String,
+            anchor_turn_id: String,
+            previous_turn_fingerprint: RequiredWireField<Option<String>>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            stream_id: wire.stream_id,
+            generation: wire.generation,
+            anchor_turn_id: wire.anchor_turn_id,
+            previous_turn_fingerprint: wire.previous_turn_fingerprint.0,
+        })
+    }
+}
+
+/// A JSON field that must be present. `Option`'s derived deserializer treats absence as
+/// `None`, which would accept an anchor that omitted `previousTurnFingerprint`.
+#[derive(Deserialize)]
+struct RequiredWireField<T>(T);
+
+/// Why a replacement delta cannot be applied. The response then carries a full newest page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReferenceHistoryResetReason {
+    GenerationChanged,
+    AnchorOutsideWindow,
+    AnchorNotTurnStart,
+    AnchorPrevMismatch,
+    TooFarBehind,
+    UnalignedTurns,
+    NotNative,
+    UnsupportedProjection,
+}
+
+/// Rev3 history read. A rev2 host never emits this; it keeps returning [`ReferenceHistoryPage`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ReferenceHistoryDeltaResponse {
+    Delta {
+        source: ReferenceHistorySource,
+        generation: String,
+        replace_from_turn_id: String,
+        turns: Vec<ReferenceTurn>,
+        next_anchor: ReferenceHistoryAnchor,
+        tail_open: bool,
+    },
+    Reset {
+        reason: ReferenceHistoryResetReason,
+        page: ReferenceHistoryPage,
+    },
+}
+
+/// Advisory frame. It carries no path, stream content, model, or transcript payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ReferenceHistoryEvent {
+    ReferenceHistoryChanged {
+        target: ReferenceTargetRef,
+        change_seq: String,
+    },
+}
+
+/// Fork or resume. The owning host builds the argv; the client does not send one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReferenceContinueMode {
+    Fork,
+    Resume,
+}
+
+/// Host-validated startup for a new pane. Not a mutation of the source pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ReferenceSessionStartup {
+    AgentContinue {
+        agent_type: String,
+        provider_session: crate::daemon::protocol::AgentProviderSession,
+        mode: ReferenceContinueMode,
+    },
 }
 
 /// A bounded, VT-aware snapshot of the original pane.
@@ -816,6 +1102,15 @@ pub fn reference_chat_route(session_id: &str, suffix: &str) -> String {
 /// the caller resolves it.
 pub const REFERENCE_OUTCOME_UNKNOWN_CODE: &str = "OPERATION_OUTCOME_UNKNOWN";
 
+/// Rev3 capability: the history route accepts an `after` anchor and may return a replacement delta.
+pub const REFERENCE_HISTORY_DELTA_V1: &str = "referenceHistoryDeltaV1";
+
+/// Rev3 capability: the owning host serves a bounded payload for an opaque output or diff ref.
+pub const REFERENCE_PAYLOAD_V1: &str = "referencePayloadV1";
+
+/// `cursor` and `after` together are not a query. Callers surface this as `INVALID_REQUEST`.
+pub const REFERENCE_HISTORY_CURSOR_AND_AFTER: &str = "INVALID_REQUEST";
+
 /// Does this wire error code mean the outcome is unknown?
 pub fn reference_is_outcome_unknown(code: &str) -> bool {
     code == REFERENCE_OUTCOME_UNKNOWN_CODE
@@ -903,6 +1198,8 @@ mod tests {
             has_more: false,
             generation: "g1".into(),
             unavailable_reason: None,
+        
+            composer: None,
         };
         assert!(native.is_native());
         assert_eq!(native.disclosure(), None);
@@ -920,6 +1217,8 @@ mod tests {
             has_more: false,
             generation: "g1".into(),
             unavailable_reason: Some("no native reader".into()),
+        
+            composer: None,
         };
         assert!(!scrollback.is_native());
         assert_eq!(scrollback.disclosure(), Some(REFERENCE_SCROLLBACK_DISCLOSURE));
@@ -936,6 +1235,8 @@ mod tests {
             has_more: false,
             generation: "g1".into(),
             unavailable_reason: None,
+        
+            composer: None,
         };
         assert!(not_started.disclosure().is_some());
     }
@@ -1026,7 +1327,7 @@ mod tests {
         let part: ReferencePart = serde_json::from_value(document.clone()).expect("the pinned skill part decodes");
         assert_eq!(part.kind(), ReferencePartKind::Skill);
         assert!(!part.is_inline_text(), "a chip is not prose");
-        let ReferencePart::Skill { skill } = &part else {
+        let ReferencePart::Skill { skill , ..} = &part else {
             panic!("the part is the skill variant, got {:?}", part.kind());
         };
         assert_eq!(skill.name, "lonely");
@@ -1269,5 +1570,215 @@ mod tests {
         assert_ne!(reference_draft_key(&base), reference_draft_key(&other_owner));
         let bound = ReferenceTargetRef::with_provider_session(target(), "p9");
         assert_eq!(reference_draft_key(&base), reference_draft_key(&bound));
+    }
+
+    #[test]
+    fn rev2_page_is_unchanged_when_rev3_fields_are_absent() {
+        let wire = json!({
+            "source": "pi-transcript",
+            "availability": "native",
+            "turns": [{"role": "assistant", "parts": [{"kind": "thinking", "text": "hmm"}]}],
+            "cursor": {"streamId": "dev:ino", "offset": 4096},
+            "hasMore": true,
+            "generation": "gen-9"
+        });
+        roundtrip::<ReferenceHistoryPage>(wire.clone());
+        let page: ReferenceHistoryPage = serde_json::from_value(wire.clone()).unwrap();
+        assert!(page.composer.is_none());
+        assert!(page.turns[0].id.is_none());
+        assert!(page.turns[0].meta.is_none());
+        let rendered = serde_json::to_string(&page).unwrap();
+        for key in ["composer", "callId", "outputPayload", "parentCallId", "\"id\""] {
+            assert!(!rendered.contains(key), "{key} leaked into a rev2 page: {rendered}");
+        }
+        assert_eq!(REFERENCE_HISTORY_DELTA_V1, "referenceHistoryDeltaV1");
+        assert_eq!(REFERENCE_PAYLOAD_V1, "referencePayloadV1");
+        assert_eq!(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY, "terminalContinueV1");
+        assert_eq!(REFERENCE_HISTORY_CURSOR_AND_AFTER, "INVALID_REQUEST");
+    }
+
+    #[test]
+    fn rev3_optional_fields_round_trip_and_absent_fields_are_omitted() {
+        let wire = json!({
+            "source": "claude-transcript",
+            "availability": "native",
+            "turns": [{
+                "role": "assistant",
+                "id": "turn-1",
+                "meta": {
+                    "provider": "claude",
+                    "model": "opus",
+                    "usage": {"inputTokens": 3, "outputTokens": 4}
+                },
+                "parts": [
+                    {
+                        "kind": "tool",
+                        "name": "read",
+                        "summary": "s",
+                        "input": "i",
+                        "output": "cut",
+                        "id": "part-1",
+                        "callId": "call-1",
+                        "status": "running",
+                        "outputPayload": {
+                            "ref": "out-1",
+                            "byteLength": 90,
+                            "digest": "abc",
+                            "truncated": true
+                        }
+                    },
+                    {
+                        "kind": "taskResult",
+                        "id": "tasks",
+                        "tasks": [{
+                            "id": "task-1",
+                            "title": "audit",
+                            "status": "unverifiable",
+                            "result": "restarted",
+                            "parentCallId": "call-9"
+                        }]
+                    },
+                    {
+                        "kind": "diff",
+                        "id": "diff-1",
+                        "patch": {
+                            "ref": "patch-1",
+                            "byteLength": 12,
+                            "digest": "def",
+                            "truncated": false
+                        }
+                    }
+                ]
+            }],
+            "hasMore": false,
+            "generation": "gen-3",
+            "composer": {
+                "models": {
+                    "current": "opus",
+                    "choices": [{"id": "opus", "label": "Opus", "efforts": ["low", "high"]}],
+                    "apply": "command"
+                },
+                "options": [{
+                    "id": "effort",
+                    "label": "Effort",
+                    "values": ["low", "high"],
+                    "current": null,
+                    "apply": "agent-picker"
+                }],
+                "slashCommands": [{"name": "model", "description": null}],
+                "followUp": {"queue": true, "steer": false}
+            }
+        });
+        roundtrip::<ReferenceHistoryPage>(wire);
+
+        roundtrip::<ReferenceHistoryEvent>(json!({
+            "type": "referenceHistoryChanged",
+            "target": {
+                "hostId": "host-a",
+                "ownerId": "owner-a",
+                "epoch": u64::MAX.to_string(),
+                "backendSessionId": "sess-1"
+            },
+            "changeSeq": "7"
+        }));
+        roundtrip::<ReferenceHistoryAnchor>(json!({
+            "streamId": "dev:ino",
+            "generation": "gen-3",
+            "anchorTurnId": "turn-1",
+            "previousTurnFingerprint": null
+        }));
+        roundtrip::<ReferenceHistoryDeltaResponse>(json!({
+            "mode": "delta",
+            "source": "claude-transcript",
+            "generation": "gen-3",
+            "replaceFromTurnId": "turn-1",
+            "turns": [{"role": "assistant", "id": "turn-1", "parts": []}],
+            "nextAnchor": {
+                "streamId": "dev:ino",
+                "generation": "gen-3",
+                "anchorTurnId": "turn-1",
+                "previousTurnFingerprint": "fp"
+            },
+            "tailOpen": true
+        }));
+        roundtrip::<ReferenceHistoryDeltaResponse>(json!({
+            "mode": "reset",
+            "reason": "anchorOutsideWindow",
+            "page": {
+                "source": "scrollback",
+                "availability": "scrollback",
+                "turns": [],
+                "hasMore": false,
+                "generation": "gen-1",
+                "unavailableReason": "no native reader"
+            }
+        }));
+        roundtrip::<ReferenceSessionStartup>(json!({
+            "kind": "agentContinue",
+            "agentType": "claude",
+            "providerSession": {"key": "session_id", "id": "native-1"},
+            "mode": "fork"
+        }));
+    }
+
+    #[test]
+    fn malformed_rev3_values_are_refused() {
+        assert!(serde_json::from_value::<ReferencePart>(json!({
+            "kind": "tool", "name": "read", "summary": "s", "input": "i", "output": "o", "status": "pending"
+        })).is_err());
+        let cancelled: ReferencePart = serde_json::from_value(json!({
+            "kind": "tool", "name": "read", "summary": "s", "input": "i", "output": "o", "status": "cancelled"
+        }))
+        .expect("cancelled is a tool status");
+        assert!(matches!(
+            cancelled,
+            ReferencePart::Tool {
+                status: Some(ReferenceToolStatus::Cancelled),
+                ..
+            }
+        ));
+        assert!(serde_json::to_string(&cancelled).unwrap().contains("\"status\":\"cancelled\""));
+        assert!(serde_json::from_value::<ReferencePart>(json!({
+            "kind": "taskResult", "tasks": [{"id": "t", "title": "t", "status": "unknown", "result": "x"}]
+        })).is_err());
+        assert!(serde_json::from_value::<ReferencePart>(json!({
+            "kind": "diff", "patch": {"ref": "p", "digest": "d", "truncated": false}
+        })).is_err());
+        assert!(serde_json::from_value::<ReferencePart>(json!({"kind": "diff"})).is_err());
+        assert!(serde_json::from_value::<ReferenceHistoryEvent>(json!({
+            "type": "referenceHistoryChanged",
+            "target": {"hostId": "h", "ownerId": "o", "epoch": "1", "backendSessionId": "s"},
+            "changeSeq": 1
+        })).is_err());
+        assert!(serde_json::from_value::<ReferenceHistoryDeltaResponse>(json!({
+            "mode": "reset",
+            "reason": "stale",
+            "page": {
+                "source": "scrollback",
+                "availability": "scrollback",
+                "turns": [],
+                "hasMore": false,
+                "generation": "g",
+                "unavailableReason": "x"
+            }
+        })).is_err());
+        assert!(serde_json::from_value::<ReferenceSessionStartup>(json!({
+            "kind": "agentContinue",
+            "agentType": "claude",
+            "providerSession": {"key": "session_id", "id": "n"},
+            "mode": "copy"
+        })).is_err());
+        assert!(serde_json::from_value::<ReferenceSessionStartup>(json!({
+            "kind": "agentResume", "agentType": "claude", "mode": "resume"
+        })).is_err());
+        assert!(serde_json::from_value::<ReferenceHistoryAnchor>(json!({
+            "streamId": "s", "generation": "g", "anchorTurnId": "t"
+        })).is_err());
+        assert!(serde_json::from_value::<ReferenceComposerCapabilities>(json!({
+            "models": {"current": null, "choices": [], "apply": "guess"},
+            "options": [],
+            "slashCommands": [],
+            "followUp": {"queue": false, "steer": false}
+        })).is_err());
     }
 }
