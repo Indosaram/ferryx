@@ -1036,7 +1036,12 @@ export async function dailyWebviewBefore(ctx) {
       && words.some((next) => /^ta[bt]/.test(ctx_norm(next.text)) && Math.abs(next.top - to.top) < 8 && next.left > to.left && next.left - (to.left + to.width) < 40));
     const rows = { tab: false, bookmark: false, history: false };
     for (let frame = 0; frame < 4 && !(rows.tab && rows.bookmark && rows.history); frame += 1) {
-      const words = screenWords(ctx);
+      const path = ctx.probeShot();
+      const words = ctx.ocr(path) ?? [];
+      // The "Switch to tab" row is small grey monospace text that the regular pass missed on every
+      // frame of macOS run 41957576848 (probes 046-049, row on screen); the strip pass on the same
+      // frame read "Switch", "to", "tab" there. Same predicate, more text read.
+      if (!rows.tab && !switchRow(words) && ctx.ocrStrips) words.push(...ctx.ocrStrips(path));
       rows.tab ||= switchRow(words);
       rows.bookmark ||= has(words, "bravo");
       rows.history ||= has(words, "alpha");
