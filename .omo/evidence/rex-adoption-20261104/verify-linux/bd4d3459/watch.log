@@ -1,0 +1,61 @@
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793851111 rex verify-linux gate (one-shot) · 41964894364
+Triggered via push about 2 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 127039532002)
+  ✓ Set up job
+  ✓ Free runner disk
+  * Run actions/checkout@v4
+  * Import private native source bundle
+  * Isolated TMPDIR, gate dir and git identity
+  * Run mlugg/setup-zig@v2
+  * Run oven-sh/setup-bun@v2
+  * Run dtolnay/rust-toolchain@stable
+  * Run swatinem/rust-cache@v2
+  * Install build dependencies
+  * Frontend assets and FFmpeg SDK
+  * gate 1: cargo test --manifest-path src-tauri/Cargo.toml --lib native_terminalosc_effects --locke
+  * gate 2: cargo test --manifest-path src-tauri/Cargo.toml --lib supervisor_peer --locked
+  * gate 3: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib native_termina
+  * gate 4: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib supervisor_pee
+  * gate 5: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+  * gate 6: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --loc
+  * gate 7: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793851111 rex verify-linux gate (one-shot) · 41964894364
+Triggered via push about 5 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 127039532002)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  * gate 1: cargo test --manifest-path src-tauri/Cargo.toml --lib native_terminalosc_effects --locke
+  * gate 2: cargo test --manifest-path src-tauri/Cargo.toml --lib supervisor_peer --locked
+  * gate 3: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib native_termina
+  * gate 4: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib supervisor_pee
+  * gate 5: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+  * gate 6: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --loc
+  * gate 7: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4

@@ -1,0 +1,8 @@
+ M src-tauri/gen/schemas/acl-manifests.json
+ M src-tauri/gen/schemas/capabilities.json
+ M src-tauri/gen/schemas/desktop-schema.json
+ M src-tauri/gen/schemas/linux-schema.json
+ M ui/public/llms.txt
+ M ui/public/search.json
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root       145G   48G   97G  33% /

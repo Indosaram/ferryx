@@ -1,0 +1,4 @@
+cargo build --manifest-path src-tauri/Cargo.toml --bins --features local-split-qa --locked
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux-live/account-qa.mjs
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux-live/extra-qa.mjs
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux-live/live-qa.mjs

@@ -1,0 +1,20 @@
+$ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+[1m[92m   Compiling[0m ferryx v2026.1101.1 (/home/runner/work/ferryx/ferryx/src-tauri)
+[1m[91merror[0m[1m: items after a test module[0m
+   [1m[94m--> [0msrc/daemon/plugins/runner.rs:99:1
+    [1m[94m|[0m
+[1m[94m 99[0m [1m[94m|[0m mod tests {
+    [1m[94m|[0m [1m[91m^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m143[0m [1m[94m|[0m pub fn entry() -> Option<i32> {
+    [1m[94m|[0m [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m148[0m [1m[94m|[0m pub fn run_stdio() -> i32 {
+    [1m[94m|[0m [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mhelp[0m: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#items_after_test_module
+    [1m[94m= [0m[1mnote[0m: `-D clippy::items-after-test-module` implied by `-D warnings`
+    [1m[94m= [0m[1mhelp[0m: to override `-D warnings` add `#[allow(clippy::items_after_test_module)]`
+    [1m[94m= [0m[1mhelp[0m: move the items to before the test module was defined
+
+[1m[91merror[0m: could not compile `ferryx` (lib test) due to 1 previous error

@@ -1,0 +1,2 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux/account-qa.mjs
+error: Module not found ".github/rex-gate/verify-linux/account-qa.mjs"

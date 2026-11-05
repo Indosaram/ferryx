@@ -1,0 +1,25 @@
+$ cargo test --manifest-path src-tauri/Cargo.toml --lib supervisor_peer --locked
+[1m[92m    Finished[0m `test` profile [unoptimized] target(s) in 1.89s
+[1m[92m     Running[0m unittests src/lib.rs (src-tauri/target/debug/deps/ferryx_lib-93e9a44a9366851b)
+
+running 17 tests
+test daemon::supervisor_peer::tests::a_pane_descendant_is_refused_and_an_outside_process_is_not ... ok
+test daemon::supervisor_peer::tests::a_reused_ancestor_pid_is_not_a_pane ... ok
+test daemon::supervisor_peer::tests::a_reparented_pane_process_is_still_refused_by_session_or_terminal ... ok
+test daemon::supervisor_peer::tests::a_reused_pid_and_an_ancestor_that_vanishes_mid_walk_are_refused ... ok
+test daemon::supervisor_peer::tests::a_token_authenticated_peer_is_refused ... ok
+test daemon::supervisor_peer::tests::classify_returns_the_session_the_peer_descends_from ... ok
+test daemon::supervisor_peer::tests::exited_ancestor_owner_recovery_uses_real_classifier_without_promoting_panes ... ok
+test daemon::supervisor_peer::tests::exited_windows_ssh_ancestor_needs_positive_pre_pane_identity ... ok
+test daemon::supervisor_peer::tests::a_hidden_live_process_is_unreadable_and_a_reaped_one_vanished ... ok
+test daemon::supervisor_peer::tests::missing_restricted_ancestor_blocks_even_pre_cutoff_owner_evidence ... ok
+test daemon::supervisor_peer::tests::newer_intermediate_parent_cannot_hide_live_restricted_ancestor ... ok
+test daemon::supervisor_peer::tests::the_accept_time_chain_is_reused_and_the_peer_re_read ... ok
+test daemon::supervisor_peer::tests::the_peer_pid_of_a_socketpair_is_this_process ... ok
+test daemon::supervisor_peer::tests::the_real_process_table_is_read ... ok
+test daemon::supervisor_peer::tests::unknown_or_unreadable_peers_are_refused ... ok
+test daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases ... ok
+test daemon::supervisor_peer::registry_drops_exited_pane ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 5797 filtered out; finished in 1.31s
+

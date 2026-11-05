@@ -1,0 +1,8 @@
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --locked
+cargo test --manifest-path src-tauri/Cargo.toml --lib daemon::plugins --locked
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemon::plugins --locked
+bun run --cwd ui test -- PluginsSection PluginPane
+bun run --cwd ui typecheck:test
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --locked -- -D warnings

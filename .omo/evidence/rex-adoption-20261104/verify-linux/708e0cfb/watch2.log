@@ -1,0 +1,205 @@
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793848280 rex verify-linux gate (one-shot) · 41960022396
+Triggered via push about 31 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 127023931110)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+  ✓ gate 2: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --loc
+  * gate 3: cargo test --manifest-path src-tauri/Cargo.toml --lib daemonplugins --locked
+  * gate 4: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemonplugin
+  * gate 5: bun run --cwd ui test -- PluginsSection PluginPane
+  * gate 6: bun run --cwd ui typechecktest
+  * gate 7: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  * gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793848280 rex verify-linux gate (one-shot) · 41960022396
+Triggered via push about 34 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 127023931110)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+  ✓ gate 2: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --loc
+  ✓ gate 3: cargo test --manifest-path src-tauri/Cargo.toml --lib daemonplugins --locked
+  * gate 4: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemonplugin
+  * gate 5: bun run --cwd ui test -- PluginsSection PluginPane
+  * gate 6: bun run --cwd ui typechecktest
+  * gate 7: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  * gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793848280 rex verify-linux gate (one-shot) · 41960022396
+Triggered via push about 37 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 127023931110)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+  ✓ gate 2: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --loc
+  ✓ gate 3: cargo test --manifest-path src-tauri/Cargo.toml --lib daemonplugins --locked
+  * gate 4: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemonplugin
+  * gate 5: bun run --cwd ui test -- PluginsSection PluginPane
+  * gate 6: bun run --cwd ui typechecktest
+  * gate 7: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  * gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793848280 rex verify-linux gate (one-shot) · 41960022396
+Triggered via push about 40 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 127023931110)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+  ✓ gate 2: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --loc
+  ✓ gate 3: cargo test --manifest-path src-tauri/Cargo.toml --lib daemonplugins --locked
+  ✓ gate 4: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemonplugin
+  ✓ gate 5: bun run --cwd ui test -- PluginsSection PluginPane
+  ✓ gate 6: bun run --cwd ui typechecktest
+  * gate 7: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  * gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793848280 rex verify-linux gate (one-shot) · 41960022396
+Triggered via push about 43 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 127023931110)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+  ✓ gate 2: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --loc
+  ✓ gate 3: cargo test --manifest-path src-tauri/Cargo.toml --lib daemonplugins --locked
+  ✓ gate 4: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemonplugin
+  ✓ gate 5: bun run --cwd ui test -- PluginsSection PluginPane
+  ✓ gate 6: bun run --cwd ui typechecktest
+  ✓ gate 7: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ Summary and workspace diff
+  ✓ Upload gate evidence
+  X Fail when any gate command failed
+  - Post Run swatinem/rust-cache@v2
+  - Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+X ci/rex-verify-linux-gate-1793848280 rex verify-linux gate (one-shot) · 41960022396
+Triggered via push about 46 minutes ago
+
+JOBS
+X rex verify-linux Linux gate in 43m25s (ID 127023931110)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+  ✓ gate 2: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --loc
+  ✓ gate 3: cargo test --manifest-path src-tauri/Cargo.toml --lib daemonplugins --locked
+  ✓ gate 4: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemonplugin
+  ✓ gate 5: bun run --cwd ui test -- PluginsSection PluginPane
+  ✓ gate 6: bun run --cwd ui typechecktest
+  ✓ gate 7: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ Summary and workspace diff
+  ✓ Upload gate evidence
+  X Fail when any gate command failed
+  - Post Run swatinem/rust-cache@v2
+  - Post Run oven-sh/setup-bun@v2
+  ✓ Post Run mlugg/setup-zig@v2
+  ✓ Post Run actions/checkout@v4
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/upload-artifact@v4, mlugg/setup-zig@v2. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+rex verify-linux Linux gate: .github#2
+
+X Process completed with exit code 1.
+rex verify-linux Linux gate: .github#21
+

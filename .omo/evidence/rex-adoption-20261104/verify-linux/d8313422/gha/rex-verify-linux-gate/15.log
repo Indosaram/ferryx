@@ -1,0 +1,3 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-hash-handover.mjs --binary src-tauri/target/debug/ferryx-cli --successor src-tauri/target/debug/ferryx-cli
+HASH_EQUAL=true RETAINED=10000 SESSIONS=1
+HASH_EQUAL=true RETAINED=10000 SESSIONS=4

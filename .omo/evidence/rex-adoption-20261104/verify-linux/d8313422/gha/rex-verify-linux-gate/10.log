@@ -1,0 +1,33 @@
+$ cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay --bin ferryx-account --locked
+[1m[92m   Compiling[0m tokio v1.53.1
+[1m[92m   Compiling[0m wasm-encoder v0.263.0
+[1m[92m   Compiling[0m wast v263.0.0
+[1m[92m   Compiling[0m hyper v1.11.0
+[1m[92m   Compiling[0m tokio-rustls v0.26.4
+[1m[92m   Compiling[0m tokio-stream v0.1.19
+[1m[92m   Compiling[0m tower v0.5.3
+[1m[92m   Compiling[0m hyper-util v0.1.20
+[1m[92m   Compiling[0m sqlx-core v0.8.6
+[1m[92m   Compiling[0m tokio-tungstenite v0.29.0
+[1m[92m   Compiling[0m axum v0.8.9
+[1m[92m   Compiling[0m sqlx-sqlite v0.8.6
+[1m[92m   Compiling[0m sqlx v0.8.6
+[1m[92m   Compiling[0m hyper-rustls v0.27.9
+[1m[92m   Compiling[0m tower-http v0.6.11
+[1m[92m   Compiling[0m wat v1.263.0
+[1m[92m   Compiling[0m tokio-util v0.7.19
+[1m[92m   Compiling[0m wasmi v0.46.0
+[1m[92m   Compiling[0m reqwest v0.12.28
+[1m[92m   Compiling[0m ferryx-hub v0.1.0 (/home/runner/work/ferryx/ferryx/crates/ferryx-hub)
+[1m[92m   Compiling[0m quinn v0.11.11
+[1m[92m   Compiling[0m ferryx v2026.1101.1 (/home/runner/work/ferryx/ferryx/src-tauri)
+[1m[33mwarning[0m[1m: static `NATIVE_DEBUG_SEQUENCE` is never used[0m
+  [1m[94m--> [0msrc/ipc/debug.rs:34:8
+   [1m[94m|[0m
+[1m[94m34[0m [1m[94m|[0m static NATIVE_DEBUG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+   [1m[94m|[0m        [1m[33m^^^^^^^^^^^^^^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m: `ferryx` (lib) generated 1 warning
+[1m[92m    Finished[0m `dev` profile [unoptimized] target(s) in 1m 47s

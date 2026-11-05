@@ -1,0 +1,24 @@
+lane=verify-linux sha=708e0cfb767a02e3d93db1661d6bf5035480f1f9 repo=Indosaram/ferryx
+ref=ci/rex-verify-linux-ref-708e0cfb7 gate=ci/rex-verify-linux-gate-1793848280 scratch=/tmp/rex-gate-verify-linux-1793848280 evidence=/Volumes/T9-Mac/project/ferryx-wt/rex-verify-linux-20261104/.omo/evidence/rex-adoption-20261104/verify-linux/708e0cfb/gha
+remote: 
+remote: Create a pull request for 'ci/rex-verify-linux-ref-708e0cfb7' on GitHub by visiting:        
+remote:      https://github.com/Indosaram/ferryx/pull/new/ci/rex-verify-linux-ref-708e0cfb7        
+remote: 
+remote: 
+remote: Create a pull request for 'ci/rex-verify-linux-gate-1793848280' on GitHub by visiting:        
+remote:      https://github.com/Indosaram/ferryx/pull/new/ci/rex-verify-linux-gate-1793848280        
+remote: 
+pushed ci/rex-verify-linux-ref-708e0cfb7=708e0cfb767a02e3d93db1661d6bf5035480f1f9 ci/rex-verify-linux-gate-1793848280=6819cef55c6101f63d6d52070b5170e64fec0574
+RUN-STARTED verify-linux run=41960022396 url=https://github.com/Indosaram/ferryx/actions/runs/41960022396
+per-command exit codes:
+1 EXIT=0 SECONDS=865
+2 EXIT=0 SECONDS=226
+3 EXIT=0 SECONDS=610
+4 EXIT=0 SECONDS=368
+5 EXIT=0 SECONDS=3
+6 EXIT=0 SECONDS=31
+7 EXIT=101 SECONDS=163
+8 EXIT=101 SECONDS=125
+sha=708e0cfb767a02e3d93db1661d6bf5035480f1f9
+GATE-DONE verify-linux run=41960022396 conclusion=failure
+remote refs ci/rex-verify-linux-*: none left

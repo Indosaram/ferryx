@@ -1,0 +1,7 @@
+cargo test --manifest-path src-tauri/Cargo.toml --lib native_terminal::osc_effects --locked
+cargo test --manifest-path src-tauri/Cargo.toml --lib supervisor_peer --locked
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib native_terminal::osc_effects --locked
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib supervisor_peer --locked
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --locked
+cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-unknown-linux-gnu --target-dir remote-helper/target && bun scripts/helper-build-receipt.mjs x86_64-unknown-linux-gnu remote-helper/target/x86_64-unknown-linux-gnu/release/ferryx-remote-helper "$GATE_DIR/x86_64-unknown-linux-gnu.json" && cp remote-helper/target/x86_64-unknown-linux-gnu/release/ferryx-remote-helper "$GATE_DIR/ferryx-remote-helper-linux-x64"

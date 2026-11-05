@@ -1,0 +1,480 @@
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 21 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  * gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  * gate 5: bun run --cwd ui test
+  * gate 6: bun run --cwd ui lint
+  * gate 7: bun run --cwd ui typechecktest
+  * gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  * gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  * gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  * gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  * gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  * gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  * gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  * gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  * gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  * gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  * gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  * gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 24 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  * gate 5: bun run --cwd ui test
+  * gate 6: bun run --cwd ui lint
+  * gate 7: bun run --cwd ui typechecktest
+  * gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  * gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  * gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  * gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  * gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  * gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  * gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  * gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  * gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  * gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  * gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  * gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 27 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  * gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  * gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  * gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  * gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  * gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  * gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  * gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  * gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  * gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  * gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  * gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  * gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 30 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  * gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  * gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  * gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  * gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  * gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  * gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  * gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  * gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  * gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  * gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  * gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 33 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  * gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  * gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  * gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  * gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  * gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  * gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  * gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  * gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  * gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  * gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 36 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  * gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  * gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  * gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  * gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  * gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  * gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 39 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  * gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  * gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  * gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  * gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 42 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  ✓ gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  ✓ gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  ✓ gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  ✓ gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 45 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  ✓ gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  ✓ gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  ✓ gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  ✓ gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 48 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  ✓ gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  ✓ gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  ✓ gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  ✓ gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  * gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4

@@ -1,0 +1,2 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-attach.mjs
+DETACH_ROUNDTRIP_OK
