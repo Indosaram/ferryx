@@ -945,7 +945,12 @@ pub enum DaemonRequest {
     GetCapabilities,
     PluginsList,
     Script { action: crate::script::control::Action },
-    PluginSetEnabled { name: String, enabled: bool },
+    PluginSetEnabled {
+        name: String,
+        enabled: bool,
+        #[serde(default)]
+        expected: Option<crate::daemon::plugins::Manifest>,
+    },
     PluginView { plugin: String, view: String },
     /// Accepted only over the plugin's own stdio; never a public owner request.
     PluginRender { view: String, html: String },
