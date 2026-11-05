@@ -1054,11 +1054,14 @@ writeFileSync(agentAuthority, JSON.stringify({ settings: { requirePairing: false
 summary.agent_access = { requirePairing: false, file: agentAuthority };
 
 let app = null;
+/** The log file of the running app (app.log, then the restart logs). */
+let currentAppLog = "app.log";
 // Session files outside the isolation dirs, before the app ever ran (G1: nothing is written there).
 const startedAtMs = Date.now();
 const outsideBefore = Object.fromEntries(outsideSessionFiles(platform).map((path) => [path, statOrNull(path)]));
 /** Starts the app with the isolated env; its exit is recorded unless the harness restarted it. */
 function launchApp(logName) {
+  currentAppLog = logName;
   const log = openSync(join(out, logName), "w");
   const child = spawn(binary, [], { env, stdio: ["ignore", log, log], cwd: dirs.tmp, detached: platform !== "win32" });
   child.on("exit", (code, signal) => {
@@ -2013,6 +2016,7 @@ const daily = {
   startedAtMs,
   outsideBefore,
   closeDialogs: () => (platform === "win32" ? win.closeDialogs() : { ok: true }),
+  appLogName: () => currentAppLog,
   chromeFocusClick: () => chromeFocus[1](),
 };
 // Settings is open: these run on the page, so close it first; they need the system webview.

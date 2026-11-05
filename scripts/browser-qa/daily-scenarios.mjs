@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 
 /** The gaps each platform must report (G6 notifications and G9 print run on Linux and Windows). */
 export function expectedDailyGaps(platform) {
@@ -99,6 +100,8 @@ drop.addEventListener('drop',(e)=>{e.preventDefault();const x=e.dataTransfer.fil
     ["/notify.html", { body: notify, type: "text/html" }],
     ["/upload.html", { body: upload, type: "text/html" }],
     ["/print.html", { body: page("qa-print", "PRINTPAGE"), type: "text/html" }],
+    // A plain page whose only use is to test that a URL typed through the address bar lands.
+    ["/qa/probe.html", { body: page("qa-probe", "PROBEPAGE"), type: "text/html" }],
     ["/doc.pdf", { body: makePdf(), type: "application/pdf" }],
   ]);
 }
@@ -145,6 +148,26 @@ function readJson(path) {
   } catch {
     return null;
   }
+}
+
+/** The current app log's lines matching `pattern` (ANSI colour stripped), last 20. */
+function appLogLines(ctx, pattern) {
+  const path = join(ctx.out, ctx.appLogName?.() ?? "app.log");
+  if (!existsSync(path)) return { path, missing: true };
+  const lines = stripVTControlCharacters(readFileSync(path, "utf8")).split(/\r?\n/).filter((line) => pattern.test(line));
+  return { path, lines: lines.slice(-20) };
+}
+
+/**
+ * Where input goes right now (Windows: the foreground window and the keyboard-focus chain with
+ * process names; elsewhere null) and every tab with id, URL, title and visibility.
+ */
+function inputState(ctx) {
+  return {
+    at: new Date().toISOString(),
+    tabs: ctx.sessions().list.map((entry) => ({ browserId: entry.browserId, url: entry.url, title: entry.title, visible: entry.visible, engine: entry.engine })),
+    focus: ctx.platform === "win32" ? ctx.win.windowRows("focuschain") : null,
+  };
 }
 
 async function historyRows(ctx) {
@@ -492,11 +515,38 @@ function closeFileManager(ctx) {
 async function visit(ctx, url, expect, timeout = 20000) {
   const path = new URL(url).pathname;
   const landed = () => ctx.sessions().list.some((entry) => entry.visible !== false && (entry.url ?? "").split(/[?#]/)[0].endsWith(path));
+  let ok = false;
+  let attempts = 0;
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    attempts += 1;
     for (const [, action] of ctx.typeUrl(url)) await action();
-    if (await until(landed, 8000)) break;
+    if (await until(landed, 8000)) {
+      ok = true;
+      break;
+    }
   }
-  return expect ? waitWords(ctx, [].concat(expect), timeout) : null;
+  const seen = expect ? await waitWords(ctx, [].concat(expect), timeout) : null;
+  // Where every typed navigation of the daily scenarios went: run 41958163263 typed /print.html
+  // and /notify.html after daily-g8-upload and the tab stayed on /upload.html with no record of it.
+  // A visit that did not land also records where the input went.
+  (ctx.summary.daily_visits ??= []).push({
+    path, landed: ok, attempts, text_seen: expect ? Boolean(seen) : null,
+    ...(ok ? { at: new Date().toISOString() } : inputState(ctx)),
+  });
+  return seen;
+}
+
+/**
+ * Records the tab list, the keyboard focus and whether a URL typed into the address bar lands,
+ * under summary.daily_probes[label]. Changes no check: it only types /qa/probe.html, so the
+ * caller loads the page it needs afterwards.
+ */
+async function probeInput(ctx, label) {
+  const before = inputState(ctx);
+  const path = "/qa/probe.html";
+  const typed = Boolean(await visit(ctx, `${ctx.fixtureBase}${path}`, "PROBEPAGE", 8000));
+  const landed = ctx.sessions().list.some((entry) => (entry.url ?? "").split(/[?#]/)[0].endsWith(path));
+  (ctx.summary.daily_probes ??= {})[label] = { before, typed_url_landed: landed, probe_text_seen: typed, after: inputState(ctx) };
 }
 
 /** Focus the app chrome (not the page) and send an app shortcut to the active browser tab. */
@@ -1209,6 +1259,9 @@ export async function dailyWebviewBefore(ctx) {
       return has(words, "password") && save.length ? { save, not } : null;
     }, 15000);
     g3.checks.save_prompt_shown = Boolean(prompt);
+    // The prompt the app offered, read back from app.log by the save step below (prompt_id lines
+    // from browser_vault.rs): how many offers, and which one was last.
+    g3.prompt_seen_at = new Date().toISOString();
     if (!prompt) return { ok: false, stderr: "no save prompt", page, typed: g3.typed };
     // The Save button: the rightmost "Save" left of "Not now" (the sentence starts with "Save" too).
     // OCR often reads only the sentence's "Save" (Windows run 41824966041 probe 070: "Save" at
@@ -1233,9 +1286,11 @@ export async function dailyWebviewBefore(ctx) {
     g3.save_words = prompt.save.map((word) => [word.left, word.top, word.width]);
     g3.not_word = prompt.not ? [prompt.not.left, prompt.not.top, prompt.not.width] : null;
     g3.vault_before_click = vaultState();
+    g3.save_clicked_at = new Date().toISOString();
     ctx.host.click(...at);
     const vault = await until(() => (readJson(vaultPath)?.items?.length ?? 0) > 0, 10000);
     g3.checks.saved = Boolean(vault);
+    g3.vault_log = appLogLines(ctx, /a password|save prompt/);
     g3.vault_after_click = vaultState();
     if (!vault) {
       const line = prompt.save[0].top;
@@ -1327,6 +1382,9 @@ export async function dailyWebviewBefore(ctx) {
     if (!picked) ctx.closeDialogs();
     g8.panel_closed = await closeFilePanel(ctx);
     ctx.host.focus();
+    // Instrumentation only: where input goes after the picker (run 41958163263: every typed
+    // visit after this step stayed on /upload.html). The reload below brings the page back.
+    await probeInput(ctx, "after-g8-picker");
     // A picker answer that went astray can leave the tab off the upload page; the drag check
     // needs DROPZONE on screen, so the page is loaded again first.
     if (!(tab(ctx, daily.tabB)?.url ?? "").split(/[?#]/)[0].endsWith("/upload.html")) {
@@ -1344,6 +1402,7 @@ export async function dailyWebviewBefore(ctx) {
     g8.checks.drag_in = Boolean(dropped);
     g8.drop_title = tab(ctx, daily.tabB)?.title ?? null;
     ctx.host.focus();
+    await probeInput(ctx, "after-g8-drag");
     return { ok: g8.checks.upload_picker && g8.checks.drag_in };
   });
 
