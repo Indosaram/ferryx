@@ -6574,7 +6574,18 @@ async fn reference_chat_session_is_remote(
     else {
         return false;
     };
-    crate::agent_transcript::remote_target_from_store(&raw, session_id).is_some()
+    let Ok(store) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    store
+        .get("remoteSessions")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|sessions| {
+            sessions.iter().any(|row| {
+                row.pointer("/descriptor/backendSessionId").and_then(serde_json::Value::as_str)
+                    == Some(session_id)
+            })
+        })
 }
 
 /// The cursor a read names, or the refusal that keeps a cursor from being re-anchored.

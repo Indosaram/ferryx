@@ -3459,15 +3459,23 @@ async fn a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally() 
         }],
     });
     std::fs::create_dir_all(store_path.parent().expect("store dir")).expect("store dir");
-    std::fs::write(&store_path, store.to_string()).expect("write remote session store");
+    for project_path in [
+        worktree.to_string_lossy().into_owned(),
+        "/home/remote/project".into(),
+        r"C:\Users\remote\project".into(),
+    ] {
+        let mut store = store.clone();
+        store["remoteSessions"][0]["descriptor"]["config"]["projectPath"] = project_path.clone().into();
+        std::fs::write(&store_path, store.to_string()).expect("write remote session store");
 
-    let (status, body) = fixture.stage("remote.txt", b"remote body").await;
-    assert!(
-        staged_attachment_dirs(&worktree).is_empty(),
-        "an SSH-remote pane's file was staged on this gateway's disk: {body}"
-    );
-    assert_eq!(status, 422, "{body}");
-    assert!(body.contains("UNSUPPORTED"), "{body}");
+        let (status, body) = fixture.stage("remote.txt", b"remote body").await;
+        assert!(
+            staged_attachment_dirs(&worktree).is_empty(),
+            "an SSH-remote pane's file was staged locally for {project_path}: {body}"
+        );
+        assert_eq!(status, 422, "{project_path}: {body}");
+        assert!(body.contains("UNSUPPORTED"), "{project_path}: {body}");
+    }
     fixture.server.stop().await;
 }
 
