@@ -1,0 +1,71 @@
+[
+  {
+    "command": [
+      "git",
+      "diff",
+      "d8313422..708e0cfb"
+    ],
+    "exit": 0,
+    "artifact": "repair.diff.gz"
+  },
+  {
+    "command": [
+      "git",
+      "diff",
+      "--exit-code",
+      "708e0cfb",
+      "--",
+      ".",
+      ":!.omo/evidence/rex-adoption-20261104/verify-audit"
+    ],
+    "exit": 0,
+    "artifact": "product-identity.log"
+  },
+  {
+    "command": [
+      "git",
+      "merge-base",
+      "--is-ancestor",
+      "c5976f1f",
+      "708e0cfb"
+    ],
+    "exit": 0,
+    "artifact": "author-ancestry.log"
+  },
+  {
+    "command": [
+      "git",
+      "-C",
+      "/Volumes/T9-Mac/project/ferryx-wt/rex-repair-terminal-build-20261104/src-tauri/vendor/ghostty",
+      "diff",
+      "83fb95624b0439ee660c2679b43b38c8b63769cd..216426b"
+    ],
+    "exit": 0,
+    "artifact": "native.diff.gz"
+  },
+  {
+    "command": [
+      "git",
+      "-C",
+      "/Volumes/T9-Mac/project/ferryx-wt/rex-repair-terminal-build-20261104/src-tauri/vendor/ghostty",
+      "rev-parse",
+      "HEAD"
+    ],
+    "exit": 0,
+    "artifact": "native-head.log"
+  },
+  {
+    "command": [
+      "git",
+      "diff",
+      "--exit-code",
+      "2138dfb2b",
+      "--",
+      ".omo/evidence/rex-adoption-20261104/verify-audit/F1-audit.md",
+      ".omo/evidence/rex-adoption-20261104/verify-audit/F2-security-review.md",
+      ".omo/evidence/rex-adoption-20261104/verify-audit/d8313422"
+    ],
+    "exit": 0,
+    "artifact": "historical-reports.log"
+  }
+]

@@ -1,0 +1,35 @@
+{
+  "head": "708e0cfb767a02e3d93db1661d6bf5035480f1f9",
+  "author_anchor": "c5976f1f",
+  "finals": {
+    "F1": {
+      "status": "APPROVE",
+      "scope": "Source compliance with explicitly authorized migration-only leafId exception; not whole-plan acceptance."
+    },
+    "F2": {
+      "status": "APPROVE",
+      "scope": "Bounded R2-1/R2-2 source repairs only; no executed security proof."
+    }
+  },
+  "report": "review.md",
+  "findings": [],
+  "closed_in_source": [
+    "R2-1 reviewed manifest identity substitution",
+    "R2-2 unbounded retained render documents"
+  ],
+  "migration_exception": "Preserve legacy import/backup and transient mapping; prohibit persisted visual leaf IDs as daemon-owned pane identity. Literal references enumerated, not hidden.",
+  "native_revision": "216426b inspected in dated rex-repair-terminal-build worktree; no source blocker in bounded diff",
+  "execution": {
+    "builds": [],
+    "tests": [],
+    "runtime_qa": []
+  },
+  "remaining_gates": [
+    "T13 release prerequisite",
+    "Windows recovery runtime verification",
+    "Non-waived automated and host acceptance/security gates"
+  ],
+  "waiver": "No waived macOS GUI QA performed or required by this review.",
+  "historical_evidence": "Preserved unchanged",
+  "product_edits": false
+}

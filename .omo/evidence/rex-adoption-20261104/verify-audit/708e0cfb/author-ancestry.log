@@ -1,0 +1,2 @@
+$ git merge-base --is-ancestor c5976f1f 708e0cfb
+EXIT=0

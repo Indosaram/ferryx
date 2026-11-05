@@ -1,0 +1,3 @@
+$ git -C /Volumes/T9-Mac/project/ferryx-wt/rex-repair-terminal-build-20261104/src-tauri/vendor/ghostty rev-parse HEAD
+216426b657b93d8fadd11d7506615f744581221e
+EXIT=0

@@ -1,0 +1,4 @@
+$ git -C /Volumes/T9-Mac/project/ferryx-wt/rex-repair-terminal-build/src-tauri/vendor/ghostty show --stat --oneline 216426b
+fatal: cannot change to '/Volumes/T9-Mac/project/ferryx-wt/rex-repair-terminal-build/src-tauri/vendor/ghostty': No such file or directory
+EXIT=128
+Resolved using dated worktree path; see native-head.log and native.diff.gz.

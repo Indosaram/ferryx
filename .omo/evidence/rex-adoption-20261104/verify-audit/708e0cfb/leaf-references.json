@@ -1,0 +1,37 @@
+[
+  {
+    "path": "src-tauri/src/daemon/layout_migration.rs",
+    "line": 120,
+    "text": "    let visual = text(tree, \"leafId\");"
+  },
+  {
+    "path": "src-tauri/src/daemon/layout_migration.rs",
+    "line": 171,
+    "text": "            \"one\":{\"root\":{\"type\":\"leaf\",\"leafId\":\"repeated\"},\"activeLeafId\":\"repeated\",\"expandedLeafId\":\"repeated\"},"
+  },
+  {
+    "path": "src-tauri/src/daemon/layout_migration.rs",
+    "line": 172,
+    "text": "            \"two\":{\"root\":{\"type\":\"leaf\",\"leafId\":\"repeated\"},\"activeLeafId\":\"repeated\",\"expandedLeafId\":\"repeated\"}"
+  },
+  {
+    "path": "src-tauri/src/daemon/layout_migration.rs",
+    "line": 245,
+    "text": "            serde_json::json!({\"tabs\":[{\"id\":\"t\",\"label\":\"old\",\"sessionId\":\"s\",\"paneTree\":{\"type\":\"leaf\",\"leafId\":\"visual\"},\"sessionIdsByLeafId\":{\"visual\":\"s\"}}]}),"
+  },
+  {
+    "path": "src-tauri/src/daemon/layout_migration.rs",
+    "line": 246,
+    "text": "            serde_json::json!({\"tabs\":[{\"id\":\"t\",\"label\":\"terminal\",\"terminal\":{\"primarySessionId\":\"s\",\"paneTree\":{\"type\":\"leaf\",\"leafId\":\"visual\"},\"sessionIdsByLeafId\":{\"visual\":\"s\"}}}]}),"
+  },
+  {
+    "path": "src-tauri/src/daemon/layout_migration.rs",
+    "line": 247,
+    "text": "            serde_json::json!({\"tabs\":[{\"id\":\"t\",\"label\":\"mixed\"}],\"activeTabId\":\"t\",\"layoutsByTabId\":{\"t\":{\"root\":{\"type\":\"split\",\"direction\":\"vertical\",\"ratio\":0.4,\"first\":{\"type\":\"leaf\",\"leafId\":\"visual\"},\"second\":{\"type\":\"leaf\",\"leafId\":\"browser\"}},\"activeLeafId\":\"visual\",\"contentsByLeafId\":{\"visual\":{\"kind\":\"terminal\",\"sessionId\":\"s\"},\"browser\":{\"kind\":\"browser\",\"browser\":{\"url\":\"https://example.org\"}}}}},\"tabGroups\":[{\"id\":\"g\",\"tabIds\":[\"t\"],\"activeTabId\":\"t\"}],\"tabGroupLayout\":{\"type\":\"group\",\"groupId\":\"g\"},\"focusedGroupId\":\"g\"}),"
+  },
+  {
+    "path": "src-tauri/src/daemon/layout_migration.rs",
+    "line": 261,
+    "text": "            assert!(!persisted.contains(\"leafId\"));"
+  }
+]
