@@ -683,11 +683,12 @@ async function clickToolbarIcon(ctx, index, verify, { spread = 1 } = {}) {
  * the regular pass misses, the thin-strip pass reads the same frame: macOS run 41846200603 never
  * read the highlighted (white on blue) "Duplicate browser tab" menu item (probes 180-182, 275).
  */
-async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0 } = {}) {
+async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0, where = null } = {}) {
+  const match = (word) => test(word.text) && (!where || where(word));
   const hit = await until(() => {
     const path = ctx.probeShot();
-    let words = (ctx.ocr(path) ?? []).filter((word) => test(word.text));
-    if (!words.length && ctx.ocrStrips) words = ctx.ocrStrips(path).filter((word) => test(word.text));
+    let words = (ctx.ocr(path) ?? []).filter(match);
+    if (!words.length && ctx.ocrStrips) words = ctx.ocrStrips(path).filter(match);
     if (!words.length) return null;
     const sorted = pick === "rightmost" ? words.sort((a, b) => b.left - a.left)
       : pick === "bottom" ? words.sort((a, b) => b.top - a.top) : words.sort((a, b) => a.top - b.top || a.left - b.left);
@@ -1080,7 +1081,15 @@ export async function dailyWebviewBefore(ctx) {
       // The open <select> list is a native popup on Windows: a click on its "QAFolder" option
       // did nothing (Windows run 41824966041 probe 058: list open, bookmark still on the bar).
       // The keyboard picks the option on every OS; the bookmarks file decides below.
-      const option = await clickWord(ctx, (text) => /qafolder/i.test(text), { timeout: 4000, pick: "bottom" });
+      // Only an option of this select counts: below its line and starting at its column. The
+      // folder's own row title ("QAFolder", left in the list) opens the folder when clicked, which
+      // took the bravo row (and its select) out of view, so the keyboard fallback below typed into
+      // nothing and parentId stayed "bar" (the shared g2-folder failure).
+      const option = await clickWord(ctx, (text) => /qafolder/i.test(text), {
+        timeout: 4000,
+        pick: "bottom",
+        where: (word) => word.top > move.top + move.height && word.left >= move.left - 40,
+      });
       const placed = option ? await until(() => {
         const tree = bookmarksFile(ctx);
         const target = tree.folders.find((entry) => entry.name === "QAFolder");

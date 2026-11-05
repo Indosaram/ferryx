@@ -2626,8 +2626,28 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       }],
       // Chrome commits Preferences on a 10s timer; the Settings list reads them when no engine runs.
       12000,
+      // After "Add extension" Chromium focuses a New Tab (macOS runs 41846200603 and 41949155327,
+      // screenshot 63 and probes 289-292), so neither Chrome's "added" bubble nor the store page
+      // was on screen and this ui_check failed on every run. The store tab is brought back and its
+      // install button, which reads "Remove from Chrome" only once the extension is installed, is
+      // given OCR-readable colours like "Add to Chrome" above; the ui_check reads it on screen.
+      ["show the store tab's 'Remove from Chrome' button (CLI tab switch + eval)", async () => {
+        if (!storeTab) return { ok: false, stderr: "no store tab" };
+        const switched = cli("tab", "switch", "--browser-id", storeTab.browserId);
+        const script = "(() => { const b = [...document.querySelectorAll('button')].find((e) => /Remove from Chrome/i.test(e.textContent || '')); if (!b) return 'none'; b.scrollIntoView({block: 'center', inline: 'center'}); b.style.setProperty('background', '#ffffff', 'important'); b.style.setProperty('color', '#000000', 'important'); b.querySelectorAll('*').forEach((e) => e.style.setProperty('color', '#000000', 'important')); return b.textContent.trim(); })()";
+        const deadline = Date.now() + 30000;
+        let result = null;
+        do {
+          result = await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script);
+          if (result.ok && !result.stdout.includes("none")) return { ok: true, switched: switched.ok, button: result.stdout.replace(/"/g, "") };
+          await sleep(2000);
+        } while (Date.now() < deadline);
+        return { ok: false, switched: switched.ok, stderr: `store page shows no 'Remove from Chrome' button (${result?.stdout ?? result?.stderr ?? "no result"})` };
+      }],
+      waitForText(["Remove"], 15000),
     ],
-    { any: ["added", "uBlock"] },
+    // "uBlock" is in the store tab's title before any install, so it no longer counts here.
+    { any: ["added", "Remove"] },
     // The profile wait alone is up to 120 s, after the store page and Chrome's dialog.
     { capMs: 360000 },
   );
