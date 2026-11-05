@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import assert from 'node:assert/strict';
 
 const binary = resolve(process.env.FERRYX_CLI ?? 'src-tauri/target/debug/ferryx-cli');
-const root = await mkdtemp(join(tmpdir(), 'ferryx-detached-'));
+const root = await mkdtemp(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'fx-detach-'));
 const env = { ...process.env, FERRYX_RUNTIME_DIR: join(root, 'rt'), FERRYX_DATA_DIR: join(root, 'data') };
 delete env.FERRYX_SESSION_ID;
 const children = [];
@@ -19,7 +19,7 @@ const sockets = [];
 const timeout = () => AbortSignal.timeout(90_000);
 async function launch(legacy) {
   const controller = new AbortController();
-  const events = legacy ? watch(env.FERRYX_RUNTIME_DIR, { signal: controller.signal }) : null;
+  const events = legacy ? watch(env.FERRYX_RUNTIME_DIR, { signal: controller.signal })[Symbol.asyncIterator]() : null;
   const changed = events?.next();
   const child = spawn(binary, ['--daemon', ...(legacy ? ['--handover-from', legacy] : [])], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(child);

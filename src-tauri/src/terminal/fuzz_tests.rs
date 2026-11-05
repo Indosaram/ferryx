@@ -134,6 +134,20 @@ fn feed_mirror(mirror: &mut ScreenMirror, bytes: &[u8]) {
     mirror.feed(bytes);
 }
 
+/// Exact minimized input retained from verify-linux/gha3/rex-verify-linux-gate/1.log.
+/// Keep the acceptance assertion intact while repairing the native formatter.
+#[test]
+fn malformed_stream_seed_round_trip_regression() {
+    #[derive(serde::Deserialize)]
+    struct Case { cols: u16, rows: u16, chunks: Vec<Vec<u8>> }
+    let case: Case = serde_json::from_str(include_str!("../../tests/fixtures/screen_mirror_malformed_round_trip.json")).unwrap();
+    let mut mirror = ScreenMirror::new(case.cols, case.rows).unwrap();
+    for chunk in case.chunks { mirror.feed(&chunk); }
+    let seed = mirror.seed().unwrap();
+    let rebuilt = ScreenMirror::from_seed(&seed).unwrap();
+    assert_eq!(without_spacer_heads(rebuilt.grid_text_for_test()), without_spacer_heads(mirror.grid_text_for_test()));
+}
+
 /// Narrowest grid whose scrollback row count is bounded by `2 * MIRROR_SCROLLBACK_LINES`.
 /// libghostty prunes scrollback a whole page at a time, and a page holds more rows the
 /// narrower the grid, so a 2-column mirror can keep several thousand rows over the limit.

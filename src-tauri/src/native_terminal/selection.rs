@@ -59,7 +59,7 @@ fn viewport_ref(
     Ok(grid_ref)
 }
 
-fn screen_ref(
+pub(super) fn screen_ref(
     handle: NonNull<GhosttyTerminalImpl>,
     col: u16,
     row: u32,
