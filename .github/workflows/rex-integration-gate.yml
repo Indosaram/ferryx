@@ -81,6 +81,13 @@ jobs:
           cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx-cli --no-default-features --locked 2>&1 | tail -10
           bun scripts/gen-llms-txt.mjs --cli ./src-tauri/target/debug/ferryx-cli --check
           grep -c "integrations" docs/llms.txt
+      - name: Detached pane tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- daemon::layout::detached 2>&1 | tail -20
+          cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked -- --test-threads=1 layout_survives_handover detached_survives_handover 2>&1 | tail -25
+          bun run --cwd ui test -- Detached 2>&1 | tail -20
+          bun scripts/release-workflow-policy.mjs 2>&1 | tail -5
       - name: Grants reactor tests
         run: |
           set -o pipefail
