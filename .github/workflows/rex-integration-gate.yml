@@ -69,6 +69,12 @@ jobs:
           bun run --cwd ui typecheck:test 2>&1 | tail -20
           bun test scripts/build-latest-json.test.mjs scripts/gen-llms-txt.test.mjs 2>&1 | tail -25
           bun run --cwd ui test 2>&1 | tail -40
+      - name: Handover transfer and contract integration tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked -- --test-threads=1 2>&1 | tail -35
+          cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_contract --locked -- --test-threads=1 2>&1 | tail -35
+          cargo test --manifest-path src-tauri/Cargo.toml --test machine_owner_handover --locked -- --test-threads=1 2>&1 | tail -25
       - name: Grants reactor tests
         run: |
           set -o pipefail
