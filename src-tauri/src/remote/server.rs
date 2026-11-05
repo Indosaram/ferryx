@@ -2143,8 +2143,10 @@ async fn ws_terminal_handler(
             ),
         )
         .await;
-        if let Err(error) = state.session_backend.detach_size(&session_id, &size_client).await {
-            tracing::warn!(%session_id, %error, "size owner detach failed");
+        if resized.load(std::sync::atomic::Ordering::Acquire) {
+            if let Err(error) = state.session_backend.detach_size(&session_id, &size_client).await {
+                tracing::warn!(%session_id, %error, "size owner detach failed");
+            }
         }
     }))
 }

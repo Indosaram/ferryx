@@ -34,8 +34,18 @@ where F: FnMut(DaemonRequest) -> Fut, Fut: Future<Output = Result<Value, String>
             }
         }
         if *disabled.borrow() { return Ok(()); }
-        let result = Command::new(&manifest.command[0]).args(&manifest.command[1..])
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
+        let approved = manifest.clone();
+        let bytes = tokio::task::spawn_blocking(move || approved.approved_bytes()).await
+            .map_err(|e| e.to_string())??;
+        if *disabled.borrow() { return Ok(()); }
+        let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+        command.env_clear();
+        #[cfg(not(test))]
+        command.arg("--plugin-wasm-runner");
+        #[cfg(test)]
+        command.args(["--exact", "daemon::plugins::tests::wasm_runner_child", "--nocapture"])
+            .env("FERRYX_WASM_RUNNER_TEST", "1");
+        let result = command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .kill_on_drop(true).spawn();
         let mut child = match result {
             Ok(child) => child,
@@ -47,10 +57,20 @@ where F: FnMut(DaemonRequest) -> Fut, Fut: Future<Output = Result<Value, String>
         };
         let pid = child.id().ok_or("plugin pid unavailable")?;
         if events.send(Event::Started(pid)).is_err() { return Err("plugin observer closed".into()); }
-        let mut input = child.stdin.take().ok_or("plugin stdin unavailable")?;
-        let output = child.stdout.take().ok_or("plugin stdout unavailable")?;
-        let mut output = BufReader::new(output);
         let serve = async {
+            let mut input = child.stdin.take().ok_or("plugin stdin unavailable")?;
+            input.write_all(&(bytes.len() as u32).to_le_bytes()).await.map_err(|e| e.to_string())?;
+            input.write_all(&bytes).await.map_err(|e| e.to_string())?;
+            input.flush().await.map_err(|e| e.to_string())?;
+            let output = child.stdout.take().ok_or("plugin stdout unavailable")?;
+            let mut output = BufReader::new(output);
+            #[cfg(test)]
+            loop {
+                let mut line = String::new();
+                output.read_line(&mut line).await.map_err(|e| e.to_string())?;
+                if line.trim_end().ends_with("FERRYX_WASM_RUNNER_READY") { break; }
+                if line.is_empty() { return Err("test runner closed before ready".into()); }
+            }
             loop {
                 let mut line = Vec::new();
                 let count = (&mut output).take((MAX_LINE + 1) as u64)
@@ -61,9 +81,10 @@ where F: FnMut(DaemonRequest) -> Fut, Fut: Future<Output = Result<Value, String>
                 }
                 let response = match serde_json::from_slice::<DaemonRequest>(&line) {
                     Ok(request) => match authorize(&manifest, &request, &grants) {
-                        Ok(()) => match dispatch(request).await {
-                            Ok(value) => value,
-                            Err(message) => json!({"code":"PLUGIN_REQUEST_FAILED", "message":message}),
+                        Ok(()) => match tokio::time::timeout(Duration::from_secs(5), dispatch(request)).await {
+                            Ok(Ok(value)) => value,
+                            Ok(Err(message)) => json!({"code":"PLUGIN_REQUEST_FAILED", "message":message}),
+                            Err(_) => return Err("plugin host operation timed out".into()),
                         },
                         Err(error) => serde_json::to_value(error).map_err(|e| e.to_string())?,
                     },
@@ -82,6 +103,7 @@ where F: FnMut(DaemonRequest) -> Fut, Fut: Future<Output = Result<Value, String>
                 false
             },
             _ = disabled.changed() => true,
+            _ = tokio::time::sleep(Duration::from_secs(3605)) => false,
         };
         // Also kills a process that closes stdout but does not exit. Await reaping on disable.
         if child.try_wait().map_err(|e| e.to_string())?.is_none() {

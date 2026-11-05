@@ -872,8 +872,11 @@ mod spawn_owner_tests {
     fn plugins_approval_survives_handover_without_killing_predecessor() {
         use super::super::plugins::{Approvals, Manifest};
         let (_root, manager, terminals, legacy) = committing_fixture();
+        let retired = Arc::new(AtomicBool::new(false));
+        let signal = retired.clone();
+        manager.set_retirement_action(move || { signal.store(true, Ordering::SeqCst); });
         let plugin = Manifest { name: "clock".into(), version: "1".into(),
-            command: vec!["/absolute/clock".into()], capabilities: ["render".into()].into() };
+            module: std::env::temp_dir().join("clock.wasm"), sha256: "a".repeat(64), capabilities: ["render".into()].into() };
         manager.set_plugin_approvals(Arc::new(Mutex::new(Approvals { manifests: vec![plugin.clone()] })));
         manager.commit_handover_v5(&terminals).unwrap();
         let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
@@ -881,13 +884,18 @@ mod spawn_owner_tests {
         successor.set_plugin_approvals(approvals.clone());
         successor.adopt_recorded_plugins(&legacy).unwrap();
         assert!(approvals.lock().enabled(&plugin));
-        assert!(manager.is_draining(), "predecessor remains available after its decision");
+        assert_eq!(manager.status(), HandoverStatus::Retired);
+        assert!(!manager.accept_gate_open());
+        assert!(retired.load(Ordering::SeqCst));
     }
 
     #[test]
     fn layout_uses_the_committed_decision_not_shared_disk() {
         use super::super::layout::{Content, Intent, Store};
         let (root, manager, terminals, legacy) = committing_fixture();
+        let retired = Arc::new(AtomicBool::new(false));
+        let signal = retired.clone();
+        manager.set_retirement_action(move || { signal.store(true, Ordering::SeqCst); });
         let predecessor = Arc::new(Mutex::new(Store::new(root.path().join("old"))));
         predecessor.lock().apply("main", 0, Intent::AddTabWithSession {
             tab_id: "one".into(), label: "one".into(), activate: true,
@@ -908,7 +916,9 @@ mod spawn_owner_tests {
         successor.adopt_recorded_layouts(&legacy).unwrap();
         assert_eq!(adopted.lock().get("main").unwrap().layout, expected);
         assert_eq!(Store::new(new_root).get("main").unwrap().layout, expected);
-        assert!(manager.is_draining(), "predecessor remains alive after layout handover");
+        assert_eq!(manager.status(), HandoverStatus::Retired);
+        assert!(!manager.accept_gate_open());
+        assert!(retired.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -1428,7 +1438,7 @@ impl HandoverManager {
             return Err("Plugin adoption requires a committed predecessor".into());
         }
         if let (Some(bytes), Some(store)) = (record.plugin_approvals, self.plugin_approvals.read().clone()) {
-            *store.lock() = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            *store.lock() = super::plugins::Approvals::decode(&bytes)?;
         }
         Ok(())
     }

@@ -771,6 +771,7 @@ export type WorkspaceAction =
       leafId: string;
     }
   | { type: "FOCUS_PANE"; tabId: string; leafId: string }
+  | { type: "TOGGLE_PANE_EXPANDED"; tabId: string; leafId: string }
   | {
       type: "SET_PANE_RATIO";
       tabId: string;
@@ -3795,6 +3796,10 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         }
       }
       return state;
+    }
+    case "TOGGLE_PANE_EXPANDED": {
+      const layout = layoutReducer(state.layout, action);
+      return layout === state.layout ? state : { ...state, layout };
     }
     case "FOCUS_PANE": {
       const layout = layoutReducer(state.layout, { type: "FOCUS_PANE", tabId: action.tabId, leafId: action.leafId });

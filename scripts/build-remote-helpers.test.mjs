@@ -70,6 +70,13 @@ function receipt(root, { capabilities = [...REQUIRED_HELPER_CAPABILITIES], helpe
   const { fingerprint: sourceFingerprint, sources } = computeHelperSourceFingerprint(root);
   return { target, profile: 'release', executable: path, sha256: computeSha256(bytes), helperVersion, capabilities, sourceFingerprint, sources };
 }
+test('standalone worktree naming dependency invalidates old build receipts', async t => {
+  const root = fixture(t);
+  const r = receipt(root);
+  writeFileSync(join(root, 'src-tauri/src/worktree/naming.rs'), '// changed compiled dependency\n');
+  await assert.rejects(stage(root, { receipts: [r], requiredTargets: [target] }), /source changed/);
+  assert.equal(existsSync(join(root, 'out/manifest.json')), false);
+});
 test('stager requires full matrix before publishing any bytes', async t => {
   const root = fixture(t); const r = receipt(root);
   await assert.rejects(stage(root, { receipts: [r], requiredTargets: [target, 'aarch64-unknown-linux-gnu'] }));
