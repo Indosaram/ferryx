@@ -290,7 +290,18 @@ impl ControlFixture {
     async fn control(&self, request: ControlRequest, token: Option<&'static str>) -> ControlReply {
         let (client, server_side) = tokio::io::duplex(64 * 1024);
         let server = Arc::clone(&self.server);
-        tokio::spawn(async move { server.handle_control_connection(server_side, token).await });
+        // The duplex transport has no kernel peer credentials. Supply this client's real
+        // process identity, as the production listener does before authorization.
+        let (origin, ancestry) = tokio::task::spawn_blocking(|| {
+            use crate::daemon::supervisor_peer::{identify, Ancestry, SystemProcs};
+            let origin = identify(Some(std::process::id()));
+            (origin, Ancestry::at_accept(origin, &SystemProcs))
+        })
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            server.handle_control_connection_with_origin(server_side, token, origin, ancestry).await;
+        });
         let (read_half, mut write_half) = tokio::io::split(client);
         let mut frame = control::encode_request(&request);
         if let (Some(token), serde_json::Value::Object(map)) = (token, &mut frame) {
