@@ -1365,6 +1365,9 @@ export async function dailyWebviewBefore(ctx) {
     if (!zone) return { ok: false, stderr: "DROPZONE not visible" };
     g8.drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, daily.tabB)?.title === `dropped:${file.name}:${file.size}`, 8000) });
     g8.checks.drag_in = Boolean(g8.drag.dropped);
+    // How far the drag got, read off the page: DROPHOVER = dragover reached the zone,
+    // DROPPED = the drop handler ran (with the title saying whether files arrived).
+    g8.drop_zone_text = screenWords(ctx).find((word) => /^DROP(ZONE|HOVER|PED)$/i.test(word.text))?.text ?? null;
     g8.drop_title = tab(ctx, daily.tabB)?.title ?? null;
     ctx.host.focus();
     // The failing stage goes into the step record (it was only inside daily.g8.drag before).
@@ -1777,6 +1780,7 @@ export async function dailyChromium(ctx) {
     }, 8000);
     if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) });
     g8.checks.drag_in_chromium = Boolean(g8.chromium_drag?.dropped);
+    g8.chromium_drop_zone_text = screenWords(ctx).find((word) => /^DROP(ZONE|HOVER|PED)$/i.test(word.text))?.text ?? null;
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     ctx.host.focus();
     return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium, stderr: g8.checks.upload_picker_chromium ? (g8.chromium_drag?.stderr ?? (zone ? undefined : "DROPZONE not visible")) : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
