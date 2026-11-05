@@ -9,6 +9,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AgentChannel, backoffDelay, paneAlive, readAppends, RECONNECT_BUDGET_MS } from './f1-agent-link.mjs';
 import { agentLinkArgs } from './f1-acceptance.mjs';
+import { f1IsolationChecks } from './f1-isolation-check.mjs';
+import { f1NamespaceUnitChecks } from './f1-namespace-units.mjs';
+import { captureIdentity, waitIdentityExit } from './f1-process-identity.mjs';
 
 const AGENT = join(dirname(fileURLToPath(import.meta.url)), 'f1-host-agent.mjs');
 
@@ -147,26 +150,21 @@ function attachClient(args) {
   };
 }
 
-// Watch first, then reconcile; a 200 ms re-check backs up fs.watch. Bounded.
+// Watch first, then reconcile once; every later check is driven by a directory change event.
+// Bounded by the deadline; no interval re-check. A read or predicate error rejects explicitly.
 function waitFile(path, predicate, deadlineMs = 20_000) {
   return new Promise((resolveFile, rejectFile) => {
     mkdirSync(dirname(path), { recursive: true });
     let watcher = null;
-    let poll = null;
-    const done = (fn, value) => { clearTimeout(timer); clearInterval(poll); try { watcher?.close(); } catch { /* closed */ } fn(value); };
-    const evaluate = () => { try { const text = existsSync(path) ? readFileSync(path, 'utf8') : ''; if (predicate(text)) done(resolveFile, text); } catch { /* next change */ } };
+    const done = (fn, value) => { clearTimeout(timer); try { watcher?.close(); } catch { /* closed */ } fn(value); };
+    const evaluate = () => { try { const text = existsSync(path) ? readFileSync(path, 'utf8') : ''; if (predicate(text)) done(resolveFile, text); } catch (error) { done(rejectFile, error); } };
     const timer = setTimeout(() => done(rejectFile, new Error(`${path} did not reach the expected state within ${deadlineMs}ms`)), deadlineMs);
     watcher = watch(dirname(path), evaluate);
-    poll = setInterval(evaluate, 200);
     evaluate();
   });
 }
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; } };
-const waitGone = (pid, deadlineMs = 10_000) => new Promise((resolveGone, rejectGone) => {
-  const timer = setTimeout(() => { clearInterval(poll); rejectGone(new Error(`pid ${pid} still alive after ${deadlineMs}ms`)); }, deadlineMs);
-  const poll = setInterval(() => { if (!alive(pid)) { clearTimeout(timer); clearInterval(poll); resolveGone(true); } }, 50);
-});
 
 async function liveAgentChecks(check, stateRoot) {
   const dataRoot = join(stateRoot, 'f1l');
@@ -184,6 +182,7 @@ async function liveAgentChecks(check, stateRoot) {
     const attached1 = await one.waitLine('attach 1', (l) => l.event === 'agent-attached');
     await one.waitLine('ready', (l) => l.event === 'agent-ready');
     serverPid = attached1.pid;
+    const serverIdentity = captureIdentity(serverPid);
     one.send({ id: 1, op: 'init', runId, dataRoot, bun: process.execPath });
     await one.waitLine('init', (l) => l.id === 1);
     one.send({ id: 2, op: 'proxyStart', quotaResetMs: 180_000 });
@@ -221,8 +220,9 @@ async function liveAgentChecks(check, stateRoot) {
     // 4. The server does not survive (SIGKILL): a reattach serves its on-disk record (orphan).
     two.child.kill('SIGKILL');
     await two.exited;
-    process.kill(serverPid, 'SIGKILL');
-    await waitGone(serverPid);
+    // The exit subscription is armed before the SIGKILL; the wait is bounded actual exit evidence.
+    const serverExit = await waitIdentityExit(serverIdentity, 10_000, () => process.kill(serverPid, 'SIGKILL'));
+    if (!serverExit.exited) throw new Error(`server ${serverPid} still alive after SIGKILL: ${JSON.stringify(serverExit)}`);
     appendFileSync(paneFile, `${JSON.stringify({ label: 'quota-1', kind: 'stdin-closed', atMs: Date.now() })}\n`);
     const lastSeen2 = two.lines.reduce((max, l) => Math.max(max, Number(l.oseq) || 0), 0);
     const three = attachClient(['--mode', 'reattach', ...common, '--after', String(lastSeen2)]);
@@ -291,6 +291,8 @@ function paneAliveChecks(check) {
 }
 
 export async function f1LinkUnitChecks(check, stateRoot) {
+  await f1NamespaceUnitChecks(check, stateRoot);
+  await f1IsolationChecks(check, stateRoot);
   paneAliveChecks(check);
   appendChecks(check);
   linkArgChecks(check);

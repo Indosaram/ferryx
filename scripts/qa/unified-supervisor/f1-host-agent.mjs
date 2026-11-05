@@ -25,8 +25,8 @@
 // Ownership: it owns only what it starts here: the fixture provider proxy (in-process, loopback)
 // and target daemons it spawns (recorded pid, executable, argv; signalled by that pid's process
 // group only). Fixture panes are children of those daemons; a pane still alive after its daemon
-// exited is signalled only when its pid comes from its own pane-<pid>.jsonl AND its argv names
-// this run's pane script and log dir. Its stdin closing (runner gone, ssh dropped) tears down.
+// exited is signalled only when host-helper metadata verifies the pane's recorded namespace
+// identity AND its argv names this run's pane script and log dir. Its stdin closing tears down.
 // All state lives under <dataRoot>/runs/<runId>; a dataRoot holding anything else is refused.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -36,7 +36,8 @@ import { homedir, hostname } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { paneAlive, readAppends } from './f1-agent-link.mjs';
+import { readAppends } from './f1-agent-link.mjs';
+import { captureIdentity, daemonGroupAlive, mapRecordedIdentity, observeIdentity, paneTeardownState, teardownIdentityGroup, waitIdentityExit } from './f1-process-identity.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const PANE = join(dirname(SELF), 'f1-pane.mjs');
@@ -66,6 +67,13 @@ const writeProxyState = () => {
   if (state.agentDir) writeFileSync(join(state.agentDir, 'proxy-state.json'), JSON.stringify({ outage: { startedAtMs: proxy.outageStartedMs, untilMs: proxy.outageUntilMs }, quotaResetMs: proxy.quotaResetMs, quotaUntil: Object.fromEntries(proxy.quotaUntil) }));
 };
 const readJsonl = (path) => (existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } }) : []);
+// Same records as readJsonl, but a line that does not parse is counted, never silently dropped.
+const readJsonlStrict = (path) => {
+  const records = [];
+  let invalid = 0;
+  if (existsSync(path)) for (const line of readFileSync(path, 'utf8').split('\n').filter(Boolean)) { try { records.push(JSON.parse(line)); } catch { invalid += 1; } }
+  return { records, invalid };
+};
 const runRootOf = (dataRoot, runId) => join(resolve(dataRoot), 'runs', runId);
 const agentPaths = (runRoot) => ({ agentDir: join(runRoot, 'agent'), socket: join(runRoot, 'agent', 's'), outFile: join(runRoot, 'agent', 'out.jsonl') });
 
@@ -118,16 +126,12 @@ function waitUntil(dir, check, deadlineMs, label) {
   return new Promise((resolveWait, rejectWait) => {
     let watcher = null;
     let done = false;
-    let finish = (fn, value) => { if (done) return; done = true; clearTimeout(timer); try { watcher?.close(); } catch { /* closed */ } fn(value); };
-    const evaluate = () => { try { const value = check(); if (value) finish(resolveWait, value); } catch { /* the next change re-reads */ } };
+    const finish = (fn, value) => { if (done) return; done = true; clearTimeout(timer); watcher?.close(); fn(value); };
+    const evaluate = () => { try { const value = check(); if (value) finish(resolveWait, value); } catch (error) { finish(rejectWait, error); } };
     const timer = setTimeout(() => finish(rejectWait, fail('DEADLINE_EXCEEDED', `${label} was not observed within ${deadlineMs}ms`)), deadlineMs);
-    // fs.watch misses appends on some target filesystems (overlay/network homes): a 500 ms
-    // re-check backs it up, so a wait never depends on a watch event arriving.
-    const backstop = setInterval(evaluate, 500);
-    const clear = finish;
-    finish = (fn, value) => { clearInterval(backstop); clear(fn, value); };
     mkdirSync(dir, { recursive: true });
     watcher = watch(dir, evaluate);
+    watcher.once('error', (error) => finish(rejectWait, error));
     evaluate();
   });
 }
@@ -141,6 +145,21 @@ function scanPanes() {
     for (const { text } of lines) {
       let record;
       try { record = JSON.parse(text); } catch { record = { unparsed: text }; }
+      if (record.kind === 'ready' && record.identity) {
+        // A mapping failure is recorded and reported, never thrown: pane delivery and teardown go on,
+        // and a pane with no mapping reads as unmapped (never clean) at teardown.
+        const mapFile = join(state.agentDir ?? state.runRoot, 'pane-identities.jsonl');
+        let mapError = null;
+        try {
+          const identity = mapRecordedIdentity(record.identity);
+          if (identity) appendFileSync(mapFile, `${JSON.stringify({ file: name, identity })}\n`);
+          else mapError = 'identity could not be mapped to a host process';
+        } catch (error) { mapError = String(error?.message ?? error); }
+        if (mapError) {
+          try { appendFileSync(mapFile, `${JSON.stringify({ file: name, mapError })}\n`); } catch (error) { mapError = `${mapError}; not persisted: ${String(error?.message ?? error)}`; }
+          out({ event: 'pane-map-error', file: name, error: mapError });
+        }
+      }
       out({ event: 'pane', file: name, record });
     }
     if (end !== offset) { state.seen.set(name, end); moved = true; }
@@ -176,6 +195,7 @@ function daemonEnv(extra = {}) {
     PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: process.env.LANG ?? 'C.UTF-8', TERM: 'xterm-256color', USER: process.env.USER ?? 'qa',
     HOME: join(root, 'home'), TMPDIR: join(root, 'tmp'), FERRYX_DATA_DIR: join(root, 'data'), FERRYX_RUNTIME_DIR: join(root, 'runtime'),
     FERRYX_HUB_DB: join(root, 'hub', 'hub.sqlite'), FERRYX_HUB: 'off', SHELL: state.shell, ...extra,
+    ...Object.fromEntries(['F1_PID_ISOLATED', 'F1_HOST_HELPER', 'F1_ISOLATION_ROOT', 'F1_BUN'].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]])),
   };
 }
 
@@ -204,7 +224,7 @@ const ops = {
     writeFileSync(state.shell, `#!/bin/sh\ncase "$1" in\n  -*c*) shift; exec /bin/sh -c "$1" ;;\nesac\nexec ${q(interpreter)} ${q(PANE)} ${q(state.logDir)} ${q(state.modeFile)}\n`, { mode: 0o755 });
     chmodSync(state.shell, 0o755);
     watchPanes();
-    return { runRoot: state.runRoot, shell: state.shell, hostname: hostname(), agentPid: process.pid, platform: process.platform, nowMs: Date.now() };
+    return { runRoot: state.runRoot, shell: state.shell, hostname: hostname(), agentPid: process.pid, identity: captureIdentity(), platform: process.platform, nowMs: Date.now() };
   },
 
   async repo() {
@@ -274,7 +294,8 @@ const ops = {
     const record = { pid: child.pid, executable: ferryxCli, args, startedAtMs: Date.now(), exited: null };
     child.on('exit', (code, signal) => { record.exited = { code, signal, atMs: Date.now() }; });
     state.daemons.push({ child, record });
-    persist('daemons.jsonl', { pid: record.pid, executable: ferryxCli, args, startedAtMs: record.startedAtMs });
+    record.identity = captureIdentity(record.pid);
+    persist('daemons.jsonl', record);
     await waitUntil(dirname(socketPath), () => existsSync(socketPath), deadlineMs, 'target daemon socket');
     return { ...record, socket: socketPath, log: join(root, 'data', 'logs', 'daemon.log') };
   },
@@ -362,17 +383,6 @@ function argvOf(pid) {
   return ps.status === 0 ? ps.stdout.trim() : null;
 }
 
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; } };
-const procState = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '')[0] ?? null; } catch { return null; } };
-const cmdlineBytes = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`).length; } catch { return null; } };
-// A pane's teardown observation: liveness by paneAlive, with the raw proc facts recorded.
-function paneProbe(pid) {
-  const exists = alive(pid);
-  const state = exists ? procState(pid) : null;
-  const bytes = exists ? cmdlineBytes(pid) : null;
-  return { exists, procState: state, cmdlineBytes: bytes, live: paneAlive({ exists, procState: state, cmdlineBytes: bytes }) };
-}
-
 async function teardown(reason) {
   try { state.watcher?.close(); } catch { /* closed */ }
   clearInterval(state.scanTimer);
@@ -380,31 +390,30 @@ async function teardown(reason) {
   const daemons = [];
   for (const { child, record } of [...state.daemons].reverse()) {
     const receipt = { ...record, reason, signals: [] };
+    // Retain verified group-member identities before a leader can exit on TERM.
+    daemonGroupAlive(record.identity);
     for (const [signal, waitMs] of [['SIGTERM', 10_000], ['SIGKILL', 5_000]]) {
       if (record.exited) break;
-      try { process.kill(-record.pid, signal); receipt.signals.push({ signal, target: 'group', pid: record.pid }); } catch (error) {
-        receipt.signals.push({ signal, target: 'group', pid: record.pid, error: String(error?.message ?? error) });
-      }
+      const owner = daemonIdentity(record);
+      if (owner.verdict !== 'match') break;
       await new Promise((resolveExit) => {
         if (record.exited) { resolveExit(); return; }
-        const timer = setTimeout(resolveExit, waitMs);
-        child.once('exit', () => { clearTimeout(timer); resolveExit(); });
+        const finish = () => { clearTimeout(timer); child.removeListener('exit', finish); resolveExit(); };
+        const timer = setTimeout(finish, waitMs);
+        child.once('exit', finish);
+        try { process.kill(-owner.pid, signal); receipt.signals.push({ signal, target: 'group', pid: owner.pid }); } catch (error) {
+          receipt.signals.push({ signal, target: 'group', pid: owner.pid, error: String(error?.message ?? error) });
+          finish();
+        }
       });
     }
     receipt.exited = record.exited;
+    receipt.memberTeardown = await finishDaemonMembers(record.identity);
+    receipt.groupAlive = daemonGroupAlive(record.identity);
     daemons.push(receipt);
   }
-  const panes = [];
-  for (const name of state.logDir && existsSync(state.logDir) ? readdirSync(state.logDir) : []) {
-    const pid = Number(name.match(/^pane-(\d+)\.jsonl$/)?.[1]);
-    if (!Number.isInteger(pid)) continue;
-    const probe = paneProbe(pid);
-    const live = probe.live;
-    const argv = live ? argvOf(pid) : null;
-    const ours = live && Boolean(argv?.includes(PANE) && argv?.includes(state.logDir));
-    if (ours) { try { process.kill(pid, 'SIGTERM'); } catch { /* raced its exit */ } }
-    panes.push({ pid, aliveAtTeardown: live, signalled: ours, argv, procState: probe.procState, exiting: probe.exists && !probe.live });
-  }
+  const panes = await teardownPanes();
+  for (const receipt of daemons) receipt.groupAlive = daemonGroupAlive(receipt.identity);
   try { state.server?.stop(true); } catch { /* stopped */ }
   // Small enough for one JSONL reply line: pane logs were already streamed as pane events.
   return { reason, runRoot: state.runRoot, daemons, panes, outage: { startedAtMs: proxy.outageStartedMs, untilMs: proxy.outageUntilMs }, served: proxy.served.length };
@@ -413,13 +422,72 @@ async function teardown(reason) {
 // Identity of a recorded target daemon this process did not spawn (orphan mode): alive, its
 // argv names the recorded executable with --daemon, and (Linux) its cwd is this run root.
 function daemonIdentity(record) {
-  if (!alive(record.pid)) return { verdict: 'gone' };
-  const argv = argvOf(record.pid);
+  const observed = observeIdentity(record.identity);
+  if (observed.verdict !== 'match') return observed;
+  const argv = argvOf(observed.pid);
   let cwd = null;
-  try { cwd = realpathSync(`/proc/${record.pid}/cwd`); } catch { /* not Linux */ }
+  try { cwd = realpathSync(`/proc/${observed.pid}/cwd`); } catch { /* not Linux */ }
   const argvOk = Boolean(argv?.includes(record.executable) && argv?.includes('--daemon'));
   const cwdOk = cwd !== null && cwd === realpathSync(state.runRoot);
-  return { verdict: argvOk && cwdOk ? 'match' : 'unverified', argv, cwd };
+  return { ...observed, verdict: argvOk && (process.platform !== 'linux' || cwdOk) ? 'match' : 'unverified', argv, cwd };
+}
+
+async function finishDaemonMembers(identity) {
+  const receipts = [];
+  for (const [signal, deadlineMs] of [['SIGTERM', 5_000], ['SIGKILL', 5_000]]) {
+    if (daemonGroupAlive(identity) === false) break;
+    // The helper retains individual start identities; never signal a reused bare PGID.
+    receipts.push(await teardownIdentityGroup(identity, signal, deadlineMs));
+  }
+  return receipts;
+}
+
+async function teardownPanes() {
+  const panes = [];
+  for (const name of state.logDir && existsSync(state.logDir) ? readdirSync(state.logDir) : []) {
+    if (!/^pane-\d+\.jsonl$/.test(name)) continue;
+    const path = join(state.logDir, name);
+    const records = readJsonl(path);
+    // Never use a pane's local pid as a host pid. Mapping is authored by the outer helper
+    // while the recorded process is alive and persisted by the agent for orphan teardown.
+    const local = records.find((record) => record.identity)?.identity ?? null;
+    const mapped = readJsonlStrict(join(state.agentDir ?? state.runRoot, 'pane-identities.jsonl'));
+    let mapError = mapped.records.find((record) => record.file === name && record.mapError)?.mapError ?? null;
+    let identity = mapped.records.find((record) => record.file === name && record.identity)?.identity ?? null;
+    if (!identity && local) {
+      try { identity = mapRecordedIdentity(local); } catch (error) { mapError ??= String(error?.message ?? error); }
+    }
+    if (!identity && mapped.invalid > 0) mapError ??= `pane-identities.jsonl has ${mapped.invalid} invalid line(s)`;
+    const observation = observeIdentity(identity);
+    const before = paneTeardownState(records, observation, PANE, state.logDir);
+    let signalled = false;
+    let endObserved = before.ended;
+    if (before.signalPid !== null) {
+      // Install the end-log subscription before TERM. An end record alone never makes a
+      // live identity clean; the outer helper must also observe the actual process exit.
+      const reconcileEnd = () => { endObserved = paneTeardownState(readJsonl(path), observation, PANE, state.logDir).ended; };
+      const endWatcher = watch(path, reconcileEnd);
+      try {
+        reconcileEnd();
+        await waitIdentityExit(identity, 5_000, () => {
+          // Re-verify after the helper arms the host exit subscription, not before the wait.
+          const owner = paneTeardownState(readJsonl(path), observeIdentity(identity), PANE, state.logDir);
+          if (owner.signalPid === null) return;
+          try { process.kill(owner.signalPid, 'SIGTERM'); signalled = true; } catch (error) {
+            if (error?.code !== 'ESRCH') throw error;
+          }
+        });
+        reconcileEnd();
+      } finally {
+        endWatcher.close();
+      }
+    }
+    const final = paneTeardownState(readJsonl(path), observeIdentity(identity), PANE, state.logDir);
+    // No verified host identity: an end record alone is not proof the process exited.
+    if (!identity) Object.assign(final, { alive: true, clean: false, unmapped: true, mapError: mapError ?? 'no host identity mapping' });
+    panes.push({ file: name, identity, observation, aliveAtTeardown: before.alive, signalled, endObserved, ...final });
+  }
+  return panes;
 }
 
 // Orphan teardown: the serving agent is gone, its daemons may not be. Each recorded daemon is
@@ -429,34 +497,35 @@ async function orphanTeardown(reason) {
   clearInterval(state.scanTimer);
   scanPanes();
   const daemons = [];
-  for (const record of readJsonl(join(state.agentDir, 'daemons.jsonl')).reverse()) {
-    const receipt = { ...record, reason, orphan: true, signals: [], identity: daemonIdentity(record), exited: null };
-    if (receipt.identity.verdict === 'gone') receipt.exited = { observed: 'gone-before-teardown', atMs: Date.now() };
-    if (receipt.identity.verdict === 'match') {
+  const recorded = readJsonlStrict(join(state.agentDir, 'daemons.jsonl'));
+  for (const record of recorded.records.reverse()) {
+    const receipt = { ...record, reason, orphan: true, signals: [], observation: daemonIdentity(record), exited: null };
+    daemonGroupAlive(record.identity);
+    if (receipt.observation.verdict === 'gone') receipt.exited = { observed: 'gone-before-teardown', atMs: Date.now() };
+    if (receipt.observation.verdict === 'match') {
       for (const [signal, waitMs] of [['SIGTERM', 10_000], ['SIGKILL', 5_000]]) {
-        try { process.kill(-record.pid, signal); receipt.signals.push({ signal, target: 'group', pid: record.pid }); } catch (error) {
-          receipt.signals.push({ signal, target: 'group', pid: record.pid, error: String(error?.message ?? error) });
-        }
-        // Not our child: no exit event exists, so its existence is re-checked within the bound.
-        const until = Date.now() + waitMs;
-        while (alive(record.pid) && Date.now() < until) await new Promise((r) => setTimeout(r, 200));
-        if (!alive(record.pid)) { receipt.exited = { observed: 'gone-after-signal', signal, atMs: Date.now() }; break; }
+        const owner = daemonIdentity(record);
+        if (owner.verdict !== 'match') break;
+        // Subscribe to real process-exit evidence; a successful signal is not an exit.
+        await waitIdentityExit(record.identity, waitMs, () => {
+          const current = daemonIdentity(record);
+          if (current.verdict !== 'match') return;
+          try { process.kill(-current.pid, signal); receipt.signals.push({ signal, target: 'group', pid: current.pid }); } catch (error) {
+            receipt.signals.push({ signal, target: 'group', pid: current.pid, error: String(error?.message ?? error) });
+          }
+        });
+        if (observeIdentity(record.identity).verdict === 'gone') { receipt.exited = { observed: 'gone-after-signal', signal, atMs: Date.now() }; break; }
       }
     }
+    receipt.memberTeardown = await finishDaemonMembers(record.identity);
+    receipt.groupAlive = daemonGroupAlive(record.identity);
     daemons.push(receipt);
   }
-  const panes = [];
-  for (const name of state.logDir && existsSync(state.logDir) ? readdirSync(state.logDir) : []) {
-    const pid = Number(name.match(/^pane-(\d+)\.jsonl$/)?.[1]);
-    if (!Number.isInteger(pid)) continue;
-    const probe = paneProbe(pid);
-    const live = probe.live;
-    const argv = live ? argvOf(pid) : null;
-    const ours = live && Boolean(argv?.includes(PANE) && argv?.includes(state.logDir));
-    if (ours) { try { process.kill(pid, 'SIGTERM'); } catch { /* raced its exit */ } }
-    panes.push({ pid, aliveAtTeardown: live, signalled: ours, argv, procState: probe.procState, exiting: probe.exists && !probe.live });
-  }
-  return { reason, orphan: true, runRoot: state.runRoot, daemons, panes, outage: readProxyState().outage, served: readJsonl(join(state.agentDir, 'served.jsonl')).length };
+  const panes = await teardownPanes();
+  for (const receipt of daemons) receipt.groupAlive = daemonGroupAlive(receipt.identity);
+  // Valid records were torn down above; an unreadable daemon record means the fleet cannot be called clean.
+  const stateError = recorded.invalid > 0 ? `STATE_INVALID daemons.jsonl: ${recorded.invalid} invalid line(s); those daemons were not torn down` : null;
+  return { reason, orphan: true, ...(stateError ? { error: stateError } : {}), runRoot: state.runRoot, daemons, panes, outage: readProxyState().outage, served: readJsonl(join(state.agentDir, 'served.jsonl')).length };
 }
 
 const readProxyState = () => {
@@ -562,8 +631,9 @@ function serve() {
   });
   try { unlinkSync(paths.socket); } catch { /* absent */ }
   server.listen(paths.socket, () => {
-    writeFileSync(join(paths.agentDir, 'server.json'), JSON.stringify({ pid: process.pid, hostname: hostname(), startedAtMs: Date.now(), orphanMs }));
-    out({ event: 'agent-ready', pid: process.pid, hostname: hostname(), transport: 'serve' });
+    const identity = captureIdentity();
+    writeFileSync(join(paths.agentDir, 'server.json'), JSON.stringify({ pid: process.pid, identity, hostname: hostname(), startedAtMs: Date.now(), orphanMs }));
+    out({ event: 'agent-ready', pid: process.pid, identity, hostname: hostname(), transport: 'serve' });
     armOrphan();
   });
   process.on('SIGHUP', () => { /* detached: a hangup is not a shutdown */ });
@@ -635,5 +705,5 @@ if (argv.includes('--serve')) {
   const input = createInterface({ input: process.stdin, terminal: false });
   input.on('line', (line) => void handleRequest(line, ops, async () => process.exit(0)));
   input.on('close', async () => { await (tearing ??= teardown('stdin-closed')); process.exit(0); });
-  out({ event: 'agent-ready', pid: process.pid, hostname: hostname(), transport: 'stdio' });
+  out({ event: 'agent-ready', pid: process.pid, identity: captureIdentity(), hostname: hostname(), transport: 'stdio' });
 }
