@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { join } from 'node:path';
 import { connectNativeMahord, parseScreenChangeFrame, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
-import { launchInteractiveGuiTask, tolerableSetupProbeReadError } from '../fixtures/native-remote-agent.mjs';
+import { launchInteractiveGuiTask, stopSetupProbeWorker, tolerableSetupProbeReadError } from '../fixtures/native-remote-agent.mjs';
 
 const frame = (id) => ({ content: [{ type: 'text', text: `Screen changed: frame_id=${id}, timestamp_ms=123, age_ms=0` }] });
 const timeout = { content: [{ type: 'text', text: 'Timeout: no change detected (last_frame_id=17)' }] };
@@ -109,6 +109,65 @@ describe('native input transport', () => {
     try { await expect(rpc.call('launch-gui-interactive', {})).rejects.toMatchObject({ code: 'RUN_FAILED', receipt }); }
     finally { rpc.close(); }
   });
+});
+
+describe('setup worker cleanup', () => {
+  const profile = '/fixture/profile';
+  const worker = { owner: { pid: 123, processStart: '456' }, completionPath: '/fixture/completion.json',
+    wrapperMarkerPath: '/fixture/wrapper-exit.marker', deleteArgs: ['/delete', '/tn', 'owned-task', '/f'] };
+
+  for (const first of ['process', 'wrapper']) {
+    test(`requires both exit proofs when ${first} finishes first`, async () => {
+      const processExit = Promise.withResolvers();
+      const wrapperExit = Promise.withResolvers();
+      const requested = Promise.withResolvers();
+      const proofs = new Set();
+      let deleted = false;
+      let closed = false;
+      const operation = stopSetupProbeWorker({ profile, worker, signal: AbortSignal.timeout(1000) }, {
+        subscribe: () => ({ promise: wrapperExit.promise, close: () => { closed = true; } }),
+        waitExit: (pid, start) => {
+          expect({ pid, start }).toEqual({ pid: 123, start: '456' });
+          return processExit.promise;
+        },
+        persist: async () => { requested.resolve(); },
+        invoke: async () => {
+          expect([...proofs].sort()).toEqual(['process', 'wrapper']);
+          deleted = true;
+        },
+      });
+      await requested.promise;
+      const finish = (name) => {
+        proofs.add(name);
+        (name === 'process' ? processExit : wrapperExit).resolve();
+      };
+      finish(first);
+      // Flush the first proof's continuations, not a wall-clock delay.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(deleted).toBe(false);
+      finish(first === 'process' ? 'wrapper' : 'process');
+      await operation;
+      expect(deleted).toBe(true);
+      expect(closed).toBe(true);
+    });
+  }
+
+  for (const failure of ['process', 'wrapper', 'delete']) {
+    test(`preserves cleanup failure from ${failure}`, async () => {
+      const error = new Error(`${failure} failed`);
+      let deleted = false;
+      let closed = false;
+      await expect(stopSetupProbeWorker({ profile, worker, signal: AbortSignal.timeout(1000) }, {
+        subscribe: () => ({ promise: failure === 'wrapper' ? Promise.reject(error) : Promise.resolve(), close: () => { closed = true; } }),
+        waitExit: async () => { if (failure === 'process') throw error; },
+        persist: async () => {},
+        invoke: async () => { deleted = true; throw error; },
+      })).rejects.toBe(error);
+      expect(deleted).toBe(failure === 'delete');
+      expect(closed).toBe(true);
+    });
+  }
 });
 
 describe('interactive task lifecycle', () => {
