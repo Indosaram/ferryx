@@ -1,4 +1,3 @@
-import { runGit } from "./unified-supervisor/git-env.mjs";
 /**
  * Frozen fixtures, schemas and shared helpers for the Herdr reference-chat acceptance
  * harness (plan task 14). Contract: docs/chat/herdr-port-contract.md (rev 2).
@@ -252,8 +251,12 @@ export const REFERENCE_ROUTES = [
  *
  * All four reference-chat read routes — `history`, `screen`, `prompt` and the staged-file
  * `files/{fileId}` route — deserialize the host's own `ReferenceChatReadQuery`, so each of
- * them admits exactly that struct's fields and the same nine apply to all four. The list is
+ * them admits exactly that struct's fields and the same ten apply to all four. The list is
  * written once below and backs all four entries, so the mirror cannot drift again.
+ *
+ * `after` is part of the relay's `reference_chat_read_fields` allowlist and is read by the
+ * history paging code, so it belongs here: omitting it made the mirror drift test fail while
+ * the relay actually accepted the field.
  *
  * CORRECTED IDENTITY CONTRACT (task 12 handoff): a READ OMITS hostId and the gateway resolves
  * its own reference-chat host id. ownerId, epoch and backendSessionId stay required; epoch
@@ -270,6 +273,7 @@ const REFERENCE_CHAT_READ_FIELDS = [
   "limit",
   "cursor",
   "cursorStream",
+  "after",
 ];
 
 export const REFERENCE_READ_QUERY_FIELDS = {
@@ -628,7 +632,7 @@ const REPRODUCIBLE_GIT_CONFIG = [
 ];
 
 function git(root, args) {
-  const result = runGit([...REPRODUCIBLE_GIT_CONFIG, ...args], { cwd: root, encoding: "utf8" });
+  const result = spawnSync("git", [...REPRODUCIBLE_GIT_CONFIG, ...args], { cwd: root, encoding: "utf8" });
   if (result.status !== 0) {
     return { ok: false, stdout: (result.stdout || "").trim(), stderr: (result.stderr || "").trim() };
   }
@@ -648,7 +652,7 @@ function git(root, args) {
  */
 export function captureSourceProvenance(root, sourcePaths, toolVersions) {
   const revision = git(root, ["rev-parse", "HEAD"]);
-  const diff = runGit([...REPRODUCIBLE_GIT_CONFIG, "diff", "HEAD", "--binary"], {
+  const diff = spawnSync("git", [...REPRODUCIBLE_GIT_CONFIG, "diff", "HEAD", "--binary"], {
     cwd: root,
     encoding: "buffer",
   });
