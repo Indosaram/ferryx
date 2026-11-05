@@ -198,7 +198,9 @@ describe("RemoteApp phone home", () => {
     const card = await screen.findByTestId("setup-card", undefined, { timeout: 3000 });
     expect(card).toHaveTextContent(/Turn on the supervisor on /);
     for (const section of ["Needs you", "Handling", "Sessions"]) expect(screen.queryByRole("region", { name: section })).toBeNull();
-    expect(supervisorCalls).toContain("GET /api/v1/supervisor");
+    // The setup card can render from the machine snapshot before the panel fetch is recorded,
+    // so this waits for the call instead of asserting on whatever the first paint captured.
+    await waitFor(() => expect(supervisorCalls).toContain("GET /api/v1/supervisor"));
   });
 
   it("turns the supervisor on through the hub start route on the one computer that can run it", async () => {
