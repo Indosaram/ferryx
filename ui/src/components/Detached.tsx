@@ -15,7 +15,7 @@ export function Detached({ scope }: { scope?: string }) {
       } catch (failure) { setError(String(failure)); }
     };
     void refreshOffers();
-    const subscription = listen("LayoutChanged", () => { void refreshOffers(); });
+    const subscription = listen("LayoutChanged", () => { void refreshOffers(); }).catch(failure => { setError(String(failure)); return () => {}; });
     return () => { void subscription.then(unlisten => unlisten(), failure => setError(String(failure))); };
   }, []);
   const openOffer = async (machineId: string, revision: number) => {

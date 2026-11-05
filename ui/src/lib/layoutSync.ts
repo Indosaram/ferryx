@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createLayoutState, normalizeLayout } from "../state/layout";
-import { resolveSeam } from "../state/paneTree";
+import { collectLeafIds, resolveSeam } from "../state/paneTree";
 import type { PaneNode } from "../state/paneTree";
 import type { WorkspaceState } from "../state/workspaceStore";
 import type { LayoutState, PaneContent, TabGroupLayoutNode, WorkspaceTab } from "./types";
@@ -230,13 +230,14 @@ export function intentForAction(sync: LayoutSync, action: WorkspaceAction, befor
 function unscopedIntentForAction(sync: LayoutSync, action: WorkspaceAction, before: WorkspaceState, after: WorkspaceState): LayoutIntent | null {
   const scope = layoutScope(before);
   const node = (tab: string, leaf: string | null) => {
+    leaf ??= collectLeafIds(before.layout.layoutsByTabId[tab].root)[0] ?? null;
     if (leaf === null) throw new Error("Layout has no active pane");
     return sync.nodeId(scope, tab, leaf);
   };
   const content = (tab: string, leaf?: string): DaemonContent => {
     const panes = after.layout.layoutsByTabId[tab];
-    const id = leaf ?? panes.activeLeafId;
-    if (id === null) throw new Error("Layout has no active pane");
+    const id = leaf ?? panes.activeLeafId ?? collectLeafIds(panes.root)[0];
+    if (id === undefined) throw new Error("Layout has no active pane");
     const pane = panes.contentsByLeafId?.[id] ?? { kind: "terminal" as const, sessionId: panes.sessionIdsByLeafId[id] };
     return daemonContent(pane, after);
   };
@@ -263,7 +264,7 @@ function unscopedIntentForAction(sync: LayoutSync, action: WorkspaceAction, befo
     case "DETACH_PANE_TO_TAB": return { type: action.type, sourceTabId: action.sourceTabId,
       nodeId: node(action.sourceTabId, action.leafId), tabId: action.newTab.id, label: action.newTab.label,
       targetGroupId: action.targetGroupId ?? before.layout.focusedGroupId ?? "main" };
-    case "CLOSE_PANE": case "FOCUS_PANE":
+    case "CLOSE_PANE": case "FOCUS_PANE": case "TOGGLE_PANE_EXPANDED":
       return { type: action.type, tabId: action.tabId, nodeId: node(action.tabId, action.leafId) };
     case "SWAP_PANES": return { type: action.type, tabId: action.tabId,
       sourceNodeId: node(action.tabId, action.sourceLeafId), targetNodeId: node(action.tabId, action.targetLeafId) };
@@ -289,16 +290,18 @@ export function isLayoutIntentAction(action: WorkspaceAction): boolean {
   return ["ADD_TAB_WITH_SESSION", "CLOSE_TAB", "ACTIVATE_TAB", "REORDER_TAB", "RENAME_TAB", "SET_TAB_PINNED",
     "SET_PANE_RATIO", "SET_TAB_GROUP_RATIO", "EQUALIZE_TAB_GROUP_RUN", "EQUALIZE_PANE_RUN", "SPLIT_PANE",
     "MOVE_TAB_TO_GROUP", "MOVE_TAB_TO_SPLIT", "MOVE_TAB_TO_PANE_SPLIT", "DETACH_PANE_TO_TAB", "CLOSE_PANE",
-    "FOCUS_PANE", "SWAP_PANES", "UPDATE_FILE_TAB", "UPDATE_BROWSER_TAB"].includes(action.type);
+    "FOCUS_PANE", "TOGGLE_PANE_EXPANDED", "SWAP_PANES", "UPDATE_FILE_TAB", "UPDATE_BROWSER_TAB"].includes(action.type);
 }
 
 export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.current()): WorkspaceState {
   if (!view) return state;
-  const sessions = { ...state.sessions };
+  let sessions = state.sessions;
   const admit = (node: DaemonNode) => {
     if (node.type === "split") { admit(node.a); admit(node.b); return; }
     if (node.content.kind === "disconnectedTerminal") {
       const id = foreignSessionId(node.content.machineId, node.content.backendSessionId);
+      if (sessions[id]?.backendSessionId === null) return;
+      sessions = { ...sessions };
       sessions[id] = { id, backendSessionId: null, workspaceId: state.workspaceId ?? "", cwd: "", worktree: null,
         lifecycle: "failed", processState: "standby", remoteConnectionState: "disconnected",
         backendUnavailableReason: "remote_session_gone" };
@@ -307,6 +310,7 @@ export function rehydrateWorkspace(state: WorkspaceState, view = layoutSync.curr
     if (node.content.kind !== "terminal") return;
     const id = node.content.backendSessionId;
     if (!Object.values(sessions).some((session) => session.backendSessionId === id)) {
+      sessions = { ...sessions };
       sessions[id] = { id, backendSessionId: id, workspaceId: state.workspaceId ?? "", cwd: state.activeWorktreePath ?? "",
         worktree: null, lifecycle: "working" };
     }

@@ -679,7 +679,6 @@ export function deriveFocusedTerminal(
     ? (activeLeafId && tabLayout?.sessionIdsByLeafId?.[activeLeafId]) || focusedTab.sessionId
     : null;
   const session = localSessionId ? state.sessions[localSessionId] : undefined;
-  useScripting(session?.backendSessionId ?? null);
 
   const sessionWorktreePath = session?.worktreePath ?? session?.cwd;
   const foundWorktree = sessionWorktreePath
@@ -2338,6 +2337,7 @@ function WorkspaceApp({
     () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots()),
     [activeProject.workspaceId, state, parkedActivityVersion],
   );
+  useScripting(focusedTerminalPayload?.backendSessionId ?? null);
   const publishedTerminalPayloadKey = useRef<string | null>(null);
   const [focusedTerminalRetry, setFocusedTerminalRetry] = useState(0);
 
