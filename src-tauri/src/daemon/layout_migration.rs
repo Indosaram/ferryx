@@ -229,7 +229,11 @@ mod tests {
             assert_eq!(other.parked_layouts[&scope_key("other", Some("/other"))].tabs.len(), 2);
             assert_eq!(view.layout.parked_layouts[&scope_key("w", Some("/parked"))].tabs.len(), 2);
             assert_eq!(Store::new(root.path().into()).get("main").unwrap().layout, view.layout);
-            let mut successor = Store::new(root.path().join("successor"));
+            let successor_root = root.path().join("successor");
+            std::fs::create_dir_all(&successor_root).unwrap();
+            // Handover on the same machine retains its persisted identity.
+            std::fs::copy(root.path().join("identity.json"), successor_root.join("identity.json")).unwrap();
+            let mut successor = Store::new(successor_root);
             successor.adopt(BTreeMap::from([("main".into(), view.layout.clone())])).unwrap();
             assert_eq!(successor.get("main").unwrap().layout, view.layout);
         }

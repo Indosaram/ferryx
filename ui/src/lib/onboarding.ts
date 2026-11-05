@@ -191,9 +191,9 @@ let persistence: Promise<void> = Promise.resolve();
 
 /** Hydrate before opening; localStorage is only a cache on desktop. */
 export async function hydrateOnboardingState(): Promise<OnboardingState> {
-  const cache = loadOnboardingState();
-  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return cache;
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return loadOnboardingState();
   await persistence;
+  const cache = loadOnboardingState();
   const { invoke } = await import("@tauri-apps/api/core");
   const state = await invoke<OnboardingState>("cmd_onboarding_get", { cache });
   browserStorage()?.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(state));

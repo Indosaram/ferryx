@@ -20,7 +20,11 @@ const timeout = () => AbortSignal.timeout(90_000);
 async function launch(legacy) {
   const controller = new AbortController();
   const events = legacy ? watch(env.FERRYX_RUNTIME_DIR, { signal: controller.signal })[Symbol.asyncIterator]() : null;
-  const changed = events?.next();
+  const nextChange = () => events.next().catch(error => {
+    if (controller.signal.aborted) return { done: true };
+    throw error;
+  });
+  const changed = events ? nextChange() : null;
   const child = spawn(binary, ['--daemon', ...(legacy ? ['--handover-from', legacy] : [])], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(child);
   child.stderr.pipe(process.stderr);
@@ -33,7 +37,7 @@ async function launch(legacy) {
         await Promise.race([event, new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('successor readiness timeout')), { once: true }))]);
         // Subscribe before probing: handover keeps the same listener, so only an
         // exact-PID handshake proves the successor has committed ownership.
-        event = events.next();
+        event = nextChange();
         try { const probe = await client(child.pid); probe.socket.destroy(); break; }
         catch (error) { if (signal.aborted) throw error; }
       }
