@@ -62,11 +62,14 @@ pub fn outcome_of(response: DaemonResponse) -> (Value, i32) {
     }
 }
 
-fn block_on<T>(future: impl std::future::Future<Output = T>) -> Result<T, (Value, i32)> {
+fn block_on<T>(
+    budget: std::time::Duration,
+    future: impl std::future::Future<Output = T>,
+) -> Result<Result<T, tokio::time::error::Elapsed>, (Value, i32)> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map(|runtime| runtime.block_on(future))
+        .map(|runtime| runtime.block_on(async { tokio::time::timeout(budget, future).await }))
         .map_err(|error| failure("INTERNAL", &error.to_string()))
 }
 
@@ -80,10 +83,10 @@ pub fn run_grants_cli(args: &[String]) -> i32 {
         Ok(action) => {
             let mutates = !matches!(action, PaneGrantAction::List);
             let request = DaemonRequest::PaneGrant { request: action };
-            match block_on(tokio::time::timeout(
+            match block_on(
                 GRANTS_TIMEOUT,
                 super::supervisor_goal::exchange_once(PANE_GRANTS_CAPABILITY, request, mutates),
-            )) {
+            ) {
                 Ok(Ok(Ok(response))) => outcome_of(response),
                 Ok(Ok(Err(failed))) | Err(failed) => failed,
                 Ok(Err(_)) => failure("TIMEOUT", "the daemon did not answer before the wait budget elapsed"),
@@ -101,10 +104,10 @@ pub fn run_grants_cli(args: &[String]) -> i32 {
 pub fn owner_action_refusal(session_id: Option<&std::ffi::OsStr>) -> Option<String> {
     session_id.filter(|session| !session.is_empty())?;
     let check = DaemonRequest::PaneGrant { request: PaneGrantAction::CheckAdmin };
-    let answer = block_on(tokio::time::timeout(
+    let answer = block_on(
         GRANTS_TIMEOUT,
         super::supervisor_goal::exchange_once(PANE_GRANTS_CAPABILITY, check, false),
-    ));
+    );
     match answer {
         Ok(Ok(Ok(DaemonResponse::PaneGrantsOk { admin: Some(false), .. }))) => Some(format!(
             "FORBIDDEN: {OWNER_ACTION_REQUIRED}: run from Settings > Pane access or outside a pane \
@@ -120,6 +123,12 @@ mod tests {
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    #[test]
+    fn bounded_future_enters_the_runtime_before_creating_the_timer() {
+        let result = block_on(std::time::Duration::from_millis(100), std::future::ready(42));
+        assert_eq!(result.unwrap().unwrap(), 42);
     }
 
     #[test]
