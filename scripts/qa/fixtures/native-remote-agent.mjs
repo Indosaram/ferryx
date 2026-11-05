@@ -1,4 +1,5 @@
 // Runs only when the sole verifier starts it over SSH. JSONL RPC, no GUI actions.
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { watch } from 'node:fs';
@@ -1101,6 +1102,13 @@ function createNativeBarrierAdapter({ hub, emitReceipt }) {
 
 async function dispatch(method, args, signal) {
   switch (method) {
+    case 'identity': {
+      const resolvedPath = await realpath(fileURLToPath(import.meta.url));
+      const checkout = await realpath(await command('git', ['-C', resolve(resolvedPath, '..'), 'rev-parse', '--show-toplevel'], signal));
+      const headRevision = await command('git', ['-C', checkout, 'rev-parse', 'HEAD'], signal);
+      const status = await command('git', ['-C', checkout, 'status', '--porcelain', '--untracked-files=all'], signal);
+      return { resolvedPath, checkout, headRevision, clean: status === '', status };
+    }
     case 'prepare': {
       const { worktreeRoot, worktree, runId, operationId, binary, uiDist, manifest } = args;
       if (!/^[a-z0-9-]+$/.test(runId) || !inside(worktreeRoot, worktree)) throw fail('Noncanonical worktree/runId');

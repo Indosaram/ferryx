@@ -22,7 +22,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { connectNativeMahord, rpcProcess } from '../fixtures/native-configured-adapters.mjs';
 import { FRONTEND_DEV_URL } from '../../lib/qa-scenarios/frontend-server.mjs';
-import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
+import { connectRemoteAgent } from './remote-agent.mjs';
+import { LaneBlocked, StepFailed, recordIdentity, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
 import { acceptedReply, configureGateway, framePoint, panelReadRequest, compactOcrShows, workspaceProblem, ocrShows, reportGoalRequest, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession, windowRect } from './seams.mjs';
 import { terminalTokenShown, singleLineOcrShows, scrollDelta, startupDsrObserved } from './seams.mjs';
@@ -98,13 +99,10 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     try {
       helper = ssh(host.hostHelper);
       const who = await helper.call('identity', { checkout: host.worktree });
-      lane.receipt.machine = who.machine;
-      lane.receipt.candidate = who.candidate;
-      lane.receipt.harness = who.harness;
+      recordIdentity(lane, who);
     } catch (error) {
       throw new LaneBlocked('HOST_UNAVAILABLE', `ssh ${host.sshDestination} (${host.hostId}): ${error.message}`);
     }
-    lane.write('identity', 'identity.json', { machine: lane.receipt.machine, candidate: lane.receipt.candidate, harness: lane.receipt.harness });
     const harnessRevision = run.harnessRevision ?? run.revision;
     if (lane.receipt.harness?.headRevision !== harnessRevision) throw new StepFailed('HARNESS_REVISION_MISMATCH', `${host.hostId} harness is at ${lane.receipt.harness?.headRevision}, expected ${harnessRevision}`);
     if (lane.receipt.harness.clean !== true) throw new StepFailed('HARNESS_DIRTY', `${host.hostId} harness checkout is not clean: ${lane.receipt.harness.status}`);
@@ -118,7 +116,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
 
     // 1. Isolated profile + candidate daemon through the existing native agent. The build
     // stamp the agent checked against the manifest must be this revision plus its patch hash.
-    agent = ssh(host.remoteAgent);
+    agent = await connectRemoteAgent({ helper, host, run, lane, connect: ssh });
     setup = await agent.call('prepare', { worktreeRoot: host.worktreeRoot, worktree: host.worktree, runId: run.runId, operationId: `f3-${run.runId}`,
       binary: host.binary, uiDist: host.uiDist, manifest: host.buildManifest });
     lane.receipt.candidate.stamp = setup.candidate;
@@ -634,7 +632,7 @@ async function launchGui({ agent, helper, mahord, setup, host, run, lane }) {
     if (launchError) throw launchError;
     if (task?.created && !task.deleted) throw new StepFailed('GUI_TASK_DELETE', JSON.stringify({ taskName: task.taskName, deleteError: task.deleteError }));
   } else {
-    const opened = await helper.call('open-gui-bundle', { profile: setup.profile, bundleId: `dev.ferryx.qa.${run.runId}`, agent: host.remoteAgent, specPath });
+    const opened = await helper.call('open-gui-bundle', { profile: setup.profile, bundleId: `dev.ferryx.qa.${run.runId}`, agent: lane.receipt.remoteAgent.resolvedPath, specPath });
     lane.write('gui-receipt', 'gui-bundle.json', opened);
   }
   const gui = await receipt;

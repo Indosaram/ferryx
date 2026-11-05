@@ -15,7 +15,7 @@
 // ChildProcess handle it spawned itself; it removes only the serve port it added itself.
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { homedir, hostname, platform, release } from 'node:os';
@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { activationScript, engineFiles, guiBundleFiles, inputSourceScript, qaProjectSeed, parseEnvBlock, stubReply, windowBoundsScript, windowsEnvScript } from './seams.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CHECKOUT = resolve(HERE, '..', '..', '..');
+const CHECKOUT = realpathSync(resolve(HERE, '..', '..', '..'));
 const DAEMON_PROTOCOL_VERSION = 5;
 const WIN = process.platform === 'win32';
 const MAC = process.platform === 'darwin';
@@ -58,6 +58,7 @@ function machineId() {
 
 function identity({ checkout = CHECKOUT } = {}) {
   if (!isAbsolute(checkout)) throw fail('IDENTITY_REFUSED', 'candidate checkout must be absolute');
+  checkout = realpathSync(checkout);
   const candidateGit = (...args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8' }).trim();
   const status = candidateGit('status', '--porcelain', '--untracked-files=no');
   const harnessStatus = git('status', '--porcelain', '--untracked-files=all');
@@ -66,6 +67,18 @@ function identity({ checkout = CHECKOUT } = {}) {
     candidate: { checkout, headRevision: candidateGit('rev-parse', 'HEAD'), clean: status === '', status },
     harness: { checkout: CHECKOUT, headRevision: git('rev-parse', 'HEAD'), clean: harnessStatus === '', status: harnessStatus },
   };
+}
+
+function resolveAgent({ path, checkouts }) {
+  const resolvedPath = realpathSync(path);
+  const checkout = checkouts.find((root) => {
+    const canonical = realpathSync(root);
+    return canonical === root && inside(canonical, resolvedPath);
+  });
+  if (!checkout) throw fail('REMOTE_AGENT_PROVENANCE', 'agent is outside recorded checkouts');
+  const actual = execFileSync('git', ['-C', dirname(resolvedPath), 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+  if (realpathSync(actual) !== checkout) throw fail('REMOTE_AGENT_PROVENANCE', 'agent belongs to a different nested checkout');
+  return { resolvedPath, checkout };
 }
 
 /** The isolated daemon's endpoint: the unix socket, or Windows loopback port plus token. */
@@ -440,7 +453,7 @@ const METHODS = {
     catch (error) { throw fail('HARNESS_WORKSPACE_UNAVAILABLE', error.message); }
   },
   'prepare-project': prepareProject,
-  identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
+  identity, 'resolve-agent': resolveAgent, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
   cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,
   'serve-status': serveStatus, 'serve-add': serveAdd, 'serve-remove': serveRemove, 'open-gui-bundle': openGuiBundle, 'process-isolation': processIsolation, 'activate-gui': activateGui, 'gui-bounds': guiBounds,
   'engine-stub': startEngineStub, 'input-source': inputSource,

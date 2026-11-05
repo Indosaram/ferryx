@@ -29,6 +29,12 @@ export function newLane(name, evidenceDir) {
   return { name, dir, receipt, write, log };
 }
 
+/** Preserve the same complete identity in every host lane and its raw artifact. */
+export function recordIdentity(lane, who) {
+  Object.assign(lane.receipt, who);
+  lane.write('identity', 'identity.json', who);
+}
+
 /** Runs `body(ctx)` as the step for `scenarioId`; returns the recorded step. */
 export async function runStep(lane, scenarioId, body) {
   const startedAt = new Date();

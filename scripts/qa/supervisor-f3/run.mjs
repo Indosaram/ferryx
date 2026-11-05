@@ -27,7 +27,7 @@ import { runDesktopLane } from './desktop-lane.mjs';
 import { runIphoneLane } from './iphone-lane.mjs';
 import { configProblems, newRunId, runLanes as selectedLanes } from './seams.mjs';
 import { startSession } from './session.mjs';
-import { LaneBlocked, markNotRun, newLane } from './steps.mjs';
+import { LaneBlocked, markNotRun, newLane, recordIdentity } from './steps.mjs';
 import { controlIdentity, manifestFiles, verifyEvidence } from './verify.mjs';
 
 const USAGE = 'usage: run.mjs --config <f3.json> --revision <40-hex> --evidence <new dir> [--smoke] | --validate <evidence dir>';
@@ -71,11 +71,10 @@ function crossChecks(shared, lanes) {
 }
 
 /** Session host first (relay, daemon, panes); then both desktops and the phone together. */
-async function runLanes({ config, run, lanes, session, shared, signal }) {
+export async function runLanes({ config, run, lanes, session, shared, signal }) {
   try {
     const who = await shared.probe();
-    Object.assign(session.receipt, { machine: who.machine, candidate: who.candidate });
-    session.write('identity', 'identity.json', who);
+    recordIdentity(session, who);
     await shared.start();
     if (!shared.panesOnDesktop) await shared.spawnPanes();
   } catch (error) {
