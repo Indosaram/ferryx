@@ -395,12 +395,24 @@ async fn desktop_gui_session_lifecycle_machine_events() {
 
     // 4. Close session and receive sessionExited event
     eprintln!("[events_test] close session");
+    service.workspace_service.machine_events.publish(
+        "agentControlChanged",
+        Some(&request.workspace_id),
+        Some(&session_id),
+        serde_json::json!({}),
+    );
     service.terminal_service.close_session(&session_id).await.unwrap();
     eprintln!("[events_test] wait sessionExited");
-    let exit_event = tokio::time::timeout(std::time::Duration::from_secs(5), events_rx.recv())
+    let exit_event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events_rx.recv().await.expect("machine event receive");
+            if event["type"] == "sessionExited" && event["sessionId"] == session_id {
+                break event;
+            }
+        }
+    })
         .await
-        .expect("sessionExited timeout")
-        .expect("sessionExited receive");
+        .expect("matching sessionExited timeout");
     assert_eq!(exit_event["type"], "sessionExited");
     assert_eq!(exit_event["sessionId"], session_id);
     assert_eq!(exit_event["workspaceId"], request.workspace_id);

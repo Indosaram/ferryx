@@ -5,3 +5,10 @@
 pub fn cdylib_export_link_arg(target: &str) -> Option<&'static str> {
     target.ends_with("-windows-gnu").then_some("-Wl,--exclude-all-symbols")
 }
+
+/// Raise the default 4 GiB PDB capacity to 8 GiB without removing debug info.
+/// Supported by VS 2022+ link.exe; consuming these PDBs needs 22H2-era or newer
+/// debugging tools. Apply to both the library DLL and package executables.
+pub fn pdb_page_size_link_arg(target: &str) -> Option<&'static str> {
+    target.ends_with("-windows-msvc").then_some("/PDBPAGESIZE:8192")
+}
