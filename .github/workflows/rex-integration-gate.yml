@@ -1,0 +1,100 @@
+name: rex integration gates
+
+on:
+  push:
+    branches: ['ci/rex-items-*']
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: rex integration Linux gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          df -h /
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Import private native source bundle
+        run: |
+          git checkout 35c984684 -- src-tauri/vendor/ghostty
+          git submodule update --init --recursive
+          git -C src-tauri/vendor/ghostty fetch "$GITHUB_WORKSPACE/.github/rex-gate/grants/native.bundle" refs/heads/rex/repair-history-spacer
+          git reset HEAD src-tauri/vendor/ghostty
+          git checkout HEAD -- src-tauri/vendor/ghostty
+          git -C src-tauri/vendor/ghostty checkout --detach 216426b657b93d8fadd11d7506615f744581221e
+          git submodule update --init --recursive
+      - name: Isolated TMPDIR and gate dir
+        run: |
+          mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/gate"
+          echo "TMPDIR=$RUNNER_TEMP/tmp" >> "$GITHUB_ENV"
+          echo "GATE_DIR=$RUNNER_TEMP/gate" >> "$GITHUB_ENV"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+          use-cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev clang libclang-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev libva-dev libdrm-dev libgbm-dev libegl-dev libgl-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev libx11-dev libxext-dev libxrandr-dev libxfixes-dev libxtst-dev libxi-dev libevdev-dev libudev-dev
+      - name: UI and SDK
+        run: |
+          bun install --cwd ui
+          bun run --cwd ui build
+          bun scripts/fetch-ffmpeg.mjs
+      - name: Grants reactor tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- cli::grants owner_action 2>&1 | tail -60
+      - name: Integrations CLI tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked -- cli::integrations agent_hook_install api_catalog 2>&1 | tail -60
+      - name: Supervisor peer and control-wire registry tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- supervisor_peer control_wire_tests 2>&1 | tail -60
+      - name: Daemon onboarding and layout tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- daemon::onboarding daemon::layout::foreign_snapshot 2>&1 | tail -60
+      - name: Config import tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- config_import 2>&1 | tail -60
+      - name: Luau sandbox tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- script:: 2>&1 | tail -60
+      - name: Account onboarding sync tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked -- account::onboarding_sync_tests 2>&1 | tail -60
+      - name: Clippy default features
+        run: |
+          set -o pipefail
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings 2>&1 | tail -40
+      - name: Clippy headless
+        run: |
+          set -o pipefail
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --locked -- -D warnings 2>&1 | tail -40
