@@ -43,7 +43,7 @@ async function ocr(tesseract, pngPath, rect = null, singleLine = false) {
       for (let i = 0; i < gray.px.length; i += 1) gray.px[i] = Math.max(0, Math.min(255, (gray.px[i] - 20) * 255 / 190));
       image.png = encodePng(gray.width, gray.height, 1, gray.px);
     }
-    input = pngPath.replace(/\.png$/, '.ocr-input.png');
+    input = pngPath.replace(/\.png$/, singleLine ? '.ocr-line-input.png' : '.ocr-input.png');
     writeFileSync(input, image.png);
     scale = image.scale;
     map = (x, y) => ({ x: image.origin.x + x / image.scale, y: image.origin.y + y / image.scale });
@@ -227,7 +227,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const runMarker = 'Supervisor';
     // OCR reads a middle dot as '-' and 1 as i: text is compared with those folded (seams ocrShows).
     const shows = ocrShows;
-    let frameSize; let windowFrame;
+    let frameSize; let windowFrame; let captureSequence = 0;
     const click = (point) => mahord.click(framePoint(point, frameSize.width, frameSize.height), signal);
     const scrollPanel = (dy) => mahord.scroll({ ...framePoint({ x: windowFrame.x + Math.min(180, windowFrame.width * 0.10), y: windowFrame.y + windowFrame.height * 0.55 }, frameSize.width, frameSize.height), dx: 0, dy }, signal);
     const frame = async (name, step, { marker = runMarker } = {}) => {
@@ -238,7 +238,8 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
         frameSize = { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
         const rect = await windowOf(bytes.readUInt32BE(16));
         windowFrame = rect;
-        const shot = step ? step.artifact('screenshot', `${name}.png`, bytes) : lane.write('screenshot', `frames/${name}-${Date.now()}.png`, bytes);
+        const captureName = `${name}-${++captureSequence}`;
+        const shot = step ? step.artifact('screenshot', `${captureName}.png`, bytes) : lane.write('screenshot', `frames/${captureName}.png`, bytes);
         const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path), rect);
         if (name.endsWith('terminal-ready')) {
           const header = await ocr(run.tesseract, join(run.evidenceDir, shot.path),
@@ -246,14 +247,14 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
           read.text += `\n${header.text}`;
           read.words.push(...header.words);
         }
-        if (step) step.artifact('ocr', `${name}.ocr.tsv`, read.tsv);
+        if (step) step.artifact('ocr', `${captureName}.ocr.tsv`, read.tsv);
         if (workspaceProblem(read.text)) throw new StepFailed('HARNESS_WORKSPACE_UNAVAILABLE', read.text.slice(0, 1800));
         if (host.platform !== 'darwin' || !marker || shows(read.text, marker)) return { shot, read, bytes };
         if (attempt >= 5) throw new StepFailed('GUI_NOT_FRONT', `frame ${name}: the run window text "${marker}" is not in the cropped frame after ${attempt} captures (a stale or covered frame)`);
         await new Promise((resolveWait) => { setTimeout(resolveWait, 1_000); });
       }
     };
-    const keep = (step, name, seen) => { step.artifact('screenshot', `${name}.png`, seen.bytes); step.artifact('ocr', `${name}.ocr.tsv`, seen.read.tsv); return seen; };
+    const keep = (step, name, seen) => { const captureName = `${name}-${++captureSequence}`; step.artifact('screenshot', `${captureName}.png`, seen.bytes); step.artifact('ocr', `${captureName}.ocr.tsv`, seen.read.tsv); return seen; };
     // First launch discovers the other linked checkouts. Dismiss only the import prompt actually
     // observed in the owned window, through the same real MahoRD click used by the clauses.
     const initial = await until('owned supervisor frontend rendered', () => frame('initial-import', null, { marker: null }),
