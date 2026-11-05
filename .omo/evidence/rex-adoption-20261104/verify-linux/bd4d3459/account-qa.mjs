@@ -8,7 +8,7 @@ async function req(path,method,body,token){const r=await fetch(base+path,{method
 assert.equal((await req('/api/v1/account/onboarding','PUT',{completedSteps:['intro'],dismissed:false})).status,401);
 assert.equal((await req('/api/account/v1/login/request','POST',{email:'verifier@example.test'})).status,202);
 const files=readdirSync(join(root,'mail'));assert.equal(files.length,1);const code=new URL(readFileSync(join(root,'mail',files[0]),'utf8')).searchParams.get('code');
-const login=await req('/api/account/v1/login/consume','POST',{code});assert.equal(login.status,200);const token=login.body.bearerToken??login.body.bearer_token;assert(token);
+const login=await req('/api/account/v1/login/consume','POST',{code});assert.equal(login.status,200);const token=login.body.token;assert(token);
 assert.equal((await req('/api/v1/account/onboarding','PUT',{completedSteps:['intro'],dismissed:false},token)).status,200);
 const got=await req('/api/v1/account/onboarding','GET',undefined,token);assert.equal(got.status,200);assert(got.body.completedSteps.includes('intro'));
 assert.equal((await req('/api/v1/account/onboarding','PUT',{completedSteps:['enroll'],dismissed:false},token)).status,400);console.log('ACCOUNT_SYNC_LIVE_OK');
