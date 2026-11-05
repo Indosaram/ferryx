@@ -1,0 +1,59 @@
+{
+  "leg": "audit",
+  "head": "d8313422bde72275f08a1db6bf789597edc46d34",
+  "finals": {
+    "F1": {
+      "status": "REJECT",
+      "report": "F1-audit.md",
+      "merge_inventory": "PASS; 30 delivering anchors are ancestors, T13 release-gated",
+      "literal_leafId": "Migration-only references remain; semantic pane identity uses numeric node IDs. Explicit plan wording resolution required."
+    },
+    "F2-security": {
+      "status": "REJECT",
+      "report": "F2-security-review.md",
+      "findings": [
+        {
+          "id": "R2-1",
+          "severity": "HIGH",
+          "summary": "Enable approves reloaded manifest without binding displayed identity",
+          "location": "src-tauri/src/daemon/plugins/registry.rs:63-79",
+          "repair": "Supply reviewed manifest fingerprint and reject mismatch under consent lock."
+        },
+        {
+          "id": "R2-2",
+          "severity": "HIGH availability",
+          "summary": "Guest-selected views retain documents without aggregate byte or count budget",
+          "location": "src-tauri/src/daemon/server.rs:6812-6816",
+          "repair": "Enforce daemon per-plugin/global aggregate document and cardinality budgets before insertion."
+        }
+      ],
+      "source_closed": [
+        "SEC-1",
+        "SEC-2 original native owner-socket bypass",
+        "SEC-3",
+        "TOGGLE_PANE_EXPANDED forwarding"
+      ]
+    },
+    "F3": "Not executed by this audit",
+    "F4": "Parent-owned; no whole-plan completion claim"
+  },
+  "execution": {
+    "builds": [],
+    "tests": [],
+    "runtime_qa": [],
+    "baseline_failures": [],
+    "windows_recovery": "runtime-unproven",
+    "waiver": "macOS manual/GUI only, not security or automatic tests"
+  },
+  "limitations": [
+    "Native dependency revision unavailable locally; exact command and exit in native-source-unavailable.log.",
+    "Source inspection is not exploit reproduction or automatic-test success."
+  ],
+  "historical_reports": "Unchanged; prior verdicts preserved.",
+  "cleanup": {
+    "product_edits": false,
+    "pushes": false,
+    "production_process_operations": false,
+    "worktree": "Retained for evidence handoff"
+  }
+}

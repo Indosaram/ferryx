@@ -1,0 +1,35 @@
+{
+  "leg": "audit",
+  "head": "35c984684",
+  "finals": {
+    "F1": {
+      "status": "REJECT",
+      "report": "F1-audit.md",
+      "merge_inventory": "PASS; 30 todos merged, 13 release-gated"
+    },
+    "F2-security": {
+      "status": "REJECT",
+      "report": "F2-security-review.md",
+      "findings": [
+        "SEC-1 remote mutation gate omissions",
+        "SEC-2 plugin owner-socket bypass",
+        "SEC-3 Unknown origin fail-open"
+      ]
+    },
+    "F3": "N/A: host legs own execution",
+    "F4": "N/A: parent owns success-criteria fidelity"
+  },
+  "acceptance": [
+    {
+      "cmd": "python3 .omo/evidence/rex-adoption-20261104/verify-audit/static-review.py",
+      "exit": 1,
+      "log": "static-review.log"
+    }
+  ],
+  "qa": [],
+  "cleanup": {
+    "ci_refs_deleted": "N/A: none created/pushed",
+    "remote_worktrees_removed": "N/A: none created",
+    "hosts_released": "N/A: none claimed"
+  }
+}

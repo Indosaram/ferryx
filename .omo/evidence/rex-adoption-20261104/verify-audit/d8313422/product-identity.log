@@ -1,0 +1,2 @@
+$ git diff --exit-code d8313422 -- . :!.omo/evidence/rex-adoption-20261104/verify-audit
+EXIT=0

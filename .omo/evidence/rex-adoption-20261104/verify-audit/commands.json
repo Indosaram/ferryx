@@ -1,0 +1,38 @@
+[
+  {
+    "check": "protocol-constant-diff",
+    "cmd": "git diff d59508fa9...35c984684 -- src-tauri/src/daemon/protocol.rs",
+    "exit": 0,
+    "log": "protocol-constant-diff.log"
+  },
+  {
+    "check": "ffmpeg-boundary",
+    "cmd": "git diff --exit-code d59508fa9...35c984684 -- scripts/build-ffmpeg-lgpl.sh src-tauri/resources/ffmpeg",
+    "exit": 0,
+    "log": "ffmpeg-boundary.log"
+  },
+  {
+    "check": "lint-config-boundary",
+    "cmd": "git diff --exit-code d59508fa9...35c984684 -- ui/eslint.config.js ui/eslint.config.mjs clippy.toml .clippy.toml scripts/release-workflow-policy.mjs AGENTS.md scripts/pick-build-host.sh",
+    "exit": 0,
+    "log": "lint-config-boundary.log"
+  },
+  {
+    "check": "release-precondition",
+    "cmd": "git tag --contains 5ac05fd10",
+    "exit": 0,
+    "log": "release-precondition.log"
+  },
+  {
+    "check": "t25-ancestry",
+    "cmd": "git merge-base --is-ancestor c73df3967 35c984684",
+    "exit": 0,
+    "log": "t25-ancestry.log"
+  },
+  {
+    "check": "t31-ancestry",
+    "cmd": "git merge-base --is-ancestor 1fa362974 35c984684",
+    "exit": 0,
+    "log": "t31-ancestry.log"
+  }
+]

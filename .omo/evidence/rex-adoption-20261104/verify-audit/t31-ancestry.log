@@ -1,0 +1,3 @@
+$ git merge-base --is-ancestor 1fa362974 35c984684
+
+EXIT=0

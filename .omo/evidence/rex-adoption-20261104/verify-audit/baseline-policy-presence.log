@@ -1,0 +1,9 @@
+$ git cat-file -e d59508fa9:src-tauri/src/daemon/pane_grants.rs
+fatal: path 'src-tauri/src/daemon/pane_grants.rs' exists on disk, but not in 'd59508fa9'
+EXIT=128
+$ git cat-file -e d59508fa9:src-tauri/src/daemon/plugins/runtime.rs
+fatal: path 'src-tauri/src/daemon/plugins/runtime.rs' exists on disk, but not in 'd59508fa9'
+EXIT=128
+$ git cat-file -e d59508fa9:src-tauri/src/daemon/windows_pipe.rs
+fatal: path 'src-tauri/src/daemon/windows_pipe.rs' exists on disk, but not in 'd59508fa9'
+EXIT=128

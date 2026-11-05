@@ -1,0 +1,22 @@
+{
+  "head": "d8313422bde72275f08a1db6bf789597edc46d34",
+  "kind": "source review; no tests or runtime QA",
+  "closed_in_source": [
+    "SEC-1",
+    "SEC-2 native socket escape",
+    "SEC-3",
+    "expansion forwarding"
+  ],
+  "findings": [
+    {
+      "id": "R2-1",
+      "location": "src-tauri/src/daemon/plugins/registry.rs:63-76",
+      "observation": "Approval reloads manifest by name; caller supplies no displayed digest/capability identity."
+    },
+    {
+      "id": "R2-2",
+      "location": "src-tauri/src/daemon/server.rs:6812-6816",
+      "observation": "Each guest-controlled view key adds a retained document without cardinality or aggregate byte budget."
+    }
+  ]
+}

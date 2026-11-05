@@ -1,0 +1,2 @@
+$ git diff --exit-code 2138dfb2b -- .omo/evidence/rex-adoption-20261104/verify-audit/F1-audit.md .omo/evidence/rex-adoption-20261104/verify-audit/F2-security-review.md .omo/evidence/rex-adoption-20261104/verify-audit/d8313422
+EXIT=0
