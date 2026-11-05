@@ -94,8 +94,9 @@ struct Exiting {
 static EXITING: LazyLock<Mutex<HashMap<String, Exiting>>> = LazyLock::new(Default::default);
 /// How long a quitting engine gets before the next engine of its profile ends it.
 const PREVIOUS_ENGINE_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
-/// How often the exit watcher checks a quitting engine.
-const EXIT_POLL: Duration = Duration::from_millis(100);
+/// How often the exit watcher checks a quitting engine. Faster than [`EXIT_POLL`]: this one
+/// only runs after a quit was requested, and the profile's next launch blocks on it.
+const EXIT_POLL_QUITTING: Duration = Duration::from_millis(100);
 
 /// How the profile's previous engine was out of the way of a new one.
 #[derive(Debug, PartialEq, Eq)]
@@ -117,7 +118,7 @@ fn begin_exit(profile: &str, child: Child) {
             let _ = exited.send(());
             return;
         }
-        std::thread::sleep(EXIT_POLL);
+        std::thread::sleep(EXIT_POLL_QUITTING);
     });
 }
 
