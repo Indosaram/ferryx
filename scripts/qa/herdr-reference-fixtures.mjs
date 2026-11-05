@@ -1,3 +1,4 @@
+import { runGit } from "./unified-supervisor/git-env.mjs";
 /**
  * Frozen fixtures, schemas and shared helpers for the Herdr reference-chat acceptance
  * harness (plan task 14). Contract: docs/chat/herdr-port-contract.md (rev 2).
@@ -627,7 +628,7 @@ const REPRODUCIBLE_GIT_CONFIG = [
 ];
 
 function git(root, args) {
-  const result = spawnSync("git", [...REPRODUCIBLE_GIT_CONFIG, ...args], { cwd: root, encoding: "utf8" });
+  const result = runGit([...REPRODUCIBLE_GIT_CONFIG, ...args], { cwd: root, encoding: "utf8" });
   if (result.status !== 0) {
     return { ok: false, stdout: (result.stdout || "").trim(), stderr: (result.stderr || "").trim() };
   }
@@ -647,7 +648,7 @@ function git(root, args) {
  */
 export function captureSourceProvenance(root, sourcePaths, toolVersions) {
   const revision = git(root, ["rev-parse", "HEAD"]);
-  const diff = spawnSync("git", [...REPRODUCIBLE_GIT_CONFIG, "diff", "HEAD", "--binary"], {
+  const diff = runGit([...REPRODUCIBLE_GIT_CONFIG, "diff", "HEAD", "--binary"], {
     cwd: root,
     encoding: "buffer",
   });

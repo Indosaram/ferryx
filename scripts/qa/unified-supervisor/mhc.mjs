@@ -1,3 +1,4 @@
+import { gitEnv } from './git-env.mjs';
 // Fixtures and steps of the `runtime` scenario (plan todo 6): the hub's retained mhc supervisor
 // engine, driven through the product surface `ferryx-cli supervisor engine status|assess`.
 //
@@ -625,7 +626,7 @@ async function runRuntime(ctx) {
     if (!git) throw new HarnessError('PREREQUISITE_MISSING', 'git is not on PATH; the runtime scenario provisions its supervisor identity against a fixture git repository');
     const repo = join(data, 'runtime-repo');
     mkdirSync(repo, { recursive: true });
-    const gitInit = await ctx.run('git-init-runtime', git, ['-c', 'init.defaultBranch=main', 'init', '-q', repo], { deadlineMs: 30_000 });
+    const gitInit = await ctx.run('git-init-runtime', git, ['-c', 'init.defaultBranch=main', 'init', '-q', repo], { deadlineMs: 30_000, env: gitEnv() });
     if (gitInit.code !== 0) throw new HarnessError('FIXTURE_FAILED', `git init exited ${gitInit.code}: ${gitInit.stderr}`);
     const setup = await ctx.cli(['supervisor', 'setup', '--owner', config.ownerPrincipal, '--project', RUNTIME_PROJECT, '--repo-identity', `qa:${RUNTIME_PROJECT}`,
       '--host', RUNTIME_HOST, '--git-common-dir', realpathSync(join(repo, '.git')), '--json'], { label: 'supervisor-setup-runtime', env });

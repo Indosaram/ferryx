@@ -1,3 +1,4 @@
+import { gitEnv } from './git-env.mjs';
 // Scenario `channels` (plan todo 17, scenario table "channels"): one owner, one supervisor, one
 // goal across three channels. The owner submits in a thread of the approved, dedicated Slack QA
 // channel (the real Slack workspace, posted with the owner's own user token), corrects from the
@@ -219,7 +220,7 @@ export async function runChannels(ctx, deps) {
   const gitArgs = ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid'];
   for (const [label, args] of [['git-init', [...gitArgs, 'init', '-q', repo]], ['git-add', [...gitArgs, '-C', repo, 'add', 'verify.sh']],
     ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '-m', 'qa fixture verifier']]]) {
-    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000, env: gitEnv() });
     if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
   }
   const workerLogs = join(data, 'workers');

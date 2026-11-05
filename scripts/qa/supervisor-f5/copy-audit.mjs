@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runGit } from '../unified-supervisor/git-env.mjs';
 /**
  * scripts/qa/supervisor-f5/copy-audit.mjs
  *
@@ -60,8 +61,8 @@ function loadPlaywright(ui) {
 }
 
 function gitRevision(dir) {
-  const out = spawnSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" });
-  const dirty = spawnSync("git", ["-C", dir, "status", "--porcelain", "--", "."], { encoding: "utf8" });
+  const out = runGit(["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" });
+  const dirty = runGit(["-C", dir, "status", "--porcelain", "--", "."], { encoding: "utf8" });
   return out.status === 0 ? `${out.stdout.trim()}${dirty.stdout.trim() ? "+dirty" : ""}` : "unknown";
 }
 

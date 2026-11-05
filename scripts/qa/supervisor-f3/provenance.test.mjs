@@ -1,3 +1,4 @@
+import { gitEnv } from '../unified-supervisor/git-env.mjs';
 // Remote harness provenance is enforced at the run-receipt boundary, not on iPhone.
 import { describe, expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
@@ -96,7 +97,7 @@ describe('remote harness provenance', () => {
       expect(await helper.call('resolve-agent', { path, checkouts: [checkout] })).toEqual({ resolvedPath: path, checkout });
       await expect(helper.call('resolve-agent', { path, checkouts: [`${checkout}/scripts/qa/supervisor-f3`] })).rejects.toMatchObject({ code: 'REMOTE_AGENT_PROVENANCE' });
       const report = await agent.call('identity', {});
-      const git = (...args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8' }).trim();
+      const git = (...args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8', env: gitEnv() }).trim();
       expect(report).toEqual({ resolvedPath: path, checkout, headRevision: git('rev-parse', 'HEAD'), clean: git('status', '--porcelain', '--untracked-files=all') === '', status: git('status', '--porcelain', '--untracked-files=all') });
     } finally { agent.close(); helper.close(); }
   });

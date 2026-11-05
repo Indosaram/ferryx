@@ -1,3 +1,4 @@
+import { gitEnv } from '../unified-supervisor/git-env.mjs';
 // On-disk half of the F3 verdict. contract.mjs judges the receipt; this file refuses to let a
 // receipt vouch for bytes it does not have: every artifact path a step names is read back from
 // the evidence dir and its sha256 and byte count recomputed, manifest.json must list exactly the
@@ -14,7 +15,7 @@ import { LANES, validateRun } from './contract.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CHECKOUT = resolve(HERE, '..', '..', '..');
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const git = (...args) => execFileSync('git', ['-C', CHECKOUT, ...args], { encoding: 'utf8' }).trim();
+const git = (...args) => execFileSync('git', ['-C', CHECKOUT, ...args], { encoding: 'utf8', env: gitEnv() }).trim();
 
 /** The scripts that produce and judge F3 evidence, with their hashes. */
 export function scriptHashes() {

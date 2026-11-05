@@ -739,9 +739,10 @@ export async function collectLaunchEvidence(profile, signal, { ownedProfiles = p
   return files;
 }
 
+import { gitEnv } from '../unified-supervisor/git-env.mjs';
 function command(executable, args, signal) {
   return new Promise((resolveCommand, reject) => {
-    const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, signal });
+    const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, signal, ...(executable === 'git' ? { env: gitEnv() } : {}) });
     let stdout = ''; let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });

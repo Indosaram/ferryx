@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { gitEnv } from '../unified-supervisor/git-env.mjs';
 // F3 host helper: runs on a desktop host (macOS or Windows) or the session host (Linux, macOS
 // or Windows) under `ssh -T <host> node
 // <checkout>/scripts/qa/supervisor-f3/host-helper.mjs --rpc`, next to the existing
@@ -44,7 +45,7 @@ function requireProfile(profile, path) {
   if (!isAbsolute(profile ?? '') || !/[\\/]\.native-qa[\\/][a-z0-9-]+$/.test(profile)) throw fail('PROFILE_REFUSED', `not an isolated .native-qa profile: ${profile}`);
   if (path !== undefined && !inside(profile, path)) throw fail('PATH_REFUSED', `${path} is outside ${profile}`);
 }
-const git = (...args) => execFileSync('git', ['-C', CHECKOUT, ...args], { encoding: 'utf8' }).trim();
+const git = (...args) => execFileSync('git', ['-C', CHECKOUT, ...args], { encoding: 'utf8', env: gitEnv() }).trim();
 
 function machineId() {
   if (WIN) {
@@ -59,7 +60,7 @@ function machineId() {
 function identity({ checkout = CHECKOUT } = {}) {
   if (!isAbsolute(checkout)) throw fail('IDENTITY_REFUSED', 'candidate checkout must be absolute');
   checkout = realpathSync(checkout);
-  const candidateGit = (...args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8' }).trim();
+  const candidateGit = (...args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8', env: gitEnv() }).trim();
   const status = candidateGit('status', '--porcelain', '--untracked-files=no');
   const harnessStatus = git('status', '--porcelain', '--untracked-files=all');
   return {
@@ -76,7 +77,7 @@ function resolveAgent({ path, checkouts }) {
     return canonical === root && inside(canonical, resolvedPath);
   });
   if (!checkout) throw fail('REMOTE_AGENT_PROVENANCE', 'agent is outside recorded checkouts');
-  const actual = execFileSync('git', ['-C', dirname(resolvedPath), 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+  const actual = execFileSync('git', ['-C', dirname(resolvedPath), 'rev-parse', '--show-toplevel'], { encoding: 'utf8', env: gitEnv() }).trim();
   if (realpathSync(actual) !== checkout) throw fail('REMOTE_AGENT_PROVENANCE', 'agent belongs to a different nested checkout');
   return { resolvedPath, checkout };
 }
@@ -425,10 +426,10 @@ function prepareProject({ profile, binary, uiDist }) {
   requireProfile(profile);
   const repo = join(profile, 'repo');
   mkdirSync(repo, { recursive: true });
-  execFileSync('git', ['init', '-q', repo]);
+  execFileSync('git', ['init', '-q', repo], { env: gitEnv() });
   writeFileSync(join(repo, 'README.md'), 'F3 isolated fixture repository\n');
-  execFileSync('git', ['-C', repo, '-c', 'user.name=F3 QA', '-c', 'user.email=f3@localhost', 'add', '.']);
-  execFileSync('git', ['-C', repo, '-c', 'user.name=F3 QA', '-c', 'user.email=f3@localhost', 'commit', '-qm', 'Initialize fixture']);
+  execFileSync('git', ['-C', repo, '-c', 'user.name=F3 QA', '-c', 'user.email=f3@localhost', 'add', '.'], { env: gitEnv() });
+  execFileSync('git', ['-C', repo, '-c', 'user.name=F3 QA', '-c', 'user.email=f3@localhost', 'commit', '-qm', 'Initialize fixture'], { env: gitEnv() });
   const staged = join(profile, 'frontend');
   cpSync(uiDist, staged, { recursive: true });
   const index = join(staged, 'index.html');
@@ -449,7 +450,7 @@ const METHODS = {
   'project-head': ({ profile, repo }) => {
     requireProfile(profile);
     if (resolve(repo) !== resolve(join(profile, 'repo'))) throw fail('HARNESS_WORKSPACE_UNAVAILABLE', 'Project is outside the run-owned repository');
-    try { return execFileSync('git', ['-C', repo, 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' }).trim(); }
+    try { return execFileSync('git', ['-C', repo, 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8', env: gitEnv() }).trim(); }
     catch (error) { throw fail('HARNESS_WORKSPACE_UNAVAILABLE', error.message); }
   },
   'prepare-project': prepareProject,

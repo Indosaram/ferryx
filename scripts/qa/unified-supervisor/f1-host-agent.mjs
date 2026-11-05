@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runGit } from './git-env.mjs';
 // F1 host agent: one per fixture computer. The F1 runner starts it directly on the hub computer
 // and as `ssh -T <host> <bun> <repoDir>/scripts/qa/unified-supervisor/f1-host-agent.mjs` on every
 // other computer. JSONL RPC on stdin/stdout: {id, op, ...} -> {id, ok, result | error}; it also
@@ -230,7 +231,7 @@ const ops = {
   async repo() {
     const repo = join(state.runRoot, 'ws', 'f1-project');
     mkdirSync(repo, { recursive: true });
-    const git = (args) => spawnSync('git', ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid', ...args], { encoding: 'utf8', timeout: 30_000 });
+    const git = (args) => runGit(['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid', ...args], { encoding: 'utf8', timeout: 30_000 });
     for (const args of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'f1 fixture']]) {
       const result = git(args);
       if (result.status !== 0) throw fail('FIXTURE_FAILED', `git ${args.join(' ')}: ${result.stderr}`);
@@ -317,11 +318,11 @@ const ops = {
   // ferryx-cli this computer runs: the evidence records each computer's provenance.
   async rev({ ferryxCli } = {}) {
     const dir = dirname(PANE);
-    const git = (args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 20_000 });
+    const git = (args) => runGit(['-C', dir, ...args], { encoding: 'utf8', timeout: 20_000 });
     const top = git(['rev-parse', '--show-toplevel']);
     const repoRoot = top.status === 0 ? top.stdout.trim() : null;
     const head = git(['rev-parse', 'HEAD']);
-    const status = repoRoot ? spawnSync('git', ['-C', repoRoot, 'status', '--porcelain'], { encoding: 'utf8', timeout: 20_000 }) : null;
+    const status = repoRoot ? runGit(['-C', repoRoot, 'status', '--porcelain'], { encoding: 'utf8', timeout: 20_000 }) : null;
     const dirty = status?.status === 0 ? (status.stdout.trim() || null) : 'git status failed';
     let binary = null;
     if (typeof ferryxCli === 'string' && isAbsolute(ferryxCli)) {

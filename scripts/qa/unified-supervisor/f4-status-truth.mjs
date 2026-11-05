@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { runGit } from './git-env.mjs';
 // F4 status-truth driver (docs/plans/SUPERVISOR_AUTONOMY_PANEL_PLAN_2026-11-02.md, final
 // verification F4): headless, against isolated live daemons built from this revision.
 //
@@ -74,7 +75,7 @@ const clause = (name, pass, detail) => {
 };
 
 // --- provenance -------------------------------------------------------------------------------
-const git = (gitArgs) => spawnSync('git', ['-C', REPO, ...gitArgs], { encoding: 'utf8' }).stdout.trim();
+const git = (gitArgs) => runGit(['-C', REPO, ...gitArgs], { encoding: 'utf8' }).stdout.trim();
 evidence.repo = { head: git(['rev-parse', 'HEAD']), dirty: git(['status', '--porcelain']) || null };
 {
   const sha = spawnSync('sha256sum', [args['ferryx-cli']], { encoding: 'utf8' });
@@ -145,7 +146,7 @@ async function bringUp(label, hub) {
   writeFileSync(entry, `await import(${JSON.stringify(PANE)});\n`);
   const repo = join(base, 'ws', 'project');
   for (const gitArgs of [['init', '-q', repo], ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'f4 fixture']]) {
-    const result = spawnSync('git', ['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid', ...gitArgs], { encoding: 'utf8' });
+    const result = runGit(['-c', 'init.defaultBranch=main', '-c', 'user.name=qa', '-c', 'user.email=qa@example.invalid', ...gitArgs], { encoding: 'utf8' });
     if (result.status !== 0) throw fail('FIXTURE_FAILED', `git ${gitArgs.join(' ')}: ${result.stderr}`);
   }
   if (hub) {
