@@ -517,6 +517,40 @@ pub async fn devtools(
     devtools_answer(method, ok, &raw)
 }
 
+/// Drops local files on the tab's page at viewport point (x, y) (CSS pixels) through CDP
+/// Input.dispatchDragEvent (dragEnter, dragOver, drop), the way an OS drop would; Chromium grants
+/// the page access to the files. Returns each call's outcome, in order.
+pub async fn drop_files(
+    browser_id: &str,
+    paths: &[String],
+    x: f64,
+    y: f64,
+) -> Vec<(String, Result<serde_json::Value, String>)> {
+    let mut calls = Vec::new();
+    for kind in ["dragEnter", "dragOver", "drop"] {
+        let params = serde_json::json!({
+            "type": kind,
+            "x": x,
+            "y": y,
+            "data": {"items": [], "files": paths, "dragOperationsMask": 1},
+        });
+        let result = devtools(
+            browser_id,
+            "Input.dispatchDragEvent",
+            params,
+            Duration::from_secs(5),
+        )
+        .await
+        .map_err(|error| error.to_string());
+        let failed = result.is_err();
+        calls.push((kind.to_string(), result));
+        if failed {
+            break;
+        }
+    }
+    calls
+}
+
 /// Turns an engine DevTools answer into the CDP result or a typed failure.
 fn devtools_answer(method: &str, ok: bool, raw: &str) -> Result<serde_json::Value, BrowserError> {
     let value: serde_json::Value = serde_json::from_str(raw).map_err(|error| {

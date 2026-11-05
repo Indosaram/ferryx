@@ -214,6 +214,16 @@ pub enum BrowserCliRequest {
         #[serde(default, alias = "duration_ms")]
         duration_ms: Option<u64>,
     },
+    /// QA probe: drops the file at `path` on the page at viewport point (`x`, `y`), CSS
+    /// pixels, through CDP. `serde_json::Number` keeps the enum `Eq`.
+    #[serde(rename_all = "camelCase")]
+    DropFiles {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        path: String,
+        x: serde_json::Number,
+        y: serde_json::Number,
+    },
     #[serde(rename_all = "camelCase")]
     RemoteAttach {
         #[serde(default)]
@@ -1654,6 +1664,9 @@ pub enum BrowserCliResponse {
     Highlighted {
         highlight: crate::browser::picker::BrowserHighlightResult,
     },
+    FilesDropped {
+        calls: serde_json::Value,
+    },
     Extensions {
         listing: serde_json::Value,
     },
@@ -3019,6 +3032,51 @@ async fn execute_request<R: tauri::Runtime>(
             match result {
                 Ok(highlight) => BrowserCliResponse::Highlighted { highlight },
                 Err(error) => error_response(error),
+            }
+        }
+        BrowserCliRequest::DropFiles {
+            browser_id,
+            path,
+            x,
+            y,
+        } => {
+            if !(cfg!(debug_assertions) || std::env::var_os("FERRYX_DATA_DIR").is_some()) {
+                return error_response(IpcError::new(
+                    IpcErrorCode::Unsupported,
+                    "drop-files is a QA probe: debug builds or isolated runs (FERRYX_DATA_DIR) only",
+                ));
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+            {
+                let _ = (browser_id, path, x, y);
+                error_response(IpcError::new(
+                    IpcErrorCode::Unsupported,
+                    "drop-files needs the Chromium engine",
+                ))
+            }
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+            {
+                let (Some(x), Some(y)) = (x.as_f64(), y.as_f64()) else {
+                    return error_response(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "drop-files needs numeric --x and --y",
+                    ));
+                };
+                let calls = crate::browser::cef_engine::drop_files(&browser_id, &[path], x, y)
+                    .await
+                    .into_iter()
+                    .map(|(event, result)| match result {
+                        Ok(result) => {
+                            serde_json::json!({"event": event, "ok": true, "result": result})
+                        }
+                        Err(error) => {
+                            serde_json::json!({"event": event, "ok": false, "error": error})
+                        }
+                    })
+                    .collect();
+                BrowserCliResponse::FilesDropped {
+                    calls: serde_json::Value::Array(calls),
+                }
             }
         }
         BrowserCliRequest::RemoteAttach { protocol_version } => {
@@ -4749,6 +4807,20 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"eval""#));
         assert!(json.contains(r#""browserId":"b1""#));
+        let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        // DropFiles
+        let req = BrowserCliRequest::DropFiles {
+            browser_id: "b1".into(),
+            path: "/tmp/a.txt".into(),
+            x: serde_json::Number::from_f64(10.5).unwrap(),
+            y: serde_json::Number::from_f64(20.0).unwrap(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"dropFiles""#));
+        assert!(json.contains(r#""browserId":"b1""#));
+        assert!(json.contains(r#""x":10.5"#));
         let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, req);
 

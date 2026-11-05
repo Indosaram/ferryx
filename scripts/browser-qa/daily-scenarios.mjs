@@ -944,6 +944,23 @@ async function dropData(ctx, browserId) {
   return read.ok ? read.stdout : { stderr: read.stderr };
 }
 
+/** Stage-1 probe: drops `file` on #drop through `ferryx browser drop-files` (CDP Input.dispatchDragEvent) and reads what the page got. */
+async function cdpDropProbe(ctx, browserId, file) {
+  // Clears what the real drag left (title "dropped:...", #drop's record) so only this drop can set them.
+  const at = await ctx.cliAsync("eval", "--browser-id", browserId, "--script", "(document.title = 'cdpprobe', delete document.getElementById('drop').dataset.info, JSON.stringify((r => [r.x + r.width / 2, r.y + r.height / 2])(document.getElementById('drop').getBoundingClientRect())))");
+  const point = at.ok ? parseEval(at.stdout) : null;
+  if (!Array.isArray(point)) return { verdict: "CDP_DROP_PROBE_NO_POINT", eval: { ok: at.ok, stdout: at.stdout, stderr: at.stderr } };
+  const sent = await ctx.cliAsync("drop-files", "--browser-id", browserId, "--path", file.path, "--x", String(point[0]), "--y", String(point[1]));
+  // stdout is {"type":"filesDropped","calls":[{event, ok, result|error}]}; a CDP failure still exits 0.
+  let calls = null;
+  try { calls = JSON.parse(sent.stdout).calls ?? null; } catch { calls = null; }
+  const delivered = sent.ok && Array.isArray(calls) && calls.length === 3 && calls.every((call) => call.ok);
+  const title = await until(() => (tab(ctx, browserId)?.title ?? "").startsWith("dropped:") ? tab(ctx, browserId).title : null, 5000, 500);
+  const data = await dropData(ctx, browserId);
+  const verdict = !delivered ? "CDP_DROP_REFUSED" : title === `dropped:${file.name}:${file.size}` ? "CDP_DROP_DELIVERED" : title ? "CDP_DROP_NO_FILES" : "CDP_DROP_NOT_RECEIVED";
+  return { verdict, point, sent: { ok: sent.ok, stdout: sent.stdout, stderr: sent.stderr }, calls, title, data };
+}
+
 /** The Finder icon above the selected item's blue label highlight, or null. */
 function finderSelection(ctx) {
   const image = ctx.decodePng(ctx.probeShot());
@@ -1792,6 +1809,9 @@ export async function dailyChromium(ctx) {
     g8.chromium_drop_zone_text = screenWords(ctx).find((word) => /^DROP(ZONE|HOVER|PED)$/i.test(word.text))?.text ?? null;
     g8.chromium_drop_data = await dropData(ctx, created.browserId);
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
+    // Stage-1 probe, Linux only: can the engine hand the page real File objects from a CDP drop
+    // alone (no X drag)? Diagnostic: runs after the real-drag check above and changes no check.
+    if (ctx.platform === "linux" && zone) g8.chromium_cdp_drop_probe = await cdpDropProbe(ctx, created.browserId, file);
     ctx.host.focus();
     return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium, stderr: g8.checks.upload_picker_chromium ? (g8.chromium_drag?.stderr ?? (zone ? undefined : "DROPZONE not visible")) : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
   }
