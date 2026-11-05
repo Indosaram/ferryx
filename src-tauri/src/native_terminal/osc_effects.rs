@@ -157,10 +157,13 @@ pub fn parse_cwd(text: &str) -> Option<String> {
     let path = if text.starts_with("file://") {
         let uri = url::Url::parse(text).ok()?;
         if uri.query().is_some() || uri.fragment().is_some() { return None; }
-        let mut local = uri;
-        // Reset Url's cached host as well as its serialized authority. set_host(None)
-        // leaves the old Host cached, so to_file_path rejects this on Unix.
-        local.set_host(Some("")).ok()?;
+        // Reparse a local file URI rather than mutating its host. set_host(None)
+        // retains the old cached Host, while set_host(Some("")) stores Domain("").
+        // On Windows to_file_path treats that empty Domain as a UNC authority,
+        // producing a malformed UNC path rather than the drive path C:\Temp.
+        // Parsing localhost canonicalizes the host to None on every platform.
+        // Keep the encoded path intact so to_file_path decodes it exactly once.
+        let local = url::Url::parse(&format!("file://localhost{}", uri.path())).ok()?;
         local.to_file_path().ok()?.to_string_lossy().into_owned()
     } else {
         text.to_string()
@@ -265,6 +268,34 @@ mod tests {
         assert_eq!(parse_cwd("file://shell-host/tmp/a%20b"), Some("/tmp/a b".into()));
         assert_eq!(parse_cwd("file:///tmp/a%20b"), Some("/tmp/a b".into()));
         assert_eq!(parse_cwd("file://shell-host/tmp?query"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_host_file_uri_is_a_drive_path_not_unc() {
+        for host in ["shell-host", "localhost", ""] {
+            assert_eq!(parse_cwd(&format!("file://{host}/C:/Temp")), Some(r"C:\Temp".into()));
+            assert_eq!(parse_cwd(&format!("file://{host}/C:/Temp/a%20b%2520")), Some(r"C:\Temp\a b%20".into()));
+        }
+        assert_eq!(parse_cwd("file://shell-host/C:/Temp?query"), None);
+        assert_eq!(parse_cwd("file://shell-host/C:/Temp#fragment"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pwd_callback_and_muted_seed_keep_absolute_drive_path() {
+        for terminator in [&b"\x07"[..], &b"\x1b\\"[..]] {
+            let mut mirror = ScreenMirror::new(80, 24).unwrap();
+            assert!(mirror.enable_program_status());
+            mirror.feed(b"\x1b]7;file://shell-host/C:/Temp");
+            mirror.feed(terminator);
+            assert_eq!(mirror.osc_cwd().as_deref(), Some(r"C:\Temp"));
+            let seed = mirror.seed().unwrap();
+            let mut restored = ScreenMirror::from_seed(&seed).unwrap();
+            assert!(restored.enable_program_status());
+            assert_eq!(restored.osc_cwd().as_deref(), Some(r"C:\Temp"));
+            assert!(restored.take_osc_effects().is_empty());
+        }
     }
 
     #[test]
