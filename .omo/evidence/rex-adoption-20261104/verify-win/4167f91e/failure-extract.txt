@@ -1,0 +1,280 @@
+9653: oolchains\stable-x86_64-pc-windows-msvc\bin"&& C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc
+9654: .exe --crate-name thiserror_impl --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\this
+9655: error-impl-2.0.20\src\lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type
+9656:  proc-macro --emit=dep-info,link -C prefer-dynamic -C embed-bitcode=no -C debuginfo=1 --check-cfg cfg(docsrs,test) --ch
+9657: eck-cfg "cfg(feature, values())" -C metadata=fcdc7db649f9f8e1 -C extra-filename=-203895294643e1dc --out-dir C:\Users\so
+9658: ok\ferryx-wt\.target\windows-dev\deps -L dependency=C:\Users\sook\ferryx-wt\.target\windows-dev\deps --extern proc_macr
+9659: o2=C:\Users\sook\ferryx-wt\.target\windows-dev\deps\libproc_macro2-3261a90d845f125a.rlib --extern quote=C:\Users\sook\f
+9660: erryx-wt\.target\windows-dev\deps\libquote-3a065e01feb129c1.rlib --extern syn=C:\Users\sook\ferryx-wt\.target\windows-d
+9661: ev\deps\libsyn-3c855edda9dfbe50.rlib --extern proc_macro --cap-lints warn`
+9662:    Compiling displaydoc v0.2.7
+9663:      Running `set CARGO=C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe&& set CARGO_CRATE_
+9664: NAME=displaydoc&& set CARGO_MANIFEST_DIR=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\displaydoc-
+9665: 0.2.7&& set CARGO_MANIFEST_PATH=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\displaydoc-0.2.7\Car
+9666: go.toml&& set CARGO_PKG_AUTHORS="Jane Lusby <jlusby@yaah.dev>"&& set CARGO_PKG_DESCRIPTION="A derive macro for implemen
+9667: ting the display Trait via a doc comment and string interpolation
+9668: "&& set CARGO_PKG_HOMEPAGE=https://github.com/yaahc/displaydoc&& set CARGO_PKG_LICENSE="MIT OR Apache-2.0"&& set CARGO_
+9669: PKG_LICENSE_FILE=""&& set CARGO_PKG_NAME=displaydoc&& set CARGO_PKG_README=README.md&& set CARGO_PKG_REPOSITORY=https:/
+9670: /github.com/yaahc/displaydoc&& set CARGO_PKG_RUST_VERSION=1.71.0&& set CARGO_PKG_VERSION=0.2.7&& set CARGO_PKG_VERSION_
+9671: MAJOR=0&& set CARGO_PKG_VERSION_MINOR=2&& set CARGO_PKG_VERSION_PATCH=7&& set CARGO_PKG_VERSION_PRE=""&& set OPUS_NO_PK
+9672: G=1&& set PATH="C:\Users\sook\ferryx-wt\.target\windows-dev\deps;C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-ta
+9978: pc-windows-msvc\bin"&& C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name yoke_d
+9979: erive --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\yoke-derive-0.8.2\src\lib.rs --
+9980: error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type proc-macro --emit=dep-info,lin
+9981: k -C prefer-dynamic -C embed-bitcode=no -C debuginfo=1 --warn=clippy::wildcard_dependencies --warn=clippy::useless_tran
+9982: smute --warn=unused_qualifications --warn=unused_macro_rules --warn=unused_lifetimes --warn=clippy::unnecessary-wraps -
+9983: -warn=unexpected_cfgs --deny=clippy::trivially_copy_pass_by_ref --deny=trivial_numeric_casts --warn=clippy::transmutes_
+9984: expressible_as_ptr_casts --warn=clippy::transmute_undefined_repr --warn=clippy::transmute_ptr_to_ref --warn=clippy::tra
+9985: nsmute_ptr_to_ptr --warn=clippy::transmute_int_to_non_zero --warn=clippy::transmute_int_to_bool --warn=clippy::transmut
+9986: e_bytes_to_str --warn=clippy::todo --warn=clippy::same_functions_in_if_condition --warn=clippy::or-fun-call --warn=clip
+9987: py::negative_feature_names --warn=clippy::missing_transmute_annotations --warn=clippy::missing_fields_in_debug --deny=m
+9988: issing_debug_implementations --warn=clippy::mismatching_type_param_order --warn=clippy::large_stack_arrays --warn=clipp
+9989: y::infinite_loop --warn=clippy::fn_to_numeric_cast_any --deny=clippy::exhaustive_structs --deny=clippy::exhaustive_enum
+9990: s --warn=clippy::doc_markdown --warn=clippy::debug_assert_with_mut_call --warn=clippy::dbg_macro --warn=clippy::crosspo
+9991: inter_transmute --warn=clippy::collection_is_never_read --warn=clippy::branches-sharing-code --warn=clippy::alloc-inste
+9992: ad-of-core --check-cfg cfg(icu4c_enable_renaming) --check-cfg cfg(needs_alloc_error_handler) --check-cfg cfg(icu4x_run_
+9993: size_tests) --check-cfg cfg(icu4x_unstable_fast_trie_only) --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, value
+9994: s())" -C metadata=433a980b916f83e8 -C extra-filename=-f670c1e0994d73ab --out-dir C:\Users\sook\ferryx-wt\.target\window
+9995: s-dev\deps -L dependency=C:\Users\sook\ferryx-wt\.target\windows-dev\deps --extern proc_macro2=C:\Users\sook\ferryx-wt\
+9996: .target\windows-dev\deps\libproc_macro2-3261a90d845f125a.rlib --extern quote=C:\Users\sook\ferryx-wt\.target\windows-de
+9997: v\deps\libquote-3a065e01feb129c1.rlib --extern syn=C:\Users\sook\ferryx-wt\.target\windows-dev\deps\libsyn-b9fe8445b25b
+10031: oolchains\stable-x86_64-pc-windows-msvc\bin"&& C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc
+10032: .exe --crate-name thiserror_impl --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\this
+10033: error-impl-1.0.69\src\lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type
+10034:  proc-macro --emit=dep-info,link -C prefer-dynamic -C embed-bitcode=no -C debuginfo=1 --check-cfg cfg(docsrs,test) --ch
+10035: eck-cfg "cfg(feature, values())" -C metadata=fcbb130c81c752be -C extra-filename=-a5703a8e848d78ca --out-dir C:\Users\so
+10036: ok\ferryx-wt\.target\windows-dev\deps -L dependency=C:\Users\sook\ferryx-wt\.target\windows-dev\deps --extern proc_macr
+10037: o2=C:\Users\sook\ferryx-wt\.target\windows-dev\deps\libproc_macro2-3261a90d845f125a.rlib --extern quote=C:\Users\sook\f
+10038: erryx-wt\.target\windows-dev\deps\libquote-3a065e01feb129c1.rlib --extern syn=C:\Users\sook\ferryx-wt\.target\windows-d
+10039: ev\deps\libsyn-b9fe8445b25b8d84.rlib --extern proc_macro --cap-lints warn`
+10040: warning: hiding a lifetime that's elided elsewhere is confusing
+10041:   --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\thiserror-impl-1.0.69\src\attr.rs:48:19
+10042:    |
+10043: 48 | pub fn get(input: &[Attribute]) -> Result<Attrs> {
+10044:    |                   ^^^^^^^^^^^^            ^^^^^ the same lifetime is hidden here
+10045:    |                   |
+10046:    |                   the lifetime is elided here
+10047:    |
+10048:    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+10049:    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+10050: help: use `'_` for type paths
+22115: svc\bin"&& C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name windows_threading 
+22116: --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-threading-0.1.0\src\lib.rs --
+22117: error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,l
+22118: ink -C embed-bitcode=no -C debuginfo=1 --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values())" -C metadata=0b
+22119: 0fbe3fe3a54566 -C extra-filename=-36f8d4bf256dbd07 --out-dir C:\Users\sook\ferryx-wt\.target\windows-dev\deps -L depend
+22120: ency=C:\Users\sook\ferryx-wt\.target\windows-dev\deps --extern windows_link=C:\Users\sook\ferryx-wt\.target\windows-dev
+22121: \deps\libwindows_link-9e2716c319a93007.rmeta --cap-lints warn`
+22122:      Running `set CARGO=C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe&& set CARGO_CFG_DE
+22123: BUG_ASSERTIONS=""&& set CARGO_CFG_FEATURE=std&& set CARGO_CFG_PANIC=unwind&& set CARGO_CFG_TARGET_ABI=""&& set CARGO_CF
+22124: G_TARGET_ARCH=x86_64&& set CARGO_CFG_TARGET_ENDIAN=little&& set CARGO_CFG_TARGET_ENV=msvc&& set CARGO_CFG_TARGET_FAMILY
+22125: =windows&& set CARGO_CFG_TARGET_FEATURE=cmpxchg16b,fxsr,sse,sse2,sse3&& set CARGO_CFG_TARGET_HAS_ATOMIC=128,16,32,64,8,
+22126: ptr&& set CARGO_CFG_TARGET_HAS_ATOMIC_PRIMITIVE_ALIGNMENT=128,16,32,64,8,ptr&& set CARGO_CFG_TARGET_OS=windows&& set CA
+22127: RGO_CFG_TARGET_POINTER_WIDTH=64&& set CARGO_CFG_TARGET_VENDOR=pc&& set CARGO_CFG_WINDOWS=""&& set CARGO_ENCODED_RUSTFLA
+22128: GS=""&& set CARGO_FEATURE_STD=1&& set CARGO_MANIFEST_DIR=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b
+22129: 557f\getrandom-0.3.4&& set CARGO_MANIFEST_PATH=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\getra
+22130: ndom-0.3.4\Cargo.toml&& set CARGO_PKG_AUTHORS="The Rand Project Developers"&& set CARGO_PKG_DESCRIPTION="A small cross-
+22131: platform library for retrieving random data from system source"&& set CARGO_PKG_HOMEPAGE=""&& set CARGO_PKG_LICENSE="MI
+22132: T OR Apache-2.0"&& set CARGO_PKG_LICENSE_FILE=""&& set CARGO_PKG_NAME=getrandom&& set CARGO_PKG_README=README.md&& set 
+22133: CARGO_PKG_REPOSITORY=https://github.com/rust-random/getrandom&& set CARGO_PKG_RUST_VERSION=1.63&& set CARGO_PKG_VERSION
+22134: =0.3.4&& set CARGO_PKG_VERSION_MAJOR=0&& set CARGO_PKG_VERSION_MINOR=3&& set CARGO_PKG_VERSION_PATCH=4&& set CARGO_PKG_
+54624: milar_names --allow=clippy::return_self_not_must_use --allow=clippy::redundant_closure_for_method_calls --allow=clippy:
+54625: :must_use_candidate --allow=clippy::module_name_repetitions --allow=clippy::missing_panics_doc --allow=clippy::missing_
+54626: errors_doc --allow=clippy::maybe_infinite_iter --allow=clippy::match_same_arms --allow=clippy::items_after_statements -
+54627: -allow=clippy::implicit_hasher --allow=clippy::ignored_unit_patterns --allow=clippy::enum_glob_use --allow=clippy::defa
+54628: ult_trait_access --allow=clippy::cast_sign_loss --allow=clippy::cast_precision_loss --allow=clippy::cast_possible_wrap 
+54629: --allow=clippy::cast_possible_truncation -C debug-assertions=on --cfg "feature=\"runtime\"" --check-cfg cfg(docsrs,test
+54630: ) --check-cfg "cfg(feature, values(\"__cli\", \"__testing_only_extra_assertions\", \"__testing_only_libclang_16\", \"__
+54631: testing_only_libclang_20\", \"__testing_only_libclang_22\", \"default\", \"experimental\", \"libcpp\", \"logging\", \"p
+54632: rettyplease\", \"runtime\", \"static\"))" -C metadata=890b05b4b3b4db03 -C extra-filename=-b3a2b027de21f6cb --out-dir C:
+54633: \Users\sook\ferryx-wt\.target\windows-dev\build\bindgen-b3a2b027de21f6cb -L dependency=C:\Users\sook\ferryx-wt\.target\
+54634: windows-dev\deps --cap-lints warn`
+54635: warning: unexpected `cfg` condition value: `cargo-clippy`
+54636:    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\nom-7.1.3\src\lib.rs:375:13
+54637:     |
+54638: 375 | #![cfg_attr(feature = "cargo-clippy", allow(clippy::doc_markdown))]
+54639:     |             ^^^^^^^^^^^^^^^^^^^^^^^^
+54640:     |
+54641:     = note: expected values for `feature` are: `alloc`, `default`, `docsrs`, and `std`
+54642:     = help: consider adding `cargo-clippy` as a feature in `Cargo.toml`
+54643:     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about che
+63900: ble-x86_64-pc-windows-msvc\bin"&& C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-
+63901: name tauri --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tauri-2.11.5\src\lib.rs --
+63902: error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,l
+63903: ink -C embed-bitcode=no -C debuginfo=1 --cfg "feature=\"common-controls-v6\"" --cfg "feature=\"compression\"" --cfg "fe
+63904: ature=\"dbus\"" --cfg "feature=\"default\"" --cfg "feature=\"devtools\"" --cfg "feature=\"dynamic-acl\"" --cfg "feature
+63905: =\"image\"" --cfg "feature=\"image-png\"" --cfg "feature=\"macos-private-api\"" --cfg "feature=\"tauri-runtime-wry\"" -
+63906: -cfg "feature=\"test\"" --cfg "feature=\"unstable\"" --cfg "feature=\"webkit2gtk\"" --cfg "feature=\"webview2-com\"" --
+63907: cfg "feature=\"wry\"" --cfg "feature=\"x11\"" --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values(\"common-co
+63908: ntrols-v6\", \"compression\", \"config-json5\", \"config-toml\", \"custom-protocol\", \"data-url\", \"dbus\", \"default
+63909: \", \"devtools\", \"dynamic-acl\", \"http-range\", \"image\", \"image-ico\", \"image-png\", \"isolation\", \"linux-libx
+63910: do\", \"macos-private-api\", \"macos-proxy\", \"native-tls\", \"native-tls-vendored\", \"objc-exception\", \"process-re
+63911: launch-dangerous-allow-symlink-macos\", \"protocol-asset\", \"rustls-tls\", \"specta\", \"tauri-runtime-wry\", \"test\"
+63912: , \"tracing\", \"tray-icon\", \"unstable\", \"uuid\", \"webkit2gtk\", \"webview-data-url\", \"webview2-com\", \"wry\", 
+63913: \"x11\"))" -C metadata=e5e814f303b94998 -C extra-filename=-335b99261ea27c57 --out-dir C:\Users\sook\ferryx-wt\.target\w
+63914: indows-dev\deps -L dependency=C:\Users\sook\ferryx-wt\.target\windows-dev\deps --extern anyhow=C:\Users\sook\ferryx-wt\
+63915: .target\windows-dev\deps\libanyhow-539c9a679d2fe37f.rmeta --extern cookie=C:\Users\sook\ferryx-wt\.target\windows-dev\d
+63916: eps\libcookie-57d7f3a4a8e5b99a.rmeta --extern dirs=C:\Users\sook\ferryx-wt\.target\windows-dev\deps\libdirs-9de2ad9363b
+63917: e3fc7.rmeta --extern dunce=C:\Users\sook\ferryx-wt\.target\windows-dev\deps\libdunce-bfc7cb0764cc9424.rmeta --extern ge
+63918: trandom=C:\Users\sook\ferryx-wt\.target\windows-dev\deps\libgetrandom-6bd000f34135f2b3.rmeta --extern glob=C:\Users\soo
+63919: k\ferryx-wt\.target\windows-dev\deps\libglob-3115d72530185321.rmeta --extern heck=C:\Users\sook\ferryx-wt\.target\windo
+97091:     |
+97092: 557 | ::windows_targets::link!("icu.dll" "cdecl" fn ucasemap_open(locale : ::windows_sys::core::PCSTR, options : u32, p
+97093: errorcode : *mut UErrorCode) -> *mut UCaseMap);
+97094:     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+97095: ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+97096:     |
+97097:     = help: use `extern "C"` instead
+97098:     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a f
+97099: uture release!
+97100:     = note: for more information, see issue #137018 <https://github.com/rust-lang/rust/issues/137018>
+97101:     = note: this warning originates in the macro `::windows_targets::link` (in Nightly builds, run with -Z macro-backtr
+97102: ace for more info)
+97103: 
+97104: warning: "cdecl" is not a supported ABI for the current target
+97105:    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-sys-0.52.0\src\Windows\Win32\Globaliz
+97106: ation\mod.rs:558:1
+97107:     |
+97108: 558 | ::windows_targets::link!("icu.dll" "cdecl" fn ucasemap_setBreakIterator(csm : *mut UCaseMap, itertoadopt : *mut U
+97109: BreakIterator, perrorcode : *mut UErrorCode) -> ());
+97110:     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+111825: indows-msvc\bin"&& C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name build_scri
+111826: pt_build --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\quinn-udp-0.5.15\build.rs --
+111827: error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C em
+111828: bed-bitcode=no -C debuginfo=1 --cfg "feature=\"tracing\"" --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values
+111829: (\"default\", \"direct-log\", \"fast-apple-datapath\", \"log\", \"tracing\"))" -C metadata=90d0381cb18dac17 -C extra-fi
+111830: lename=-ccf27553616b5d3d --out-dir C:\Users\sook\ferryx-wt\.target\windows-dev\build\quinn-udp-ccf27553616b5d3d -L depe
+111831: ndency=C:\Users\sook\ferryx-wt\.target\windows-dev\deps --extern cfg_aliases=C:\Users\sook\ferryx-wt\.target\windows-de
+111832: v\deps\libcfg_aliases-84e5d103898ab8bf.rlib --cap-lints warn`
+111833:      Running `set CARGO=C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe&& set CARGO_CRATE_
+111834: NAME=build_script_build&& set CARGO_MANIFEST_DIR=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgp
+111835: u-core-30.0.1&& set CARGO_MANIFEST_PATH=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wgpu-core-30
+111836: .0.1\Cargo.toml&& set CARGO_PKG_AUTHORS="gfx-rs developers"&& set CARGO_PKG_DESCRIPTION="Core implementation logic of w
+111837: gpu, the cross-platform, safe, pure-rust graphics API"&& set CARGO_PKG_HOMEPAGE=https://wgpu.rs/&& set CARGO_PKG_LICENS
+111838: E="MIT OR Apache-2.0"&& set CARGO_PKG_LICENSE_FILE=""&& set CARGO_PKG_NAME=wgpu-core&& set CARGO_PKG_README=""&& set CA
+111839: RGO_PKG_REPOSITORY=https://github.com/gfx-rs/wgpu&& set CARGO_PKG_RUST_VERSION=1.87&& set CARGO_PKG_VERSION=30.0.1&& se
+111840: t CARGO_PKG_VERSION_MAJOR=30&& set CARGO_PKG_VERSION_MINOR=0&& set CARGO_PKG_VERSION_PATCH=1&& set CARGO_PKG_VERSION_PR
+111841: E=""&& set OPUS_NO_PKG=1&& set PATH="C:\Users\sook\ferryx-wt\.target\windows-dev\deps;C:\Users\sook\ferryx-wt\rex-verif
+111842: y-win-20261104\src-tauri\resources\ffmpeg\sdk\bin;C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools
+111843: \MSVC\14.51.36231\bin\HostX64\x64;C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\IDE\VC\VCPackage
+111844: s;C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\IDE\CommonExtensions\Microsoft\TestWindow;C:\Pro
+125655: ustc_hash-2dc2b35bb5ef80f4.rmeta --extern rustls=C:\Users\sook\ferryx-wt\.target\windows-dev\deps\librustls-f7c03e02e5f
+125656: c8c6d.rmeta --extern slab=C:\Users\sook\ferryx-wt\.target\windows-dev\deps\libslab-aff90d78f62e15f3.rmeta --extern this
+125657: error=C:\Users\sook\ferryx-wt\.target\windows-dev\deps\libthiserror-2cd4e6053d7b1bd7.rmeta --extern tinyvec=C:\Users\so
+125658: ok\ferryx-wt\.target\windows-dev\deps\libtinyvec-ca52c20a4ccf28c1.rmeta --extern tracing=C:\Users\sook\ferryx-wt\.targe
+125659: t\windows-dev\deps\libtracing-55a9f9500c5f5774.rmeta --cap-lints warn -L native=C:\Users\sook\ferryx-wt\.target\windows
+125660: -dev\build\ring-51534a71909785b6\out`
+125661: warning: unexpected `cfg` condition value: `cargo-clippy`
+125662:    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\base64-0.21.7\src\lib.rs:223:13
+125663:     |
+125664: 223 | #![cfg_attr(feature = "cargo-clippy", allow(clippy::cast_lossless))]
+125665:     |             ^^^^^^^^^^^^^^^^^^^^^^^^
+125666:     |
+125667:     = note: expected values for `feature` are: `alloc`, `default`, and `std`
+125668:     = help: consider adding `cargo-clippy` as a feature in `Cargo.toml`
+125669:     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about che
+125670: cking conditional configuration
+125671: note: the lint level is defined here
+125672:    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\base64-0.21.7\src\lib.rs:232:5
+125673:     |
+125674: 232 |     warnings
+128806: \stable-x86_64-pc-windows-msvc\bin"&& C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --cr
+128807: ate-name tar --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tar-0.4.46\src\lib.rs --
+128808: error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,l
+128809: ink -C embed-bitcode=no -C debuginfo=1 --deny=dead_code --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values(\
+128810: "default\", \"xattr\"))" -C metadata=2d030ded92452f12 -C extra-filename=-0a8eb6914956ceb0 --out-dir C:\Users\sook\ferry
+128811: x-wt\.target\windows-dev\deps -L dependency=C:\Users\sook\ferryx-wt\.target\windows-dev\deps --extern filetime=C:\Users
+128812: \sook\ferryx-wt\.target\windows-dev\deps\libfiletime-ec82693613a4cea8.rmeta --cap-lints warn`
+128813: [openssl-sys 0.9.117] 	"cl"  /Zi /Fdossl_static.pdb /MT /Zl /Gs0 /GF /Gy /W3 /wd4090 /nologo /O2 -I"." -I"include" -I"providers\common\include" -I"providers\implementations\include" -D"L_ENDIAN" -D"OPENSSL_PIC" -D"OPENSSLDIR=\"C:\\Users\\sook\\ferryx-wt\\.target\\windows-dev\\build\\openssl-sys-9714739a5ecd4905\\out\\openssl-build\\install\\SYS\ANAGER:[OPENSSL]\"" -D"ENGINESDIR=\"C:\\Users\\sook\\ferryx-wt\\.target\\windows-dev\\build\\openssl-sys-9714739a5ecd4905\\out\\openssl-build\\install\\lib\\engines-3\"" -D"MODULESDIR=\"C:\\Users\\sook\\ferryx-wt\\.target\\windows-dev\\build\\openssl-sys-9714739a5ecd4905\\out\\openssl-build\\install\\lib\\ossl-modules\"" -D"OPENSSL_BUILDING_OPENSSL" -D"OPENSSL_SYS_WIN32" -D"WIN32_LEAN_AND_MEAN" -D"UNICODE" -D"_UNICODE" -D"_CRT_SECURE_NO_DEPRECATE" -D"_WINSOCK_DEPRECATED_NO_WARNINGS" -D"NDEBUG"   -DAES_ASM -DBSAES_ASM -DECP_NISTZ256_ASM -DGHASH_ASM -DKECCAK1600_ASM -DMD5_ASM -DOPENSSL_BN_ASM_GF2m -DOPENSSL_BN_ASM_MONT -DOPENSSL_BN_ASM_MONT5 -DOPENSSL_CPUID_OBJ -DOPENSSL_IA32_SSE2 -DOPENSSL_SM3_ASM -DPADLOCK_ASM -DPOLY1305_ASM -DRC4_ASM -DSHA1_ASM -DSHA256_ASM -DSHA512_ASM -DSM4_ASM -DSTATIC_LEGACY -DVPAES_ASM -DWHIRLPOOL_ASM -DX25519_ASM -c /Focrypto\aes\libcrypto-lib-aes_ige.obj "crypto\aes\aes_ige.c"
+128814: [openssl-sys 0.9.117] aes_ige.c
+128815: warning: `unsafe-libyaml` (lib) generated 63 warnings
+128816:    Compiling resvg v0.48.1
+128817:      Running `set CARGO=C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe&& set CARGO_CRATE_
+128818: NAME=resvg&& set CARGO_MANIFEST_DIR=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\resvg-0.48.1&& s
+128819: et CARGO_MANIFEST_PATH=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\resvg-0.48.1\Cargo.toml&& set
+128820:  CARGO_PKG_AUTHORS=""&& set CARGO_PKG_DESCRIPTION="An SVG rendering library."&& set CARGO_PKG_HOMEPAGE=""&& set CARGO_P
+128821: KG_LICENSE="Apache-2.0 OR MIT"&& set CARGO_PKG_LICENSE_FILE=""&& set CARGO_PKG_NAME=resvg&& set CARGO_PKG_README=README
+128822: .md&& set CARGO_PKG_REPOSITORY=https://github.com/linebender/resvg&& set CARGO_PKG_RUST_VERSION=1.85.0&& set CARGO_PKG_
+128823: VERSION=0.48.1&& set CARGO_PKG_VERSION_MAJOR=0&& set CARGO_PKG_VERSION_MINOR=48&& set CARGO_PKG_VERSION_PATCH=1&& set C
+128824: ARGO_PKG_VERSION_PRE=""&& set OPUS_NO_PKG=1&& set PATH="C:\Users\sook\ferryx-wt\.target\windows-dev\deps;C:\Users\sook\
+128825: ferryx-wt\rex-verify-win-20261104\src-tauri\resources\ffmpeg\sdk\bin;C:\Program Files (x86)\Microsoft Visual Studio\18\
+134929: ff_api_dlog\"))" --check-cfg "cfg(feature, values(\"ff_api_dv_frame_profile\"))" --check-cfg "cfg(feature, values(\"ff_
+134930: api_emu_edge\"))" --check-cfg "cfg(feature, values(\"ff_api_error_frame\"))" --check-cfg "cfg(feature, values(\"ff_api_
+134931: error_rate\"))" --check-cfg "cfg(feature, values(\"ff_api_frame_qp\"))" --check-cfg "cfg(feature, values(\"ff_api_get_b
+134932: uffer\"))" --check-cfg "cfg(feature, values(\"ff_api_get_channel_layout_compat\"))" --check-cfg "cfg(feature, values(\"
+134933: ff_api_gmc\"))" --check-cfg "cfg(feature, values(\"ff_api_hmac\"))" --check-cfg "cfg(feature, values(\"ff_api_idct_xvid
+134934: mmx\"))" --check-cfg "cfg(feature, values(\"ff_api_input_preserved\"))" --check-cfg "cfg(feature, values(\"ff_api_lavf_
+134935: avctx\"))" --check-cfg "cfg(feature, values(\"ff_api_lavf_bitexact\"))" --check-cfg "cfg(feature, values(\"ff_api_lavf_
+134936: frac\"))" --check-cfg "cfg(feature, values(\"ff_api_lls_private\"))" --check-cfg "cfg(feature, values(\"ff_api_lowres\"
+134937: ))" --check-cfg "cfg(feature, values(\"ff_api_max_bframes\"))" --check-cfg "cfg(feature, values(\"ff_api_mb_type\"))" -
+134938: -check-cfg "cfg(feature, values(\"ff_api_missing_sample\"))" --check-cfg "cfg(feature, values(\"ff_api_motion_est\"))" 
+134939: --check-cfg "cfg(feature, values(\"ff_api_mpv_opt\"))" --check-cfg "cfg(feature, values(\"ff_api_mv0\"))" --check-cfg "
+134940: cfg(feature, values(\"ff_api_neg_linesizes\"))" --check-cfg "cfg(feature, values(\"ff_api_normalize_aqp\"))" --check-cf
+134941: g "cfg(feature, values(\"ff_api_old_avoptions\"))" --check-cfg "cfg(feature, values(\"ff_api_old_decode_audio\"))" --ch
+134942: eck-cfg "cfg(feature, values(\"ff_api_old_encode_audio\"))" --check-cfg "cfg(feature, values(\"ff_api_old_encode_video\
+134943: "))" --check-cfg "cfg(feature, values(\"ff_api_old_msmpeg4\"))" --check-cfg "cfg(feature, values(\"ff_api_old_open_call
+134944: backs\"))" --check-cfg "cfg(feature, values(\"ff_api_opt_type_metadata\"))" --check-cfg "cfg(feature, values(\"ff_api_p
+134945: ix_fmt\"))" --check-cfg "cfg(feature, values(\"ff_api_pix_fmt_desc\"))" --check-cfg "cfg(feature, values(\"ff_api_pkt_p
+134946: ts\"))" --check-cfg "cfg(feature, values(\"ff_api_private_opt\"))" --check-cfg "cfg(feature, values(\"ff_api_probesize_
+134947: 32\"))" --check-cfg "cfg(feature, values(\"ff_api_qscale_type\"))" --check-cfg "cfg(feature, values(\"ff_api_quant_bias
+134948: \"))" --check-cfg "cfg(feature, values(\"ff_api_rc_strategy\"))" --check-cfg "cfg(feature, values(\"ff_api_request_chan
+138129: [ferryx 2026.1101.1] cargo:rerun-if-changed=resources\mhc\payload\.gitkeep
+138130: [ferryx 2026.1101.1] 
+138131: [ferryx 2026.1101.1] thread 'main' (30896) panicked at build.rs:146:39:
+138132: [ferryx 2026.1101.1] tauri build failed: resource path `..\ui\dist` doesn't exist
+138133: [ferryx 2026.1101.1] note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+138134: [openssl-sys 0.9.117] 	cmd /C ""cl" /Zs /showIncludes  /Zi /Fdossl_static.pdb /MT /Zl /Gs0 /GF /Gy /W3 /wd4090 /nologo /O2 -I"." -I"include" -I"providers\common\include" -I"providers\implementations\include" -D"L_ENDIAN" -D"OPENSSL_PIC" -D"OPENSSLDIR=\"C:\\Users\\sook\\ferryx-wt\\.target\\windows-dev\\build\\openssl-sys-9714739a5ecd4905\\out\\openssl-build\\install\\SYS\ANAGER:[OPENSSL]\"" -D"ENGINESDIR=\"C:\\Users\\sook\\ferryx-wt\\.target\\windows-dev\\build\\openssl-sys-9714739a5ecd4905\\out\\openssl-build\\install\\lib\\engines-3\"" -D"MODULESDIR=\"C:\\Users\\sook\\ferryx-wt\\.target\\windows-dev\\build\\openssl-sys-9714739a5ecd4905\\out\\openssl-build\\install\\lib\\ossl-modules\"" -D"OPENSSL_BUILDING_OPENSSL" -D"OPENSSL_SYS_WIN32" -D"WIN32_LEAN_AND_MEAN" -D"UNICODE" -D"_UNICODE" -D"_CRT_SECURE_NO_DEPRECATE" -D"_WINSOCK_DEPRECATED_NO_WARNINGS" -D"NDEBUG"   -DAES_ASM -DBSAES_ASM -DECP_NISTZ256_ASM -DGHASH_ASM -DKECCAK1600_ASM -DMD5_ASM -DOPENSSL_BN_ASM_GF2m -DOPENSSL_BN_ASM_MONT -DOPENSSL_BN_ASM_MONT5 -DOPENSSL_CPUID_OBJ -DOPENSSL_IA32_SSE2 -DOPENSSL_SM3_ASM -DPADLOCK_ASM -DPOLY1305_ASM -DRC4_ASM -DSHA1_ASM -DSHA256_ASM -DSHA512_ASM -DSM4_ASM -DSTATIC_LEGACY -DVPAES_ASM -DWHIRLPOOL_ASM -DX25519_ASM "crypto\asn1\a_object.c" > crypto\asn1\libcrypto-lib-a_object.d 2>&1"
+138135: error: failed to run custom build command for `ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src
+138136: -tauri)`
+138137: 
+138138: Caused by:
+138139:   process didn't exit successfully: `set CARGO=C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo
+138140: .exe&& set CARGO_CFG_DEBUG_ASSERTIONS=""&& set CARGO_CFG_FEATURE=default,desktop,hub-discord,hub-slack,hub-voice,native
+138141: -terminal,remote-desktop&& set CARGO_CFG_PANIC=unwind&& set CARGO_CFG_TARGET_ABI=""&& set CARGO_CFG_TARGET_ARCH=x86_64&
+138142: & set CARGO_CFG_TARGET_ENDIAN=little&& set CARGO_CFG_TARGET_ENV=msvc&& set CARGO_CFG_TARGET_FAMILY=windows&& set CARGO_
+138143: CFG_TARGET_FEATURE=cmpxchg16b,fxsr,sse,sse2,sse3&& set CARGO_CFG_TARGET_HAS_ATOMIC=128,16,32,64,8,ptr&& set CARGO_CFG_T
+138144: ARGET_HAS_ATOMIC_PRIMITIVE_ALIGNMENT=128,16,32,64,8,ptr&& set CARGO_CFG_TARGET_OS=windows&& set CARGO_CFG_TARGET_POINTE
+138145: R_WIDTH=64&& set CARGO_CFG_TARGET_VENDOR=pc&& set CARGO_CFG_WINDOWS=""&& set CARGO_ENCODED_RUSTFLAGS=""&& set CARGO_FEA
+138146: TURE_DEFAULT=1&& set CARGO_FEATURE_DESKTOP=1&& set CARGO_FEATURE_HUB_DISCORD=1&& set CARGO_FEATURE_HUB_SLACK=1&& set CA
+138147: RGO_FEATURE_HUB_VOICE=1&& set CARGO_FEATURE_NATIVE_TERMINAL=1&& set CARGO_FEATURE_REMOTE_DESKTOP=1&& set CARGO_MANIFEST
+138148: _DIR=C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri&& set CARGO_MANIFEST_PATH=C:\Users\sook\ferryx-wt\rex-ve
+138133: [ferryx 2026.1101.1] note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+138134: [openssl-sys 0.9.117] 	cmd /C ""cl" /Zs /showIncludes  /Zi /Fdossl_static.pdb /MT /Zl /Gs0 /GF /Gy /W3 /wd4090 /nologo /O2 -I"." -I"include" -I"providers\common\include" -I"providers\implementations\include" -D"L_ENDIAN" -D"OPENSSL_PIC" -D"OPENSSLDIR=\"C:\\Users\\sook\\ferryx-wt\\.target\\windows-dev\\build\\openssl-sys-9714739a5ecd4905\\out\\openssl-build\\install\\SYS\ANAGER:[OPENSSL]\"" -D"ENGINESDIR=\"C:\\Users\\sook\\ferryx-wt\\.target\\windows-dev\\build\\openssl-sys-9714739a5ecd4905\\out\\openssl-build\\install\\lib\\engines-3\"" -D"MODULESDIR=\"C:\\Users\\sook\\ferryx-wt\\.target\\windows-dev\\build\\openssl-sys-9714739a5ecd4905\\out\\openssl-build\\install\\lib\\ossl-modules\"" -D"OPENSSL_BUILDING_OPENSSL" -D"OPENSSL_SYS_WIN32" -D"WIN32_LEAN_AND_MEAN" -D"UNICODE" -D"_UNICODE" -D"_CRT_SECURE_NO_DEPRECATE" -D"_WINSOCK_DEPRECATED_NO_WARNINGS" -D"NDEBUG"   -DAES_ASM -DBSAES_ASM -DECP_NISTZ256_ASM -DGHASH_ASM -DKECCAK1600_ASM -DMD5_ASM -DOPENSSL_BN_ASM_GF2m -DOPENSSL_BN_ASM_MONT -DOPENSSL_BN_ASM_MONT5 -DOPENSSL_CPUID_OBJ -DOPENSSL_IA32_SSE2 -DOPENSSL_SM3_ASM -DPADLOCK_ASM -DPOLY1305_ASM -DRC4_ASM -DSHA1_ASM -DSHA256_ASM -DSHA512_ASM -DSM4_ASM -DSTATIC_LEGACY -DVPAES_ASM -DWHIRLPOOL_ASM -DX25519_ASM "crypto\asn1\a_object.c" > crypto\asn1\libcrypto-lib-a_object.d 2>&1"
+138135: error: failed to run custom build command for `ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src
+138136: -tauri)`
+138137: 
+138138: Caused by:
+138139:   process didn't exit successfully: `set CARGO=C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo
+138140: .exe&& set CARGO_CFG_DEBUG_ASSERTIONS=""&& set CARGO_CFG_FEATURE=default,desktop,hub-discord,hub-slack,hub-voice,native
+138141: -terminal,remote-desktop&& set CARGO_CFG_PANIC=unwind&& set CARGO_CFG_TARGET_ABI=""&& set CARGO_CFG_TARGET_ARCH=x86_64&
+138142: & set CARGO_CFG_TARGET_ENDIAN=little&& set CARGO_CFG_TARGET_ENV=msvc&& set CARGO_CFG_TARGET_FAMILY=windows&& set CARGO_
+138143: CFG_TARGET_FEATURE=cmpxchg16b,fxsr,sse,sse2,sse3&& set CARGO_CFG_TARGET_HAS_ATOMIC=128,16,32,64,8,ptr&& set CARGO_CFG_T
+138144: ARGET_HAS_ATOMIC_PRIMITIVE_ALIGNMENT=128,16,32,64,8,ptr&& set CARGO_CFG_TARGET_OS=windows&& set CARGO_CFG_TARGET_POINTE
+138145: R_WIDTH=64&& set CARGO_CFG_TARGET_VENDOR=pc&& set CARGO_CFG_WINDOWS=""&& set CARGO_ENCODED_RUSTFLAGS=""&& set CARGO_FEA
+138146: TURE_DEFAULT=1&& set CARGO_FEATURE_DESKTOP=1&& set CARGO_FEATURE_HUB_DISCORD=1&& set CARGO_FEATURE_HUB_SLACK=1&& set CA
+138147: RGO_FEATURE_HUB_VOICE=1&& set CARGO_FEATURE_NATIVE_TERMINAL=1&& set CARGO_FEATURE_REMOTE_DESKTOP=1&& set CARGO_MANIFEST
+138148: _DIR=C:\Users\sook\ferryx-wt\rex-verify-win-20261104\src-tauri&& set CARGO_MANIFEST_PATH=C:\Users\sook\ferryx-wt\rex-ve
+138149: rify-win-20261104\src-tauri\Cargo.toml&& set CARGO_PKG_AUTHORS="Ferryx Contributors"&& set CARGO_PKG_DESCRIPTION="Ultra
+138150: -lightweight workspace & AI agent launcher (Tauri v2 + Rust)"&& set CARGO_PKG_HOMEPAGE=https://ferryx.app&& set CARGO_P
+138151: KG_LICENSE=""&& set CARGO_PKG_LICENSE_FILE=../LICENSE&& set CARGO_PKG_NAME=ferryx&& set CARGO_PKG_README=""&& set CARGO
+138152: _PKG_REPOSITORY=https://github.com/ferryx/ferryx&& set CARGO_PKG_RUST_VERSION=1.89&& set CARGO_PKG_VERSION=2026.1101.1&
+138276:   --- stderr
+138277: 
+138278:   thread 'main' (30896) panicked at build.rs:146:39:
+138279:   tauri build failed: resource path `..\ui\dist` doesn't exist
+138280:   note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+138281: warning: build failed, waiting for other jobs to finish...
+138282: [mlua-sys 0.13.0] LuauConfig.cpp
+138283: warning: hiding a lifetime that's elided elsewhere is confusing
+138284:    --> C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\wasmi-0.46.0\src\engine\code_map.rs:313:21
+138285:     |
+138286: 313 |     fn get_compiled(&self, func: EngineFunc) -> Option<CompiledFuncRef> {
+138287:     |                     ^^^^^ the lifetime is elided here  ^^^^^^^^^^^^^^^ the same lifetime is hidden here
+138288:     |
+138289:     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+138290:     = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+138291: help: use `'_` for type paths
+138292:     |
+138293: 313 |     fn get_compiled(&self, func: EngineFunc) -> Option<CompiledFuncRef<'_>> {
+138294:     |                                                                       ++++
+138295: 
