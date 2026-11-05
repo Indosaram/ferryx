@@ -1,0 +1,2 @@
+$ git diff --exit-code d59508fa9...d8313422 -- ui/eslint.config.js ui/eslint.config.mjs .clippy.toml clippy.toml AGENTS.md scripts/pick-build-host.sh
+EXIT=0

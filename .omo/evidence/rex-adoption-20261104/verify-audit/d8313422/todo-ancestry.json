@@ -1,0 +1,311 @@
+[
+  {
+    "todo": 1,
+    "event": "task-completed",
+    "commit": "97dedfd33",
+    "merge": "ab857d087",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 2,
+    "event": "merged-unverified",
+    "commit": "e99573577",
+    "merge": "5fa4803fc",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 3,
+    "event": "merged-unverified",
+    "commit": "b2048809c",
+    "merge": "b58b6e767",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 4,
+    "event": "merged-unverified",
+    "commit": "3b9d35ead",
+    "merge": "218281885",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": "worker evidence: linux GHA 41797148814 + maho-mac attempt3 green; verifier cancelled by implement-first rule; checkbox waits for combined verification",
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 5,
+    "event": "merged-unverified",
+    "commit": "c55972eb4",
+    "merge": "7e1353ab7",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 6,
+    "event": "task-completed",
+    "commit": "caf8cabb9",
+    "merge": "b305178bb",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": "no-default-features error sets identical to base; default-features 189 passed; clippy clean; lint = baseline 6; QA headers+403+browser cspViolations=0; extra mutation is_desktop_app_origin RED",
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 7,
+    "event": "merged-unverified",
+    "commit": "feb63c972",
+    "merge": "cf6724d42",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 8,
+    "event": "merged-unverified",
+    "commit": "403c53eba",
+    "merge": "dd26fe4bd",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 9,
+    "event": "merged-unverified",
+    "commit": "a6bb6e506",
+    "merge": "bb2083063",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 10,
+    "event": "merged-unverified",
+    "commit": "a77961f04",
+    "merge": "64f432a64",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 11,
+    "event": "merged-unverified",
+    "commit": "17f16b42f",
+    "merge": "d7383e10c",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 12,
+    "event": "merged-unverified",
+    "commit": "5ac05fd10",
+    "merge": "9061418c1",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 13,
+    "event": "unmet",
+    "commit": null,
+    "merge": null,
+    "ancestor_exit": null,
+    "reason": "mandatory precondition false: git tag --contains 5ac05fd10 returns no tags and no docs/releases record of a published release containing todo 12; run delivery forbids release publishing",
+    "note": null
+  },
+  {
+    "todo": 14,
+    "event": "merged-unverified",
+    "commit": "9c14d0c31",
+    "merge": "da1dcbf0b",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 15,
+    "event": "task-completed",
+    "commit": "4b0f204f8",
+    "merge": "9279e5836",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 16,
+    "event": "merged-unverified",
+    "commit": "313128b1f",
+    "merge": "c20b053cb",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 17,
+    "event": "merged-unverified",
+    "commit": "70abbf890",
+    "merge": "303e8dafb",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 18,
+    "event": "merged-unverified",
+    "commit": "44df0c820",
+    "merge": "552441d92",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 19,
+    "event": "task-completed",
+    "commit": "259007893",
+    "merge": "5ed9b1881",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": "worker cmpqa step compared nothing (wrong key); verifier re-derived identical sets",
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 20,
+    "event": "merged-unverified",
+    "commit": "572f97932",
+    "merge": "3b0f49e21",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 21,
+    "event": "merged-unverified",
+    "commit": "3dadd2410",
+    "merge": "bfff3902f",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 22,
+    "event": "merged-unverified",
+    "commit": "454eb5e27",
+    "merge": "6bde38523",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 23,
+    "event": "merged-unverified",
+    "commit": "941506750",
+    "merge": "8dcad082a",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 24,
+    "event": "merged-unverified",
+    "commit": "7485dd228",
+    "merge": "e4a8549d4",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 25,
+    "event": "task-completed",
+    "commit": null,
+    "merge": "rex/integration-20261104 @ c73df3967",
+    "ancestor_exit": null,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 26,
+    "event": "merged-unverified",
+    "commit": "e12c302af",
+    "merge": "a5b367074",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 27,
+    "event": "task-completed",
+    "commit": "03208b10e",
+    "merge": "8adb176d9",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": "lint 6 + E0433 seed.rs:162 match baseline 41797579234; live -2 suffix observed at 350 sessions; mutations RED",
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 28,
+    "event": "merged-unverified",
+    "commit": "b22a4b7d9",
+    "merge": "cae91bff3",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 29,
+    "event": "merged-unverified",
+    "commit": "fbec910bf",
+    "merge": "87de8a08d",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 30,
+    "event": "merged-unverified",
+    "commit": "5e9922dc8",
+    "merge": "942919ce4",
+    "ancestor_exit": 0,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  },
+  {
+    "todo": 31,
+    "event": "task-completed",
+    "commit": null,
+    "merge": "rex/integration-20261104 @ 1fa362974",
+    "ancestor_exit": null,
+    "reason": null,
+    "note": null,
+    "frozen_ancestor_exit": 0
+  }
+]

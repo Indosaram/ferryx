@@ -1,0 +1,2 @@
+$ git diff --exit-code d59508fa9...d8313422 -- scripts/build-ffmpeg-lgpl.sh src-tauri/resources/ffmpeg
+EXIT=0

@@ -1,0 +1,1 @@
+Raw numbered source and diff excerpts are losslessly gzip-compressed to preserve verbatim whitespace. Initial staged whitespace check exited 2 on capture formatting; full output is initial-evidence-check.log.gz. No product source was changed to address it. Decode with gzip to read the logical .txt files.

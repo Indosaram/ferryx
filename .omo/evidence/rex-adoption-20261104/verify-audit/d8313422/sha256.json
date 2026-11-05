@@ -1,0 +1,21 @@
+{
+  "F1-audit.md": "c8fe219035411813474a09e27c10c5c0b27f126265bec641dd4661c544a053d3",
+  "F2-security-review.md": "57ae385822a40b540686f80e4f4c95c11a6ffe3eb349a3fc7a3c8638a5f7c991",
+  "audit-result.json": "05e3c74c27284582a841d6b02e5dc8afa613df9b3618eeae3ea022cb3c009432",
+  "capture-format.md": "6d649a66a6005ef86872d95bae709e7bb3e57510bab8f4984c6aa46ffcf90fce",
+  "ffmpeg-boundary.log": "98a0ba53b2a65cc17a6c4e7c96a626cef4465faeb92404f3eaa413dcf68fbc85",
+  "frozen-ancestor.log": "ecefe3aada99cd486a61228fedd10cbc81e9c5b085ecc0258bfc6307c2bdbbc8",
+  "full-integration.diff.gz": "ed5d8f881a4e8e1d7beffdee3c2c250ddad3a4b39d4acc641217956d9f92c99f",
+  "guardrails.json": "09d1b2978856612e1e696746be77aebe00079fc7370611019853da5cbee91db1",
+  "initial-evidence-check.log.gz": "41e7a1b688b5e44b8307d14c67e99b5d2c3512c98f20ead78fef2f3555fe84c9",
+  "lint-config.log": "2eb217f39e7ea1c67a97b164f60ec967e9c037c2338fdee3946ff3eef13c5c88",
+  "native-source-unavailable.log": "5f929eafd188d672e81085f0cf3666d1df81cd1ff73b8fda1666c1874cfc7612",
+  "numbered-source.txt.gz": "dedbc02976a93ea2fae1d7d7fe6bc5f88f61380562c0e5743a3b007922db9a4c",
+  "other-repairs.txt.gz": "0df63504194cd783f7e9d7badd720b13eac7850409294a71ef8bf1050d7dfb26",
+  "product-identity.log": "44bf38afea567890d625623e40e381ea725e7751e39ccb979e914ac1e2930654",
+  "protocol-diff.log": "627f8f857a2395f3042031d2fe4a9bee9724a4d449ef140ebe7c60258e8a8277",
+  "release-precondition.log": "aecd58a19f29146d91f43a6d52eff7040a5ab477f17e108e185948fd952c9985",
+  "repair.diff.gz": "170c3636cb54d92dd4b8226fe500a17c8feea29da281711ebf8242ea92a1abe2",
+  "review-observations.json": "d814c9798798ba46d48586bab034618f47557ea3ea9b2c30d04fa465ee388712",
+  "todo-ancestry.json": "9c9f07d8a671654126c602592d519538f47d8425baa0e712bcc00f2fea93026d"
+}

@@ -1,0 +1,17 @@
+{
+  "frozen-ancestor": 0,
+  "protocol-diff": 0,
+  "ffmpeg-boundary": 0,
+  "lint-config": 0,
+  "release-precondition": 0,
+  "added_suppressions": [],
+  "leaf_references": [
+    "src-tauri/src/daemon/layout_migration.rs:120:let visual = text(tree, \"leafId\");",
+    "src-tauri/src/daemon/layout_migration.rs:171:\"one\":{\"root\":{\"type\":\"leaf\",\"leafId\":\"repeated\"},\"activeLeafId\":\"repeated\",\"expandedLeafId\":\"repeated\"},",
+    "src-tauri/src/daemon/layout_migration.rs:172:\"two\":{\"root\":{\"type\":\"leaf\",\"leafId\":\"repeated\"},\"activeLeafId\":\"repeated\",\"expandedLeafId\":\"repeated\"}",
+    "src-tauri/src/daemon/layout_migration.rs:245:serde_json::json!({\"tabs\":[{\"id\":\"t\",\"label\":\"old\",\"sessionId\":\"s\",\"paneTree\":{\"type\":\"leaf\",\"leafId\":\"visual\"},\"sessionIdsByLeafId\":{\"visual\":\"s\"}}]}),",
+    "src-tauri/src/daemon/layout_migration.rs:246:serde_json::json!({\"tabs\":[{\"id\":\"t\",\"label\":\"terminal\",\"terminal\":{\"primarySessionId\":\"s\",\"paneTree\":{\"type\":\"leaf\",\"leafId\":\"visual\"},\"sessionIdsByLeafId\":{\"visual\":\"s\"}}}]}),",
+    "src-tauri/src/daemon/layout_migration.rs:247:serde_json::json!({\"tabs\":[{\"id\":\"t\",\"label\":\"mixed\"}],\"activeTabId\":\"t\",\"layoutsByTabId\":{\"t\":{\"root\":{\"type\":\"split\",\"direction\":\"vertical\",\"ratio\":0.4,\"first\":{\"type\":\"leaf\",\"leafId\":\"visual\"},\"second\":{\"type\":\"leaf\",\"leafId\":\"browser\"}},\"activeLeafId\":\"visual\",\"contentsByLeafId\":{\"visual\":{\"kind\":\"terminal\",\"sessionId\":\"s\"},\"browser\":{\"kind\":\"browser\",\"browser\":{\"url\":\"https://example.org\"}}}}},\"tabGroups\":[{\"id\":\"g\",\"tabIds\":[\"t\"],\"activeTabId\":\"t\"}],\"tabGroupLayout\":{\"type\":\"group\",\"groupId\":\"g\"},\"focusedGroupId\":\"g\"}),",
+    "src-tauri/src/daemon/layout_migration.rs:261:assert!(!persisted.contains(\"leafId\"));"
+  ]
+}

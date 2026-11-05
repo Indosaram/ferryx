@@ -1,0 +1,2 @@
+$ git tag --contains 5ac05fd10
+EXIT=0

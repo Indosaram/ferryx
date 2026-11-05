@@ -1,0 +1,128 @@
+$ git diff --unified=0 d59508fa9...d8313422 -- src-tauri/src/daemon/protocol.rs
+diff --git a/src-tauri/src/daemon/protocol.rs b/src-tauri/src/daemon/protocol.rs
+index 4efddadf7..a5bbe99d6 100644
+--- a/src-tauri/src/daemon/protocol.rs
++++ b/src-tauri/src/daemon/protocol.rs
+@@ -401,0 +402,7 @@ pub struct DaemonSessionDetails {
++    /// Foreground argv0 basename only; never the full command line.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub foreground_command: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub agent: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub size_owner: Option<String>,
+@@ -490,0 +498,3 @@ impl DaemonSessionDetails {
++            size_owner: None,
++            foreground_command: None,
++            agent: None,
+@@ -889,0 +900,9 @@ pub enum DaemonRequest {
++    DescribeScreenHash {
++        session_id: String,
++    },
++    #[serde(rename_all = "camelCase")]
++    SetScrollbackBudget {
++        session_id: String,
++        lines: usize,
++    },
++    #[serde(rename_all = "camelCase")]
+@@ -913,0 +933,10 @@ pub enum DaemonRequest {
++    LayoutGet { window: String },
++    LayoutOffer { window: String, snapshot: crate::daemon::layout::Layout },
++    #[serde(rename_all = "camelCase")]
++    LayoutImport { window: String, machine_id: String, revision: u64 },
++    Panes { request: crate::daemon::layout::PaneAction },
++    LayoutGetScoped { window: String, scope: String },
++    #[serde(rename_all = "camelCase")]
++    LayoutApply { window: String, base_revision: u64, intent: crate::daemon::layout::Intent },
++    OnboardingGet,
++    OnboardingSet { state: crate::daemon::onboarding::State, #[serde(default)] migrate: bool },
+@@ -916,0 +946,10 @@ pub enum DaemonRequest {
++    PluginsList,
++    Script { action: crate::script::control::Action },
++    PluginSetEnabled { name: String, enabled: bool },
++    PluginView { plugin: String, view: String },
++    /// Accepted only over the plugin's own stdio; never a public owner request.
++    PluginRender { view: String, html: String },
++    PluginAttach { plugin: String, window: Option<String> },
++    /// Owner-only local preference, persisted independently of process lifetime.
++    #[serde(rename_all = "camelCase")]
++    SetTerminalOsc52Write { enabled: bool },
+@@ -1156,0 +1196,2 @@ pub enum DaemonRequest {
++        #[serde(default)]
++        session_cont: bool,
+@@ -1227,0 +1269,5 @@ pub enum DaemonRequest {
++    /// Lists or changes the cross-pane grants (`paneGrantsV1`). Add and Remove are accepted
++    /// only from the owner (a peer outside every Ferryx pane).
++    PaneGrant {
++        request: crate::daemon::pane_grants::PaneGrantAction,
++    },
+@@ -1574,0 +1621,8 @@ pub enum DaemonResponse {
++    #[serde(rename_all = "camelCase")]
++    DescribeScreenHashOk {
++        hash: String,
++        text_hash: String,
++        vt_version: String,
++        retained_lines: usize,
++    },
++    SetScrollbackBudgetOk,
+@@ -1584,0 +1639,7 @@ pub enum DaemonResponse {
++    /// The grants after a `PaneGrant` request; `admin` answers `CheckAdmin`.
++    #[serde(rename_all = "camelCase")]
++    PaneGrantsOk {
++        grants: Vec<crate::daemon::pane_grants::PaneGrant>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        admin: Option<bool>,
++    },
+@@ -1648,0 +1710 @@ pub enum DaemonResponse {
++    OnboardingOk { state: Option<crate::daemon::onboarding::State> },
+@@ -1649,0 +1712,8 @@ pub enum DaemonResponse {
++    LayoutOk { view: crate::daemon::layout::View },
++    LayoutImported { window: String, view: crate::daemon::layout::View },
++    PanesOk { detached: crate::daemon::layout::DetachedRegistry },
++    PluginsOk { plugins: Vec<crate::daemon::plugins::registry::Status> },
++    ScriptOk { value: serde_json::Value },
++    PluginViewOk { document: String },
++    #[serde(rename_all = "camelCase")]
++    LayoutConflict { code: String, revision: u64, layout: crate::daemon::layout::Layout },
+@@ -1768,0 +1839,2 @@ pub enum DaemonStreamMessage<'a> {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        foreground_command: Option<Cow<'a, str>>,
+@@ -2074,0 +2147 @@ mod tests {
++            foreground_command: None,
+@@ -2716,0 +2790 @@ mod tests {
++            foreground_command: None,
+@@ -2755,0 +2830 @@ mod tests {
++            foreground_command: None,
+@@ -2797,0 +2873 @@ mod tests {
++                foreground_command: None,
+@@ -2815,0 +2892 @@ mod tests {
++            foreground_command: None,
+@@ -2840,0 +2918,18 @@ mod tests {
++    #[test]
++    fn foreground_command_is_additive_stream_metadata() {
++        let mut frame = protocol_frame("working");
++        if let DaemonStreamMessage::AgentState { foreground_command, .. } = &mut frame {
++            *foreground_command = Some(Cow::Borrowed("sleep"));
++        }
++        let value = serde_json::to_value(&frame).unwrap();
++        assert_eq!(value["foregroundCommand"], "sleep");
++        let encoded = serde_json::to_string(&frame).unwrap();
++        let decoded: DaemonStreamMessage<'_> = serde_json::from_str(&encoded).unwrap();
++        assert!(matches!(decoded, DaemonStreamMessage::AgentState { foreground_command: Some(name), .. } if name == "sleep"));
++        let mut legacy = value;
++        legacy.as_object_mut().unwrap().remove("foregroundCommand");
++        let encoded = legacy.to_string();
++        let decoded: DaemonStreamMessage<'_> = serde_json::from_str(&encoded).unwrap();
++        assert!(matches!(decoded, DaemonStreamMessage::AgentState { foreground_command: None, .. }));
++    }
++
+@@ -2842,0 +2938 @@ mod tests {
++            foreground_command: None,
+@@ -2873,0 +2970 @@ mod tests {
++            foreground_command: None,
+@@ -3368,0 +3466,2 @@ mod tests {
++                foreground_command: None,
++                agent: None,
+@@ -3369,0 +3469 @@ mod tests {
++                size_owner: None,
+EXIT=0
