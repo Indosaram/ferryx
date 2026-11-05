@@ -1,0 +1,104 @@
+name: rex acceptance matrix
+
+on:
+  push:
+    branches: ['ci/rex-accept-*']
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: rex integration Linux gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          df -h /
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Import private native source bundle
+        run: |
+          git checkout 35c984684 -- src-tauri/vendor/ghostty
+          git submodule update --init --recursive
+          git -C src-tauri/vendor/ghostty fetch "$GITHUB_WORKSPACE/.github/rex-gate/grants/native.bundle" refs/heads/rex/repair-history-spacer
+          git reset HEAD src-tauri/vendor/ghostty
+          git checkout HEAD -- src-tauri/vendor/ghostty
+          git -C src-tauri/vendor/ghostty checkout --detach 216426b657b93d8fadd11d7506615f744581221e
+          git submodule update --init --recursive
+      - name: Isolated TMPDIR and gate dir
+        run: |
+          mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/gate"
+          echo "TMPDIR=$RUNNER_TEMP/tmp" >> "$GITHUB_ENV"
+          echo "GATE_DIR=$RUNNER_TEMP/gate" >> "$GITHUB_ENV"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+          use-cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev clang libclang-dev libpipewire-0.3-dev libspa-0.2-dev libdbus-1-dev libva-dev libdrm-dev libgbm-dev libegl-dev libgl-dev libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev libx11-dev libxext-dev libxrandr-dev libxfixes-dev libxtst-dev libxi-dev libevdev-dev libudev-dev
+      - name: UI and SDK
+        run: |
+          bun install --cwd ui
+          bun run --cwd ui build
+          bun scripts/fetch-ffmpeg.mjs
+
+      - name: Acceptance matrix
+        run: |
+          set +e
+          fails=""
+          run() {
+            label="$1"; shift
+            echo "=============== ITEM $label ==============="
+            "$@" > "/tmp/item-$label.log" 2>&1
+            st=$?
+            echo "ITEM $label EXIT=$st"
+            grep -E 'test result:' "/tmp/item-$label.log" | tail -3
+            if [ "$st" != 0 ]; then
+              echo "----- item $label log (last 40) -----"
+              tail -40 "/tmp/item-$label.log"
+              echo "----- end $label -----"
+            fi
+            if [ "$st" != 0 ]; then fails="$fails $label"; fi
+            return 0
+          }
+          M="--manifest-path src-tauri/Cargo.toml --lib --locked"
+          run 01-terminal cargo test $M -- terminal::fuzz_tests terminal::vt_stream::osc1337 terminal::foreground
+          run 04-grants cargo test $M -- control_wire_tests pane_grants supervisor_peer
+          run 07-mirror cargo test $M -- screen_mirror handover_socket handover_wire
+          run 08-size cargo test $M -- size_ownership remote::resize_security_tests daemon::server::session_path_tests
+          run 09-layout cargo test $M -- daemon::layout
+          run 14-notify cargo test $M -- native_terminal::osc_effects notification
+          run 18-updater cargo test $M -- ipc::updater
+          run 21-onboard cargo test $M -- daemon::onboarding account::onboarding_sync_tests
+          run 22-names cargo test $M -- session_names
+          run 23-script cargo test $M -- script::
+          run 24-iroh cargo test $M -- iroh
+          run 28-config cargo test $M -- config_import
+          run 30-plugins cargo test $M -- plugins::
+          run H1-handover cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked
+          echo "========================================="
+          echo "ACCEPTANCE_FAILED_ITEMS=$fails"
+          echo "ACCEPTANCE_FAILED_COUNT=$(echo $fails | wc -w)"
+          if [ -n "$fails" ]; then exit 1; fi
+          exit 0
