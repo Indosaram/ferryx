@@ -683,12 +683,20 @@ async function clickToolbarIcon(ctx, index, verify, { spread = 1 } = {}) {
  * the regular pass misses, the thin-strip pass reads the same frame: macOS run 41846200603 never
  * read the highlighted (white on blue) "Duplicate browser tab" menu item (probes 180-182, 275).
  */
-async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0, where = null } = {}) {
+async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0, where = null, trail = null } = {}) {
   const match = (word) => test(word.text) && (!where || where(word));
   const hit = await until(() => {
     const path = ctx.probeShot();
-    let words = (ctx.ocr(path) ?? []).filter(match);
-    if (!words.length && ctx.ocrStrips) words = ctx.ocrStrips(path).filter(match);
+    const all = ctx.ocr(path) ?? [];
+    let words = all.filter(match);
+    let pass = "regular";
+    if (!words.length && ctx.ocrStrips) {
+      const strips = ctx.ocrStrips(path);
+      words = strips.filter(match);
+      pass = "strips";
+      // Evidence for a miss: what the frame read where the target was expected.
+      if (trail) trail.push({ probe: path.split(/[\\/]/).pop(), pass, matches: words.length, near: strips.filter((word) => !where || where(word)).map((word) => word.text).slice(0, 30) });
+    } else if (trail) trail.push({ probe: path.split(/[\\/]/).pop(), pass, matches: words.length });
     if (!words.length) return null;
     const sorted = pick === "rightmost" ? words.sort((a, b) => b.left - a.left)
       : pick === "bottom" ? words.sort((a, b) => b.top - a.top) : words.sort((a, b) => a.top - b.top || a.left - b.left);
@@ -698,6 +706,18 @@ async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0, wh
   const at = [hit.left + Math.round(hit.width / 2) + dx, hit.top + Math.round(hit.height / 2)];
   ctx.host.click(...at);
   return at;
+}
+
+/**
+ * Items of the "Duplicate browser tab" submenu, given the clicked parent item's centre: the
+ * submenu's first item shares the parent's row, the rest follow below it (about 22px a row), and
+ * it opens beside the parent, right of it or (near the screen edge) left of it. Macos run
+ * 41949155327: parent at [484,182] -> Private [674,204]; parent at [859,182] -> work [721,226].
+ * "Private" or "work" elsewhere on screen (a tab title, the Settings profile row) never counts.
+ */
+function inDuplicateSubmenu(parent) {
+  const [x, y] = parent;
+  return (word) => word.top + word.height / 2 >= y - 12 && word.top <= y + 160 && Math.abs(word.left - x) <= 420 && Math.abs(word.left - x) >= 60;
 }
 
 /** Runs one real-input check body inside an audit step and records it. */
@@ -1624,8 +1644,9 @@ export async function dailyWebviewAfter(ctx) {
     await sleep(1200);
     const duplicate = await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
     await sleep(1000);
-    const privateItem = duplicate ? await clickWord(ctx, (text) => /^Private$/.test(text), { timeout: 5000, pick: "rightmost" }) : null;
-    g11.private_menu = { duplicate, private: privateItem };
+    const privateTrail = [];
+    const privateItem = duplicate ? await clickWord(ctx, (text) => /^Private$/.test(text), { timeout: 5000, where: inDuplicateSubmenu(duplicate), trail: privateTrail }) : null;
+    g11.private_menu = { duplicate, private: privateItem, trail: privateTrail };
     // No menu item was clicked: no tab can appear, so the wait is skipped.
     const privateTab = privateItem
       ? await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.profileId === "private"), 15000)
@@ -1800,7 +1821,8 @@ export async function dailyChromium(ctx) {
       await sleep(1200);
       const duplicate = await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
       await sleep(1000);
-      g11.work_menu = { duplicate, work: duplicate ? await clickWord(ctx, (text) => /^work$/i.test(text), { timeout: 5000, pick: "rightmost" }) : null };
+      const workTrail = [];
+      g11.work_menu = { duplicate, work: duplicate ? await clickWord(ctx, (text) => /^work$/i.test(text), { timeout: 5000, where: inDuplicateSubmenu(duplicate), trail: workTrail }) : null, trail: workTrail };
       // Windows run 41824966041 screenshot 60: the Duplicate submenu listed only "Default
       // (current)" and "Private" (the profile was never added), so no "work" item existed.
       if (!g11.work_menu.work) ctx.host.key({ key: "Escape" });
