@@ -15,6 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import { rpcProcess } from '../fixtures/native-configured-adapters.mjs';
 import { SESSION_PROFILE_SUFFIX, acceptedReply, configureGateway, gatewayPortFor, hubEnv, relayListenPort, remotePath, rpcCommand, sameServeConfig, serveAddedProblems, startupDsrObserved } from './seams.mjs';
+import { connectRemoteAgent } from './remote-agent.mjs';
 import { LaneBlocked, StepFailed, latch, mutex, stopExact, until } from './steps.mjs';
 
 export function startSession({ config, run, lane }) {
@@ -96,7 +97,7 @@ export function startSession({ config, run, lane }) {
 
     // The fixture daemon: the session host's own isolated candidate, prepared and launched by the
     // native agent with exact-pid receipts and the build stamp checked against its manifest.
-    agent = rpc(host.remoteAgent);
+    agent = await connectRemoteAgent({ helper, host, run, lane, connect: rpc });
     setup = await agent.call('prepare', { worktreeRoot: host.worktreeRoot, worktree: host.worktree, runId: sessionRunId, operationId: `f3-${run.runId}`,
       binary: host.binary, uiDist: host.uiDist, manifest: host.buildManifest });
     Object.assign(lane.receipt.candidate, { stamp: setup.candidate, binarySha256: setup.binarySha256, uiSha256: setup.uiSha256 });

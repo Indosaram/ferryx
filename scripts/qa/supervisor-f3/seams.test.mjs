@@ -463,7 +463,7 @@ describe('all-local run', () => {
 
   test('a smoke run never passes, and a lane left out blocks its scenarios', () => {
     const rev = 'b'.repeat(40);
-    const session = { schema: LANE_SCHEMA, lane: 'session', blocked: null, failure: null, machine: { id: 'm' }, candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, harness: { headRevision: rev, clean: true, status: '' }, steps: [], cleanup: [] };
+    const session = { schema: LANE_SCHEMA, lane: 'session', blocked: null, failure: null, machine: { id: 'm' }, candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, harness: { checkout: '/harness', headRevision: rev, clean: true, status: '' }, remoteAgent: { checkout: '/harness', resolvedPath: '/harness/agent.mjs', headRevision: rev, clean: true }, steps: [], cleanup: [] };
     const base = { schema: RUN_SCHEMA, revision: rev, control: { hostname: 'c', head: rev, clean: true, scripts: [{ path: 'a', sha256: 'c'.repeat(64) }] }, session, cross: [] };
     const out = { schema: LANE_SCHEMA, blocked: { code: 'LANE_NOT_IN_RUN' }, steps: [], cleanup: [] };
     const verdict = validateRun({ ...base, lanes: { macos: out, windows: out, iphone: out } });
@@ -527,7 +527,7 @@ describe('macOS GUI launcher bundle', () => {
 describe('session host in the verdict', () => {
   const rev = 'b'.repeat(40);
   const session = (extra = {}) => ({ schema: LANE_SCHEMA, lane: 'session', blocked: null, failure: null, machine: { id: 'm' },
-    candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, harness: { headRevision: rev, clean: true, status: '' }, steps: [], cleanup: [], ...extra });
+    candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, harness: { checkout: '/harness', headRevision: rev, clean: true, status: '' }, remoteAgent: { checkout: '/harness', resolvedPath: '/harness/agent.mjs', headRevision: rev, clean: true }, steps: [], cleanup: [], ...extra });
   const run = (s) => ({ schema: RUN_SCHEMA, revision: rev, control: { hostname: 'c', head: rev, clean: true, scripts: [{ path: 'a', sha256: 'c'.repeat(64) }] },
     session: s, lanes: {}, cross: [] });
 
@@ -536,7 +536,7 @@ describe('session host in the verdict', () => {
     expect(validateRun(run(session({ failure: { code: 'SERVE_ENDPOINT' } }))).errors.join()).toContain('session host: lane failed: SERVE_ENDPOINT');
     expect(validateRun(run(session({ candidate: { headRevision: rev, clean: true, stamp: 'x+y' } }))).errors.join()).toContain('session host: candidate build stamp');
     const leak = session({ cleanup: [{ resource: 'serve-endpoint', port: 47930, action: 'reported-not-killed' }] });
-    expect(validateRun(run(leak)).verdict).toBe('fail');
+    expect(validateRun(run(leak)).errors).toContain('session host cleanup leak: {"resource":"serve-endpoint","port":47930,"action":"reported-not-killed"}');
     expect(validateRun(run(null)).errors.join()).toContain('session host: lane receipt missing');
   });
 
@@ -545,6 +545,7 @@ describe('session host in the verdict', () => {
     const receipt = { ...run(session()), harnessRevision: harness };
     receipt.control.head = harness;
     receipt.session.harness.headRevision = harness;
+    receipt.session.remoteAgent.headRevision = harness;
     expect(validateRun(receipt).errors).toEqual([]);
     receipt.session.candidate.headRevision = harness;
     expect(validateRun(receipt).errors.some((error) => error.includes('candidate head'))).toBe(true);

@@ -21,6 +21,8 @@
 //    revision with a matching build stamp unless it was blocked, and its cleanup (daemon, relay,
 //    profile, relay root, the run's serve endpoint) must prove every resource gone.
 
+import { win32, posix } from 'node:path';
+
 export const RUN_SCHEMA = 'ferryx-supervisor-f3.run/3';
 export const LANE_SCHEMA = 'ferryx-supervisor-f3.lane/2';
 export const EXIT = Object.freeze({ PASS: 0, FAIL: 1, BLOCKED: 2, USAGE: 5, INTERRUPTED: 130 });
@@ -111,10 +113,24 @@ function controlDefect(control, revision) {
   return null;
 }
 
-function harnessDefect(lane, revision) {
+export function harnessDefect(lane, revision) {
   if (!lane || lane.blocked) return null;
   if (lane.harness?.headRevision !== revision) return `harness head ${lane.harness?.headRevision} is not harness revision ${revision}`;
   if (lane.harness?.clean !== true) return 'harness checkout is not clean';
+  return null;
+}
+
+export function remoteAgentDefect(lane, revision) {
+  if (!lane || lane.blocked) return null;
+  const agent = lane.remoteAgent;
+  if (!agent || agent.headRevision !== revision || agent.clean !== true) return 'REMOTE_AGENT_PROVENANCE: missing, dirty or wrong revision';
+  const paths = lane.machine?.platform === 'win32' ? win32 : posix;
+  const inside = (root, file) => {
+    if (!paths.isAbsolute(root ?? '') || !paths.isAbsolute(file ?? '')) return false;
+    const delta = paths.relative(root, file);
+    return delta !== '' && delta !== '..' && !delta.startsWith(`..${paths.sep}`) && !paths.isAbsolute(delta);
+  };
+  if (![lane.harness?.checkout, lane.candidate?.checkout].some((root) => root === agent.checkout && inside(root, agent.resolvedPath))) return 'REMOTE_AGENT_PROVENANCE: agent outside recorded checkout';
   return null;
 }
 
@@ -159,12 +175,16 @@ export function validateRun(run, extraErrors = []) {
     if (name !== 'iphone') {
       const harness = harnessDefect(run?.lanes?.[name], run?.harnessRevision ?? run?.revision);
       if (harness) errors.push(`${name}: ${harness}`);
+      const agent = remoteAgentDefect(run?.lanes?.[name], run?.harnessRevision ?? run?.revision);
+      if (agent) errors.push(`${name}: ${agent}`);
     }
   }
   const session = laneDefect(run?.session, run?.revision);
   if (session) errors.push(`session host: ${session}`);
   const sessionHarness = harnessDefect(run?.session, run?.harnessRevision ?? run?.revision);
   if (sessionHarness) errors.push(`session host: ${sessionHarness}`);
+  const sessionAgent = remoteAgentDefect(run?.session, run?.harnessRevision ?? run?.revision);
+  if (sessionAgent) errors.push(`session host: ${sessionAgent}`);
   for (const leak of cleanupLeaks(run?.session)) errors.push(`session host cleanup leak: ${JSON.stringify(leak).slice(0, 400)}`);
   const scenarios = SCENARIOS.map((scenario) => scenarioVerdict(run, scenario));
   const verdict = errors.length > 0 ? 'fail'
