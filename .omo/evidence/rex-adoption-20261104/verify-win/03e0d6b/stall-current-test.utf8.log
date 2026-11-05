@@ -1,0 +1,18 @@
+cargo :    Compiling ferryx-rd-net v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-03e0d6b\crates\ferryx-rd\ferryx-rd-ne
+t)
+위치 C:\Users\sook\ferryx-wt\rex-win-03e-gates.ps1:21 문자:15
++ ... n repaired {cargo test --manifest-path src-tauri/Cargo.toml --locked  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling fe...\ferryx-rd-net):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-03e0d6b\crates\ferryx-hub)
+   Compiling ferryx-rd-app v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-03e0d6b\crates\ferryx-rd\ferryx-rd-app)
+   Compiling ferryx-rd-host v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-03e0d6b\crates\ferryx-rd\ferryx-rd-host)
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-03e0d6b\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 39s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-4933797226d2b7dc.exe)
+
+running 2 tests
+test daemon::session_service::machine_tests::desktop_inventory_isolated_parent ... ok
+test remote::reference_chat::route_tests::a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally has been running for over 60 seconds

@@ -1,0 +1,166 @@
+
+************* Preparing the environment for Debugger Extensions Gallery repositories **************
+   ExtensionRepository : Implicit
+   UseExperimentalFeatureForNugetShare : true
+   AllowNugetExeUpdate : true
+   NonInteractiveNuget : true
+   AllowNugetMSCredentialProviderInstall : true
+   AllowParallelInitializationOfLocalRepositories : true
+
+   EnableRedirectToV8JsProvider : false
+
+   -- Configuring repositories
+      ----> Repository : LocalInstalled, Enabled: true
+      ----> Repository : UserExtensions, Enabled: true
+
+>>>>>>>>>>>>> Preparing the environment for Debugger Extensions Gallery repositories completed, duration 0.000 seconds
+
+************* Waiting for Debugger Extensions Gallery to Initialize **************
+
+>>>>>>>>>>>>> Waiting for Debugger Extensions Gallery to Initialize completed, duration 0.156 seconds
+   ----> Repository : UserExtensions, Enabled: true, Packages count: 0
+   ----> Repository : LocalInstalled, Enabled: true, Packages count: 30
+
+Microsoft (R) Windows Debugger Version 10.0.26100.7705 AMD64
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+*** wait with pending attach
+
+************* Path validation summary **************
+Response                         Time (ms)     Location
+Deferred                                       srv*
+Symbol search path is: srv*
+Executable search path is: 
+WARNING: Process 17444 is not attached as a debuggee
+         The process can be examined but debug events will not be received
+................................................................
+...
+(4424.62c): Wake debugger - code 80000007 (first chance)
+
++------------------------------------------------------------------------+
+| This target supports Hardware-enforced Stack Protection. A HW based    |
+| "Shadow Stack" may be available to assist in debugging and analysis.   |
+| See aka.ms/userhsp for more info.                                      |
+|                                                                        |
+| dps @ssp                                                               |
+|                                                                        |
++------------------------------------------------------------------------+
+
+ntdll!NtWaitForAlertByThreadId+0x14:
+00007ffc`205459c4 c3              ret
+0:000> cdb: Reading initial command '~* kb;qd'
+
+.  0  Id: 4424.62c Suspend: 1 Teb: 00000053`f877f000 Unfrozen "main"
+RetAddr               : Args to Child                                                           : Call Site
+00007ffc`2044ca73     : 00000000`00000000 00000000`00000000 00000000`00000000 ffffffff`ffffffff : ntdll!NtWaitForAlertByThreadId+0x14
+00007ffc`1d6de158     : 000001a3`ec007bf8 00000000`00000000 00000053`f88fe880 00000053`f88fe887 : ntdll!RtlWaitOnAddress+0x213
+*** WARNING: Unable to verify checksum for C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-4933797226d2b7dc.exe
+00007ff7`62cb56d1     : 00007ffc`1d6de120 00000053`f88feac0 00000000`00000000 000001a3`ebfd8a80 : KERNELBASE!WaitOnAddress+0x38
+00007ff7`5d7fa088     : 000001a3`ec7b4c50 00000000`00000008 00000000`00000200 00007ff7`63702738 : ferryx_lib_4933797226d2b7dc+0xc3956d1
+00007ff7`5d80bd6a     : 00000053`f88feac0 00000053`f88feab8 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x6eda088
+00007ff7`5d818dfa     : 000001a3`ebe51440 000001a3`ebe502a8 000001a3`ec790130 00000000`00000006 : ferryx_lib_4933797226d2b7dc+0x6eebd6a
+00007ff7`5d7feb21     : 00000000`00000000 00007ffc`1d990960 00000053`f88ff701 00007ffc`1d990960 : ferryx_lib_4933797226d2b7dc+0x6ef8dfa
+00007ff7`58cd5c95     : 00007ffc`1fa90000 00007ff7`62cc8cc4 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x6edeb21
+00007ff7`5792191b     : 00000000`00000003 00007ffc`1d6b491c 00000000`00000000 00007ff7`64718630 : ferryx_lib_4933797226d2b7dc+0x23b5c95
+00007ff7`5b8a125e     : 00000000`00150014 00007ffc`204930d1 00000000`00000000 ffffffff`fffffffe : ferryx_lib_4933797226d2b7dc+0x100191b
+00007ff7`5c2fb671     : 00000000`00000000 00007ffc`1d6e69c0 00000000`00006000 00000053`f88f5000 : ferryx_lib_4933797226d2b7dc+0x4f8125e
+00007ff7`62cbd540     : 000001a3`ebfd8030 00007ff7`63a04f00 00000053`f88ff9e0 0202020c`ff879ab5 : ferryx_lib_4933797226d2b7dc+0x59db671
+00007ff7`5c0f2eea     : 00000000`00000100 00000053`f88ff9d0 00007ff7`663c0e38 00007ff7`5f7a765e : ferryx_lib_4933797226d2b7dc+0xc39d540
+00007ff7`590a1b49     : 00000000`000000e7 00000000`00000000 00000000`00000000 00007ff7`6337bf18 : ferryx_lib_4933797226d2b7dc+0x57d2eea
+00007ff7`6336c33f     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x2781b49
+00007ffc`1fabdda7     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0xca4c33f
+00007ffc`2045ee4c     : 00000000`00000000 00000000`00000000 000004f0`fffffb30 000004d0`fffffb30 : KERNEL32!BaseThreadInitThunk+0x17
+00000000`00000000     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ntdll!RtlUserThreadStart+0x2c
+
+   1  Id: 4424.79cc Suspend: 1 Teb: 00000053`f8789000 Unfrozen "remote::reference_chat::route_tests::a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_l"
+RetAddr               : Args to Child                                                           : Call Site
+00007ffc`2044ca73     : 000001a3`ec747000 00000000`00000000 00000000`00000002 00000000`00000000 : ntdll!NtWaitForAlertByThreadId+0x14
+00007ffc`1d6de158     : 00000053`f8fff658 00000000`00000000 00000053`f8ffd320 000001a3`ebfe94e0 : ntdll!RtlWaitOnAddress+0x213
+00007ff7`62b8e989     : 00000000`00000000 00007ff7`62b89262 00000000`00000000 00007ff7`62b896c8 : KERNELBASE!WaitOnAddress+0x38
+00007ff7`62b8e9d7     : 000001a3`ec0096d0 00000000`00000001 00000000`00000000 00000000`00000001 : ferryx_lib_4933797226d2b7dc+0xc26e989
+00007ff7`62b8fc05     : 00000053`f8ffd470 00000053`f8ffd110 000001a3`ec7cd440 00007ff7`62b8c7c3 : ferryx_lib_4933797226d2b7dc+0xc26e9d7
+00007ff7`62b95ae9     : 000001a3`ebfb0000 00007ff7`62b86f62 000001a3`ec741420 000001a3`ec7cd420 : ferryx_lib_4933797226d2b7dc+0xc26fc05
+00007ff7`62b938a5     : 000001a3`ec741420 00000000`00000100 000001a3`ec7cd420 00000000`00000028 : ferryx_lib_4933797226d2b7dc+0xc275ae9
+00007ff7`62b8a071     : 00000000`00000008 00007ffc`20433ccd 00000000`00000008 00007ff7`62afb053 : ferryx_lib_4933797226d2b7dc+0xc2738a5
+00007ff7`62b28a40     : 00000000`00000000 00000000`00000001 040001a3`ec7cd440 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0xc26a071
+00007ff7`62b32e73     : 00800100`00000000 000001a3`ec7cd440 000001a3`ec7cd440 00007ff7`62b37d35 : ferryx_lib_4933797226d2b7dc+0xc208a40
+00007ff7`62b3a6e2     : 00000053`f8ffd67e 000001a3`ec009668 000001a3`ec009668 000001a3`ec009668 : ferryx_lib_4933797226d2b7dc+0xc212e73
+00007ff7`62b36ec6     : 000001a3`ebfd05a0 00000053`f8ffd99d 000001a3`ec009668 00007ff7`62b1d736 : ferryx_lib_4933797226d2b7dc+0xc21a6e2
+00007ff7`62b36c8e     : 00000053`f8ffd99d 000001a3`ec009668 00000053`f8ffd99b 000001a3`ec009668 : ferryx_lib_4933797226d2b7dc+0xc216ec6
+00007ff7`62b1c7e1     : 00000053`f8ffd99d 000001a3`ec009668 000001a3`ec009668 000001a3`ec009668 : ferryx_lib_4933797226d2b7dc+0xc216c8e
+00007ff7`62b329e5     : 00000053`f8ffd99d 00007ff7`62ae3f4e 00000053`f8ffee98 00007ff7`62b36cf9 : ferryx_lib_4933797226d2b7dc+0xc1fc7e1
+00007ff7`62b37fbe     : 000001a3`ec009668 00000053`f8ffd928 00000053`f8ffd950 00000053`f8ffd928 : ferryx_lib_4933797226d2b7dc+0xc2129e5
+00007ff7`62b32b82     : 00007ff7`646b4158 000001a3`ebfc9700 000001a3`ec009668 000001a3`ec009668 : ferryx_lib_4933797226d2b7dc+0xc217fbe
+00007ff7`62b32996     : 000001a3`ec009668 000001a3`ec009668 00000101`ec009668 00007ff7`62b3b0ae : ferryx_lib_4933797226d2b7dc+0xc212b82
+00007ff7`62b587c5     : 000001a3`ebfc9758 00007ff7`62ae344e 00000053`f8ffda90 00007ff7`62adf63e : ferryx_lib_4933797226d2b7dc+0xc212996
+00007ff7`62b58f3f     : 00007ff7`6351ced8 00000000`00000008 00000000`000000a8 00007ff7`63702738 : ferryx_lib_4933797226d2b7dc+0xc2387c5
+00007ff7`62b5b064     : 00000053`f8ffee88 00007ff7`62ae26e2 00000053`f8ffde50 00007ff7`5aab54f1 : ferryx_lib_4933797226d2b7dc+0xc238f3f
+00007ff7`62ae312f     : 00000053`f8ffee58 00000053`f8ffee80 00000053`f8ffee80 00007ff7`62ae237e : ferryx_lib_4933797226d2b7dc+0xc23b064
+00007ff7`62ae25fb     : 00000053`f8ffe630 00007ff7`639ccd90 00000000`00000010 00007ff7`639ccdb0 : ferryx_lib_4933797226d2b7dc+0xc1c312f
+00007ff7`5be5176f     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0xc1c25fb
+00007ff7`5bb4ed28     : 00000000`00000030 01000000`00000030 000001a3`ec008210 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x553176f
+00007ff7`5797eed6     : 000001a3`ebe50000 00000000`00000000 000001a3`ec008210 00000000`00000008 : ferryx_lib_4933797226d2b7dc+0x522ed28
+00007ff7`5d7eab60     : 00000000`00002000 000001a3`ec008210 00000000`00000010 00000000`0000001c : ferryx_lib_4933797226d2b7dc+0x105eed6
+00007ff7`5d7f8b2b     : 00000000`00000000 00007ffc`2041200b 00000000`00000002 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x6ecab60
+00007ff7`5d7f341d     : 000001a3`ebfcf9b0 00000000`00000040 00007ff7`6351ced8 00000000`00000008 : ferryx_lib_4933797226d2b7dc+0x6ed8b2b
+00007ff7`5d7fcba5     : 00000000`00000000 00007ff7`59073f32 00000053`f8fff980 00007ff7`62cc9d64 : ferryx_lib_4933797226d2b7dc+0x6ed341d
+00007ff7`62cc8f03     : 000001a3`ec007490 000001a3`ec005850 000001a3`ec008190 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x6edcba5
+00007ffc`1fabdda7     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0xc3a8f03
+00007ffc`2045ee4c     : 00000000`00000000 00000000`00000000 000004f0`fffffb30 000004d0`fffffb30 : KERNEL32!BaseThreadInitThunk+0x17
+00000000`00000000     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ntdll!RtlUserThreadStart+0x2c
+
+   2  Id: 4424.1c84 Suspend: 1 Teb: 00000053`f878d000 Unfrozen
+RetAddr               : Args to Child                                                           : Call Site
+00007ffc`20404d0e     : 00000000`00000000 00000000`00000000 00007ffc`20404150 000001a3`ec6f3b00 : ntdll!NtWaitForWorkViaWorkerFactory+0x14
+00007ffc`1fabdda7     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ntdll!TppWorkerThread+0x37e
+00007ffc`2045ee4c     : 00000000`00000000 00000000`00000000 000004f0`fffffb30 000004d0`fffffb30 : KERNEL32!BaseThreadInitThunk+0x17
+00000000`00000000     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ntdll!RtlUserThreadStart+0x2c
+
+   3  Id: 4424.66c4 Suspend: 1 Teb: 00000053`f87a5000 Unfrozen "tokio-rt-worker"
+RetAddr               : Args to Child                                                           : Call Site
+00007ffc`1d622773     : 00007ff7`646b9538 00007ff7`646b9538 000001a3`ec7ce480 00007ff7`646b9538 : ntdll!NtWaitForMultipleObjects+0x14
+00007ffc`1d622641     : 000001a3`ec77c680 00007ff7`5d8c7fbe 000001a3`ec0631b0 000001a3`ec06a770 : KERNELBASE!WaitForMultipleObjectsEx+0x123
+00007ff7`5d8b3e40     : 000001a3`ec0631b0 000001a3`ec06a770 000001a3`ec0a3cc0 00000053`f9cfa04c : KERNELBASE!WaitForMultipleObjects+0x11
+00007ff7`596d9be3     : 00000000`00000000 00000000`00000004 00000053`f9cfa500 00000053`f9cfeed0 : ferryx_lib_4933797226d2b7dc+0x6f93e40
+00007ff7`5c44a6b2     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x2db9be3
+00007ff7`5804e47f     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x5b2a6b2
+00007ff7`56f0263e     : 000001a3`ec8d1cc0 000001a3`ebfb0000 000001a3`00000200 00000000`000002ac : ferryx_lib_4933797226d2b7dc+0x172e47f
+00007ff7`572d0e6d     : 00000000`00000000 000001a3`ebfb6728 000001a3`ebfb0150 000001a3`ec8cf210 : ferryx_lib_4933797226d2b7dc+0x5e263e
+00007ff7`56a8589c     : 000001a3`ebe51500 00000000`00000000 00000000`00000008 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x9b0e6d
+00007ff7`5aa533f1     : 00000000`00000080 00007ffc`20412144 000001a3`ebe50000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x16589c
+00007ff7`5b2124bb     : 00000000`00000002 00000000`00000000 00000000`00000008 00007ffb`f89d0000 : ferryx_lib_4933797226d2b7dc+0x41333f1
+00007ff7`5aa8d003     : 00000000`000002e0 00000000`000002f0 000001a3`ec6c04b0 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0x48f24bb
+00007ff7`5a8fadc9     : 00000000`00000000 00007ffb`f89ed534 00007ffb`f89d0000 00007ffb`f89d0000 : ferryx_lib_4933797226d2b7dc+0x416d003
+00007ff7`569ccb49     : 00007ffb`f5720000 00007ffb`f89e7b9e 00000000`000000c9 00007ff7`62aee2f9 : ferryx_lib_4933797226d2b7dc+0x3fdadc9
+00007ff7`56cdb6d8     : 00000000`7ffe0384 00007ffc`204fef6a 00007ffb`f5720000 00000000`00000002 : ferryx_lib_4933797226d2b7dc+0xacb49
+00007ff7`56cdb963     : 000001a3`ec8c4100 00007ff7`56b70aae 00007ffc`205ad938 00000000`00000002 : ferryx_lib_4933797226d2b7dc+0x3bb6d8
+00007ff7`5c934bbb     : 00000053`f9cff53e 00007ff7`62b3b335 00000000`00000000 00007ff7`646b8608 : ferryx_lib_4933797226d2b7dc+0x3bb963
+00007ff7`62aef1a6     : 000001a3`ebfc9700 010001a3`ebfc9700 000001a3`ebfc9700 00007ff7`62adaa51 : ferryx_lib_4933797226d2b7dc+0x6014bbb
+00007ff7`62ace1e8     : 00000053`f9cff600 00007ff7`62ade39e 00000000`00000001 000001a3`ebfc97c8 : ferryx_lib_4933797226d2b7dc+0xc1cf1a6
+00007ff7`62b58925     : 00000053`f9cff600 00007ff7`62ac8dd3 00000000`00000003 00000000`00000004 : ferryx_lib_4933797226d2b7dc+0xc1ae1e8
+00007ff7`62b59e46     : 000001a3`ec7718f0 000001a3`ec771900 00000000`00000001 00007ff7`62acdb79 : ferryx_lib_4933797226d2b7dc+0xc238925
+00007ff7`62b576c4     : 01000000`00000000 ffffffff`fffffffe 000001a3`ec0a3cc0 000001a3`ec06a770 : ferryx_lib_4933797226d2b7dc+0xc239e46
+00007ff7`62aeafb9     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0xc2376c4
+00007ff7`62b3f5a7     : 00000053`f9cff9e0 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0xc1cafb9
+00007ff7`62b608f1     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0xc21f5a7
+00007ff7`62b340b6     : 00000000`00000000 00000000`00000000 000001a3`ec7cd9c0 00000000`00000020 : ferryx_lib_4933797226d2b7dc+0xc2408f1
+00007ff7`62b491e3     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00010000 : ferryx_lib_4933797226d2b7dc+0xc2140b6
+00007ff7`62b3f284     : 000001a3`ec7cd9c0 000001a3`ec7cd9c0 000001a3`ec7cd9c0 000001a3`ec771130 : ferryx_lib_4933797226d2b7dc+0xc2291e3
+00007ff7`62ae4e2e     : 000001a3`00001000 00000000`00000104 00000000`00006000 00000053`f9cf7000 : ferryx_lib_4933797226d2b7dc+0xc21f284
+00007ff7`62cc8f03     : 000001a3`ec0631b0 000001a3`ec06a770 000001a3`ec0a3cc0 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0xc1c4e2e
+00007ffc`1fabdda7     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ferryx_lib_4933797226d2b7dc+0xc3a8f03
+00007ffc`2045ee4c     : 00000000`00000000 00000000`00000000 000004f0`fffffb30 000004d0`fffffb30 : KERNEL32!BaseThreadInitThunk+0x17
+00000000`00000000     : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : ntdll!RtlUserThreadStart+0x2c
+quit:
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\atlmfc.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\ObjectiveC.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\concurrency.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\cpp_rest.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\stl.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Data.Json.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Geolocation.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Devices.Sensors.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\Windows.Media.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\windows.natvis'
+NatVis script unloaded from 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\Visualizers\winrt.natvis'
+EXIT=0

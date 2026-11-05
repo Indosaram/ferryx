@@ -1,0 +1,6 @@
+Head 03e0d6b56e77ad4fd8a3defee5abd98a3fd4b942
+Executable /tmp/rex-03e-win-helper/ferryx-remote-helper.exe
+Receipt /Volumes/T9-Mac/project/ferryx-wt/rex-verify-win-20261104/.omo/evidence/rex-adoption-20261104/verify-win/03e0d6b/windows-helper-receipt.json
+Binary SHA256 612b5432d7b1c2698bcabf13da870c17e990e8aaae067a6f08b48f9787dcd999
+sourceFingerprint 400dca582fba8fe412ca1158f9a6adcc87470f72271ac3826827112cfb26d56d
+Need complete verified five-target tree before release; no staging bypass.
