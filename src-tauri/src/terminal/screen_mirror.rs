@@ -36,6 +36,16 @@ pub const MAX_MIRROR_SCROLLBACK_LINES: usize = 10_000;
 const SCROLLBACK_BYTES_PER_CELL: usize = 16;
 /// Largest estimated scrollback memory one session may hold.
 pub const MAX_SCROLLBACK_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+// Ghostty prunes whole pages. Retain one standard page of slack so pruning
+// cannot remove any of the requested newest rows. The external hash/seed window
+// remains exactly the requested budget. At this pin pages are at most 512 KiB
+// and cells occupy eight bytes; row headers only reduce the row capacity.
+fn parser_scrollback_lines(lines: usize, cols: u16) -> usize {
+    if lines <= MIRROR_SCROLLBACK_LINES {
+        return lines;
+    }
+    lines.saturating_add(524_288 / (8 * usize::from(cols.max(1))))
+}
 /// Error code of a refused `SetScrollbackBudget` request.
 pub const SCROLLBACK_BUDGET_EXCEEDED: &str = "SCROLLBACK_BUDGET_EXCEEDED";
 /// The mirror never reports pixels; any non-zero cell size satisfies the parser.
@@ -275,7 +285,8 @@ impl ScreenMirror {
         };
         // Query answers belong to the real client; the mirror must never generate any.
         terminal.set_pty_writes_suppressed(true);
-        if let Err(error) = terminal.set_scrollback_limit_lines(Some(MIRROR_SCROLLBACK_LINES)) {
+        if let Err(error) = terminal.set_scrollback_limit_bytes(None).and_then(|()|
+            terminal.set_scrollback_limit_lines(Some(parser_scrollback_lines(MIRROR_SCROLLBACK_LINES, cols)))) {
             tracing::warn!(%error, "screen mirror scrollback limit rejected");
             return None;
         }
@@ -324,7 +335,7 @@ impl ScreenMirror {
             .map_err(|error| ScrollbackBudgetError::Rejected(error.to_string()))?;
         check_scrollback_budget(lines, cols)?;
         self.terminal
-            .set_scrollback_limit_lines(Some(lines))
+            .set_scrollback_limit_lines(Some(parser_scrollback_lines(lines, cols)))
             .map_err(|error| ScrollbackBudgetError::Rejected(error.to_string()))?;
         self.scrollback_lines = lines;
         Ok(())
@@ -464,7 +475,7 @@ impl ScreenMirror {
         if let Err(error) = self.terminal.resize(cols, rows, CELL_WIDTH_PX, CELL_HEIGHT_PX) {
             tracing::warn!(%error, cols, rows, "screen mirror resize failed");
         }
-        let limit = self.effective_scrollback_lines(cols);
+        let limit = parser_scrollback_lines(self.effective_scrollback_lines(cols), cols);
         if let Err(error) = self.terminal.set_scrollback_limit_lines(Some(limit)) {
             tracing::warn!(%error, limit, "screen mirror scrollback limit rejected after resize");
         }
@@ -608,7 +619,12 @@ impl ScreenMirror {
 
     fn serialize(&self) -> Option<ScreenSeed> {
         let (cols, rows) = self.terminal.dimensions().ok()?;
-        match self.terminal.reconstruction_bytes() {
+        let bytes = if self.scrollback_lines > MIRROR_SCROLLBACK_LINES {
+            self.terminal.reconstruction_bytes_with_scrollback(self.scrollback_lines)
+        } else {
+            self.terminal.reconstruction_bytes()
+        };
+        match bytes {
             Ok(bytes) => Some(ScreenSeed { cols, rows, bytes }),
             Err(error) => {
                 tracing::warn!(%error, "screen mirror serialization failed");
@@ -744,6 +760,24 @@ mod tests {
         mirror.set_scrollback_lines(10_000).unwrap();
         assert!(mirror.set_scrollback_lines(100_000).is_err());
         assert_eq!(mirror.scrollback_lines(), 10_000);
+    }
+
+    #[test]
+    fn ten_thousand_newest_rows_survive_page_pruning_and_seed_replay() {
+        for cols in [40, 80, 115, 240] {
+            let mut mirror = ScreenMirror::new(cols, 24).unwrap();
+            mirror.set_scrollback_lines(10_000).unwrap();
+            for line in 0..12_000 {
+                mirror.feed(format!("line {line}\r\n").as_bytes());
+            }
+            let before = mirror.grid_hash().unwrap();
+            assert_eq!(before.retained_lines, 10_000);
+            let mut restored = ScreenMirror::from_seed_with_scrollback(&mirror.seed().unwrap(), 10_000).unwrap();
+            assert_eq!(restored.grid_hash().unwrap(), before);
+            mirror.feed(b"continued\r\n");
+            restored.feed(b"continued\r\n");
+            assert_eq!(restored.grid_hash(), mirror.grid_hash());
+        }
     }
 
     /// A seed taken by the previous libghostty-vt pin (6a508fd) crosses a rolling handover into

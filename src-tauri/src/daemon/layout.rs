@@ -960,14 +960,14 @@ mod detached {
         let root = tempfile::tempdir().unwrap();
         let mut store = Store::new(root.path().into());
         let live = BTreeSet::from(["a".into(), "b".into(), "orphan".into()]);
-        for (window, session) in [("main", "a"), ("second", "b")] {
+        for (window, session) in [("main", "a"), ("ws-second", "b")] {
             store.apply(window, 0, Intent::Scoped { scope: "workspace".into(), intent: Box::new(Intent::AddTabWithSession { tab_id: session.into(), label: session.into(), content: Content::Terminal { backend_session_id: session.into() }, activate: true }) }).unwrap();
         }
         assert_eq!(store.detached(&live).unwrap(), BTreeSet::from(["orphan".into()]));
         store.panes(PaneAction::Swap { a: "a".into(), b: "b".into() }, &live).unwrap();
         assert_eq!(store.locations().iter().find(|entry| entry.0 == "main").unwrap().4, "b");
         store.panes(PaneAction::Zoom { session: "a".into() }, &live).unwrap();
-        assert!(store.get_scoped("second", Some("workspace")).unwrap().layout.tabs[0].expanded_node_id.is_some());
+        assert!(store.get_scoped("ws-second", Some("workspace")).unwrap().layout.tabs[0].expanded_node_id.is_some());
     }
 
     #[test]
@@ -1067,15 +1067,19 @@ mod tests {
         assert_eq!(store.get_scoped("main", Some(scope)).unwrap().layout.tabs.len(), 1);
         let content: Content = serde_json::from_value(serde_json::json!({"kind":"browser","url":"https://example.org","browserId":"surface"})).unwrap();
         store.apply("main", 1, scoped(Intent::SplitPane { tab_id: "one".into(), target_node_id: 1, dir: Direction::Horizontal, first: false, content })).unwrap();
-        store.apply("main", 2, scoped(Intent::TransferTab { tab_id: "one".into(), target_window: "second".into(), target_scope: Some(scope.into()) })).unwrap();
+        store.apply("main", 2, scoped(Intent::TransferTab { tab_id: "one".into(), target_window: "ws-second".into(), target_scope: Some(scope.into()) })).unwrap();
         assert!(store.get_scoped("main", Some(scope)).unwrap().layout.tabs.is_empty());
-        let transferred = store.get_scoped("second", Some(scope)).unwrap();
+        let transferred = store.get_scoped("ws-second", Some(scope)).unwrap();
         let json = serde_json::to_value(&transferred.layout).unwrap();
         assert_eq!(json["tabs"][0]["paneTree"]["b"]["content"]["browserId"], "surface");
-        assert_eq!(Store::new(root.path().into()).get_scoped("second", Some(scope)).unwrap().layout, transferred.layout);
-        let mut successor = Store::new(root.path().join("successor"));
+        assert_eq!(Store::new(root.path().into()).get_scoped("ws-second", Some(scope)).unwrap().layout, transferred.layout);
+        let successor_root = root.path().join("successor");
+        std::fs::create_dir_all(&successor_root).unwrap();
+        // A handover changes the store, not the host identity.
+        std::fs::copy(root.path().join("identity.json"), successor_root.join("identity.json")).unwrap();
+        let mut successor = Store::new(successor_root);
         successor.adopt(store.layouts.clone()).unwrap();
-        assert_eq!(successor.get_scoped("second", Some(scope)).unwrap().layout, transferred.layout);
+        assert_eq!(successor.get_scoped("ws-second", Some(scope)).unwrap().layout, transferred.layout);
     }
     #[test]
     fn pane_ownership_roundtrips() {

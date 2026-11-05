@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const EXPECTED_GHOSTTY_SHA: &str = "83fb95624b0439ee660c2679b43b38c8b63769cd";
+pub const EXPECTED_GHOSTTY_SHA: &str = "216426b657b93d8fadd11d7506615f744581221e";
 pub const REQUIRED_ZIG_VERSION: &str = "0.17.0";
 
 /// Version of the shared libghostty-vt artifact cache layout and of the `zig build`

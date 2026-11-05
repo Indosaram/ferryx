@@ -400,12 +400,18 @@ impl Ancestry {
     fn walk(peer: PeerProcess, info: &ProcInfo, table: &impl ProcTable) -> Self {
         let mut chain = Vec::new();
         let mut current = info.ppid;
+        let mut child_start = info.start;
         for _ in 0..MAX_ANCESTRY {
             if current <= 1 {
                 return Ancestry { peer, chain, end: WalkEnd::Complete };
             }
             match table.info(current) {
                 Ok(next) => {
+                    if next.start > child_start {
+                        chain.push((current, None));
+                        return Ancestry { peer, chain, end: WalkEnd::Changed { pid: current } };
+                    }
+                    child_start = next.start;
                     chain.push((current, Some(next.start)));
                     if next.ppid == current {
                         return Ancestry { peer, chain, end: WalkEnd::Complete };
@@ -462,6 +468,16 @@ pub fn classify(
     panes: &PaneRegistry,
     table: &impl ProcTable,
 ) -> Result<PeerClass, String> {
+    classify_with_cutoff(origin, ancestry, panes, table, None)
+}
+
+fn classify_with_cutoff(
+    origin: PeerOrigin,
+    ancestry: &mut Option<Ancestry>,
+    panes: &PaneRegistry,
+    table: &impl ProcTable,
+    owner_cutoff: Option<u64>,
+) -> Result<PeerClass, String> {
     let peer = match origin {
         PeerOrigin::TokenAuthenticated => return Ok(PeerClass::TokenAuthenticated),
         PeerOrigin::Unknown => return Ok(PeerClass::Unknown),
@@ -512,13 +528,30 @@ pub fn classify(
     }
     match walked.end {
         WalkEnd::Complete => Ok(PeerClass::Owner),
-        WalkEnd::Changed { pid: current } => Err(format!(
-            "the parent chain of process {pid} changed while it was checked (process {current} exited); retry"
-        )),
+        WalkEnd::Changed { pid: current } => {
+            {
+                #[cfg(windows)]
+                let owner_cutoff = owner_cutoff.or_else(|| table.info(std::process::id()).ok().map(|info| info.start));
+                let panes = panes.panes.read();
+                if let Some(cutoff) = owner_cutoff.filter(|_| panes.values().all(|entry| entry.start.is_some())) {
+                    let cutoff = panes.values().filter_map(|entry| entry.start).fold(cutoff, u64::min);
+                    if predates_restricted_roots(peer, &walked.chain, cutoff) {
+                        return Ok(PeerClass::Owner);
+                    }
+                }
+            }
+            Err(format!(
+                "the parent chain of process {pid} changed while it was checked (process {current} exited); retry"
+            ))
+        },
         WalkEnd::TooDeep => Err(format!(
             "the parent chain of process {pid} is deeper than {MAX_ANCESTRY}"
         )),
     }
+}
+
+fn predates_restricted_roots(peer: PeerProcess, chain: &[(u32, Option<u64>)], cutoff: u64) -> bool {
+    peer.start < cutoff || chain.iter().any(|(_, start)| start.is_some_and(|start| start < cutoff))
 }
 
 /// Why a peer may not mutate supervisor state, or `None` when it may (see [`classify`]).
@@ -581,6 +614,59 @@ async fn registry_drops_exited_pane() {
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn exited_windows_ssh_ancestor_needs_positive_pre_pane_identity() {
+        assert!(predates_restricted_roots(PeerProcess { pid: 50, start: 100 }, &[], 200));
+        assert!(predates_restricted_roots(PeerProcess { pid: 60, start: 300 }, &[(50, Some(100)), (40, None)], 200));
+        assert!(!predates_restricted_roots(PeerProcess { pid: 60, start: 300 }, &[(50, Some(250)), (40, None)], 200));
+        assert!(!predates_restricted_roots(PeerProcess { pid: 60, start: 300 }, &[(40, None)], 200));
+        assert!(!predates_restricted_roots(PeerProcess { pid: 60, start: 200 }, &[], 200));
+    }
+
+    #[test]
+    fn verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases() {
+        // verify-win/pipe-final-qa.log records these pids and the vanished ancestor, not
+        // creation times. Times below are explicit scenarios, not reconstructed evidence.
+        let mut procs = Table { procs: HashMap::new(), unreadable: HashSet::new() };
+        let info = |ppid, start| ProcInfo { ppid, pgid: None, session: None, tty: None, start };
+        procs.procs.insert(11476, info(932, 100));
+        procs.procs.insert(22324, info(932, 200));
+        procs.procs.insert(30000, info(22324, 300));
+        let panes = PaneRegistry::default();
+        panes.insert("pane-a", 30000, &procs);
+        let owner = PeerOrigin::Process(PeerProcess { pid: 11476, start: 100 });
+        let mut ancestry = Ancestry::at_accept(owner, &procs);
+        assert!(matches!(ancestry.as_ref().unwrap().end, WalkEnd::Changed { pid: 932 }));
+        assert_eq!(classify_with_cutoff(owner, &mut ancestry, &panes, &procs, Some(200)), Ok(PeerClass::Owner));
+
+        procs.procs.insert(31000, info(30000, 400));
+        let descendant = PeerOrigin::Process(PeerProcess { pid: 31000, start: 400 });
+        assert!(matches!(classify_with_cutoff(descendant, &mut None, &panes, &procs, Some(200)),
+            Ok(PeerClass::Pane { session_id, .. }) if session_id == "pane-a"));
+        procs.procs.remove(&30000);
+        assert!(classify_with_cutoff(descendant, &mut None, &panes, &procs, Some(200)).is_err());
+
+        procs.procs.get_mut(&11476).unwrap().start = 500;
+        let later_owner = PeerOrigin::Process(PeerProcess { pid: 11476, start: 500 });
+        assert!(classify_with_cutoff(later_owner, &mut None, &panes, &procs, Some(200)).is_err());
+        procs.procs.insert(932, info(1, 600));
+        assert!(classify_with_cutoff(later_owner, &mut None, &panes, &procs, Some(200)).is_err());
+        assert!(classify_with_cutoff(owner, &mut ancestry, &panes, &procs, Some(200)).is_err());
+    }
+
+    #[test]
+    fn exited_ancestor_owner_recovery_uses_real_classifier_without_promoting_panes() {
+        let mut procs = world();
+        procs.procs.remove(&50);
+        let panes = panes_of(200, &procs);
+        assert_eq!(classify_with_cutoff(peer(70), &mut None, &panes, &procs, Some(1000)), Ok(PeerClass::Owner));
+        procs.procs.get_mut(&220).unwrap().session = None;
+        procs.procs.get_mut(&220).unwrap().tty = None;
+        assert!(matches!(classify_with_cutoff(peer(220), &mut None, &panes, &procs, Some(1000)), Ok(PeerClass::Pane { .. })));
+        procs.procs.remove(&210);
+        assert!(classify_with_cutoff(peer(220), &mut None, &panes, &procs, Some(1000)).is_err());
+    }
 
     /// A fake process table: pid -> (ppid, session, tty); missing pids are `Vanished`, pids in
     /// `unreadable` exist but cannot be read.

@@ -2267,7 +2267,8 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
                                 details: None,
                             },
                         },
-                        DaemonRequest::PairedTerminalDetach { .. } => {
+                        DaemonRequest::PairedTerminalDetach { session_id } => {
+                            assert!(session_id == "daemon-session:paired-1" || session_id == "local-pane-1");
                             detach.store(true, Ordering::SeqCst);
                             DaemonResponse::CloseOk
                         }
@@ -2306,12 +2307,15 @@ async fn test_p12_close_terminates_remote_session_while_detach_preserves_it() {
         "detach_terminal must NOT terminate remote PTY"
     );
 
-    // 2. Detach on local session: must fail with invalid input
-    let local_detach = client.detach_terminal("local-pane-1").await;
+    // Local detach releases the client attachment, never the daemon-owned PTY.
+    detach_called.store(false, Ordering::SeqCst);
+    client.detach_terminal("local-pane-1").await.expect("detach local attachment");
     assert!(
-        local_detach.is_err(),
-        "detach_terminal must be rejected for local sessions"
+        detach_called.load(Ordering::SeqCst),
+        "local detach must release the attachment through PairedTerminalDetach"
     );
+    assert!(!local_close_called.load(Ordering::SeqCst));
+    assert!(!remote_close_called.load(Ordering::SeqCst));
 
     // 3. Close on paired session: terminates remote PTY session with CloseSession and closes local proxy
     client
