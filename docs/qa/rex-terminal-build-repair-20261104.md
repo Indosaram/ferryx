@@ -7,6 +7,73 @@ are not covered by the user's macOS manual/GUI waiver.
 
 ## Causes and limits
 
+### Windows 03e0d6b: page-size remedy falsified; reduce aggregate debug input
+
+This supersedes the deferred default-dev rebuild below. Integration was
+fast-forwarded through `03e0d6b56` before the follow-up. Evidence packet
+`4a5d9120e`, `verify-win/03e0d6b/cli-default.utf8.log`, establishes:
+
+- Lines 7599-7603 compile all three library crate types with `debuginfo=2`
+  and all default features. Lines 7692-7695 identify link.exe exit 1140 and
+  MSVC 14.51.36231; lines 7876-7885 show the DLL `/DEBUG` link actually
+  receiving `/PDBPAGESIZE:8192`. This was not a missing-flag failure.
+- Lines 7699-7851 aggregate the Tauri/Wry/WebView2, wgpu/naga, Songbird,
+  crypto, SQL, and remote-desktop archives, including multiple versions of
+  several dependencies, into that DLL. Lines 4534-4536 and 6580-6583 show
+  FFmpeg Rust dependencies using full debug info. Local crates also use full
+  debug info (for example lines 973-975 and 7551-7553). The log does not
+  measure per-archive debug sizes, PDB stream sizes, or module/type counts;
+  it cannot establish an 8 GiB overflow or identify a single culprit.
+- Current Microsoft LNK1140 documentation covers module, symbol, and type
+  limits, not just bytes, and explicitly suggests compiling some modules
+  without debug information. `/DEBUG` means `/DEBUG:FULL`, aggregating
+  object/library private symbols into one PDB. `/DEBUG:FASTLINK` is removed
+  in Visual Studio 2026, so it is not a supported remedy for this toolchain.
+  No evidence yet warrants replacing the linker.
+
+Material change: opt-in `[profile.windows-dev]`, inheriting `dev`, sets
+external dependencies to `debug=1` (limited module/line information without
+type or variable information), while retaining `debug=2` for Ferryx and all
+currently linked local project crates, including the vendored portable-pty.
+The named local overrides are necessary because these path crates are not
+members of Ferryx's workspace and would otherwise match Cargo's `"*"`.
+No features, assertions, optimization overrides, or error reporting are
+disabled. Project variable/type debugging remains available; dependency
+variable/type debugging is intentionally traded for less aggregate PDB input.
+The existing 8192 page setting is unchanged, not increased again.
+
+This is an evidence-grounded input-volume repair hypothesis, not a verified
+link success or proof of the exact internal PDB limit. It leaves normal dev,
+test, release, and the fixed headless cfg boundary untouched. The supplied
+report records 5116 passes and exactly 27 baseline failure identities; none
+of those tests or fixes is changed here. An ordinary default-dev build is
+still known to fail; Windows verification must explicitly select this profile.
+
+Deferred command from the patched Windows checkout, same developer shell:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$env:CARGO_TARGET_DIR = 'C:\Users\sook\ferryx-wt\.target'
+$env:CARGO_INCREMENTAL = '0'
+$env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
+$env:LIBCLANG_PATH = 'C:\Users\sook\ferryx-wt\.llvm\clang+llvm-23.1.4-x86_64-pc-windows-msvc\bin'
+cargo build --manifest-path src-tauri/Cargo.toml --locked --profile windows-dev --bin ferryx-cli -vv
+if ($LASTEXITCODE -ne 0) { throw "windows-dev CLI rebuild failed: $LASTEXITCODE" }
+```
+
+Output is `.target/windows-dev/ferryx-cli.exe`, not `.target/debug/`.
+The distinct profile output prevents older dev binaries from satisfying this
+gate. Retain verbose output and verify external crates use `debuginfo=1`,
+local crates use `debuginfo=2`, and the final DLL link still uses `/DEBUG`.
+Do not reinterpret another failure as success or keep increasing page size.
+No builds, tests, diagnostics, or binaries were produced in this repair lane.
+
+References inspected for this follow-up:
+- <https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/linker-tools-error-lnk1140?view=msvc-170>
+- <https://learn.microsoft.com/en-us/cpp/build/reference/debug-generate-debug-info?view=msvc-180>
+- <https://doc.rust-lang.org/cargo/reference/profiles.html#overrides>
+- <https://doc.rust-lang.org/cargo/reference/profiles.html#debug>
+
 ### Windows bd4d3459 CLI link and headless cfg follow-up
 
 Integration was fast-forwarded through `bd4d3459d` before this patch.

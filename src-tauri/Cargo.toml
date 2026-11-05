@@ -412,6 +412,48 @@ strip = "none"
 [profile.test.build-override]
 strip = "none"
 
+# Windows MSVC aggregates dependency CodeView types into the final PDB. Keep
+# full project debugging but omit external dependency type/variable records.
+# Explicit path-package overrides are needed: these are separate workspaces,
+# so Cargo's "*" dependency selector includes them too.
+[profile.windows-dev]
+inherits = "dev"
+debug = 2
+strip = "none"
+
+[profile.windows-dev.package."*"]
+debug = 1
+
+[profile.windows-dev.package.ferryx]
+debug = 2
+
+[profile.windows-dev.package.ferryx-hub]
+debug = 2
+
+[profile.windows-dev.package.ferryx-browser-engine-protocol]
+debug = 2
+
+[profile.windows-dev.package.ferryx-rd-proto]
+debug = 2
+
+[profile.windows-dev.package.ferryx-rd-net]
+debug = 2
+
+[profile.windows-dev.package.ferryx-rd-host]
+debug = 2
+
+[profile.windows-dev.package.ferryx-rd-decode]
+debug = 2
+
+[profile.windows-dev.package.ferryx-rd-render]
+debug = 2
+
+[profile.windows-dev.package.ferryx-rd-app]
+debug = 2
+
+[profile.windows-dev.package.portable-pty]
+debug = 2
+
 # The daemon SHA-256 hashes its own executable for its generation key before it binds the
 # control endpoint and reports FERRYX_DAEMON_READY (owner_admission::current_generation_key).
 # A Linux debug binary is ~900 MB, and unoptimized sha2 takes ~14 s to hash it, past the
