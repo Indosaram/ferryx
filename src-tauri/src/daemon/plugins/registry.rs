@@ -41,7 +41,14 @@ impl Registry {
                     Ok(entries) => for entry in entries {
                         let entry = entry.map_err(crate::ipc::IpcError::internal)?;
                         let name = entry.file_name().to_string_lossy().into_owned();
-                        let manifest = Manifest::load(&root, &name).map_err(crate::ipc::IpcError::internal)?;
+                        let manifest = match Manifest::load(&root, &name) {
+                            Ok(manifest) => manifest,
+                            Err(error) if error.starts_with("PLUGIN_NATIVE_UNSUPPORTED") => {
+                                tracing::warn!(plugin = %name, %error, "Native plugin rejected; explicit Wasm migration required");
+                                continue;
+                            },
+                            Err(error) => return Err(crate::ipc::IpcError::internal(error)),
+                        };
                         statuses.push(Status { enabled: approvals.enabled(&manifest), manifest });
                     },
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
@@ -64,7 +71,9 @@ impl Registry {
             next.manifests.retain(|m| m.name != name);
             if enabled {
                 let root = super::config_root().ok_or_else(|| crate::ipc::IpcError::internal("plugin config root unavailable"))?;
-                next.manifests.push(Manifest::load(&root, &name).map_err(crate::ipc::IpcError::internal)?);
+                let manifest = Manifest::load(&root, &name).map_err(crate::ipc::IpcError::internal)?;
+                manifest.approved_bytes().map_err(crate::ipc::IpcError::internal)?;
+                next.manifests.push(manifest);
             }
             next.save(&path).map_err(crate::ipc::IpcError::internal)?;
             *current = next;

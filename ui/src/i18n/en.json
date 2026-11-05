@@ -22,7 +22,7 @@
   },
   "plugins": {
     "title": "Block plugins",
-    "consent": "Enabled plugins run as your user. Enable only executables you trust. Changed commands or permissions require fresh approval.",
+    "consent": "Plugins run as capability-only WebAssembly modules. Review the module digest and permissions before enabling. Changed module content or permissions require fresh approval. Native executable plugins are not supported.",
     "empty": "No plugins installed in your Ferryx configuration directory.",
     "enable": "Enable {{name}}",
     "capabilities": "Requested capabilities: {{capabilities}}",

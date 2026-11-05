@@ -1,5 +1,5 @@
 name = "clock"
-version = "0.1.0"
-# Replace these with the absolute bun and clock.ts paths on the owner's machine.
-command = ["/absolute/path/to/bun", "run", "/absolute/path/to/clock.ts"]
-capabilities = ["getCapabilities", "render"]
+version = "0.2.0"
+module = "/absolute/path/to/clock.wasm"
+sha256 = "REPLACE_WITH_LOWERCASE_SHA256_OF_COMPILED_MODULE"
+capabilities = ["render"]

@@ -2639,6 +2639,132 @@ mod agent_integration_tests {
         )
     }
 
+    #[tokio::test]
+    async fn unknown_transport_mutations_are_refused_before_side_effects() {
+        let data = tempfile::tempdir().unwrap();
+        let server = Arc::new(server_at(data.path()));
+        let (client, peer) = UnixStream::pair().unwrap();
+        let serving = tokio::spawn(Arc::clone(&server).handle_client_with_origin(
+            peer, super::super::supervisor_peer::PeerOrigin::Unknown, None));
+        let (read, mut write) = client.into_split();
+        let mut reader = BufReader::new(read);
+        for request in [DaemonRequest::SetAgentIntegration { enabled: false },
+            DaemonRequest::AbortHandover, DaemonRequest::Shutdown] {
+            let response = exchange(&mut write, &mut reader, request).await;
+            assert!(matches!(response, DaemonResponse::Error { code: Some(ref code), .. } if code == "FORBIDDEN"), "{response:?}");
+        }
+        assert!(server.agent_integration.enabled());
+        assert!(!data.path().join("agent-integration.json").exists());
+        drop(write);
+        drop(reader);
+        serving.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pane_remote_mutations_are_refused_over_real_socket_then_reach_handler_with_grant() {
+        let data = tempfile::tempdir().unwrap();
+        let server = Arc::new(server_at(data.path()));
+        let identity = super::super::supervisor_peer::identify(Some(std::process::id()));
+        let registry = server.terminal_service.pty_manager().pane_registry();
+        registry.insert("source", std::process::id(), &super::super::supervisor_peer::SystemProcs);
+        let (client, peer) = UnixStream::pair().unwrap();
+        let serving = tokio::spawn(Arc::clone(&server).handle_client_with_origin(peer, identity, None));
+        let (read, mut write) = client.into_split();
+        let mut reader = BufReader::new(read);
+        for (request, op) in [
+            (DaemonRequest::RemoteWrite { session_id: "absent-target".into(), generation: 1, data: vec![1] }, super::super::pane_grants::GrantOp::Write),
+            (DaemonRequest::RemoteResize { session_id: "absent-target".into(), generation: 1, cols: 80, rows: 24 }, super::super::pane_grants::GrantOp::Control),
+            (DaemonRequest::RetryRemoteSession { session_id: "absent-target".into() }, super::super::pane_grants::GrantOp::Control),
+        ] {
+            let denied = exchange(&mut write, &mut reader, request.clone()).await;
+            assert!(matches!(denied, DaemonResponse::Error { code: Some(ref code), .. } if code == "FORBIDDEN"), "{denied:?}");
+            server.pane_grants.add(super::super::pane_grants::PaneGrant { from: "source".into(), to: "absent-target".into(), ops: [op].into() }).unwrap();
+            let admitted = exchange(&mut write, &mut reader, request).await;
+            assert!(!matches!(admitted, DaemonResponse::Error { code: Some(ref code), .. } if code == "FORBIDDEN"), "{admitted:?}");
+            server.pane_grants.remove("source", "absent-target").unwrap();
+        }
+        registry.remove("source");
+        drop(write);
+        drop(reader);
+        serving.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_mutation_grants_protect_live_legacy_target_and_forward_exactly_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = tempfile::Builder::new().prefix("fx-gate").tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = data.path().join("legacy.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (receipts, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let receipt_lifetime = receipts.clone();
+        let target = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+                    let response = match request {
+                        DaemonRequest::Handshake { version, .. } => serde_json::json!({
+                            "type":"handshakeOk", "version":version, "pid":1, "epoch":1
+                        }),
+                        DaemonRequest::RemoteWrite { session_id, generation, data } => {
+                            receipts.send((session_id, generation, Some(data), None)).unwrap();
+                            serde_json::json!({"type":"writeOk"})
+                        },
+                        DaemonRequest::RemoteResize { session_id, generation, cols, rows } => {
+                            receipts.send((session_id, generation, None, Some((cols, rows)))).unwrap();
+                            serde_json::json!({"type":"resizeOk"})
+                        },
+                        other => panic!("unexpected live target request: {other:?}"),
+                    };
+                    write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                }
+            }
+        });
+        let server = Arc::new(server_at(data.path()));
+        server.session_router.add_legacy_peer(Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket, vec!["remote-victim".into()])));
+        let registry = server.terminal_service.pty_manager().pane_registry();
+        registry.insert("source", std::process::id(), &super::super::supervisor_peer::SystemProcs);
+        let (client, peer) = UnixStream::pair().unwrap();
+        let serving = tokio::spawn(Arc::clone(&server).handle_client_with_origin(peer,
+            super::super::supervisor_peer::identify(Some(std::process::id())), None));
+        let (read, mut write) = client.into_split();
+        let mut reader = BufReader::new(read);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            for (request, op, expected) in [
+                (DaemonRequest::RemoteWrite { session_id: "remote-victim".into(), generation: 17, data: b"owned-input".to_vec() },
+                    super::super::pane_grants::GrantOp::Write, ("remote-victim".to_string(), 17, Some(b"owned-input".to_vec()), None)),
+                (DaemonRequest::RemoteResize { session_id: "remote-victim".into(), generation: 17, cols: 103, rows: 37 },
+                    super::super::pane_grants::GrantOp::Control, ("remote-victim".to_string(), 17, None, Some((103, 37)))),
+            ] {
+                let denied = exchange(&mut write, &mut reader, request.clone()).await;
+                assert!(matches!(denied, DaemonResponse::Error { code: Some(ref code), .. } if code == "FORBIDDEN"), "{denied:?}");
+                assert!(matches!(received.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+                server.pane_grants.add(super::super::pane_grants::PaneGrant {
+                    from: "source".into(), to: "remote-victim".into(), ops: [op].into(),
+                }).unwrap();
+                let admitted = exchange(&mut write, &mut reader, request.clone()).await;
+                assert!(matches!((&request, admitted),
+                    (DaemonRequest::RemoteWrite { .. }, DaemonResponse::WriteOk)
+                    | (DaemonRequest::RemoteResize { .. }, DaemonResponse::ResizeOk)));
+                assert_eq!(received.recv().await.unwrap(), expected);
+                server.pane_grants.remove("source", "remote-victim").unwrap();
+                let denied = exchange(&mut write, &mut reader, request).await;
+                assert!(matches!(denied, DaemonResponse::Error { code: Some(ref code), .. } if code == "FORBIDDEN"));
+                assert!(matches!(received.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+            }
+        }).await.expect("live legacy target exchanges complete");
+        registry.remove("source");
+        drop(write);
+        drop(reader);
+        serving.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), target).await.unwrap().unwrap();
+        drop(receipt_lifetime);
+    }
+
     /// Runs `env` in a pane with no inherited herdr, returning what it printed.
     async fn pane_env_without_user_herdr(server: &DaemonServer) -> String {
         let mut cmd = portable_pty::CommandBuilder::new("/usr/bin/env");
@@ -6520,11 +6646,10 @@ impl DaemonServer {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        // A transport without a peer pid: on unix that is an in-process pair; on the loopback
-        // TCP transport the token check below admits the connection. Neither may change the
-        // supervisor (supervisor_peer::refusal).
+        // This adapter is for explicitly trusted in-process pairs on Unix. Public Unix
+        // listeners must use handle_unix_client to identify the actual kernel peer.
         #[cfg(unix)]
-        let origin = super::supervisor_peer::PeerOrigin::Unknown;
+        let origin = super::supervisor_peer::identify(Some(std::process::id()));
         #[cfg(not(unix))]
         let origin = super::supervisor_peer::PeerOrigin::TokenAuthenticated;
         self.handle_client_with_origin(stream, origin, None).await
@@ -6625,34 +6750,31 @@ impl DaemonServer {
 
     /// The pane-grant gate (rex todo 5): `Some(FORBIDDEN)` when this connection's peer may not
     /// send `request`. Runs before any handler, so a refused AgentControl never reaches the
-    /// supervisor fence ratchet. `known_owner` keeps an Owner verdict for the connection: a
-    /// process outside every pane cannot later descend from a pane spawned after it (a new
-    /// pane leads its own new session and pty), so typing from the desktop GUI pays the
-    /// process-table read once, not per Write.
+    /// supervisor fence ratchet. The peer is revalidated on each mutating request.
     async fn pane_grant_refusal(
         &self,
         request: &DaemonRequest,
         origin: super::supervisor_peer::PeerOrigin,
         ancestry: &mut Option<super::supervisor_peer::Ancestry>,
-        known_owner: &mut bool,
+        _known_owner: &mut bool,
     ) -> Option<DaemonResponse> {
         use super::pane_grants::{decide, gate_for, Gate};
         use super::supervisor_peer::{PeerClass, PeerOrigin};
-        let gate = gate_for(request)?;
-        if *known_owner {
-            return None;
-        }
-        // Unidentified peers keep today's behaviour for every gated request except grant
-        // changes; they need no process-table read.
-        if matches!(origin, PeerOrigin::TokenAuthenticated | PeerOrigin::Unknown) && gate != Gate::OwnerOnly {
+        // Revalidate even an earlier Owner verdict: a plugin can connect during launch,
+        // and process identity failures must never inherit a cached authorization.
+        // Only legacy Windows TCP retains token-only compatibility.
+        if origin == PeerOrigin::TokenAuthenticated && gate_for(request) != Some(Gate::OwnerOnly) {
             return None;
         }
         let class = match self.classify_peer(origin, ancestry).await {
             Ok(class) => class,
             Err(message) => return Some(forbidden(message, None)),
         };
+        if class == PeerClass::Unknown {
+            return Some(forbidden("the daemon cannot identify this connection's process".into(), None));
+        }
+        let gate = gate_for(request)?;
         if class == PeerClass::Owner {
-            *known_owner = true;
             return None;
         }
         if let PeerClass::Pane { session_id, .. } = &class {
