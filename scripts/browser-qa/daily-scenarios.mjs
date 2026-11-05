@@ -1221,9 +1221,28 @@ export async function dailyWebviewBefore(ctx) {
       ? [prompt.not.left - 40, prompt.not.top + Math.round(prompt.not.height / 2)]
       : [buttons[0].left + Math.round(buttons[0].width / 2), buttons[0].top + Math.round(buttons[0].height / 2)];
     g3.save_click = { at, via: onlySentence ? "40px left of 'Not now'" : "ocr 'Save'" };
+    // Windows run 41846200603: the .dpapi key existed but vault.json never got an item. What the
+    // file held before the click, and what the bar shows after it, tell a missed click (prompt
+    // still up, no error) from a failed save (the bar's role=alert error text on the prompt line)
+    // from a dismissed prompt (bar gone, nothing saved).
+    const vaultPath = join(ctx.dirs.data, "browser-vault", "vault.json");
+    const vaultState = () => {
+      const file = readJson(vaultPath);
+      return { exists: existsSync(vaultPath), items: file?.items?.length ?? null, mtime: existsSync(vaultPath) ? statSync(vaultPath).mtimeMs : null };
+    };
+    g3.save_words = prompt.save.map((word) => [word.left, word.top, word.width]);
+    g3.not_word = prompt.not ? [prompt.not.left, prompt.not.top, prompt.not.width] : null;
+    g3.vault_before_click = vaultState();
     ctx.host.click(...at);
-    const vault = await until(() => (readJson(join(ctx.dirs.data, "browser-vault", "vault.json"))?.items?.length ?? 0) > 0, 10000);
+    const vault = await until(() => (readJson(vaultPath)?.items?.length ?? 0) > 0, 10000);
     g3.checks.saved = Boolean(vault);
+    g3.vault_after_click = vaultState();
+    if (!vault) {
+      const line = prompt.save[0].top;
+      const words = screenWords(ctx);
+      g3.prompt_after_click = has(words, "password") && words.some((word) => /^not$/i.test(word.text));
+      g3.prompt_line_after_click = words.filter((word) => Math.abs(word.top - line) < 14).sort((a, b) => a.left - b.left).map((word) => word.text).join(" ");
+    }
     // The key's OS keystore item.
     let keystore = null;
     if (ctx.platform === "linux") {
@@ -1393,6 +1412,17 @@ export async function dailyWebviewBefore(ctx) {
       let seen = await until(() => (printUiSeen(ctx).length >= 2 ? printUiSeen(ctx) : null), 20000);
       g9.print_words = seen;
       g9.checks.print_dialog = Boolean(seen);
+      if (!seen) {
+        // Never opened, or opened but unread: the print tab's title and the visible top-level
+        // windows (WebView2's print preview is a window of the msedgewebview2 process), plus the
+        // words OCR did read, so the next run tells the two apart without a screenshot.
+        g9.after_mod_p = {
+          tab: tabAt(ctx, "/print.html"),
+          words: screenWords(ctx).map((word) => word.text).slice(0, 80),
+          windows: ctx.platform === "win32" ? ctx.win.windowRows("topwindows").slice(0, 25) : null,
+          focus: ctx.platform === "win32" ? ctx.win.windowRows("focuschain") : null,
+        };
+      }
       if (seen) {
         const cancel = await clickWord(ctx, (text) => /^Cancel$/.test(text), { timeout: 4000, pick: "bottom" });
         if (!cancel) ctx.host.key({ key: "Escape" });

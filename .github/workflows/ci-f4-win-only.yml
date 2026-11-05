@@ -1,18 +1,18 @@
-name: Browser UI audit macOS only (one-off, f4 mac harness)
+name: Browser UI audit Windows only (one-off, f4 win harness)
 
-# One-off copy of the ui-audit job of ci-bc-qa.yml, macOS matrix entry only, for the f4 mac
+# One-off copy of the ui-audit job of ci-bc-qa.yml, Windows matrix entry only, for the f4 Windows
 # harness fixes. Deleted again before the branch is handed over.
 on:
   workflow_dispatch:
   push:
     branches:
-      - 'ci/f4-mac-harness-20261105'
+      - 'ci/f4-win-harness-20261105'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-f4-mac-only-${{ github.ref }}
+  group: ci-f4-win-only-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,8 +24,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-15
-            os_name: macos
+          - platform: windows-2022
+            os_name: windows
     env:
       # Shared CEF SDK location for the Linux engine bundle (crates/ferryx-browser-engine).
       CEF_PATH: ${{ github.workspace }}/../cef-sdk
