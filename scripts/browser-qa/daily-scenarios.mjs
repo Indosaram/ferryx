@@ -81,7 +81,7 @@ if(p==='granted'){new Notification('ferryx-qa',{body:'ferryx qa body'});document
 <label id=pick>UPLOADPICK<input id=f type=file></label><div id=drop>DROPZONE</div>
 <script>f.addEventListener('change',()=>{const x=f.files[0];document.title=x?'picked:'+x.name+':'+x.size:'picked:none'});
 for(const t of ['dragenter','dragover'])drop.addEventListener(t,(e)=>{e.preventDefault();drop.textContent='DROPHOVER'});
-drop.addEventListener('drop',(e)=>{e.preventDefault();const x=e.dataTransfer.files[0];document.title=x?'dropped:'+x.name+':'+x.size:'dropped:none';drop.textContent='DROPPED'})</script>`;
+drop.addEventListener('drop',(e)=>{e.preventDefault();const d=e.dataTransfer,x=d.files[0];drop.dataset.info=JSON.stringify({types:[...d.types],files:d.files.length,uris:d.getData('text/uri-list')});document.title=x?'dropped:'+x.name+':'+x.size:'dropped:none';drop.textContent='DROPPED'})</script>`;
   const cookies = (request) => {
     const header = request.headers.get("cookie") ?? "";
     return page(`cookies:${header || "none"}`, "COOKIES", `<p>COOKIES:${header || "none"}</p>`);
@@ -938,6 +938,12 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
   }
 }
 
+/** The drop handler's record of the upload fixture's last drop, read through the CLI. */
+async function dropData(ctx, browserId) {
+  const read = await ctx.cliAsync("eval", "--browser-id", browserId, "--script", "document.getElementById('drop').dataset.info || null");
+  return read.ok ? read.stdout : { stderr: read.stderr };
+}
+
 /** The Finder icon above the selected item's blue label highlight, or null. */
 function finderSelection(ctx) {
   const image = ctx.decodePng(ctx.probeShot());
@@ -1368,6 +1374,9 @@ export async function dailyWebviewBefore(ctx) {
     // How far the drag got, read off the page: DROPHOVER = dragover reached the zone,
     // DROPPED = the drop handler ran (with the title saying whether files arrived).
     g8.drop_zone_text = screenWords(ctx).find((word) => /^DROP(ZONE|HOVER|PED)$/i.test(word.text))?.text ?? null;
+    // What the engine handed the page on drop (types, files.length, text/uri-list); null when
+    // the drop handler never ran. Diagnostic only: the check above still needs the file.
+    g8.webview_drop_data = await dropData(ctx, daily.tabB);
     g8.drop_title = tab(ctx, daily.tabB)?.title ?? null;
     ctx.host.focus();
     // The failing stage goes into the step record (it was only inside daily.g8.drag before).
@@ -1781,6 +1790,7 @@ export async function dailyChromium(ctx) {
     if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) });
     g8.checks.drag_in_chromium = Boolean(g8.chromium_drag?.dropped);
     g8.chromium_drop_zone_text = screenWords(ctx).find((word) => /^DROP(ZONE|HOVER|PED)$/i.test(word.text))?.text ?? null;
+    g8.chromium_drop_data = await dropData(ctx, created.browserId);
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     ctx.host.focus();
     return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium, stderr: g8.checks.upload_picker_chromium ? (g8.chromium_drag?.stderr ?? (zone ? undefined : "DROPZONE not visible")) : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
