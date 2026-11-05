@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { Switch } from "../ui/switch";
 import { useTranslation } from "../../i18n";
 
-type PluginStatus = { manifest: { name: string; version: string; module: string; sha256: string; capabilities: string[] }; enabled: boolean };
+type PluginManifest = { name: string; version: string; module: string; sha256: string; capabilities: string[] };
+type PluginStatus = { manifest: PluginManifest; enabled: boolean };
 
 export function PluginsSection() {
   const { t } = useTranslation();
@@ -16,9 +17,11 @@ export function PluginsSection() {
       .catch((cause: unknown) => { if (!disposed) setError(String(cause)); });
     return () => { disposed = true; };
   }, []);
-  const toggle = async (name: string, enabled: boolean) => {
+  const toggle = async (manifest: PluginManifest, enabled: boolean) => {
     setBusy(true);
-    try { setPlugins(await invoke<PluginStatus[]>("cmd_plugins", { name, enabled })); setError(null); }
+    try { setPlugins(await invoke<PluginStatus[]>("cmd_plugins", {
+      name: manifest.name, enabled, expected: enabled ? manifest : null,
+    })); setError(null); }
     catch (cause) { setError(String(cause)); }
     finally { setBusy(false); }
   };
@@ -30,7 +33,7 @@ export function PluginsSection() {
     {plugins.map(({ manifest, enabled }) => <div key={manifest.name}>
       <label>{manifest.name} {manifest.version}
         <Switch aria-label={t("plugins.enable", { name: manifest.name })} checked={enabled} disabled={busy}
-          onCheckedChange={(checked) => { void toggle(manifest.name, checked); }} />
+          onCheckedChange={(checked) => { void toggle(manifest, checked); }} />
       </label>
       <pre>{manifest.module}{"\n"}{manifest.sha256}</pre>
       <p>{t("plugins.capabilities", { capabilities: manifest.capabilities.join(", ") || t("plugins.none") })}</p>

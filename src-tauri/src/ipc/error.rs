@@ -33,6 +33,7 @@ pub enum IpcErrorCode {
     AgentResumeInvalid,
     AgentSessionConflict,
     DaemonProtocolMismatch,
+    PluginApprovalRequired,
     /// The running daemon predates the request; the change takes effect after a restart.
     DaemonUpgradeRequired,
     /// The daemon is retiring (control-v1 RetireWhenIdle / Shutdown) and accepts no new session.
