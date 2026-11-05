@@ -802,9 +802,10 @@ function TabGroupView({
   dropFeedbackLeafId,
 }: TabGroupViewProps) {
   const group = groups[groupId];
-  if (!group) return null;
-  const tabById = new Map(layout.tabs.map((tab) => [tab.id, tab]));
-  const tabs = group.tabIds.map((tabId) => tabById.get(tabId)).filter((tab): tab is WorkspaceTab => Boolean(tab));
+  const tabById = new Map((group ? layout.tabs : []).map((tab) => [tab.id, tab]));
+  const tabs = group
+    ? group.tabIds.map((tabId) => tabById.get(tabId)).filter((tab): tab is WorkspaceTab => Boolean(tab))
+    : [];
   const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
   const supervisorActingTabIds = useMemo(() => {
     const acting = actingSessionIds(supervisor, supervisorNow);
@@ -816,7 +817,7 @@ function TabGroupView({
     }
     return ids;
   }, [supervisor, supervisorNow, tabs, sessions]);
-  const activeTab = tabs.find((tab) => tab.id === group.activeTabId) ?? tabs[0] ?? null;
+  const activeTab = tabs.find((tab) => tab.id === group?.activeTabId) ?? tabs[0] ?? null;
   const isFocused = layout.focusedGroupId === groupId;
 
   const focusGroup = () => {
@@ -838,6 +839,8 @@ function TabGroupView({
       }),
     [tabs, fileTabWorktreePath],
   );
+
+  if (!group) return null;
 
   return (
     <div

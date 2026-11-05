@@ -47,7 +47,6 @@ function runBridge(fakeWindow: FakeWindow): Ring {
   const fakeConsole = { log: () => {}, info: () => {}, warn: () => {}, error: () => {} };
   const doc = document.implementation.createHTMLDocument('guest');
   fakeWindow.open = () => null;
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval
   const run = new Function('window', 'location', 'document', 'console', script);
   run(fakeWindow, fakeLocation, doc, fakeConsole);
   return fakeWindow.__FERRYX_BROWSER_CONSOLE__ ?? [];

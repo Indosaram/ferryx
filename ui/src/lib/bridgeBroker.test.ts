@@ -29,7 +29,6 @@ function loadBroker(): void {
     channel: () => (channelPresent ? (body: string) => posts.push(body) : null),
     isTrusted: () => trusted,
   };
-  // eslint-disable-next-line @typescript-eslint/no-implied-eval
   const run = new Function('globalThis', 'window', 'document', '__hooks', instrumented);
   run(fakeGlobal, fakeWindow, doc, hooks);
 }
@@ -337,7 +336,6 @@ describe('isolated-world broker channel detection (no hooks)', () => {
 
   function loadRealBroker(world: World): NonNullable<World['__ferryxWorld']> {
     const source = readFileSync(BROKER_PATH, 'utf8');
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
     const run = new Function('globalThis', 'window', 'document', source);
     const topWindow = new EventTarget() as EventTarget & { top?: unknown };
     topWindow.top = topWindow;
