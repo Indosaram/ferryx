@@ -191,8 +191,19 @@ cp target/debug/ferryx-{cli,relay,account} ~/bin/ && rm -rf src-tauri/target
 
 ## Sleeping and waking
 
-When the Manus task is idle the sandbox suspends and `ssh` times out. Memory and disk survive; the
-processes do not. Wake it by sending any message to the task in the Manus web app, then reconnect
-once the node is back online (observed ~30 s after one such wake). Long builds therefore belong in
-`nohup` with a log file, so a suspend does not lose the output — but a suspend **does** kill the
-build, and it has to be restarted (incrementally, from the last compiled crate).
+When the Manus task is idle the sandbox suspends and `ssh` times out. Memory and disk survive
+**only while the task still exists**; the processes do not. Wake it by sending any message to the
+task in the Manus web app, then reconnect once the node is back online (observed ~30 s after one
+such wake). Long builds therefore belong in `nohup` with a log file, so a suspend does not lose the
+output — but a suspend **does** kill the build, and it has to be restarted (incrementally, from the
+last compiled crate).
+
+A suspended task and a deleted task look identical from the tailnet, so reachability alone cannot tell
+them apart. What is certain: deleting the Manus task destroys the VM, and the Tailscale peer stays
+registered afterwards with a valid `KeyExpiry`. Neither `tailscale status` nor a live key proves the
+box exists; only a passing `ssh` does. To decide which case it is, look at the task in the Manus web
+app.
+
+Observed on 2026-11-05: the node read `offline, last seen 11h ago` with `KeyExpiry 2027-05-03` while
+`ping`, `nc` and `ssh` all timed out and `tailscale ping` got no reply. That state is reachable-but-gone
+or suspended-and-not-woken; the tailnet cannot say which.
