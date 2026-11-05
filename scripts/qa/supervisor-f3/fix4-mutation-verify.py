@@ -23,6 +23,15 @@ for case in ['missing', 'relative', 'empty']:
     mutations.append((f'F1-{case}', source, 'return { path: null, reason: error.message };', 'return { path: override, reason: null };', f1test, f'F1 git objects {case}'))
 mutations.append(('F1-bwrap', qa / 'unified-supervisor/f1-isolation-check.mjs', 'bwrap: existsSync(BWRAP),', '', f1test, 'F1 bubblewrap'))
 summary = []
+# Strict RED detection. `'expect(' in red.stdout` was non-discriminating: bun prints
+# "N expect() calls" even for a passing run, so that guard accepted a mutation that never
+# turned anything red. Require an actual bun test-failure line for the pattern under test.
+import re
+
+def red_is_real(stdout: str, pattern: str) -> bool:
+    escaped = re.escape(pattern)
+    return re.search(rf'^\(fail\)\s.*{escaped}', stdout, re.MULTILINE) is not None
+
 for name, path, old, new, test, pattern in mutations:
     original = path.read_text()
     assert original.count(old) == 1, (name, 'anchor not unique')
@@ -31,7 +40,7 @@ for name, path, old, new, test, pattern in mutations:
         path.write_text(original.replace(old, new))
         red = subprocess.run(command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         (out / f'{name}-RED.log').write_text(red.stdout)
-        assert red.returncode != 0 and 'expect(' in red.stdout, (name, red.stdout)
+        assert red.returncode != 0 and red_is_real(red.stdout, pattern), (name, red.stdout[-4000:])
     finally:
         path.write_text(original)
     green = subprocess.run(command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
