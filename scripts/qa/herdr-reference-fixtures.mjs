@@ -251,8 +251,12 @@ export const REFERENCE_ROUTES = [
  *
  * All four reference-chat read routes — `history`, `screen`, `prompt` and the staged-file
  * `files/{fileId}` route — deserialize the host's own `ReferenceChatReadQuery`, so each of
- * them admits exactly that struct's fields and the same nine apply to all four. The list is
+ * them admits exactly that struct's fields and the same ten apply to all four. The list is
  * written once below and backs all four entries, so the mirror cannot drift again.
+ *
+ * `after` is part of the relay's `reference_chat_read_fields` allowlist and is read by the
+ * history paging code, so it belongs here: omitting it made the mirror drift test fail while
+ * the relay actually accepted the field.
  *
  * CORRECTED IDENTITY CONTRACT (task 12 handoff): a READ OMITS hostId and the gateway resolves
  * its own reference-chat host id. ownerId, epoch and backendSessionId stay required; epoch
@@ -269,6 +273,7 @@ const REFERENCE_CHAT_READ_FIELDS = [
   "limit",
   "cursor",
   "cursorStream",
+  "after",
 ];
 
 export const REFERENCE_READ_QUERY_FIELDS = {

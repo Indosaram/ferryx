@@ -97,7 +97,7 @@ impl FileStamp {
         Self { exists: false, len: 0, mtime_ns: None, inode: None }
     }
 
-    fn from_meta(meta: &std::fs::Metadata) -> Self {
+    fn from_meta(meta: &std::fs::Metadata, path: &Path) -> Self {
         Self {
             exists: true,
             len: meta.len(),
@@ -107,25 +107,39 @@ impl FileStamp {
                     .ok()
                     .map(|elapsed| elapsed.as_nanos())
             }),
-            inode: file_identity(meta),
+            inode: file_identity(meta, path),
         }
     }
 }
 
-fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+fn file_identity(meta: &std::fs::Metadata, path: &Path) -> Option<(u64, u64)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let _ = path;
         Some((meta.dev(), meta.ino()))
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        Some((u64::from(meta.volume_serial_number()?), meta.file_index()?))
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        let _ = meta;
+        let file = std::fs::OpenOptions::new().access_mode(0).open(path).ok()?;
+        let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+        // SAFETY: the live file owns the handle and info points to a correctly sized output buffer.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } == 0 {
+            return None;
+        }
+        // SAFETY: the successful call initialized the output buffer.
+        let info = unsafe { info.assume_init() };
+        Some((u64::from(info.dwVolumeSerialNumber),
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = meta;
+        let _ = (meta, path);
         None
     }
 }
@@ -133,7 +147,7 @@ fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
 /// `None` means the stat failed for a reason other than absence. Callers keep the baseline.
 fn stat_file(path: &Path) -> Option<FileStamp> {
     match std::fs::metadata(path) {
-        Ok(meta) => Some(FileStamp::from_meta(&meta)),
+        Ok(meta) => Some(FileStamp::from_meta(&meta, path)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(FileStamp::missing()),
         Err(_) => None,
     }
