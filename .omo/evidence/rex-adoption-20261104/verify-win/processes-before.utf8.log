@@ -1,0 +1,38 @@
+
+
+ProcessId      : 30712
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" "daemon" "--root" "\\?\C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62" "--host-id" "ssh-maho-win"
+
+ProcessId      : 18632
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 17596
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 5996
+ExecutablePath : C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-a3aa23b3b5f5f1b3.exe
+CommandLine    : "C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-a3aa23b3b5f5f1b3.exe"
+
+ProcessId      : 22436
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 21380
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 3516
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+
+

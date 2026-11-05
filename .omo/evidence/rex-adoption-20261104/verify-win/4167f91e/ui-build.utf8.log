@@ -1,0 +1,65 @@
+bun : $ bun ../scripts/gen-search-index.mjs && bun --bun tsc && bun --bun vite build
+위치 C:\Users\sook\ferryx-wt\.evidence\rex-4167-build.ps1:24 문자:2
++  bun run --cwd ui build *> "$l\ui-build.log"
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ($ bun ../script...-bun vite build:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[36mvite v6.4.3 [32mbuilding for production...[36m[39m
+transforming...
+[32m??[39m 2525 modules transformed.
+rendering chunks...
+[33m[plugin vite:reporter] 
+(!) C:/Users/sook/ferryx-wt/rex-verify-win-20261104/ui/src/lib/windowIdentity.ts is dynamically imported by C:/Users/so
+ok/ferryx-wt/rex-verify-win-20261104/ui/src/main.tsx but also statically imported by C:/Users/sook/ferryx-wt/rex-verify
+-win-20261104/ui/src/App.tsx, C:/Users/sook/ferryx-wt/rex-verify-win-20261104/ui/src/components/NativeTerminalPane.tsx,
+ C:/Users/sook/ferryx-wt/rex-verify-win-20261104/ui/src/lib/appShellPersistence.ts, C:/Users/sook/ferryx-wt/rex-verify-
+win-20261104/ui/src/lib/layoutSync.ts, C:/Users/sook/ferryx-wt/rex-verify-win-20261104/ui/src/lib/nativeMenu.ts, C:/Use
+rs/sook/ferryx-wt/rex-verify-win-20261104/ui/src/lib/notificationCenter/notificationCenterPersistence.ts, C:/Users/sook
+/ferryx-wt/rex-verify-win-20261104/ui/src/lib/notificationForwarding.ts, C:/Users/sook/ferryx-wt/rex-verify-win-2026110
+4/ui/src/lib/notificationLeader.ts, C:/Users/sook/ferryx-wt/rex-verify-win-20261104/ui/src/lib/tauri.ts, C:/Users/sook/
+ferryx-wt/rex-verify-win-20261104/ui/src/state/workspaceStore.ts, dynamic import will not move module into another chun
+k.
+[39m
+computing gzip size...
+[2mdist/[22m[32mindex.html                                 [39m[1m[2m    2.32 kB[22m[1m[22m[2m ??gzip:   1.00 kB[22m
+[2mdist/[22m[32massets/crush-DHElXcRZ.png                  [39m[1m[2m    5.46 kB[22m[1m[22m
+[2mdist/[22m[32massets/droid-DedzoJlY.svg                  [39m[1m[2m    6.31 kB[22m[1m[22m[2m ??gzip:   2.95 kB[22m
+[2mdist/[22m[32massets/antigravity-DgAQAdn3.svg            [39m[1m[2m    7.63 kB[22m[1m[22m[2m ??gzip:   1.74 kB[22m
+[2mdist/[22m[32massets/gjc-CmlXGg4z.png                    [39m[1m[2m   22.73 kB[22m[1m[22m
+[2mdist/[22m[32massets/geist-variable-CrgPqtmy.woff2       [39m[1m[2m   69.44 kB[22m[1m[22m
+[2mdist/[22m[32massets/ferryx-icon-OXRkkUvz.png            [39m[1m[2m  805.82 kB[22m[1m[22m
+[2mdist/[22m[35massets/RemoteApp-BP-13D3e.css              [39m[1m[2m    1.20 kB[22m[1m[22m[2m ??gzip:   0.36 kB[22m
+[2mdist/[22m[35massets/App-B-Hmda5q.css                    [39m[1m[2m    1.49 kB[22m[1m[22m[2m ??gzip:   0.53 kB[22m
+[2mdist/[22m[35massets/index-3TmU5q-u.css                  [39m[1m[2m  116.62 kB[22m[1m[22m[2m ??gzip:  20.54 kB[22m
+[2mdist/[22m[36massets/arrow-down-CT4tb1tS.js              [39m[1m[2m    0.34 kB[22m[1m[22m[2m ??gzip:   0.27 kB[22m
+[2mdist/[22m[36massets/nativeShortcutTable-cJvPW76E.js     [39m[1m[2m    0.80 kB[22m[1m[22m[2m ??gzip:   0.42 kB[22m
+[2mdist/[22m[36massets/advancedFeatures-BBvElnX8.js        [39m[1m[2m    1.14 kB[22m[1m[22m[2m ??gzip:   0.60 kB[22m
+[2mdist/[22m[36massets/sliders-horizontal-D9lg-kVy.js      [39m[1m[2m    1.34 kB[22m[1m[22m[2m ??gzip:   0.50 kB[22m
+[2mdist/[22m[36massets/onboardingSync-DICw8HjF.js          [39m[1m[2m    1.55 kB[22m[1m[22m[2m ??gzip:   0.79 kB[22m
+[2mdist/[22m[36massets/pairedHostRoute-JC0Y4PsG.js         [39m[1m[2m    1.60 kB[22m[1m[22m[2m ??gzip:   0.83 kB[22m
+[2mdist/[22m[36massets/pairedHostReachability-Bfyo6i-3.js  [39m[1m[2m    1.85 kB[22m[1m[22m[2m ??gzip:   0.92 kB[22m
+[2mdist/[22m[36massets/WhatsNewDialog-BCdijL9j.js          [39m[1m[2m    2.78 kB[22m[1m[22m[2m ??gzip:   1.13 kB[22m
+[2mdist/[22m[36massets/shortcutOverrides-Cp3S-iIP.js       [39m[1m[2m    3.04 kB[22m[1m[22m[2m ??gzip:   1.23 kB[22m
+[2mdist/[22m[36massets/onboarding-DAwkdv6h.js              [39m[1m[2m    4.07 kB[22m[1m[22m[2m ??gzip:   1.68 kB[22m
+[2mdist/[22m[36massets/tailscaleDiscovery-D9elAm3x.js      [39m[1m[2m    5.88 kB[22m[1m[22m[2m ??gzip:   2.28 kB[22m
+[2mdist/[22m[36massets/pairedHostInventory-DAvr8Fsq.js     [39m[1m[2m   15.17 kB[22m[1m[22m[2m ??gzip:   5.20 kB[22m
+[2mdist/[22m[36massets/SystemResourcesDialog-BnWWVnq4.js   [39m[1m[2m   15.58 kB[22m[1m[22m[2m ??gzip:   5.45 kB[22m
+[2mdist/[22m[36massets/browserProtocol-NpLYH7GS.js         [39m[1m[2m   16.47 kB[22m[1m[22m[2m ??gzip:   4.16 kB[22m
+[2mdist/[22m[36massets/MobileChatWorkspace-DPiG1918.js     [39m[1m[2m   27.19 kB[22m[1m[22m[2m ??gzip:   7.82 kB[22m
+[2mdist/[22m[36massets/RemoteTerminal-BugoJ58G.js          [39m[1m[2m   56.65 kB[22m[1m[22m[2m ??gzip:  18.76 kB[22m
+[2mdist/[22m[36massets/RemoteBrowserWorkspace-CjiY5Oks.js  [39m[1m[2m   56.71 kB[22m[1m[22m[2m ??gzip:  16.52 kB[22m
+[2mdist/[22m[36massets/WelcomeWizard-BNAJvP3i.js           [39m[1m[2m   68.85 kB[22m[1m[22m[2m ??gzip:  23.41 kB[22m
+[2mdist/[22m[36massets/accountSession-gBcLZLQe.js          [39m[1m[2m   72.78 kB[22m[1m[22m[2m ??gzip:  24.17 kB[22m
+[2mdist/[22m[36massets/RemoteAccessSection-BrCAVB2R.js     [39m[1m[2m   83.24 kB[22m[1m[22m[2m ??gzip:  27.07 kB[22m
+[2mdist/[22m[36massets/SettingsDialog-DM_F8sho.js          [39m[1m[2m  230.69 kB[22m[1m[22m[2m ??gzip:  62.90 kB[22m
+[2mdist/[22m[36massets/index-B6AOfkAe.js                   [39m[1m[2m  241.12 kB[22m[1m[22m[2m ??gzip:  75.56 kB[22m
+[2mdist/[22m[36massets/RemoteApp-BjrJn3uj.js               [39m[1m[33m  910.31 kB[39m[22m[2m ??gzip: 277.66 kB[22m
+[2mdist/[22m[36massets/App-BIDeZqeO.js                     [39m[1m[33m1,110.12 kB[39m[22m[2m ??gzip: 326.60 kB[22m
+[33m
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-m
+anualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.[39m
+[32m??built in 20.04s[39m

@@ -1,0 +1,41 @@
+QA_PID=22324 already gone
+
+
+ProcessId      : 30712
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" "daemon" "--root" "\\?\C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62" "--host-id" "ssh-maho-win"
+
+ProcessId      : 18632
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 17596
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 26320
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 31148
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 27672
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+
+
+ M src-tauri/gen/schemas/acl-manifests.json
+ M src-tauri/gen/schemas/capabilities.json
+ M src-tauri/gen/schemas/desktop-schema.json
+ M src-tauri/gen/schemas/windows-schema.json
+ M ui/public/llms.txt
+ M ui/public/search.json

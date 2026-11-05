@@ -1,0 +1,13 @@
+cargo :    Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-03e0d6b\src-tauri)
+위치 C:\Users\sook\ferryx-wt\rex-win-03e-gates.ps1:23 문자:15
++ ... n headless {cargo check --manifest-path src-tauri/Cargo.toml --no-def ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling fe...0d6b\src-tauri):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking portable-pty v0.9.0 (C:\Users\sook\ferryx-wt\rex-verify-win-03e0d6b\src-tauri\vendor\portable-pty)
+    Checking ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-03e0d6b\crates\ferryx-hub)
+    Checking ferryx-browser-engine-protocol v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-03e0d6b\crates\browser-engin
+e-protocol)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 52s
+EXIT=0

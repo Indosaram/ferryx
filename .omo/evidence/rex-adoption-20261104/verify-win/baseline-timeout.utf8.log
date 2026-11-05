@@ -1,0 +1,2 @@
+BASELINE_RUNNER_PID=5996 STOPPED_AFTER_NO_PROGRESS; full baseline incomplete
+Focused baseline runner PID=26164 stopped: route test lacks progress beyond bounded wait. EXIT=TIMEOUT

@@ -1,0 +1,39 @@
+{
+  "head": "03e0d6b56e77ad4fd8a3defee5abd98a3fd4b942",
+  "counts": {
+    "passed": 5116,
+    "failed": 27,
+    "ignored": 10
+  },
+  "failures": [
+    "agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript",
+    "agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records",
+    "agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input",
+    "agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled",
+    "agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream",
+    "agent_history::tests::older_message_search_and_exact_identity",
+    "agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc",
+    "cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically",
+    "cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir",
+    "ipc::file_preview::file_preview_tests::not_a_directory_is_a_missing_file_not_a_permission_problem",
+    "native_terminal::platform::windows::pointer_tests::presented_terminal_yields_cross_thread_pointer_hit_testing_to_input",
+    "paired_host::file_read::tests::resolve_host_path_expands_home",
+    "paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session",
+    "paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot",
+    "remote::reference_chat::prompt_codex::tests::a_free_form_answer_line_holding_text_takes_no_custom_answer",
+    "remote::reference_chat::prompt_codex::tests::the_prompt_id_names_the_content_and_not_the_cursor",
+    "remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept",
+    "remote::reference_chat::route_tests::staged_preview_keeps_original_bytes_after_parent_replacement",
+    "remote::repo_discovery::tests::hidden_repositories_need_include_hidden",
+    "remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control",
+    "remote::repo_discovery::tests::registrations_join_by_canonical_root",
+    "remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself",
+    "remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules",
+    "remote::server::file_read_session_base_tests::live_shell_cwd_wins_over_the_desktop_supplied_cwd",
+    "remote::server::tests::test_machine_terminal_client_close_acknowledges_and_preserves_pty",
+    "ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection",
+    "ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match"
+  ],
+  "new_vs_prior_27": [],
+  "prior_27_now_absent": []
+}

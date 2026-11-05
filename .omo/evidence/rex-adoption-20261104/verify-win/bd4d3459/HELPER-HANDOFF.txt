@@ -1,0 +1,8 @@
+Windows helper handoff, built at bd4d3459d70e5de999c44fe2eaef63fadd87bdee on maho-win:
+- Existing executable: /tmp/rex-bd4-win-helper/ferryx-remote-helper.exe
+- Receipt: /Volumes/T9-Mac/project/ferryx-wt/rex-verify-win-20261104/.omo/evidence/rex-adoption-20261104/verify-win/bd4d3459/windows-helper-receipt.json
+- target x86_64-pc-windows-msvc; release; helperVersion 2026.1101.1
+- sourceFingerprint 400dca582fba8fe412ca1158f9a6adcc87470f72271ac3826827112cfb26d56d
+- binary SHA256 6ba0409b1d4259aee1993e553381b72133f9631a9be9001f3909589e7e51b069
+- Executable hash remeasured locally and matched receipt. Receipt's remote executable path is provenance, no longer an existing path: owned remote worktree was cleaned.
+- Both executable and receipt are required for staging; do not rewrite fingerprints or carry to a changed helper-source fingerprint. Full five-target staging still required.

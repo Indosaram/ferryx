@@ -1,0 +1,634 @@
+{
+  "head": "bd4d3459d70e5de999c44fe2eaef63fadd87bdee",
+  "host": "maho-win",
+  "command": "cargo test --manifest-path src-tauri/Cargo.toml --locked --lib -- --test-threads=1 --nocapture",
+  "exit": 101,
+  "counts": {
+    "passed": 5114,
+    "failed": 29,
+    "ignored": 10
+  },
+  "failures": [
+    {
+      "test": "agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\ferryx_scope\\history\\tests.rs:253:5",
+      "candidate_output_excerpt": "thread 'agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript' (22088) panicked at sr\nc\\ferryx_scope\\history\\tests.rs:253:5:\nassertion `left == right` failed: the workspace_uris file URI must resolve to the cwd\n  left: 0\n right: 1\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript ... FAILED\n\nthread 'agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records' (4436) panicked at src\n\\ferryx_scope\\history\\tests.rs:327:5:\nassertion `left == right` failed: assistant prose must be searchable\n  left: 0\n right: 1\ntest agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records ... FAILED\n\nthread 'agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input' (8108) panicked at src\\\nferryx_scope\\history\\tests.rs:231:5:\nassertion `left == right` failed: the messages document must not be listed as a second conversation\n  left: 0\n right: 1\ntest agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input ... FAILED\ntest agent_history::tests::copilot_session_lists_without_a_cwd_and_reads_both_roles ... ok\ntest agent_history::tests::crush_follows_its_project_index_and_skips_child_sessions ... ok\ntest agent_history::tests::cursor_lists_a_chat_from_hex_encoded_meta_without_its_blob_tree ... ok\ntest agent_history::tests::cursor_reads_the_root_blob_tree_and_resolves_its_workspace_cwd ... ok\ntest agent_history::tests::cursor_without_a_matching_md5_folder_or_root_blob_reports_what_is_missing ... ok\n\nthread 'agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled' (32896) panicked at src\\fe\nrryx_scope\\his",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 509,
+          "output": "test agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 171,
+          "output": "test agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\ferryx_scope\\history\\tests.rs:253:5:assertion `left == right` failed: the workspace_uris file URI must resolve to the cwd  left: 0 right: 1note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Normalize Windows path identity and native-history fixture discovery; retain searchable record assertions.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\ferryx_scope\\history\\tests.rs:327:5",
+      "candidate_output_excerpt": "thread 'agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records' (4436) panicked at src\n\\ferryx_scope\\history\\tests.rs:327:5:\nassertion `left == right` failed: assistant prose must be searchable\n  left: 0\n right: 1\ntest agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records ... FAILED\n\nthread 'agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input' (8108) panicked at src\\\nferryx_scope\\history\\tests.rs:231:5:\nassertion `left == right` failed: the messages document must not be listed as a second conversation\n  left: 0\n right: 1\ntest agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input ... FAILED\ntest agent_history::tests::copilot_session_lists_without_a_cwd_and_reads_both_roles ... ok\ntest agent_history::tests::crush_follows_its_project_index_and_skips_child_sessions ... ok\ntest agent_history::tests::cursor_lists_a_chat_from_hex_encoded_meta_without_its_blob_tree ... ok\ntest agent_history::tests::cursor_reads_the_root_blob_tree_and_resolves_its_workspace_cwd ... ok\ntest agent_history::tests::cursor_without_a_matching_md5_folder_or_root_blob_reports_what_is_missing ... ok\n\nthread 'agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled' (32896) panicked at src\\fe\nrryx_scope\\history\\tests.rs:144:5:\nassertion `left == right` failed: a session_start-only file is hidden, as droid's own find hides it\n  left: 0\n right: 1\ntest agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled ... FAILED\ntest agent_history::tests::every_canonical_provider_has_a_wire_name_the_search_gate_accepts ... ok\n\nthread 'agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream' (21856) panicked at src\\f",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 507,
+          "output": "test agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 172,
+          "output": "test agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\ferryx_scope\\history\\tests.rs:327:5:assertion `left == right` failed: assistant prose must be searchable  left: 0 right: 1",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Normalize Windows path identity and native-history fixture discovery; retain searchable record assertions.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\ferryx_scope\\history\\tests.rs:231:5",
+      "candidate_output_excerpt": "thread 'agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input' (8108) panicked at src\\\nferryx_scope\\history\\tests.rs:231:5:\nassertion `left == right` failed: the messages document must not be listed as a second conversation\n  left: 0\n right: 1\ntest agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input ... FAILED\ntest agent_history::tests::copilot_session_lists_without_a_cwd_and_reads_both_roles ... ok\ntest agent_history::tests::crush_follows_its_project_index_and_skips_child_sessions ... ok\ntest agent_history::tests::cursor_lists_a_chat_from_hex_encoded_meta_without_its_blob_tree ... ok\ntest agent_history::tests::cursor_reads_the_root_blob_tree_and_resolves_its_workspace_cwd ... ok\ntest agent_history::tests::cursor_without_a_matching_md5_folder_or_root_blob_reports_what_is_missing ... ok\n\nthread 'agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled' (32896) panicked at src\\fe\nrryx_scope\\history\\tests.rs:144:5:\nassertion `left == right` failed: a session_start-only file is hidden, as droid's own find hides it\n  left: 0\n right: 1\ntest agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled ... FAILED\ntest agent_history::tests::every_canonical_provider_has_a_wire_name_the_search_gate_accepts ... ok\n\nthread 'agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream' (21856) panicked at src\\ferryx_scope\\\nhistory\\tests.rs:214:5:\nassertion `left == right` failed: a reply split across chunks must still be searchable\n  left: 0\n right: 1\ntest agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream ... FAILED\ntest agent_history::tests::kimi_reads_the_wire_stream_and_resolves_its_cwd_from_kimi_json ... ok\ntest agent_history::te",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 506,
+          "output": "test agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 166,
+          "output": "test agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\ferryx_scope\\history\\tests.rs:231:5:assertion `left == right` failed: the messages document must not be listed as a second conversation  left: 0 right: 1",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Normalize Windows path identity and native-history fixture discovery; retain searchable record assertions.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\ferryx_scope\\history\\tests.rs:144:5",
+      "candidate_output_excerpt": "thread 'agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled' (32896) panicked at src\\fe\nrryx_scope\\history\\tests.rs:144:5:\nassertion `left == right` failed: a session_start-only file is hidden, as droid's own find hides it\n  left: 0\n right: 1\ntest agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled ... FAILED\ntest agent_history::tests::every_canonical_provider_has_a_wire_name_the_search_gate_accepts ... ok\n\nthread 'agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream' (21856) panicked at src\\ferryx_scope\\\nhistory\\tests.rs:214:5:\nassertion `left == right` failed: a reply split across chunks must still be searchable\n  left: 0\n right: 1\ntest agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream ... FAILED\ntest agent_history::tests::kimi_reads_the_wire_stream_and_resolves_its_cwd_from_kimi_json ... ok\ntest agent_history::tests::kimi_without_wire_or_kimi_json_reads_context_users_and_reports_no_cwd ... ok\n\nthread 'agent_history::tests::older_message_search_and_exact_identity' (16616) panicked at src\\ferryx_scope\\history\\tes\nts.rs:37:5:\nassertion `left == right` failed\n  left: Some(\"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpn9A0Ne\\\\logs\\\\older.jsonl\")\n right: Some(\"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpn9A0Ne\\\\logs\\\\older.jsonl\")\ntest agent_history::tests::older_message_search_and_exact_identity ... FAILED\ntest agent_history::tests::opencode_reads_sessions_out_of_its_shared_sqlite_store ... ok\ntest agent_history::tests::selected_session_exact_typed_resume_and_duplicate_fence ... ok\n\nthread 'agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc' (30800) panicked at src\\f\nerryx_scope\\history\\tests.rs:102:9:\nassertion `left == right` f",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 514,
+          "output": "test agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 164,
+          "output": "test agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\ferryx_scope\\history\\tests.rs:144:5:assertion `left == right` failed: a session_start-only file is hidden, as droid's own find hides it  left: 0 right: 1",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Normalize Windows path identity and native-history fixture discovery; retain searchable record assertions.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\ferryx_scope\\history\\tests.rs:214:5",
+      "candidate_output_excerpt": "thread 'agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream' (21856) panicked at src\\ferryx_scope\\\nhistory\\tests.rs:214:5:\nassertion `left == right` failed: a reply split across chunks must still be searchable\n  left: 0\n right: 1\ntest agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream ... FAILED\ntest agent_history::tests::kimi_reads_the_wire_stream_and_resolves_its_cwd_from_kimi_json ... ok\ntest agent_history::tests::kimi_without_wire_or_kimi_json_reads_context_users_and_reports_no_cwd ... ok\n\nthread 'agent_history::tests::older_message_search_and_exact_identity' (16616) panicked at src\\ferryx_scope\\history\\tes\nts.rs:37:5:\nassertion `left == right` failed\n  left: Some(\"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpn9A0Ne\\\\logs\\\\older.jsonl\")\n right: Some(\"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpn9A0Ne\\\\logs\\\\older.jsonl\")\ntest agent_history::tests::older_message_search_and_exact_identity ... FAILED\ntest agent_history::tests::opencode_reads_sessions_out_of_its_shared_sqlite_store ... ok\ntest agent_history::tests::selected_session_exact_typed_resume_and_duplicate_fence ... ok\n\nthread 'agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc' (30800) panicked at src\\f\nerryx_scope\\history\\tests.rs:102:9:\nassertion `left == right` failed: omo session must be searchable by its message text\n  left: 0\n right: 1\ntest agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc ... FAILED\ntest agent_history::tests::session_cwd_names_the_store_record_cwd_for_one_id ... ok\ntest agent_transcript::tests::remote_transcript_over_ssh ... ignored, requires a live paired host\ntest agent_transcript::tests::test_conversation_message_timestamp_passthrough_and_tolerance ... ok\ntest agent_tran",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 516,
+          "output": "test agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 165,
+          "output": "test agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\ferryx_scope\\history\\tests.rs:214:5:assertion `left == right` failed: a reply split across chunks must still be searchable  left: 0 right: 1",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Normalize Windows path identity and native-history fixture discovery; retain searchable record assertions.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "agent_history::tests::older_message_search_and_exact_identity",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\ferryx_scope\\history\\tests.rs:37:5",
+      "candidate_output_excerpt": "thread 'agent_history::tests::older_message_search_and_exact_identity' (16616) panicked at src\\ferryx_scope\\history\\tes\nts.rs:37:5:\nassertion `left == right` failed\n  left: Some(\"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpn9A0Ne\\\\logs\\\\older.jsonl\")\n right: Some(\"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpn9A0Ne\\\\logs\\\\older.jsonl\")\ntest agent_history::tests::older_message_search_and_exact_identity ... FAILED\ntest agent_history::tests::opencode_reads_sessions_out_of_its_shared_sqlite_store ... ok\ntest agent_history::tests::selected_session_exact_typed_resume_and_duplicate_fence ... ok\n\nthread 'agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc' (30800) panicked at src\\f\nerryx_scope\\history\\tests.rs:102:9:\nassertion `left == right` failed: omo session must be searchable by its message text\n  left: 0\n right: 1\ntest agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc ... FAILED\ntest agent_history::tests::session_cwd_names_the_store_record_cwd_for_one_id ... ok\ntest agent_transcript::tests::remote_transcript_over_ssh ... ignored, requires a live paired host\ntest agent_transcript::tests::test_conversation_message_timestamp_passthrough_and_tolerance ... ok\ntest agent_transcript::tests::test_display_false_excluded ... ok\ntest agent_transcript::tests::test_latest_transcript_for_cwd ... ok\ntest agent_transcript::tests::test_limit_tail_and_paging ... ok\ntest agent_transcript::tests::test_multi_part_content_concatenation ... ok\ntest agent_transcript::tests::test_path_traversal_rejection ... ok\ntest agent_transcript::tests::test_read_conversation_from_bytes_parses_remote_output ... ok\ntest agent_transcript::tests::test_remote_target_refuses_a_record_missing_its_host_or_path ... ok\ntest agent_transcript::tests",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 526,
+          "output": "test agent_history::tests::older_message_search_and_exact_identity ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 167,
+          "output": "test agent_history::tests::older_message_search_and_exact_identity ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\ferryx_scope\\history\\tests.rs:37:5:assertion `left == right` failed  left: Some(\"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpn9A0Ne\\\\logs\\\\older.jsonl\") right: Some(\"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpn9A0Ne\\\\logs\\\\older.jsonl\")",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Normalize Windows path identity and native-history fixture discovery; retain searchable record assertions.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\ferryx_scope\\history\\tests.rs:102:9",
+      "candidate_output_excerpt": "thread 'agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc' (30800) panicked at src\\f\nerryx_scope\\history\\tests.rs:102:9:\nassertion `left == right` failed: omo session must be searchable by its message text\n  left: 0\n right: 1\ntest agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc ... FAILED\ntest agent_history::tests::session_cwd_names_the_store_record_cwd_for_one_id ... ok\ntest agent_transcript::tests::remote_transcript_over_ssh ... ignored, requires a live paired host\ntest agent_transcript::tests::test_conversation_message_timestamp_passthrough_and_tolerance ... ok\ntest agent_transcript::tests::test_display_false_excluded ... ok\ntest agent_transcript::tests::test_latest_transcript_for_cwd ... ok\ntest agent_transcript::tests::test_limit_tail_and_paging ... ok\ntest agent_transcript::tests::test_multi_part_content_concatenation ... ok\ntest agent_transcript::tests::test_path_traversal_rejection ... ok\ntest agent_transcript::tests::test_read_conversation_from_bytes_parses_remote_output ... ok\ntest agent_transcript::tests::test_remote_target_refuses_a_record_missing_its_host_or_path ... ok\ntest agent_transcript::tests::test_remote_target_resolves_from_a_real_store_record ... ok\ntest agent_transcript::tests::test_remote_transcript_dir_matches_the_paired_host_layout ... ok\ntest agent_transcript::tests::test_remote_transcript_dir_refuses_hosts_whose_layout_is_unverified ... ok\ntest agent_transcript::tests::test_slug_for_cwd ... ok\ntest agent_transcript::tests::test_split_remote_size_line_parses_and_fails_closed ... ok\ntest agent_transcript::tests::test_synthetic_transcript_and_filtering ... ok\ntest agent_transcript::tests::test_thinking_and_tool_call_arguments_are_structured ... ok\ntest agent_transcript::test",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 524,
+          "output": "test agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 163,
+          "output": "test agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\ferryx_scope\\history\\tests.rs:102:9:assertion `left == right` failed: omo session must be searchable by its message text  left: 0 right: 1",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Normalize Windows path identity and native-history fixture discovery; retain searchable record assertions.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\cli\\supervisor_goal.rs:845:59",
+      "candidate_output_excerpt": "thread 'cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically' (17724) panicked at src\\cli\\superv\nisor_goal.rs:845:59:\ncalled `Result::unwrap()` on an `Err` value: UsageError(\"--git-common-dir must be an absolute path\")\ntest cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically ... FAILED\ntest cli::supervisor_goal::tests::setup_spellings_of_one_checkout_are_one_mapping ... ok\ntest cli::supervisor_goal::tests::the_cli_parses_every_goal_command ... ok\ntest cli::supervisor_goal::tests::the_cli_refuses_bad_input_before_contacting_a_daemon ... ok\n\nthread 'cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir' (228) panicked at src\\cli\n\\supervisor_goal.rs:736:43:\ncalled `Result::unwrap()` on an `Err` value: UsageError(\"--git-common-dir must be an absolute path\")\ntest cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir ... FAILED\ntest cli::supervisor_request::tests::a_receipt_and_typed_refusals_map_to_json_and_exit_codes ... ok\ntest cli::supervisor_request::tests::the_cli_takes_exactly_one_json_file ... ok\ntest cli::tests::account_enroll_cli_parses_code_and_optional_origin ... ok\ntest cli::tests::account_login_cli_parses_email_and_optional_origin ... ok\ntest cli::tests::account_plan_cli_parses_json_and_optional_origin ... ok\ntest cli::tests::approval_polling_honors_interval_and_slow_down ... ok\ntest cli::tests::approval_polling_retries_unreachable_and_server_errors_only ... ok\ntest cli::tests::browser_cli_relative_paths_are_anchored_to_cli_cwd ... ok\ntest cli::tests::browser_cli_request_mapping_for_tabs_and_state ... ok\ntest cli::tests::browser_cli_request_mappings ... ok\ntest cli::tests::browser_cli_request_mappings_phase3 ... ok\ntest cli::tests::browser_cli_runtime_sup",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 897,
+          "output": "test cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 19,
+          "output": "test cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\cli\\supervisor_goal.rs:845:59:called `Result::unwrap()` on an `Err` value: UsageError(\"--git-common-dir must be an absolute path\")",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Make path fixtures/platform path acceptance explicit; preserve absolute-path validation.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\cli\\supervisor_goal.rs:736:43",
+      "candidate_output_excerpt": "thread 'cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir' (228) panicked at src\\cli\n\\supervisor_goal.rs:736:43:\ncalled `Result::unwrap()` on an `Err` value: UsageError(\"--git-common-dir must be an absolute path\")\ntest cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir ... FAILED\ntest cli::supervisor_request::tests::a_receipt_and_typed_refusals_map_to_json_and_exit_codes ... ok\ntest cli::supervisor_request::tests::the_cli_takes_exactly_one_json_file ... ok\ntest cli::tests::account_enroll_cli_parses_code_and_optional_origin ... ok\ntest cli::tests::account_login_cli_parses_email_and_optional_origin ... ok\ntest cli::tests::account_plan_cli_parses_json_and_optional_origin ... ok\ntest cli::tests::approval_polling_honors_interval_and_slow_down ... ok\ntest cli::tests::approval_polling_retries_unreachable_and_server_errors_only ... ok\ntest cli::tests::browser_cli_relative_paths_are_anchored_to_cli_cwd ... ok\ntest cli::tests::browser_cli_request_mapping_for_tabs_and_state ... ok\ntest cli::tests::browser_cli_request_mappings ... ok\ntest cli::tests::browser_cli_request_mappings_phase3 ... ok\ntest cli::tests::browser_cli_runtime_supports_the_request_timeout ... ok\ntest cli::tests::browser_cli_unknown_subcommand_and_usage ... ok\ntest cli::tests::browser_cli_windows_tilde_backslash_is_expanded ... ok\ntest cli::tests::browser_click_cli_preserves_generation_and_reference ... ok\ntest cli::tests::browser_close_cli_happy_and_missing ... ok\ntest cli::tests::browser_console_and_errors_cli_parsing ... ok\ntest cli::tests::browser_cookie_header_from_session_cookies ... ok\ntest cli::tests::browser_cookies_cli_parsing ... ok\ntest cli::tests::browser_dialog_cli_parsing_and_mapping ... ok\ntest cli::tests::browser_dom_action_cli_p",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 906,
+          "output": "test cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 18,
+          "output": "test cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\cli\\supervisor_goal.rs:736:43:called `Result::unwrap()` on an `Err` value: UsageError(\"--git-common-dir must be an absolute path\")",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Make path fixtures/platform path acceptance explicit; preserve absolute-path validation.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "daemon::session_service::machine_tests::desktop_inventory_isolated_parent",
+      "classification": "baseline_passed_candidate_failed",
+      "panic_location": "src\\daemon\\wip_desktop_inventory_tests.rs:451:5",
+      "candidate_output_excerpt": "thread 'daemon::session_service::machine_tests::desktop_inventory_isolated_parent' (29336) panicked at src\\daemon\\wip_d\nesktop_inventory_tests.rs:451:5:\n[inventory_test] start\n[desktop_fixture] entering desktop_fixture\n[desktop_fixture] creating tempdir\n[desktop_fixture] project_dir: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpy6OYrS\\\\project\"\n[desktop_fixture] run_git init\n[desktop_fixture] run_git config name\n[desktop_fixture] run_git config email\n[desktop_fixture] write init.txt\n[desktop_fixture] run_git add\n[desktop_fixture] run_git commit\n[desktop_fixture] creating DaemonServer\n[desktop_fixture] registering workspace: desktop-project\n[desktop_fixture] asserting repo_root\n[desktop_fixture] ready\n[inventory_test] fixture ready\n[inventory_test] admit_spawn\n[inventory_test] spawned session_id: b7ea672b-5daf-428b-9cc1-dfb6ce85f99c\n[inventory_test] machine_sessions_routed\n[inventory_test] validate_machine_target\n[inventory_test] stale_epoch\n[inventory_test] wrong_machine_id\n[inventory_test] ssh reject\n[inventory_test] closing sessions\n[inventory_test] cleaning root\n[inventory_test] complete\n[managed_test] start\n[desktop_fixture] entering desktop_fixture\n[desktop_fixture] creating tempdir\n[desktop_fixture] project_dir: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpmnOXfX\\\\project\"\n[desktop_fixture] run_git init\n[desktop_fixture] run_git config name\n[desktop_fixture] run_git config email\n[desktop_fixture] write init.txt\n[desktop_fixture] run_git add\n[desktop_fixture] run_git commit\n[desktop_fixture] creating DaemonServer\n[desktop_fixture] registering workspace: desktop-project\n[desktop_fixture] asserting repo_root\n[desktop_fixture] ready\n[managed_test] fixture ready\n[managed_test] create worktree\n[managed_test] worktree ready: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-last-two.utf8.log",
+          "line": 4,
+          "output": "test daemon::session_service::machine_tests::desktop_inventory_isolated_parent ... ok"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 354,
+          "output": "test daemon::session_service::machine_tests::desktop_inventory_isolated_parent ... ok"
+        }
+      ],
+      "panic_output_unwrapped": "src\\daemon\\wip_desktop_inventory_tests.rs:451:5:[inventory_test] start[desktop_fixture] entering desktop_fixture[desktop_fixture] creating tempdir[desktop_fixture] project_dir: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpy6OYrS\\\\project\"[desktop_fixture] run_git init[desktop_fixture] run_git config name[desktop_fixture] run_git config email[desktop_fixture] write init.txt[desktop_fixture] run_git add[desktop_fixture] run_git commit[desktop_fixture] creating DaemonServer[desktop_fixture] registering workspace: desktop-project[desktop_fixture] asserting repo_root[desktop_fixture] ready[inventory_test] fixture ready[inventory_test] admit_spawn[inventory_test] spawned session_id: b7ea672b-5daf-428b-9cc1-dfb6ce85f99c[inventory_test] machine_sessions_routed[inventory_test] validate_machine_target[inventory_test] stale_epoch[inventory_test] wrong_machine_id[inventory_test] ssh reject[inventory_test] closing sessions[inventory_test] cleaning root[inventory_test] complete[managed_test] start[desktop_fixture] entering desktop_fixture[desktop_fixture] creating tempdir[desktop_fixture] project_dir: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpmnOXfX\\\\project\"[desktop_fixture] run_git init[desktop_fixture] run_git config name[desktop_fixture] run_git config email[desktop_fixture] write init.txt[desktop_fixture] run_git add[desktop_fixture] run_git commit[desktop_fixture] creating DaemonServer[desktop_fixture] registering workspace: desktop-project[desktop_fixture] asserting repo_root[desktop_fixture] ready[managed_test] fixture ready[managed_test] create worktree[managed_test] worktree ready: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpmnOXfX\\\\project\\\\.ferryx-worktrees\\\\desktop-project\\\\feature-task\"[managed_test] spawn shell[managed_test] check inventory[managed_test] validate target[managed_test] close session[managed_test] clean root[managed_test] complete[jail_test] start[desktop_fixture] entering desktop_fixture[desktop_fixture] creating tempdir[desktop_fixture] project_dir: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpJO6GWP\\\\project\"[desktop_fixture] run_git init[desktop_fixture] run_git config name[desktop_fixture] run_git config email[desktop_fixture] write init.txt[desktop_fixture] run_git add[desktop_fixture] run_git commit[desktop_fixture] creating DaemonServer[desktop_fixture] registering workspace: desktop-project[desktop_fixture] asserting repo_root[desktop_fixture] ready[jail_test] fixture ready[jail_test] spawn shell escape[jail_test] validate escape target[jail_test] spawn shell missing path[jail_test] validate missing path target[jail_test] close sessions[jail_test] clean root[jail_test] complete[events_test] start[desktop_fixture] entering desktop_fixture[desktop_fixture] creating tempdir[desktop_fixture] project_dir: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmp4Txd20\\\\project\"[desktop_fixture] run_git init[desktop_fixture] run_git config name[desktop_fixture] run_git config email[desktop_fixture] write init.txt[desktop_fixture] run_git add[desktop_fixture] run_git commit[desktop_fixture] creating DaemonServer[desktop_fixture] registering workspace: desktop-project[desktop_fixture] asserting repo_root[desktop_fixture] ready[events_test] fixture ready[events_test] admit_spawn[events_test] spawned session_id: e37097cf-c874-478e-9ab3-bf0e95613bfd[events_test] wait sessionStarted[events_test] check inventory[events_test] close session[events_test] wait sessionExited",
+      "author_scope": "daemon session lifecycle / desktop inventory test author",
+      "smallest_repair_shape": "Subscribe before close and await/filter the exact sessionExited event for this session, allowing unrelated agentControlChanged events without discarding exit verification; inspect emitter ordering before choosing harness-only repair.",
+      "child_panic_location": "src/daemon/wip_desktop_inventory_tests.rs:404:5",
+      "child_panic": "left String(\"agentControlChanged\"), right \"sessionExited\"",
+      "source_review": [
+        "src-tauri/src/daemon/wip_desktop_inventory_tests.rs:361-417 subscribes once and takes the next event after close; parent propagates child failure at :451."
+      ],
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "ipc::file_preview::file_preview_tests::not_a_directory_is_a_missing_file_not_a_permission_problem",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\ipc\\file_preview_tests.rs:1811:5",
+      "candidate_output_excerpt": "thread 'ipc::file_preview::file_preview_tests::not_a_directory_is_a_missing_file_not_a_permission_problem' (24488) pani\ncked at src\\ipc\\file_preview_tests.rs:1811:5:\nassertion `left == right` failed\n  left: \"PermissionDenied\"\n right: \"MissingFile\"\ntest ipc::file_preview::file_preview_tests::not_a_directory_is_a_missing_file_not_a_permission_problem ... FAILED\ntest ipc::file_preview::file_preview_tests::only_absolute_or_home_rooted_paths_skip_the_session_cwd ... ok\ntest ipc::file_preview::file_preview_tests::only_desktop_app_windows_may_hold_capabilities ... ok\ntest ipc::file_preview::file_preview_tests::only_get_and_head_are_routed_and_unknown_handles_404 ... ok\ntest ipc::file_preview::file_preview_tests::open_decodes_bounded_text_without_a_media_capability ... ok\ntest ipc::file_preview::file_preview_tests::open_offloads_file_io_off_the_async_reactor ... ok\ntest ipc::file_preview::file_preview_tests::open_refuses_non_regular_and_missing_paths ... ok\ntest ipc::file_preview::file_preview_tests::open_refuses_remote_specs_urls_and_nul_bytes ... ok\ntest ipc::file_preview::file_preview_tests::opening_b_revokes_a_for_the_same_window ... ok\ntest ipc::file_preview::file_preview_tests::preview_kind_and_media_type_follow_the_frozen_extension_allowlist ... ok\ntest ipc::file_preview::file_preview_tests::range_header_parses_the_three_supported_single_forms ... ok\ntest ipc::file_preview::file_preview_tests::range_header_rejects_multi_malformed_and_unsatisfiable_forms ... ok\ntest ipc::file_preview::file_preview_tests::resolve_preview_target_directory ... ok\ntest ipc::file_preview::file_preview_tests::resolve_preview_target_missing_file ... ok\ntest ipc::file_preview::file_preview_tests::resolve_preview_target_relative_and_canonical ... ok\ntest ipc::file_preview::file_preview_tests::revo",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 2036,
+          "output": "test ipc::file_preview::file_preview_tests::not_a_directory_is_a_missing_file_not_a_permission_problem ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 32,
+          "output": "test ipc::file_preview::file_preview_tests::not_a_directory_is_a_missing_file_not_a_permission_problem ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\ipc\\file_preview_tests.rs:1811:5:assertion `left == right` failed  left: \"PermissionDenied\" right: \"MissingFile\"",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Map Windows non-directory traversal to MissingFile without broad permission-error suppression.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "native_terminal::platform::windows::pointer_tests::presented_terminal_yields_cross_thread_pointer_hit_testing_to_input",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\native_terminal\\platform\\windows_pointer_tests.rs:328:5",
+      "candidate_output_excerpt": "orm::windows::pointer_tests::presented_terminal_yields_cross_thread_pointer_hit_testing_t\no_input' (31332) panicked at src\\native_terminal\\platform\\windows_pointer_tests.rs:328:5:\npresented_terminal_yields_cross_thread_pointer_hit_testing_to_input requires an interactive Windows user desktop sessio\nn (WinSta0); got session_id=0 input_desktop_is_null=true\ntest native_terminal::platform::windows::pointer_tests::presented_terminal_yields_cross_thread_pointer_hit_testing_to_input ... FAILED\nD6 created parent=0x32f7015a child=0x2bde0092 owner=21076 case=Worker; observer subscribed\nD6 dropping production WindowsCompositorTarget worker=26704 owner=21076\nD6 barrier=true child_live=false destruction_threads=[21076] owner=21076\nD6 cleanup parent=0x32f7015a result=1\nD6 cleanup child_live=0 parent_live=0 destruction_threads=[21076]\ntest native_terminal::platform::windows::tests::child_is_destroyed_on_owner_thread_when_detached_by_worker ... ok\nD6 created parent=0x32f8015a child=0x2bdf0092 owner=17952 case=Owner; observer subscribed\nD6 barrier=true child_live=false destruction_threads=[17952] owner=17952\nD6 cleanup parent=0x32f8015a result=1\nD6 cleanup child_live=0 parent_live=0 destruction_threads=[17952]\ntest native_terminal::platform::windows::tests::child_is_destroyed_when_dropped_by_owner ... ok\nD6 created parent=0x32f9015a child=0x2be00092 owner=20908 case=DestroyedParent; observer subscribed\nD6 dropping production WindowsCompositorTarget worker=25672 owner=20908\nD6 barrier=true child_live=false destruction_threads=[20908] owner=20908\nD6 cleanup child_live=0 parent_live=0 destruction_threads=[20908]\ntest native_terminal::platform::windows::tests::drop_after_parent_destruction_is_harmless ... ok\ntest native_terminal::program_status::tests::disabled_by_default_query_gets_no_repl",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-lib-test.utf8.log",
+          "line": 2418,
+          "output": "test native_terminal::platform::windows::pointer_tests::presented_terminal_yields_cross_thread_pointer_hit_testing_to_input ... FAILED"
+        },
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 25,
+          "output": "test native_terminal::platform::windows::pointer_tests::presented_terminal_yields_cross_thread_pointer_hit_testing_to_input ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\native_terminal\\platform\\windows_pointer_tests.rs:328:5:presented_terminal_yields_cross_thread_pointer_hit_testing_to_input requires an interactive Windows user desktop session (WinSta0); got session_id=0 input_desktop_is_null=true",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Run interactive-desktop-required test in the intended Windows desktop session; do not weaken WinSta0 requirement.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "paired_host::file_read::tests::resolve_host_path_expands_home",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\paired_host\\file_read.rs:583:67",
+      "candidate_output_excerpt": "thread 'paired_host::file_read::tests::resolve_host_path_expands_home' (21868) panicked at src\\paired_host\\file_read.rs\n:583:67:\ncalled `Result::unwrap()` on an `Err` value: InvalidPath\ntest paired_host::file_read::tests::resolve_host_path_expands_home ... FAILED\n\nthread 'paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session' (29972) panicked at src\\\npaired_host\\file_read.rs:597:91:\ncalled `Result::unwrap()` on an `Err` value: InvalidPath\ntest paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session ... FAILED\n\nthread 'paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot' (13300) panicked at src\n\\paired_host\\file_read.rs:613:79:\ncalled `Result::unwrap()` on an `Err` value: InvalidPath\ntest paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot ... FAILED\ntest paired_host::file_read::tests::serve_host_read_ranges_and_refusals ... ok\ntest paired_host::file_read::tests::serve_host_read_version_tracks_content_identity ... ok\ntest paired_host::file_read::tests::unknown_host_cwd_preserves_the_typed_refusal ... ok\ntest paired_host::inventory_tests::a_host_attach_round_trips_through_the_inventory_file ... ok\ntest paired_host::inventory_tests::actual_write_failure_keeps_disk_and_legacy_authority_and_fences_leases ... ok\ntest paired_host::inventory_tests::an_insecure_saved_relay_does_not_hide_the_other_hosts ... ok\ntest paired_host::inventory_tests::an_invalid_host_attach_is_refused ... ok\ntest paired_host::inventory_tests::an_old_row_without_attach_still_loads_and_leases_no_attach ... ok\ntest paired_host::inventory_tests::corrupt_unknown_newer_and_external_replacement_never_overwrite ... ok\ntest paired_host::inventory_tests::fixture_loopback_store_roundt",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 41,
+          "output": "test paired_host::file_read::tests::resolve_host_path_expands_home ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\paired_host\\file_read.rs:583:67:called `Result::unwrap()` on an `Err` value: InvalidPath",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Make path fixtures/platform path acceptance explicit; preserve absolute-path validation.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\paired_host\\file_read.rs:597:91",
+      "candidate_output_excerpt": "thread 'paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session' (29972) panicked at src\\\npaired_host\\file_read.rs:597:91:\ncalled `Result::unwrap()` on an `Err` value: InvalidPath\ntest paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session ... FAILED\n\nthread 'paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot' (13300) panicked at src\n\\paired_host\\file_read.rs:613:79:\ncalled `Result::unwrap()` on an `Err` value: InvalidPath\ntest paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot ... FAILED\ntest paired_host::file_read::tests::serve_host_read_ranges_and_refusals ... ok\ntest paired_host::file_read::tests::serve_host_read_version_tracks_content_identity ... ok\ntest paired_host::file_read::tests::unknown_host_cwd_preserves_the_typed_refusal ... ok\ntest paired_host::inventory_tests::a_host_attach_round_trips_through_the_inventory_file ... ok\ntest paired_host::inventory_tests::actual_write_failure_keeps_disk_and_legacy_authority_and_fences_leases ... ok\ntest paired_host::inventory_tests::an_insecure_saved_relay_does_not_hide_the_other_hosts ... ok\ntest paired_host::inventory_tests::an_invalid_host_attach_is_refused ... ok\ntest paired_host::inventory_tests::an_old_row_without_attach_still_loads_and_leases_no_attach ... ok\ntest paired_host::inventory_tests::corrupt_unknown_newer_and_external_replacement_never_overwrite ... ok\ntest paired_host::inventory_tests::fixture_loopback_store_roundtrips_but_production_fails_closed ... ok\ntest paired_host::inventory_tests::host_view_roundtrips_explicit_device_id_machine_values ... ok\ntest paired_host::inventory_tests::legacy_host_view_decodes_without_device_id_and_omits_none_in_wire_format ... ok\ntest paired_h",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 42,
+          "output": "test paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\paired_host\\file_read.rs:597:91:called `Result::unwrap()` on an `Err` value: InvalidPath",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Make path fixtures/platform path acceptance explicit; preserve absolute-path validation.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\paired_host\\file_read.rs:613:79",
+      "candidate_output_excerpt": "thread 'paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot' (13300) panicked at src\n\\paired_host\\file_read.rs:613:79:\ncalled `Result::unwrap()` on an `Err` value: InvalidPath\ntest paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot ... FAILED\ntest paired_host::file_read::tests::serve_host_read_ranges_and_refusals ... ok\ntest paired_host::file_read::tests::serve_host_read_version_tracks_content_identity ... ok\ntest paired_host::file_read::tests::unknown_host_cwd_preserves_the_typed_refusal ... ok\ntest paired_host::inventory_tests::a_host_attach_round_trips_through_the_inventory_file ... ok\ntest paired_host::inventory_tests::actual_write_failure_keeps_disk_and_legacy_authority_and_fences_leases ... ok\ntest paired_host::inventory_tests::an_insecure_saved_relay_does_not_hide_the_other_hosts ... ok\ntest paired_host::inventory_tests::an_invalid_host_attach_is_refused ... ok\ntest paired_host::inventory_tests::an_old_row_without_attach_still_loads_and_leases_no_attach ... ok\ntest paired_host::inventory_tests::corrupt_unknown_newer_and_external_replacement_never_overwrite ... ok\ntest paired_host::inventory_tests::fixture_loopback_store_roundtrips_but_production_fails_closed ... ok\ntest paired_host::inventory_tests::host_view_roundtrips_explicit_device_id_machine_values ... ok\ntest paired_host::inventory_tests::legacy_host_view_decodes_without_device_id_and_omits_none_in_wire_format ... ok\ntest paired_host::inventory_tests::legacy_inventory_disk_record_decodes_without_device_id ... ok\ntest paired_host::inventory_tests::linking_a_saved_ssh_host_is_explicit_and_survives_restart ... ok\ntest paired_host::inventory_tests::migration_requires_host_proof_and_verified_copy_and_preserves_source ... ok\ntest paired_host::",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 59,
+          "output": "test paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\paired_host\\file_read.rs:613:79:called `Result::unwrap()` on an `Err` value: InvalidPath",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Make path fixtures/platform path acceptance explicit; preserve absolute-path validation.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::reference_chat::prompt_codex::tests::a_free_form_answer_line_holding_text_takes_no_custom_answer",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\reference_chat\\prompt_codex.rs:1974:9",
+      "candidate_output_excerpt": "thread 'remote::reference_chat::prompt_codex::tests::a_free_form_answer_line_holding_text_takes_no_custom_answer' (3119\n2) panicked at src\\remote\\reference_chat\\prompt_codex.rs:1974:9:\nassertion `left != right` failed: the fixture holds the placeholder line\n  left: \"\\r\\n??Queued follow-up inputs\\r\\n  Any notes?\\r\\n  Type your answer\\r\\n  enter submit   ctrl+] skip   alt+??ma\nin prompt\\r\\n\"\n right: \"\\r\\n??Queued follow-up inputs\\r\\n  Any notes?\\r\\n  Type your answer\\r\\n  enter submit   ctrl+] skip   alt+??ma\nin prompt\\r\\n\"\ntest remote::reference_chat::prompt_codex::tests::a_free_form_answer_line_holding_text_takes_no_custom_answer ... FAILED\ntest remote::reference_chat::prompt_codex::tests::a_free_form_placeholder_line_keeps_its_custom_answer ... ok\ntest remote::reference_chat::prompt_codex::tests::a_gap_inside_one_rows_name_is_read_by_the_column_the_rows_share ... ok\ntest remote::reference_chat::prompt_codex::tests::a_list_that_is_not_the_card_is_refused ... ok\ntest remote::reference_chat::prompt_codex::tests::a_menu_the_reader_cannot_aim_at_is_refused ... ok\ntest remote::reference_chat::prompt_codex::tests::a_model_list_holding_the_end_of_the_screen_is_reported ... ok\ntest remote::reference_chat::prompt_codex::tests::a_prompt_whose_hint_ended_above_later_output_is_refused ... ok\ntest remote::reference_chat::prompt_codex::tests::an_answer_shape_the_card_does_not_take_is_refused ... ok\ntest remote::reference_chat::prompt_codex::tests::every_named_codex_responder_has_a_branch ... ok\ntest remote::reference_chat::prompt_codex::tests::the_advanced_levels_carry_their_note_and_survive_a_narrow_pane ... ok\ntest remote::reference_chat::prompt_codex::tests::the_approval_reads_its_question_its_body_and_its_escape_row ... ok\ntest remote::reference_chat::prompt_codex::tests::the_col",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 80,
+          "output": "test remote::reference_chat::prompt_codex::tests::a_free_form_answer_line_holding_text_takes_no_custom_answer ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\reference_chat\\prompt_codex.rs:1974:9:assertion `left != right` failed: the fixture holds the placeholder line  left: \"\\r\\n??Queued follow-up inputs\\r\\n  Any notes?\\r\\n  Type your answer\\r\\n  enter submit   ctrl+] skip   alt+??main prompt\\r\\n\" right: \"\\r\\n??Queued follow-up inputs\\r\\n  Any notes?\\r\\n  Type your answer\\r\\n  enter submit   ctrl+] skip   alt+??main prompt\\r\\n\"",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Inspect native rendered prompt fixture encoding/content and parser expectation without weakening machine fields.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::reference_chat::prompt_codex::tests::the_prompt_id_names_the_content_and_not_the_cursor",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\reference_chat\\prompt_codex.rs:2396:59",
+      "candidate_output_excerpt": "thread 'remote::reference_chat::prompt_codex::tests::the_prompt_id_names_the_content_and_not_the_cursor' (4988) panicke\nd at src\\remote\\reference_chat\\prompt_codex.rs:2396:59:\nthe moved menu parses\ntest remote::reference_chat::prompt_codex::tests::the_prompt_id_names_the_content_and_not_the_cursor ... FAILED\ntest remote::reference_chat::prompt_codex::tests::the_question_title_carries_its_position_only_past_the_first ... ok\ntest remote::reference_chat::prompt_copilot::tests::copilot_answers_each_row_with_its_number_key ... ok\ntest remote::reference_chat::prompt_copilot::tests::copilot_idle_and_working_screens_are_not_prompts ... ok\ntest remote::reference_chat::prompt_copilot::tests::copilot_run_command_box_is_an_approval_with_its_numbered_rows ... ok\ntest remote::reference_chat::prompt_crush::tests::crush_idle_and_working_screens_are_not_prompts ... ok\ntest remote::reference_chat::prompt_crush::tests::crush_permission_dialog_is_read_between_its_corners ... ok\ntest remote::reference_chat::prompt_cursor::tests::cursor_card_is_reached_through_the_chain_for_both_registry_names ... ok\ntest remote::reference_chat::prompt_cursor::tests::cursor_idle_and_working_screens_are_not_prompts ... ok\ntest remote::reference_chat::prompt_cursor::tests::cursor_run_command_card_is_an_approval_with_its_printed_keys ... ok\ntest remote::reference_chat::prompt_gjc::tests::gjc_ask_selector_is_a_question_with_a_custom_row ... ok\ntest remote::reference_chat::prompt_gjc::tests::gjc_idle_working_and_answered_screens_are_not_prompts ... ok\ntest remote::reference_chat::prompt_grok::tests::grok_idle_and_working_screens_are_not_prompts ... ok\ntest remote::reference_chat::prompt_grok::tests::grok_permission_rows_are_an_approval_answered_by_their_digit ... ok\ntest remote::reference_chat::prompt_kimi::tests",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 169,
+          "output": "test remote::reference_chat::prompt_codex::tests::the_prompt_id_names_the_content_and_not_the_cursor ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\reference_chat\\prompt_codex.rs:2396:59:the moved menu parses",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Inspect native rendered prompt fixture encoding/content and parser expectation without weakening machine fields.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::reference_chat::route_tests::a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally",
+      "classification": "unclassified_not_proven_baseline",
+      "panic_location": "src\\remote\\reference_chat\\route_tests.rs:3465:5",
+      "candidate_output_excerpt": "thread 'remote::reference_chat::route_tests::a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally' (748\n0) panicked at src\\remote\\reference_chat\\route_tests.rs:3465:5:\nan SSH-remote pane's file was staged on this gateway's disk: {\"ok\":true,\"data\":{\"receipt\":{\"hostId\":\"local\",\"attachment\nId\":\"02827385-5427-461f-a718-1a434bc0e57e\",\"sha256\":\"7fa6931a112c5639298e1b64068105379d8c58a5a900722a040ac1f36ec588e0\",\n\"sizeBytes\":11,\"mediaType\":\"text/plain\"},\"displayName\":\"remote.txt\",\"mentionText\":\"@.ferryx-reference-chat-files/028273\n85-5427-461f-a718-1a434bc0e57e/remote.txt \"},\"requestId\":\"ffdfa37f-b744-4e94-abf7-a26c5ab1f4c5\"}\ntest remote::reference_chat::route_tests::a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally ... FAILED\ntest remote::reference_chat::route_tests::a_stage_whose_caller_leaves_mid_write_leaves_no_hidden_reservation ... ok\ntest remote::reference_chat::route_tests::a_staged_file_of_an_exited_session_can_still_be_deleted ... ok\ntest remote::reference_chat::route_tests::a_staged_mention_resolves_from_the_panes_live_cwd_after_a_cd ... ok\ntest remote::reference_chat::route_tests::a_staged_mention_resolves_to_the_uploaded_bytes_under_the_pane_worktree ... ok\n\nthread 'remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept' (26472) panicked at s\nrc\\remote\\reference_chat\\route_tests.rs:3495:10:\nopen staged dir: Os { code: 5, kind: PermissionDenied, message: \"?\u226a\uaf6d?\u317a? \u5ac4\uacd5??\uc10f\ubfc0?\ub4ec\ub572??\" }\ntest remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept ... FAILED\ntest remote::reference_chat::route_tests::a_submit_whose_caller_leaves_after_the_paste_still_writes_its_enter ... ok\ntest remote::reference_chat::route_tests::a_target_naming_another_owner_is_refused_without_writing_or_resi",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [],
+      "panic_output_unwrapped": "src\\remote\\reference_chat\\route_tests.rs:3465:5:an SSH-remote pane's file was staged on this gateway's disk: {\"ok\":true,\"data\":{\"receipt\":{\"hostId\":\"local\",\"attachmentId\":\"02827385-5427-461f-a718-1a434bc0e57e\",\"sha256\":\"7fa6931a112c5639298e1b64068105379d8c58a5a900722a040ac1f36ec588e0\",\"sizeBytes\":11,\"mediaType\":\"text/plain\"},\"displayName\":\"remote.txt\",\"mentionText\":\"@.ferryx-reference-chat-files/02827385-5427-461f-a718-1a434bc0e57e/remote.txt \"},\"requestId\":\"ffdfa37f-b744-4e94-abf7-a26c5ab1f4c5\"}",
+      "author_scope": "remote reference-chat file staging / remote-target routing author",
+      "smallest_repair_shape": "Decouple remote-session membership/refusal from POSIX transcript-directory derivation; reject matching remote backendSessionId before any local stage. Keep no-local-bytes and typed refusal assertions intact.",
+      "source_review": [
+        "route_tests.rs:3434-3471 supplies matching remote session with Windows worktree projectPath.",
+        "remote/server.rs:6561-6577 uses remote_target_from_store(...).is_some() for remote membership.",
+        "agent_transcript.rs:382-402 calls remote_transcript_dir; :426-428 rejects colon/backslash project paths, returning None."
+      ],
+      "root_cause_status": "Source-grounded Windows path rejection; no baseline result exists for this exact test.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\reference_chat\\route_tests.rs:3495:10",
+      "candidate_output_excerpt": "thread 'remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept' (26472) panicked at s\nrc\\remote\\reference_chat\\route_tests.rs:3495:10:\nopen staged dir: Os { code: 5, kind: PermissionDenied, message: \"?\u226a\uaf6d?\u317a? \u5ac4\uacd5??\uc10f\ubfc0?\ub4ec\ub572??\" }\ntest remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept ... FAILED\ntest remote::reference_chat::route_tests::a_submit_whose_caller_leaves_after_the_paste_still_writes_its_enter ... ok\ntest remote::reference_chat::route_tests::a_target_naming_another_owner_is_refused_without_writing_or_resizing ... ok\ntest remote::reference_chat::route_tests::a_view_only_device_cannot_acknowledge_an_outcome ... ok\ntest remote::reference_chat::route_tests::a_view_only_device_cannot_mutate_a_reference_chat_target ... ok\ntest remote::reference_chat::route_tests::an_answer_whose_caller_leaves_after_navigation_still_finishes_its_keys ... ok\ntest remote::reference_chat::route_tests::an_ordered_submit_is_deduplicated_and_never_resizes_the_pane ... ok\ntest remote::reference_chat::route_tests::an_unknown_reference_chat_suffix_is_not_a_route ... ok\ntest remote::reference_chat::route_tests::concurrent_stages_for_one_target_respect_the_file_cap ... ok\ntest remote::reference_chat::route_tests::deleting_a_staged_file_this_target_no_longer_holds_succeeds_and_touches_nothing_else ... ok\ntest remote::reference_chat::route_tests::every_reference_chat_route_is_registered_behind_authentication ... ok\ntest remote::reference_chat::route_tests::files_a_submitted_turn_referenced_free_the_per_turn_bounds ... ok\ntest remote::reference_chat::route_tests::orphaned_staged_files_are_listed_and_can_be_released ... ok\ntest remote::reference_chat::route_tests::outcome_acknowledgement_clears_only_the_authenticated_current_target ...",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 353,
+          "output": "test remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\reference_chat\\route_tests.rs:3495:10:open staged dir: Os { code: 5, kind: PermissionDenied, message: \"?\u226a\uaf6d?\u317a? \u5ac4\uacd5??\uc10f\ubfc0?\ub4ec\ub572??\" }",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Inspect Windows directory handle sharing/rename permissions while preserving staged-byte and cleanup guarantees.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::reference_chat::route_tests::staged_preview_keeps_original_bytes_after_parent_replacement",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\reference_chat\\route_tests.rs:1468:43",
+      "candidate_output_excerpt": "thread 'remote::reference_chat::route_tests::staged_preview_keeps_original_bytes_after_parent_replacement' (31332) pani\ncked at src\\remote\\reference_chat\\route_tests.rs:1468:43:\nrename parent while handle is retained: Os { code: 5, kind: PermissionDenied, message: \"?\u226a\uaf6d?\u317a? \u5ac4\uacd5??\uc10f\ubfc0?\ub4ec\ub572??\" }\ntest remote::reference_chat::route_tests::staged_preview_keeps_original_bytes_after_parent_replacement ... FAILED\ntest remote::reference_chat::route_tests::staged_preview_refuses_same_size_in_place_content_changes ... ok\ntest remote::reference_chat::route_tests::staged_reference_files_round_trip_on_the_owning_host ... ok\ntest remote::reference_chat::route_tests::the_relay_allowlist_admits_exactly_the_reference_chat_route_table ... ok\ntest remote::reference_chat::screen::tests::a_densely_filled_pane_sized_screen_is_never_truncated ... ok\ntest remote::reference_chat::screen::tests::absent_segmented_history_reports_a_replay_gap ... ok\ntest remote::reference_chat::screen::tests::blank_screen_renders_no_text ... ok\ntest remote::reference_chat::screen::tests::bounded_output_keeps_the_tail_and_flags_truncation ... ok\ntest remote::reference_chat::screen::tests::bounding_never_splits_a_multibyte_character ... ok\ntest remote::reference_chat::screen::tests::empty_segmented_history_is_not_a_gap ... ok\ntest remote::reference_chat::screen::tests::reading_the_same_pane_twice_is_stable_and_never_resizes ... ok\ntest remote::reference_chat::screen::tests::rendered_text_places_lines_by_index_and_trims_padding ... ok\ntest remote::reference_chat::screen::tests::revision_tracks_the_visible_screen_and_ignores_the_cursor ... ok\ntest remote::reference_chat::screen::tests::segmented_history_replays_at_its_recorded_geometry ... ok\ntest remote::reference_chat::screen::tests::segmented_history_replays_in_order_and_r",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 348,
+          "output": "test remote::reference_chat::route_tests::staged_preview_keeps_original_bytes_after_parent_replacement ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\reference_chat\\route_tests.rs:1468:43:rename parent while handle is retained: Os { code: 5, kind: PermissionDenied, message: \"?\u226a\uaf6d?\u317a? \u5ac4\uacd5??\uc10f\ubfc0?\ub4ec\ub572??\" }",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Inspect Windows directory handle sharing/rename permissions while preserving staged-byte and cleanup guarantees.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::repo_discovery::tests::hidden_repositories_need_include_hidden",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\repo_discovery_tests.rs:22:18",
+      "candidate_output_excerpt": "thread 'remote::repo_discovery::tests::hidden_repositories_need_include_hidden' (19248) panicked at src\\remote\\repo_dis\ncovery_tests.rs:22:18:\ncalled `Option::unwrap()` on a `None` value\ntest remote::repo_discovery::tests::hidden_repositories_need_include_hidden ... FAILED\n\nthread 'remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control' (27908) pani\ncked at src\\remote\\repo_discovery_tests.rs:309:9:\nassertion `left == right` failed\n  left: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpRx9L9R\"\n right: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpRx9L9R\"\ntest remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control ... FAILED\ntest remote::repo_discovery::tests::query_accepts_only_path_depth_and_include_hidden ... ok\n\nthread 'remote::repo_discovery::tests::registrations_join_by_canonical_root' (1952) panicked at src\\remote\\repo_discove\nry_tests.rs:186:9:\nassertion `left == right` failed\n  left: Some(\"project-alpha\")\n right: None\ntest remote::repo_discovery::tests::registrations_join_by_canonical_root ... FAILED\ntest remote::repo_discovery::tests::relay_allows_only_the_discovery_query_fields ... ok\n\nthread 'remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself' (16360) panicked at src\\remote\\re\npo_discovery_tests.rs:147:5:\nassertion `left == right` failed\n  left: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\"\n right: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\"\ntest remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself ... FAILED\n\nthread 'remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules' (33376) panicked at src\\rem\note\\repo_discovery_tests.rs:22:18:\ncalled `Option::unwrap()` on",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 299,
+          "output": "test remote::repo_discovery::tests::hidden_repositories_need_include_hidden ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\repo_discovery_tests.rs:22:18:called `Option::unwrap()` on a `None` value",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Align canonical Windows verbatim path identity and repository fixture matching.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\repo_discovery_tests.rs:309:9",
+      "candidate_output_excerpt": "thread 'remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control' (27908) pani\ncked at src\\remote\\repo_discovery_tests.rs:309:9:\nassertion `left == right` failed\n  left: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpRx9L9R\"\n right: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpRx9L9R\"\ntest remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control ... FAILED\ntest remote::repo_discovery::tests::query_accepts_only_path_depth_and_include_hidden ... ok\n\nthread 'remote::repo_discovery::tests::registrations_join_by_canonical_root' (1952) panicked at src\\remote\\repo_discove\nry_tests.rs:186:9:\nassertion `left == right` failed\n  left: Some(\"project-alpha\")\n right: None\ntest remote::repo_discovery::tests::registrations_join_by_canonical_root ... FAILED\ntest remote::repo_discovery::tests::relay_allows_only_the_discovery_query_fields ... ok\n\nthread 'remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself' (16360) panicked at src\\remote\\re\npo_discovery_tests.rs:147:5:\nassertion `left == right` failed\n  left: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\"\n right: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\"\ntest remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself ... FAILED\n\nthread 'remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules' (33376) panicked at src\\rem\note\\repo_discovery_tests.rs:22:18:\ncalled `Option::unwrap()` on a `None` value\ntest remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules ... FAILED\ntest remote::resources_api::tests::http_route_samples_for_machine_control_and_refuses_everyone_else ... ok\ntest remote::resources_api::tests::redact_paths_keeps",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 324,
+          "output": "test remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\repo_discovery_tests.rs:309:9:assertion `left == right` failed  left: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpRx9L9R\" right: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpRx9L9R\"",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Align canonical Windows verbatim path identity and repository fixture matching.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::repo_discovery::tests::registrations_join_by_canonical_root",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\repo_discovery_tests.rs:186:9",
+      "candidate_output_excerpt": "thread 'remote::repo_discovery::tests::registrations_join_by_canonical_root' (1952) panicked at src\\remote\\repo_discove\nry_tests.rs:186:9:\nassertion `left == right` failed\n  left: Some(\"project-alpha\")\n right: None\ntest remote::repo_discovery::tests::registrations_join_by_canonical_root ... FAILED\ntest remote::repo_discovery::tests::relay_allows_only_the_discovery_query_fields ... ok\n\nthread 'remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself' (16360) panicked at src\\remote\\re\npo_discovery_tests.rs:147:5:\nassertion `left == right` failed\n  left: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\"\n right: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\"\ntest remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself ... FAILED\n\nthread 'remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules' (33376) panicked at src\\rem\note\\repo_discovery_tests.rs:22:18:\ncalled `Option::unwrap()` on a `None` value\ntest remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules ... FAILED\ntest remote::resources_api::tests::http_route_samples_for_machine_control_and_refuses_everyone_else ... ok\ntest remote::resources_api::tests::redact_paths_keeps_only_the_worktree_directory_name ... ok\ntest remote::sealed_offer::tests::sealed_offer_rejects_a_different_recipient ... ok\ntest remote::sealed_offer::tests::sealed_offer_rejects_tampering_and_context_changes ... ok\ntest remote::sealed_offer::tests::sealed_offer_round_trips_and_hides_the_token ... ok\ntest remote::security_headers::gateway_tests::gateway_documents_and_api_responses_carry_security_headers ... ok\ntest remote::security_headers::gateway_tests::gateway_refuses_cross_site_websocket_upgrades_with_403 ... ok\ntest remote::s",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 177,
+          "output": "test remote::repo_discovery::tests::registrations_join_by_canonical_root ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\repo_discovery_tests.rs:186:9:assertion `left == right` failed  left: Some(\"project-alpha\") right: None",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Align canonical Windows verbatim path identity and repository fixture matching.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\repo_discovery_tests.rs:147:5",
+      "candidate_output_excerpt": "thread 'remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself' (16360) panicked at src\\remote\\re\npo_discovery_tests.rs:147:5:\nassertion `left == right` failed\n  left: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\"\n right: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\"\ntest remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself ... FAILED\n\nthread 'remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules' (33376) panicked at src\\rem\note\\repo_discovery_tests.rs:22:18:\ncalled `Option::unwrap()` on a `None` value\ntest remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules ... FAILED\ntest remote::resources_api::tests::http_route_samples_for_machine_control_and_refuses_everyone_else ... ok\ntest remote::resources_api::tests::redact_paths_keeps_only_the_worktree_directory_name ... ok\ntest remote::sealed_offer::tests::sealed_offer_rejects_a_different_recipient ... ok\ntest remote::sealed_offer::tests::sealed_offer_rejects_tampering_and_context_changes ... ok\ntest remote::sealed_offer::tests::sealed_offer_round_trips_and_hides_the_token ... ok\ntest remote::security_headers::gateway_tests::gateway_documents_and_api_responses_carry_security_headers ... ok\ntest remote::security_headers::gateway_tests::gateway_refuses_cross_site_websocket_upgrades_with_403 ... ok\ntest remote::security_headers::tests::api_json_gets_nosniff_and_referrer_policy_only ... ok\ntest remote::security_headers::tests::csp_lists_relay_https_and_wss_and_never_a_bare_scheme ... ok\ntest remote::security_headers::tests::foreign_origin_upgrade_is_refused_before_routing ... ok\ntest remote::security_headers::tests::handler_headers_are_kept ... ok\ntest remote::security_headers::tests::hsts_is_o",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 300,
+          "output": "test remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\repo_discovery_tests.rs:147:5:assertion `left == right` failed  left: \"C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\" right: \"\\\\\\\\?\\\\C:\\\\Users\\\\sook\\\\AppData\\\\Local\\\\Temp\\\\.tmpaIC3zo\\\\alpha\"",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Align canonical Windows verbatim path identity and repository fixture matching.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\repo_discovery_tests.rs:22:18",
+      "candidate_output_excerpt": "thread 'remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules' (33376) panicked at src\\rem\note\\repo_discovery_tests.rs:22:18:\ncalled `Option::unwrap()` on a `None` value\ntest remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules ... FAILED\ntest remote::resources_api::tests::http_route_samples_for_machine_control_and_refuses_everyone_else ... ok\ntest remote::resources_api::tests::redact_paths_keeps_only_the_worktree_directory_name ... ok\ntest remote::sealed_offer::tests::sealed_offer_rejects_a_different_recipient ... ok\ntest remote::sealed_offer::tests::sealed_offer_rejects_tampering_and_context_changes ... ok\ntest remote::sealed_offer::tests::sealed_offer_round_trips_and_hides_the_token ... ok\ntest remote::security_headers::gateway_tests::gateway_documents_and_api_responses_carry_security_headers ... ok\ntest remote::security_headers::gateway_tests::gateway_refuses_cross_site_websocket_upgrades_with_403 ... ok\ntest remote::security_headers::tests::api_json_gets_nosniff_and_referrer_policy_only ... ok\ntest remote::security_headers::tests::csp_lists_relay_https_and_wss_and_never_a_bare_scheme ... ok\ntest remote::security_headers::tests::foreign_origin_upgrade_is_refused_before_routing ... ok\ntest remote::security_headers::tests::handler_headers_are_kept ... ok\ntest remote::security_headers::tests::hsts_is_only_added_by_the_tls_layer ... ok\ntest remote::security_headers::tests::html_gets_every_document_header ... ok\ntest remote::security_headers::tests::native_and_allowlisted_upgrades_pass_the_guard ... ok\ntest remote::security_headers::tests::other_html_cannot_be_framed_but_keeps_its_inline_scripts ... ok\ntest remote::security_settings::tests::insecure_env_is_ignored_in_release_without_setting ... ok\ntest remote::se",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 181,
+          "output": "test remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\repo_discovery_tests.rs:22:18:called `Option::unwrap()` on a `None` value",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Align canonical Windows verbatim path identity and repository fixture matching.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::server::file_read_session_base_tests::live_shell_cwd_wins_over_the_desktop_supplied_cwd",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\server.rs:5189:9",
+      "candidate_output_excerpt": "thread 'remote::server::file_read_session_base_tests::live_shell_cwd_wins_over_the_desktop_supplied_cwd' (20088) panick\ned at src\\remote\\server.rs:5189:9:\nassertion `left == right` failed\n  left: None\n right: Some(\"/wt/sub/dir\")\ntest remote::server::file_read_session_base_tests::live_shell_cwd_wins_over_the_desktop_supplied_cwd ... FAILED\ntest remote::server::file_read_session_base_tests::relative_path_anchors_on_live_shell_cwd_before_worktree ... ok\ntest remote::server::file_read_session_base_tests::relative_path_refuses_worktree_and_stale_supplied_cwd_without_live_cwd ... ok\ntest remote::server::machine_output_writer::tests::blocked_tcp_write_expires_when_ten_seconds_elapse ... ok\ntest remote::server::machine_output_writer::tests::blocked_tcp_write_is_cancelled_when_output_overflows ... ok\ntest remote::server::machine_output_writer::tests::serialized_controls_and_frames_are_rejected_when_wire_allowance_is_exceeded ... ok\ntest remote::server::p19_insecure_direct_tests::test_p19_cgnat_address_with_authoritative_overlay_proof_is_exempt ... ok\ntest remote::server::p19_insecure_direct_tests::test_p19_cgnat_address_without_overlay_proof_is_gated ... ok\ntest remote::server::p19_insecure_direct_tests::test_p19_non_loopback_direct_with_insecure_opt_in_binds_and_serves ... ok\ntest remote::server::p19_insecure_direct_tests::test_p19_non_loopback_direct_without_insecure_opt_in_refuses_to_serve ... ok\ntest remote::server::p19_insecure_direct_tests::test_p19_overlay_mode_tailscale_unaffected ... ok\ntest remote::server::p20_insecure_relay_tests::test_p20_development_insecure_flag_allows_rfc1918_but_forbids_public ... ok\ntest remote::server::p20_insecure_relay_tests::test_p20_loopback_http_and_non_loopback_https_allowed ... ok\ntest remote::server::p20_insecure_relay_tests::test_p20_n",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 170,
+          "output": "test remote::server::file_read_session_base_tests::live_shell_cwd_wins_over_the_desktop_supplied_cwd ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\server.rs:5189:9:assertion `left == right` failed  left: None right: Some(\"/wt/sub/dir\")",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Use valid native absolute cwd fixtures and preserve live-shell precedence.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "remote::server::tests::test_machine_terminal_client_close_acknowledges_and_preserves_pty",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\remote\\..\\..\\tests\\support\\machine_input_fixture.rs:101:55",
+      "candidate_output_excerpt": "thread 'remote::server::tests::test_machine_terminal_client_close_acknowledges_and_preserves_pty' (28064) panicked at s\nrc\\remote\\..\\..\\tests\\support\\machine_input_fixture.rs:101:55:\ncalled `Result::unwrap()` on an `Err` value: reqwest::Error { kind: Status(409, None), url: \"http://127.0.0.1:56523/api\n/v1/sessions\" }\ntest remote::server::tests::test_machine_terminal_client_close_acknowledges_and_preserves_pty ... FAILED\ntest remote::server::tests::test_phase4_gateway_browser_ws_single_use_ticket_admission ... ok\ntest remote::server::tests::test_phase4_server_valid_socket_target_allows_browser ... ok\ntest remote::server::tests::test_push_auth ... ok\ntest remote::server::tests::test_r4_3_desktop_scope_is_derived_server_side_not_from_query ... ok\ntest remote::server::tests::test_r4_4_live_socket_terminates_on_device_revocation ... ok\ntest remote::server::tests::test_r4_6_receiver_attachment_is_passive_and_teardown_halts_capture ... ok\ntest remote::server::tests::test_r5_14_writer_ordering_barrier_and_bounded_shutdown ... ok\ntest remote::server::tests::test_r5_3_absent_scope_fails_closed_and_enforces_inventory ... ok\ntest remote::server::tests::test_r5_4_scope_watch_terminates_socket_during_await ... ok\ntest remote::server::tests::test_r6_4_scope_change_interrupts_inline_dispatch_await ... ok\ntest remote::server::tests::test_remote_server_handle_prepare_and_replace_relay_contract ... ok\ntest remote::server::tests::test_spawn_shell_method ... ok\ntest remote::server::tests::test_workspace_worktrees_scoped_request_and_not_found ... ok\ntest remote::server::tests::test_worktree_list_failure_returns_structured_error_not_200_empty ... ok\ntest remote::server::token_lifetime_tests::a_legacy_token_without_issue_time_starts_its_lifetime_on_first_use ... ok\ntest remote::server::token_l",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 336,
+          "output": "test remote::server::tests::test_machine_terminal_client_close_acknowledges_and_preserves_pty ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\remote\\..\\..\\tests\\support\\machine_input_fixture.rs:101:55:called `Result::unwrap()` on an `Err` value: reqwest::Error { kind: Status(409, None), url: \"http://127.0.0.1:56523/api/v1/sessions\" }",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Inspect machine fixture session-admission 409 and preserve close acknowledgement/PTy survival assertions.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\ssh\\bridge_tests.rs:1087:13",
+      "candidate_output_excerpt": "thread 'ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection' (6568) panicked at src\\ssh\\bridge_tests.rs:108\n7:13:\nconnect SshBridgeClient over OpenSSH failed: Timeout(\"Frame read timed out at stage 'awaiting_header_byte_0' (header_re\nad=0/4, header_raw=[], body_len=0, body_read=0) [ssh_pid=Some(15408), exit_code=None, stderr_bytes=0: \\\"\\\"]\")\n  endpoint_exists=true\n  endpoint_content=Some(\"{\\\"address\\\":\\\"127.0.0.1:60073\\\",\\\"token\\\":\\\"<redacted>\\\",\\\"pid\\\":27616}\")\n  direct_helper_probe=Ok(Ok(HandshakeResult { protocol: 1, capabilities: [\"sshHelperV1\", \"dagStreamingV1\", \"dagSubscrib\neV1\", \"agentHookV1\", \"agentStateV1\"], host_id: \"test-live-loopback-ec76ad35-ff8c-47ac-ac17-76cf053f5609\", owner_id: \"c7\nd3b5e6-e078-4505-9f83-f1ceb3b8fac3\", epoch: Epoch(6176622062433633287), os: \"windows\", arch: \"x86_64\" })) [helper_pid=S\nome(3432), stderr=\"\", cleanup=Ok(Ok(()))]\ntest ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection ... FAILED\ntest ssh::bridge::tests::ssh_bridge_remote_pid_does_not_expose_signal_target ... ok\ntest ssh::bridge::tests::ssh_bridge_single_attempt_write_does_not_queue ... ok\ntest ssh::bridge::tests::ssh_bridge_spawn_retry_requires_matching_client_request_id ... ok\ntest ssh::bridge::tests::ssh_bridge_target_expired_fails_explicitly_never_spawns ... ok\ntest ssh::bridge::tests::ssh_bridge_target_mismatch_on_describe_or_read_is_rejected ... ok\ntest ssh::bridge::tests::ssh_reconnect_safety_setup_error_preserves_structured_fields ... ok\ntest ssh::bridge::tests::test_ssh_bridge_dag_inventory_and_poll ... ok\ntest ssh::bridge::transfer_tests::test_bridge_drop_after_detach_does_not_kill_child ... ok\ntest ssh::bridge::transfer_tests::test_bridge_freeze_export_import_roundtrip ... ok\ntest ssh::bridge::transfer_tests::test_bridge_poisoned_connection_e",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 330,
+          "output": "test ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\ssh\\bridge_tests.rs:1087:13:connect SshBridgeClient over OpenSSH failed: Timeout(\"Frame read timed out at stage 'awaiting_header_byte_0' (header_read=0/4, header_raw=[], body_len=0, body_read=0) [ssh_pid=Some(15408), exit_code=None, stderr_bytes=0: \\\"\\\"]\")  endpoint_exists=true  endpoint_content=Some(\"{\\\"address\\\":\\\"127.0.0.1:60073\\\",\\\"token\\\":\\\"<redacted>\\\",\\\"pid\\\":27616}\")  direct_helper_probe=Ok(Ok(HandshakeResult { protocol: 1, capabilities: [\"sshHelperV1\", \"dagStreamingV1\", \"dagSubscribeV1\", \"agentHookV1\", \"agentStateV1\"], host_id: \"test-live-loopback-ec76ad35-ff8c-47ac-ac17-76cf053f5609\", owner_id: \"c7d3b5e6-e078-4505-9f83-f1ceb3b8fac3\", epoch: Epoch(6176622062433633287), os: \"windows\", arch: \"x86_64\" })) [helper_pid=Some(3432), stderr=\"\", cleanup=Ok(Ok(()))]",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Trace real OpenSSH bridge framing/handshake timeout with helper identity and captured stderr; no flake assumption.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    },
+    {
+      "test": "ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match",
+      "classification": "confirmed_same_host_baseline",
+      "panic_location": "src\\test_support.rs:27:5",
+      "candidate_output_excerpt": "thread 'ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match' (23092) panicked at src\\test_\nsupport.rs:27:5:\ncargo build --bin ferryx-cli failed: exit code: 101\ntest ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match ... FAILED\nferryx askpass: FERRYX_SSH_ASKPASS_PORT is unset for an askpass invocation; ssh ran the helper without the askpass envi\nronment\ntest ssh::password::tests::askpass_dispatch_returns_none_for_non_prompt_invocations ... ok\ntest ssh::password::tests::askpass_dispatch_serves_password_when_credentials_match ... correct-horse-battery-staple\nok\ntest ssh::password::tests::askpass_prompt_argument_detection ... ok\ntest ssh::password::tests::credentials_are_transient_endpoint_scoped_and_redacted ... ok\ntest ssh::password::tests::invalid_passwords_do_not_enter_store ... ok\ntest ssh::password::tests::stale_generation_cannot_clear_replacement ... ok\ntest ssh::projects::memo_tests::enabled_host_observes_new_content_after_same_length_and_mtime_rewrite_via_invalidation ... ok\ntest ssh::projects::memo_tests::invalidate_store_memo_clears_both_projects_and_hosts_caches ... ok\ntest ssh::projects::memo_tests::memoized_read_race_safe_drops_stale_entry_when_invalidated_during_read ... ok\ntest ssh::projects::memo_tests::resolve_memoizes_unchanged_projects_file_without_reparsing ... ok\ntest ssh::projects::memo_tests::resolve_observes_new_content_when_file_rewritten_with_different_size ... ok\ntest ssh::projects::tests::connection_failure_does_not_register_or_fall_back_to_existing_local_directory ... ok\ntest ssh::projects::tests::corrupted_metadata_and_identity_collision_fail_closed_without_overwrite ... ok\ntest ssh::projects::tests::disabled_host_registration_leaves_no_project_or_temporary_files ... ok\ntest ssh::proje",
+      "candidate_artifact": "full-lib.utf8.log",
+      "same_host_baseline_head": "d59508fa9",
+      "baseline_exact_test_receipts": [
+        {
+          "artifact": "baseline-matching-failures.utf8.log",
+          "line": 426,
+          "output": "test ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match ... FAILED"
+        }
+      ],
+      "panic_output_unwrapped": "src\\test_support.rs:27:5:cargo build --bin ferryx-cli failed: exit code: 101",
+      "author_scope": "existing baseline owner; not newly assigned regression",
+      "smallest_repair_shape": "Repair required CLI build/link prerequisite; retain askpass process integration.",
+      "baseline_match_scope": "Exact same-host test failure, not proof of identical root cause; no assumed flake."
+    }
+  ],
+  "classification_counts": {
+    "confirmed_same_host_baseline": 27,
+    "baseline_passed_candidate_failed": 1,
+    "unclassified_not_proven_baseline": 1
+  }
+}

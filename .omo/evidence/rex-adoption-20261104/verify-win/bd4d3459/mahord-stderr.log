@@ -1,0 +1,5 @@
+[2m2026-11-05T04:18:41.473433Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Initializing headless client session [3mhost[0m[2m=[0m127.0.0.1 [3mtcp_port[0m[2m=[0m29730 [3mudp_port[0m[2m=[0m29731 [3mtimeout_secs[0m[2m=[0mNone
+[2m2026-11-05T04:18:41.474228Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Reconnecting with stored pairing record [3mpairing_id[0m[2m=[0m9929DC13-3841-4182-A399-9E1323F961A2
+[2m2026-11-05T04:18:41.714845Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Handshake completed, session ready [3mhost_name[0m[2m=[0mDESKTOP-1LAPJMP [3mwidth[0m[2m=[0m1920 [3mheight[0m[2m=[0m1080 [3mversion[0m[2m=[0m3
+[2m2026-11-05T04:18:41.715127Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Awaiting UDP media datagrams and decoding frames...
+[2m2026-11-05T04:18:42.676557Z[0m [33m WARN[0m [2mmaho_client[0m[2m:[0m TCP runtime poll error [3merr[0m[2m=[0mTLS transport error: TCP I/O failed: unexpected EOF

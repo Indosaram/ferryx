@@ -1,0 +1,24 @@
+cargo :     Blocking waiting for file lock on package cache
+위치 C:\Users\sook\ferryx-wt\rex-win-bd4-gates.ps1:22 문자:18
++ ... ll-targets {cargo check --manifest-path src-tauri/Cargo.toml --locked ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...n package cache:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Blocking waiting for file lock on build directory
+   Compiling ffmpeg-sys-next v9.0.1
+    Checking ferryx-rd-proto v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-rd\ferryx-rd-proto)
+    Checking ferryx-rd-render v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-rd\ferryx-rd-render
+)
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\src-tauri)
+    Checking portable-pty v0.9.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\src-tauri\vendor\portable-pty)
+    Checking ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-hub)
+    Checking ferryx-browser-engine-protocol v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\browser-engi
+ne-protocol)
+    Checking ferryx-rd-net v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-rd\ferryx-rd-net)
+    Checking ferryx-rd-host v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-rd\ferryx-rd-host)
+   Compiling ffmpeg-next v9.0.0
+    Checking ferryx-rd-decode v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-rd\ferryx-rd-decode
+)
+    Checking ferryx-rd-app v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-rd\ferryx-rd-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8m 33s

@@ -1,0 +1,10 @@
+
+running 4 tests
+test daemon::windows_pipe::tests::pipe_rejects_owner_sid_marked_deny_only ... ok
+test daemon::windows_pipe::tests::tcp_compatibility_stream_still_works ... ok
+test daemon::windows_pipe::tests::pipe_identity_and_cross_pane_write_refusal ... ok
+test daemon::server::control_server::control_wire_tests::windows_pipe_pane_descendant_cannot_write_other_pane_or_retire_owner ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 5126 filtered out; finished in 0.69s
+
+EXIT=0

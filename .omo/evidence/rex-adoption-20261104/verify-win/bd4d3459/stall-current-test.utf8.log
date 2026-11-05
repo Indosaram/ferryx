@@ -1,0 +1,80 @@
+R12 signal phase=afterJournal deleting=true pid=30728 R12_WINDOW
+R12 process phase=afterJournal deleting=true pid=30728 reaped=true status=exit code: 1
+R12 signal phase=replay deleting=true pid=22168 R12_REPLAY unregister 204
+R12 process phase=replay deleting=true pid=22168 reaped=true status=exit code: 0
+R12 kill-window=afterJournal same_device_request_replay=201 revision=1 removed=true
+test remote::workspace_api_tests::r12_real_kill_windows ... ok
+R12 phase=prepare revoked=401 rows=0 workers_finished=true removed=true
+R12 phase=beforeGate revoked=401 rows=0 workers_finished=true removed=true
+R12 phase=beforeCommit revoked=401 rows=0 workers_finished=true removed=true
+R12 phase=beforeResponse revoked=401 rows=1 workers_finished=true removed=true
+R12 phase=listProbe revoked=401 rows=0 workers_finished=true removed=true
+test remote::workspace_api_tests::r12_revocation_fences ... ok
+R12 real router auth_entries=16 health=200 revoked=401 sockets_closed=true listener_joined=true root_removed=true
+test remote::workspace_api_tests::r12_router_auth_admission ... ok
+R12 incomplete body sockets_closed=true gateway_joined=true root_removed=true
+test remote::workspace_api_tests::r12_router_incomplete_body ... ok
+R1 topology git pid=3432 reaped=true parent_git=true
+R1 topology parent_git=true status=400 rows=0 revision=0 body={"error":{"code":"INVALID_PATH","message":"INVALID_PATH",
+"retryable":false,"requestId":"0eceecbf-b4dc-42d7-9366-bc46b3eaf428","details":{}}}
+R1 topology cleanup parent_git=true workers_drained=true gateway_joined=true removed=true
+R1 topology git pid=11372 reaped=true parent_git=false
+R1 topology parent_git=false status=201 rows=1 revision=1 body={"workspaceId":"project-91495c6f4b3840de8db1aa3a4b1815c0
+","repoRoot":"\\\\?\\C:\\Users\\sook\\AppData\\Local\\Temp\\.tmpdWhB1u\\parent\\plain","gitRoot":"\\\\?\\C:\\Users\\soo
+k\\AppData\\Local\\Temp\\.tmpdWhB1u\\parent\\plain","gitCommonDir":"C:/Users/sook/AppData/Local/Temp/.tmpdWhB1u/parent/
+plain/.git","gitRemote":null,"gitBranch":"master","gitHead":null,"availability":"ready","revision":"1"}
+R1 topology cleanup parent_git=false workers_drained=true gateway_joined=true removed=true
+test remote::workspace_api_tests::r1_topology_after_gate_http ... ok
+test remote::workspace_catalog::tests::v1_migration_retains_legacy_rows_observations_and_empty_authority_distinction ... ok
+test rollout_tests::a24_rollback_waits_for_drain_and_preserves_unrelated_owner ... ok
+test scoped_contracts::tests::epoch_rejects_noncanonical_or_out_of_range_wire_values ... ok
+test scoped_contracts::tests::paired_daemon_target_decodes_without_local_fallback ... ok
+test scoped_contracts::tests::producer_boundaries_roundtrip ... ok
+test scoped_contracts::tests::result_rejects_mismatched_discriminants ... ok
+test scoped_contracts::tests::shared_envelopes_roundtrip ... ok
+test scoped_contracts::tests::target_roundtrip_preserves_full_u64_epoch_as_string ... ok
+test script::api_tests::script_api_each_host_function_accepts_valid_arguments ... ok
+test script::api_tests::script_api_events_deliver_payloads_and_keys_default_to_non_override ... ok
+test script::api_tests::script_api_rejects_bad_arguments_before_host_effects ... ok
+test script::api_tests::script_api_repeating_timer_uses_durable_claim_without_clock_sleeps ... ok
+test script::tests::callback_watchdog_interrupts_a_timer ... ok
+test script::tests::disabled_setting_does_not_read_or_load_script ... ok
+test script::tests::handover_reload_and_windows_restart_deduplicate_with_fake_clock ... ok
+test script::tests::infinite_loop_interrupts_under_two_hundred_milliseconds ... ok
+test script::tests::memory_limit_is_enforced ... ok
+test script::tests::sandbox_denies_host_libraries_and_dynamic_loading ... ok
+test script::tests::sixty_fifth_timer_is_refused_and_failed_initialization_clears_timers ... ok
+test session::tests::test_concurrent_saves_never_publish_mixed_documents ... ok
+Warning: Session state file was corrupted (key must be a string at line 1 column 3), moved to backup.
+test session::tests::test_corrupted_session_recovery ... ok
+test session::tests::test_first_v3_save_over_v2_session_publishes_and_keeps_backup ... ok
+test session::tests::test_save_self_heals_unreadable_session ... ok
+test session::tests::test_session_path_for_main_window_is_unchanged ... ok
+test session::tests::test_session_path_for_secondary_window_is_mapped_next_to_primary ... ok
+test session::tests::test_session_path_rejects_non_app_and_unsafe_labels ... ok
+test session::tests::test_session_save_load_clear_cycle ... ok
+test session::tests::test_window_session_files_do_not_overwrite_each_other ... ok
+test session_names::tests::session_names_a_session_keeps_its_name ... ok
+test session_names::tests::session_names_base_name_is_two_words_and_stable ... ok
+test session_names::tests::session_names_collision_gets_suffix_two_and_workspaces_are_independent ... ok
+test session_names::tests::session_names_retain_frees_names_of_gone_sessions_only ... ok
+test session_names::tests::session_names_three_hundred_sessions_in_one_workspace_are_unique ... ok
+test session_names::tests::session_names_three_sessions_get_three_distinct_two_word_names ... ok
+test session_names::tests::session_names_word_lists_are_lowercase_unique_and_about_256_each ... ok
+test shortcut_dispatch::tests::missing_window_does_not_consume_shortcut ... ok
+test shortcut_dispatch::tests::shortcuts_reach_listeners_with_browser_children ... ok
+test shortcut_dispatch::tests::shortcuts_reach_only_the_focused_window ... ok
+test ssh::bridge::tests::ssh_bridge_agent_state_snapshot_dto_and_read_result_contract ... ok
+test ssh::bridge::tests::ssh_bridge_cursor_canonical_decimal_u64_parsing ... ok
+test ssh::bridge::tests::ssh_bridge_dag_frame_ordering_requires_contiguity_or_resync ... ok
+test ssh::bridge::tests::ssh_bridge_dag_subscription_accepts_closed_frame_with_same_sequence ... ok
+test ssh::bridge::tests::ssh_bridge_dag_subscription_drop_releases_helper_and_keeps_pty_alive ... ok
+test ssh::bridge::tests::ssh_bridge_dag_subscription_rejects_unregistered_project ... ok
+test ssh::bridge::tests::ssh_bridge_dag_subscription_released_after_eof_during_blocked_next ... ok
+test ssh::bridge::tests::ssh_bridge_dag_subscription_streams_inventory_updates_and_cancels ... ok
+test ssh::bridge::tests::ssh_bridge_frame_framing_roundtrip_and_size_bounds ... ok
+test ssh::bridge::tests::ssh_bridge_handshake_independently_validates_configured_host_and_target_identity ... ok
+test ssh::bridge::tests::ssh_bridge_handshake_mismatch_returns_connection_closed ... ok
+test ssh::bridge::tests::ssh_bridge_handshake_verifies_host_and_epoch ... ok
+test ssh::bridge::tests::ssh_bridge_independent_read_does_not_block_control ... ok
+test ssh::bridge::tests::ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping ... ok

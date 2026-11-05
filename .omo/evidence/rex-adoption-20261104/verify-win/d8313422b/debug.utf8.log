@@ -1,0 +1,83 @@
+cargo :     Updating crates.io index
+위치 C:\Users\sook\ferryx-wt\rex-win-d831-gates.ps1:28 문자:13
++ Gate debug {cargo build --manifest-path src-tauri/Cargo.toml --locked ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Updating crates.io index:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Downloading crates ...
+  Downloaded downcast-rs v2.0.2
+  Downloaded leb128fmt v0.1.0
+  Downloaded multi-stash v0.2.0
+  Downloaded string-interner v0.19.0
+  Downloaded wasm-encoder v0.263.0
+  Downloaded wasmi_collections v0.46.0
+  Downloaded wasmi_ir v0.46.0
+  Downloaded wasmi_core v0.46.0
+  Downloaded wat v1.263.0
+  Downloaded wasmparser v0.228.0
+  Downloaded wast v263.0.0
+  Downloaded wasmparser v0.263.0
+  Downloaded wasmi v0.46.0
+   Compiling spin v0.9.9
+   Compiling bindgen v0.73.2
+   Compiling lazy_static v1.5.0
+   Compiling flume v0.11.1
+   Compiling ferryx-rd-proto v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-proto)
+   Compiling symphonia-core v0.5.5
+   Compiling num-bigint-dig v0.8.6
+   Compiling leb128fmt v0.1.0
+   Compiling wasmparser v0.228.0
+   Compiling downcast-rs v2.0.2
+   Compiling wasm-encoder v0.263.0
+   Compiling ece v2.3.1
+   Compiling wasmi_core v0.46.0
+   Compiling async-web-client v0.6.4
+   Compiling x509-parser v0.18.1
+   Compiling sqlx-sqlite v0.8.6
+   Compiling rsa v0.9.10
+   Compiling ferryx-rd-net v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-net)
+   Compiling symphonia-metadata v0.5.5
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling symphonia-codec-aac v0.5.5
+   Compiling wast v263.0.0
+   Compiling wasmi_ir v0.46.0
+   Compiling symphonia-utils-xiph v0.5.5
+   Compiling symphonia-bundle-mp3 v0.5.5
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling symphonia-codec-vorbis v0.5.5
+   Compiling symphonia-format-isomp4 v0.5.5
+   Compiling symphonia-format-ogg v0.5.5
+   Compiling symphonia-format-riff v0.5.5
+   Compiling sqlx-macros-core v0.8.6
+   Compiling symphonia v0.5.5
+   Compiling superboring v0.1.14
+   Compiling ferryx-rd-render v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-rende
+r)
+   Compiling songbird v0.5.0
+   Compiling sharded-slab v0.1.7
+   Compiling wat v1.263.0
+   Compiling shared_library v0.1.9
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\src-tauri)
+   Compiling wasmi_collections v0.46.0
+   Compiling multi-stash v0.2.0
+   Compiling portable-pty v0.9.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\src-tauri\vendor\portable-pty)
+   Compiling tracing-subscriber v0.3.23
+   Compiling ferryx-rd-host v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-host)
+   Compiling rodio v0.22.2
+   Compiling sqlx-macros v0.8.6
+   Compiling jwt-simple v0.12.11
+   Compiling wasmi v0.46.0
+   Compiling rustls-acme v0.15.4
+   Compiling web-push v0.11.0
+   Compiling sqlx v0.8.6
+   Compiling ferryx-browser-engine-protocol v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\browser-eng
+ine-protocol)
+   Compiling ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-hub)
+   Compiling ffmpeg-sys-next v9.0.1
+   Compiling ffmpeg-next v9.0.0
+   Compiling ferryx-rd-decode v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-decod
+e)
+   Compiling ferryx-rd-app v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8m 56s
+EXIT=0

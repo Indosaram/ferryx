@@ -1,0 +1,7 @@
+[2m2026-11-04T21:45:17.566111Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Initializing headless client session [3mhost[0m[2m=[0m100.68.224.49 [3mtcp_port[0m[2m=[0m19730 [3mudp_port[0m[2m=[0m19731 [3mtimeout_secs[0m[2m=[0mNone
+[2m2026-11-04T21:45:17.566245Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Reconnecting with stored pairing record [3mpairing_id[0m[2m=[0m9929DC13-3841-4182-A399-9E1323F961A2
+Error: reconnect with stored pairing failed
+
+Caused by:
+    0: I/O failed: connection timed out
+    1: connection timed out

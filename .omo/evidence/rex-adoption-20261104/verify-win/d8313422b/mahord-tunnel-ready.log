@@ -1,0 +1,8 @@
+[2m2026-11-05T02:11:07.883136Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Initializing headless client session [3mhost[0m[2m=[0m127.0.0.1 [3mtcp_port[0m[2m=[0m29730 [3mudp_port[0m[2m=[0m29731 [3mtimeout_secs[0m[2m=[0mSome(25)
+[2m2026-11-05T02:11:07.883192Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Initiating bootstrap pairing with host via PIN
+Error: bootstrap pairing failed
+
+Caused by:
+    0: TLS transport error: TLS handshake failed: the handshake failed: error:0A00045B:SSL routines:ssl3_read_bytes:tlsv1 alert unknown psk identity:ssl/record/rec_layer_s3.c:918:SSL alert number 115
+    1: TLS handshake failed: the handshake failed: error:0A00045B:SSL routines:ssl3_read_bytes:tlsv1 alert unknown psk identity:ssl/record/rec_layer_s3.c:918:SSL alert number 115
+EXIT=1

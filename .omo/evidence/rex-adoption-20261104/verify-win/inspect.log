@@ -1,0 +1,104 @@
+
+
+    디렉터리: C:\Users\sook\ferryx-wt\rex-buildgreen-logs
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+-a----      2026-11-05   오전 6:08           1074 clippy.log                                                           
+-a----      2026-11-05   오전 6:05           1074 default.log                                                          
+-a----      2026-11-05   오전 6:12            572 exits.log                                                            
+-a----      2026-11-05   오전 6:04            288 ffmpeg.log                                                           
+-a----      2026-11-05   오전 6:06           2694 headless.log                                                         
+-a----      2026-11-05   오전 6:12           1300 test.log                                                             
+-a----      2026-11-05   오전 6:03          12676 ui-build.log                                                         
+-a----      2026-11-05   오전 6:02            196 ui-install.log                                                       
+-a----      2026-11-05   오전 6:03            782 ui-typecheck.log                                                     
+
+
+    디렉터리: C:\Users\sook\ferryx-wt\.tmp-out
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+-a----      2026-11-03  오전 11:13         156221 check.c                                                              
+-a----      2026-11-05   오전 6:33      291966807 rex-verify-win-20261104.bundle                                       
+-a----      2026-11-05   오전 6:34            424 rex-win-inspect.ps1                                                  
+
+
+
+
+ProcessId      : 30712
+Name           : ferryx-remote-helper.exe
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" "daemon" "--root" "\\?\C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62" "--host-id" "ssh-maho-win"
+
+ProcessId      : 18632
+Name           : ferryx-remote-helper.exe
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 17596
+Name           : ferryx-remote-helper.exe
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 4872
+Name           : ferryx-remote-helper.exe
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 23468
+Name           : ferryx-remote-helper.exe
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 9844
+Name           : ferryx-remote-helper.exe
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 27008
+Name           : ferryx-relay.exe
+ExecutablePath : C:\Users\sook\ferryx-wt\f3prod-20261105\.qa\f3-bin\gui\ferryx-relay.exe
+CommandLine    : C:\Users\sook\ferryx-wt\f3prod-20261105\.qa\f3-bin\gui\ferryx-relay.exe --port 47960
+
+ProcessId      : 20412
+Name           : ferryx.exe
+ExecutablePath : C:\Users\sook\ferryx-wt\f3prod-20261105\.qa\f3-bin\gui\ferryx.exe
+CommandLine    : C:\Users\sook\ferryx-wt\f3prod-20261105\.qa\f3-bin\gui\ferryx.exe --daemon
+
+ProcessId      : 31056
+Name           : ferryx.exe
+ExecutablePath : C:\Users\sook\ferryx-wt\f3prod-20261105\.qa\f3-bin\gui\ferryx.exe
+CommandLine    : C:\Users\sook\ferryx-wt\f3prod-20261105\.qa\f3-bin\gui\ferryx.exe --daemon
+
+ProcessId      : 24304
+Name           : ferryx.exe
+ExecutablePath : C:\Users\sook\ferryx-wt\f3prod-20261105\.qa\f3-bin\gui\ferryx.exe
+CommandLine    : C:\Users\sook\ferryx-wt\f3prod-20261105\.qa\f3-bin\gui\ferryx.exe
+
+
+
+
+
+    디렉터리: \\.\pipe
+
+
+Mode                 LastWriteTime         Length Name                                                                 
+----                 -------------         ------ ----                                                                 
+------      1601-01-01   오전 9:00              1 ferryx-pty-31056-1                                                   
+------      1601-01-01   오전 9:00              1 ferryx-pty-out-31056-1                                               
+------      1601-01-01   오전 9:00              1 ferryx-pty-31056-2                                                   
+------      1601-01-01   오전 9:00              1 ferryx-pty-out-31056-2                                               
+------      1601-01-01   오전 9:00              1 ferryx-pty-31056-3                                                   
+------      1601-01-01   오전 9:00              1 ferryx-pty-out-31056-3                                               
+-83fb95624b0439ee660c2679b43b38c8b63769cd src-tauri/vendor/ghostty
+
+

@@ -1,0 +1,328 @@
+{
+  "leg": "win",
+  "head": "35c984684",
+  "evidence_commit": "filled by evidence commit containing this file",
+  "verdicts": {
+    "2": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "CHANGED_FILES=0",
+          "artifact": ".omo/evidence/rex-adoption-20261104/verify-win/integrations-idempotent.utf8.log"
+        },
+        {
+          "scenario": "FAILURE",
+          "observable": "USER_EDIT_PRESERVED=True",
+          "artifact": ".omo/evidence/rex-adoption-20261104/verify-win/integrations-uninstall.utf8.log"
+        }
+      ],
+      "failure": {
+        "details": ".omo/evidence/rex-adoption-20261104/verify-win/failures.json",
+        "repair": "See SUMMARY.md; no product edits."
+      }
+    },
+    "3": {
+      "status": "N/A",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "4": {
+      "status": "N/A",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "5": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "7": {
+      "status": "N/A",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "8": {
+      "status": "BLOCKED",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "9": {
+      "status": "FAIL",
+      "acceptance": [],
+      "qa": [],
+      "failure": {
+        "details": ".omo/evidence/rex-adoption-20261104/verify-win/failures.json",
+        "repair": "See SUMMARY.md; no product edits."
+      }
+    },
+    "10": {
+      "status": "FAIL",
+      "acceptance": [],
+      "qa": [],
+      "failure": {
+        "details": ".omo/evidence/rex-adoption-20261104/verify-win/failures.json",
+        "repair": "See SUMMARY.md; no product edits."
+      }
+    },
+    "11": {
+      "status": "FAIL",
+      "acceptance": [],
+      "qa": [],
+      "failure": {
+        "details": ".omo/evidence/rex-adoption-20261104/verify-win/failures.json",
+        "repair": "See SUMMARY.md; no product edits."
+      }
+    },
+    "12": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "3 dev pipes; agents list succeeds without daemon.port; owner registerWorkspace refused: exited ancestor PID 932",
+          "artifact": ".omo/evidence/rex-adoption-20261104/verify-win/pipe-final-qa.log"
+        },
+        {
+          "scenario": "FAILURE",
+          "observable": "Restricted token/pipe refusal tests pass; old-client real TCP fallback not exercised",
+          "artifact": ".omo/evidence/rex-adoption-20261104/verify-win/pipe-focused.utf8.log"
+        }
+      ],
+      "failure": null
+    },
+    "14": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "16": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "17": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "18": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "ferryx_lib-ea620c3a1cf0c11a.exe --nocapture ipc::updater::",
+          "exit": 0,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/updater-focused.utf8.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "cmd_updater_check reports signed halt/floor codes",
+          "artifact": ".omo/evidence/rex-adoption-20261104/verify-win/updater-focused.utf8.log"
+        },
+        {
+          "scenario": "FAILURE",
+          "observable": "modified manifest unverified; downgrade offer=None",
+          "artifact": ".omo/evidence/rex-adoption-20261104/verify-win/updater-focused.utf8.log"
+        }
+      ],
+      "failure": null
+    },
+    "20": {
+      "status": "BLOCKED",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "21": {
+      "status": "BLOCKED",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "22": {
+      "status": "N/A",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "23": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "24": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "26": {
+      "status": "BLOCKED",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "28": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "29": {
+      "status": "N/A",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "30": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": ".omo/evidence/rex-adoption-20261104/verify-win/lib-test-corrected.utf8.log"
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "details": ".omo/evidence/rex-adoption-20261104/verify-win/failures.json",
+        "repair": "See SUMMARY.md; no product edits."
+      }
+    }
+  },
+  "finals": {
+    "F3(b)": "PASS: headless CLI/relay/account build exit 0",
+    "F3(c)": "BLOCKED: MahoRD connection timeout; no package install or activation proof",
+    "F3(e)": "FAIL: release ffmpeg build script STATUS_STACK_OVERFLOW, exit 101",
+    "F2 Windows full library": "FAIL: 5068 passed, 52 failed, 10 ignored",
+    "F4": "NOT APPROVED; see SUMMARY.md for fidelity blockers"
+  },
+  "regressions": [
+    "New layout/handover/plugin/opt-out tests fail; details in failures.json",
+    "Two candidate failures pass baseline: diagnostics count and inventory event order; parallel-state cause not established",
+    "Owner pipe ancestry rejects SSH owner workspace registration"
+  ],
+  "baseline_failures": [
+    "agent_history::tests::antigravity_lists_from_the_summary_index_and_reads_the_transcript",
+    "agent_history::tests::antigravity_reads_planner_responses_as_assistant_and_tool_records",
+    "agent_history::tests::cline_reads_the_sibling_messages_document_and_unwraps_user_input",
+    "agent_history::tests::droid_lists_sessions_with_turns_and_reports_read_as_unsettled",
+    "agent_history::tests::grok_rejoins_message_chunks_from_the_update_stream",
+    "agent_history::tests::older_message_search_and_exact_identity",
+    "agent_history::tests::senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc",
+    "cli::supervisor_goal::tests::setup_remote_form_maps_a_paired_host_lexically",
+    "cli::supervisor_goal::tests::the_setup_cli_needs_every_flag_once_and_an_absolute_dir",
+    "daemon::agent_extension::p09_tests::disabled_integration_skips_the_hook_install",
+    "ipc::file_preview::file_preview_tests::not_a_directory_is_a_missing_file_not_a_permission_problem",
+    "native_terminal::platform::windows::pointer_tests::presented_terminal_yields_cross_thread_pointer_hit_testing_to_input",
+    "paired_host::file_read::tests::resolve_host_path_expands_home",
+    "paired_host::file_read::tests::resolve_host_path_joins_relative_onto_cwd_then_session",
+    "paired_host::file_read::tests::resolve_host_path_keeps_absolute_and_normalizes_dot_dot",
+    "remote::reference_chat::prompt_codex::tests::a_free_form_answer_line_holding_text_takes_no_custom_answer",
+    "remote::reference_chat::prompt_codex::tests::the_prompt_id_names_the_content_and_not_the_cursor",
+    "remote::reference_chat::route_tests::a_stale_staging_dir_in_a_cwd_the_pane_left_is_swept",
+    "remote::reference_chat::route_tests::staged_preview_keeps_original_bytes_after_parent_replacement",
+    "remote::repo_discovery::tests::hidden_repositories_need_include_hidden",
+    "remote::repo_discovery::tests::http_route_lists_repositories_and_capability_needs_machine_control",
+    "remote::repo_discovery::tests::registrations_join_by_canonical_root",
+    "remote::repo_discovery::tests::root_that_is_a_repository_returns_only_itself",
+    "remote::repo_discovery::tests::walk_applies_depth_ignore_symlink_and_nesting_rules",
+    "remote::server::file_read_session_base_tests::live_shell_cwd_wins_over_the_desktop_supplied_cwd",
+    "remote::server::tests::test_machine_terminal_client_close_acknowledges_and_preserves_pty",
+    "ssh::bridge::tests::ssh_bridge_dag_frame_ordering_requires_contiguity_or_resync",
+    "ssh::bridge::tests::ssh_bridge_dag_subscription_accepts_closed_frame_with_same_sequence",
+    "ssh::bridge::tests::ssh_bridge_dag_subscription_drop_releases_helper_and_keeps_pty_alive",
+    "ssh::bridge::tests::ssh_bridge_dag_subscription_rejects_unregistered_project",
+    "ssh::bridge::tests::ssh_bridge_dag_subscription_released_after_eof_during_blocked_next",
+    "ssh::bridge::tests::ssh_bridge_dag_subscription_streams_inventory_updates_and_cancels",
+    "ssh::bridge::tests::ssh_bridge_handshake_mismatch_returns_connection_closed",
+    "ssh::bridge::tests::ssh_bridge_handshake_verifies_host_and_epoch",
+    "ssh::bridge::tests::ssh_bridge_independent_read_does_not_block_control",
+    "ssh::bridge::tests::ssh_bridge_lifecycle_poison_on_timeout_cancel_and_eof_reaping",
+    "ssh::bridge::tests::ssh_bridge_live_loopback_openssh_connection",
+    "ssh::bridge::tests::ssh_bridge_single_attempt_write_does_not_queue",
+    "ssh::bridge::tests::ssh_bridge_spawn_retry_requires_matching_client_request_id",
+    "ssh::bridge::tests::ssh_bridge_target_expired_fails_explicitly_never_spawns",
+    "ssh::bridge::tests::ssh_bridge_target_mismatch_on_describe_or_read_is_rejected",
+    "ssh::bridge::tests::test_ssh_bridge_dag_inventory_and_poll",
+    "ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match"
+  ],
+  "blocked": [
+    "MSIX install/updater externally managed/deep links",
+    "Plugin GUI isolation and drag masking",
+    "Windows idle restart recovery",
+    "T26 two-host and UDP-blocked QA",
+    "Full baseline completion; 43 matching failures reproduced, others explicitly classified"
+  ],
+  "cleanup": {
+    "ci_refs_deleted": "N/A none pushed",
+    "remote_worktrees_removed": true,
+    "hosts_released": true
+  }
+}

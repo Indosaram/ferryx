@@ -1,0 +1,43 @@
+cargo :     Blocking waiting for file lock on build directory
+위치 C:\Users\sook\ferryx-wt\rex-win-bd4-gates.ps1:21 문자:12
++ Run added {cargo test --manifest-path src-tauri/Cargo.toml --locked - ...
++            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...build directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling bindgen v0.73.2
+   Compiling ffmpeg-sys-next v9.0.1
+   Compiling ffmpeg-next v9.0.0
+   Compiling ferryx-rd-decode v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-rd\ferryx-rd-decode
+)
+   Compiling ferryx-rd-app v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-rd\ferryx-rd-app)
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12m 14s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-fe3e171e148fc8c9.exe)
+
+running 21 tests
+test daemon::supervisor_peer::tests::a_reparented_pane_process_is_still_refused_by_session_or_terminal ... ok
+test daemon::supervisor_peer::tests::a_reused_ancestor_pid_is_not_a_pane ... ok
+test daemon::supervisor_peer::tests::exited_windows_ssh_ancestor_needs_positive_pre_pane_identity ... ok
+test daemon::supervisor_peer::tests::a_reused_pid_and_an_ancestor_that_vanishes_mid_walk_are_refused ... ok
+test daemon::supervisor_peer::tests::a_token_authenticated_peer_is_refused ... ok
+test daemon::supervisor_peer::tests::newer_intermediate_parent_cannot_hide_live_restricted_ancestor ... ok
+test daemon::supervisor_peer::tests::the_accept_time_chain_is_reused_and_the_peer_re_read ... ok
+test daemon::supervisor_peer::tests::a_pane_descendant_is_refused_and_an_outside_process_is_not ... ok
+test daemon::supervisor_peer::tests::classify_returns_the_session_the_peer_descends_from ... ok
+test daemon::supervisor_peer::tests::exited_ancestor_owner_recovery_uses_real_classifier_without_promoting_panes ... ok
+test daemon::supervisor_peer::tests::unknown_or_unreadable_peers_are_refused ... ok
+test daemon::supervisor_peer::tests::missing_restricted_ancestor_blocks_even_pre_cutoff_owner_evidence ... ok
+test native_terminal::osc_effects::tests::desktop_engine_does_not_handle_effects ... ok
+test native_terminal::osc_effects::tests::notification_rate_limit_and_owned_copy ... ok
+test native_terminal::osc_effects::tests::shell_host_file_uri_is_a_drive_path_not_unc ... ok
+test native_terminal::osc_effects::tests::windows_pwd_callback_and_muted_seed_keep_absolute_drive_path ... ok
+test daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases ... ok
+test native_terminal::osc_effects::tests::sanitizes_controls_bidi_and_character_bound ... ok
+test native_terminal::osc_effects::tests::seed_replay_never_delivers_effects_but_preserves_pwd ... ok
+test native_terminal::osc_effects::tests::osc_expectation_table ... ok
+test native_terminal::osc_effects::tests::output_hub_checks_local_ownership_before_clipboard_delivery ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 5132 filtered out; finished in 0.59s
+
+EXIT=0

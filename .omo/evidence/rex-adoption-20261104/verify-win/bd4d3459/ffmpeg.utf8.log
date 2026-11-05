@@ -1,0 +1,3 @@
+ffmpeg-lgpl-9.0.2-x86_64-pc-windows-msvc.tar.gz: sha256 matches pin
+installed FFmpeg SDK ffmpeg-sdk-9.0.2-1 (x86_64-pc-windows-msvc) into C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\src-tauri\resources\ffmpeg\sdk
+EXIT=0

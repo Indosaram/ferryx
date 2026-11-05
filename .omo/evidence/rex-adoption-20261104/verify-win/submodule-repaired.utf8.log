@@ -1,0 +1,12 @@
+git : Cloning into 'C:/Users/sook/ferryx-wt/rex-verify-win-20261104/src-tauri/vendor/ghostty'...
+위치 C:\Users\sook\ferryx-wt\.tmp-out\rex-win-setup.ps1:4 문자:1
++ git -c protocol.file.allow=always submodule update --init src-tauri/v ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Cloning into 'C...dor/ghostty'...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+done.
+From C:\Users\sook\ferryx\.git\modules\src-tauri\vendor\ghostty
+ * branch                83fb95624b0439ee660c2679b43b38c8b63769cd -> FETCH_HEAD
+Submodule path 'src-tauri/vendor/ghostty': checked out '83fb95624b0439ee660c2679b43b38c8b63769cd'
+EXIT=0

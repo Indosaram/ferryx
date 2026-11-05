@@ -1,0 +1,8 @@
+
+running 2 tests
+test ipc::debug::pane_liveness_diagnostics_tests::pane_liveness_diagnostics_entry_size_bound ... ok
+test daemon::session_service::machine_tests::desktop_inventory_isolated_parent ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4957 filtered out; finished in 14.33s
+
+EXIT=0

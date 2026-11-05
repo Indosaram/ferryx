@@ -1,0 +1,58 @@
+
+running 22 tests
+test ipc::updater::tests::managed_externally_returns_typed_error_without_touching_plugin ... ok
+test ipc::updater::tests::committed_updater_pubkey_decodes ... ok
+test ipc::updater::tests::manifest_policy_rejects_malformed_fields ... ok
+test ipc::updater::tests::signature_url_appends_minisig_suffix ... ok
+test ipc::updater::tests::slow_progress_never_stalls ... ok
+test ipc::updater::tests::stall_fires_after_no_progress_window ... ok
+test ipc::updater::tests::cancel_stops_before_install ... ok
+test ipc::updater::tests::completed_download_yields_bytes ... ok
+test ipc::updater::tests::test_distribution_channel_non_windows ... ok
+test ipc::updater::tests::stall_fires_when_headers_never_arrive ... ok
+test ipc::updater::tests::test_managed_externally_for_linux_packages ... ok
+test ipc::updater::tests::version_mismatch_is_refused ... ok
+test ipc::updater::tests::test_channel_endpoints ... ok
+test ipc::updater::tests::test_distribution_channel_windows ... ok
+test ipc::updater::tests::externally_managed_install_never_fetches_the_manifest ... ok
+tampered manifest -> Err("\"UPDATE_MANIFEST_UNVERIFIED\"")
+halt manifest -> Err("\"UPDATE_HALTED\"")
+below-floor manifest -> Err("\"UPDATE_BELOW_FLOOR\"")
+QA cmd_updater_check halt: code="UPDATE_HALTED"
+test ipc::updater::tests::halt_switch_refuses_update ... ok
+test ipc::updater::tests::offer_below_minimum_version_is_refused ... ok
+ferryx_lib-ea620c3a1cf0c11a.exe : [[33mWARNING[0m] The updater endpoint "http://127.0.0.1:63093/latest.json" doesn't 
+use `https` protocol. This is allowed in development but will fail in release builds.
+위치 C:\Users\sook\ferryx-wt\.tmp-out\rex-win-focused.ps1:8 문자:1
++ & $test --nocapture ipc::updater:: *> "$logs\updater-focused.log"
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([[33mWARNING[...release builds.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[[33mWARNING[0m] if this is a desired behavior, you can enable `dangerousInsecureTransportProtocol` in the plugin con
+figuration
+[[33mWARNING[0m] The updater endpoint "http://127.0.0.1:63098/latest.json" doesn't use `https` protocol. This is allo
+wed in development but will fail in release builds.
+[[33mWARNING[0m] if this is a desired behavior, you can enable `dangerousInsecureTransportProtocol` in the plugin con
+figuration
+[[33mWARNING[0m] The updater endpoint "http://127.0.0.1:63096/latest.json" doesn't use `https` protocol. This is allo
+wed in development but will fail in release builds.
+[[33mWARNING[0m] if this is a desired behavior, you can enable `dangerousInsecureTransportProtocol` in the plugin con
+figuration
+QA cmd_updater_check floor: code="UPDATE_BELOW_FLOOR"
+QA cmd_updater_check unsigned: code="UPDATE_MANIFEST_UNVERIFIED"
+test ipc::updater::tests::bad_or_missing_signature_is_unverified ... ok
+[[33mWARNING[0m] The updater endpoint "http://127.0.0.1:63120/latest.json" doesn't use `https` protocol. This is allo
+wed in development but will fail in release builds.
+[[33mWARNING[0m] if this is a desired behavior, you can enable `dangerousInsecureTransportProtocol` in the plugin con
+figuration
+1.0.0 manifest to a 2.0.0 client -> Ok(None)
+test ipc::updater::tests::older_signed_manifest_never_downgrades ... ok
+QA cmd_updater_check downgrade: offer=None
+test ipc::updater::tests::manifest_swapped_after_verification_is_unverified ... ok
+test ipc::updater::tests::signed_manifest_offers_newer_version ... ok
+test ipc::updater::tests::qa_cmd_updater_check_reports_reason_codes ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 5108 filtered out; finished in 0.08s
+
+EXIT=0

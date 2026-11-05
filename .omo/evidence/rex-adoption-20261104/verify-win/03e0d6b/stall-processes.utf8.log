@@ -1,0 +1,19 @@
+
+
+ProcessId       : 31512
+ParentProcessId : 22988
+ExecutablePath  : C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe" test --manifest-path s
+                  rc-tauri/Cargo.toml --locked --lib -- daemon::session_service::machine_tests::desktop_inventory_isola
+                  ted_parent remote::reference_chat::route_tests::a_stage_for_an_ssh_remote_pane_is_refused_and_writes_
+                  nothing_locally
+
+ProcessId       : 17444
+ParentProcessId : 31512
+ExecutablePath  : C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-4933797226d2b7dc.exe
+CommandLine     : "C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-4933797226d2b7dc.exe" daemon::session_service:
+                  :machine_tests::desktop_inventory_isolated_parent remote::reference_chat::route_tests::a_stage_for_an
+                  _ssh_remote_pane_is_refused_and_writes_nothing_locally
+
+
+

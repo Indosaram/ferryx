@@ -1,0 +1,3 @@
+error: Cannot find module 'C:/Users/sook/ferryx-wt/f3-win-launch-20261105/scripts/qa/fixtures/native-configured-adapters.mjs' from 'C:\Users\sook\ferryx-wt\rex-win-bd4-native-probe.mjs'
+
+Bun v1.4.3 (Windows x64)

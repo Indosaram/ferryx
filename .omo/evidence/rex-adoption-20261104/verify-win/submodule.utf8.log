@@ -1,0 +1,19 @@
+git : Cloning into 'C:/Users/sook/ferryx-wt/rex-verify-win-20261104/src-tauri/vendor/ghostty'...
+위치 C:\Users\sook\ferryx-wt\.tmp-out\rex-win-build.ps1:17 문자:17
++ ... submodule { git submodule update --init --depth 1 src-tauri/vendor/gh ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Cloning into 'C...dor/ghostty'...:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: --depth is ignored in local clones; use file:// instead.
+fatal: transport 'file' not allowed
+fatal: clone of 'C:\Users\sook\ferryx\.git\modules\src-tauri\vendor\ghostty' into submodule path 'C:/Users/sook/ferryx-
+wt/rex-verify-win-20261104/src-tauri/vendor/ghostty' failed
+Failed to clone 'src-tauri/vendor/ghostty'. Retry scheduled
+Cloning into 'C:/Users/sook/ferryx-wt/rex-verify-win-20261104/src-tauri/vendor/ghostty'...
+warning: --depth is ignored in local clones; use file:// instead.
+fatal: transport 'file' not allowed
+fatal: clone of 'C:\Users\sook\ferryx\.git\modules\src-tauri\vendor\ghostty' into submodule path 'C:/Users/sook/ferryx-
+wt/rex-verify-win-20261104/src-tauri/vendor/ghostty' failed
+Failed to clone 'src-tauri/vendor/ghostty' a second time, aborting
+EXIT=1

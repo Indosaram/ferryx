@@ -1,0 +1,14 @@
+BASELINE_REMOVE_EXIT=0
+CANDIDATE_REMOVE_EXIT=0
+PRUNE_EXIT=0
+CANDIDATE_EXISTS=False
+BASELINE_EXISTS=False
+NO_REMOTE_CI_REFS_CREATED; shared .target retained by policy; no per-worktree target created
+C:/Users/sook/ferryx                                824b84e9 [main]
+C:/Users/sook/ferryx-releases/store-20261024/source a1019e93 (detached HEAD)
+C:/Users/sook/ferryx-wt/f3-ocr-20261105             afec7d05 (detached HEAD)
+C:/Users/sook/ferryx-wt/f3dd-20261105               4c2da010 (detached HEAD)
+C:/Users/sook/ferryx-wt/f3prod-20261105             468fe3b6 (detached HEAD)
+C:/Users/sook/ferryx-wt/f3qh-20261105               47e79e1e (detached HEAD)
+C:/Users/sook/ferryx-wt/supv-f3-final               37db7955 (detached HEAD)
+HOST_RELEASE_EXIT=0

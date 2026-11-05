@@ -1,0 +1,71 @@
+cargo :    Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\src-tauri)
+위치 C:\Users\sook\ferryx-wt\rex-win-r2.ps1:13 문자:1
++ cargo test --manifest-path src-tauri/Cargo.toml --locked --lib -- dae ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling fe...422b\src-tauri):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 02s
+     Running unittests src\lib.rs (C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-343f9c021bb9f724.exe)
+
+running 24 tests
+test daemon::plugins::tests::capabilities_and_grants_are_both_required ... ok
+{}
+test daemon::plugins::tests::disabled_plugin_never_spawned ... ok
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+{}
+test daemon::plugins::runner::tests::ambient_imports_cannot_instantiate_even_in_start_function ... ok
+test daemon::plugins::tests::global_view_count_and_bytes_bound_all_plugins_and_reuse_freed_capacity ... ok
+test daemon::plugins::runner::tests::host_call_budget_is_enforced_with_real_replies ... ok
+test daemon::plugins::tests::missing_module_never_starts_runner ... ok
+test daemon::plugins::tests::render_permission_is_identity_local_and_public_mutations_are_admin_gated ... ok
+test daemon::plugins::tests::plugin_request_schema_uses_the_real_daemon_encoding ... ok
+test daemon::plugins::tests::ungranted_write_is_forbidden ... ok
+test daemon::plugins::tests::view_budgets_reject_novel_keys_and_account_for_replacement_and_cleanup ... ok
+test daemon::plugins::tests::registry_runner_disable_clears_retained_views_before_returning ... ok
+test daemon::plugins::tests::changed_bytes_require_fresh_content_approval_even_at_same_path ... ok
+test daemon::plugins::tests::approvals_survive_reload_and_reject_changed_module_identity ... ok
+test daemon::plugins::tests::wasm_runner_child ... ok
+test daemon::plugins::tests::disable_frees_plugin_views_and_global_capacity ... ok
+test daemon::plugins::tests::native_manifests_and_legacy_approvals_never_migrate_implicitly ... ok
+test daemon::plugins::tests::disable_reaps_running_plugin ... ok
+test daemon::plugins::tests::registry_restores_windows_idle_restart_consent_and_disable_persists ... ok
+test daemon::plugins::tests::reviewed_identity_is_required_and_manifest_replacement_never_gains_consent ... ok
+test daemon::plugins::tests::wasm_render_bridge_dispatches_only_approved_operation_and_disable_reaps ... ok
+test daemon::plugins::tests::wasm_bridge_novel_view_exhaustion_rejects_without_mutation ... ok
+test daemon::plugins::tests::plugin_content_round_trips_for_layout_recovery ... ok
+test daemon::plugins::runner::tests::guest_fuel_memory_and_pointer_limits_trap ... ok
+test daemon::plugins::tests::crashed_process_restarts_at_most_three_times ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 5125 filtered out; finished in 7.40s
+
+EXIT=0

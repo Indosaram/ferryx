@@ -1,0 +1,100 @@
+
+running 70 tests
+test daemon::agent_extension::p09_tests::an_opencode_provider_session_resolves_to_a_resume_plan ... ok
+test daemon::agent_extension::p09_tests::an_opencode_install_that_is_not_there_is_skipped ... ok
+test daemon::agent_extension::p09_tests::remove_never_deletes_directories ... ok
+test daemon::agent_extension::p09_tests::malformed_setting_file_defaults_to_enabled ... ok
+test daemon::agent_extension::p09_tests::pi_installs_into_the_senpi_agent_dir ... ok
+test daemon::agent_extension::p09_tests::remove_keeps_user_modified_file_and_reports_path ... ok
+test daemon::agent_extension::p09_tests::pi_honours_senpi_coding_agent_dir ... ok
+test daemon::agent_extension::p09_tests::the_opencode_plugin_maps_the_measured_events ... ok
+test daemon::agent_extension::p09_tests::the_opencode_plugin_follows_the_xdg_config_home ... ok
+test daemon::agent_extension::p09_tests::omo_and_pi_sharing_one_dir_install_once_and_resolve_identity_at_runtime ... ok
+test daemon::agent_extension::p09_tests::remove_deletes_files_matching_any_agent_payload ... ok
+test daemon::agent_extension::p09_tests::setting_file_respects_ferryx_data_dir ... ok
+test daemon::agent_extension::p09_tests::disabled_integration_skips_boot_install ... ok
+test daemon::agent_extension::p09_tests::removal_covers_the_senpi_dir_byte_exactly ... ok
+test daemon::agent_extension::p09_tests::upstream_pi_and_senpi_are_both_installed ... ok
+test daemon::agent_extension::p09_tests::the_opencode_plugin_is_installed_where_opencode_loads_it ... ok
+test daemon::handover::spawn_owner_tests::control_retire_and_shutdown_on_draining_daemon_change_nothing ... ok
+test daemon::agent_extension::p09_tests::disabled_integration_skips_the_hook_install ... ok
+test daemon::handover::spawn_owner_tests::a_failed_decision_write_resumes_renewing_and_an_abort_hands_nothing_over ... ok
+test daemon::handover::spawn_owner_tests::an_abort_decision_leaves_the_lease_client_renewing ... ok
+test daemon::handover::spawn_owner_tests::an_abort_record_carries_no_pane_grants ... ok
+test daemon::handover::spawn_owner_tests::control_retirement_waits_for_in_flight_request ... ok
+test daemon::handover::spawn_owner_tests::control_shutdown_first_makes_the_next_spawn_daemon_retiring ... ok
+test daemon::handover::spawn_owner_tests::control_shutdown_stale_count_on_retiring_daemon_stays_retiring ... ok
+test daemon::handover::spawn_owner_tests::control_shutdown_with_wrong_count_restores_active ... ok
+test daemon::handover::spawn_owner_tests::control_retire_when_idle_waits_for_a_parked_spawn ... ok
+test daemon::handover::spawn_owner_tests::control_shutdown_while_a_spawn_is_parked_answers_spawn_in_flight ... ok
+test daemon::handover::spawn_owner_tests::only_a_missing_record_after_a_failed_decision_write_resumes_renewing ... ok
+test daemon::handover::spawn_owner_tests::commit_waits_for_a_barrier_parked_request_before_writing_the_decision ... ok
+test daemon::handover::spawn_owner_tests::local_split_reliability_handover_prepared_owner_and_abort ... ok
+test daemon::handover::spawn_owner_tests::generated_legacy_socket_paths_are_unique_and_parseable_for_predecessor_pid ... ok
+test daemon::agent_extension::p09_tests::per_agent_opt_outs_survive_the_boot_install ... ok
+test daemon::handover::spawn_owner_tests::committed_handover_ends_every_gated_accept_loop ... ok
+test daemon::handover::spawn_owner_tests::decision_write_failure_reopens_the_gate_and_keeps_serving ... ok
+test daemon::agent_extension::p09_tests::removal_reports_settings_files_it_cleaned ... ok
+test daemon::agent_extension::p09_tests::userprofile_only_installs_existing_agent_extensions ... ok
+test daemon::handover::spawn_owner_tests::only_a_retired_record_hands_over_its_supervisor_lease ... ok
+test daemon::handover::spawn_owner_tests::plugins_approval_survives_handover_without_killing_predecessor ... ok
+test daemon::handover::spawn_owner_tests::the_commit_decision_hands_the_supervisor_lease_to_the_successor ... ok
+test daemon::handover::spawn_owner_tests::size_ownership_survives_committed_handover ... ok
+test daemon::handover::spawn_owner_tests::pane_grants_survive_handover_in_the_decision_record ... ok
+test daemon::layout::tests::pane_ownership_roundtrips ... ok
+test daemon::layout::tests::replacement_and_collinear_seams_match_ui ... ok
+test daemon::layout::tests::invalid_intent_is_transactional ... ok
+test daemon::layout::tests::conflict_rebase_and_idle_restart ... ok
+test daemon::layout::detached::restart_and_handover_roundtrip ... ok
+test daemon::layout::detached::parked_scopes_and_other_windows_are_attached ... ok
+test daemon::layout::detached::split_attach_and_detach_collapse_only_the_target_leaf ... ok
+test daemon::layout::tests::content_updates_tab_transplant_and_expansion ... ok
+test daemon::layout_migration::tests::historical_visual_ids_are_scoped_by_workspace_worktree_and_tab ... ok
+test daemon::layout_migration::tests::active_checkout_and_nested_surface_metadata_are_migrated ... ok
+ferryx_lib-343f9c021bb9f724.exe : 
+위치 C:\Users\sook\ferryx-wt\rex-win-r2-original.ps1:4 문자:1
++ & C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-343f9c021bb9f ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+thread 'daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases' (22312) pan
+icked at src\daemon\supervisor_peer.rs:648:9:
+assertion failed: classify_with_cutoff(descendant, &mut None, &panes, &procs,
+        Some(200)).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases ... FAILED
+test ipc::debug::pane_liveness_diagnostics_tests::pane_liveness_diagnostics_entry_size_bound ... ok
+test ipc::debug::pane_liveness_diagnostics_tests::pane_liveness_diagnostics_held_writer_precedence ... ok
+test ipc::debug::pane_liveness_diagnostics_tests::pane_liveness_diagnostics_prearmed_held_reader_barrier ... ok
+test ipc::debug::pane_liveness_diagnostics_tests::pane_liveness_diagnostics_release_allowlist_filtering ... ok
+test ipc::debug::pane_liveness_diagnostics_tests::pane_liveness_diagnostics_full_wire_envelope_codec ... ok
+test ipc::debug::pane_liveness_diagnostics_tests::pane_liveness_diagnostics_sanitization_removes_sensitive_payloads ... ok
+test daemon::layout::tests::scoped_transfer_survives_restart_and_handover ... ok
+test daemon::layout::foreign_snapshot::foreign_disk_and_adopt_never_replace_local_tree ... ok
+test ipc::debug::pane_liveness_diagnostics_tests::pane_liveness_diagnostics_sink_concurrency_and_drop_accounting ... ok
+test daemon::layout::foreign_snapshot::newer_foreign_revision_is_offer_only_and_import_adds_window ... ok
+
+thread 'native_terminal::osc_effects::tests::osc_expectation_table' (17148) panicked at src\native_terminal\osc_effects
+.rs:214:17:
+assertion `left == right` failed: cwd
+  left: None
+ right: Some("C:\\Temp")
+test native_terminal::osc_effects::tests::osc_expectation_table ... FAILED
+test daemon::layout::foreign_snapshot::offers_and_placeholders_survive_restart_and_handover ... ok
+test daemon::handover::spawn_owner_tests::layout_uses_the_committed_decision_not_shared_disk ... ok
+test daemon::layout::tests::split_move_close_preserves_backend_identity ... ok
+test daemon::layout_migration::tests::parked_workspace_and_worktree_layouts_survive_migration_and_restart ... ok
+test daemon::layout_migration::tests::three_saved_session_shapes_and_corruption_recovery ... ok
+test daemon::layout::tests::ui_reducer_golden_fixtures ... ok
+test daemon::layout::tests::size_bound ... ok
+
+failures:
+
+failures:
+    daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases
+    native_terminal::osc_effects::tests::osc_expectation_table
+
+test result: FAILED. 68 passed; 2 failed; 0 ignored; 0 measured; 5079 filtered out; finished in 22.44s
+
+EXIT=101
