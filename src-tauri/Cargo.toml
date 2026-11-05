@@ -423,6 +423,12 @@ opt-level = 3
 [profile.dev.package.bindgen]
 opt-level = 3
 
+# Cargo compiles release build dependencies at opt-level=0 unless explicitly
+# overridden too. The dev override does not apply to ffmpeg-sys-next's release
+# build-script process (Windows STATUS_STACK_OVERFLOW).
+[profile.release.package.bindgen]
+opt-level = 3
+
 # The remote desktop viewer (default feature `remote-desktop`) converts every decoded NV12 frame to RGB
 # and encodes it as JPEG. Unoptimized, that costs over a second per desktop-sized frame, so a
 # dev build presents about one frame per second. Optimizing just these packages keeps the

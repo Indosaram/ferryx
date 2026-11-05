@@ -573,6 +573,10 @@ impl NativeTerminal {
         super::vt_format::reconstruction_bytes(self.handle)
     }
 
+    pub(crate) fn reconstruction_bytes_with_scrollback(&self, lines: usize) -> Result<Vec<u8>, NativeTerminalError> {
+        super::vt_format::reconstruction_bytes_with_scrollback(self.handle, lines)
+    }
+
     /// Plain text of one grid row in screen coordinates (scrollback first).
     pub fn screen_row_text(&self, row: usize) -> Result<String, NativeTerminalError> {
         let row = u32::try_from(row).map_err(|_| NativeTerminalError::LimitExceeded)?;

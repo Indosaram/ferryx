@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createLayoutState, layoutReducer, toPaneContent } from "../state/layout";
 import type { WorkspaceState } from "../state/workspaceStore";
-import { hydrateLayout, intentForAction, layoutScope, rehydrateWorkspace, LayoutSync, type DaemonLayout, type LayoutReply, type LayoutTransport } from "./layoutSync";
+import { hydrateLayout, intentForAction, isLayoutIntentAction, layoutScope, rehydrateWorkspace, LayoutSync, type DaemonLayout, type LayoutReply, type LayoutTransport } from "./layoutSync";
 import { tabTransferIntent } from "../state/windowMove";
 import { closeTerminal } from "./tauri";
 import { withTimeout } from "./withTimeout";
@@ -25,6 +25,31 @@ function ready(layout: DaemonLayout): LayoutReply {
 }
 
 describe("daemon layout revisions", () => {
+  it("uses the first acknowledged pane when a legacy layout has no active pane", async () => {
+    const sync = new LayoutSync({ get: async () => ready(daemon()), apply: vi.fn() });
+    await sync.refresh();
+    const state = workspace();
+    state.layout = hydrateLayout(sync.current()!, state);
+    state.layout.layoutsByTabId.tab.activeLeafId = null;
+    const action = { type: "UPDATE_BROWSER_TAB" as const, tabId: "tab", updates: { url: "https://example.org" } };
+    expect(intentForAction(sync, action, state, state)).toEqual({ type: "SCOPED", scope: layoutScope(state),
+      intent: { type: "UPDATE_BROWSER_TAB", tabId: "tab", nodeId: 1, url: "https://example.org" } });
+  });
+  it("translates expansion into a scoped daemon node intent and restores it", async () => {
+    const sync = new LayoutSync({ get: async () => ready(daemon()), apply: vi.fn() });
+    await sync.refresh();
+    const state = workspace();
+    state.layout = hydrateLayout(sync.current()!, state);
+    const leafId = state.layout.layoutsByTabId.tab.activeLeafId!;
+    const action = { type: "TOGGLE_PANE_EXPANDED" as const, tabId: "tab", leafId };
+    expect(isLayoutIntentAction(action)).toBe(true);
+    expect(intentForAction(sync, action, state, state)).toEqual({ type: "SCOPED", scope: layoutScope(state),
+      intent: { type: "TOGGLE_PANE_EXPANDED", tabId: "tab", nodeId: 1 } });
+    const saved = daemon(2);
+    saved.tabs[0].expandedNodeId = 1;
+    expect(hydrateLayout({ revision: 2, layout: saved }, state).layoutsByTabId.tab.expandedLeafId).toBe(leafId);
+    expect(rehydrateWorkspace(state, { revision: 2, layout: saved }).sessions).toBe(state.sessions);
+  });
   it("keeps foreign session ids disconnected even when a local backend id matches", () => {
     const state = workspace();
     const saved = daemon();
@@ -107,7 +132,7 @@ describe("daemon layout revisions", () => {
     before.layout = hydrateLayout(sync.current()!, before);
     const action = { type: "RENAME_TAB" as const, tabId: "tab", label: "optimistic" };
     let after = { ...before, layout: layoutReducer(before.layout, action) };
-    expect(after.layout.tabs[0].label).toBe("optimistic");
+    expect(after.layout.tabs[0]).toMatchObject({ customLabel: "optimistic" });
     await sync.send(() => intentForAction(sync, action, before, after), () => {
       after = { ...after, layout: hydrateLayout(sync.current()!, after) };
     });

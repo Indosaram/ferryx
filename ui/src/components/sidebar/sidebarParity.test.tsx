@@ -56,6 +56,7 @@ const DESKTOP_ONLY_CONTROLS: readonly { readonly role: string; readonly name: Re
   { role: "button", name: /^Add project$/ },
   { role: "button", name: /^Settings$/ },
   { role: "button", name: /^System resources$/ },
+  { role: "button", name: /^Refresh detached sessions$/ },
   { role: "separator", name: /^Resize sidebar$/ },
   { role: "button", name: /^Add worktree to / },
   { role: "button", name: /^More actions for / },

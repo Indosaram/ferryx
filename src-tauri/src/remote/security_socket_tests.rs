@@ -157,6 +157,8 @@ struct SocketBackend {
     acknowledged_outcomes: AtomicUsize,
     resize_calls: Arc<AtomicUsize>,
     restore_calls: Arc<AtomicUsize>,
+    resized: tokio::sync::Notify,
+    restored: tokio::sync::Notify,
 }
 
 impl SocketBackend {
@@ -173,6 +175,8 @@ impl SocketBackend {
             acknowledged_outcomes: AtomicUsize::new(0),
             resize_calls: Arc::new(AtomicUsize::new(0)),
             restore_calls: Arc::new(AtomicUsize::new(0)),
+            resized: tokio::sync::Notify::new(),
+            restored: tokio::sync::Notify::new(),
         })
     }
 }
@@ -267,6 +271,7 @@ impl RemoteSessionBackend for SocketBackend {
     }
     fn resize<'a>(&'a self, _: &'a str, _: u16, _: u16) -> BoxFuture<'a, Result<(), String>> {
         self.resize_calls.fetch_add(1, Ordering::SeqCst);
+        self.resized.notify_one();
         Box::pin(async { Ok(()) })
     }
     fn restore_desktop_geometry<'a>(
@@ -274,6 +279,7 @@ impl RemoteSessionBackend for SocketBackend {
         _: &'a str,
     ) -> BoxFuture<'a, Result<(), String>> {
         self.restore_calls.fetch_add(1, Ordering::SeqCst);
+        self.restored.notify_one();
         Box::pin(async { Ok(()) })
     }
     fn signal<'a>(&'a self, _: &'a str, _: TerminalSignal) -> BoxFuture<'a, Result<(), String>> {
@@ -899,7 +905,6 @@ async fn socket_close_restores_desktop_geometry_only_if_resized() {
         write_client_ws_frame(&mut socket, 8, &[]).await;
         while !matches!(frame(&mut socket).await, ServerWebSocketFrame::Close) {}
         drop(socket);
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(
         backend.restore_calls.load(Ordering::SeqCst),
@@ -911,19 +916,21 @@ async fn socket_close_restores_desktop_geometry_only_if_resized() {
     {
         let mut socket = open_ws_stream(server.addr, "/api/v1/terminal/session", Some(&token)).await;
         let _ = frame(&mut socket).await;
+        let resized = backend.resized.notified();
+        let restored = backend.restored.notified();
         write_client_ws_frame(
             &mut socket,
             1,
             br#"{"type":"resize","cols":100,"rows":30}"#,
         )
         .await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(DEADLINE, resized).await.unwrap();
         assert_eq!(backend.resize_calls.load(Ordering::SeqCst), 1);
 
         write_client_ws_frame(&mut socket, 8, &[]).await;
         while !matches!(frame(&mut socket).await, ServerWebSocketFrame::Close) {}
         drop(socket);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(DEADLINE, restored).await.unwrap();
     }
     assert_eq!(
         backend.restore_calls.load(Ordering::SeqCst),

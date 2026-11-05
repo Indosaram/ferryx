@@ -165,6 +165,8 @@ describe("terminal settings", () => {
       shell: null,
       scrollback: null,
       scrollbackCompression: null,
+      cursorStyle: null,
+      theme: null,
     });
 
     act(() => result.current.updateSettings({ fontSize: 17 }));
@@ -176,6 +178,8 @@ describe("terminal settings", () => {
         shell: null,
         scrollback: null,
         scrollbackCompression: null,
+        cursorStyle: null,
+        theme: null,
       }),
     );
 
@@ -188,6 +192,8 @@ describe("terminal settings", () => {
         shell: "pwsh",
         scrollback: null,
         scrollbackCompression: null,
+        cursorStyle: null,
+        theme: null,
       }),
     );
 
