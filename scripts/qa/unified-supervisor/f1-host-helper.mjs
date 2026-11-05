@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSy
 import { createConnection, createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gitObjectsSource } from './f1-git-objects.mjs';
 import { linuxProcess, sameProcess } from './f1-process-identity.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
@@ -209,8 +210,10 @@ export async function supervise(root, args) {
   const env = { ...process.env, F1_PID_ISOLATED: '1', F1_BUN: bun, F1_HOST_HELPER: socket,
     HOME: join(root, 'base-home'), TMPDIR: join(root, 'base-tmp'), FERRYX_DATA_DIR: join(root, 'base-data'), FERRYX_RUNTIME_DIR: join(root, 'base-runtime') };
   delete env.F1_HOST_PROC;
+  const gitObjects = gitObjectsSource();
+  if (!gitObjects.path) throw failure('GIT_OBJECTS_REFUSED', gitObjects.reason);
   const bwrapArgs = ['--unshare-pid', '--ro-bind', '/', '/', '--tmpfs', '/run', '--tmpfs', '/home/indo',
-    '--dir', '/home/indo/code/ferryx/.git', '--ro-bind', '/home/indo/code/ferryx/.git/objects', '/home/indo/code/ferryx/.git/objects',
+    '--dir', '/home/indo/code/ferryx/.git', '--ro-bind', gitObjects.path, '/home/indo/code/ferryx/.git/objects',
     '--tmpfs', '/tmp', '--dir', root, '--bind', root, root, '--ro-bind', helperDir, helperDir,
     '--dev-bind', '/dev', '/dev', '--proc', '/proc', '--chdir', root, bun, ...args];
   child = spawn('/usr/bin/bwrap', bwrapArgs, { env, stdio: 'inherit' });

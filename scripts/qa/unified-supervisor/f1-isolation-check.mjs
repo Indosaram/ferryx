@@ -18,6 +18,7 @@ import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtemp
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { gitObjectsSource } from './f1-git-objects.mjs';
 import { fleetTeardownClean, linuxProcess, paneTeardownState, sameProcess } from './f1-process-identity.mjs';
 const SELF = fileURLToPath(import.meta.url);
 const QA_DIR = dirname(SELF);
@@ -201,12 +202,13 @@ export async function f1IsolationChecks(check, stateRoot) {
     check('f1-isolation-integration-linux-only', true, { skipped: true, reason: 'PID-namespace isolation integration needs Linux bwrap', platform: process.platform });
     return;
   }
+  const gitObjects = gitObjectsSource();
   const preconditions = {
     bwrap: existsSync(BWRAP), helperSource: existsSync(HELPER), wrapperSource: existsSync(WRAPPER),
-    gitObjects: existsSync('/home/indo/code/ferryx/.git/objects'), pythonPidfd: pidfdSupport(),
+    gitObjects: gitObjects.path !== null, pythonPidfd: pidfdSupport(),
   };
   const ready = Object.values(preconditions).every(Boolean);
-  check('f1-isolation-requirements-available', ready, { required: preconditions, bwrap: BWRAP, note: 'Linux requires bwrap, the wrapper git-objects bind source, the host helper and python3 pidfd; none is skipped silently' });
+  check('f1-isolation-requirements-available', ready, { required: preconditions, gitObjects, bwrap: BWRAP, note: 'Linux requires bwrap, the wrapper git-objects bind source, the host helper and python3 pidfd; none is skipped silently' });
   if (!ready) return;
 
   mkdirSync(stateRoot, { recursive: true });
@@ -232,7 +234,7 @@ export async function f1IsolationChecks(check, stateRoot) {
     { root, bun, staged: [...staged], note: 'byte-identical copies of the current sources' });
 
   // Initial invocation: not yet isolated, so the wrapper must enter bwrap --unshare-pid.
-  const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8', USER: process.env.USER ?? 'qa', F1_ISOLATION_ROOT: root, F1_BUN: bun };
+  const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8', USER: process.env.USER ?? 'qa', F1_GIT_OBJECTS: gitObjects.path, F1_ISOLATION_ROOT: root, F1_BUN: bun };
   const hostNamespace = readlinkSync('/proc/self/ns/pid');
   let initial = null; let events = null; let parentLocal = null;
   try {

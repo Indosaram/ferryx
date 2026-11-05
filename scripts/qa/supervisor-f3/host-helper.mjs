@@ -408,18 +408,29 @@ async function processIsolation({ pid }) {
  * macOS: brings the run-owned GUI (exact pid) to the front through NSRunningApplication, which
  * needs no accessibility grant. It only ever names the pid it is given.
  */
-async function activateGui({ pid, executable }) {
-  if (!MAC) return { activated: false, reason: 'macOS only' };
-  // Only a candidate binary of this checkout is ever raised; the script re-checks the live
-  // process's executable before it activates anything.
-  if (!isAbsolute(executable ?? '') || !inside(CHECKOUT, executable)) throw fail('ACTIVATE_REFUSED', `${executable} is not a candidate binary of ${CHECKOUT}`);
-  return JSON.parse((await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', activationScript(pid, executable)])).trim());
+function guiExecutable(executable, checkout, code) {
+  const refused = () => fail(code, `${executable} is not a candidate binary of recorded checkout ${checkout}`);
+  if (!isAbsolute(executable ?? '') || !isAbsolute(checkout ?? '')) throw refused();
+  let root; let binary;
+  try {
+    root = realpathSync(checkout);
+    binary = realpathSync(executable);
+  } catch { throw refused(); }
+  if (root !== checkout || !inside(root, binary)) throw refused();
+  return binary;
 }
 
-async function guiBounds({ pid, executable }) {
-  if (!MAC) return { bounds: null, reason: 'macOS only' };
-  if (!isAbsolute(executable ?? '') || !inside(CHECKOUT, executable)) throw fail('BOUNDS_REFUSED', `${executable} is not a candidate binary of ${CHECKOUT}`);
-  return JSON.parse((await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', windowBoundsScript(pid, executable)])).trim());
+export async function activateGui({ pid, executable, checkout }, { mac = MAC, invoke = run } = {}) {
+  executable = guiExecutable(executable, checkout, 'ACTIVATE_REFUSED');
+  if (!mac) return { activated: false, reason: 'macOS only' };
+  // The script re-checks the live process's executable before it activates anything.
+  return JSON.parse((await invoke('/usr/bin/osascript', ['-l', 'JavaScript', '-e', activationScript(pid, executable)])).trim());
+}
+
+export async function guiBounds({ pid, executable, checkout }, { mac = MAC, invoke = run } = {}) {
+  executable = guiExecutable(executable, checkout, 'BOUNDS_REFUSED');
+  if (!mac) return { bounds: null, reason: 'macOS only' };
+  return JSON.parse((await invoke('/usr/bin/osascript', ['-l', 'JavaScript', '-e', windowBoundsScript(pid, executable)])).trim());
 }
 
 function prepareProject({ profile, binary, uiDist }) {

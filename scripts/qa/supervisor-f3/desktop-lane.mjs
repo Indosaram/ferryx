@@ -195,7 +195,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // every frame, so every OCR read and every click lands on the run's own window.
     const raise = async () => {
       if (host.platform !== 'darwin') return;
-      const raised = await helper.call('activate-gui', { pid: gui.pid, executable: gui.executable });
+      const raised = await helper.call('activate-gui', { pid: gui.pid, executable: gui.executable, checkout: lane.receipt.candidate.checkout });
       if (raised.activated !== true) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} was not raised: ${JSON.stringify(raised)}`);
     };
     // macOS: MahoRD types ASCII as key codes, which an input method (e.g. Korean 2-Set) composes
@@ -224,7 +224,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const windowOf = async (frameWidth) => {
       const seen = host.platform === 'win32'
         ? await agent.call('setup-target', { profile: setup.profile, gui, boundsOnly: true })
-        : await helper.call('gui-bounds', { pid: gui.pid, executable: gui.executable });
+        : await helper.call('gui-bounds', { pid: gui.pid, executable: gui.executable, checkout: lane.receipt.candidate.checkout });
       // Read right after the capture: a frame taken while another app was in front is never OCRed.
       if (!seen.bounds || seen.frontPid !== gui.pid) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} not frontmost with a window at capture: ${JSON.stringify(seen)}`);
       return windowRect(seen.bounds, seen.screen, frameWidth);
