@@ -90,6 +90,31 @@ jobs:
         run: |
           set -o pipefail
           cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked -- account::onboarding_sync_tests 2>&1 | tail -60
+      - name: Foreground command and terminal size ownership tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- terminal::foreground size_ownership remote::resize_security_tests daemon::server::session_path_tests 2>&1 | tail -60
+      - name: Terminal VT fuzz tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- terminal::fuzz_tests native_terminal::osc_effects 2>&1 | tail -60
+      - name: Screen mirror and handover wire tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- screen_mirror handover_socket handover_wire 2>&1 | tail -60
+      - name: Remote transport security tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- remote::security_headers remote::relay_server remote::security_socket_tests remote::cors 2>&1 | tail -60
+      - name: Updater floor tests
+        run: |
+          set -o pipefail
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- ipc::updater 2>&1 | tail -60
+      - name: Deep link and updater script tests
+        run: |
+          set -o pipefail
+          bun test scripts/build-latest-json.test.mjs scripts/gen-llms-txt.test.mjs 2>&1 | tail -30
+          bun ui/scripts/check-hardcoded.ts
       - name: Clippy default features
         run: |
           set -o pipefail
