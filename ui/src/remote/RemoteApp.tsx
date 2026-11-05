@@ -35,9 +35,6 @@ import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
 import { MobileSheet } from "./chat/MobileSheet";
 import { PhoneAlertsSettings } from "../components/settings/NotificationsSection";
 import { muteSessionPush, type PushRequest } from "../lib/pushSubscription";
-import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
-import { remoteInboxEntries, useRemoteInbox, type RemoteInboxTransport } from "./remoteInbox";
-import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { DecisionFocusContext, useDecisionDeepLink, type DecisionFocus } from "./decisionDeepLink";
 import { usePanelPresence } from "./panelPresence";
@@ -205,7 +202,7 @@ import { DIRECT_SIDEBAR_MACHINE, useRemoteSidebarMachines } from "./useRemoteSid
 import { directSidebarInventory } from "./directSidebarInventory";
 import { useRemoteSidebarModel } from "./useRemoteSidebarModel";
 import { AccountButton } from "./home/AccountButton";
-import { buildInboxRows, optionForSession, type InboxRow } from "./home/phoneHomeModel";
+import { optionForSession } from "./home/phoneHomeModel";
 import { PhoneHomeView } from "./home/PhoneHomeView";
 import { SupervisorSessionStrip } from "./home/SupervisorSessionStrip";
 import { usePhoneNavigation } from "./home/usePhoneNavigation";
@@ -1645,7 +1642,7 @@ export const RemoteHostConnection: React.FC<{
   }), [hostId]);
   const [model, setModel] = useState<RemoteWorkspaceModel>(EMPTY_MODEL);
   const modelRef = useRef(model);
-  /** The session the phone opened on its own from the Inbox, kept over desktop refreshes. */
+  /** The session opened on this phone, including continuation, kept over desktop refreshes. */
   const localSessionRef = useRef<{ workspaceId: string; tabId: string; terminal: RemoteTerminalItem } | null>(null);
   const modelMachineIdRef = useRef<string | null>(null);
   // Set by every user-driven selection that names a session or tab: the read-only
@@ -1749,10 +1746,6 @@ export const RemoteHostConnection: React.FC<{
   const chatDeltaCapableRef = useRef(false);
   const payloadFlightRef = useRef<string | null>(null);
   const [loadingPayloadRef, setLoadingPayloadRef] = useState<string | null>(null);
-  /** The phone Inbox's handlers for the same push, and for a reconnected events socket. */
-  const inboxPushRef = useRef<((change: AgentPromptChange) => void) | null>(null);
-  const inboxRefreshRef = useRef<(() => void) | null>(null);
-  const [inboxOpen, setInboxOpen] = useState(false);
   const chatComposerRef = useRef<MobileChatComposerHandle | null>(null);
   const [chatScreenRevision, setChatScreenRevision] = useState<string | null>(null);
   const [chatTypedAnswer, setChatTypedAnswer] = useState<ReferencePromptAnswer | null>(null);
@@ -2532,7 +2525,7 @@ export const RemoteHostConnection: React.FC<{
     const refreshVersion = workspaceRefreshVersionRef.current;
     const next = await loadWorkspace();
     if (!next || workspaceRefreshVersionRef.current !== refreshVersion) return null;
-    // A session the phone opened on its own (from the Inbox) stays on screen while it is listed:
+    // A session opened on this phone stays on screen while it is listed:
     // a desktop refresh updates the mirror around it, never takes it back.
     const local = localSessionRef.current;
     const localTab = local && next.context.workspaceId === local.workspaceId
@@ -2731,7 +2724,6 @@ export const RemoteHostConnection: React.FC<{
       const promptChange = parseAgentPromptChange(text);
       if (promptChange) {
         chatPromptPushRef.current?.(promptChange);
-        inboxPushRef.current?.(promptChange);
         if (activeTunnelConnection) supervisorBus.emit(activeTunnelConnection.machine.machineId, text);
         else supervisorBus.emit(DIRECT_SIDEBAR_MACHINE, text);
         return;
@@ -2836,8 +2828,6 @@ export const RemoteHostConnection: React.FC<{
         attempt = 0;
         setEventsDownSince(null);
         workspaceRefreshVersionRef.current += 1;
-        // Pushes missed while the socket was down: every Inbox row reads its card again.
-        inboxRefreshRef.current?.();
         if (eventsOpened) chatHistoryReconnectRef.current?.();
         eventsOpened = true;
         const pendingSelection = pendingSelectionRef.current;
@@ -3551,7 +3541,7 @@ export const RemoteHostConnection: React.FC<{
   /* The worktree drawer, host drawer and Account sheet own their entries through useOverlayHistory;
      counting them here too would push twice and pop twice on a button close. */
   const overlayOpen = !desktopSidebar
-    && (switcherOpen || menuOpen || phoneAlertsOpen || inboxOpen);
+    && (switcherOpen || menuOpen || phoneAlertsOpen);
   const overlayEntryRef = useRef(false);
   useEffect(() => {
     if (!overlayOpen) {
@@ -3572,7 +3562,6 @@ export const RemoteHostConnection: React.FC<{
       setSwitcherOpen(false);
       setMenuOpen(false);
       setPhoneAlertsOpen(false);
-      setInboxOpen(false);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -3580,7 +3569,6 @@ export const RemoteHostConnection: React.FC<{
   /** The worktree a phone tap is opening while its tunnel is acquired; shown at once on the Session screen. */
   const [phoneOpening, setPhoneOpening] = useState<string | null>(null);
   const openPhoneSessionRef = useRef<(option: AccountWorktreeOption) => void>(() => {});
-  const [unopenableRowIds, setUnopenableRowIds] = useState<ReadonlySet<string>>(() => new Set());
   const openPanelSessionRef = useRef<(sessionRef: string) => void>(() => {});
   const phoneSessionLost = phoneHome && phoneNav.screen.kind === "session" && !token && !initialAccountTarget && phoneOpening === null;
   useEffect(() => {
@@ -3759,94 +3747,6 @@ export const RemoteHostConnection: React.FC<{
     freshHistoryAnswerKey,
   );
   const followUpIdleSeq = followUpIdleClockRef.current.seq;
-
-  /* The phone's Inbox reads and answers each waiting session's card through the same prompt
-     routes, bound to that session's own target. Nothing here selects a pane on the desktop. */
-  const inboxTargetFor = useCallback(
-    (sessionId: string): ReferenceTargetRef | null => {
-      const ownerId = chatGateway?.referenceOwnerId ?? null;
-      const epoch =
-        chatGateway?.daemonEpoch ?? sessionEpochs[sessionId] ?? sessionEpochsRef.current.get(sessionId) ?? null;
-      if (!ownerId || !epoch) return null;
-      return {
-        target: {
-          hostId: chatGateway?.referenceHostId ?? REFERENCE_CHAT_DEFAULT_HOST_ID,
-          ownerId,
-          epoch,
-          backendSessionId: sessionId,
-        },
-      };
-    },
-    [chatGateway, sessionEpochs],
-  );
-  const inboxTransport = useMemo<RemoteInboxTransport>(
-    () => ({
-      read: async (sessionId, registryId) => {
-        const target = inboxTargetFor(sessionId);
-        if (!target || !token) return null;
-        const path = `${referenceChatRoute(sessionId, "prompt")}?${referenceChatReadQuery(target, registryId)}`;
-        const response = await remoteFetch(transportBaseUrl, path, { headers: { Authorization: `Bearer ${token}` } });
-        if (!response.ok) throw new ReferencePromptRefused(await readChatErrorCode(response), "prompt read failed");
-        const body: unknown = await response.json();
-        const prompt = parseChatPrompt(body);
-        return { prompt, screenRevision: prompt === null ? null : parseChatScreenRevision(body) };
-      },
-      answer: async (sessionId, registryId, payload) => {
-        const target = inboxTargetFor(sessionId);
-        if (!target || !token) return { ok: false, code: "UNAUTHORIZED", message: CHAT_NO_SESSION_WARNING };
-        const outcome = await postChatMutation(transportBaseUrl, sessionId, token, "answer", {
-          requestId: newChatRequestId(),
-          target: target.target,
-          registryId,
-          params: payload,
-        });
-        return outcome.ok ? { ok: true } : { ok: false, code: outcome.code, message: outcome.message };
-      },
-    }),
-    [inboxTargetFor, token, transportBaseUrl],
-  );
-  /* One Inbox for the whole host: every waiting or finished session of every worktree, project
-     and (account mode) machine, not only the desktop's active selection. The phone home and the
-     session sheet both render these rows. */
-  const accountInboxRows: InboxRow[] = isAccountMode
-    ? buildInboxRows({
-        options: accountDiscovery.accountOptions,
-        inventories: accountDiscovery.sessionInventories,
-        lanes: phoneSupervisor.lanes,
-      })
-    : [];
-  const inboxEntries = remoteInboxEntries({
-    model: effectiveModel,
-    machineId: activeMachineId,
-    accountRows: accountInboxRows,
-  });
-  const remoteInbox = useRemoteInbox({ entries: inboxEntries, transport: inboxTransport });
-  inboxPushRef.current = remoteInbox.push;
-  /* Opening an Inbox row moves only this phone's own view to that session, the way the read-only
-     desktop follow applies a session: no /workspace/select, so the desktop's focus never moves.
-     The pick counts as the user's own, so the desktop follow does not take it back. */
-  const showSessionLocally = useCallback((tab: RemoteTerminalTabInfo) => {
-    const sessionId = tab.sessionId;
-    const workspaceId = modelRef.current.context.workspaceId;
-    if (!sessionId || !workspaceId) return;
-    independentSessionRef.current = true;
-    const active: RemoteTerminalItem = {
-      sessionId,
-      running: true,
-      title: tab.label,
-      workspaceId,
-      worktreeLabel: tab.worktreeLabel ?? modelRef.current.context.worktreeLabel ?? null,
-      ...(tab.daemonEpoch !== null && tab.daemonEpoch !== undefined ? { daemonEpoch: tab.daemonEpoch } : {}),
-    };
-    localSessionRef.current = { workspaceId, tabId: tab.id, terminal: active };
-    const apply = (prev: RemoteWorkspaceModel): RemoteWorkspaceModel =>
-      prev.context.workspaceId !== workspaceId
-        ? prev
-        : { ...prev, context: { ...prev.context, activeTabId: tab.id, activeTerminal: active } };
-    modelRef.current = apply(modelRef.current);
-    setModel(apply);
-  }, []);
-  inboxRefreshRef.current = remoteInbox.refreshAll;
 
   // Read through refs so a poll closure never runs against a pane it was not started for.
   const chatTargetRef = useRef<ReferenceTargetRef | null>(null);
@@ -6199,46 +6099,6 @@ export const RemoteHostConnection: React.FC<{
     else void selectAccountOption(option);
   };
   openPanelSessionRef.current = openPanelSession;
-  /* Opening an Inbox row never moves the desktop's focus: a pane already mirrored is shown on this
-     phone only, and any other account session opens through the read-only account selection. */
-  const openInboxRow = (row: AttentionRow): boolean => {
-    const entry = inboxEntries.find((candidate) => candidate.key === row.id);
-    if (!entry) return false;
-    const tab = entry.tabId ? terminalTabs.find((candidate) => candidate.id === entry.tabId) : undefined;
-    if (tab) {
-      showSessionLocally(tab);
-      if (phoneHome) phoneNav.openSession();
-      return true;
-    }
-    const option = entry.machineId
-      ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId)
-      : null;
-    if (!option) {
-      setUnopenableRowIds((previous) => new Set(previous).add(row.id));
-      toast.error("This session can't be opened from here right now", {
-        description: entry.machineId
-          ? "Its computer is offline or has not listed it yet."
-          : "Answer it here, or pick its worktree to open it.",
-      });
-      return false;
-    }
-    openPhoneSession(option);
-    return true;
-  };
-  /* Rows whose computer cannot open them here say so on the row before any tap; the model already
-     knows: no mirrored tab and no account option for that machine's session. */
-  const inboxRows = remoteInbox.rows.map((row) => {
-    const entry = inboxEntries.find((candidate) => candidate.key === row.id);
-    if (!entry) return row;
-    const openable = (entry.tabId && terminalTabs.some((candidate) => candidate.id === entry.tabId))
-      || (entry.machineId ? optionForSession(accountDiscovery.accountOptions, entry.machineId, entry.sessionId) !== null : false);
-    if (openable && !unopenableRowIds.has(row.id)) return row;
-    if (!entry.machineId && !unopenableRowIds.has(row.id)) return row;
-    // The reason rides on `unavailable`, not on `text`: the Inbox re-reads a row's prompt when its
-    // text changes, so marking a row must not send a request.
-    const note = entry.machineId ? "Computer offline. Can't open it from here right now." : "Answer it here, or pick its worktree to open it.";
-    return { ...row, unavailable: note };
-  });
   const activeSupervisorSnapshot = phoneHome && activeMachineId
     ? phoneSupervisor.machines.find((machine) => machine.machineId === activeMachineId)?.snapshot ?? null
     : null;
@@ -6455,7 +6315,6 @@ export const RemoteHostConnection: React.FC<{
           viewMode={viewMode === "browser" ? "chat" : viewMode}
           onViewModeChange={setViewMode}
           sessionCount={terminalTabs.length >= 1 ? terminalTabs.length : undefined}
-          inbox={{ count: remoteInbox.needsYou, open: inboxOpen, onOpen: () => setInboxOpen(true) }}
           switcherOpen={switcherOpen}
           onOpenSwitcher={() => setSwitcherOpen(true)}
           menuOpen={menuOpen}
@@ -6837,23 +6696,6 @@ export const RemoteHostConnection: React.FC<{
           );
         }}
       />
-
-      <MobileSheet
-        open={inboxOpen}
-        onOpenChange={setInboxOpen}
-        title="Inbox"
-        ariaLabel="Inbox"
-        testId="mobile-inbox-sheet"
-      >
-        <AttentionInbox
-          compact
-          rows={inboxRows}
-          prompts={remoteInbox.prompts}
-          onOpen={(row) => {
-            if (openInboxRow(row)) setInboxOpen(false);
-          }}
-        />
-      </MobileSheet>
 
       <MobileOverflowSheet
         open={menuOpen}
