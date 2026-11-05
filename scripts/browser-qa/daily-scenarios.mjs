@@ -11,7 +11,7 @@
 // summary.daily.<gap>.checks; check-summary.mjs fails the job on a false or missing gap.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -818,24 +818,44 @@ async function macKeystrokeAnswer(ctx, path) {
   ctx.host.key({ key: "Enter" });
 }
 
-/** Real drag of a file from an OS file source onto screen point `to`. */
-async function dragFileTo(ctx, file, to) {
+/**
+ * Real drag of a file from an OS file source onto screen point `to`. `verify` (async, bounded)
+ * is awaited after the drop while the source is still alive: the drop's data transfer is
+ * asynchronous (Xdnd asks the source for the URI list after the button is released), so the
+ * source must outlive it. Its result is `dropped`; `ok` is true only when it was truthy.
+ * On Linux the GTK source logs its drag signals and a failure names the stage that broke:
+ * NO_DRAG_BEGIN, URI_TRANSFER_FAILED or PAGE_DROP_NO_FILES.
+ */
+async function dragFileTo(ctx, file, to, { verify }) {
   const record = { from: null, helper: null };
   let helper = null;
+  const sourceLog = join(ctx.out, "drag-source.log");
   try {
     if (ctx.platform === "linux") {
       const script = join(ctx.out, "drag-source.py");
       writeFileSync(script, `import sys, gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gdk
-uri = 'file://' + sys.argv[1]
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gtk, Gdk, Gio
+uri = Gio.File.new_for_path(sys.argv[1]).get_uri()
+log = open(sys.argv[2], 'w', buffering=1)
+def note(*parts): log.write(' '.join(str(part) for part in parts) + '\\n')
+def data_get(widget, context, data, info, time):
+    ok = data.set_uris([uri])
+    note('drag-data-get', 'target=' + data.get_target().name(), 'info=' + str(info), 'ok=' + str(ok), 'uris=' + uri)
 w = Gtk.Window(title='QA DRAG SOURCE'); w.set_default_size(260, 140); w.move(40, 40)
 b = Gtk.EventBox(); l = Gtk.Label(); l.set_markup('<span size="xx-large" weight="bold">DRAGME</span>'); b.add(l); w.add(b)
 b.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [], Gdk.DragAction.COPY); b.drag_source_add_uri_targets()
-b.connect('drag-data-get', lambda wd, ctx, data, info, t: data.set_uris([uri]))
+b.connect('drag-begin', lambda widget, context: note('drag-begin'))
+b.connect('drag-data-get', data_get)
+b.connect('drag-failed', lambda widget, context, result: note('drag-failed', result.value_nick) or False)
+b.connect('drag-end', lambda widget, context: note('drag-end'))
+note('ready', uri)
 w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
 `);
-      helper = spawn("python3", [script, file.path], { stdio: "ignore", env: process.env });
+      writeFileSync(sourceLog, "");
+      const stderr = openSync(join(ctx.out, "drag-source.stderr.log"), "w");
+      helper = spawn("python3", [script, file.path, sourceLog], { stdio: ["ignore", "ignore", stderr], env: { ...process.env, GDK_BACKEND: "x11" } });
       const window = await until(() => ctx.run("xdotool", ["search", "--name", "QA DRAG SOURCE"]).stdout.split(/\s+/).filter(Boolean)[0], 15000, 500);
       record.helper = window ?? null;
       if (!window) return { ...record, ok: false, stderr: "drag source window did not appear" };
@@ -861,6 +881,10 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       }, 10000, 800);
       record.from = from;
       if (!from) return { ...record, ok: false, stderr: "the file name was not read in Explorer" };
+      // `explorer /select` only highlights the item; a real left press on it makes Explorer
+      // the foreground window with the item selected before the drag press.
+      ctx.host.click(from[0], from[1]);
+      await sleep(600);
     } else {
       ctx.run("open", ["-R", file.path]);
       await sleep(3500);
@@ -880,9 +904,13 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
     const [x0, y0] = record.from;
     ctx.host.mouseDown(x0, y0);
     await sleep(300);
-    // A short first move past the OS drag threshold, held, so the source starts the drag before
-    // the long move.
+    // Short first moves past the OS drag threshold (GTK: more than 8px) while still inside the
+    // source, held, so the source starts the drag before the long move.
     ctx.host.mouseMove(x0 + 8, y0 + 8);
+    await sleep(150);
+    ctx.host.mouseMove(x0 + 12, y0 + 12);
+    await sleep(150);
+    ctx.host.mouseMove(x0 + 18, y0 + 16);
     await sleep(400);
     const steps = 20;
     for (let index = 1; index <= steps; index += 1) {
@@ -891,10 +919,18 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
     }
     await sleep(500);
     ctx.host.mouseUp(to[0], to[1]);
-    return { ...record, ok: true };
+    // The source stays alive until the page shows the drop or `verify` gives up.
+    record.dropped = Boolean(await verify());
+    if (record.dropped) return { ...record, ok: true };
+    if (ctx.platform !== "linux") return { ...record, ok: false, stderr: "DROP_NOT_OBSERVED: the page title did not show the dropped file" };
+    const lines = readFileSync(sourceLog, "utf8").split("\n").filter(Boolean);
+    record.source_log = lines;
+    const served = lines.find((line) => line.startsWith("drag-data-get") && line.includes("ok=True"));
+    if (!lines.includes("drag-begin")) return { ...record, ok: false, stderr: "NO_DRAG_BEGIN: the press and moves did not start a drag in the GTK source" };
+    if (!served) return { ...record, ok: false, stderr: "URI_TRANSFER_FAILED: the drag began but the source never served the URI list" };
+    return { ...record, ok: false, stderr: `PAGE_DROP_NO_FILES: the source served the URI (${served}) but the page saw no files` };
   } finally {
     helper?.kill();
-    await sleep(1500);
     record.file_manager_closed = closeFileManager(ctx);
   }
 }
@@ -1023,7 +1059,10 @@ export async function dailyWebviewBefore(ctx) {
     g2.activate_b = await activateTab(ctx, daily.tabB, null);
     ctx.host.focus();
     await ctx.chromeFocusClick();
-    const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 2500)) !== null);
+    // 8s, not 2.5s: one banded OCR frame takes several seconds, so 2.5s read a single frame,
+    // and linux run 41931931004 (screenshot 13) had the menu open while that frame missed it;
+    // the next icons were then clicked (Focus, Zoom in) with the menu still open.
+    const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 8000)) !== null);
     g2.history_menu = opened;
     if (!opened.ok) return { ok: false, stderr: "History menu did not open", opened };
     // "Show all history": OCR reads it as separate words.
@@ -1074,7 +1113,7 @@ export async function dailyWebviewBefore(ctx) {
     let tabBtn = await clickWord(ctx, (text) => /^bookmarks$/i.test(text), { timeout: 5000 });
     if (!tabBtn) {
       // The history step did not leave the library open: History menu > Bookmarks manager.
-      const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 2500)) !== null);
+      const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 8000)) !== null);
       g2.folder_menu = opened;
       if (opened.ok) tabBtn = await clickWord(ctx, (text) => /^manager$/i.test(text) || /bookmarksmanager/i.test(text), { timeout: 5000 });
     }
@@ -1320,9 +1359,8 @@ export async function dailyWebviewBefore(ctx) {
     }, 8000);
     g8.drop_zone = zone;
     if (!zone) return { ok: false, stderr: "DROPZONE not visible" };
-    g8.drag = await dragFileTo(ctx, file, zone);
-    const dropped = await until(() => tab(ctx, daily.tabB)?.title === `dropped:${file.name}:${file.size}`, 8000);
-    g8.checks.drag_in = Boolean(dropped);
+    g8.drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, daily.tabB)?.title === `dropped:${file.name}:${file.size}`, 8000) });
+    g8.checks.drag_in = Boolean(g8.drag.dropped);
     g8.drop_title = tab(ctx, daily.tabB)?.title ?? null;
     ctx.host.focus();
     return { ok: g8.checks.upload_picker && g8.checks.drag_in };
@@ -1732,9 +1770,8 @@ export async function dailyChromium(ctx) {
       const hit = screenWords(ctx).find((word) => /DROPZONE/i.test(word.text));
       return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
     }, 8000);
-    if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone);
-    const dropped = g8.chromium_drag?.ok ? await until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) : null;
-    g8.checks.drag_in_chromium = Boolean(dropped);
+    if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) });
+    g8.checks.drag_in_chromium = Boolean(g8.chromium_drag?.dropped);
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     ctx.host.focus();
     return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium };
@@ -1834,17 +1871,33 @@ export async function dailyChromium(ctx) {
     g11.work_tab = workTab ?? null;
     g11.checks.work_tab_opened = Boolean(workTab) && workTab.engine === "chromium";
     if (!workTab) return { ok: false, stderr: "no work tab", ...g11.settings };
+    // Each stage is timed into g11.trail, so an abandoned step still says where it was. Linux run
+    // 41931931004 spent its whole 240s cap after the work tab was listed: the work engine only
+    // started (app log) when the step was abandoned, and the tab showed Ferryx's own toolbar
+    // over a blank pane, so nothing below could land.
+    const t0 = Date.now();
+    g11.trail = [];
+    const mark = (stage, extra = {}) => g11.trail.push({ stage, ms: Date.now() - t0, ...extra });
     await sleep(3000);
-    await chromiumNavigate(workTab.browserId, `${fixtureBase}/set-work.html`);
-    await waitWords(ctx, ["workset"], 15000);
+    // The work engine must show its page before anything is typed into it: the fixture title
+    // through the CLI, within 20s, or the step stops here with a named error.
+    g11.work_nav = await chromiumNavigate(workTab.browserId, `${fixtureBase}/set-work.html`);
+    const workSet = await until(() => tab(ctx, workTab.browserId)?.title === "qa-work-set", 20000, 1000);
+    mark("set-work", { title: tab(ctx, workTab.browserId)?.title ?? null, nav: g11.work_nav });
+    if (!workSet) {
+      ctx.cli("close", "--browser-id", workTab.browserId);
+      return { ok: false, stderr: "WORK_ENGINE_NOT_LOADING: the work tab never showed /set-work.html within 20s", trail: g11.trail, ...g11.settings };
+    }
     await chromiumNavigate(workTab.browserId, `${fixtureBase}/cookies.html`);
     const workCookies = await until(() => {
       const value = tab(ctx, workTab.browserId)?.title ?? "";
       return value.startsWith("cookies:") ? value : null;
     }, 10000);
+    mark("work-cookies", { title: workCookies });
     g11.work_cookie_title = workCookies;
     g11.checks.work_cookie_kept = Boolean(workCookies) && workCookies.includes("qa_work");
     const defaultTab = await newChromiumTab();
+    mark("default-tab", { opened: Boolean(defaultTab) });
     if (defaultTab) {
       await chromiumNavigate(defaultTab.browserId, `${fixtureBase}/cookies.html`);
       const defaultCookies = await until(() => {
@@ -1852,6 +1905,7 @@ export async function dailyChromium(ctx) {
         return value.startsWith("cookies:") ? value : null;
       }, 10000);
       g11.default_chromium_cookie_title = defaultCookies;
+      mark("default-cookies", { title: defaultCookies });
       g11.checks.work_cookie_not_in_default = defaultTab.profileId !== "work" && Boolean(defaultCookies) && !defaultCookies.includes("qa_work");
       ctx.cli("close", "--browser-id", defaultTab.browserId);
     }
