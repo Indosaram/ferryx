@@ -1,0 +1,13 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+commit
+RAW TEST BIN
+-rwxr-xr-x@ 1 I552267  staff  553872648 Nov  5 06:40 /Users/I552267/code/ferryx-wt/.target/debug/deps/ferryx_lib-e661397823158427
+GUI ENTITLEMENTS
+Orca, Slack, Heynote, dbeaver, Bitwarden, Activity Monitor, Finder, Joule Work, Microsoft Word, ferryx, Microsoft Outlook, iPhone Mirroring, Microsoft Excel, MSTeams, System Settings, Notes, Google Chrome
+RELEASE
+   Compiling foreign-types v0.5.0
+   Compiling png v0.18.1
+   Compiling crossbeam-channel v0.5.16
+   Compiling dpi v0.1.2
+
+__RELAY_EXIT=0

@@ -1,0 +1,396 @@
+{
+  "leg": "mac",
+  "head": "35c984684",
+  "evidence_commit": null,
+  "verdicts": {
+    "2": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "3": {
+      "status": "N/A",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "4": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "5": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "7": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "before/after grid and text hashes equal; retainedLines=9912, required 10000; exit 1",
+          "artifact": "raw/hash-short.log"
+        }
+      ],
+      "failure": {
+        "reason": "10,000-line retention assertion fails (9910 unit, 9912 QA); hashes are equal in short-path QA.",
+        "log": "failures.json",
+        "baseline": "not established"
+      }
+    },
+    "8": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "reason": "Socket resize restore assertion failed at remote/security_socket_tests.rs:928.",
+        "log": "failures.json",
+        "baseline": "not established"
+      }
+    },
+    "9": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "LAYOUT_QA_OK revision=4; isolated daemon cleaned",
+          "artifact": "raw/layout-qa.log"
+        }
+      ],
+      "failure": {
+        "reason": "Layout committed-decision and migration assertions failed.",
+        "log": "failures.json",
+        "baseline": "not established"
+      }
+    },
+    "10": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "BLOCKED: System Events UI elements enabled=false; screencapture exit=1 could not create image from display",
+          "artifact": "progress-3.log"
+        }
+      ],
+      "failure": null
+    },
+    "11": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "reason": "Detached parked-window fixture rejects label second; Bun QA watch iterator fails.",
+        "log": "failures.json",
+        "baseline": "not established"
+      }
+    },
+    "12": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "reason": "Required full mac library gate failed.",
+        "log": "failures.json",
+        "baseline": "not established"
+      }
+    },
+    "14": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "reason": "OSC cwd fixture got None rather than /tmp.",
+        "log": "failures.json",
+        "baseline": "not established"
+      }
+    },
+    "16": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        },
+        {
+          "cmd": "DYLD_LIBRARY_PATH=<recorded lib paths> .target/debug/deps/ferryx_lib-e661397823158427 --exact terminal::foreground::tests::foreground_command_of_real_pty --nocapture",
+          "exit": 0,
+          "log": "raw/foreground-real.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "17": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "18": {
+      "status": "PASS",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked ipc::updater::tests::qa_cmd_updater_check_reports_reason_codes -- --exact --nocapture",
+          "exit": 0,
+          "log": "updater-run.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "Real cmd_updater_check: UPDATE_HALTED, UPDATE_BELOW_FLOOR",
+          "artifact": "updater-run.log"
+        },
+        {
+          "scenario": "FAILURE",
+          "observable": "UPDATE_MANIFEST_UNVERIFIED and downgrade offer=None",
+          "artifact": "updater-run.log"
+        }
+      ],
+      "failure": null
+    },
+    "20": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "BLOCKED: System Events UI elements enabled=false; screencapture exit=1 could not create image from display",
+          "artifact": "progress-3.log"
+        }
+      ],
+      "failure": null
+    },
+    "21": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "BLOCKED: System Events UI elements enabled=false; screencapture exit=1 could not create image from display",
+          "artifact": "progress-3.log"
+        }
+      ],
+      "failure": null
+    },
+    "22": {
+      "status": "N/A",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "23": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [],
+      "failure": null
+    },
+    "24": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "BLOCKED: System Events UI elements enabled=false; screencapture exit=1 could not create image from display",
+          "artifact": "progress-3.log"
+        }
+      ],
+      "failure": null
+    },
+    "26": {
+      "status": "N/A",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "28": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "BLOCKED: System Events UI elements enabled=false; screencapture exit=1 could not create image from display",
+          "artifact": "progress-3.log"
+        }
+      ],
+      "failure": null
+    },
+    "29": {
+      "status": "N/A",
+      "acceptance": [],
+      "qa": [],
+      "failure": null
+    },
+    "30": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "full-lib.log"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "BLOCKED: System Events UI elements enabled=false; screencapture exit=1 could not create image from display",
+          "artifact": "progress-3.log"
+        }
+      ],
+      "failure": {
+        "reason": "Plugin predecessor-alive handover assertion failed; iframe isolation unverified.",
+        "log": "failures.json",
+        "baseline": "not established"
+      }
+    }
+  },
+  "finals": {
+    "F1": "Not assigned; FFmpeg diff empty (ffmpeg-diff.log).",
+    "F2": "Not assigned.",
+    "F3(a)": "BLOCKED full 4-way old/new GUI matrix; same-build --v5 passes (v5-qa.log), hash QA equal hashes but retained-lines assertion fails. Do not infer full matrix from same-build success.",
+    "F3(e)": "FAIL release exit 101 src-tauri/build.rs:84 helper asset freshness gate. Candidate fingerprint 424c02c8... differs bundled 3abee5f4...; baseline exact gate passes.",
+    "F4": "NOT APPROVED: outstanding failures and blocked real-surface checks."
+  },
+  "regressions": [
+    {
+      "reason": "Release bundled helpers stale on candidate; baseline gate passes",
+      "cmd": "cargo build --release --manifest-path src-tauri/Cargo.toml --locked",
+      "exit": 101,
+      "log": "raw/release.log",
+      "location": "src-tauri/build.rs:84",
+      "first_error": "helper-freshness-gate ERROR stale bundled helper assets",
+      "baseline_evidence": "baseline-helper-gate.log",
+      "repair": "Rebuild and stage remote helpers with current source fingerprint; regenerate manifest, then rerun release gate."
+    }
+  ],
+  "baseline_failures": [],
+  "blocked": [
+    "GUI screenshots and native keyboard/drag/deep-link scenarios: UI automation false and screencapture exit 1.",
+    "T30 iframe native-runtime isolation and drag masking unverified.",
+    "F3(a) four-way old/new GUI matrix not run; only same-build isolated v5.",
+    "T4 same-host baseline/current latency comparison not run.",
+    "Full baseline mac suite not run: do not label any of its 35 candidate failures baseline.",
+    "T2/5/23 non-test live HAPPY+FAILURE scenarios not executed; acceptance test passes alone are not QA.",
+    "T10 interrupted transfer, T11 interrupted swap, T28 persisted import restart, and paired/draining size recovery not exercised.",
+    "Default-feature local-split-qa GUI harness was not built or run."
+  ],
+  "cleanup": {
+    "ci_refs_deleted": [
+      "ci/rex-verify-mac-20261104"
+    ],
+    "remote_worktrees_removed": [
+      "rex-verify-mac-20261104",
+      "rex-verify-mac-base-20261104"
+    ],
+    "hosts_released": [
+      "maho-mac relay lock removed"
+    ],
+    "per_worktree_targets": "none created; existing shared .target retained",
+    "production": "never killed or restarted production daemon; fallback relay shell retained (not owned)",
+    "baseline_release": "stopped only recorded own cargo PID and descendants after baseline exact gate passed; full baseline release not asserted"
+  }
+}

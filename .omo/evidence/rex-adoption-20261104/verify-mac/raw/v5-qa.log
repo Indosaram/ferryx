@@ -1,0 +1,7 @@
+QA initial PID 70116; runtime /tmp/fx-handover-qTScpJ/runtime
+QA initial version 2026.1101.1
+PASS predecessor 70116 retired immediately after v5 commit
+PASS generation 1: 1 original PTYs; history, executed input, resize preserved
+PASS predecessor 70535 retired immediately after v5 commit
+PASS generation 2: 2 original PTYs; history, executed input, resize preserved
+CLEANUP isolated runtime removed: /tmp/fx-handover-qTScpJ

@@ -1,0 +1,32 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+EXITS
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+   Compiling ferryx-rd-render v0.1.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/ferryx-rd/ferryx-rd-render)
+   Compiling ferryx v2026.1101.1 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri)
+   Compiling ferryx-rd-net v0.1.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/ferryx-rd/ferryx-rd-net)
+   Compiling portable-pty v0.9.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/src-tauri/vendor/portable-pty)
+   Compiling ferryx-hub v0.1.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/ferryx-hub)
+   Compiling ferryx-browser-engine-protocol v0.1.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/browser-engine-protocol)
+   Compiling ffmpeg-next v9.0.0
+   Compiling ferryx-rd-decode v0.1.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/ferryx-rd/ferryx-rd-decode)
+   Compiling ferryx-rd-host v0.1.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/ferryx-rd/ferryx-rd-host)
+   Compiling ferryx-rd-app v0.1.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/ferryx-rd/ferryx-rd-app)
+DEBUG BIN
+-rwxr-xr-x@ 1 I552267  staff  375103416 Nov  5 04:26 /Users/I552267/code/ferryx-wt/.target/debug/ferryx
+-rwxr-xr-x@ 1 I552267  staff  240995624 Nov  5 05:23 /Users/I552267/code/ferryx-wt/.target/debug/ferryx-cli
+-rw-r--r--@ 1 I552267  staff      57560 Nov  5 05:23 /Users/I552267/code/ferryx-wt/.target/debug/ferryx-cli.d
+-rwxr-xr-x@ 1 I552267  staff   48074992 Nov  5 04:23 /Users/I552267/code/ferryx-wt/.target/debug/ferryx-relay
+-rw-r--r--@ 1 I552267  staff      56565 Nov  5 04:23 /Users/I552267/code/ferryx-wt/.target/debug/ferryx-relay.d
+-rw-r--r--@ 1 I552267  staff      79146 Nov  5 04:26 /Users/I552267/code/ferryx-wt/.target/debug/ferryx.d
+RESOURCE
+82280  99.3   1456 /Users/I552267/.local/bin/bun
+24676  96.2 2946032 /Users/I552267/.rustup/toolchains/1.92.0-aarch64-apple-darwin/bin/rustc
+ 7085  79.9 235424 /Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon_unprivileged.app/Contents/MacOS/wdavdaemon_unprivileged
+  748  79.8  76832 /usr/libexec/syspolicyd
+  655  44.2  72048 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+33800  18.9  25808 /Library/SystemExtensions/2BAAE0D4-6342-48D4-994D-B380F43C29E6/com.microsoft.wdav.epsext.systemextension/Contents/MacOS/epsext
+
+__RELAY_EXIT=0

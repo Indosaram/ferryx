@@ -1,0 +1,13 @@
+43 |   await new Promise((resolveReady, reject) => {
+44 |     const signal = timeout();
+45 |     const abort = () => reject(new Error('daemon readiness timeout'));
+46 |     signal.addEventListener('abort', abort, { once: true });
+47 |     child.once('error', reject);
+48 |     child.once('exit', code => reject(new Error(`daemon exited ${code}`)));
+                                               ^
+error: daemon exited 0
+      at <anonymous> (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/detach-attach.mjs:48:43)
+      at emit (node:events:103:22)
+      at #handleOnExit (node:child_process:570:14)
+
+Bun v1.4.2 (macOS arm64)

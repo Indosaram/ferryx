@@ -1,0 +1,12 @@
+18 | const sockets = [];
+19 | const timeout = () => AbortSignal.timeout(90_000);
+20 | async function launch(legacy) {
+21 |   const controller = new AbortController();
+22 |   const events = legacy ? watch(env.FERRYX_RUNTIME_DIR, { signal: controller.signal }) : null;
+23 |   const changed = events?.next();
+                               ^
+TypeError: events?.next is not a function. (In 'events?.next()', 'events?.next' is undefined)
+      at launch (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/detach-attach.mjs:23:27)
+      at /Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/detach-attach.mjs:136:9
+
+Bun v1.4.2 (macOS arm64)

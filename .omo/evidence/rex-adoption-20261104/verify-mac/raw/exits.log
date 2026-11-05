@@ -1,0 +1,10 @@
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+full-lib EXIT=101
+cli-build EXIT=0
+handover EXIT=101
+hooks EXIT=0
+release EXIT=101
+DONE

@@ -1,0 +1,26 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+RELEASE
+   Compiling polling v3.11.0
+   Compiling pkcs1 v0.7.5
+   Compiling chacha20 v0.9.1
+   Compiling symphonia-codec-aac v0.5.5
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling ferryx-rd-proto v0.1.0 (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/crates/ferryx-rd/ferryx-rd-proto)
+EXITS
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+full-lib EXIT=101
+cli-build EXIT=0
+handover EXIT=101
+hooks EXIT=0
+TARGETS
+1.7G	/Users/I552267/code/ferryx-wt/.target/release
+DYLlB PROBE
+account::billing::entitlement::entitlement_tests::a_free_account_can_enroll_three_machines_and_is_refused_on_the_fourth: test
+account::billing::entitlement::entitlement_tests::an_expired_pro_account_over_the_free_limit_keeps_its_machines_and_only_blocks_enrollment: test
+account::billing::entitlement::entitlement_tests::test_active_and_on_trial_status_aware_ends_at_expiry: test
+account::billing::entitlement::entitlement_tests::test_boundary_machines_used_equals_limit_blocks_enroll_new: test
+
+__RELAY_EXIT=0

@@ -1,0 +1,11 @@
+100 |     client.close();
+101 |     for (let i = 0; i < sessions.length; i++) {
+102 |       const after = await next.call({ type: 'describeScreenHash', sessionId: sessions[i] });
+103 |       const field = before[i].vtVersion === after.vtVersion ? 'hash' : 'textHash';
+104 |       if (!before[i][field] || before[i][field] !== after[field] || after.retainedLines !== 10_000) {
+105 |         throw new Error(`hash mismatch: ${JSON.stringify({ before: before[i], after })}`);
+                        ^
+error: hash mismatch: {"before":{"type":"describeScreenHashOk","hash":"c3b02596336df94cbf40b7ac526f17b6de41af5fc4e322314e8e2cacfb998347","textHash":"c0b7e5efb370d58e5ab457b112f9ca31a8a433345997e33068975fad0743e236","vtVersion":"83fb95624b0439ee660c2679b43b38c8b63769cd","retainedLines":9912},"after":{"type":"describeScreenHashOk","hash":"c3b02596336df94cbf40b7ac526f17b6de41af5fc4e322314e8e2cacfb998347","textHash":"c0b7e5efb370d58e5ab457b112f9ca31a8a433345997e33068975fad0743e236","vtVersion":"83fb95624b0439ee660c2679b43b38c8b63769cd","retainedLines":9912}}
+      at handover (/Users/I552267/code/ferryx-wt/rex-verify-mac-20261104/scripts/qa/screen-hash-handover.mjs:105:19)
+
+Bun v1.4.2 (macOS arm64)

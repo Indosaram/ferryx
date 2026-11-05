@@ -1,0 +1,29 @@
+createSession unavailable on host; using fallback shell 38a4203c-f3f2-400d-929c-5395e3cb7beb
+LIBGHOSTTY
+/Users/I552267/code/ferryx-wt/.target/debug/build/ferryx-3d84622cddeb2714/out/ghostty_vt/lib/libghostty-vt.dylib
+/Users/I552267/code/ferryx-wt/.target/debug/build/ferryx-c86ff2ed08599941/out/ghostty_vt/lib/libghostty-vt.dylib
+/Users/I552267/code/ferryx-wt/.target/debug/build/ferryx-5e65efc662fee894/out/ghostty_vt/lib/libghostty-vt.dylib
+/Users/I552267/code/ferryx-wt/.target/debug/build/ferryx-c0d3f9f472b1a004/out/ghostty_vt/lib/libghostty-vt.dylib
+/Users/I552267/code/ferryx-wt/.target/debug/build/ferryx-bea24b3a2e6a0826/out/ghostty_vt/lib/libghostty-vt.dylib
+/Users/I552267/code/ferryx-wt/.target/debug/build/ferryx-7f6ddaf5bd0d3820/out/ghostty_vt/lib/libghostty-vt.dylib
+/Users/I552267/code/ferryx-wt/.target/debug/build/ferryx-22e2c5fbabcd3a54/out/ghostty_vt/lib/libghostty-vt.dylib
+/Users/I552267/code/ferryx-wt/.target/debug/build/ferryx-c54bc4ec6ffa9ca8/out/ghostty_vt/lib/libghostty-vt.dylib
+EXITS
+ui-install EXIT=0
+ui-build EXIT=0
+ffmpeg EXIT=0
+metadata EXIT=0
+full-lib EXIT=101
+cli-build EXIT=0
+handover EXIT=101
+hooks EXIT=0
+RELEASE
+   Compiling allocator-api2 v0.2.21
+   Compiling hashbrown v0.15.5
+   Compiling naga-types v30.0.1
+   Compiling ffmpeg-sys-next v9.0.1
+DISK
+Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s5   460Gi   404Gi    26Gi    95%    4.7M  268M    2%   /System/Volumes/Data
+
+__RELAY_EXIT=0

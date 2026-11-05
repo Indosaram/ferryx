@@ -1,0 +1,11 @@
+layout-qa EXIT=0
+detach-qa EXIT=1
+hash-qa EXIT=1
+v5-qa EXIT=0
+llms EXIT=0
+DONE
+detach-short EXIT=1
+hash-short EXIT=1
+updater-qa EXIT=0
+foreground-focused EXIT=134
+foreground-real EXIT=0
