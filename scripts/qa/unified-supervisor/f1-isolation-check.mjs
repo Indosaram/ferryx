@@ -196,19 +196,23 @@ function exitWatchSupport() {
   return probe.status === 0;
 }
 
-export async function f1IsolationChecks(check, stateRoot) {
-  if (process.platform !== 'linux') {
+export async function f1IsolationChecks(check, stateRoot, probes = {}) {
+  // The Linux integration runs real bwrap namespaces, so it cannot run on a non-Linux host. The
+  // requirement gate below is pure and is exercised on every platform through these probes.
+  const platform = probes.platform ?? process.platform;
+  const bwrapPath = probes.bwrapPath ?? BWRAP;
+  const exists = probes.exists ?? existsSync;
+  if (platform !== 'linux') {
     // Explicit, never silent: the PID-namespace integration only exists on Linux. No bwrap here.
-    check('f1-isolation-integration-linux-only', true, { skipped: true, reason: 'PID-namespace isolation integration needs Linux bwrap', platform: process.platform });
-    return;
+    check('f1-isolation-integration-linux-only', true, { skipped: true, reason: 'PID-namespace isolation integration needs Linux bwrap', platform });
   }
-  const gitObjects = gitObjectsSource();
+  const gitObjects = probes.gitObjects ?? gitObjectsSource();
   const preconditions = {
-    bwrap: existsSync(BWRAP), helperSource: existsSync(HELPER), wrapperSource: existsSync(WRAPPER),
-    gitObjects: gitObjects.path !== null, pythonExitWatch: exitWatchSupport(),
+    bwrap: exists(bwrapPath), helperSource: exists(HELPER), wrapperSource: exists(WRAPPER),
+    gitObjects: gitObjects.path !== null, pythonExitWatch: probes.pythonExitWatch ?? exitWatchSupport(),
   };
   const ready = Object.values(preconditions).every(Boolean);
-  check('f1-isolation-requirements-available', ready, { required: preconditions, gitObjects, bwrap: BWRAP, note: 'Linux requires bwrap, the wrapper git-objects bind source, the host helper and python3 with readable proc identity stamps; none is skipped silently' });
+  check('f1-isolation-requirements-available', ready, { required: preconditions, gitObjects, bwrap: bwrapPath, note: 'Linux requires bwrap, the wrapper git-objects bind source, the host helper and python3 with readable proc identity stamps; none is skipped silently' });
   if (!ready) return;
 
   mkdirSync(stateRoot, { recursive: true });

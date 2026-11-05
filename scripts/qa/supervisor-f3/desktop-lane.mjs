@@ -90,6 +90,16 @@ function locate(read, phrase, { below = -1 } = {}) {
 /** The isolated-profile keys a live GUI process must carry with exactly the run's values. */
 const ISOLATED_ENV = ['FERRYX_QA_ISOLATED', 'FERRYX_QA_RUN_ID', 'FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_SESSION_DIR', 'HOME'];
 
+/**
+ * The arguments for every host-helper call that names the run's own GUI (N3.1). Both the raise
+ * before each frame and the bounds read that follows it go through here, so neither can drift to
+ * a caller-supplied checkout: the host helper refuses any checkout that is not the recorded
+ * candidate's git top level, and this is the only place that checkout is read from.
+ */
+export function guiIdentity(lane, gui) {
+  return { pid: gui.pid, executable: gui.executable, checkout: lane.receipt.candidate.checkout };
+}
+
 export async function runDesktopLane(lane, { host, run, shared, signal }) {
   const ids = scenariosForLane(lane.name);
   let agent; let helper; let mahord; let setup; let daemon; let gui; let wrappers;
@@ -195,7 +205,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // every frame, so every OCR read and every click lands on the run's own window.
     const raise = async () => {
       if (host.platform !== 'darwin') return;
-      const raised = await helper.call('activate-gui', { pid: gui.pid, executable: gui.executable, checkout: lane.receipt.candidate.checkout });
+      const raised = await helper.call('activate-gui', guiIdentity(lane, gui));
       if (raised.activated !== true) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} was not raised: ${JSON.stringify(raised)}`);
     };
     // macOS: MahoRD types ASCII as key codes, which an input method (e.g. Korean 2-Set) composes
@@ -224,7 +234,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const windowOf = async (frameWidth) => {
       const seen = host.platform === 'win32'
         ? await agent.call('setup-target', { profile: setup.profile, gui, boundsOnly: true })
-        : await helper.call('gui-bounds', { pid: gui.pid, executable: gui.executable, checkout: lane.receipt.candidate.checkout });
+        : await helper.call('gui-bounds', guiIdentity(lane, gui));
       // Read right after the capture: a frame taken while another app was in front is never OCRed.
       if (!seen.bounds || seen.frontPid !== gui.pid) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} not frontmost with a window at capture: ${JSON.stringify(seen)}`);
       return windowRect(seen.bounds, seen.screen, frameWidth);
