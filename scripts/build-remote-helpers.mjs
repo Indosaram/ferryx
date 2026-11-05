@@ -39,6 +39,7 @@ export function computeHelperSourceClosure(repoRoot = REPO_ROOT) {
     "src-tauri/src/dag/journal.rs",
     "src-tauri/src/dag/paths.rs",
     "src-tauri/src/scoped_contracts.rs",
+    "src-tauri/src/worktree/naming.rs",
   ];
   const sshDir = join(repoRoot, "src-tauri/src/ferryx_scope/ssh");
   assert(existsSync(sshDir), `Helper ssh source directory missing: ${sshDir}`);

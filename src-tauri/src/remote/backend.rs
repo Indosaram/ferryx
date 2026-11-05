@@ -128,8 +128,8 @@ pub trait RemoteSessionBackend: Send + Sync {
             Ok(true)
         })
     }
-    fn detach_size<'a>(&'a self, _id: &'a str, _client: &'a str) -> BoxFuture<'a, Result<(), String>> {
-        Box::pin(async { Ok(()) })
+    fn detach_size<'a>(&'a self, id: &'a str, _client: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        self.restore_desktop_geometry(id)
     }
     fn acknowledge_agent_outcome<'a>(
         &'a self,

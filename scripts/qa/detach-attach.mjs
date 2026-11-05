@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import assert from 'node:assert/strict';
 
 const binary = resolve(process.env.FERRYX_CLI ?? 'src-tauri/target/debug/ferryx-cli');
-const root = await mkdtemp(join(tmpdir(), 'ferryx-detached-'));
+const root = await mkdtemp(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'fx-detach-'));
 const env = { ...process.env, FERRYX_RUNTIME_DIR: join(root, 'rt'), FERRYX_DATA_DIR: join(root, 'data') };
 delete env.FERRYX_SESSION_ID;
 const children = [];

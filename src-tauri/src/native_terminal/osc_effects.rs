@@ -158,7 +158,9 @@ pub fn parse_cwd(text: &str) -> Option<String> {
         let uri = url::Url::parse(text).ok()?;
         if uri.query().is_some() || uri.fragment().is_some() { return None; }
         let mut local = uri;
-        local.set_host(None).ok()?;
+        // Reset Url's cached host as well as its serialized authority. set_host(None)
+        // leaves the old Host cached, so to_file_path rejects this on Unix.
+        local.set_host(Some("")).ok()?;
         local.to_file_path().ok()?.to_string_lossy().into_owned()
     } else {
         text.to_string()
@@ -255,6 +257,14 @@ mod tests {
     fn sanitizes_controls_bidi_and_character_bound() {
         assert_eq!(sanitize("a\u{202e}b\n\u{2066}c"), "abc");
         assert_eq!(sanitize(&"\u{4e2d}".repeat(300)).chars().count(), 256);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_host_is_not_a_file_server() {
+        assert_eq!(parse_cwd("file://shell-host/tmp/a%20b"), Some("/tmp/a b".into()));
+        assert_eq!(parse_cwd("file:///tmp/a%20b"), Some("/tmp/a b".into()));
+        assert_eq!(parse_cwd("file://shell-host/tmp?query"), None);
     }
 
     #[test]
