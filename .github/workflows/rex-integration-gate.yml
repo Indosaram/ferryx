@@ -75,6 +75,12 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked -- --test-threads=1 2>&1 | tail -35
           cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_contract --locked -- --test-threads=1 2>&1 | tail -35
           cargo test --manifest-path src-tauri/Cargo.toml --test machine_owner_handover --locked -- --test-threads=1 2>&1 | tail -25
+      - name: Generated docs match a freshly built CLI
+        run: |
+          set -o pipefail
+          cargo build --manifest-path src-tauri/Cargo.toml --bin ferryx-cli --no-default-features --locked 2>&1 | tail -10
+          bun scripts/gen-llms-txt.mjs --cli ./src-tauri/target/debug/ferryx-cli --check
+          grep -c "integrations" docs/llms.txt
       - name: Grants reactor tests
         run: |
           set -o pipefail
