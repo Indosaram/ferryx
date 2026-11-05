@@ -91,7 +91,10 @@ jobs:
       - name: Extended fuzz and UI build
         run: |
           set -o pipefail
-          PROPTEST_CASES=20000 cargo test --manifest-path src-tauri/Cargo.toml --release --lib --locked -- terminal::fuzz_tests 2>&1 | tail -20
+          # The release-profile build is blocked by a pre-existing repo-wide defect (bundled helper
+          # manifest sourceFingerprint 3abee5f4... != current source 8f02c2b1..., identical on main),
+          # so the 20k-case leg runs on the dev profile instead and is reported as such.
+          PROPTEST_CASES=20000 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- terminal::fuzz_tests 2>&1 | tail -20
           cargo test --manifest-path src-tauri/Cargo.toml --lib --locked -- terminal::vt_stream::osc1337 2>&1 | tail -15
           bun run --cwd ui build 2>&1 | tail -20
       - name: Grants reactor tests
