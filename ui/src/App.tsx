@@ -519,7 +519,9 @@ export function App() {
         // loadSession is window-scoped by the backend: a secondary window reads only its own file.
         const savedSession = await loadSession().catch(() => null);
         // Capability-gated: an older daemon retains the legacy restore path.
-        await layoutSync.refresh();
+        await layoutSync.refresh().catch((error) => {
+          console.warn("Layout sync refresh failed; continuing legacy workspace restore:", error);
+        });
         const recovered = recoverProjectBootstrap(savedSession);
         const prepared = isPrimary
           ? canonicalizeProjectBootstrap(

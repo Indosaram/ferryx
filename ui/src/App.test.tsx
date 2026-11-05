@@ -21,7 +21,9 @@ if (typeof window === "undefined") {
 
 if (!(window as any).__TAURI_INTERNALS__) {
   (window as any).__TAURI_INTERNALS__ = {
-    invoke: (cmd: string) => Promise.resolve(cmd === "cmd_browser_download_list" ? [] : undefined),
+    invoke: (cmd: string, args?: { cache?: unknown }) => Promise.resolve(
+      cmd === "cmd_browser_download_list" ? [] : cmd === "cmd_onboarding_get" ? args?.cache : undefined,
+    ),
     transformCallback: () => 1,
   };
 }
