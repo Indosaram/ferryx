@@ -191,8 +191,8 @@ async function signalAndAwaitExit(socket, identity, hostPid, signal) {
   return reply.result;
 }
 
-function pidfdSupport() {
-  const probe = spawnSync('python3', ['-c', "import os,sys;sys.exit(0 if hasattr(os,'pidfd_open') else 1)"], { timeout: 10_000 });
+function exitWatchSupport() {
+  const probe = spawnSync('python3', ['-c', "import time; s=open('/proc/self/stat').read().rsplit(') ',1)[1].split(); assert s[19].isdigit(); time.monotonic()"], { timeout: 10_000 });
   return probe.status === 0;
 }
 
@@ -205,10 +205,10 @@ export async function f1IsolationChecks(check, stateRoot) {
   const gitObjects = gitObjectsSource();
   const preconditions = {
     bwrap: existsSync(BWRAP), helperSource: existsSync(HELPER), wrapperSource: existsSync(WRAPPER),
-    gitObjects: gitObjects.path !== null, pythonPidfd: pidfdSupport(),
+    gitObjects: gitObjects.path !== null, pythonExitWatch: exitWatchSupport(),
   };
   const ready = Object.values(preconditions).every(Boolean);
-  check('f1-isolation-requirements-available', ready, { required: preconditions, gitObjects, bwrap: BWRAP, note: 'Linux requires bwrap, the wrapper git-objects bind source, the host helper and python3 pidfd; none is skipped silently' });
+  check('f1-isolation-requirements-available', ready, { required: preconditions, gitObjects, bwrap: BWRAP, note: 'Linux requires bwrap, the wrapper git-objects bind source, the host helper and python3 with readable proc identity stamps; none is skipped silently' });
   if (!ready) return;
 
   mkdirSync(stateRoot, { recursive: true });

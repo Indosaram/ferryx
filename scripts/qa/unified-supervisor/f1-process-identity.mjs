@@ -1,6 +1,7 @@
 // Fixture-only process identities. A namespace-local pid is never a host pid: inside the isolated
 // namespace an identity is a recorded {namespacePid, pidNamespace, startStamp}, and every host
 // fact (host pid, group members, exit evidence) comes from the outer host helper over F1_HOST_HELPER.
+import { exitWatchSource } from './f1-exit-watch.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { createConnection } from 'node:net';
@@ -152,27 +153,13 @@ export function observeIdentity(identity) {
   }
 }
 
-const portableWatch = `import os,sys,select
-pid=int(sys.argv[1]); timeout=float(sys.argv[2])
-try:
- if hasattr(os,'pidfd_open'):
-  fd=os.pidfd_open(pid)
-  print('ARMED',flush=True)
-  print('EXIT' if select.select([fd],[],[],timeout)[0] else 'TIMEOUT',flush=True)
- else:
-  kq=select.kqueue()
-  kq.control([select.kevent(pid,filter=select.KQ_FILTER_PROC,flags=select.KQ_EV_ADD|select.KQ_EV_ONESHOT,fflags=select.KQ_NOTE_EXIT)],0,0)
-  print('ARMED',flush=True)
-  print('EXIT' if kq.control(None,1,timeout) else 'TIMEOUT',flush=True)
-except ProcessLookupError:
- print('GONE',flush=True)
-`;
+const portableWatch = exitWatchSource();
 
-// Local (no helper) event wait: kernel pidfd (Linux) or kqueue NOTE_EXIT (macOS). The watched pid is
-// re-verified against the identity after the subscription is armed, closing the pid-reuse window.
+// Local wait: kernel pidfd, kqueue NOTE_EXIT, or bounded identity-stamp polling.
+// The watched pid is re-verified after arming, closing the subscription reuse window.
 function localWait(identity, deadlineMs, trigger) {
   return new Promise((resolveWait, rejectWait) => {
-    const child = spawn('python3', ['-u', '-c', portableWatch, String(identity.localPid ?? identity.pid), String(deadlineMs / 1000)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('python3', ['-u', '-c', portableWatch, String(identity.localPid ?? identity.pid), identity.startStamp, String(deadlineMs / 1000), 'none'], { stdio: ['ignore', 'pipe', 'pipe'] });
     let result = null; let stderr = ''; let settled = false; let chain = Promise.resolve();
     const finish = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); child.kill('SIGKILL'); fn(value); };
     const timer = setTimeout(() => finish(rejectWait, failure('EXIT_WATCH_TIMEOUT', 'exit watcher did not finish within its bound')), deadlineMs + 5_000);
@@ -189,7 +176,7 @@ function localWait(identity, deadlineMs, trigger) {
     child.once('close', (code) => {
       void chain.then(() => {
         if (code !== 0 || !['EXIT', 'GONE', 'TIMEOUT'].includes(result)) finish(rejectWait, failure('EXIT_WATCH_FAILED', `exit watcher failed: ${stderr.trim() || result || code}`));
-        else finish(resolveWait, { exited: result !== 'TIMEOUT', via: process.platform === 'linux' ? 'pidfd' : 'kqueue' });
+        else finish(resolveWait, { exited: result !== 'TIMEOUT', via: stderr.match(/^WATCH_VIA=(\w+)$/m)?.[1] ?? 'identity' });
       });
     });
   });

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // This process runs outside bwrap. Only recorded task identities cross its socket;
 // no proc mount, process root link, namespace fd, or arbitrary host signal is exported.
+import { exitWatchSource } from './f1-exit-watch.mjs';
 import { spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
@@ -28,23 +29,8 @@ function lines(stream, consume) {
   });
 }
 
-// pidfd readiness is actual kernel exit evidence, including an unreaped zombie.
-// The descriptor is opened before ARMED and before any caller-triggered signal.
-const PIDFD = `import os,sys,select,signal,json
-pid=int(sys.argv[1]); stamp=sys.argv[2]; timeout=float(sys.argv[3]); sig=sys.argv[4]
-try:
- fd=os.pidfd_open(pid)
- stat=open('/proc/%d/stat'%pid).read().rsplit(') ',1)[1].split()
- if stat[19]!=stamp:
-  print('GONE',flush=True); sys.exit(0)
- print('ARMED',flush=True)
- if sig!='none': signal.pidfd_send_signal(fd,getattr(signal,sig))
- print('EXIT' if select.select([fd],[],[],timeout)[0] else 'TIMEOUT',flush=True)
-except ProcessLookupError:
- print('GONE',flush=True)
-except FileNotFoundError:
- print('GONE',flush=True)
-`;
+// Shared watcher arms before signalling and verifies the recorded start stamp.
+const PIDFD = exitWatchSource({ kqueue: 'False' });
 
 function waitHost(identity, deadlineMs, armed, signal = 'none') {
   return new Promise((resolveWait, rejectWait) => {
@@ -57,7 +43,7 @@ function waitHost(identity, deadlineMs, armed, signal = 'none') {
     lines(child.stdout, (line) => { if (line === 'ARMED') armed(); else result = line; });
     child.once('close', (code) => {
       if (code !== 0 || !['EXIT', 'GONE', 'TIMEOUT'].includes(result)) finish(rejectWait, failure('EXIT_WATCH_FAILED', `pidfd watch failed: ${stderr || result || code}`));
-      else finish(resolveWait, { exited: result !== 'TIMEOUT', via: 'pidfd' });
+      else finish(resolveWait, { exited: result !== 'TIMEOUT', via: stderr.match(/^WATCH_VIA=(\w+)$/m)?.[1] ?? 'identity' });
     });
   });
 }
