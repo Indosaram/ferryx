@@ -31,6 +31,7 @@ static DEBUG_SINK_DROPS: AtomicU64 = AtomicU64::new(0);
 static SINK_FILES: Mutex<Option<HashMap<std::path::PathBuf, (std::fs::File, u64)>>> =
     Mutex::new(None);
 
+#[cfg(feature = "desktop")]
 static NATIVE_DEBUG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static NATIVE_DEBUG_RUN_ID: Mutex<Option<String>> = Mutex::new(None);
 
