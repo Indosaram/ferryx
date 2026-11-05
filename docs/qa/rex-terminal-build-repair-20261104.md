@@ -111,6 +111,36 @@ On Windows use the actual transferred bundle path instead of `/tmp/...`.
 
 ## Remote provisioning (deferred, do not run on owner's Mac)
 
+### Windows cwd follow-up on 708e0cfb7
+
+Integration was fast-forwarded into the owned repair branch before this fix.
+Raw `verify-win/708e0cfb/original-failures.utf8.log:78-83` confirms the
+unchanged expectation table still reports None instead of `C:\Temp`.
+The previous empty-host mutation was not portable: url 2.5.8's
+`set_host(Some(""))` stores `Host::Domain("")`, and its Windows
+`to_file_path()` passes that as `Some("")` to the UNC conversion branch.
+That branch prepends two backslashes and appends `\C:\Temp`, instead of
+taking the drive-letter branch. The resulting malformed UNC path fails
+`Path::is_absolute`, causing parse_cwd to return None. This is downstream
+of the callback; the fixture is valid and remains unchanged.
+
+The fix reparses `file://localhost` plus the still-encoded URI path. The
+file URL parser canonicalizes localhost to no host; Windows conversion
+then takes its existing drive-letter branch and percent-decodes once.
+Query/fragment rejection and the absolute-path check remain unchanged.
+Added Windows direct conversion tests for remote/localhost/empty hosts,
+encoded paths, and query/fragment rejection, plus split-input callback
+and muted seed replay tests using both BEL and ST terminators. All are
+unexecuted in this code-only round; the original cwd assertion is intact.
+
+The requested stall log is at
+`verify-win/d8313422b/full-lib-timeout.utf8.log`, not under 708e0cfb.
+It records PID 33368, 1707.21875 CPU seconds, no output for over 27
+minutes, and a bounded timeout. It identifies no test, stack, module,
+or parser operation. Therefore this evidence does NOT attribute the
+stall to terminal changes or exclude them. No source stall investigation
+or new execution was undertaken absent an identifying trace.
+
 Use isolated remote worktrees of the final consolidated source revision, with
 the pinned submodule initialized. Hold the normal host claim. On native Linux
 x86_64, Linux aarch64, macOS aarch64, macOS x86_64, and Windows x86_64 hosts,
