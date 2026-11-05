@@ -1,0 +1,30 @@
+bd4d3459d70e5de999c44fe2eaef63fadd87bdee
+216426b657b93d8fadd11d7506615f744581221e
+ M src-tauri/gen/schemas/acl-manifests.json
+ M src-tauri/gen/schemas/capabilities.json
+ M src-tauri/gen/schemas/desktop-schema.json
+ M src-tauri/gen/schemas/windows-schema.json
+ M ui/public/llms.txt
+ M ui/public/search.json
+BEGIN ffmpeg 2026-11-05T12:16:32.0934005+09:00
+ffmpeg EXIT=0 2026-11-05T12:16:32.7866435+09:00
+BEGIN helper-debug 2026-11-05T12:16:32.7881455+09:00
+helper-debug EXIT=0 2026-11-05T12:17:19.7794290+09:00
+BEGIN helper-release 2026-11-05T12:17:19.7804330+09:00
+helper-release EXIT=0 2026-11-05T12:17:59.0409992+09:00
+BEGIN helper-receipt 2026-11-05T12:17:59.0430492+09:00
+helper-receipt EXIT=0 2026-11-05T12:18:00.7010340+09:00
+BEGIN ui-install 2026-11-05T12:18:00.7046985+09:00
+ui-install EXIT=0 2026-11-05T12:18:53.9965897+09:00
+BEGIN ui-build 2026-11-05T12:18:53.9976377+09:00
+ui-build EXIT=0 2026-11-05T12:19:31.8010423+09:00
+BEGIN original 2026-11-05T12:19:31.8022663+09:00
+original EXIT=0 2026-11-05T12:26:43.8860125+09:00
+BEGIN added 2026-11-05T12:26:43.8870677+09:00
+BEGIN all-targets 2026-11-05T12:39:14.2669641+09:00
+all-targets EXIT=0 2026-11-05T12:47:48.6768909+09:00
+BEGIN headless 2026-11-05T12:47:48.6779355+09:00
+headless EXIT=0 2026-11-05T12:59:39.4072536+09:00
+BEGIN full-lib 2026-11-05T12:59:39.4082580+09:00
+full-lib EXIT=101 2026-11-05T13:27:08.3913261+09:00
+DONE

@@ -1,0 +1,76 @@
+
+
+ProcessId       : 8164
+ParentProcessId : 7824
+SessionId       : 1
+Name            : explorer.exe
+ExecutablePath  : C:\WINDOWS\Explorer.EXE
+CommandLine     : C:\WINDOWS\Explorer.EXE
+
+ProcessId       : 30712
+ParentProcessId : 11664
+SessionId       : 0
+Name            : ferryx-remote-helper.exe
+ExecutablePath  : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine     : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" "daemon" "--root" "\\?\C:\U
+                  sers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62" "--host-id" "ssh-maho-win"
+
+ProcessId       : 20752
+ParentProcessId : 28088
+SessionId       : 1
+Name            : maho-host.exe
+ExecutablePath  : C:\Users\sook\tools\mahord-client-f0a226132\target\debug\maho-host.exe
+CommandLine     : "C:\Users\sook\tools\mahord-client-f0a226132\target\debug\maho-host.exe" --bootstrap-pin 62335298 --a
+                  uto-approve --relay http://127.0.0.1:8080 --relay-host-id desktop-1lapjmp
+
+ProcessId       : 28744
+ParentProcessId : 24392
+SessionId       : 0
+Name            : ferryx-remote-helper.exe
+ExecutablePath  : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine     : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\U
+                  sers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId       : 9676
+ParentProcessId : 9844
+SessionId       : 0
+Name            : ferryx-remote-helper.exe
+ExecutablePath  : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine     : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\U
+                  sers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId       : 26604
+ParentProcessId : 21636
+SessionId       : 0
+Name            : ferryx-remote-helper.exe
+ExecutablePath  : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine     : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\U
+                  sers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId       : 29204
+ParentProcessId : 24004
+SessionId       : 0
+Name            : ferryx-remote-helper.exe
+ExecutablePath  : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine     : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\U
+                  sers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId       : 28504
+ParentProcessId : 17404
+SessionId       : 0
+Name            : ferryx-remote-helper.exe
+ExecutablePath  : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine     : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\U
+                  sers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+
+
+ 사용자 이름           세션 이름          ID  상태    유휴 시간  로그온 시간
+ sook                  console             1  활성        none   2026-10-28 오후 9:03
+
+LocalAddress  State OwningProcess
+------------  ----- -------------
+0.0.0.0      Listen         20752
+                                 
+
+

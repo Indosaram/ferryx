@@ -1,0 +1,130 @@
+
+
+ProcessId       : 6864
+ParentProcessId : 7536
+Name            : cargo.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe" test --manifest-path s
+                  rc-tauri/Cargo.toml --locked --lib -- --test-threads=1 --nocapture
+
+ProcessId       : 32200
+ParentProcessId : 8764
+Name            : cargo.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe" run --release --bin bu
+                  ndle-engine -- C:\Users\sook\ferryx-wt\f4-t23-20261105\.qa-t23\engine-out --release
+
+ProcessId       : 26744
+ParentProcessId : 32200
+Name            : rustc.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe" --crate-name serde_der
+                  ive --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde_derive-1.
+                  0.229\src\lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crat
+                  e-type proc-macro --emit=dep-info,link -C prefer-dynamic -C embed-bitcode=no -C debug-assertions=off 
+                  --cfg feature=\"default\" --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values(\"default\", 
+                  \"deserialize_in_place\"))" -C metadata=536fe1c9814e7d54 -C extra-filename=-1a3f21a2debe9daf --out-di
+                  r C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps -C strip=d
+                  ebuginfo -L dependency=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\re
+                  lease\deps --extern proc_macro2=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\
+                  target\release\deps\libproc_macro2-956e7a2a7e59ef2e.rlib --extern quote=C:\Users\sook\ferryx-wt\f4-t2
+                  3-20261105\crates\ferryx-browser-engine\target\release\deps\libquote-f1c855fd081dad4d.rlib --extern s
+                  yn=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps\libsyn-14
+                  02032e0d39c6d3.rlib --extern proc_macro --cap-lints allow
+
+ProcessId       : 26252
+ParentProcessId : 32200
+Name            : rustc.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe" --crate-name regex_aut
+                  omata --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\regex-automat
+                  a-0.4.18\src\lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --c
+                  rate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debug-assertions=off --cfg feature
+                  =\"alloc\" --cfg feature=\"dfa-onepass\" --cfg feature=\"hybrid\" --cfg feature=\"meta\" --cfg featur
+                  e=\"nfa-backtrack\" --cfg feature=\"nfa-pikevm\" --cfg feature=\"nfa-thompson\" --cfg feature=\"perf-
+                  inline\" --cfg feature=\"perf-literal\" --cfg feature=\"perf-literal-multisubstring\" --cfg feature=\
+                  "perf-literal-substring\" --cfg feature=\"std\" --cfg feature=\"syntax\" --cfg feature=\"unicode\" --
+                  cfg feature=\"unicode-age\" --cfg feature=\"unicode-bool\" --cfg feature=\"unicode-case\" --cfg featu
+                  re=\"unicode-gencat\" --cfg feature=\"unicode-perl\" --cfg feature=\"unicode-script\" --cfg feature=\
+                  "unicode-segment\" --cfg feature=\"unicode-word-boundary\" --check-cfg cfg(docsrs,test) --check-cfg "
+                  cfg(feature, values(\"alloc\", \"default\", \"dfa\", \"dfa-build\", \"dfa-onepass\", \"dfa-search\", 
+                  \"hybrid\", \"internal-instrument\", \"internal-instrument-pikevm\", \"logging\", \"meta\", \"nfa\", 
+                  \"nfa-backtrack\", \"nfa-pikevm\", \"nfa-thompson\", \"perf\", \"perf-inline\", \"perf-literal\", \"p
+                  erf-literal-multisubstring\", \"perf-literal-substring\", \"std\", \"syntax\", \"unicode\", \"unicode
+                  -age\", \"unicode-bool\", \"unicode-case\", \"unicode-gencat\", \"unicode-perl\", \"unicode-script\",
+                   \"unicode-segment\", \"unicode-word-boundary\"))" -C metadata=403f3ae8ef44fac6 -C extra-filename=-f3
+                  5566ee1ef1e924 --out-dir C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\
+                  release\deps -C strip=debuginfo -L dependency=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-b
+                  rowser-engine\target\release\deps --extern aho_corasick=C:\Users\sook\ferryx-wt\f4-t23-20261105\crate
+                  s\ferryx-browser-engine\target\release\deps\libaho_corasick-6d4eb8bd343954be.rmeta --extern memchr=C:
+                  \Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps\libmemchr-011f
+                  26948dcd0f6a.rmeta --extern regex_syntax=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browse
+                  r-engine\target\release\deps\libregex_syntax-051e8b14d85521c4.rmeta --cap-lints allow
+
+ProcessId       : 1860
+ParentProcessId : 32200
+Name            : rustc.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe" --crate-name rustls --
+                  edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rustls-0.23.46\src\li
+                  b.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib -
+                  -emit=dep-info,metadata,link -C embed-bitcode=no -C debug-assertions=off --cfg feature=\"log\" --cfg 
+                  feature=\"logging\" --cfg feature=\"ring\" --cfg feature=\"std\" --cfg feature=\"tls12\" --check-cfg 
+                  cfg(docsrs,test) --check-cfg "cfg(feature, values(\"aws-lc-rs\", \"aws_lc_rs\", \"brotli\", \"custom-
+                  provider\", \"default\", \"fips\", \"hashbrown\", \"log\", \"logging\", \"prefer-post-quantum\", \"re
+                  ad_buf\", \"ring\", \"rustversion\", \"std\", \"tls12\", \"zlib\"))" -C metadata=ab39fa641587d54d -C 
+                  extra-filename=-5df146095d75c55a --out-dir C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-brow
+                  ser-engine\target\release\deps -C strip=debuginfo -L dependency=C:\Users\sook\ferryx-wt\f4-t23-202611
+                  05\crates\ferryx-browser-engine\target\release\deps --extern log=C:\Users\sook\ferryx-wt\f4-t23-20261
+                  105\crates\ferryx-browser-engine\target\release\deps\liblog-36958e2ea59a8a10.rmeta --extern once_cell
+                  =C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps\libonce_cel
+                  l-1d802f1d706a5b3f.rmeta --extern ring=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-
+                  engine\target\release\deps\libring-376112054ee1d2eb.rmeta --extern pki_types=C:\Users\sook\ferryx-wt\
+                  f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps\librustls_pki_types-2139a63184659d96
+                  .rmeta --extern webpki=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\re
+                  lease\deps\libwebpki-4429fd045977589e.rmeta --extern subtle=C:\Users\sook\ferryx-wt\f4-t23-20261105\c
+                  rates\ferryx-browser-engine\target\release\deps\libsubtle-88c4714714c0f21f.rmeta --extern zeroize=C:\
+                  Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps\libzeroize-40ac
+                  58230ef7c310.rmeta --cap-lints allow -L native=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-
+                  browser-engine\target\release\build\ring-9285e501c31d8f68\out
+
+ProcessId       : 30468
+ParentProcessId : 32200
+Name            : rustc.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe" --crate-name clap --ed
+                  ition=2024 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\clap-4.6.7\src\lib.rs -
+                  -error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=
+                  dep-info,metadata,link -C embed-bitcode=no -C debug-assertions=off --cfg feature=\"color\" --cfg feat
+                  ure=\"default\" --cfg feature=\"derive\" --cfg feature=\"error-context\" --cfg feature=\"help\" --cfg
+                   feature=\"std\" --cfg feature=\"suggestions\" --cfg feature=\"usage\" --check-cfg cfg(docsrs,test) -
+                  -check-cfg "cfg(feature, values(\"cargo\", \"color\", \"debug\", \"default\", \"deprecated\", \"deriv
+                  e\", \"env\", \"error-context\", \"help\", \"std\", \"string\", \"suggestions\", \"unicode\", \"unsta
+                  ble-derive-ui-tests\", \"unstable-doc\", \"unstable-ext\", \"unstable-markdown\", \"unstable-styles\"
+                  , \"unstable-v5\", \"usage\", \"wrap_help\"))" -C metadata=f4de5362d20d41f5 -C extra-filename=-7a27b9
+                  3d0d798966 --out-dir C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\rele
+                  ase\deps -C strip=debuginfo -L dependency=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-brows
+                  er-engine\target\release\deps --extern clap_builder=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\fe
+                  rryx-browser-engine\target\release\deps\libclap_builder-c0c13f7be928e473.rmeta --extern clap_derive=C
+                  :\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps\clap_derive-8
+                  4327166cb994b61.dll --cap-lints allow
+
+ProcessId       : 27960
+ParentProcessId : 32200
+Name            : rustc.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe" --crate-name anstream 
+                  --edition=2021 C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstream-1.0.0\src\
+                  lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib
+                   --emit=dep-info,metadata,link -C opt-level=3 -C embed-bitcode=no --cfg feature=\"auto\" --cfg featur
+                  e=\"default\" --cfg feature=\"wincon\" --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values(
+                  \"auto\", \"default\", \"test\", \"wincon\"))" -C metadata=c04f7eff9cde60cd -C extra-filename=-a9866d
+                  5f82143b7a --out-dir C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\rele
+                  ase\deps -C strip=debuginfo -L dependency=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-brows
+                  er-engine\target\release\deps --extern anstyle=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-
+                  browser-engine\target\release\deps\libanstyle-581ff1c19fc06382.rmeta --extern anstyle_parse=C:\Users\
+                  sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps\libanstyle_parse-5802
+                  34e3f38d7862.rmeta --extern anstyle_query=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-brows
+                  er-engine\target\release\deps\libanstyle_query-d8fd039cf9fc64d4.rmeta --extern anstyle_wincon=C:\User
+                  s\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps\libanstyle_wincon-c
+                  a577be28d08fbf5.rmeta --extern colorchoice=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-brow
+                  ser-engine\target\release\deps\libcolorchoice-031889af12fa5c1a.rmeta --extern is_terminal_polyfill=C:
+                  \Users\sook\ferryx-wt\f4-t23-20261105\crates\ferryx-browser-engine\target\release\deps\libis_terminal
+                  _polyfill-0abe0587b0eddbc5.rmeta --extern utf8parse=C:\Users\sook\ferryx-wt\f4-t23-20261105\crates\fe
+                  rryx-browser-engine\target\release\deps\libutf8parse-a0c30e3ea0d2fdd2.rmeta --cap-lints allow
+
+
+

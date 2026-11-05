@@ -1,0 +1,16 @@
+
+
+ProcessId       : 6864
+ParentProcessId : 7536
+ExecutablePath  : C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe" test --manifest-path s
+                  rc-tauri/Cargo.toml --locked --lib -- --test-threads=1 --nocapture
+
+ProcessId       : 6800
+ParentProcessId : 6864
+ExecutablePath  : C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-fe3e171e148fc8c9.exe
+CommandLine     : "C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-fe3e171e148fc8c9.exe" --test-threads=1 --nocap
+                  ture
+
+
+

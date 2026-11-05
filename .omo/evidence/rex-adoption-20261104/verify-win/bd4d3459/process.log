@@ -1,0 +1,120 @@
+
+
+ProcessId       : 20896
+ParentProcessId : 30560
+Name            : cargo.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe" build --manifest-path 
+                  src-tauri/Cargo.toml --bin ferryx
+
+ProcessId       : 25824
+ParentProcessId : 29980
+Name            : cargo.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe" test --manifest-path s
+                  rc-tauri/Cargo.toml --locked --lib -- daemon::supervisor_peer:: native_terminal::osc_effects::
+
+ProcessId       : 20512
+ParentProcessId : 20896
+Name            : rustc.exe
+CommandLine     : "C:\Users\sook\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe" --crate-name ferryx_li
+                  b --edition=2021 src\lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-inco
+                  mpat --crate-type staticlib --crate-type cdylib --crate-type rlib --emit=dep-info,link -C embed-bitco
+                  de=no -C debuginfo=2 --cfg feature=\"default\" --cfg feature=\"desktop\" --cfg feature=\"hub-discord\
+                  " --cfg feature=\"hub-slack\" --cfg feature=\"hub-voice\" --cfg feature=\"native-terminal\" --cfg fea
+                  ture=\"remote-desktop\" --check-cfg cfg(docsrs,test) --check-cfg "cfg(feature, values(\"default\", \"
+                  desktop\", \"hub-discord\", \"hub-slack\", \"hub-voice\", \"local-split-qa\", \"native-terminal\", \"
+                  qa-protocol-bump\", \"remote-desktop\"))" -C metadata=6a426596a506fd85 --out-dir C:/Users/sook/ferryx
+                  -wt/.target\debug\deps -C incremental=C:/Users/sook/ferryx-wt/.target\debug\incremental -L dependency
+                  =C:/Users/sook/ferryx-wt/.target\debug\deps --extern aes=C:/Users/sook/ferryx-wt/.target\debug\deps\l
+                  ibaes-5ff2225c9a70dd24.rlib --extern anyhow=C:/Users/sook/ferryx-wt/.target\debug\deps\libanyhow-3145
+                  457cd07fff04.rlib --extern async_trait=C:/Users/sook/ferryx-wt/.target\debug\deps\async_trait-4a677aa
+                  77e5bb535.dll --extern axum=C:/Users/sook/ferryx-wt/.target\debug\deps\libaxum-403a9e70f4e7b561.rlib 
+                  --extern base64=C:/Users/sook/ferryx-wt/.target\debug\deps\libbase64-a3f60faaadc718f3.rlib --extern b
+                  lake2=C:/Users/sook/ferryx-wt/.target\debug\deps\libblake2-c31541c21bcc9a9c.rlib --extern bytemuck=C:
+                  /Users/sook/ferryx-wt/.target\debug\deps\libbytemuck-f0c72bd57fcb264f.rlib --extern bytes=C:/Users/so
+                  ok/ferryx-wt/.target\debug\deps\libbytes-bfa802b58b70dff6.rlib --extern cbc=C:/Users/sook/ferryx-wt/.
+                  target\debug\deps\libcbc-b5e6eb7343df41fe.rlib --extern chacha20poly1305=C:/Users/sook/ferryx-wt/.tar
+                  get\debug\deps\libchacha20poly1305-b5d3c1c02f42a12d.rlib --extern cookie=C:/Users/sook/ferryx-wt/.tar
+                  get\debug\deps\libcookie-2f508acc1f9a5e14.rlib --extern ece=C:/Users/sook/ferryx-wt/.target\debug\dep
+                  s\libece-8536076189f2439a.rlib --extern ed25519_dalek=C:/Users/sook/ferryx-wt/.target\debug\deps\libe
+                  d25519_dalek-444113483c88d8b6.rlib --extern ferryx_browser_engine_protocol=C:/Users/sook/ferryx-wt/.t
+                  arget\debug\deps\libferryx_browser_engine_protocol-56db294cfc7794b2.rlib --extern ferryx_hub=C:/Users
+                  /sook/ferryx-wt/.target\debug\deps\libferryx_hub-8b167ac4304df0a0.rlib --extern ferryx_rd_app=C:/User
+                  s/sook/ferryx-wt/.target\debug\deps\libferryx_rd_app-9bbda7e53cd57a37.rlib --extern ferryx_rd_decode=
+                  C:/Users/sook/ferryx-wt/.target\debug\deps\libferryx_rd_decode-05d1990c6dedf1ce.rlib --extern ferryx_
+                  rd_host=C:/Users/sook/ferryx-wt/.target\debug\deps\libferryx_rd_host-c7c913f68af55f63.rlib --extern f
+                  erryx_rd_net=C:/Users/sook/ferryx-wt/.target\debug\deps\libferryx_rd_net-d436783588b23fd8.rlib --exte
+                  rn ferryx_rd_proto=C:/Users/sook/ferryx-wt/.target\debug\deps\libferryx_rd_proto-57e32da6012d86e8.rli
+                  b --extern futures_util=C:/Users/sook/ferryx-wt/.target\debug\deps\libfutures_util-ad7b9e19a73d009f.r
+                  lib --extern hmac=C:/Users/sook/ferryx-wt/.target\debug\deps\libhmac-17aac3938314f309.rlib --extern i
+                  mage=C:/Users/sook/ferryx-wt/.target\debug\deps\libimage-6b542dd5641efd5a.rlib --extern jwt_simple=C:
+                  /Users/sook/ferryx-wt/.target\debug\deps\libjwt_simple-0017e47a9165714f.rlib --extern libc=C:/Users/s
+                  ook/ferryx-wt/.target\debug\deps\liblibc-164e536e6913663d.rlib --extern md5=C:/Users/sook/ferryx-wt/.
+                  target\debug\deps\libmd5-b421d531f59785ef.rlib --extern mime_guess=C:/Users/sook/ferryx-wt/.target\de
+                  bug\deps\libmime_guess-55896586b2dcf2fa.rlib --extern notify=C:/Users/sook/ferryx-wt/.target\debug\de
+                  ps\libnotify-fd6370208ef8af87.rlib --extern notify_rust=C:/Users/sook/ferryx-wt/.target\debug\deps\li
+                  bnotify_rust-c7972829f758d1d0.rlib --extern openssl=C:/Users/sook/ferryx-wt/.target\debug\deps\libope
+                  nssl-5ced25fe767c26fa.rlib --extern parking_lot=C:/Users/sook/ferryx-wt/.target\debug\deps\libparking
+                  _lot-fc56ac37df9e0106.rlib --extern pbkdf2=C:/Users/sook/ferryx-wt/.target\debug\deps\libpbkdf2-f75dd
+                  949eea4d67c.rlib --extern png=C:/Users/sook/ferryx-wt/.target\debug\deps\libpng-a0ad1ff4fecff4a7.rlib
+                   --extern pollster=C:/Users/sook/ferryx-wt/.target\debug\deps\libpollster-e9053154d13e6499.rlib --ext
+                  ern portable_pty=C:/Users/sook/ferryx-wt/.target\debug\deps\libportable_pty-a0343d04078bfec2.rlib --e
+                  xtern quinn=C:/Users/sook/ferryx-wt/.target\debug\deps\libquinn-f124db25236745b5.rlib --extern rand=C
+                  :/Users/sook/ferryx-wt/.target\debug\deps\librand-fa4053b0ac57c054.rlib --extern raw_window_handle=C:
+                  /Users/sook/ferryx-wt/.target\debug\deps\libraw_window_handle-058a6e4e4595ca72.rlib --extern rcgen=C:
+                  /Users/sook/ferryx-wt/.target\debug\deps\librcgen-e9b897f90fcfbc04.rlib --extern regex=C:/Users/sook/
+                  ferryx-wt/.target\debug\deps\libregex-9bbe2408beac956a.rlib --extern reqwest=C:/Users/sook/ferryx-wt/
+                  .target\debug\deps\libreqwest-06931eac3017e568.rlib --extern rodio=C:/Users/sook/ferryx-wt/.target\de
+                  bug\deps\librodio-3075ab912d8eec07.rlib --extern rusqlite=C:/Users/sook/ferryx-wt/.target\debug\deps\
+                  librusqlite-caba4172923206a5.rlib --extern rustls=C:/Users/sook/ferryx-wt/.target\debug\deps\librustl
+                  s-9c7e28820ad51767.rlib --extern rustls_acme=C:/Users/sook/ferryx-wt/.target\debug\deps\librustls_acm
+                  e-c3098f75cf8f460d.rlib --extern rustls_pki_types=C:/Users/sook/ferryx-wt/.target\debug\deps\librustl
+                  s_pki_types-f7ba190a86cdceee.rlib --extern serde=C:/Users/sook/ferryx-wt/.target\debug\deps\libserde-
+                  e1d3c3d016feeee6.rlib --extern serde_json=C:/Users/sook/ferryx-wt/.target\debug\deps\libserde_json-d6
+                  846fd7a89c0109.rlib --extern sha1=C:/Users/sook/ferryx-wt/.target\debug\deps\libsha1-42f03cad77ddd99b
+                  .rlib --extern sha2=C:/Users/sook/ferryx-wt/.target\debug\deps\libsha2-8ee3958f8e5a608c.rlib --extern
+                   snow=C:/Users/sook/ferryx-wt/.target\debug\deps\libsnow-9160e315209a0371.rlib --extern tauri=C:/User
+                  s/sook/ferryx-wt/.target\debug\deps\libtauri-be92da6c0891ca0c.rlib --extern tauri_plugin_dialog=C:/Us
+                  ers/sook/ferryx-wt/.target\debug\deps\libtauri_plugin_dialog-5eb530be15c43c3c.rlib --extern tauri_plu
+                  gin_notification=C:/Users/sook/ferryx-wt/.target\debug\deps\libtauri_plugin_notification-7d0e4fa8a56f
+                  d28d.rlib --extern tauri_plugin_process=C:/Users/sook/ferryx-wt/.target\debug\deps\libtauri_plugin_pr
+                  ocess-1c925a8c8f198816.rlib --extern tauri_plugin_updater=C:/Users/sook/ferryx-wt/.target\debug\deps\
+                  libtauri_plugin_updater-8f74032ff0d3bf69.rlib --extern tauri_plugin_window_state=C:/Users/sook/ferryx
+                  -wt/.target\debug\deps\libtauri_plugin_window_state-8ccad6abfeb7b07f.rlib --extern tempfile=C:/Users/
+                  sook/ferryx-wt/.target\debug\deps\libtempfile-7d690b9c3f166cdc.rlib --extern thiserror=C:/Users/sook/
+                  ferryx-wt/.target\debug\deps\libthiserror-a5ee79f77897a7f6.rlib --extern time=C:/Users/sook/ferryx-wt
+                  /.target\debug\deps\libtime-33457ee6fd71ccb0.rlib --extern tokio=C:/Users/sook/ferryx-wt/.target\debu
+                  g\deps\libtokio-38edc3d1827615a1.rlib --extern tokio_rustls=C:/Users/sook/ferryx-wt/.target\debug\dep
+                  s\libtokio_rustls-38f0f2f44607396f.rlib --extern tokio_tungstenite=C:/Users/sook/ferryx-wt/.target\de
+                  bug\deps\libtokio_tungstenite-453f91200bd0c2d6.rlib --extern tokio_util=C:/Users/sook/ferryx-wt/.targ
+                  et\debug\deps\libtokio_util-c99fdf471858a738.rlib --extern toml=C:/Users/sook/ferryx-wt/.target\debug
+                  \deps\libtoml-f301b22b27dbcbff.rlib --extern tower_http=C:/Users/sook/ferryx-wt/.target\debug\deps\li
+                  btower_http-8916237e9986c83f.rlib --extern tracing=C:/Users/sook/ferryx-wt/.target\debug\deps\libtrac
+                  ing-e9115cd0e58f0d2d.rlib --extern tracing_subscriber=C:/Users/sook/ferryx-wt/.target\debug\deps\libt
+                  racing_subscriber-7ac6a43f82d49ab4.rlib --extern url=C:/Users/sook/ferryx-wt/.target\debug\deps\libur
+                  l-50700ead1425624c.rlib --extern uuid=C:/Users/sook/ferryx-wt/.target\debug\deps\libuuid-99d6a4cbcf00
+                  d217.rlib --extern web_push=C:/Users/sook/ferryx-wt/.target\debug\deps\libweb_push-9fd64ae8b1741d0a.r
+                  lib --extern webview2_com=C:/Users/sook/ferryx-wt/.target\debug\deps\libwebview2_com-447850f43b221ed5
+                  .rlib --extern wgpu=C:/Users/sook/ferryx-wt/.target\debug\deps\libwgpu-926abdb3f5baefdf.rlib --extern
+                   windows=C:/Users/sook/ferryx-wt/.target\debug\deps\libwindows-1284aa76facca221.rlib --extern windows
+                  _sys=C:/Users/sook/ferryx-wt/.target\debug\deps\libwindows_sys-40881edfec6aec86.rlib --extern winit=C
+                  :/Users/sook/ferryx-wt/.target\debug\deps\libwinit-7af27d8664f3f525.rlib --extern x25519_dalek=C:/Use
+                  rs/sook/ferryx-wt/.target\debug\deps\libx25519_dalek-e2dd0307cfbf55ce.rlib --extern zip=C:/Users/sook
+                  /ferryx-wt/.target\debug\deps\libzip-fbb85171a1828595.rlib -L native=C:/Users/sook/ferryx-wt/.target\
+                  debug\build\ferryx-a6493327393beebe\out\ghostty_vt\lib -L native=C:/Users/sook/ferryx-wt/.target\debu
+                  g\build\ring-ee669eae9230956d\out -L native=C:/Users/sook/ferryx-wt/.target\debug\build\openssl-sys-d
+                  635839640980a54\out\openssl-build\install\lib -L native=C:/Users/sook/ferryx-wt/.target\debug\build\a
+                  udiopus_sys-0bf4856be5368d1a\out/lib -L native=C:/Users/sook/ferryx-wt/.target\debug\build\libsqlite3
+                  -sys-05bd95dfb1f6ce9d\out -L native=C:/Users/sook/ferryx-wt/.target\debug\build\zstd-sys-7e3a03149fec
+                  fdd5\out -L native=C:/Users/sook/ferryx-wt/.target\debug\build\webview2-com-sys-fde1c95e69a31b0b\out\
+                  x64 -L native=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-
+                  0.52.6\lib -L "native=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.5
+                  1.36231\atlmfc\lib\x64" -L "native=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\To
+                  ols\MSVC\14.51.36231\atlmfc\lib\x64" -L native=C:\Users\sook\ferryx-wt\pane-chat-native-20261105\src-
+                  tauri/resources/ffmpeg/sdk\lib -L native=C:\Users\sook\.cargo\registry\src\index.crates.io-1949cf8c6b
+                  5b557f\windows_x86_64_msvc-0.53.1\lib -l static=ghostty-vt-static -C link-arg=/MANIFEST:EMBED -C link
+                  -arg=/MANIFESTINPUT:C:/Users/sook/ferryx-wt/.target\debug\build\ferryx-a6493327393beebe\out\ferryx-ap
+                  p-manifest.xml --cfg desktop --cfg dev --check-cfg cfg(a10_wire_red) --check-cfg cfg(desktop) --check
+                  -cfg cfg(mobile) --check-cfg cfg(dev)
+
+
+

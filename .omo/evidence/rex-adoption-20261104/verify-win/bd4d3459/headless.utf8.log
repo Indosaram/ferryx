@@ -1,0 +1,67 @@
+cargo :     Blocking waiting for file lock on build directory
+위치 C:\Users\sook\ferryx-wt\rex-win-bd4-gates.ps1:23 문자:15
++ ... n headless {cargo check --manifest-path src-tauri/Cargo.toml --no-def ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...build directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking tokio v1.53.1
+    Checking arrayvec v0.7.8
+    Checking icu_normalizer v2.3.0
+    Checking num-bigint-dig v0.8.6
+    Checking harfrust v0.12.0
+    Checking flume v0.11.1
+    Checking ece v2.3.1
+    Checking async-web-client v0.6.4
+    Checking x509-parser v0.18.1
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\src-tauri)
+    Checking wasmparser v0.228.0
+    Checking portable-pty v0.9.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\src-tauri\vendor\portable-pty)
+    Checking polycool v0.4.0
+    Checking blake2b_simd v1.0.5
+    Checking idna_adapter v1.2.2
+    Checking tiny-skia v0.12.0
+    Checking rusqlite v0.32.1
+    Checking tracing-subscriber v0.3.23
+    Checking kurbo v0.13.1
+    Checking idna v1.1.0
+    Checking mlua v0.12.2
+    Checking rsa v0.9.10
+    Checking url v2.5.8
+    Checking rustls-acme v0.15.4
+    Checking svgtypes v0.16.1
+    Checking superboring v0.1.14
+    Checking jwt-simple v0.12.11
+    Checking usvg v0.48.1
+    Checking wasmi v0.46.0
+    Checking tokio-rustls v0.26.4
+    Checking hyper v1.11.0
+    Checking tokio-stream v0.1.19
+    Checking tower v0.5.3
+    Checking tokio-util v0.7.19
+    Checking quinn v0.11.11
+    Checking tokio-tungstenite v0.29.0
+    Checking sqlx-core v0.8.6
+    Checking tokio-test v0.4.5
+    Checking web-push v0.11.0
+    Checking tower-http v0.6.11
+    Checking hyper-util v0.1.20
+    Checking resvg v0.48.1
+    Checking sqlx-sqlite v0.8.6
+    Checking hyper-rustls v0.27.9
+    Checking axum v0.8.9
+    Checking reqwest v0.12.28
+    Checking sqlx v0.8.6
+    Checking ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-bd4d3459\crates\ferryx-hub)
+warning: static `NATIVE_DEBUG_SEQUENCE` is never used
+  --> src\ipc\debug.rs:34:8
+   |
+34 | static NATIVE_DEBUG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+   |        ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ferryx` (lib) generated 1 warning
+warning: `ferryx` (lib test) generated 1 warning (1 duplicate)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11m 50s
+EXIT=0
