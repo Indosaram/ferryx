@@ -5,7 +5,7 @@ import { exitWatchSource } from './f1-exit-watch.mjs';
 import { spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitObjectsSource } from './f1-git-objects.mjs';
 import { linuxProcess, sameProcess } from './f1-process-identity.mjs';
@@ -198,8 +198,13 @@ export async function supervise(root, args) {
   delete env.F1_HOST_PROC;
   const gitObjects = gitObjectsSource();
   if (!gitObjects.path) throw failure('GIT_OBJECTS_REFUSED', gitObjects.reason);
+  // Bind the objects at the path they actually live at on this host. A fixed in-sandbox
+  // destination only ever matched the original developer's checkout; on any other host it was
+  // inert (nothing in the sandbox refers to it), and it hid every other /home entry. The run
+  // root is re-bound below, so a root under /home stays visible even under the tmpfs.
+  const gitObjectsMount = dirname(gitObjects.path);
   const bwrapArgs = ['--unshare-pid', '--ro-bind', '/', '/', '--tmpfs', '/run', '--tmpfs', '/home',
-    '--dir', '/home/indo/code/ferryx/.git', '--ro-bind', gitObjects.path, '/home/indo/code/ferryx/.git/objects',
+    '--dir', gitObjectsMount, '--ro-bind', gitObjects.path, gitObjects.path,
     '--tmpfs', '/tmp', '--dir', root, '--bind', root, root, '--ro-bind', helperDir, helperDir,
     '--dev-bind', '/dev', '/dev', '--proc', '/proc', '--chdir', root, bun, ...args];
   child = spawn('/usr/bin/bwrap', bwrapArgs, { env, stdio: 'inherit' });
