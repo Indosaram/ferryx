@@ -517,6 +517,15 @@ function addressWord(words) {
 }
 
 /**
+ * The address bar word on the frame at `path`: the regular pass first, then the thin-strip pass
+ * on the same frame. macOS run 41846200603 (probes 047-067, 142-146) never read the URL in the
+ * regular pass, so the toolbar icons were not found; 44px strips read it on every one of them.
+ */
+function addressWordAt(ctx, path, words) {
+  return addressWord(words) ?? (ctx.ocrStrips ? addressWord(ctx.ocrStrips(path)) : null);
+}
+
+/**
  * Column runs on line `y` between x0 and x1 that differ from the line's background (the most
  * common colour near x0), probing 6px above and below so 14px glyphs are not missed.
  */
@@ -558,7 +567,7 @@ function rowRuns(image, y, x0, x1) {
 function toolbarIcons(ctx) {
   const path = ctx.probeShot();
   const words = ctx.ocr(path) ?? [];
-  const url = addressWord(words);
+  const url = addressWordAt(ctx, path, words);
   const label = words.filter((word) => /^\d{2,3}%$/.test(word.text)).sort((a, b) => a.top - b.top)[0] ?? null;
   const anchor = url ?? label;
   if (!anchor) return { icons: [], label: null, via: "neither the address bar nor the zoom readout was read" };
@@ -591,7 +600,7 @@ function toolbarIcons(ctx) {
 /** The toolbar Back button: the third control left of the address box (Back, Forward, Reload). */
 function toolbarBack(ctx) {
   const path = ctx.probeShot();
-  const url = addressWord(ctx.ocr(path) ?? []);
+  const url = addressWordAt(ctx, path, ctx.ocr(path) ?? []);
   if (!url) return null;
   const y = url.top + Math.round(url.height / 2);
   // The box border sits ~10px left of its text; stop before it.
@@ -669,10 +678,16 @@ async function clickToolbarIcon(ctx, index, verify, { spread = 1 } = {}) {
   return { ok: false, tried, icons: icons.length, label };
 }
 
-/** Clicks the OCR word matching `test` (topmost or as picked); returns its centre or null. */
+/**
+ * Clicks the OCR word matching `test` (topmost or as picked); returns its centre or null. When
+ * the regular pass misses, the thin-strip pass reads the same frame: macOS run 41846200603 never
+ * read the highlighted (white on blue) "Duplicate browser tab" menu item (probes 180-182, 275).
+ */
 async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0 } = {}) {
   const hit = await until(() => {
-    const words = screenWords(ctx).filter((word) => test(word.text));
+    const path = ctx.probeShot();
+    let words = (ctx.ocr(path) ?? []).filter((word) => test(word.text));
+    if (!words.length && ctx.ocrStrips) words = ctx.ocrStrips(path).filter((word) => test(word.text));
     if (!words.length) return null;
     const sorted = pick === "rightmost" ? words.sort((a, b) => b.left - a.left)
       : pick === "bottom" ? words.sort((a, b) => b.top - a.top) : words.sort((a, b) => a.top - b.top || a.left - b.left);
