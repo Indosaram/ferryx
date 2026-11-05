@@ -7,6 +7,7 @@ use ferryx_lib::cli::{
 };
 
 fn main() {
+    if let Some(code) = ferryx_lib::daemon::plugins::runner::entry() { std::process::exit(code); }
     #[cfg(unix)]
     if let Some(code) = ferryx_lib::ssh::transport_unix::run_supervisor_mode() {
         std::process::exit(code);

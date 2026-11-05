@@ -2765,58 +2765,6 @@ mod agent_integration_tests {
         drop(receipt_lifetime);
     }
 
-    #[test]
-    fn plugin_owner_socket_child() {
-        use std::io::{BufRead, Write};
-        let Some(socket) = std::env::var_os("FERRYX_PLUGIN_TEST_SOCKET") else { return; };
-        let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
-        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-        for request in [DaemonRequest::Write { session_id: "victim".into(), data: vec![1] },
-            DaemonRequest::Shutdown,
-            DaemonRequest::PaneGrant { request: super::super::pane_grants::PaneGrantAction::Add {
-                grant: super::super::pane_grants::PaneGrant { from: "plugin:clock".into(), to: "*".into(),
-                    ops: [super::super::pane_grants::GrantOp::Admin].into() } } }] {
-            writeln!(stream, "{}", serde_json::to_string(&request).unwrap()).unwrap();
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let response: DaemonResponse = serde_json::from_str(&line).unwrap();
-            assert!(matches!(response, DaemonResponse::Error { code: Some(ref code), .. } if code == "FORBIDDEN"), "{response:?}");
-        }
-        std::fs::write(std::env::var_os("FERRYX_PLUGIN_TEST_DONE").unwrap(), b"refused").unwrap();
-    }
-
-    #[tokio::test]
-    async fn render_only_plugin_cannot_use_owner_socket_at_launch_or_via_descendant() {
-        let data = tempfile::tempdir().unwrap();
-        let socket = data.path().join("owner.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let server = Arc::new(server_at(data.path()));
-        let executable = std::env::current_exe().unwrap();
-        let plugin = super::super::plugins::Manifest {
-            name: "clock".into(), version: "1".into(), capabilities: ["render".into()].into(),
-            command: vec!["/bin/sh".into(), "-c".into(),
-                "FERRYX_PLUGIN_TEST_SOCKET=\"$1\" FERRYX_PLUGIN_TEST_DONE=\"$3\" \"$2\" --exact daemon::server::agent_integration_tests::plugin_owner_socket_child --nocapture >/dev/null; read line".into(),
-                "plugin".into(), socket.to_string_lossy().into_owned(), executable.to_string_lossy().into_owned(),
-                data.path().join("done").to_string_lossy().into_owned()],
-        };
-        let approvals = super::super::plugins::Approvals { manifests: vec![plugin.clone()] };
-        let (stop, stopped) = tokio::sync::watch::channel(false);
-        let (events, _observed) = tokio::sync::mpsc::unbounded_channel();
-        let grants = Arc::clone(&server.pane_grants);
-        let runtime = tokio::spawn(async move {
-            super::super::plugins::runtime::supervise(plugin, &approvals, grants, stopped, events,
-                |_| async { Err("unexpected stdio dispatch".into()) }).await
-        });
-        tokio::time::timeout(Duration::from_secs(20), async {
-            let (stream, _) = listener.accept().await.unwrap();
-            Arc::clone(&server).handle_unix_client(stream).await;
-        }).await.expect("plugin completed ordinary socket requests");
-        assert_eq!(std::fs::read(data.path().join("done")).unwrap(), b"refused");
-        stop.send(true).unwrap();
-        tokio::time::timeout(Duration::from_secs(20), runtime).await.unwrap().unwrap().unwrap();
-        assert!(server.pane_grants.list().is_empty());
-    }
-
     /// Runs `env` in a pane with no inherited herdr, returning what it printed.
     async fn pane_env_without_user_herdr(server: &DaemonServer) -> String {
         let mut cmd = portable_pty::CommandBuilder::new("/usr/bin/env");

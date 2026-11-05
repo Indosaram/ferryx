@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: bridge.invoke }));
 afterEach(cleanup);
 
 it("does not enable on discovery and sends explicit consent only on owner action", async () => {
-  const manifest = { name: "clock", version: "1", command: ["/bin/clock"], capabilities: ["render"] };
+  const manifest = { name: "clock", version: "1", module: "/plugins/clock.wasm", sha256: "a".repeat(64), capabilities: ["render"] };
   let discovered!: () => void;
   const discovery = new Promise<void>((resolve) => { discovered = resolve; });
   bridge.invoke.mockImplementation((_command, args) => {

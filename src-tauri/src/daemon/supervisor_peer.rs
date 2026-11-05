@@ -105,13 +105,6 @@ pub trait ProcTable {
 /// The kernel's process table.
 pub struct SystemProcs;
 
-// Serializes process launch with authorization. The write guard spans spawn and registration:
-// even a plugin connecting in its first instruction cannot be mistaken for an owner.
-// Retired roots remain as ancestry tombstones: a surviving descendant must not become Owner
-// just because its plugin parent was reaped. Start times prevent live pid reuse matches.
-pub(crate) static PLUGIN_ROOTS: parking_lot::RwLock<Vec<PeerProcess>> =
-    parking_lot::RwLock::new(Vec::new());
-
 impl ProcTable for SystemProcs {
     fn info(&self, pid: u32) -> Result<ProcInfo, ProcError> {
         proc_info(pid)
@@ -475,16 +468,14 @@ pub fn classify(
     panes: &PaneRegistry,
     table: &impl ProcTable,
 ) -> Result<PeerClass, String> {
-    let plugins = PLUGIN_ROOTS.read();
-    classify_with_roots(origin, ancestry, panes, table, &plugins, None)
+    classify_with_cutoff(origin, ancestry, panes, table, None)
 }
 
-fn classify_with_roots(
+fn classify_with_cutoff(
     origin: PeerOrigin,
     ancestry: &mut Option<Ancestry>,
     panes: &PaneRegistry,
     table: &impl ProcTable,
-    plugins: &[PeerProcess],
     owner_cutoff: Option<u64>,
 ) -> Result<PeerClass, String> {
     let peer = match origin {
@@ -498,10 +489,6 @@ fn classify_with_roots(
         Ok(_) => return Err(format!("process {pid} is not the process that connected (its pid was reused); it may not change the supervisor")),
         Err(_) => return Err(format!("process {pid} could not be read; it may not change the supervisor")),
     };
-    if plugins.iter().any(|root| (root.pid == pid && (root.start == 0 || root.start == info.start))
-        || info.pgid == Some(root.pid)) {
-        return Err("PLUGIN_STDIO_REQUIRED: plugins may not use the owner transport".into());
-    }
     let pane = |session_id: String, why: String| Ok(PeerClass::Pane { session_id, why });
     if let Some((session_id, _)) = panes.find(|entry| entry.pid == pid) {
         return pane(session_id, format!("pane process {pid}"));
@@ -526,10 +513,6 @@ fn classify_with_roots(
         *ancestry = Some(Ancestry::walk(peer, &info, table));
     }
     let walked = ancestry.as_ref().expect("walked above");
-    if walked.chain.iter().any(|(pid, start)| plugins.iter().any(|root|
-        root.pid == *pid && (root.start == 0 || start.is_none_or(|start| start == root.start)))) {
-        return Err("PLUGIN_STDIO_REQUIRED: plugin descendants may not use the owner transport".into());
-    }
     for &(ancestor, start) in &walked.chain {
         // A pane whose start time differs is a later process that reused an ancestor's pid.
         let descends = |entry: &PaneEntry| {
@@ -551,8 +534,7 @@ fn classify_with_roots(
                 let owner_cutoff = owner_cutoff.or_else(|| table.info(std::process::id()).ok().map(|info| info.start));
                 let panes = panes.panes.read();
                 if let Some(cutoff) = owner_cutoff.filter(|_| panes.values().all(|entry| entry.start.is_some())) {
-                    let cutoff = panes.values().filter_map(|entry| entry.start)
-                        .chain(plugins.iter().map(|root| root.start)).fold(cutoff, u64::min);
+                    let cutoff = panes.values().filter_map(|entry| entry.start).fold(cutoff, u64::min);
                     if predates_restricted_roots(peer, &walked.chain, cutoff) {
                         return Ok(PeerClass::Owner);
                     }
@@ -656,41 +638,21 @@ mod tests {
         let owner = PeerOrigin::Process(PeerProcess { pid: 11476, start: 100 });
         let mut ancestry = Ancestry::at_accept(owner, &procs);
         assert!(matches!(ancestry.as_ref().unwrap().end, WalkEnd::Changed { pid: 932 }));
-        assert_eq!(classify_with_roots(owner, &mut ancestry, &panes, &procs, &[], Some(200)), Ok(PeerClass::Owner));
+        assert_eq!(classify_with_cutoff(owner, &mut ancestry, &panes, &procs, Some(200)), Ok(PeerClass::Owner));
 
         procs.procs.insert(31000, info(30000, 400));
         let descendant = PeerOrigin::Process(PeerProcess { pid: 31000, start: 400 });
-        assert!(matches!(classify_with_roots(descendant, &mut None, &panes, &procs, &[], Some(200)),
+        assert!(matches!(classify_with_cutoff(descendant, &mut None, &panes, &procs, Some(200)),
             Ok(PeerClass::Pane { session_id, .. }) if session_id == "pane-a"));
         procs.procs.remove(&30000);
-        assert!(classify_with_roots(descendant, &mut None, &panes, &procs, &[], Some(200)).is_err());
+        assert!(classify_with_cutoff(descendant, &mut None, &panes, &procs, Some(200)).is_err());
 
         procs.procs.get_mut(&11476).unwrap().start = 500;
         let later_owner = PeerOrigin::Process(PeerProcess { pid: 11476, start: 500 });
-        assert!(classify_with_roots(later_owner, &mut None, &panes, &procs, &[], Some(200)).is_err());
+        assert!(classify_with_cutoff(later_owner, &mut None, &panes, &procs, Some(200)).is_err());
         procs.procs.insert(932, info(1, 600));
-        assert!(classify_with_roots(later_owner, &mut None, &panes, &procs, &[], Some(200)).is_err());
-        assert!(classify_with_roots(owner, &mut ancestry, &panes, &procs, &[], Some(200)).is_err());
-    }
-
-    #[test]
-    fn plugin_roots_descendants_and_retired_groups_never_classify_as_owner() {
-        let mut procs = world();
-        let roots = [PeerProcess { pid: 300, start: 3000 }];
-        procs.procs.insert(300, ProcInfo { ppid: 100, pgid: Some(300), session: None, tty: None, start: 3000 });
-        procs.procs.insert(310, ProcInfo { ppid: 300, pgid: None, session: None, tty: None, start: 3100 });
-        procs.procs.insert(320, ProcInfo { ppid: 1, pgid: Some(300), session: None, tty: None, start: 3200 });
-        let panes = PaneRegistry::default();
-        for pid in [300, 310, 320] {
-            assert!(classify_with_roots(peer(pid), &mut None, &panes, &procs, &roots, None).is_err());
-        }
-        let mut cached = Ancestry::at_accept(peer(310), &procs);
-        procs.procs.remove(&300);
-        assert!(classify_with_roots(peer(310), &mut cached, &panes, &procs, &roots, None).is_err());
-        assert!(classify_with_roots(peer(320), &mut None, &panes, &procs, &roots, None).is_err());
-        procs.procs.get_mut(&310).unwrap().ppid = 300;
-        assert!(classify_with_roots(peer(310), &mut None, &panes, &procs,
-            &[PeerProcess { pid: 300, start: 0 }], None).is_err());
+        assert!(classify_with_cutoff(later_owner, &mut None, &panes, &procs, Some(200)).is_err());
+        assert!(classify_with_cutoff(owner, &mut ancestry, &panes, &procs, Some(200)).is_err());
     }
 
     #[test]
@@ -698,12 +660,12 @@ mod tests {
         let mut procs = world();
         procs.procs.remove(&50);
         let panes = panes_of(200, &procs);
-        assert_eq!(classify_with_roots(peer(70), &mut None, &panes, &procs, &[], Some(1000)), Ok(PeerClass::Owner));
+        assert_eq!(classify_with_cutoff(peer(70), &mut None, &panes, &procs, Some(1000)), Ok(PeerClass::Owner));
         procs.procs.get_mut(&220).unwrap().session = None;
         procs.procs.get_mut(&220).unwrap().tty = None;
-        assert!(matches!(classify_with_roots(peer(220), &mut None, &panes, &procs, &[], Some(1000)), Ok(PeerClass::Pane { .. })));
+        assert!(matches!(classify_with_cutoff(peer(220), &mut None, &panes, &procs, Some(1000)), Ok(PeerClass::Pane { .. })));
         procs.procs.remove(&210);
-        assert!(classify_with_roots(peer(220), &mut None, &panes, &procs, &[], Some(1000)).is_err());
+        assert!(classify_with_cutoff(peer(220), &mut None, &panes, &procs, Some(1000)).is_err());
     }
 
     /// A fake process table: pid -> (ppid, session, tty); missing pids are `Vanished`, pids in

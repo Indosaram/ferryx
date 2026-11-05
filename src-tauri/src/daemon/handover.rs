@@ -876,7 +876,7 @@ mod spawn_owner_tests {
         let signal = retired.clone();
         manager.set_retirement_action(move || { signal.store(true, Ordering::SeqCst); });
         let plugin = Manifest { name: "clock".into(), version: "1".into(),
-            command: vec!["/absolute/clock".into()], capabilities: ["render".into()].into() };
+            module: std::env::temp_dir().join("clock.wasm"), sha256: "a".repeat(64), capabilities: ["render".into()].into() };
         manager.set_plugin_approvals(Arc::new(Mutex::new(Approvals { manifests: vec![plugin.clone()] })));
         manager.commit_handover_v5(&terminals).unwrap();
         let successor = HandoverManager::new(legacy.with_file_name("successor.sock"));
@@ -1438,7 +1438,7 @@ impl HandoverManager {
             return Err("Plugin adoption requires a committed predecessor".into());
         }
         if let (Some(bytes), Some(store)) = (record.plugin_approvals, self.plugin_approvals.read().clone()) {
-            *store.lock() = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            *store.lock() = super::plugins::Approvals::decode(&bytes)?;
         }
         Ok(())
     }

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Switch } from "../ui/switch";
 import { useTranslation } from "../../i18n";
 
-type PluginStatus = { manifest: { name: string; version: string; command: string[]; capabilities: string[] }; enabled: boolean };
+type PluginStatus = { manifest: { name: string; version: string; module: string; sha256: string; capabilities: string[] }; enabled: boolean };
 
 export function PluginsSection() {
   const { t } = useTranslation();
@@ -32,7 +32,7 @@ export function PluginsSection() {
         <Switch aria-label={t("plugins.enable", { name: manifest.name })} checked={enabled} disabled={busy}
           onCheckedChange={(checked) => { void toggle(manifest.name, checked); }} />
       </label>
-      <pre>{JSON.stringify(manifest.command)}</pre>
+      <pre>{manifest.module}{"\n"}{manifest.sha256}</pre>
       <p>{t("plugins.capabilities", { capabilities: manifest.capabilities.join(", ") || t("plugins.none") })}</p>
     </div>)}
   </section>;

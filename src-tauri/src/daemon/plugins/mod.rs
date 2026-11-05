@@ -6,17 +6,20 @@ use std::{collections::BTreeSet, path::{Path, PathBuf}};
 
 pub mod runtime;
 pub mod registry;
+pub mod runner;
 #[cfg(test)]
 mod tests;
 
 pub const MAX_LINE: usize = 64 * 1024;
+pub const MAX_MODULE: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub name: String,
     pub version: String,
-    pub command: Vec<String>,
+    pub module: PathBuf,
+    pub sha256: String,
     pub capabilities: BTreeSet<String>,
 }
 
@@ -29,26 +32,55 @@ impl Manifest {
         let path = root.join(name).join("plugin.toml");
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         if bytes.len() > MAX_LINE { return Err("manifest too large".into()); }
-        let manifest: Self = toml::from_str(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?)
+        let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+        let document: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
+        if document.get("command").is_some() {
+            return Err("PLUGIN_NATIVE_UNSUPPORTED: port to a capability-only Wasm module and approve again".into());
+        }
+        let manifest: Self = toml::from_str(text)
             .map_err(|e| e.to_string())?;
-        if manifest.name != name || manifest.version.is_empty() || manifest.command.is_empty()
-            || !Path::new(&manifest.command[0]).is_absolute()
+        if manifest.name != name || manifest.version.is_empty()
+            || !manifest.module.is_absolute()
+            || manifest.sha256.len() != 64
+            || !manifest.sha256.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             || manifest.capabilities.iter().any(|c| !matches!(c.as_str(), "listSessions" | "getCapabilities" | "write" | "render")) {
             return Err("invalid manifest or unsupported capability".into());
         }
         Ok(manifest)
     }
+
+    pub fn approved_bytes(&self) -> Result<Vec<u8>, String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        let file = std::fs::File::open(&self.module).map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        file.take((MAX_MODULE + 1) as u64).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        if bytes.len() > MAX_MODULE || !bytes.starts_with(b"\0asm") {
+            return Err("PLUGIN_WASM_REQUIRED: module must be binary WebAssembly, at most 1 MiB".into());
+        }
+        if format!("{:x}", Sha256::digest(&bytes)) != self.sha256 {
+            return Err("PLUGIN_APPROVAL_REQUIRED: module content changed; update sha256 and explicitly approve again".into());
+        }
+        Ok(bytes)
+    }
 }
 
-/// Persisted approval includes the complete manifest: changing argv or permissions requires
+/// Persisted approval includes module identity: changing bytes or permissions requires
 /// fresh owner consent. Reload this file after restart; carry the same snapshot on handover.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Approvals { pub manifests: Vec<Manifest> }
 
 impl Approvals {
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        let manifests = value.get_mut("manifests").and_then(|value| value.as_array_mut())
+            .ok_or("invalid plugin approvals")?;
+        manifests.retain(|manifest| manifest.get("command").is_none());
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
     pub fn load(path: &Path) -> Result<Self, String> {
         match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+            Ok(bytes) => Self::decode(&bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.to_string()),
         }
