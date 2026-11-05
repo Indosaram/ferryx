@@ -1,0 +1,292 @@
+[
+  {
+    "test": "daemon::server::control_server::control_wire_tests::a_supervisor_mutation_from_an_unidentified_peer_is_forbidden",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:1003:17",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::a_supervisor_mutation_from_an_unidentified_peer_is_forbidden' (35039) panicked at src/daemon/control_wire_tests.rs:1003:17:\nassertion `left == right` failed: SupervisorRequestV1 { envelope: Object {\"requestId\": String(\"peer-1\"), \"goalId\": String(\"g\"), \"expectedRevision\": Number(1), \"action\": String(\"pause\"), \"payload\": Object {}}, cli: true, mcp: false }\n  left: Some(\"SUPERVISOR_UNAVAILABLE\")\n right: Some(\"FORBIDDEN\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_close_parked_after_session_removal_defers_exit_until_its_guard_drops",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:636:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_close_parked_after_session_removal_defers_exit_until_its_guard_drops' (35056) panicked at src/daemon/control_wire_tests.rs:636:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 1 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_hello_and_retirement_marker_carry_the_generation_key",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:684:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_hello_and_retirement_marker_carry_the_generation_key' (35061) panicked at src/daemon/control_wire_tests.rs:684:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 0 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_retire_when_idle_on_idle_daemon_answers_before_exit",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:704:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_retire_when_idle_on_idle_daemon_answers_before_exit' (35064) panicked at src/daemon/control_wire_tests.rs:704:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 0 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_retire_when_idle_parked_spawn_session_keeps_daemon_alive_until_closed",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:741:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_retire_when_idle_parked_spawn_session_keeps_daemon_alive_until_closed' (35066) panicked at src/daemon/control_wire_tests.rs:741:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 0 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_retire_when_idle_with_live_session_exits_after_it_closes",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:716:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_retire_when_idle_with_live_session_exits_after_it_closes' (35068) panicked at src/daemon/control_wire_tests.rs:716:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 1 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_shutdown_ends_exactly_the_confirmed_sessions",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:765:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_shutdown_ends_exactly_the_confirmed_sessions' (35076) panicked at src/daemon/control_wire_tests.rs:765:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 1 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_shutdown_wrong_count_leaves_no_marker_and_no_exit",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:778:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_shutdown_wrong_count_leaves_no_marker_and_no_exit' (35084) panicked at src/daemon/control_wire_tests.rs:778:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Failed(ControlFailure { code: \"COUNT_CHANGED\", live: Some(0) })\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::request_upgrade_rejects_unstaged_executables_and_keeps_serving",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:337:9",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::request_upgrade_rejects_unstaged_executables_and_keeps_serving' (35108) panicked at src/daemon/control_wire_tests.rs:337:9:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Failed(ControlFailure { code: \"BAD_REQUEST\", live: None })\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/control_wire_tests.rs:401:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate' (35110) panicked at src/daemon/control_wire_tests.rs:401:5:\nprivate RequestUpgrade scenario failed: \nrunning 1 test\ntest daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate ... FAILED\n\nfailures:\n\nfailures:\n    daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5805 filtered out; finished in 0.00s\n\n\n\nthread 'daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate' (35112) panicked at src/daemon/control_wire_tests.rs:435:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: UpgradeAccepted\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/daemon/supervisor_peer.rs:648:9",
+    "first_error": "\nthread 'daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases' (39933) panicked at src/daemon/supervisor_peer.rs:648:9:\nassertion failed: classify_with_cutoff(descendant, &mut None, &panes, &procs,\n        Some(200)).is_err()\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "native_terminal::osc_effects::tests::osc_expectation_table",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/native_terminal/osc_effects.rs:214:17",
+    "first_error": "\nthread 'native_terminal::osc_effects::tests::osc_expectation_table' (47108) panicked at src/native_terminal/osc_effects.rs:214:17:\nassertion `left == right` failed: cwd\n  left: None\n right: Some(\"/tmp\")\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "native_terminal::osc_effects::tests::shell_host_is_not_a_file_server",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/3.log",
+    "file_line": "src/native_terminal/osc_effects.rs:265:9",
+    "first_error": "\nthread 'native_terminal::osc_effects::tests::shell_host_is_not_a_file_server' (47112) panicked at src/native_terminal/osc_effects.rs:265:9:\nassertion `left == right` failed\n  left: None\n right: Some(\"/tmp/a b\")\n\n\nfailures:\n    daemon::server::control_server::control_wire_tests::a_supervisor_mutation_from_an_unidentified_peer_is_forbidden\n    daemon::server::control_server::control_wire_tests::control_close_parked_after_session_removal_defers_exit_until_its_guard_drops\n    daemon::server::control_server::control_wire_tests::control_hello_and_retirement_marker_carry_the_generation_key\n    daemon::server::control_server::control_wire_tests::control_retire_when_idle_on_idle_daemon_answers_before_exit\n    daemon::server::control_server::control_wire_tests::control_retire_when_idle_parked_spawn_session_keeps_daemon_alive_until_closed\n    daemon::server::control_server::control_wire_tests::control_retire_when_idle_with_live_session_exits_after_it_closes\n    daemon::server::control_server::control_wire_tests::control_shutdown_ends_exactly_the_confirmed_sessions\n    daemon::server::control_server::control_wire_tests::control_shutdown_wrong_count_leaves_no_marker_and_no_exit\n    daemon::server::control_server::control_wire_tests::request_upgrade_rejects_unstaged_executables_and_keeps_serving\n    daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate\n    daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases\n    native_terminal::osc_effects::tests::osc_expectation_table\n    native_terminal::osc_effects::tests::shell_host_is_not_a_file_server\n\ntest result: FAILED. 5786 passed; 13 failed; 7 ignored; 0 measured; 0 filtered out; finished in 190.08s\n\nerror: test failed, to rerun pass `--lib`\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::a_supervisor_mutation_from_an_unidentified_peer_is_forbidden",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:1003:17",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::a_supervisor_mutation_from_an_unidentified_peer_is_forbidden' (66876) panicked at src/daemon/control_wire_tests.rs:1003:17:\nassertion `left == right` failed: SupervisorRequestV1 { envelope: Object {\"requestId\": String(\"peer-1\"), \"goalId\": String(\"g\"), \"expectedRevision\": Number(1), \"action\": String(\"pause\"), \"payload\": Object {}}, cli: true, mcp: false }\n  left: Some(\"SUPERVISOR_UNAVAILABLE\")\n right: Some(\"FORBIDDEN\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_close_parked_after_session_removal_defers_exit_until_its_guard_drops",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:636:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_close_parked_after_session_removal_defers_exit_until_its_guard_drops' (66891) panicked at src/daemon/control_wire_tests.rs:636:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 1 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_hello_and_retirement_marker_carry_the_generation_key",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:684:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_hello_and_retirement_marker_carry_the_generation_key' (66896) panicked at src/daemon/control_wire_tests.rs:684:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 0 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_retire_when_idle_on_idle_daemon_answers_before_exit",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:704:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_retire_when_idle_on_idle_daemon_answers_before_exit' (66899) panicked at src/daemon/control_wire_tests.rs:704:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 0 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_retire_when_idle_parked_spawn_session_keeps_daemon_alive_until_closed",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:741:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_retire_when_idle_parked_spawn_session_keeps_daemon_alive_until_closed' (66901) panicked at src/daemon/control_wire_tests.rs:741:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 0 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_retire_when_idle_with_live_session_exits_after_it_closes",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:716:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_retire_when_idle_with_live_session_exits_after_it_closes' (66903) panicked at src/daemon/control_wire_tests.rs:716:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 1 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_shutdown_ends_exactly_the_confirmed_sessions",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:765:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_shutdown_ends_exactly_the_confirmed_sessions' (66910) panicked at src/daemon/control_wire_tests.rs:765:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Live { live: 1 }\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::control_shutdown_wrong_count_leaves_no_marker_and_no_exit",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:778:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::control_shutdown_wrong_count_leaves_no_marker_and_no_exit' (66918) panicked at src/daemon/control_wire_tests.rs:778:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Failed(ControlFailure { code: \"COUNT_CHANGED\", live: Some(0) })\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::request_upgrade_rejects_unstaged_executables_and_keeps_serving",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:337:9",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::request_upgrade_rejects_unstaged_executables_and_keeps_serving' (66943) panicked at src/daemon/control_wire_tests.rs:337:9:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: Failed(ControlFailure { code: \"BAD_REQUEST\", live: None })\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/control_wire_tests.rs:401:5",
+    "first_error": "\nthread 'daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate' (66945) panicked at src/daemon/control_wire_tests.rs:401:5:\nprivate RequestUpgrade scenario failed: \nrunning 1 test\ntest daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate ... FAILED\n\nfailures:\n\nfailures:\n    daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4779 filtered out; finished in 0.00s\n\n\n\nthread 'daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate' (66947) panicked at src/daemon/control_wire_tests.rs:435:5:\nassertion `left == right` failed\n  left: Failed(ControlFailure { code: \"FORBIDDEN\", live: None })\n right: UpgradeAccepted\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/daemon/supervisor_peer.rs:648:9",
+    "first_error": "\nthread 'daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases' (75334) panicked at src/daemon/supervisor_peer.rs:648:9:\nassertion failed: classify_with_cutoff(descendant, &mut None, &panes, &procs,\n        Some(200)).is_err()\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "native_terminal::osc_effects::tests::osc_expectation_table",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/native_terminal/osc_effects.rs:214:17",
+    "first_error": "\nthread 'native_terminal::osc_effects::tests::osc_expectation_table' (75868) panicked at src/native_terminal/osc_effects.rs:214:17:\nassertion `left == right` failed: cwd\n  left: None\n right: Some(\"/tmp\")\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "native_terminal::osc_effects::tests::shell_host_is_not_a_file_server",
+    "cmd": "timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/4.log",
+    "file_line": "src/native_terminal/osc_effects.rs:265:9",
+    "first_error": "\nthread 'native_terminal::osc_effects::tests::shell_host_is_not_a_file_server' (75872) panicked at src/native_terminal/osc_effects.rs:265:9:\nassertion `left == right` failed\n  left: None\n right: Some(\"/tmp/a b\")\n\n\nfailures:\n    daemon::server::control_server::control_wire_tests::a_supervisor_mutation_from_an_unidentified_peer_is_forbidden\n    daemon::server::control_server::control_wire_tests::control_close_parked_after_session_removal_defers_exit_until_its_guard_drops\n    daemon::server::control_server::control_wire_tests::control_hello_and_retirement_marker_carry_the_generation_key\n    daemon::server::control_server::control_wire_tests::control_retire_when_idle_on_idle_daemon_answers_before_exit\n    daemon::server::control_server::control_wire_tests::control_retire_when_idle_parked_spawn_session_keeps_daemon_alive_until_closed\n    daemon::server::control_server::control_wire_tests::control_retire_when_idle_with_live_session_exits_after_it_closes\n    daemon::server::control_server::control_wire_tests::control_shutdown_ends_exactly_the_confirmed_sessions\n    daemon::server::control_server::control_wire_tests::control_shutdown_wrong_count_leaves_no_marker_and_no_exit\n    daemon::server::control_server::control_wire_tests::request_upgrade_rejects_unstaged_executables_and_keeps_serving\n    daemon::server::control_server::control_wire_tests::request_upgrade_with_a_staged_generation_prepares_the_handover_and_starts_the_candidate\n    daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases\n    native_terminal::osc_effects::tests::osc_expectation_table\n    native_terminal::osc_effects::tests::shell_host_is_not_a_file_server\n\ntest result: FAILED. 4761 passed; 13 failed; 6 ignored; 0 measured; 0 filtered out; finished in 109.88s\n\nerror: test failed, to rerun pass `--lib`\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap",
+    "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/13.log",
+    "file_line": "tests/daemon_handover_transfer_contract.rs:1018:13",
+    "first_error": "\nthread 'a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap' (101329) panicked at tests/daemon_handover_transfer_contract.rs:1018:13:\nsuccessor serving: the persistent lock /tmp/fx-v05-PlYKwR/data/locks/identity.lock was free\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "layout_survives_handover",
+    "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/13.log",
+    "file_line": "tests/daemon_handover_transfer_contract.rs:2114:5",
+    "first_error": "\nthread 'layout_survives_handover' (101633) panicked at tests/daemon_handover_transfer_contract.rs:2114:5:\npredecessor was never killed\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  },
+  {
+    "test": "ten_thousand_line_session_handover_preserves_screen_hash",
+    "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked",
+    "exit": 101,
+    "log": "gha/rex-verify-linux-gate/13.log",
+    "file_line": "tests/daemon_handover_transfer_contract.rs:533:92",
+    "first_error": "\nthread 'ten_thousand_line_session_handover_preserves_screen_hash' (101660) panicked at tests/daemon_handover_transfer_contract.rs:533:92:\ncalled `Result::unwrap()` on an `Err` value: \"Timed out waiting for pattern in stream\"\n\n\nfailures:\n    a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap\n    layout_survives_handover\n    ten_thousand_line_session_handover_preserves_screen_hash\n\ntest result: FAILED. 11 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.52s\n\nerror: test failed, to rerun pass `--test daemon_handover_transfer_contract`\n",
+    "classification": "FAIL; no matching baseline proof for this failure",
+    "repair_shape": "Owner must repair the violated contract; verifier made no product edits."
+  }
+]

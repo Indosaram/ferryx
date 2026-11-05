@@ -1,0 +1,108 @@
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m rustls v0.23.43
+[1m[92m  Downloaded[0m unicode-width v0.1.14
+[1m[92m    Checking[0m lock_api v0.4.14
+[1m[92m   Compiling[0m serde_json v1.0.151
+[1m[92m    Checking[0m parking_lot v0.12.5
+[1m[92m    Checking[0m spin v0.9.9
+[1m[92m    Checking[0m tokio v1.53.1
+[1m[92m    Checking[0m lazy_static v1.5.0
+[1m[92m   Compiling[0m rustls v0.23.43
+[1m[92m    Checking[0m symphonia-core v0.5.5
+[1m[92m    Checking[0m erased-serde v0.4.10
+[1m[92m    Checking[0m jsonptr v0.6.3
+[1m[92m    Checking[0m symphonia-metadata v0.5.5
+[1m[92m    Checking[0m json-patch v3.0.1
+[1m[92m    Checking[0m serde-untagged v0.1.9
+[1m[92m    Checking[0m tokio-rustls v0.26.4
+[1m[92m    Checking[0m tauri-utils v2.9.3
+[1m[92m    Checking[0m hyper v1.11.0
+[1m[92m    Checking[0m hyper-util v0.1.20
+[1m[92m    Checking[0m tao v0.35.3
+[1m[92m    Checking[0m image v0.25.10
+[1m[92m    Checking[0m tauri-runtime v2.11.3
+[1m[92m    Checking[0m tower v0.5.3
+[1m[92m    Checking[0m symphonia-utils-xiph v0.5.5
+[1m[92m    Checking[0m serialize-to-javascript v0.1.2
+[1m[92m    Checking[0m tauri-runtime-wry v2.11.4
+[1m[92m    Checking[0m unicode-width v0.1.14
+[1m[92m    Checking[0m codespan-reporting v0.13.1
+[1m[92m    Checking[0m tauri v2.11.5
+[1m[92m    Checking[0m tower-http v0.6.11
+[1m[92m   Compiling[0m ffmpeg-sys-next v9.0.1
+[1m[92m    Checking[0m hyper-rustls v0.27.9
+[1m[92m    Checking[0m tokio-util v0.7.19
+[1m[92m    Checking[0m naga v30.0.1
+[1m[92m   Compiling[0m sqlx-core v0.8.6
+[1m[92m   Compiling[0m zbus_macros v5.19.0
+[1m[92m    Checking[0m tokio-stream v0.1.19
+[1m[92m    Checking[0m symphonia-format-riff v0.5.5
+[1m[92m   Compiling[0m ffmpeg-next v9.0.0
+[1m[92m    Checking[0m zbus v5.19.0
+[1m[92m    Checking[0m wgpu-naga-bridge v30.0.1
+[1m[92m    Checking[0m flume v0.11.1
+[1m[92m    Checking[0m num-bigint-dig v0.8.6
+[1m[92m   Compiling[0m sqlx-sqlite v0.8.6
+[1m[92m    Checking[0m symphonia-format-isomp4 v0.5.5
+[1m[92m    Checking[0m symphonia-format-ogg v0.5.5
+[1m[92m    Checking[0m symphonia-codec-vorbis v0.5.5
+[1m[92m    Checking[0m symphonia-bundle-flac v0.5.5
+[1m[92m    Checking[0m symphonia-bundle-mp3 v0.5.5
+[1m[92m    Checking[0m symphonia-codec-pcm v0.5.5
+[1m[92m    Checking[0m symphonia-codec-aac v0.5.5
+[1m[92m    Checking[0m ferryx-rd-proto v0.1.0 (/home/runner/work/_temp/rex-base/crates/ferryx-rd/ferryx-rd-proto)
+[1m[92m    Checking[0m futures-intrusive v0.5.0
+[1m[92m    Checking[0m wgpu-hal v30.0.1
+[1m[92m    Checking[0m tungstenite v0.26.2
+[1m[92m   Compiling[0m sqlx-macros-core v0.8.6
+[1m[92m    Checking[0m symphonia v0.5.5
+[1m[92m    Checking[0m rsa v0.9.10
+[1m[92m    Checking[0m reqwest v0.12.28
+[1m[92m    Checking[0m tungstenite v0.29.0
+[1m[92m    Checking[0m ferryx-rd-net v0.1.0 (/home/runner/work/_temp/rex-base/crates/ferryx-rd/ferryx-rd-net)
+[1m[92m    Checking[0m stream_lib v0.5.2
+[1m[92m    Checking[0m superboring v0.1.14
+[1m[92m    Checking[0m tokio-tungstenite v0.29.0
+[1m[92m    Checking[0m wgpu-core-deps-windows-linux-android v30.0.1
+[1m[92m    Checking[0m serde-aux v4.7.0
+[1m[92m   Compiling[0m sqlx-macros v0.8.6
+[1m[92m    Checking[0m rustls-platform-verifier v0.7.0
+[1m[92m    Checking[0m tokio-tungstenite v0.26.2
+[1m[92m    Checking[0m dashmap v6.2.1
+[1m[92m    Checking[0m serenity-voice-model v0.2.1
+[1m[92m    Checking[0m futures-rustls v0.26.0
+[1m[92m    Checking[0m quinn-proto v0.11.17
+[1m[92m    Checking[0m songbird v0.5.0
+[1m[92m    Checking[0m axum v0.8.9
+[1m[92m    Checking[0m jwt-simple v0.12.11
+[1m[92m    Checking[0m ece v2.3.1
+[1m[92m    Checking[0m async-web-client v0.6.4
+[1m[92m    Checking[0m sqlx v0.8.6
+[1m[92m    Checking[0m x509-parser v0.18.1
+[1m[92m    Checking[0m reqwest v0.13.4
+[1m[92m    Checking[0m wgpu-core v30.0.1
+[1m[92m    Checking[0m ferryx-rd-decode v0.1.0 (/home/runner/work/_temp/rex-base/crates/ferryx-rd/ferryx-rd-decode)
+[1m[92m    Checking[0m ferryx-rd-render v0.1.0 (/home/runner/work/_temp/rex-base/crates/ferryx-rd/ferryx-rd-render)
+[1m[92m    Checking[0m ashpd v0.11.1
+[1m[92m    Checking[0m notify-rust v4.18.0
+[1m[92m    Checking[0m tauri-plugin-fs v2.5.1
+[1m[92m   Compiling[0m ferryx v2026.1101.1 (/home/runner/work/_temp/rex-base/src-tauri)
+[1m[92m    Checking[0m sharded-slab v0.1.7
+[1m[92m    Checking[0m portable-pty v0.9.0 (/home/runner/work/_temp/rex-base/src-tauri/vendor/portable-pty)
+[1m[92m    Checking[0m tauri-plugin-updater v2.10.1
+[1m[92m    Checking[0m tracing-subscriber v0.3.23
+[1m[92m    Checking[0m ferryx-rd-host v0.1.0 (/home/runner/work/_temp/rex-base/crates/ferryx-rd/ferryx-rd-host)
+[1m[92m    Checking[0m tauri-plugin-dialog v2.7.2
+[1m[92m    Checking[0m web-push v0.11.0
+[1m[92m    Checking[0m rodio v0.22.2
+[1m[92m    Checking[0m tauri-plugin-notification v2.3.3
+[1m[92m    Checking[0m wgpu v30.0.1
+[1m[92m    Checking[0m ferryx-rd-app v0.1.0 (/home/runner/work/_temp/rex-base/crates/ferryx-rd/ferryx-rd-app)
+[1m[92m    Checking[0m quinn v0.11.11
+[1m[92m    Checking[0m ferryx-hub v0.1.0 (/home/runner/work/_temp/rex-base/crates/ferryx-hub)
+[1m[92m    Checking[0m rustls-acme v0.15.4
+[1m[92m    Checking[0m tauri-plugin-window-state v2.4.1
+[1m[92m    Checking[0m tauri-plugin-process v2.3.1
+[1m[92m    Checking[0m ferryx-browser-engine-protocol v0.1.0 (/home/runner/work/_temp/rex-base/crates/browser-engine-protocol)
+[1m[92m    Checking[0m tokio-test v0.4.5
+[1m[92m    Finished[0m `dev` profile [unoptimized] target(s) in 2m 18s

@@ -1,0 +1,118 @@
+bun install v1.4.4 (38afee6c8)
+
++ @ast-grep/cli@0.45.3
++ @tauri-apps/cli@2.11.4
+
+6 packages installed [224.00ms]
+bun install v1.4.4 (38afee6c8)
+
++ @testing-library/jest-dom@6.10.0
++ @testing-library/react@16.3.3
++ @types/jsdom@21.1.7
++ @types/node@22.20.1
++ @types/qrcode@1.5.6
++ @types/react@18.3.31
++ @types/react-dom@18.3.7
++ @vitejs/plugin-react@4.7.0
++ @vitest/coverage-v8@4.1.12
++ autoprefixer@10.5.5
++ axe-core@4.14.0
++ bun-types@1.4.2
++ eslint@10.11.0
++ eslint-plugin-react-hooks@7.1.1
++ jsdom@26.1.0
++ postcss@8.5.28
++ react-doctor@0.9.14
++ react-grab@0.2.0
++ react-scan@0.5.7
++ tailwindcss@3.4.19
++ typescript@5.9.3
++ typescript-eslint@8.71.2
++ vite@6.4.3
++ vitest@4.1.12
++ @dnd-kit/core@6.3.1
++ @dnd-kit/sortable@10.0.0
++ @dnd-kit/utilities@3.2.2
++ @noble/ciphers@2.4.0
++ @noble/hashes@2.4.0
++ @radix-ui/react-dialog@1.3.1
++ @radix-ui/react-dropdown-menu@2.2.1
++ @radix-ui/react-label@2.1.15
++ @radix-ui/react-progress@1.1.16
++ @radix-ui/react-select@2.3.7
++ @radix-ui/react-separator@1.1.15
++ @radix-ui/react-slider@1.4.7
++ @radix-ui/react-slot@1.3.3
++ @radix-ui/react-switch@1.3.7
++ @tauri-apps/api@2.11.1
++ @tauri-apps/plugin-dialog@2.7.3
++ @tauri-apps/plugin-opener@2.7.2
++ @tauri-apps/plugin-process@2.3.1
++ @tauri-apps/plugin-updater@2.11.0
++ class-variance-authority@0.7.1
++ clsx@2.1.1
++ highlight.js@11.11.1
++ i18next@25.10.10
++ lucide-react@0.475.0
++ qrcode@1.5.4
++ react@18.3.1
++ react-dom@18.3.1
++ react-i18next@16.6.6
++ react-markdown@10.1.0
++ remark-gfm@4.0.1
++ sonner@2.0.8
++ tailwind-merge@3.6.0
++ tailwindcss-animate@1.0.7
+
+641 packages installed [1313.00ms]
+$ bun ../scripts/gen-search-index.mjs && bun --bun tsc && bun --bun vite build
+[36mvite v6.4.3 [32mbuilding for production...[36m[39m
+transforming...
+[32m✓[39m 2525 modules transformed.
+rendering chunks...
+[33m[plugin vite:reporter] 
+(!) /home/runner/work/ferryx/ferryx/ui/src/lib/windowIdentity.ts is dynamically imported by /home/runner/work/ferryx/ferryx/ui/src/main.tsx but also statically imported by /home/runner/work/ferryx/ferryx/ui/src/App.tsx, /home/runner/work/ferryx/ferryx/ui/src/components/NativeTerminalPane.tsx, /home/runner/work/ferryx/ferryx/ui/src/lib/appShellPersistence.ts, /home/runner/work/ferryx/ferryx/ui/src/lib/layoutSync.ts, /home/runner/work/ferryx/ferryx/ui/src/lib/nativeMenu.ts, /home/runner/work/ferryx/ferryx/ui/src/lib/notificationCenter/notificationCenterPersistence.ts, /home/runner/work/ferryx/ferryx/ui/src/lib/notificationForwarding.ts, /home/runner/work/ferryx/ferryx/ui/src/lib/notificationLeader.ts, /home/runner/work/ferryx/ferryx/ui/src/lib/tauri.ts, /home/runner/work/ferryx/ferryx/ui/src/state/workspaceStore.ts, dynamic import will not move module into another chunk.
+[39m
+computing gzip size...
+[2mdist/[22m[32mindex.html                                 [39m[1m[2m    2.29 kB[22m[1m[22m[2m │ gzip:   0.99 kB[22m
+[2mdist/[22m[2massets/[22m[32mcrush-DHElXcRZ.png                  [39m[1m[2m    5.46 kB[22m[1m[22m
+[2mdist/[22m[2massets/[22m[32mdroid-BhrKLgQ8.svg                  [39m[1m[2m    6.30 kB[22m[1m[22m[2m │ gzip:   2.94 kB[22m
+[2mdist/[22m[2massets/[22m[32mantigravity-DgAQAdn3.svg            [39m[1m[2m    7.63 kB[22m[1m[22m[2m │ gzip:   1.74 kB[22m
+[2mdist/[22m[2massets/[22m[32mgjc-CmlXGg4z.png                    [39m[1m[2m   22.73 kB[22m[1m[22m
+[2mdist/[22m[2massets/[22m[32mgeist-variable-CrgPqtmy.woff2       [39m[1m[2m   69.44 kB[22m[1m[22m
+[2mdist/[22m[2massets/[22m[32mferryx-icon-OXRkkUvz.png            [39m[1m[2m  805.82 kB[22m[1m[22m
+[2mdist/[22m[2massets/[22m[35mRemoteApp-BP-13D3e.css              [39m[1m[2m    1.20 kB[22m[1m[22m[2m │ gzip:   0.36 kB[22m
+[2mdist/[22m[2massets/[22m[35mApp-B-Hmda5q.css                    [39m[1m[2m    1.49 kB[22m[1m[22m[2m │ gzip:   0.53 kB[22m
+[2mdist/[22m[2massets/[22m[35mindex-3TmU5q-u.css                  [39m[1m[2m  116.62 kB[22m[1m[22m[2m │ gzip:  20.54 kB[22m
+[2mdist/[22m[2massets/[22m[36marrow-down-BtOs8HGy.js              [39m[1m[2m    0.34 kB[22m[1m[22m[2m │ gzip:   0.27 kB[22m
+[2mdist/[22m[2massets/[22m[36mnativeShortcutTable-Dt9rLC65.js     [39m[1m[2m    0.80 kB[22m[1m[22m[2m │ gzip:   0.42 kB[22m
+[2mdist/[22m[2massets/[22m[36madvancedFeatures-DEb0eSlB.js        [39m[1m[2m    1.14 kB[22m[1m[22m[2m │ gzip:   0.60 kB[22m
+[2mdist/[22m[2massets/[22m[36msliders-horizontal-Cpt9z4Ne.js      [39m[1m[2m    1.34 kB[22m[1m[22m[2m │ gzip:   0.50 kB[22m
+[2mdist/[22m[2massets/[22m[36monboardingSync-DedlI30U.js          [39m[1m[2m    1.55 kB[22m[1m[22m[2m │ gzip:   0.79 kB[22m
+[2mdist/[22m[2massets/[22m[36mpairedHostRoute-DEmGSnMX.js         [39m[1m[2m    1.60 kB[22m[1m[22m[2m │ gzip:   0.83 kB[22m
+[2mdist/[22m[2massets/[22m[36mpairedHostReachability-0z-Ugm9N.js  [39m[1m[2m    1.85 kB[22m[1m[22m[2m │ gzip:   0.92 kB[22m
+[2mdist/[22m[2massets/[22m[36mWhatsNewDialog-EvqACk-t.js          [39m[1m[2m    2.78 kB[22m[1m[22m[2m │ gzip:   1.13 kB[22m
+[2mdist/[22m[2massets/[22m[36mshortcutOverrides-C_sJUuMl.js       [39m[1m[2m    3.04 kB[22m[1m[22m[2m │ gzip:   1.23 kB[22m
+[2mdist/[22m[2massets/[22m[36monboarding-XFhE42T6.js              [39m[1m[2m    4.07 kB[22m[1m[22m[2m │ gzip:   1.68 kB[22m
+[2mdist/[22m[2massets/[22m[36mtailscaleDiscovery-BexjWaGH.js      [39m[1m[2m    5.88 kB[22m[1m[22m[2m │ gzip:   2.28 kB[22m
+[2mdist/[22m[2massets/[22m[36mpairedHostInventory-CTZnXoYX.js     [39m[1m[2m   15.17 kB[22m[1m[22m[2m │ gzip:   5.20 kB[22m
+[2mdist/[22m[2massets/[22m[36mSystemResourcesDialog-B-0HlPls.js   [39m[1m[2m   15.58 kB[22m[1m[22m[2m │ gzip:   5.45 kB[22m
+[2mdist/[22m[2massets/[22m[36mbrowserProtocol-NpLYH7GS.js         [39m[1m[2m   16.47 kB[22m[1m[22m[2m │ gzip:   4.16 kB[22m
+[2mdist/[22m[2massets/[22m[36mMobileChatWorkspace-BSN_SlWt.js     [39m[1m[2m   27.19 kB[22m[1m[22m[2m │ gzip:   7.83 kB[22m
+[2mdist/[22m[2massets/[22m[36mRemoteTerminal-VHiJtsws.js          [39m[1m[2m   56.65 kB[22m[1m[22m[2m │ gzip:  18.77 kB[22m
+[2mdist/[22m[2massets/[22m[36mRemoteBrowserWorkspace-2AvJC_Lv.js  [39m[1m[2m   56.71 kB[22m[1m[22m[2m │ gzip:  16.52 kB[22m
+[2mdist/[22m[2massets/[22m[36mWelcomeWizard-BgDTGPuP.js           [39m[1m[2m   68.85 kB[22m[1m[22m[2m │ gzip:  23.41 kB[22m
+[2mdist/[22m[2massets/[22m[36maccountSession-DSKOqm8L.js          [39m[1m[2m   72.78 kB[22m[1m[22m[2m │ gzip:  24.17 kB[22m
+[2mdist/[22m[2massets/[22m[36mRemoteAccessSection-Dc7XgtfJ.js     [39m[1m[2m   83.24 kB[22m[1m[22m[2m │ gzip:  27.08 kB[22m
+[2mdist/[22m[2massets/[22m[36mSettingsDialog-DY6WB0zG.js          [39m[1m[2m  230.69 kB[22m[1m[22m[2m │ gzip:  62.91 kB[22m
+[2mdist/[22m[2massets/[22m[36mindex-C7e3Sdvv.js                   [39m[1m[2m  241.12 kB[22m[1m[22m[2m │ gzip:  75.57 kB[22m
+[2mdist/[22m[2massets/[22m[36mRemoteApp-BSDKOKbm.js               [39m[1m[33m  910.31 kB[39m[22m[2m │ gzip: 277.65 kB[22m
+[2mdist/[22m[2massets/[22m[36mApp-CGxPvZhP.js                     [39m[1m[33m1,110.12 kB[39m[22m[2m │ gzip: 326.61 kB[22m
+[33m
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.[39m
+[32m✓ built in 11.92s[39m
+ffmpeg-lgpl-9.0.2-x86_64-unknown-linux-gnu.tar.gz: sha256 matches pin
+installed FFmpeg SDK ffmpeg-sdk-9.0.2-1 (x86_64-unknown-linux-gnu) into /home/runner/work/ferryx/ferryx/src-tauri/resources/ffmpeg/sdk

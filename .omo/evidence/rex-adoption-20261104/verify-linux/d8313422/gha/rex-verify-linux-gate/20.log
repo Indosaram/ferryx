@@ -1,0 +1,1 @@
+$ clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -o "$GATE_DIR/clock.wasm" examples/plugins/clock/clock.c

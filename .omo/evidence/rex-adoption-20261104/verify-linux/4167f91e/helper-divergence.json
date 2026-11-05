@@ -1,0 +1,177 @@
+{
+  "linuxFingerprint": "8f02c2b160b5cb7369ab5c1c4a4e78d37b79ebcaa099d6c1621fbb37df23c295",
+  "windowsFingerprint": "400dca582fba8fe412ca1158f9a6adcc87470f72271ac3826827112cfb26d56d",
+  "sources": [
+    {
+      "path": "remote-helper/Cargo.lock",
+      "linux": "7266784b54ab653c59083fa8ad32f8d630ad0f3e0a9ab6486e9a615467f44cf3",
+      "windows": "56662fea0892bfb2b300ecea28afe428380cba66f498a946adae7f2bfee2f3b0",
+      "gitBlob": "7266784b54ab653c59083fa8ad32f8d630ad0f3e0a9ab6486e9a615467f44cf3",
+      "crlf": "56662fea0892bfb2b300ecea28afe428380cba66f498a946adae7f2bfee2f3b0",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "remote-helper/Cargo.toml",
+      "linux": "5ad679cd6bf155406459966828d772e3d1a2a6abf492edcfc8cda57fafb01c1a",
+      "windows": "ba18c9453e638a40a53eb361c6ac5f729a1e353dc6115d840ac037887e5d88f2",
+      "gitBlob": "5ad679cd6bf155406459966828d772e3d1a2a6abf492edcfc8cda57fafb01c1a",
+      "crlf": "ba18c9453e638a40a53eb361c6ac5f729a1e353dc6115d840ac037887e5d88f2",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/dag/journal.rs",
+      "linux": "7447566b14f9f8a7508ef887fe04074cde6f0a7a9b1c9855c6d114601c1d38cb",
+      "windows": "34751f64d4b0bdb112ab4714c04e59e59f53d5abbb4409160d5f9300bb936cda",
+      "gitBlob": "7447566b14f9f8a7508ef887fe04074cde6f0a7a9b1c9855c6d114601c1d38cb",
+      "crlf": "34751f64d4b0bdb112ab4714c04e59e59f53d5abbb4409160d5f9300bb936cda",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/dag/paths.rs",
+      "linux": "b3205715d74270ba40a49553d15e3acb833332a5dfcb86e839309055bddea992",
+      "windows": "a165cd5f4820270b914dd51794326d46e12351142257cbb4825d97903928b025",
+      "gitBlob": "b3205715d74270ba40a49553d15e3acb833332a5dfcb86e839309055bddea992",
+      "crlf": "a165cd5f4820270b914dd51794326d46e12351142257cbb4825d97903928b025",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/agent_hook_core.rs",
+      "linux": "b61b257b7b0eb2985c3f1f8bc3e73291ecfbc71e9e52c007471ed63f378a7b8b",
+      "windows": "67d2411b8256bcb92229dca970ddd7181486313e4a11a3d98e480659fb43effe",
+      "gitBlob": "b61b257b7b0eb2985c3f1f8bc3e73291ecfbc71e9e52c007471ed63f378a7b8b",
+      "crlf": "67d2411b8256bcb92229dca970ddd7181486313e4a11a3d98e480659fb43effe",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/agent_state.rs",
+      "linux": "f4dc414e6c5a55b13e8e6a6d3f54f42ce64f453229cdae435480358425dc03b2",
+      "windows": "7548608f859eb5c687f25767269d9fa8a6f54951ab1c92a1c4407a7fd64e8bfd",
+      "gitBlob": "f4dc414e6c5a55b13e8e6a6d3f54f42ce64f453229cdae435480358425dc03b2",
+      "crlf": "7548608f859eb5c687f25767269d9fa8a6f54951ab1c92a1c4407a7fd64e8bfd",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/config.rs",
+      "linux": "11e0120e99a2c05c01024eefb703880cfe55a8079857eb01bf1d087bbadd5bc8",
+      "windows": "d140b4c68939e28cb4d2e7755cbd22649b1a7aa353697d15eebfd3deb05b3c4e",
+      "gitBlob": "11e0120e99a2c05c01024eefb703880cfe55a8079857eb01bf1d087bbadd5bc8",
+      "crlf": "d140b4c68939e28cb4d2e7755cbd22649b1a7aa353697d15eebfd3deb05b3c4e",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/dag_stream.rs",
+      "linux": "4730ca5c484de137cc8878156a7f9826b8a16c3e403b15481453b7d68d345ff1",
+      "windows": "f7cbbc2506c12b23cc4cef167a3895dd16c3ddc0d4298730a16d2e496162253f",
+      "gitBlob": "4730ca5c484de137cc8878156a7f9826b8a16c3e403b15481453b7d68d345ff1",
+      "crlf": "f7cbbc2506c12b23cc4cef167a3895dd16c3ddc0d4298730a16d2e496162253f",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/dag_stream_tests.rs",
+      "linux": "91695fe67c7198187f49d1164afa920efebd0cd287b10201837fbc63c8c52cb7",
+      "windows": "46bfefa996928e98ce6a7576db355e774f77bb2939d4a499f1ee6d64d319f50b",
+      "gitBlob": "91695fe67c7198187f49d1164afa920efebd0cd287b10201837fbc63c8c52cb7",
+      "crlf": "46bfefa996928e98ce6a7576db355e774f77bb2939d4a499f1ee6d64d319f50b",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/helper.rs",
+      "linux": "6209f7475fa6d0c387d1826e6409f62ee5250fcf40eb979367f9d62f364af4ad",
+      "windows": "6078c0416fc751a5d840df7e13c229a9c96f1f4deccad7da84931b6a1e695513",
+      "gitBlob": "6209f7475fa6d0c387d1826e6409f62ee5250fcf40eb979367f9d62f364af4ad",
+      "crlf": "6078c0416fc751a5d840df7e13c229a9c96f1f4deccad7da84931b6a1e695513",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/helper_core_tests.rs",
+      "linux": "bbc8da622e777cce8f52a93df23430d50f4ab90056eefa321009f42d1f8a1d21",
+      "windows": "691a3bfc8f9cbab691a239d116f51584af6a8b329ebbd390bb48d41594203194",
+      "gitBlob": "bbc8da622e777cce8f52a93df23430d50f4ab90056eefa321009f42d1f8a1d21",
+      "crlf": "691a3bfc8f9cbab691a239d116f51584af6a8b329ebbd390bb48d41594203194",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs",
+      "linux": "a96bb6b8520d7e98330667b6c4e67a4132a536b446971dca68eae8ba8e2365d6",
+      "windows": "a21d36ead7fdd4f3ac65da7a5e1f306909e2c017f43a034812516d589bc28393",
+      "gitBlob": "a96bb6b8520d7e98330667b6c4e67a4132a536b446971dca68eae8ba8e2365d6",
+      "crlf": "a21d36ead7fdd4f3ac65da7a5e1f306909e2c017f43a034812516d589bc28393",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/hygiene.rs",
+      "linux": "881f0b1c7b934ff95285d5509c4cebfc67737c3004be61ceafbe429b41748b0d",
+      "windows": "515ca315fca1577066051a51ba61a645a7194a42f6892d41da65689acbfd49a5",
+      "gitBlob": "881f0b1c7b934ff95285d5509c4cebfc67737c3004be61ceafbe429b41748b0d",
+      "crlf": "515ca315fca1577066051a51ba61a645a7194a42f6892d41da65689acbfd49a5",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/mod.rs",
+      "linux": "9905c0d6156c4d6fdf38c4b50edf4e1e94b49ded98d5676583cb229e5b273c4b",
+      "windows": "a20c87f866279c64fd625f183d0a3abd72754087dad2f029ba307e064307bd59",
+      "gitBlob": "9905c0d6156c4d6fdf38c4b50edf4e1e94b49ded98d5676583cb229e5b273c4b",
+      "crlf": "a20c87f866279c64fd625f183d0a3abd72754087dad2f029ba307e064307bd59",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/process.rs",
+      "linux": "c0e7ca52004af7bf196acdb9abdc863381b4ff029c534235cfb56b30a377478f",
+      "windows": "6109d9d538a83b404f3f581281153359b64a8609f7729b355ea258842b5519e3",
+      "gitBlob": "c0e7ca52004af7bf196acdb9abdc863381b4ff029c534235cfb56b30a377478f",
+      "crlf": "6109d9d538a83b404f3f581281153359b64a8609f7729b355ea258842b5519e3",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/process/process_windows.rs",
+      "linux": "2f23843d3c6153787f4f731a3e8c8f27b724150af58c177628ac610951c2c8ba",
+      "windows": "9b6821809399967df863014d78609d0d48724da070d9466937a7a2fcd02b8cef",
+      "gitBlob": "2f23843d3c6153787f4f731a3e8c8f27b724150af58c177628ac610951c2c8ba",
+      "crlf": "9b6821809399967df863014d78609d0d48724da070d9466937a7a2fcd02b8cef",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/standalone.rs",
+      "linux": "bfaf5be17d3084a13f459e36bd4efcaf89fb4281993a9e7aeb3edeb17c7b5954",
+      "windows": "2099e561ad179b5cb03b0b2d954ad7ff81b889e055e8a5ccdeb1da7c9900945f",
+      "gitBlob": "bfaf5be17d3084a13f459e36bd4efcaf89fb4281993a9e7aeb3edeb17c7b5954",
+      "crlf": "2099e561ad179b5cb03b0b2d954ad7ff81b889e055e8a5ccdeb1da7c9900945f",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/scoped_contracts.rs",
+      "linux": "c1c48494cec16c8104d202eca49da5d221293dcde63ca837ef781f49290d448a",
+      "windows": "b048acc7f178312ed99c063c1434084fdd44f89596d9dcfbe440751b6dff3328",
+      "gitBlob": "c1c48494cec16c8104d202eca49da5d221293dcde63ca837ef781f49290d448a",
+      "crlf": "b048acc7f178312ed99c063c1434084fdd44f89596d9dcfbe440751b6dff3328",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    },
+    {
+      "path": "src-tauri/src/worktree/naming.rs",
+      "linux": "e4263f1b222132e9ab5d7926e4d4abc68a078075c9a4a27e767820e087172e53",
+      "windows": "a4fba82340addd3a3e443644ec856d4e645e59940abe774a39934412d7a00391",
+      "gitBlob": "e4263f1b222132e9ab5d7926e4d4abc68a078075c9a4a27e767820e087172e53",
+      "crlf": "a4fba82340addd3a3e443644ec856d4e645e59940abe774a39934412d7a00391",
+      "linuxMatchesBlob": true,
+      "windowsMatchesCRLF": true
+    }
+  ]
+}

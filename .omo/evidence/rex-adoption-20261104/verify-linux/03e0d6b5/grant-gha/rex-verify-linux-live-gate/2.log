@@ -1,0 +1,69 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 240 bun .github/rex-gate/verify-linux-live/extra-qa.mjs
+RPC {"type":"handshake","version":5} {"type":"handshakeOk","version":5,"pid":30760,"epoch":1793858578148,"binaryPath":"/home/runner/work/ferryx/ferryx/src-tauri/target/debug/ferryx-cli","binaryMtimeMs":1793858574248,"daemonVersion":"2026.1101.1","capabilities":["localSplitLifecycleV1","control-v1"],"admissionTimeUnixMs":1793858578408}
+RPC {"type":"listSessions"} {"type":"listSessionsOk","epoch":1793858578148,"sessions":[]}
+RPC {"type":"layoutGet","window":"main"} {"type":"layoutOk","view":{"revision":0,"layout":{"machineId":"371441f2-f116-49f2-bb3c-e5ed8f629b3d","revision":0,"tabs":[],"tabGroupLayout":{"type":"group","groupId":"main","tabIds":[],"activeTabId":null},"activeTabId":null,"focusedGroupId":"main","nextNodeId":1}}}
+RPC {"type":"layoutOffer","window":"main","snapshot":{"machineId":"foreign-verifier","revision":999,"tabs":[],"tabGroupLayout":{"type":"group","groupId":"main","tabIds":[],"activeTabId":null},"activeTabId":null,"focusedGroupId":"main","nextNodeId":1}} {"type":"layoutOk","view":{"revision":1,"layout":{"machineId":"371441f2-f116-49f2-bb3c-e5ed8f629b3d","revision":1,"tabs":[],"tabGroupLayout":{"type":"group","groupId":"main","tabIds":[],"activeTabId":null},"activeTabId":null,"focusedGroupId":"main","foreignOffers":{"foreign-verifier":{"machineId":"foreign-verifier","revision":999,"tabs":[],"tabGroupLayout":{"type":"group","groupId":"main","tabIds":[],"activeTabId":null},"activeTabId":null,"focusedGroupId":"main","nextNodeId":1}},"nextNodeId":1}}}
+RPC {"type":"layoutGet","window":"main"} {"type":"layoutOk","view":{"revision":1,"layout":{"machineId":"371441f2-f116-49f2-bb3c-e5ed8f629b3d","revision":1,"tabs":[],"tabGroupLayout":{"type":"group","groupId":"main","tabIds":[],"activeTabId":null},"activeTabId":null,"focusedGroupId":"main","foreignOffers":{"foreign-verifier":{"machineId":"foreign-verifier","revision":999,"tabs":[],"tabGroupLayout":{"type":"group","groupId":"main","tabIds":[],"activeTabId":null},"activeTabId":null,"focusedGroupId":"main","nextNodeId":1}},"nextNodeId":1}}}
+RPC {"type":"layoutImport","window":"main","machineId":"foreign-verifier","revision":999} {"type":"layoutImported","window":"ws-7643c18a8f35401293c15ccf9fc90ff1","view":{"revision":0,"layout":{"machineId":"371441f2-f116-49f2-bb3c-e5ed8f629b3d","revision":0,"tabs":[],"tabGroupLayout":{"type":"group","groupId":"main","tabIds":[],"activeTabId":null},"activeTabId":null,"focusedGroupId":"main","nextNodeId":1}}}
+RPC {"type":"listSessions"} {"type":"listSessionsOk","epoch":1793858578148,"sessions":[]}
+RPC {"type":"script","action":{"action":"setEnabled","enabled":true}} {"type":"scriptOk","value":{"enabled":true,"bindings":[],"log":"ready\n"}}
+RPC {"type":"script","action":{"action":"reload"}} {"type":"scriptOk","value":{"enabled":true,"bindings":[],"log":"ready\n"}}
+TIMER_LOG ready
+verifier_tick
+
+RPC {"type":"listSessions"} {"type":"listSessionsOk","epoch":1793858578148,"sessions":[]}
+RPC {"type":"pluginSetEnabled","name":"clock","enabled":true,"expected":{"name":"clock","version":"1","module":"/home/runner/work/_temp/tmp/rex-extra-UFZTHs/clock.wasm","sha256":"0000000000000000000000000000000000000000000000000000000000000000","capabilities":["render"]}} {"type":"error","message":"PLUGIN_APPROVAL_REQUIRED: plugin identity changed; review it again","code":"PLUGIN_APPROVAL_REQUIRED"}
+RPC {"type":"pluginSetEnabled","name":"clock","enabled":true,"expected":{"name":"clock","version":"1","module":"/home/runner/work/_temp/tmp/rex-extra-UFZTHs/clock.wasm","sha256":"46ca41dfb605e3e3e19279cf6d4b93e801b1d3b24e8f182647d0d12de03aee00","capabilities":["render"]}} {"type":"pluginsOk","plugins":[{"manifest":{"name":"clock","version":"1","module":"/home/runner/work/_temp/tmp/rex-extra-UFZTHs/clock.wasm","sha256":"46ca41dfb605e3e3e19279cf6d4b93e801b1d3b24e8f182647d0d12de03aee00","capabilities":["render"]},"enabled":true}]}
+CLOCK_ATTACH {"revision":2,"layout":{"machineId":"371441f2-f116-49f2-bb3c-e5ed8f629b3d","revision":2,"tabs":[{"tabId":"8dab38d1-ec39-40a2-8a39-023c1bd56311","label":"clock","pinned":false,"paneTree":{"type":"leaf","nodeId":1,"content":{"kind":"plugin","plugin":"clock","view":"main"}},"activeNodeId":1,"expandedNodeId":null}],"tabGroupLayout":{"type":"group","groupId":"main","tabIds":["8dab38d1-ec39-40a2-8a39-023c1bd56311"],"activeTabId":"8dab38d1-ec39-40a2-8a39-023c1bd56311"},"activeTabId":"8dab38d1-ec39-40a2-8a39-023c1bd56311","focusedGroupId":"main","foreignOffers":{"foreign-verifier":{"machineId":"foreign-verifier","revision":999,"tabs":[],"tabGroupLayout":{"type":"group","groupId":"main","tabIds":[],"activeTabId":null},"activeTabId":null,"focusedGroupId":"main","nextNodeId":1}},"nextNodeId":2}}
+
+RPC {"type":"pluginSetEnabled","name":"clock","enabled":false,"expected":null} {"type":"pluginsOk","plugins":[{"manifest":{"name":"clock","version":"1","module":"/home/runner/work/_temp/tmp/rex-extra-UFZTHs/clock.wasm","sha256":"46ca41dfb605e3e3e19279cf6d4b93e801b1d3b24e8f182647d0d12de03aee00","capabilities":["render"]},"enabled":false}]}
+RPC {"type":"pluginView","plugin":"clock","view":"main"} {"type":"error","message":"Plugin view unavailable"}
+DISABLED_VIEW {
+  type: "error",
+  message: "Plugin view unavailable",
+}
+RPC {"type":"registerWorkspace","workspaceId":"grant-qa","repoRoot":"/home/runner/work/ferryx/ferryx"} {"type":"registerWorkspaceOk"}
+RPC {"type":"spawn","clientRequestId":"grant-a","workspaceId":"grant-qa","cwd":"/home/runner/work/ferryx/ferryx","cols":100,"rows":30,"shell":"/bin/sh"} {"type":"spawnOk","sessionId":"a4a0a4a1-e0dc-4a5b-b08d-279715ba1f47","epoch":1793858578148,"session":{"sizeOwner":"desktop","sessionId":"a4a0a4a1-e0dc-4a5b-b08d-279715ba1f47","workspaceId":"grant-qa","worktree":null,"cwd":"/home/runner/work/ferryx/ferryx","cols":100,"rows":30,"running":true,"startSequence":1,"endSequence":1,"lastOutputAgeMs":0,"suspended":false,"readerPaused":false,"kernelStopped":false,"registrySuspended":false,"suspensionSource":"unknown","incarnation":"850c8447-7ff3-4a61-b32a-7eb550a39994","recoveryAuthority":{"status":"running","incarnation":"850c8447-7ff3-4a61-b32a-7eb550a39994","isPairedProxy":false},"isPairedProxy":false}}
+RPC {"type":"spawn","clientRequestId":"grant-b","workspaceId":"grant-qa","cwd":"/home/runner/work/ferryx/ferryx","cols":100,"rows":30,"shell":"/bin/sh"} {"type":"spawnOk","sessionId":"e7692164-8909-465a-8e9b-73a02759ec24","epoch":1793858578148,"session":{"sizeOwner":"desktop","sessionId":"e7692164-8909-465a-8e9b-73a02759ec24","workspaceId":"grant-qa","worktree":null,"cwd":"/home/runner/work/ferryx/ferryx","cols":100,"rows":30,"running":true,"startSequence":null,"endSequence":null,"lastOutputAgeMs":0,"suspended":false,"readerPaused":false,"kernelStopped":false,"registrySuspended":false,"suspensionSource":"unknown","incarnation":"cf39eb4f-50bf-42f4-8cd9-9ede737766e1","recoveryAuthority":{"status":"running","incarnation":"cf39eb4f-50bf-42f4-8cd9-9ede737766e1","isPairedProxy":false},"isPairedProxy":false}}
+RPC {"type":"handshake","version":5} {"type":"handshakeOk","version":5,"pid":30760,"epoch":1793858578148,"binaryPath":"/home/runner/work/ferryx/ferryx/src-tauri/target/debug/ferryx-cli","binaryMtimeMs":1793858574248,"daemonVersion":"2026.1101.1","capabilities":["localSplitLifecycleV1","control-v1"],"admissionTimeUnixMs":1793858579345}
+RPC {"type":"attach","sessionId":"a4a0a4a1-e0dc-4a5b-b08d-279715ba1f47"} {"type":"attachOk","epoch":1793858578148,"sessionId":"a4a0a4a1-e0dc-4a5b-b08d-279715ba1f47","startSequence":1,"endSequence":1,"gap":null,"history":"JCA=","ptyCols":100,"ptyRows":30,"historySegments":[{"cols":100,"rows":30,"bytes":"JCA="}]}
+RPC {"type":"write","sessionId":"a4a0a4a1-e0dc-4a5b-b08d-279715ba1f47","data":"c3R0eSAtZWNobzsgJy9ob21lL3J1bm5lci93b3JrL2ZlcnJ5eC9mZXJyeXgvc3JjLXRhdXJpL3RhcmdldC9kZWJ1Zy9mZXJyeXgtY2xpJyBhZ2VudHMgc2VuZCAnZTc2OTIxNjQtODkwOS00NjVhLThlOWItNzNhMDI3NTllYzI0JyAnZWNobyBncmFudC1kZWxpdmVyZWQnIDI+JjE7IHByaW50ZiAnREVOWSVzXG4nICdfRE9ORScK"} {"type":"writeOk"}
+PANE_TRANSCRIPT stty -echo; '/home/runner/work/ferryx/ferryx/src-tauri/target/debug/ferryx-cli' agents send 'e7692164-8909-465a-8e9b-73a02759ec24' 'echo grant-delivered' 2>&1; printf 'DENY%s\n' '_DONE'
+{"ok":false,"code":"FORBIDDEN","message":"PANE_GRANT_REQUIRED: the pane a4a0a4a1-e0dc-4a5b-b08d-279715ba1f47 has no grant for e7692164-8909-465a-8e9b-73a02759ec24; open Settings > Pane access"}
+DENY_DONE
+$ 
+
+thread 'main' (30832) panicked at src/cli/grants.rs:83:28:
+there is no reactor running, must be called from the context of a Tokio 1.x runtime
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+SCENARIO_FAIL live cross-pane grants denial then owner grant 15 | function observe(mark){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('pane output deadline '+mark+' '+text)),15000);observers.push({mark,resolve:()=>{clearTimeout(timer);resolve();}});});}
+16 | await stream.call({type:'attach',sessionId:a.sessionId});
+17 | async function pane(command,mark){const seen=observe(mark);await c.call({type:'write',sessionId:a.sessionId,data:Buffer.from(`stty -echo; ${command}; printf '${mark.slice(0,4)}%s\\n' '${mark.slice(4)}'\n`).toString('base64')});await seen;console.log('PANE_TRANSCRIPT',text);}
+18 | const send=`'${bin}' agents send '${b.sessionId}' 'echo grant-delivered' 2>&1`;
+19 | await pane(send,'DENY_DONE');assert(text.includes('PANE_GRANT_REQUIRED'));
+20 | execFileSync(bin,['grants','add','--from',a.sessionId,'--to',b.sessionId,'--ops','write'],{env,encoding:'utf8',timeout:10000});
+     ^
+error: Command failed: /home/runner/work/ferryx/ferryx/src-tauri/target/debug/ferryx-cli grants add --from a4a0a4a1-e0dc-4a5b-b08d-279715ba1f47 --to e7692164-8909-465a-8e9b-73a02759ec24 --ops write
+
+thread 'main' (30832) panicked at src/cli/grants.rs:83:28:
+there is no reactor running, must be called from the context of a Tokio 1.x runtime
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+ signal: null,
+ status: 101,
+ output: [ null, "", "\nthread 'main' (30832) panicked at src/cli/grants.rs:83:28:\nthere is no reactor running, must be called from the context of a Tokio 1.x runtime\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" ],
+    pid: 30832,
+ stdout: "",
+ stderr: "\nthread 'main' (30832) panicked at src/cli/grants.rs:83:28:\nthere is no reactor running, must be called from the context of a Tokio 1.x runtime\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+
+      at genericNodeError (node:child_process:1097:13)
+      at checkExecSyncError (node:child_process:504:27)
+      at execFileSync (node:child_process:301:31)
+      at <anonymous> (/home/runner/work/ferryx/ferryx/.github/rex-gate/verify-linux-live/extra-qa.mjs:20:1)
+      at async scenario (/home/runner/work/ferryx/ferryx/.github/rex-gate/verify-linux-live/extra-qa.mjs:5:61)
+
+AGENT_CLI_MISSING claude ENOENT
+AGENT_CLI_MISSING codex ENOENT
+AGENT_CLI_MISSING omp ENOENT
+LIVE_SCENARIOS [{"name":"foreign layout offer/import preserves sessions","status":"PASS"},{"name":"script timer once and daemon responsive","status":"PASS"},{"name":"compiled clock approval mismatch and disable","status":"PASS"},{"name":"live cross-pane grants denial then owner grant","status":"FAIL","error":"Error: Command failed: /home/runner/work/ferryx/ferryx/src-tauri/target/debug/ferryx-cli grants add --from a4a0a4a1-e0dc-4a5b-b08d-279715ba1f47 --to e7692164-8909-465a-8e9b-73a02759ec24 --ops write\n\nthread 'main' (30832) panicked at src/cli/grants.rs:83:28:\nthere is no reactor running, must be called from the context of a Tokio 1.x runtime\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"},{"name":"real agent binaries inventory","status":"PASS"}]
+STOPPED_RECORDED_PID 30760

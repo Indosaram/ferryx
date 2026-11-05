@@ -1,0 +1,266 @@
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push less than a minute ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  * Free runner disk
+  * Run actions/checkout@v4
+  * Isolated TMPDIR, gate dir and git identity
+  * Run mlugg/setup-zig@v2
+  * Run oven-sh/setup-bun@v2
+  * Run dtolnay/rust-toolchain@stable
+  * Run swatinem/rust-cache@v2
+  * Install build dependencies
+  * Frontend assets and FFmpeg SDK
+  * gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push about 3 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  * gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push about 6 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  * gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push about 9 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  * gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push about 12 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  * gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push about 15 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  * gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  * gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push about 18 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push about 21 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push about 24 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793832925 rex verify-linux gate (one-shot) · 41929465914
+Triggered via push about 27 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126922368014)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-taur
+  * gate 3: bash .github/rex-gate/verify-linux/baseline.sh
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4

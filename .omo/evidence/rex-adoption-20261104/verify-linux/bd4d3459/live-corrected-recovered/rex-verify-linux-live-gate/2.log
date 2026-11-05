@@ -1,0 +1,29 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux-live/account-qa.mjs
+FERRYX_ACCOUNT_MODE selfhost: billing, lease and team routes are not served
+FERRYX_ACCOUNT_READY 127.0.0.1:34501
+PUT /api/v1/account/onboarding 401 {"code":"UNAUTHORIZED","message":"missing bearer token"}
+POST /api/account/v1/login/request 202 {"loginHandle":"dac673945377dd204e7ca843562e312133eb481f954cb9c560af2af79bf2862b"}
+RECORDED_ACCOUNT_PID_STOPPED 30754
+4 | const root=mkdtempSync(join(tmpdir(),'rex-account-'));mkdirSync(join(root,'mail'));
+5 | const child=spawn(resolve('src-tauri/target/debug/ferryx-account'),[],{env:{...process.env,FERRYX_ACCOUNT_BIND:'127.0.0.1:0',FERRYX_ACCOUNT_ORIGIN:'http://127.0.0.1',FERRYX_ACCOUNT_DATA_DIR:join(root,'data'),FERRYX_MAIL_DIR:join(root,'mail'),FERRYX_DEPLOYMENT_MODE:'selfhost'},stdio:['ignore','pipe','pipe']});child.stderr.pipe(process.stderr);
+6 | try{const lines=createInterface({input:child.stdout});const base=await new Promise((res,rej)=>{const t=setTimeout(()=>rej(Error('readiness deadline')),30000);child.once('exit',c=>rej(Error('account exited '+c)));lines.on('line',l=>{console.log(l);if(l.startsWith('FERRYX_ACCOUNT_READY ')){clearTimeout(t);res('http://'+l.split(' ')[1]);}});});
+7 | async function req(path,method,body,token){const r=await fetch(base+path,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(10000)});const text=await r.text();console.log(method,path,r.status,text);return {status:r.status,body:JSON.parse(text)};}
+8 | assert.equal((await req('/api/v1/account/onboarding','PUT',{completedSteps:['intro'],dismissed:false})).status,401);
+9 | assert.equal((await req('/api/account/v1/login/request','POST',{email:'verifier@example.test'})).status,200);
+           ^
+AssertionError: Expected values to be strictly equal:
+
+202 !== 200
+
+ generatedMessage: true,
+     actual: 202,
+   expected: 200,
+   operator: "strictEqual",
+       diff: "simple",
+       code: "ERR_ASSERTION"
+
+      at /home/runner/work/ferryx/ferryx/.github/rex-gate/verify-linux-live/account-qa.mjs:9:8
+
+::error file=.github/rex-gate/verify-linux-live/account-qa.mjs,line=9,col=8,title=AssertionError: Expected values to be strictly equal%3A::202 !== 200%0A%0A      at /home/runner/work/ferryx/ferryx/.github/rex-gate/verify-linux-live/account-qa.mjs:9:8
+
+Bun v1.4.4 (Linux x64)

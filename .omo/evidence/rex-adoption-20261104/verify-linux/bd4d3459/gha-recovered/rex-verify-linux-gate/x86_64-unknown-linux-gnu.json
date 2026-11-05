@@ -1,0 +1,93 @@
+{
+  "target": "x86_64-unknown-linux-gnu",
+  "profile": "release",
+  "executable": "/home/runner/work/ferryx/ferryx/remote-helper/target/x86_64-unknown-linux-gnu/release/ferryx-remote-helper",
+  "sha256": "97b668303b33cf775ac38e47ef0b24d08c81c3b24d268cc3e0e676379a727f02",
+  "helperVersion": "2026.1101.1",
+  "capabilities": [
+    "sshHelperV1",
+    "dagStreamingV1",
+    "dagSubscribeV1",
+    "agentHookV1",
+    "agentStateV1"
+  ],
+  "sourceFingerprint": "8f02c2b160b5cb7369ab5c1c4a4e78d37b79ebcaa099d6c1621fbb37df23c295",
+  "sources": [
+    {
+      "path": "remote-helper/Cargo.lock",
+      "sha256": "7266784b54ab653c59083fa8ad32f8d630ad0f3e0a9ab6486e9a615467f44cf3"
+    },
+    {
+      "path": "remote-helper/Cargo.toml",
+      "sha256": "5ad679cd6bf155406459966828d772e3d1a2a6abf492edcfc8cda57fafb01c1a"
+    },
+    {
+      "path": "src-tauri/src/dag/journal.rs",
+      "sha256": "7447566b14f9f8a7508ef887fe04074cde6f0a7a9b1c9855c6d114601c1d38cb"
+    },
+    {
+      "path": "src-tauri/src/dag/paths.rs",
+      "sha256": "b3205715d74270ba40a49553d15e3acb833332a5dfcb86e839309055bddea992"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/agent_hook_core.rs",
+      "sha256": "b61b257b7b0eb2985c3f1f8bc3e73291ecfbc71e9e52c007471ed63f378a7b8b"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/agent_state.rs",
+      "sha256": "f4dc414e6c5a55b13e8e6a6d3f54f42ce64f453229cdae435480358425dc03b2"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/config.rs",
+      "sha256": "11e0120e99a2c05c01024eefb703880cfe55a8079857eb01bf1d087bbadd5bc8"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/dag_stream.rs",
+      "sha256": "4730ca5c484de137cc8878156a7f9826b8a16c3e403b15481453b7d68d345ff1"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/dag_stream_tests.rs",
+      "sha256": "91695fe67c7198187f49d1164afa920efebd0cd287b10201837fbc63c8c52cb7"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/helper.rs",
+      "sha256": "6209f7475fa6d0c387d1826e6409f62ee5250fcf40eb979367f9d62f364af4ad"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/helper_core_tests.rs",
+      "sha256": "bbc8da622e777cce8f52a93df23430d50f4ab90056eefa321009f42d1f8a1d21"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs",
+      "sha256": "a96bb6b8520d7e98330667b6c4e67a4132a536b446971dca68eae8ba8e2365d6"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/hygiene.rs",
+      "sha256": "881f0b1c7b934ff95285d5509c4cebfc67737c3004be61ceafbe429b41748b0d"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/mod.rs",
+      "sha256": "9905c0d6156c4d6fdf38c4b50edf4e1e94b49ded98d5676583cb229e5b273c4b"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/process.rs",
+      "sha256": "c0e7ca52004af7bf196acdb9abdc863381b4ff029c534235cfb56b30a377478f"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/process/process_windows.rs",
+      "sha256": "2f23843d3c6153787f4f731a3e8c8f27b724150af58c177628ac610951c2c8ba"
+    },
+    {
+      "path": "src-tauri/src/ferryx_scope/ssh/standalone.rs",
+      "sha256": "bfaf5be17d3084a13f459e36bd4efcaf89fb4281993a9e7aeb3edeb17c7b5954"
+    },
+    {
+      "path": "src-tauri/src/scoped_contracts.rs",
+      "sha256": "c1c48494cec16c8104d202eca49da5d221293dcde63ca837ef781f49290d448a"
+    },
+    {
+      "path": "src-tauri/src/worktree/naming.rs",
+      "sha256": "e4263f1b222132e9ab5d7926e4d4abc68a078075c9a4a27e767820e087172e53"
+    }
+  ]
+}

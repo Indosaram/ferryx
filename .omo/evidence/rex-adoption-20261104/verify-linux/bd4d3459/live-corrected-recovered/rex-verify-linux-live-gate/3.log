@@ -1,0 +1,14 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux-live/extra-qa.mjs
+Ferryx daemon error: No such file or directory (os error 2)
+1 | import net from 'node:net';import{spawn,execFileSync}from'node:child_process';import{mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync}from'node:fs';import{tmpdir}from'node:os';import{join,resolve}from'node:path';import{createInterface}from'node:readline';import{once}from'node:events';import{createHash}from'node:crypto';import assert from'node:assert/strict';
+2 | const root=mkdtempSync(join(tmpdir(),'rex-extra-'));const bin=resolve('src-tauri/target/debug/ferryx-cli');const env={...process.env,HOME:join(root,'home'),XDG_CONFIG_HOME:join(root,'config'),FERRYX_DATA_DIR:join(root,'data'),FERRYX_RUNTIME_DIR:join(root,'rt')};for(const x of ['home','config/ferryx/plugins/clock','data','rt'])mkdirSync(join(root,x),{recursive:true});const sockets=[];const daemons=[];
+3 | async function launch(){const c=spawn(bin,['--daemon'],{env,stdio:['ignore','pipe','pipe']});daemons.push(c);c.stderr.pipe(process.stderr);await new Promise((res,rej)=>{const t=setTimeout(()=>rej(Error('daemon readiness deadline')),30000);c.once('exit',n=>rej(Error('daemon exit '+n)));createInterface({input:c.stdout}).on('line',l=>{if(l.includes('FERRYX_DAEMON_READY')){clearTimeout(t);res();}})});return c;}
+                                                                                                                                                                                                                                                                        ^
+error: daemon exit 1
+      at <anonymous> (/home/runner/work/ferryx/ferryx/.github/rex-gate/verify-linux-live/extra-qa.mjs:3:261)
+      at emit (node:events:103:22)
+      at #handleOnExit (node:child_process:571:14)
+
+::error file=.github/rex-gate/verify-linux-live/extra-qa.mjs,line=3,col=261,title=error: daemon exit 1::%0A      at <anonymous> (/home/runner/work/ferryx/ferryx/.github/rex-gate/verify-linux-live/extra-qa.mjs:3:261)%0A      at emit (node:events:103:22)%0A      at #handleOnExit (node:child_process:571:14)
+
+Bun v1.4.4 (Linux x64)

@@ -1,0 +1,7 @@
+GitHub Actions runners: ephemeral ubuntu-24.04; no persistent Linux host claimed (picker exit 3).
+Candidate refs ci/rex-verify-linux-* all absent from git ls-remote after driver cleanup.
+Baseline remote worktree removed and pruned by baseline.sh EXIT trap; per-runner targets destroyed with ephemeral runner.
+No product code edited. No production daemon killed or restarted.
+Live QA daemon recorded PID 100543 stopped in gha3/rex-verify-linux-gate/17.log.
+Initial runs 41917272545 and 41917536124 cancelled during runner setup; no candidate test results claimed from those attempts. Frozen completed run 41917889082 retained, supplemental baseline run 41929465914 retained.
+MacOS manual/GUI QA SKIPPED BY USER; not PASS. Windows checks belong to the separate Windows leg.

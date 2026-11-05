@@ -1,0 +1,595 @@
+[1m[92m    Checking[0m parking_lot v0.12.5
+[1m[92m    Checking[0m rustls v0.23.43
+[1m[92m    Checking[0m tokio v1.53.1
+[1m[92m   Compiling[0m serde_json v1.0.151
+[1m[92m   Compiling[0m sqlx-core v0.8.6
+[1m[92m    Checking[0m tokio-stream v0.1.19
+[1m[92m    Checking[0m tokio-rustls v0.26.4
+[1m[92m    Checking[0m hyper v1.11.0
+[1m[92m    Checking[0m hyper-util v0.1.20
+[1m[92m   Compiling[0m sqlx-sqlite v0.8.6
+[1m[92m    Checking[0m num-bigint-dig v0.8.6
+[1m[92m    Checking[0m tower v0.5.3
+[1m[92m    Checking[0m futures-intrusive v0.5.0
+[1m[92m    Checking[0m tungstenite v0.29.0
+[1m[92m   Compiling[0m sqlx-macros-core v0.8.6
+[1m[92m    Checking[0m rsa v0.9.10
+[1m[92m    Checking[0m flume v0.11.1
+[1m[92m    Checking[0m superboring v0.1.14
+[1m[92m   Compiling[0m sqlx-macros v0.8.6
+[1m[92m    Checking[0m tokio-tungstenite v0.29.0
+[1m[92m    Checking[0m futures-rustls v0.26.0
+[1m[92m    Checking[0m jwt-simple v0.12.11
+[1m[92m    Checking[0m async-web-client v0.6.4
+[1m[92m    Checking[0m quinn-proto v0.11.17
+[1m[92m    Checking[0m axum v0.8.9
+[1m[92m    Checking[0m ece v2.3.1
+[1m[92m    Checking[0m x509-parser v0.18.1
+[1m[92m    Checking[0m sqlx v0.8.6
+[1m[92m   Compiling[0m ferryx v2026.1101.1 (/home/runner/work/_temp/rex-base/src-tauri)
+[1m[92m    Checking[0m tower-http v0.6.11
+[1m[92m    Checking[0m hyper-rustls v0.27.9
+[1m[92m    Checking[0m tokio-util v0.7.19
+[1m[92m    Checking[0m tracing-subscriber v0.3.23
+[1m[92m    Checking[0m portable-pty v0.9.0 (/home/runner/work/_temp/rex-base/src-tauri/vendor/portable-pty)
+[1m[92m    Checking[0m reqwest v0.12.28
+[1m[92m    Checking[0m web-push v0.11.0
+[1m[92m    Checking[0m ferryx-hub v0.1.0 (/home/runner/work/_temp/rex-base/crates/ferryx-hub)
+[1m[92m    Checking[0m quinn v0.11.11
+[1m[92m    Checking[0m rustls-acme v0.15.4
+[1m[92m    Checking[0m image v0.25.10
+[1m[92m    Checking[0m tokio-test v0.4.5
+[1m[91merror[E0433][0m[1m: cannot find `omo_client` in `meta`[0m
+   [1m[94m--> [0msrc/hub_runtime/seed.rs:162:23
+    [1m[94m|[0m
+[1m[94m162[0m [1m[94m|[0m     ferryx_hub::meta::omo_client::workspace_root_from(configured_root, Some(home))
+    [1m[94m|[0m                       [1m[91m^^^^^^^^^^[0m [1m[91mcould not find `omo_client` in `meta`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+   [1m[94m--> [0m/home/runner/work/_temp/rex-base/crates/ferryx-hub/src/meta/mod.rs:7:9
+    [1m[94m|[0m
+[1m[94m  6[0m [1m[94m|[0m #[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
+    [1m[94m|[0m          [1m[94m------------------------------------------------[0m [1m[94mthe item is gated here[0m
+[1m[94m  7[0m [1m[94m|[0m pub mod omo_client;
+    [1m[94m|[0m         [1m[92m^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `crate::browser::security::BrowserError`[0m
+  [1m[94m--> [0msrc/browser/bridge/mod.rs:66:5
+   [1m[94m|[0m
+[1m[94m66[0m [1m[94m|[0m use crate::browser::security::BrowserError;
+   [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `-D unused-imports` implied by `-D warnings`
+   [1m[94m= [0m[1mhelp[0m: to override `-D warnings` add `#[allow(unused_imports)]`
+
+[1m[91merror[0m[1m: unused imports: `Entry`, `Message`, and `Page`[0m
+ [1m[94m--> [0msrc/ipc/agent_history.rs:1:37
+  [1m[94m|[0m
+[1m[94m1[0m [1m[94m|[0m use crate::agent_history::history::{Entry, History, HistoryError, Message, Page};
+  [1m[94m|[0m                                     [1m[91m^^^^^[0m                         [1m[91m^^^^^^^[0m  [1m[91m^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `run_blocking`[0m
+ [1m[94m--> [0msrc/ipc/agent_history.rs:2:18
+  [1m[94m|[0m
+[1m[94m2[0m [1m[94m|[0m use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused imports: `BrowserDialogHandleRequest`, `BrowserDownloadRequest`, `BrowserManager`, `BrowserSessionCreatedPayload`, and `CreateBrowserRequest`[0m
+ [1m[94m--> [0msrc/ipc/browser_cli.rs:3:5
+  [1m[94m|[0m
+[1m[94m3[0m [1m[94m|[0m     BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserError, BrowserManager,
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^^^^^^^^^^^^^[0m                [1m[91m^^^^^^^^^^^^^^[0m
+[1m[94m4[0m [1m[94m|[0m     BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m5[0m [1m[94m|[0m     CreateBrowserRequest,
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `std::sync::Arc`[0m
+  [1m[94m--> [0msrc/ipc/browser_cli.rs:20:5
+   [1m[94m|[0m
+[1m[94m20[0m [1m[94m|[0m use std::sync::Arc;
+   [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused imports: `IpcError` and `run_blocking`[0m
+ [1m[94m--> [0msrc/ipc/cli_install.rs:5:18
+  [1m[94m|[0m
+[1m[94m5[0m [1m[94m|[0m use crate::ipc::{run_blocking, IpcError};
+  [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^[0m  [1m[91m^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `run_blocking`[0m
+ [1m[94m--> [0msrc/ipc/debug.rs:1:18
+  [1m[94m|[0m
+[1m[94m1[0m [1m[94m|[0m use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused imports: `HostView`, `InventoryChangeEvent`, `MigrationReceipt`, `MigrationRequest`, `PairRequest`, and `RedeemGrantRequest`[0m
+ [1m[94m--> [0msrc/ipc/paired_host.rs:5:21
+  [1m[94m|[0m
+[1m[94m5[0m [1m[94m|[0m         inventory::{HostView, MigrationReceipt},
+  [1m[94m|[0m                     [1m[91m^^^^^^^^[0m  [1m[91m^^^^^^^^^^^^^^^^[0m
+[1m[94m6[0m [1m[94m|[0m         service::{InventoryChangeEvent, MigrationRequest, PairRequest, RedeemGrantRequest, Result},
+  [1m[94m|[0m                   [1m[91m^^^^^^^^^^^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `std::sync::Arc`[0m
+ [1m[94m--> [0msrc/ipc/paired_host.rs:9:5
+  [1m[94m|[0m
+[1m[94m9[0m [1m[94m|[0m use std::sync::Arc;
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `crate::daemon::DaemonClient`[0m
+ [1m[94m--> [0msrc/ipc/project.rs:1:5
+  [1m[94m|[0m
+[1m[94m1[0m [1m[94m|[0m use crate::daemon::DaemonClient;
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `run_blocking`[0m
+ [1m[94m--> [0msrc/ipc/project.rs:2:18
+  [1m[94m|[0m
+[1m[94m2[0m [1m[94m|[0m use crate::ipc::{run_blocking, IpcError};
+  [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `run_git`[0m
+ [1m[94m--> [0msrc/ipc/project.rs:3:23
+  [1m[94m|[0m
+[1m[94m3[0m [1m[94m|[0m use crate::worktree::{run_git, WorkspaceRegistry, WorktreeError, WorktreeManager};
+  [1m[94m|[0m                       [1m[91m^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `std::sync::Arc`[0m
+ [1m[94m--> [0msrc/ipc/project.rs:6:5
+  [1m[94m|[0m
+[1m[94m6[0m [1m[94m|[0m use std::sync::Arc;
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `RemoteActiveDesktopSelection`[0m
+ [1m[94m--> [0msrc/ipc/remote.rs:6:5
+  [1m[94m|[0m
+[1m[94m6[0m [1m[94m|[0m     RemoteActiveDesktopSelection, RemoteSessionAttention, RemoteTerminalTabInfo,
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused imports: `REMOTE_GATEWAY_PORT` and `RemoteGatewayConfig`[0m
+  [1m[94m--> [0msrc/ipc/remote.rs:11:5
+   [1m[94m|[0m
+[1m[94m11[0m [1m[94m|[0m     RemoteGatewayConfig, RemoteGatewayState, RemoteNetworkMode, RemoteRestartPolicy,
+   [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m12[0m [1m[94m|[0m     REMOTE_GATEWAY_PORT,
+   [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `run_blocking`[0m
+ [1m[94m--> [0msrc/ipc/remote_file.rs:1:18
+  [1m[94m|[0m
+[1m[94m1[0m [1m[94m|[0m use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `DaemonAttachment`[0m
+ [1m[94m--> [0msrc/ipc/terminal.rs:2:29
+  [1m[94m|[0m
+[1m[94m2[0m [1m[94m|[0m use crate::daemon::client::{DaemonAttachment, DaemonClient};
+  [1m[94m|[0m                             [1m[91m^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `DaemonStreamMessage`[0m
+ [1m[94m--> [0msrc/ipc/terminal.rs:3:31
+  [1m[94m|[0m
+[1m[94m3[0m [1m[94m|[0m use crate::daemon::protocol::{DaemonStreamMessage, TerminalStartup};
+  [1m[94m|[0m                               [1m[91m^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `run_blocking`[0m
+ [1m[94m--> [0msrc/ipc/terminal.rs:4:18
+  [1m[94m|[0m
+[1m[94m4[0m [1m[94m|[0m use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `WorkspaceRegistry`[0m
+ [1m[94m--> [0msrc/ipc/terminal.rs:6:23
+  [1m[94m|[0m
+[1m[94m6[0m [1m[94m|[0m use crate::worktree::{WorkspaceRegistry, WorktreeError, WorktreeIdentity};
+  [1m[94m|[0m                       [1m[91m^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused imports: `Engine as _` and `engine::general_purpose::STANDARD`[0m
+ [1m[94m--> [0msrc/ipc/terminal.rs:7:14
+  [1m[94m|[0m
+[1m[94m7[0m [1m[94m|[0m use base64::{engine::general_purpose::STANDARD, Engine as _};
+  [1m[94m|[0m              [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused imports: `DaemonClient` and `DaemonRequest`[0m
+ [1m[94m--> [0msrc/ipc/worktree.rs:2:16
+  [1m[94m|[0m
+[1m[94m2[0m [1m[94m|[0m     protocol::{DaemonRequest, DaemonResponse},
+  [1m[94m|[0m                [1m[91m^^^^^^^^^^^^^[0m
+[1m[94m3[0m [1m[94m|[0m     DaemonClient,
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `run_blocking`[0m
+ [1m[94m--> [0msrc/ipc/worktree.rs:5:18
+  [1m[94m|[0m
+[1m[94m5[0m [1m[94m|[0m use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
+  [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused imports: `BranchDeletionPreview`, `DirtyState`, `ExternalWorktree`, and `Worktree`[0m
+  [1m[94m--> [0msrc/ipc/worktree.rs:12:5
+   [1m[94m|[0m
+[1m[94m12[0m [1m[94m|[0m     BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
+   [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^^^^^^^[0m                     [1m[91m^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `std::sync::Arc`[0m
+  [1m[94m--> [0msrc/ipc/worktree.rs:16:5
+   [1m[94m|[0m
+[1m[94m16[0m [1m[94m|[0m use std::sync::Arc;
+   [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `crate::ipc::run_blocking`[0m
+  [1m[94m--> [0msrc/worktree/rescan.rs:20:5
+   [1m[94m|[0m
+[1m[94m20[0m [1m[94m|[0m use crate::ipc::run_blocking;
+   [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `std::sync::Arc`[0m
+  [1m[94m--> [0msrc/worktree/rescan.rs:30:5
+   [1m[94m|[0m
+[1m[94m30[0m [1m[94m|[0m use std::sync::Arc;
+   [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `crate::native_terminal::surface_host`[0m
+  [1m[94m--> [0msrc/ipc/agents_reset_event_tests.rs:8:29
+   [1m[94m|[0m
+[1m[94m 8[0m [1m[94m|[0m use crate::native_terminal::surface_host::{
+   [1m[94m|[0m                             [1m[91m^^^^^^^^^^^^[0m [1m[91mcould not find `surface_host` in `native_terminal`[0m
+   [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+  [1m[94m--> [0msrc/native_terminal/mod.rs:51:9
+   [1m[94m|[0m
+[1m[94m50[0m [1m[94m|[0m #[cfg(feature = "native-terminal")]
+   [1m[94m|[0m       [1m[94m---------------------------[0m [1m[94mthe item is gated behind the `native-terminal` feature[0m
+[1m[94m51[0m [1m[94m|[0m pub mod surface_host;
+   [1m[94m|[0m         [1m[92m^^^^^^^^^^^^[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `crate::WorkspaceRegistry`[0m
+  [1m[94m--> [0msrc/remote/browser_lifecycle_tests.rs:17:5
+   [1m[94m|[0m
+[1m[94m17[0m [1m[94m|[0m use crate::WorkspaceRegistry;
+   [1m[94m|[0m     [1m[91m^^^^^^^[0m[1m[94m-----------------[0m
+   [1m[94m|[0m            [1m[94m|[0m
+   [1m[94m|[0m            [1m[94mno `WorkspaceRegistry` in the root[0m
+   [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+  [1m[94m--> [0msrc/lib.rs:74:15
+   [1m[94m|[0m
+[1m[94m73[0m [1m[94m|[0m #[cfg(feature = "desktop")]
+   [1m[94m|[0m       [1m[94m-------------------[0m [1m[94mthe item is gated behind the `desktop` feature[0m
+[1m[94m74[0m [1m[94m|[0m use worktree::WorkspaceRegistry;
+   [1m[94m|[0m               [1m[92m^^^^^^^^^^^^^^^^^[0m
+[1m[96mhelp[0m: consider importing this struct through its public re-export instead
+   [1m[94m|[0m
+[1m[94m17[0m [1m[94m| [0muse crate::[92mworktree::[0mWorkspaceRegistry;
+   [1m[94m|[0m            [92m++++++++++[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `crate::ipc::browser`[0m
+  [1m[94m--> [0msrc/browser/tests.rs:2:17
+   [1m[94m|[0m
+[1m[94m 2[0m [1m[94m|[0m use crate::ipc::browser::cmd_browser_set_bounds;
+   [1m[94m|[0m                 [1m[91m^^^^^^^[0m [1m[91mcould not find `browser` in `ipc`[0m
+   [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+  [1m[94m--> [0msrc/ipc/mod.rs:12:9
+   [1m[94m|[0m
+[1m[94m11[0m [1m[94m|[0m #[cfg(feature = "desktop")]
+   [1m[94m|[0m       [1m[94m-------------------[0m [1m[94mthe item is gated behind the `desktop` feature[0m
+[1m[94m12[0m [1m[94m|[0m pub mod browser;
+   [1m[94m|[0m         [1m[92m^^^^^^^[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+ [1m[94m--> [0msrc/browser/tests.rs:4:5
+  [1m[94m|[0m
+[1m[94m4[0m [1m[94m|[0m use tauri::Manager;
+  [1m[94m|[0m     [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+  [1m[94m|[0m
+  [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `crate::ipc::project_remote`[0m
+  [1m[94m--> [0msrc/daemon/remote_ssh_tests.rs:4:17
+   [1m[94m|[0m
+[1m[94m 4[0m [1m[94m|[0m use crate::ipc::project_remote::{register_remote_project, RegisterRemoteProjectRequest};
+   [1m[94m|[0m                 [1m[91m^^^^^^^^^^^^^^[0m [1m[91mcould not find `project_remote` in `ipc`[0m
+   [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+  [1m[94m--> [0msrc/ipc/mod.rs:55:9
+   [1m[94m|[0m
+[1m[94m54[0m [1m[94m|[0m #[cfg(feature = "desktop")]
+   [1m[94m|[0m       [1m[94m-------------------[0m [1m[94mthe item is gated behind the `desktop` feature[0m
+[1m[94m55[0m [1m[94m|[0m pub mod project_remote;
+   [1m[94m|[0m         [1m[92m^^^^^^^^^^^^^^[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `crate::ipc::cmd_agent_state_reset`[0m
+  [1m[94m--> [0msrc/ipc/agents_reset_event_tests.rs:7:18
+   [1m[94m|[0m
+[1m[94m 7[0m [1m[94m|[0m use crate::ipc::{cmd_agent_state_reset, run_blocking, IpcErrorCode};
+   [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mno `cmd_agent_state_reset` in `ipc`[0m
+   [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+  [1m[94m--> [0msrc/ipc/agents.rs:43:14
+   [1m[94m|[0m
+[1m[94m41[0m [1m[94m|[0m #[cfg(feature = "desktop")]
+   [1m[94m|[0m       [1m[94m-------------------[0m [1m[94mthe item is gated behind the `desktop` feature[0m
+[1m[94m42[0m [1m[94m|[0m #[tauri::command]
+[1m[94m43[0m [1m[94m|[0m pub async fn cmd_agent_state_reset<R: tauri::Runtime>(
+   [1m[94m|[0m              [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+  [1m[94m--> [0msrc/ipc/agents_reset_event_tests.rs:12:5
+   [1m[94m|[0m
+[1m[94m12[0m [1m[94m|[0m use tauri::{Listener, Manager};
+   [1m[94m|[0m     [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/browser_cli.rs:6072:13
+     [1m[94m|[0m
+[1m[94m6072[0m [1m[94m|[0m         use tauri::Manager;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `crate::ipc::worktree_disk`[0m
+   [1m[94m--> [0msrc/ipc/worktree.rs:702:21
+    [1m[94m|[0m
+[1m[94m702[0m [1m[94m|[0m     use crate::ipc::worktree_disk::WorktreeDiskScans;
+    [1m[94m|[0m                     [1m[91m^^^^^^^^^^^^^[0m [1m[91mcould not find `worktree_disk` in `ipc`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+   [1m[94m--> [0msrc/ipc/mod.rs:84:9
+    [1m[94m|[0m
+[1m[94m 83[0m [1m[94m|[0m #[cfg(feature = "desktop")]
+    [1m[94m|[0m       [1m[94m-------------------[0m [1m[94mthe item is gated behind the `desktop` feature[0m
+[1m[94m 84[0m [1m[94m|[0m pub mod worktree_disk;
+    [1m[94m|[0m         [1m[92m^^^^^^^^^^^^^[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+   [1m[94m--> [0msrc/ipc/worktree.rs:704:9
+    [1m[94m|[0m
+[1m[94m704[0m [1m[94m|[0m     use tauri::{Listener, Manager};
+    [1m[94m|[0m         [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `super::worktree_disk`[0m
+ [1m[94m--> [0msrc/ipc/worktree_disk_tests.rs:1:12
+  [1m[94m|[0m
+[1m[94m1[0m [1m[94m|[0m use super::worktree_disk::*;
+  [1m[94m|[0m            [1m[91m^^^^^^^^^^^^^[0m [1m[91mcould not find `worktree_disk` in `super`[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/browser_cli.rs:4139:13
+     [1m[94m|[0m
+[1m[94m4139[0m [1m[94m|[0m         use tauri::Listener;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/browser_cli.rs:5546:13
+     [1m[94m|[0m
+[1m[94m5546[0m [1m[94m|[0m         use tauri::Manager;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/browser_cli.rs:5592:13
+     [1m[94m|[0m
+[1m[94m5592[0m [1m[94m|[0m         use tauri::Manager;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/browser_cli.rs:5661:13
+     [1m[94m|[0m
+[1m[94m5661[0m [1m[94m|[0m         use tauri::Manager;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/browser_cli.rs:5743:13
+     [1m[94m|[0m
+[1m[94m5743[0m [1m[94m|[0m         use tauri::Manager;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/browser_cli.rs:6215:13
+     [1m[94m|[0m
+[1m[94m6215[0m [1m[94m|[0m         use tauri::Listener;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `crate::ipc::browser`[0m
+   [1m[94m--> [0msrc/ipc/file_link_tests.rs:445:21
+    [1m[94m|[0m
+[1m[94m445[0m [1m[94m|[0m     use crate::ipc::browser::open_file_path_request;
+    [1m[94m|[0m                     [1m[91m^^^^^^^[0m [1m[91mcould not find `browser` in `ipc`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+   [1m[94m--> [0msrc/ipc/mod.rs:12:9
+    [1m[94m|[0m
+[1m[94m 11[0m [1m[94m|[0m #[cfg(feature = "desktop")]
+    [1m[94m|[0m       [1m[94m-------------------[0m [1m[94mthe item is gated behind the `desktop` feature[0m
+[1m[94m 12[0m [1m[94m|[0m pub mod browser;
+    [1m[94m|[0m         [1m[92m^^^^^^^[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `crate::ipc::browser`[0m
+   [1m[94m--> [0msrc/ipc/file_link_tests.rs:509:21
+    [1m[94m|[0m
+[1m[94m509[0m [1m[94m|[0m     use crate::ipc::browser::open_file_path_request;
+    [1m[94m|[0m                     [1m[91m^^^^^^^[0m [1m[91mcould not find `browser` in `ipc`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+   [1m[94m--> [0msrc/ipc/mod.rs:12:9
+    [1m[94m|[0m
+[1m[94m 11[0m [1m[94m|[0m #[cfg(feature = "desktop")]
+    [1m[94m|[0m       [1m[94m-------------------[0m [1m[94mthe item is gated behind the `desktop` feature[0m
+[1m[94m 12[0m [1m[94m|[0m pub mod browser;
+    [1m[94m|[0m         [1m[92m^^^^^^^[0m
+
+[1m[91merror[E0432][0m[1m: unresolved imports `crate::ipc::cmd_terminal_close`, `crate::ipc::cmd_terminal_spawn`[0m
+    [1m[94m--> [0msrc/ipc/file_link_tests.rs:510:22
+     [1m[94m|[0m
+[1m[94m 510[0m [1m[94m|[0m     use crate::ipc::{cmd_terminal_close, cmd_terminal_spawn, SpawnTerminalRequest};
+     [1m[94m|[0m                      [1m[91m^^^^^^^^^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^^^^^^^^^[0m [1m[91mno `cmd_terminal_spawn` in `ipc`[0m
+     [1m[94m|[0m                      [1m[91m|[0m
+     [1m[94m|[0m                      [1m[91mno `cmd_terminal_close` in `ipc`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: found an item that was configured out
+    [1m[94m--> [0msrc/ipc/terminal.rs:5607:14
+     [1m[94m|[0m
+[1m[94m5605[0m [1m[94m|[0m #[cfg(feature = "desktop")]
+     [1m[94m|[0m       [1m[94m-------------------[0m [1m[94mthe item is gated behind the `desktop` feature[0m
+[1m[94m5606[0m [1m[94m|[0m #[tauri::command]
+[1m[94m5607[0m [1m[94m|[0m pub async fn cmd_terminal_close(
+     [1m[94m|[0m              [1m[92m^^^^^^^^^^^^^^^^^^[0m
+[1m[92mnote[0m: found an item that was configured out
+    [1m[94m--> [0msrc/ipc/terminal.rs:4238:14
+     [1m[94m|[0m
+[1m[94m4236[0m [1m[94m|[0m #[cfg(feature = "desktop")]
+     [1m[94m|[0m       [1m[94m-------------------[0m [1m[94mthe item is gated behind the `desktop` feature[0m
+[1m[94m4237[0m [1m[94m|[0m #[tauri::command]
+[1m[94m4238[0m [1m[94m|[0m pub async fn cmd_terminal_spawn<R: Runtime>(
+     [1m[94m|[0m              [1m[92m^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+   [1m[94m--> [0msrc/ipc/file_link_tests.rs:513:9
+    [1m[94m|[0m
+[1m[94m513[0m [1m[94m|[0m     use tauri::Manager;
+    [1m[94m|[0m         [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/terminal.rs:5776:13
+     [1m[94m|[0m
+[1m[94m5776[0m [1m[94m|[0m         use tauri::Manager;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/terminal.rs:6020:13
+     [1m[94m|[0m
+[1m[94m6020[0m [1m[94m|[0m         use tauri::Manager;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/terminal.rs:6236:13
+     [1m[94m|[0m
+[1m[94m6236[0m [1m[94m|[0m         use tauri::Listener;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/ipc/terminal.rs:6292:13
+     [1m[94m|[0m
+[1m[94m6292[0m [1m[94m|[0m         use tauri::Manager;
+     [1m[94m|[0m             [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+    [1m[94m--> [0msrc/remote/tests.rs:1255:9
+     [1m[94m|[0m
+[1m[94m1255[0m [1m[94m|[0m     use tauri::Manager;
+     [1m[94m|[0m         [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+     [1m[94m|[0m
+     [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+  [1m[94m--> [0msrc/remote/browser_lifecycle_tests.rs:47:9
+   [1m[94m|[0m
+[1m[94m47[0m [1m[94m|[0m     use tauri::Manager;
+   [1m[94m|[0m         [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+   [1m[94m--> [0msrc/remote/browser_lifecycle_tests.rs:641:9
+    [1m[94m|[0m
+[1m[94m641[0m [1m[94m|[0m     use tauri::Manager;
+    [1m[94m|[0m         [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+   [1m[94m--> [0msrc/remote/browser_lifecycle_tests.rs:731:9
+    [1m[94m|[0m
+[1m[94m731[0m [1m[94m|[0m     use tauri::Listener;
+    [1m[94m|[0m         [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0432][0m[1m: unresolved import `tauri`[0m
+ [1m[94m--> [0msrc/ipc/worktree_disk_tests.rs:5:5
+  [1m[94m|[0m
+[1m[94m5[0m [1m[94m|[0m use tauri::{Listener, Manager};
+  [1m[94m|[0m     [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+  [1m[94m|[0m
+  [1m[94m= [0m[1mhelp[0m: if you wanted to use a crate named `tauri`, use `cargo add tauri` to add it to your `Cargo.toml`
+
+[1m[91merror[E0433][0m[1m: cannot find module or crate `tauri` in this scope[0m
+  [1m[94m--> [0msrc/ipc/worktree_disk_tests.rs:20:25
+   [1m[94m|[0m
+[1m[94m20[0m [1m[94m|[0m         .invoke_handler(tauri::generate_handler![
+   [1m[94m|[0m                         [1m[91m^^^^^[0m [1m[91muse of unresolved module or unlinked crate `tauri`[0m
+
+[1m[91merror[0m[1m: unused import: `Entry`[0m
+ [1m[94m--> [0msrc/ipc/agent_history.rs:1:37
+  [1m[94m|[0m
+[1m[94m1[0m [1m[94m|[0m use crate::agent_history::history::{Entry, History, HistoryError, Message, Page};
+  [1m[94m|[0m                                     [1m[91m^^^^^[0m
+  [1m[94m|[0m
+  [1m[94m= [0m[1mnote[0m: `-D unused-imports` implied by `-D warnings`
+  [1m[94m= [0m[1mhelp[0m: to override `-D warnings` add `#[allow(unused_imports)]`
+
+[1m[91merror[0m[1m: unused imports: `BrowserDialogHandleRequest`, `BrowserDownloadRequest`, `BrowserSessionCreatedPayload`, and `CreateBrowserRequest`[0m
+ [1m[94m--> [0msrc/ipc/browser_cli.rs:3:5
+  [1m[94m|[0m
+[1m[94m3[0m [1m[94m|[0m     BrowserDialogHandleRequest, BrowserDownloadRequest, BrowserError, BrowserManager,
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m4[0m [1m[94m|[0m     BrowserSessionCreatedPayload, BrowserSessionSummary, BrowserWaitCondition,
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m5[0m [1m[94m|[0m     CreateBrowserRequest,
+  [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `run_blocking`[0m
+ [1m[94m--> [0msrc/ipc/cli_install.rs:5:18
+  [1m[94m|[0m
+[1m[94m5[0m [1m[94m|[0m use crate::ipc::{run_blocking, IpcError};
+  [1m[94m|[0m                  [1m[91m^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `DaemonRequest`[0m
+ [1m[94m--> [0msrc/ipc/worktree.rs:2:16
+  [1m[94m|[0m
+[1m[94m2[0m [1m[94m|[0m     protocol::{DaemonRequest, DaemonResponse},
+  [1m[94m|[0m                [1m[91m^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused imports: `BranchDeletionPreview`, `DirtyState`, and `ExternalWorktree`[0m
+  [1m[94m--> [0msrc/ipc/worktree.rs:12:5
+   [1m[94m|[0m
+[1m[94m12[0m [1m[94m|[0m     BranchDeletionPreview, DirtyState, ExternalWorktree, WorkspaceRegistry, Worktree,
+   [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^[0m  [1m[91m^^^^^^^^^^^^^^^^[0m
+
+[1m[91merror[0m[1m: unused import: `super::*`[0m
+    [1m[94m--> [0msrc/lib.rs:3137:9
+     [1m[94m|[0m
+[1m[94m3137[0m [1m[94m|[0m     use super::*;
+     [1m[94m|[0m         [1m[91m^^^^^^^^[0m
+
+[1mSome errors have detailed explanations: E0432, E0433.[0m
+[1mFor more information about an error, try `rustc --explain E0432`.[0m
+[1m[91merror[0m: could not compile `ferryx` (lib test) due to 51 previous errors
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1mFor more information about this error, try `rustc --explain E0433`.[0m
+[1m[91merror[0m: could not compile `ferryx` (lib) due to 28 previous errors

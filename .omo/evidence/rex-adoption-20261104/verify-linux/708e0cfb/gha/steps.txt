@@ -1,0 +1,27 @@
+1 success Set up job
+2 success Free runner disk
+3 success Run actions/checkout@v4
+4 success Import private native source bundle
+5 success Isolated TMPDIR, gate dir and git identity
+6 success Run mlugg/setup-zig@v2
+7 success Run oven-sh/setup-bun@v2
+8 success Run dtolnay/rust-toolchain@stable
+9 success Run swatinem/rust-cache@v2
+10 success Install build dependencies
+11 success Frontend assets and FFmpeg SDK
+12 success gate 1: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+13 success gate 2: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --loc
+14 success gate 3: cargo test --manifest-path src-tauri/Cargo.toml --lib daemonplugins --locked
+15 success gate 4: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib daemonplugin
+16 success gate 5: bun run --cwd ui test -- PluginsSection PluginPane
+17 success gate 6: bun run --cwd ui typechecktest
+18 success gate 7: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+19 success gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+20 success Summary and workspace diff
+21 success Upload gate evidence
+22 failure Fail when any gate command failed
+41 skipped Post Run swatinem/rust-cache@v2
+42 skipped Post Run oven-sh/setup-bun@v2
+43 success Post Run mlugg/setup-zig@v2
+44 success Post Run actions/checkout@v4
+45 success Complete job

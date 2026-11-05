@@ -1,0 +1,5 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-tauri/Cargo.toml --example daemon_write_bench --locked
+[1m[92m   Compiling[0m ferryx v2026.1101.1 (/home/runner/work/ferryx/ferryx/src-tauri)
+[1m[92m    Finished[0m `dev` profile [unoptimized] target(s) in 2m 22s
+[1m[92m     Running[0m `src-tauri/target/debug/examples/daemon_write_bench`
+{"requests":10000,"p50_us":94,"p95_us":128,"p99_us":144}

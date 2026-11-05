@@ -1,0 +1,47 @@
+$ bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs && bun scripts/release-workflow-policy.mjs
+bun test v1.4.4 (38afee6c8)
+
+::group::scripts/gen-llms-txt.test.mjs:
+(pass) gen-llms-txt > reads CLI_GROUPS from the catalogue source, including integrations [0.04ms]
+(pass) gen-llms-txt > the committed docs/llms.txt names every CLI_GROUPS entry [0.07ms]
+(pass) gen-llms-txt > the committed docs/llms.txt follows the llms.txt layout [0.31ms]
+(pass) gen-llms-txt > render lists every catalogue entry with its verbs, in catalogue order [0.38ms]
+(pass) gen-llms-txt > a group invoked without a verb lists no verbs [0.07ms]
+(pass) gen-llms-txt > a catalogue missing a CLI group is rejected [0.53ms]
+(pass) gen-llms-txt > malformed catalogue entries are rejected [0.11ms]
+(pass) gen-llms-txt > drift names the first differing line, or the missing file [0.05ms]
+(pass) gen-llms-txt > argument parsing rejects unknown flags and missing values [0.20ms]
+(pass) gen-llms-txt > --check passes on a fresh file and fails with DRIFT after a line is deleted [24.70ms]
+(pass) gen-llms-txt > --check fails with DRIFT when the file is missing [7.85ms]
+(pass) gen-llms-txt > a malformed catalogue file fails without writing [7.39ms]
+
+::endgroup::
+
+::group::scripts/build-latest-json.test.mjs:
+(pass) legacy CLI invocation fails closed with clear migration instructions [13.83ms]
+(pass) assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure [23.55ms]
+(pass) assembleRelease supports NSIS migration channel with windows updater target [17.73ms]
+(pass) assembleRelease fails closed if outDir already exists [3.87ms]
+(pass) assembleRelease fails closed and leaves no partial output on signature verification failure [3.86ms]
+(pass) assembleRelease fails closed and leaves no partial output on artifact content / hash tampering [3.78ms]
+(pass) assembleRelease fails closed if a receipt has mismatched commitSha or appVersion [3.73ms]
+(pass) assembleRelease fails closed if receipts directory contains unexpected files [3.65ms]
+(pass) assembleRelease rejects path traversal and symlink escape outside artifacts root [3.99ms]
+(pass) assembleRelease fails closed if macos-updater archive layout is invalid [15.20ms]
+(pass) assembleRelease fails closed and leaves no publishable output if data changes at copy boundary [16.46ms]
+(pass) assembleRelease CLI execution works end-to-end via subprocess [32.68ms]
+(pass) real repo signed archive verifies against checked-in Tauri public key [0.38ms]
+(pass) signature mutation during staging cannot publish a mismatched signature file [16.35ms]
+(pass) archive layout is checked against staged bytes rather than a mutable source [15.27ms]
+(pass) latest.json omits the update policy fields unless they are requested [16.56ms]
+(pass) halt, haltReason and minimumVersion flags land in latest.json and the signed bytes verify [39.75ms]
+(pass) invalid update policy values fail closed before any output exists [17.36ms]
+
+::endgroup::
+
+ 30 pass
+ 0 fail
+ 62 expect() calls
+Ran 30 tests across 2 files. [430.00ms]
+[release-workflow-policy] PASS: All evaluated workflows comply with local-release-only policy.
+  - workflows: valid

@@ -1,0 +1,185 @@
+{
+  "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+  "overall": "BLOCKED",
+  "todos": [
+    {
+      "todo": "2",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "3",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "4",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "5",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "7",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    },
+    {
+      "todo": "8",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "PASS"
+    },
+    {
+      "todo": "9",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    },
+    {
+      "todo": "10",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    },
+    {
+      "todo": "11",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    },
+    {
+      "todo": "12",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    },
+    {
+      "todo": "14",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    },
+    {
+      "todo": "16",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "17",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    },
+    {
+      "todo": "18",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "20",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "21",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    },
+    {
+      "todo": "22",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "23",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "24",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    },
+    {
+      "todo": "26",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "28",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "29",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "BLOCKED"
+    },
+    {
+      "todo": "30",
+      "head": "4167f91e1c2ed9c29e6959274f6f497e163d0269",
+      "status": "BLOCKED",
+      "reason": "New-head Linux acceptance/live execution unavailable: GitHub DNS/direct HTTPS failure; no idle eligible picker host. Historical receipts are not new-head proof.",
+      "historicalStatusAt35c984684": "FAIL"
+    }
+  ],
+  "historicalRecovered": {
+    "41974624352": {
+      "source": "03e0d6b56",
+      "account_authenticated_round_trip_and_machine_rejection": "PASS",
+      "account_exit": 0,
+      "log": "03e0d6b5/live-final-recovered/rex-verify-linux-live-gate/2.log"
+    },
+    "41976072348": {
+      "source": "03e0d6b56",
+      "bins_exit": 0,
+      "live_exit": 1,
+      "foreign_layout": "PASS",
+      "timer_once": "PASS",
+      "compiled_clock_approval_disable": "PASS",
+      "cross_pane_grants": "FAIL: grants.rs:83 reactor panic",
+      "log": "03e0d6b5/grant-gha/rex-verify-linux-live-gate/2.log"
+    }
+  }
+}

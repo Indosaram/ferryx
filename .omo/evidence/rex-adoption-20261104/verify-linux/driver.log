@@ -1,0 +1,15 @@
+lane=verify-linux sha=35c984684b60c40dd6d29cd8703270fe86c30580 repo=Indosaram/ferryx
+ref=ci/rex-verify-linux-ref-35c984684 gate=ci/rex-verify-linux-gate-1793828025 scratch=/tmp/rex-gate-verify-linux-1793828025 evidence=/Volumes/T9-Mac/project/ferryx-wt/rex-verify-linux-20261104/.omo/evidence/rex-adoption-20261104/verify-linux/gha
+remote: 
+remote: Create a pull request for 'ci/rex-verify-linux-ref-35c984684' on GitHub by visiting:        
+remote:      https://github.com/Indosaram/ferryx/pull/new/ci/rex-verify-linux-ref-35c984684        
+remote: 
+remote: 
+remote: Create a pull request for 'ci/rex-verify-linux-gate-1793828025' on GitHub by visiting:        
+remote:      https://github.com/Indosaram/ferryx/pull/new/ci/rex-verify-linux-gate-1793828025        
+remote: 
+pushed ci/rex-verify-linux-ref-35c984684=35c984684b60c40dd6d29cd8703270fe86c30580 ci/rex-verify-linux-gate-1793828025=5083dc62f9224af4dd72f09d68fca44df1abec18
+RUN-STARTED verify-linux run=41917272545 url=https://github.com/Indosaram/ferryx/actions/runs/41917272545
+/tmp/rex-independent-linux-gate.sh: line 253: syntax error near unexpected token `do'
+REMOTE-REFS-LEFT:
+53b8bfac8fc670dd7ebfa275f46a6ef74f90d273	refs/heads/ci/rex-verify-linux-gate-1793828130

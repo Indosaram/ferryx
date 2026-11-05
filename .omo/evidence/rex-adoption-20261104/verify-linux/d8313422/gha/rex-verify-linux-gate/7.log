@@ -1,0 +1,2 @@
+$ bun run --cwd ui typecheck:test
+$ bun --bun tsc --noEmit -p tsconfig.test.json

@@ -1,0 +1,89 @@
+$ bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-remote-helpers.test.mjs && bun scripts/release-workflow-policy.mjs
+bun test v1.4.4 (38afee6c8)
+
+::group::scripts/build-remote-helpers.test.mjs:
+(pass) stager rejects empty without publication [4.99ms]
+(pass) stager rejects gnu without publication [1.80ms]
+(pass) stager rejects debug without publication [1.79ms]
+(pass) stager rejects stale without publication [1.72ms]
+(pass) standalone worktree naming dependency invalidates old build receipts [3.87ms]
+(pass) stager requires full matrix before publishing any bytes [1.80ms]
+(pass) stager binds explicit artifact bytes, source lock and helper protocol 1 [3.07ms]
+(pass) stager records the measured capability surface in the manifest [2.62ms]
+(pass) stager rejects hash receipt [2.38ms]
+(pass) stager rejects lock receipt [2.11ms]
+(pass) stager rejects machine receipt [2.25ms]
+(pass) stager rejects duplicate receipt [1.77ms]
+(pass) stager rejects missing_closure receipt [2.77ms]
+(pass) stager rejects stale_source receipt [1.76ms]
+(pass) stager publishes aarch64-apple-darwin from an explicit Mach-O receipt [2.02ms]
+(pass) stager publishes x86_64-apple-darwin from an explicit Mach-O receipt [1.81ms]
+(pass) stager rejects darwin receipt with wrong magic [1.94ms]
+(pass) stager rejects darwin receipt with wrong cputype [2.07ms]
+(pass) stager rejects darwin receipt with wrong elf [1.75ms]
+(pass) stager still rejects a Mach-O artifact published under a linux target [1.90ms]
+(pass) stager rejects a receipt missing dagSubscribeV1 evidence even with matching version [1.84ms]
+(pass) stager rejects a receipt missing agentStateV1 evidence [1.78ms]
+(pass) stager rejects a receipt without measured capability evidence [1.87ms]
+(pass) stager rejects a receipt without a measured helper version [1.77ms]
+(pass) stager rejects a receipt whose measured helper version disagrees with the packaged version [1.79ms]
+(pass) stager rejects artifact receipt whose sources match old subset instead of full closure [1.85ms]
+(pass) validateBundledHelpers permits absent manifest in development [0.25ms]
+(pass) validateBundledHelpers rejects manifest missing sourceFingerprint [1.39ms]
+(pass) validateBundledHelpers rejects manifest with stale sourceFingerprint [1.47ms]
+(pass) validateBundledHelpers approves matching staged assets [2.23ms]
+(pass) validateBundledHelpers rejects a bundled artifact missing a recorded capability [2.22ms]
+(pass) validateBundledHelpers rejects a bundled artifact without recorded capability evidence [2.22ms]
+(pass) validateBundledHelpers ignores an emptied requiredCapabilities claim [2.20ms]
+(pass) validateBundledHelpers rejects an emptied requiredCapabilities claim with empty artifact evidence [2.39ms]
+(pass) validateBundledHelpers rejects a valid bundle whose helperVersion disagrees with remote-helper/Cargo.toml [2.59ms]
+(pass) source closure and fingerprint ignore AppleDouble sidecars from foreign extractions [2.59ms]
+(pass) validateBundledHelpers rejects an incomplete shipped target matrix [2.62ms]
+(pass) validateBundledHelpers rejects a duplicated shipped target [2.46ms]
+
+::endgroup::
+
+::group::scripts/gen-llms-txt.test.mjs:
+(pass) gen-llms-txt > reads CLI_GROUPS from the catalogue source, including integrations [0.03ms]
+(pass) gen-llms-txt > the committed docs/llms.txt names every CLI_GROUPS entry [0.05ms]
+(pass) gen-llms-txt > the committed docs/llms.txt follows the llms.txt layout [0.26ms]
+(pass) gen-llms-txt > render lists every catalogue entry with its verbs, in catalogue order [0.35ms]
+(pass) gen-llms-txt > a group invoked without a verb lists no verbs [0.03ms]
+(pass) gen-llms-txt > a catalogue missing a CLI group is rejected [0.33ms]
+(pass) gen-llms-txt > malformed catalogue entries are rejected [0.07ms]
+(pass) gen-llms-txt > drift names the first differing line, or the missing file [0.06ms]
+(pass) gen-llms-txt > argument parsing rejects unknown flags and missing values [0.21ms]
+(pass) gen-llms-txt > --check passes on a fresh file and fails with DRIFT after a line is deleted [23.57ms]
+(pass) gen-llms-txt > --check fails with DRIFT when the file is missing [7.38ms]
+(pass) gen-llms-txt > a malformed catalogue file fails without writing [6.88ms]
+
+::endgroup::
+
+::group::scripts/build-latest-json.test.mjs:
+(pass) legacy CLI invocation fails closed with clear migration instructions [12.35ms]
+(pass) assembleRelease creates complete release inventory, latest.json first, stable aliases and SHA256SUMS closure [22.38ms]
+(pass) assembleRelease supports NSIS migration channel with windows updater target [16.32ms]
+(pass) assembleRelease fails closed if outDir already exists [3.47ms]
+(pass) assembleRelease fails closed and leaves no partial output on signature verification failure [3.61ms]
+(pass) assembleRelease fails closed and leaves no partial output on artifact content / hash tampering [3.63ms]
+(pass) assembleRelease fails closed if a receipt has mismatched commitSha or appVersion [3.52ms]
+(pass) assembleRelease fails closed if receipts directory contains unexpected files [3.41ms]
+(pass) assembleRelease rejects path traversal and symlink escape outside artifacts root [3.80ms]
+(pass) assembleRelease fails closed if macos-updater archive layout is invalid [14.66ms]
+(pass) assembleRelease fails closed and leaves no publishable output if data changes at copy boundary [15.32ms]
+(pass) assembleRelease CLI execution works end-to-end via subprocess [30.45ms]
+(pass) real repo signed archive verifies against checked-in Tauri public key [0.34ms]
+(pass) signature mutation during staging cannot publish a mismatched signature file [15.07ms]
+(pass) archive layout is checked against staged bytes rather than a mutable source [14.65ms]
+(pass) latest.json omits the update policy fields unless they are requested [15.85ms]
+(pass) halt, haltReason and minimumVersion flags land in latest.json and the signed bytes verify [30.79ms]
+(pass) invalid update policy values fail closed before any output exists [17.91ms]
+
+::endgroup::
+
+ 68 pass
+ 0 fail
+ 62 expect() calls
+Ran 68 tests across 3 files. [518.00ms]
+[release-workflow-policy] PASS: All evaluated workflows comply with local-release-only policy.
+  - workflows: valid

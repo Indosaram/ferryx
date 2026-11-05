@@ -1,0 +1,23 @@
+1 success Set up job
+2 success Free runner disk
+3 success Run actions/checkout@v4
+4 success Import private native source bundle
+5 success Isolated TMPDIR, gate dir and git identity
+6 success Run mlugg/setup-zig@v2
+7 success Run oven-sh/setup-bun@v2
+8 success Run dtolnay/rust-toolchain@stable
+9 success Run swatinem/rust-cache@v2
+10 success Install build dependencies
+11 success Frontend assets and FFmpeg SDK
+12 success gate 1: cargo build --manifest-path src-tauri/Cargo.toml --bins --features local-split-qa --locked
+13 success gate 2: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+14 success gate 3: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+15 success gate 4: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+16 success Summary and workspace diff
+17 success Upload gate evidence
+18 failure Fail when any gate command failed
+33 skipped Post Run swatinem/rust-cache@v2
+34 skipped Post Run oven-sh/setup-bun@v2
+35 success Post Run mlugg/setup-zig@v2
+36 success Post Run actions/checkout@v4
+37 success Complete job

@@ -1,0 +1,148 @@
+$ bun --bun eslint src
+
+/home/runner/work/_temp/rex-base/ui/src/App.tsx
+  1187:5  warning  React Hook useMemo has a missing dependency: 'projects.length'. Either include it or remove the dependency array                                         react-hooks/exhaustive-deps
+  1323:5  warning  React Hook useMemo has an unnecessary dependency: 'discoveredDagRootsKey'. Either exclude it or remove the dependency array                              react-hooks/exhaustive-deps
+  1502:6  warning  React Hook useEffect has missing dependencies: 'activeProject' and 'projects'. Either include them or remove the dependency array                        react-hooks/exhaustive-deps
+  2232:6  warning  React Hook useEffect has a missing dependency: 'state'. Either include it or remove the dependency array                                                 react-hooks/exhaustive-deps
+  2276:5  warning  React Hook useMemo has a missing dependency: 'state'. Either include it or remove the dependency array                                                   react-hooks/exhaustive-deps
+  2330:5  warning  React Hook useMemo has an unnecessary dependency: 'parkedActivityVersion'. Either exclude it or remove the dependency array                              react-hooks/exhaustive-deps
+  2382:5  warning  React Hook useMemo has an unnecessary dependency: 'parkedActivityVersion'. Either exclude it or remove the dependency array                              react-hooks/exhaustive-deps
+  2430:5  warning  React Hook useCallback has a missing dependency: 'setPendingWorktreePath'. Either include it or remove the dependency array                              react-hooks/exhaustive-deps
+  2543:5  warning  React Hook useCallback has a missing dependency: 'setPendingWorktree'. Either include it or remove the dependency array                                  react-hooks/exhaustive-deps
+  2575:6  warning  React Hook useEffect has missing dependencies: 'pendingWorktreeAgentRef' and 'setPendingWorktree'. Either include them or remove the dependency array    react-hooks/exhaustive-deps
+  2655:6  warning  React Hook useEffect has a missing dependency: 'state'. Either include it or remove the dependency array                                                 react-hooks/exhaustive-deps
+  2823:6  warning  React Hook useEffect has a missing dependency: 'state'. Either include it or remove the dependency array                                                 react-hooks/exhaustive-deps
+  3019:5  warning  React Hook useCallback has missing dependencies: 'pendingWorktreeAgentRef' and 'setPendingWorktree'. Either include them or remove the dependency array  react-hooks/exhaustive-deps
+  4390:5  warning  React Hook useMemo has a missing dependency: 'dispatchBrowserShortcut'. Either include it or remove the dependency array                                 react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/BrowserPane.tsx
+  202:6  warning  React Hook useEffect has a missing dependency: 'tab.profileId'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/FilePreviewPane.tsx
+   71:6  warning  React Hook useEffect has missing dependencies: 'request' and 'source'. Either include them or remove the dependency array                     react-hooks/exhaustive-deps
+  106:7  warning  React Hook useEffect has a complex expression in the dependency array. Extract it to a separate variable so it can be statically checked      react-hooks/exhaustive-deps
+  151:6  warning  React Hook useEffect has missing dependencies: 'state.payload.handle' and 'state.status'. Either include them or remove the dependency array  react-hooks/exhaustive-deps
+  151:7  warning  React Hook useEffect has a complex expression in the dependency array. Extract it to a separate variable so it can be statically checked      react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/NativeTerminalPane.tsx
+  1186:5   warning  React Hook useCallback has a missing dependency: 'session'. Either include it or remove the dependency array                                                                                                                                                                                                                                                                                                                     react-hooks/exhaustive-deps
+  1293:25  warning  The ref value 'linkHoverRevision.current' will likely have changed by the time this effect cleanup function runs. If this ref points to a node rendered by React, copy 'linkHoverRevision.current' to a variable inside the effect, and use that variable in the cleanup function                                                                                                                                                react-hooks/exhaustive-deps
+  1441:6   warning  React Hook useCallback has a missing dependency: 'paneIdentity'. Either include it or remove the dependency array                                                                                                                                                                                                                                                                                                                react-hooks/exhaustive-deps
+  1636:6   warning  React Hook useCallback has unnecessary dependencies: 'remoteConnectionState' and 'remoteGeneration'. Either exclude them or remove the dependency array                                                                                                                                                                                                                                                                          react-hooks/exhaustive-deps
+  1905:6   warning  React Hook useCallback has missing dependencies: 'copyModeActiveRef', 'onBackendSessionUnavailable', 'restoreFocusIfLost', 'session?.remoteConnectionState', 'session?.remoteGeneration', 'session?.workspaceId', and 'sessionId'. Either include them or remove the dependency array. If 'onBackendSessionUnavailable' changes too often, find the parent component that defines it and wrap that definition in useCallback     react-hooks/exhaustive-deps
+  2002:5   warning  React Hook useCallback has missing dependencies: 'copyModeActiveRef', 'session?.remoteConnectionState', 'session?.remoteGeneration', and 'session?.workspaceId'. Either include them or remove the dependency array                                                                                                                                                                                                              react-hooks/exhaustive-deps
+  2179:6   warning  React Hook useCallback has missing dependencies: 'copyModeActiveRef', 'session?.remoteConnectionState', 'session?.remoteGeneration', 'session?.workspaceId', and 'updateImeAnchor'. Either include them or remove the dependency array                                                                                                                                                                                           react-hooks/exhaustive-deps
+  2211:6   warning  React Hook useCallback has missing dependencies: 'session?.remoteGeneration' and 'session?.workspaceId'. Either include them or remove the dependency array                                                                                                                                                                                                                                                                      react-hooks/exhaustive-deps
+  3714:18  warning  The ref value 'inputRef.current' will likely have changed by the time this effect cleanup function runs. If this ref points to a node rendered by React, copy 'inputRef.current' to a variable inside the effect, and use that variable in the cleanup function                                                                                                                                                                  react-hooks/exhaustive-deps
+  3763:6   warning  React Hook useEffect has missing dependencies: 'isBackendRebind', 'onBackendSessionUnavailable', 'onRefreshSessionIdentity', 'refreshScrollbar', 'restoreFocusIfLost', 'sendFocus', 'updateImeAnchor', and 'writeCurrentNativeSnapshot'. Either include them or remove the dependency array. If 'onRefreshSessionIdentity' changes too often, find the parent component that defines it and wrap that definition in useCallback  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/PairedDaemonProjectForm.tsx
+  59:146  warning  React Hook useMemo has a missing dependency: 'host'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/RemoteDesktopPane.tsx
+  117:22  warning  The ref value 'pressedKeysRef.current' will likely have changed by the time this effect cleanup function runs. If this ref points to a node rendered by React, copy 'pressedKeysRef.current' to a variable inside the effect, and use that variable in the cleanup function  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/RemoteDirectoryPicker.tsx
+  87:6  warning  React Hook useEffect has a missing dependency: 'source'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/SettingsDialog.tsx
+  122:6  warning  React Hook useEffect has a missing dependency: 'remoteContext?.machine'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/TabBar.tsx
+  516:6  warning  React Hook useCallback has a missing dependency: 'onRenameTab'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/TerminalPane.tsx
+  331:6  warning  React Hook useEffect has a missing dependency: 'splitIntent'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/TerminalSplitView.tsx
+  307:5   warning  React Hook useMemo has a missing dependency: 'normalizedLayout'. Either include it or remove the dependency array                                                                          react-hooks/exhaustive-deps
+  333:5   warning  React Hook React.useMemo has a missing dependency: 'isRedundantSplit'. Either include it or remove the dependency array                                                                    react-hooks/exhaustive-deps
+  806:56  error    React Hook "useSupervisor" is called conditionally. React Hooks must be called in the exact same order in every component render                                                           react-hooks/rules-of-hooks
+  807:34  error    React Hook "useMemo" is called conditionally. React Hooks must be called in the exact same order in every component render                                                                 react-hooks/rules-of-hooks
+  829:31  error    React Hook "useMemo" is called conditionally. React Hooks must be called in the exact same order in every component render. Did you accidentally call a React Hook after an early return?  react-hooks/rules-of-hooks
+
+/home/runner/work/_temp/rex-base/ui/src/components/dag/DagNodeInspector.tsx
+   83:6  warning  React Hook useEffect has a missing dependency: 'node'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+  114:6  warning  React Hook useEffect has a missing dependency: 'node'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/components/settings/RemoteSection.tsx
+  203:5  warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/exhaustive-deps')
+  271:5  warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/exhaustive-deps')
+
+/home/runner/work/_temp/rex-base/ui/src/components/settings/TerminalSection.tsx
+  110:6  warning  React Hook useEffect has a missing dependency: 'knownShells'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/lib/bridgeBroker.test.ts
+   32:3  error  Definition for rule '@typescript-eslint/no-implied-eval' was not found  @typescript-eslint/no-implied-eval
+  340:5  error  Definition for rule '@typescript-eslint/no-implied-eval' was not found  @typescript-eslint/no-implied-eval
+
+/home/runner/work/_temp/rex-base/ui/src/lib/desktopSidebarSync.ts
+  155:6  warning  React Hook useEffect has a missing dependency: 'publish'. Either include it or remove the dependency array               react-hooks/exhaustive-deps
+  176:6  warning  React Hook useEffect has missing dependencies: 'publish' and 'send'. Either include them or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/lib/guestBridgeWindowClose.test.ts
+  50:3  error  Definition for rule '@typescript-eslint/no-implied-eval' was not found  @typescript-eslint/no-implied-eval
+
+/home/runner/work/_temp/rex-base/ui/src/lib/previewMarkdown.ts
+  36:3  warning  Unused eslint-disable directive (no problems were reported from 'no-control-regex')
+
+/home/runner/work/_temp/rex-base/ui/src/lib/useLineWindow.ts
+   98:6  warning  React Hook useMemo has an unnecessary dependency: 'revision'. Either exclude it or remove the dependency array                                                                                                                                                                                                                                   react-hooks/exhaustive-deps
+  140:6  warning  React Hook useLayoutEffect has a missing dependency: 'revision'. Either include it or remove the dependency array                                                                                                                                                                                                                                react-hooks/exhaustive-deps
+  141:3  warning  React Hook useLayoutEffect contains a call to 'setRevision'. Without a list of dependencies, this can lead to an infinite chain of updates. To fix this, pass [active, scrollElement, listElement, revision, updateScroll, start, estimatedRowHeight, anchor, offsets, anchorInset, seek, end] as a second argument to the useLayoutEffect Hook  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/remote/RemoteApp.tsx
+  1806:6  warning  React Hook useEffect has a missing dependency: 'selectAccountOption'. Either include it or remove the dependency array                                            react-hooks/exhaustive-deps
+  2007:6  warning  React Hook useEffect has a missing dependency: 'accountDiscovery'. Either include it or remove the dependency array                                               react-hooks/exhaustive-deps
+  2242:6  warning  React Hook useCallback has a missing dependency: 'noteSessionsPayload'. Either include it or remove the dependency array                                          react-hooks/exhaustive-deps
+  2598:6  warning  React Hook useEffect has missing dependencies: 'applyParsedInventoryEvent' and 'supervisorBus'. Either include them or remove the dependency array                react-hooks/exhaustive-deps
+  2901:6  warning  React Hook useCallback has a missing dependency: 'relayUrl'. Either include it or remove the dependency array                                                     react-hooks/exhaustive-deps
+  3020:6  warning  React Hook useEffect has a missing dependency: 'accountDiscovery'. Either include it or remove the dependency array                                               react-hooks/exhaustive-deps
+  3875:6  warning  React Hook useEffect has a missing dependency: 'chatReferenceTarget'. Either include it or remove the dependency array                                            react-hooks/exhaustive-deps
+  4076:6  warning  React Hook useEffect has missing dependencies: 'activeTunnelConnection?.transport' and 'chatReferenceTarget'. Either include them or remove the dependency array  react-hooks/exhaustive-deps
+  4181:6  warning  React Hook useEffect has a missing dependency: 'chatReferenceTarget'. Either include it or remove the dependency array                                            react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/remote/RemoteBrowser.tsx
+  328:22  warning  The ref value 'framesByUrlRef.current' will likely have changed by the time this effect cleanup function runs. If this ref points to a node rendered by React, copy 'framesByUrlRef.current' to a variable inside the effect, and use that variable in the cleanup function  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/remote/RemoteTerminal.tsx
+   720:6  warning  React Hook useCallback has missing dependencies: 'onInputDrop' and 'onInputOverflow'. Either include them or remove the dependency array. If 'onInputOverflow' changes too often, find the parent component that defines it and wrap that definition in useCallback  react-hooks/exhaustive-deps
+   801:6  warning  React Hook useLayoutEffect has a missing dependency: 'resetSinkState'. Either include it or remove the dependency array                                                                                                                                              react-hooks/exhaustive-deps
+   911:6  warning  React Hook useLayoutEffect has a missing dependency: 'machineTransport'. Either include it or remove the dependency array                                                                                                                                            react-hooks/exhaustive-deps
+  1660:6  warning  React Hook useEffect has missing dependencies: 'flushMachineControls', 'flushOutboundBuffer', 'machineTransport', 'sessionId', and 'token'. Either include them or remove the dependency array                                                                       react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/remote/chat/referencePromptAnswer.ts
+  85:3  warning  Unused eslint-disable directive (no problems were reported from 'no-control-regex')
+
+/home/runner/work/_temp/rex-base/ui/src/remote/useRemoteBrowser.ts
+  308:6  warning  React Hook useEffect has a missing dependency: 'subscribeOptions'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/state/browserSessionHydration.ts
+  241:6  warning  React Hook useEffect has a missing dependency: 'state'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/state/sshActivity.integration.test.tsx
+  70:7  warning  React Hook useEffect has a missing dependency: 'store'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/state/workspaceRestoreDuplicateTab.test.tsx
+  120:12  warning  React Hook useCallback has a missing dependency: 'store'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/home/runner/work/_temp/rex-base/ui/src/state/workspaceStore.ts
+  1027:5  warning  React Hook useCallback has a missing dependency: 'emitActivityChanges'. Either include it or remove the dependency array                                react-hooks/exhaustive-deps
+  1305:6  warning  React Hook useEffect has missing dependencies: 'bumpParkedActivity' and 'emitActivityChanges'. Either include them or remove the dependency array       react-hooks/exhaustive-deps
+  1527:5  warning  React Hook useCallback has an unnecessary dependency: 'workspaceId'. Either exclude it or remove the dependency array                                   react-hooks/exhaustive-deps
+  1829:5  warning  React Hook useCallback has a missing dependency: 'ensureSessionBackends'. Either include it or remove the dependency array                              react-hooks/exhaustive-deps
+  2020:5  warning  React Hook useCallback has a missing dependency: 'dispatch'. Either include it or remove the dependency array                                           react-hooks/exhaustive-deps
+  2672:5  warning  React Hook useMemo has a missing dependency: 'renderedState'. Either include it or remove the dependency array                                          react-hooks/exhaustive-deps
+  2676:5  warning  React Hook useMemo has a missing dependency: 'renderedState'. Either include it or remove the dependency array                                          react-hooks/exhaustive-deps
+  2685:5  warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/exhaustive-deps')
+  2687:5  warning  React Hook useMemo has a missing dependency: 'renderedState'. Either include it or remove the dependency array                                          react-hooks/exhaustive-deps
+  2691:5  warning  React Hook useMemo has a missing dependency: 'renderedState'. Either include it or remove the dependency array                                          react-hooks/exhaustive-deps
+  2701:5  warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/exhaustive-deps')
+  2703:5  warning  React Hook useMemo has unnecessary dependencies: 'notificationVersion' and 'parkedActivityVersion'. Either exclude them or remove the dependency array  react-hooks/exhaustive-deps
+
+✖ 85 problems (6 errors, 79 warnings)
+  0 errors and 6 warnings potentially fixable with the `--fix` option.
+
+error: "eslint" exited with code 1
+error: script "lint" exited with code 1

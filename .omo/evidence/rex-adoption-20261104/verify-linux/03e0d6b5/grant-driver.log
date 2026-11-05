@@ -1,0 +1,16 @@
+lane=verify-linux-live sha=03e0d6b56e77ad4fd8a3defee5abd98a3fd4b942 repo=Indosaram/ferryx
+ref=ci/rex-verify-linux-live-ref-03e0d6b56 gate=ci/rex-verify-linux-live-gate-1793857553 scratch=/tmp/rex-gate-verify-linux-live-1793857553 evidence=/Volumes/T9-Mac/project/ferryx-wt/rex-verify-linux-20261104/.omo/evidence/rex-adoption-20261104/verify-linux/03e0d6b5/grant-gha
+remote: 
+remote: Create a pull request for 'ci/rex-verify-linux-live-ref-03e0d6b56' on GitHub by visiting:        
+remote:      https://github.com/Indosaram/ferryx/pull/new/ci/rex-verify-linux-live-ref-03e0d6b56        
+remote: 
+remote: 
+remote: Create a pull request for 'ci/rex-verify-linux-live-gate-1793857553' on GitHub by visiting:        
+remote:      https://github.com/Indosaram/ferryx/pull/new/ci/rex-verify-linux-live-gate-1793857553        
+remote: 
+pushed ci/rex-verify-linux-live-ref-03e0d6b56=03e0d6b56e77ad4fd8a3defee5abd98a3fd4b942 ci/rex-verify-linux-live-gate-1793857553=dd7a782852bf2ce42b82dc562fe42b6697eb0fe3
+RUN-STARTED verify-linux-live run=41976072348 url=https://github.com/Indosaram/ferryx/actions/runs/41976072348
+mkdir: /Volumes/T9-Mac/project/ferryx-wt/rex-verify-linux-20261104/.omo/evidence/rex-adoption-20261104/verify-linux/03e0d6b5/grant-gha: Operation not permitted
+fatal: Unable to read current working directory: Operation not permitted
+REMOTE-REFS-LEFT:
+ls-remote failed

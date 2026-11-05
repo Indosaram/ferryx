@@ -1,0 +1,48 @@
+$ cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked
+[1m[92m   Compiling[0m ferryx v2026.1101.1 (/home/runner/work/ferryx/ferryx/src-tauri)
+[1m[92m    Finished[0m `test` profile [unoptimized] target(s) in 1m 49s
+[1m[92m     Running[0m tests/daemon_handover_transfer_contract.rs (src-tauri/target/debug/deps/daemon_handover_transfer_contract-7b5535e3cfd1fdec)
+
+running 14 tests
+test a_successor_that_receives_fewer_sessions_than_offered_aborts_and_the_predecessor_keeps_them ... ok
+test a_multi_session_v5_handover_preserves_every_session_id ... ok
+test a_successor_that_receives_fewer_sessions_than_owned_aborts_and_the_predecessor_keeps_them ... ok
+test a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap ... FAILED
+test an_upgrade_binary_request_hands_every_session_to_the_new_daemon ... ok
+test before_commit_hello_names_the_predecessor_and_the_candidate_accepts_nothing ... ok
+test detached_survives_handover ... ok
+test grants_survive_handover ... ok
+test layout_survives_handover ... FAILED
+test test_v5_ownership_transfer_is_the_default_without_the_flag ... ok
+test test_v5_zero_session_loss_and_immediate_predecessor_exit ... ok
+test a_session_exported_to_a_slow_successor_survives_and_returns_on_abort ... ok
+test a_candidate_whose_request_expires_mid_transfer_aborts_and_exits_zero ... ok
+test ten_thousand_line_session_handover_preserves_screen_hash ... FAILED
+
+failures:
+
+---- a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap stdout ----
+
+thread 'a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap' (101329) panicked at tests/daemon_handover_transfer_contract.rs:1018:13:
+successor serving: the persistent lock /tmp/fx-v05-PlYKwR/data/locks/identity.lock was free
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- layout_survives_handover stdout ----
+
+thread 'layout_survives_handover' (101633) panicked at tests/daemon_handover_transfer_contract.rs:2114:5:
+predecessor was never killed
+
+---- ten_thousand_line_session_handover_preserves_screen_hash stdout ----
+
+thread 'ten_thousand_line_session_handover_preserves_screen_hash' (101660) panicked at tests/daemon_handover_transfer_contract.rs:533:92:
+called `Result::unwrap()` on an `Err` value: "Timed out waiting for pattern in stream"
+
+
+failures:
+    a_v5_successor_adopts_the_public_socket_and_locks_without_a_gap
+    layout_survives_handover
+    ten_thousand_line_session_handover_preserves_screen_hash
+
+test result: FAILED. 11 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.52s
+
+[1m[91merror[0m: test failed, to rerun pass `--test daemon_handover_transfer_contract`

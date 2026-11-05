@@ -1,0 +1,1147 @@
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 51 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  ✓ gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  ✓ gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  ✓ gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  ✓ gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  ✓ gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  * gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 54 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  ✓ gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  ✓ gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  ✓ gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  ✓ gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  ✓ gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  ✓ gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 57 minutes ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  ✓ gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  ✓ gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  ✓ gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  ✓ gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  ✓ gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  ✓ gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 1 hour ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  ✓ gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  ✓ gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  ✓ gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  ✓ gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  ✓ gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  ✓ gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+Refreshing run status every 180 seconds. Press Ctrl+C to quit.
+
+* ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 1 hour ago
+
+JOBS
+* rex verify-linux Linux gate (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  ✓ gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  ✓ gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  ✓ gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  ✓ gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  ✓ gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  ✓ gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  * gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  * Summary and workspace diff
+  * Upload gate evidence
+  * Fail when any gate command failed
+  * Post Run swatinem/rust-cache@v2
+  * Post Run oven-sh/setup-bun@v2
+  * Post Run mlugg/setup-zig@v2
+  * Post Run actions/checkout@v4
+X ci/rex-verify-linux-gate-1793844174 rex verify-linux gate (one-shot) · 41952594628
+Triggered via push about 1 hour ago
+
+JOBS
+X rex verify-linux Linux gate in 1h5m30s (ID 126999802844)
+  ✓ Set up job
+  ✓ Free runner disk
+  ✓ Run actions/checkout@v4
+  ✓ Import private native source bundle
+  ✓ Isolated TMPDIR, gate dir and git identity
+  ✓ Run mlugg/setup-zig@v2
+  ✓ Run oven-sh/setup-bun@v2
+  ✓ Run dtolnay/rust-toolchain@stable
+  ✓ Run swatinem/rust-cache@v2
+  ✓ Install build dependencies
+  ✓ Frontend assets and FFmpeg SDK
+  ✓ gate 1: cargo build --manifest-path remote-helper/Cargo.toml --locked --target-dir remote-helper/t
+  ✓ gate 2: cargo build --manifest-path remote-helper/Cargo.toml --locked --release --target x86_64-un
+  ✓ gate 3: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+  ✓ gate 4: timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib -
+  ✓ gate 5: bun run --cwd ui test
+  ✓ gate 6: bun run --cwd ui lint
+  ✓ gate 7: bun run --cwd ui typechecktest
+  ✓ gate 8: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+  ✓ gate 9: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --lo
+  ✓ gate 10: cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --
+  ✓ gate 11: bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+  ✓ gate 12: bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs scripts/build-re
+  ✓ gate 13: cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract -
+  ✓ gate 14: cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-
+  ✓ gate 15: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-
+  ✓ gate 16: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-
+  ✓ gate 17: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ow
+  ✓ gate 18: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/v
+  ✓ gate 19: cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+  ✓ gate 20: clang --target=wasm32 -nostdlib -Wl,--no-entry -Wl,--export-memory -Wl,--allow-undefined -
+  ✓ gate 21: cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+  ✓ gate 22: LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800
+  ✓ gate 23: rustup toolchain install nightly --profile minimal  cargo install cargo-fuzz --locked
+  ✓ Summary and workspace diff
+  ✓ Upload gate evidence
+  X Fail when any gate command failed
+  - Post Run swatinem/rust-cache@v2
+  - Post Run oven-sh/setup-bun@v2
+  ✓ Post Run mlugg/setup-zig@v2
+  ✓ Post Run actions/checkout@v4
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/upload-artifact@v4, mlugg/setup-zig@v2. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+rex verify-linux Linux gate: .github#2
+
+X Process completed with exit code 1.
+rex verify-linux Linux gate: .github#30
+
+X TestingLibraryElementError: Unable to find role="button" and name "Launch claude"
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div
+      class="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"
+    >
+      <div
+        class="selectable"
+        data-native-terminal-yield="off"
+      >
+        <section
+          aria-atomic="false"
+          aria-label="Notifications alt+T"
+          aria-live="polite"
+          aria-relevant="additions text"
+          data-react-aria-top-layer="true"
+          tabindex="-1"
+        />
+      </div>
+      <div
+        data-empty-workspaces="[]"
+        data-open="true"
+        data-testid="mock-sidebar"
+      >
+        <button
+          type="button"
+        >
+          Hide sidebar
+        </button>
+        <button
+          type="button"
+        >
+          Open settings
+        </button>
+        <button
+          type="button"
+        >
+          Add project
+        </button>
+        <span>
+          Active project 
+          default
+        </span>
+      </div>
+      <main
+        class="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
+      >
+        <div
+          class="flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"
+          data-testid="no-projects-view"
+        >
+          <div
+            class="w-full max-w-md px-4"
+          >
+            <div>
+              <p
+                class="text-[15px] font-semibold tracking-tight text-foreground"
+              >
+                No projects
+              </p>
+              <p
+                class="mt-1 text-[13px] text-muted-foreground"
+              >
+                Add a project to open a terminal workspace.
+              </p>
+            </div>
+            <div
+              class="mt-4 grid gap-2"
+            >
+              <button
+                aria-label="Add Project"
+                class="group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                data-testid="checklist-add-project"
+                type="button"
+              >
+                <div
+                  class="grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"
+                >
+                  <svg
+                    class="lucide lucide-folder-plus size-4 text-foreground"
+                    fill="none"
+                    height="24"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    viewBox="0 0 24 24"
+                    width="24"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M12 10v6"
+                    />
+                    <path
+                      d="M9 13h6"
+                    />
+                    <path
+                      d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+                    />
+                  </svg>
+                </div>
+                <div
+                  class="min-w-0 flex-1"
+                >
+                  <div
+                    class="text-[13px] font-medium text-foreground"
+                  >
+                    Add Project
+                  </div>
+                  <div
+                    class="mt-0.5 text-[12px] leading-relaxed text-muted-foreground"
+                  >
+                    Pick a folder on this computer. Git repositories unlock worktrees.
+                  </div>
+                </div>
+                <svg
+                  class="lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-w
+rex verify-linux Linux gate: ui/src/App.test.tsx#3187
+
+X TestingLibraryElementError: Unable to find role="button" and name "Launch claude"
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div
+      class="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"
+    >
+      <div
+        class="selectable"
+        data-native-terminal-yield="off"
+      >
+        <section
+          aria-atomic="false"
+          aria-label="Notifications alt+T"
+          aria-live="polite"
+          aria-relevant="additions text"
+          data-react-aria-top-layer="true"
+          tabindex="-1"
+        />
+      </div>
+      <div
+        data-empty-workspaces="[]"
+        data-open="true"
+        data-testid="mock-sidebar"
+      >
+        <button
+          type="button"
+        >
+          Hide sidebar
+        </button>
+        <button
+          type="button"
+        >
+          Open settings
+        </button>
+        <button
+          type="button"
+        >
+          Add project
+        </button>
+        <span>
+          Active project 
+          default
+        </span>
+      </div>
+      <main
+        class="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
+      >
+        <div
+          class="flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"
+          data-testid="no-projects-view"
+        >
+          <div
+            class="w-full max-w-md px-4"
+          >
+            <div>
+              <p
+                class="text-[15px] font-semibold tracking-tight text-foreground"
+              >
+                No projects
+              </p>
+              <p
+                class="mt-1 text-[13px] text-muted-foreground"
+              >
+                Add a project to open a terminal workspace.
+              </p>
+            </div>
+            <div
+              class="mt-4 grid gap-2"
+            >
+              <button
+                aria-label="Add Project"
+                class="group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                data-testid="checklist-add-project"
+                type="button"
+              >
+                <div
+                  class="grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"
+                >
+                  <svg
+                    class="lucide lucide-folder-plus size-4 text-foreground"
+                    fill="none"
+                    height="24"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    viewBox="0 0 24 24"
+                    width="24"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M12 10v6"
+                    />
+                    <path
+                      d="M9 13h6"
+                    />
+                    <path
+                      d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+                    />
+                  </svg>
+                </div>
+                <div
+                  class="min-w-0 flex-1"
+                >
+                  <div
+                    class="text-[13px] font-medium text-foreground"
+                  >
+                    Add Project
+                  </div>
+                  <div
+                    class="mt-0.5 text-[12px] leading-relaxed text-muted-foreground"
+                  >
+                    Pick a folder on this computer. Git repositories unlock worktrees.
+                  </div>
+                </div>
+                <svg
+                  class="lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-w
+rex verify-linux Linux gate: ui/src/App.test.tsx#3145
+
+X TestingLibraryElementError: Unable to find role="dialog" and name "Welcome to Ferryx"
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div
+      class="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"
+    >
+      <div
+        class="selectable"
+        data-native-terminal-yield="off"
+      >
+        <section
+          aria-atomic="false"
+          aria-label="Notifications alt+T"
+          aria-live="polite"
+          aria-relevant="additions text"
+          data-react-aria-top-layer="true"
+          tabindex="-1"
+        />
+      </div>
+      <div
+        data-empty-workspaces="[]"
+        data-open="true"
+        data-testid="mock-sidebar"
+      >
+        <button
+          type="button"
+        >
+          Hide sidebar
+        </button>
+        <button
+          type="button"
+        >
+          Open settings
+        </button>
+        <button
+          type="button"
+        >
+          Add project
+        </button>
+        <span>
+          Active project 
+          alpha
+        </span>
+        <div>
+          <button
+            type="button"
+          >
+            Project 
+            alpha
+          </button>
+          <button
+            type="button"
+          >
+            Add worktree to 
+            alpha
+          </button>
+          <button
+            type="button"
+          >
+            Remove project 
+            alpha
+          </button>
+          <button
+            type="button"
+          >
+            Agent history 
+            alpha
+          </button>
+          <div>
+            <button
+              type="button"
+            >
+              Worktree 
+              /repo/main
+            </button>
+            <button
+              type="button"
+            >
+              Delete worktree 
+              /repo/main
+            </button>
+          </div>
+          <div>
+            <button
+              type="button"
+            >
+              Worktree 
+              /repo/feature
+            </button>
+            <button
+              type="button"
+            >
+              Delete worktree 
+              /repo/feature
+            </button>
+          </div>
+          <div>
+            <button
+              type="button"
+            >
+              Worktree 
+              /repo/bugfix
+            </button>
+            <button
+              type="button"
+            >
+              Delete worktree 
+              /repo/bugfix
+            </button>
+          </div>
+          <div>
+            <button
+              type="button"
+            >
+              Worktree 
+              /repo/docs
+            </button>
+            <button
+              type="button"
+            >
+              Delete worktree 
+              /repo/docs
+            </button>
+          </div>
+        </div>
+      </div>
+      <main
+        class="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
+      >
+        <div
+          data-default-agent-id=""
+          data-search-leaf-id=""
+          data-testid="terminal-split-view"
+        >
+          <button
+            type="button"
+          >
+            Close fixture pane
+          </button>
+          <button
+            type="button"
+          >
+            Close fixture tab
+          </button>
+          <button
+            type="button"
+          >
+            New browser tab
+          </button>
+          <button
+            type="button"
+          >
+            Launch 
+            claude
+          </button>
+        </div>
+      </main>
+    </div>
+  </div>
+  <div
+    aria-hidden="true"
+    class="pointer-events-none fixed inset-0 z-50"
+    data-shortcut-hints="true"
+  />
+</body>
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div
+      class="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"
+    >
+      <div
+        class="selectable"
+        data-native-terminal-yield="off"
+      >
+        <section
+          aria-atomic="false"
+          aria-label="Notifications alt+T"
+          aria-live="polite"
+          aria-relevant="additions text"
+          data-
+rex verify-linux Linux gate: ui/src/App.test.tsx#1910
+
+X TestingLibraryElementError: Unable to find an element with the text: Active project orca-lite. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div
+      class="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"
+    >
+      <div
+        class="selectable"
+        data-native-terminal-yield="off"
+      >
+        <section
+          aria-atomic="false"
+          aria-label="Notifications alt+T"
+          aria-live="polite"
+          aria-relevant="additions text"
+          data-react-aria-top-layer="true"
+          tabindex="-1"
+        />
+      </div>
+      <div
+        data-empty-workspaces="[]"
+        data-open="true"
+        data-testid="mock-sidebar"
+      >
+        <button
+          type="button"
+        >
+          Hide sidebar
+        </button>
+        <button
+          type="button"
+        >
+          Open settings
+        </button>
+        <button
+          type="button"
+        >
+          Add project
+        </button>
+        <span>
+          Active project 
+          default
+        </span>
+      </div>
+      <main
+        class="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
+      >
+        <div
+          class="flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"
+          data-testid="no-projects-view"
+        >
+          <div
+            class="w-full max-w-md px-4"
+          >
+            <div>
+              <p
+                class="text-[15px] font-semibold tracking-tight text-foreground"
+              >
+                No projects
+              </p>
+              <p
+                class="mt-1 text-[13px] text-muted-foreground"
+              >
+                Add a project to open a terminal workspace.
+              </p>
+            </div>
+            <div
+              class="mt-4 grid gap-2"
+            >
+              <button
+                aria-label="Add Project"
+                class="group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                data-testid="checklist-add-project"
+                type="button"
+              >
+                <div
+                  class="grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"
+                >
+                  <svg
+                    class="lucide lucide-folder-plus size-4 text-foreground"
+                    fill="none"
+                    height="24"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    viewBox="0 0 24 24"
+                    width="24"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M12 10v6"
+                    />
+                    <path
+                      d="M9 13h6"
+                    />
+                    <path
+                      d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+                    />
+                  </svg>
+                </div>
+                <div
+                  class="min-w-0 flex-1"
+                >
+                  <div
+                    class="text-[13px] font-medium text-foreground"
+                  >
+                    Add Project
+                  </div>
+                  <div
+                    class="mt-0.5 text-[12px] leading-relaxed text-muted-foreground"
+                  >
+                    Pick a folder on this computer. Git repositories unlock worktrees.
+                  </div>
+                </div>
+                <svg
+                  class="lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"
+                  fill="none"
+ 
+rex verify-linux Linux gate: ui/src/App.test.tsx#1741
+
+X TestingLibraryElementError: Unable to find an element with the text: Active project orca-lite. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div
+      class="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"
+    >
+      <div
+        class="selectable"
+        data-native-terminal-yield="off"
+      >
+        <section
+          aria-atomic="false"
+          aria-label="Notifications alt+T"
+          aria-live="polite"
+          aria-relevant="additions text"
+          data-react-aria-top-layer="true"
+          tabindex="-1"
+        />
+      </div>
+      <div
+        data-empty-workspaces="[]"
+        data-open="true"
+        data-testid="mock-sidebar"
+      >
+        <button
+          type="button"
+        >
+          Hide sidebar
+        </button>
+        <button
+          type="button"
+        >
+          Open settings
+        </button>
+        <button
+          type="button"
+        >
+          Add project
+        </button>
+        <span>
+          Active project 
+          default
+        </span>
+      </div>
+      <main
+        class="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
+      >
+        <div
+          class="flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"
+          data-testid="no-projects-view"
+        >
+          <div
+            class="w-full max-w-md px-4"
+          >
+            <div>
+              <p
+                class="text-[15px] font-semibold tracking-tight text-foreground"
+              >
+                No projects
+              </p>
+              <p
+                class="mt-1 text-[13px] text-muted-foreground"
+              >
+                Add a project to open a terminal workspace.
+              </p>
+            </div>
+            <div
+              class="mt-4 grid gap-2"
+            >
+              <button
+                aria-label="Add Project"
+                class="group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                data-testid="checklist-add-project"
+                type="button"
+              >
+                <div
+                  class="grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"
+                >
+                  <svg
+                    class="lucide lucide-folder-plus size-4 text-foreground"
+                    fill="none"
+                    height="24"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    viewBox="0 0 24 24"
+                    width="24"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M12 10v6"
+                    />
+                    <path
+                      d="M9 13h6"
+                    />
+                    <path
+                      d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+                    />
+                  </svg>
+                </div>
+                <div
+                  class="min-w-0 flex-1"
+                >
+                  <div
+                    class="text-[13px] font-medium text-foreground"
+                  >
+                    Add Project
+                  </div>
+                  <div
+                    class="mt-0.5 text-[12px] leading-relaxed text-muted-foreground"
+                  >
+                    Pick a folder on this computer. Git repositories unlock worktrees.
+                  </div>
+                </div>
+                <svg
+                  class="lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"
+                  fill="none"
+ 
+rex verify-linux Linux gate: ui/src/App.test.tsx#1561
+
+X AssertionError: expected 'orca-lite' to be 'beta' // Object.is equality
+
+Expected: "beta"
+Received: "orca-lite"
+
+ ❯ src/App.test.tsx:1461:62
+
+
+rex verify-linux Linux gate: ui/src/App.test.tsx#1461
+
+X TestingLibraryElementError: Unable to find an element with the text: Active project orca-lite. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div
+      class="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground"
+    >
+      <div
+        class="selectable"
+        data-native-terminal-yield="off"
+      >
+        <section
+          aria-atomic="false"
+          aria-label="Notifications alt+T"
+          aria-live="polite"
+          aria-relevant="additions text"
+          data-react-aria-top-layer="true"
+          tabindex="-1"
+        />
+      </div>
+      <div
+        data-empty-workspaces="[]"
+        data-open="true"
+        data-testid="mock-sidebar"
+      >
+        <button
+          type="button"
+        >
+          Hide sidebar
+        </button>
+        <button
+          type="button"
+        >
+          Open settings
+        </button>
+        <button
+          type="button"
+        >
+          Add project
+        </button>
+        <span>
+          Active project 
+          default
+        </span>
+      </div>
+      <main
+        class="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-background"
+      >
+        <div
+          class="flex h-full flex-1 flex-col items-center justify-center gap-4 overflow-y-auto bg-background py-6"
+          data-testid="no-projects-view"
+        >
+          <div
+            class="w-full max-w-md px-4"
+          >
+            <div>
+              <p
+                class="text-[15px] font-semibold tracking-tight text-foreground"
+              >
+                No projects
+              </p>
+              <p
+                class="mt-1 text-[13px] text-muted-foreground"
+              >
+                Add a project to open a terminal workspace.
+              </p>
+            </div>
+            <div
+              class="mt-4 grid gap-2"
+            >
+              <button
+                aria-label="Add Project"
+                class="group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                data-testid="checklist-add-project"
+                type="button"
+              >
+                <div
+                  class="grid size-8 shrink-0 place-items-center rounded-md bg-accent/60"
+                >
+                  <svg
+                    class="lucide lucide-folder-plus size-4 text-foreground"
+                    fill="none"
+                    height="24"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    viewBox="0 0 24 24"
+                    width="24"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M12 10v6"
+                    />
+                    <path
+                      d="M9 13h6"
+                    />
+                    <path
+                      d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+                    />
+                  </svg>
+                </div>
+                <div
+                  class="min-w-0 flex-1"
+                >
+                  <div
+                    class="text-[13px] font-medium text-foreground"
+                  >
+                    Add Project
+                  </div>
+                  <div
+                    class="mt-0.5 text-[12px] leading-relaxed text-muted-foreground"
+                  >
+                    Pick a folder on this computer. Git repositories unlock worktrees.
+                  </div>
+                </div>
+                <svg
+                  class="lucide lucide-chevron-right ml-auto size-4 shrink-0 text-muted-foreground"
+                  fill="none"
+ 
+rex verify-linux Linux gate: ui/src/App.test.tsx#1338
+
+X TypeError: undefined is not an object (evaluating 'state.dismissed')
+ ❯ shouldAutoOpenOnboarding src/lib/onboarding.ts:359:6
+ ❯ src/App.tsx:3689:11
+
+This error originated in "src/App.test.tsx" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "auto-opens WelcomeWizard for a macOS status with missing permissions and zero projects". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+rex verify-linux Linux gate: ui/src/lib/onboarding.ts#359
+
+X TypeError: undefined is not an object (evaluating 'state.dismissed')
+ ❯ shouldAutoOpenOnboarding src/lib/onboarding.ts:359:6
+ ❯ src/App.tsx:3689:11
+
+This error originated in "src/App.test.tsx" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "creates try-ferryx from the setup wizard and starts the default agent through the Add Worktree path". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+rex verify-linux Linux gate: ui/src/lib/onboarding.ts#359
+
+X TypeError: undefined is not an object (evaluating 'state.completedSteps')
+ ❯ satisfiedOnboardingSteps src/lib/onboarding.ts:322:47
+ ❯ src/App.tsx:3727:30
+
+This error originated in "src/App.test.tsx" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+The latest test that might've caused the error is "creates try-ferryx from the setup wizard and starts the default agent through the Add Worktree path". It might mean one of the following:
+- The error was thrown, while Vitest was running this test.
+- If the error occurred after the test had been completed, this was the last documented test before it was thrown.
+
+rex verify-linux Linux gate: ui/src/lib/onboarding.ts#322
+

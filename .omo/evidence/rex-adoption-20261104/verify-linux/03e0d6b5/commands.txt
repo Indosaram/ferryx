@@ -1,0 +1,7 @@
+cargo test --manifest-path src-tauri/Cargo.toml --lib a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally --locked
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib a_stage_for_an_ssh_remote_pane_is_refused_and_writes_nothing_locally --locked
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --locked
+cargo build --manifest-path src-tauri/Cargo.toml --bins --features local-split-qa --locked
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux-live/account-qa.mjs
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux-live/extra-qa.mjs
