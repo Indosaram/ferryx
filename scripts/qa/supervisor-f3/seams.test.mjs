@@ -6,7 +6,7 @@ import {
   PRODUCTION_GATEWAY_PORT, acceptedReply, configProblems, configureGateway, decisionsNamingNonce, gatewayBound, gatewayPortFor,
   activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, newRunId, parseEnvBlock, untypeableShortNames, windowsEnvScript, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel, windowBoundsScript, windowRect,
-  ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, ocrShows, inputSourceScript, reportGoalRequest, stubReply, framePoint, panelReadRequest, compactOcrShows, workspaceProblem, qaProjectSeed,
+  ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, ocrShows, inputSourceScript, reportGoalRequest, stubReply, framePoint, panelReadRequest, compactOcrShows, workspaceProblem, qaProjectSeed, terminalTokenShown,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
 
@@ -14,6 +14,13 @@ const code = (fn) => { try { fn(); } catch (error) { return error.code; } return
 const codeAsync = async (fn) => { try { await fn(); } catch (error) { return error.code; } return null; };
 
 describe('real surface input and reads', () => {
+  test('terminal OCR requires the entire token and nonce', () => {
+    expect(terminalTokenShown('f3token@88ebb', 'f3token088ebb')).toBe(true);
+    expect(terminalTokenShown('f3token@88ebc', 'f3token088ebb')).toBe(false);
+    expect(terminalTokenShown('xf3token@88ebb', 'f3token088ebb')).toBe(false);
+    expect(terminalTokenShown('f3token88ebb', 'f3token088ebb')).toBe(false);
+    expect(terminalTokenShown('f3token@88ebbx', 'f3token088ebb')).toBe(false);
+  });
   test('compact OCR tolerates split token glyphs but rejects a different nonce', () => {
     expect(compactOcrShows('F3 check f3tok 1653 3d48:', 'f3tok16533d48')).toBe(true);
     expect(compactOcrShows('f3tok16533d49', 'f3tok16533d48')).toBe(false);
@@ -478,6 +485,17 @@ describe('session host in the verdict', () => {
     const leak = session({ cleanup: [{ resource: 'serve-endpoint', port: 47930, action: 'reported-not-killed' }] });
     expect(validateRun(run(leak)).verdict).toBe('fail');
     expect(validateRun(run(null)).errors.join()).toContain('session host: lane receipt missing');
+  });
+
+  test('a separate harness revision does not relax the candidate revision', () => {
+    const harness = 'd'.repeat(40);
+    const receipt = { ...run(session()), harnessRevision: harness };
+    receipt.control.head = harness;
+    expect(validateRun(receipt).errors).toEqual([]);
+    receipt.session.candidate.headRevision = harness;
+    expect(validateRun(receipt).errors.some((error) => error.includes('candidate head'))).toBe(true);
+    receipt.control.head = rev;
+    expect(validateRun(receipt).errors.some((error) => error.includes('control checkout'))).toBe(true);
   });
 
   test('a blocked session host blocks, never passes', () => {

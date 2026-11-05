@@ -455,9 +455,12 @@ export const compactOcrShows = (text, phrase) => {
   return key(text).includes(key(phrase));
 };
 
+/** A whole terminal token, including every nonce glyph. The slashed zero reads as @. */
+export const terminalTokenShown = (text, token) => String(text).split(/\s+/).some((word) => word.replace(/@/g, '0').replace(/\|$/, '') === token);
+
 export const workspaceProblem = (text) => /workspace unavailable|couldn.t open this project|invalid.repo.root/i.test(text);
 
-export const qaProjectSeed = (repo) => `<script>if(location.hostname==='127.0.0.1'){localStorage.clear();localStorage.setItem('ferryx.projects',${JSON.stringify(JSON.stringify([{ workspaceId: 'f3', repoRoot: repo, gitRoot: repo }]))});localStorage.setItem('ferryx.active-project','f3');}</script>`;
+export const qaProjectSeed = (repo) => `<script>if(location.hostname==='127.0.0.1'){localStorage.clear();localStorage.setItem('ferryx.projects',${JSON.stringify(JSON.stringify([{ workspaceId: 'f3', repoRoot: repo, gitRoot: repo }]))});localStorage.setItem('ferryx.active-project','f3');localStorage.setItem('ferryx.terminal.settings',JSON.stringify({fontSize:24}));}</script>`;
 
 export const framePoint = (point, width, height) => ({ x: point.x / width, y: point.y / height, normalized: true });
 

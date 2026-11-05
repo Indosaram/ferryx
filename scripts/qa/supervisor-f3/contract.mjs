@@ -140,7 +140,8 @@ export function validateRun(run, extraErrors = []) {
   const errors = [...extraErrors];
   if (run?.schema !== RUN_SCHEMA) errors.push('run receipt missing or wrong schema');
   if (!isRevision(run?.revision)) errors.push('run revision is not a 40-hex commit');
-  const control = controlDefect(run?.control, run?.revision);
+  if (run?.harnessRevision !== undefined && !isRevision(run.harnessRevision)) errors.push('harness revision is not a 40-hex commit');
+  const control = controlDefect(run?.control, run?.harnessRevision ?? run?.revision);
   if (control) errors.push(control);
   if (run?.error) errors.push(`runner error: ${run.error}`);
   if (run?.smoke === true) errors.push('smoke run: proves the transport only, never F3');

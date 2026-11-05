@@ -61,7 +61,7 @@ export function startSession({ config, run, lane }) {
   let handle = null;
   // Reachability alone decides HOST_UNAVAILABLE: the identity probe.
   shared.probe = async () => {
-    try { return await helper.call('identity', {}); } catch (error) {
+    try { return await helper.call('identity', { checkout: host.worktree }); } catch (error) {
       throw new LaneBlocked('HOST_UNAVAILABLE', `session host ${host.sshDestination} (${host.hostId}): ${error.message}`);
     }
   };
@@ -161,6 +161,15 @@ export function startSession({ config, run, lane }) {
       const reply = await s.call(`spawn-${mode}`, [{ type: 'spawn', clientRequestId: randomUUID(), workspaceId: 'f3', worktree: null, cwd: s.setup.repo ?? s.setup.worktree, cols: 120, rows: 32, shell: s.wrappers.wrappers[mode].shell }]);
       if (reply?.type !== 'spawnOk') throw new StepFailed('FIXTURE_PANES', `spawn ${mode}: ${JSON.stringify(reply)}`);
       panes[mode] = reply.sessionId;
+      if (s.wrappers.wrappers[mode].shell.toLowerCase().endsWith('.cmd')) {
+        // These fixture panes have no terminal surface to answer ConPTY's startup DSR.
+        // Answer only an observed query; otherwise cmd never starts the fixture child.
+        const attached = await until(`ConPTY startup for ${mode}`, () => s.call(`startup-${mode}`, [{ type: 'attach', sessionId: reply.sessionId, afterSequence: 0 }]),
+          (value) => value?.type === 'attachOk' && Buffer.from(value.history ?? '', 'base64').includes(Buffer.from('\x1b[6n')), { deadlineMs: 30_000 });
+        lane.write('panes', `startup-${mode}.json`, attached);
+        const written = await s.call(`startup-answer-${mode}`, [{ type: 'write', sessionId: reply.sessionId, data: Buffer.from('\x1b[1;1R').toString('base64') }]);
+        if (written?.type === 'error') throw new StepFailed('FIXTURE_PANES', `ConPTY startup ${mode}: ${JSON.stringify(written)}`);
+      }
     }
     shared.panes = panes;
     lane.write('panes', 'panes.json', panes);
@@ -206,7 +215,7 @@ export function startSession({ config, run, lane }) {
     return JSON.parse(Buffer.from(file.base64, 'base64').toString('utf8')).subscriptions ?? [];
   };
   shared.servedCandidate = async () => {
-    const who = await helper.call('identity', {});
+    const who = await helper.call('identity', { checkout: host.worktree });
     return { ...who.candidate, stamp: setup?.candidate ?? null, servedBy: host.hostId, uiDist: host.uiDist };
   };
   // Always runs, after every lane settled: the daemon by exact identity, then the helper's

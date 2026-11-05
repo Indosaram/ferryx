@@ -56,11 +56,14 @@ function machineId() {
   return /"IOPlatformUUID" = "([^"]+)"/.exec(out)?.[1] ?? null;
 }
 
-function identity() {
-  const status = git('status', '--porcelain', '--untracked-files=no');
+function identity({ checkout = CHECKOUT } = {}) {
+  if (!isAbsolute(checkout)) throw fail('IDENTITY_REFUSED', 'candidate checkout must be absolute');
+  const candidateGit = (...args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8' }).trim();
+  const status = candidateGit('status', '--porcelain', '--untracked-files=no');
   return {
     machine: { id: machineId(), hostname: hostname(), platform: platform(), release: release(), node: process.version },
-    candidate: { checkout: CHECKOUT, headRevision: git('rev-parse', 'HEAD'), clean: status === '', status },
+    candidate: { checkout, headRevision: candidateGit('rev-parse', 'HEAD'), clean: status === '', status },
+    harness: { checkout: CHECKOUT, headRevision: git('rev-parse', 'HEAD') },
   };
 }
 
@@ -429,6 +432,12 @@ function prepareProject({ profile, binary, uiDist }) {
 }
 
 const METHODS = {
+  'project-head': ({ profile, repo }) => {
+    requireProfile(profile);
+    if (resolve(repo) !== resolve(join(profile, 'repo'))) throw fail('HARNESS_WORKSPACE_UNAVAILABLE', 'Project is outside the run-owned repository');
+    try { return execFileSync('git', ['-C', repo, 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' }).trim(); }
+    catch (error) { throw fail('HARNESS_WORKSPACE_UNAVAILABLE', error.message); }
+  },
   'prepare-project': prepareProject,
   identity, daemon, 'write-wrappers': writeWrappers, 'spawn-owned': spawnOwned, 'await-exit': awaitExit,
   cleanup, 'read-b64': readB64, 'list-files': listFiles, 'remove-owned-dir': removeOwnedDir, 'free-port': freePort,

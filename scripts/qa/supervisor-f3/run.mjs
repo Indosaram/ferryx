@@ -38,6 +38,7 @@ function parseArgs(argv) {
     switch (argv[i]) {
       case '--config': opts.config = value(); break;
       case '--revision': opts.revision = value(); break;
+      case '--harness-revision': opts.harnessRevision = value(); break;
       case '--evidence': opts.evidence = value(); break;
       case '--validate': opts.validate = value(); break;
       case '--smoke': opts.smoke = true; break;
@@ -102,6 +103,7 @@ async function main() {
   }
   const config = loadConfig(opts.config);
   const control = controlIdentity();
+  if (opts.harnessRevision && control.head !== opts.harnessRevision) throw new Error('harness revision mismatch');
   const evidenceDir = resolve(opts.evidence);
   if (existsSync(evidenceDir) && readdirSync(evidenceDir).length > 0) throw new Error(`${evidenceDir} is not empty; give a new evidence directory`);
   mkdirSync(evidenceDir, { recursive: true });
@@ -135,7 +137,7 @@ async function main() {
     lanes[name].receipt.blocked = { code: 'SESSION_HOST_UNAVAILABLE', detail: `the session host ${config.sessionHost.hostId} did not provide the relay, daemon and fixture panes: ${JSON.stringify(cause)}`, at: new Date().toISOString() };
     markNotRun(lanes[name], scenariosForLane(name), 'SESSION_HOST_UNAVAILABLE');
   }
-  const receipt = { schema: RUN_SCHEMA, runId, revision: opts.revision, smoke: run.smoke, lanesInRun: run.lanes, startedAt, finishedAt: new Date().toISOString(), config: opts.config, control, error: runError,
+  const receipt = { schema: RUN_SCHEMA, runId, revision: opts.revision, harnessRevision: opts.harnessRevision, smoke: run.smoke, lanesInRun: run.lanes, startedAt, finishedAt: new Date().toISOString(), config: opts.config, control, error: runError,
     session: { ...session.receipt, finishedAt: new Date().toISOString() },
     lanes: Object.fromEntries(LANES.map((name) => [name, { ...lanes[name].receipt, finishedAt: new Date().toISOString() }])), cross: crossChecks(shared, lanes) };
   writeFileSync(join(evidenceDir, 'run.json'), `${JSON.stringify(receipt, null, 2)}\n`);

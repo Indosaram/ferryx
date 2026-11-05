@@ -6,7 +6,7 @@ import { mkdir, readFile, readdir, rm, stat, realpath, open, link, lstat, unlink
 import { createConnection } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { createInterface } from 'node:readline';
-import { resolve, relative, join, isAbsolute } from 'node:path';
+import { resolve, relative, join, isAbsolute, basename } from 'node:path';
 import { BarrierHub, ATTACH_TUPLE_FIELDS, correlateReceipt, requireSevenTupleReceipt } from '../../lib/qa-scenarios/common-harness.mjs';
 import { ensureFrontendServed, FRONTEND_DEV_URL } from '../../lib/qa-scenarios/frontend-server.mjs';
 import { buildWindowsOwnedWindowsScript, buildWindowsNewPaneScript, orderOwnedWindowsForSearch } from '../../lib/qa-scenarios/native-driver.mjs';
@@ -49,7 +49,7 @@ export function subscribeSetupProbe(target, signal, timeoutMs = 150000) {
       try {
         if (!result && completionPath) {
           try { result = JSON.parse(await readFile(completionPath, 'utf8')); }
-          catch (error) { if (error.code !== 'ENOENT') return finish(error); }
+          catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) return finish(error); }
         }
         if (markerPath && wrapperExitCode === null) {
           try {
@@ -194,7 +194,7 @@ export function buildSetupProbeSessionScript(gui) {
   ].join('\n');
 }
 
-export async function inspectSetupTarget({ profile, gui, point, hwnd, signal }, {
+export async function inspectSetupTarget({ profile, gui, point, hwnd, boundsOnly = false, signal }, {
   ownedProfiles = profiles, receipts = setupGuiReceipts, platform = process.platform, inspect = probe,
   load = async path => JSON.parse(await readFile(path, 'utf8')),
   run = script => runInteractiveSetupProbe({ profile, gui, script, signal }),
@@ -221,6 +221,28 @@ export async function inspectSetupTarget({ profile, gui, point, hwnd, signal }, 
       throw fail('Setup GUI exact live identity changed');
   };
   await check();
+  if (boundsOnly) {
+    const raw = await run([
+      'Add-Type @"',
+      'using System; using System.Runtime.InteropServices;',
+      'public class FerryxSetupBounds {',
+      ' [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }',
+      ' [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+      ' [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+      ' [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect rect);',
+      ' [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);',
+      '}', '"@;',
+      '$h = [FerryxSetupBounds]::GetForegroundWindow(); $owner = [uint32]0;',
+      '[FerryxSetupBounds]::GetWindowThreadProcessId($h, [ref]$owner) | Out-Null;',
+      '$r = New-Object FerryxSetupBounds+Rect;',
+      "if (![FerryxSetupBounds]::GetWindowRect($h, [ref]$r)) { throw 'Window bounds unreadable' };",
+      "@{ probe = 'setup-bounds'; frontPid = $owner; bounds = @{ x = $r.Left; y = $r.Top; width = $r.Right-$r.Left; height = $r.Bottom-$r.Top }; screen = @{ width = [FerryxSetupBounds]::GetSystemMetrics(0); height = [FerryxSetupBounds]::GetSystemMetrics(1) } } | ConvertTo-Json -Compress -Depth 4;",
+    ].join('\n'));
+    const parsed = parseWindowsProbeLine(raw, 'setup-bounds');
+    await check();
+    if (!parsed.ok || parsed.probe.frontPid !== receipt.pid) throw fail('Run-owned GUI is not foreground');
+    return parsed.probe;
+  }
   if (point) {
     if (!Number.isSafeInteger(hwnd) || hwnd <= 0 || !Number.isFinite(point.x) || !Number.isFinite(point.y)) throw fail('Invalid setup hit-test target');
     const raw = await run([
@@ -1142,6 +1164,26 @@ async function dispatch(method, args, signal) {
       if (!launcherShortPath || /[-_]/.test(launcherShortPath)) throw fail(`Launcher short path is not typeable: ${launcherShortPath}`);
       return { specPath, launcherShortPath };
     }
+    case 'launch-gui-interactive': {
+      if (process.platform !== 'win32' || !profiles.has(args.profile)) throw fail('Unknown Windows launcher profile');
+      const taskName = `FerryxF3Gui-${basename(args.profile)}`;
+      const launcher = join(args.profile, 'launch.cmd');
+      const user = (await command('whoami', [], signal)).trim();
+      const receipt = { taskName, launcher, user, created: false, started: false, deleted: false };
+      try {
+        await command('schtasks', ['/create', '/tn', taskName, '/tr', `cmd.exe /d /s /c ""${launcher}""`, '/sc', 'ONCE', '/st', '23:59', '/it', '/ru', user], signal);
+        receipt.created = true;
+        await command('schtasks', ['/run', '/tn', taskName], signal);
+        receipt.started = true;
+      } finally {
+        if (receipt.created) {
+          await command('schtasks', ['/delete', '/tn', taskName, '/f'], signal);
+          receipt.deleted = true;
+        }
+        await persistLaunch(join(args.profile, 'evidence', 'gui-interactive-task.json'), receipt);
+      }
+      return receipt;
+    }
     case 'await-gui-launch': {
       if (!profiles.has(args.profile)) throw fail('Unknown launcher profile');
       const path = join(args.profile, 'receipts', 'gui-launch.json');
@@ -1626,6 +1668,7 @@ if (process.argv.includes('--read-only-setup-probe')) {
         try { req = JSON.parse(await readFile(reqPath, 'utf8')); await unlink(reqPath); }
         catch { continue; }
         if (req.stop) { deadline = 0; break; }
+        deadline = Date.now() + 240_000;
         const jobScriptPath = join(workerDir, `${req.id}.ps1`);
         let jobFast = req.script;
         try {

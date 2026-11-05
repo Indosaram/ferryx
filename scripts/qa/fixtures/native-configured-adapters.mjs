@@ -402,7 +402,7 @@ export function rpcProcess(executable, argv, { mcp = false, signal, processSigna
   };
   child.once('error', rejectAll);
   child.once('close', (code) => rejectAll(new Error(`Native RPC exited ${code}: ${stderr}`)));
-  lines.once('close', () => rejectAll(new Error('Native RPC stdout EOF')));
+  lines.once('close', () => rejectAll(new Error(`Native RPC stdout EOF: ${stderr}`)));
   child.stdin.on('error', rejectAll);
   const write = (packet) => {
     try {
@@ -426,10 +426,11 @@ export function rpcProcess(executable, argv, { mcp = false, signal, processSigna
   return { child, call, stderr: () => stderr, close: () => child.stdin.end() };
 }
 
-export async function connectNativeMahord({ executable, address, pairingId, nudgeMs, signal, processSignal = signal, spawnProcess = spawn }) {
+export async function connectNativeMahord({ executable, address, pairingId, nudgeMs, display, codec, signal, processSignal = signal, spawnProcess = spawn }) {
   // A static Windows desktop emits no frames; nudge keeps the stream and later tool calls alive.
   const nudge = Number.isSafeInteger(nudgeMs) && nudgeMs > 0 ? ['--nudge-ms', String(nudgeMs)] : [];
-  const rpc = rpcProcess(executable, ['--host', address, '--pairing-id', pairingId, ...nudge, '--mcp'], { mcp: true, signal, processSignal, spawnProcess });
+  const video = [...(display === undefined ? [] : ['--display', String(display)]), ...(codec ? ['--codec', codec] : [])];
+  const rpc = rpcProcess(executable, ['--host', address, '--pairing-id', pairingId, ...nudge, ...video, '--mcp'], { mcp: true, signal, processSignal, spawnProcess });
   let tools;
   try {
     await rpc.call('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'ferryx-native-task9', version: '2' } });
@@ -444,10 +445,22 @@ export async function connectNativeMahord({ executable, address, pairingId, nudg
     if (result.isError) throw new Error(result.content.map((item) => item.text ?? '').join('\n'));
     return result;
   }
+  const waitForFrame = async (callSignal) => {
+    // Dispatch acknowledges queued events, not host delivery. Observe a later video frame
+    // before desktop acceptance reads the captured surface.
+    const before = await call('remote_wait_for_screen_change', { timeout_ms: 5000 }, callSignal);
+    const frameId = before.content.map((item) => item.text ?? '').join('\n').match(/frame_id=(\d+)/)?.[1];
+    if (frameId) await call('remote_wait_for_screen_change', { last_frame_id: Number(frameId), timeout_ms: 5000 }, callSignal);
+  };
   return {
     child: rpc.child,
+    waitForFrame,
     click: (point, callSignal) => call('remote_mouse_click', { ...point, button: 'left', count: 1, normalized: point.normalized ?? false }, callSignal),
-    scroll: (args, callSignal) => call('remote_mouse_scroll', args, callSignal),
+    scroll: async (args, callSignal) => {
+      // Windows wheel injection uses the actual cursor, not the coordinates on a wheel event.
+      if (args.x !== undefined && args.y !== undefined) await call('remote_mouse_move', { x: args.x, y: args.y, normalized: args.normalized ?? false }, callSignal);
+      return call('remote_mouse_scroll', args, callSignal);
+    },
     type: (text, callSignal) => call('remote_type_text', { text, delay_ms: 0 }, callSignal),
     key: (key, callSignal) => call('remote_key_press', { key }, callSignal),
     hotkey: (keys, callSignal) => call('remote_hotkey', { keys }, callSignal),

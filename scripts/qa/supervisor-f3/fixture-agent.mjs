@@ -35,27 +35,43 @@ const logFile = join(logDir, `agent-${title}.jsonl`);
 const record = (entry) => appendFileSync(logFile, `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, mode, title, ...entry })}\n`);
 let nonce = 1;
 let drawn = mode !== 'held';
+let controlInput = '';
 
 function report(state) {
   const socket = process.env.FERRYX_AGENT_STATE_SOCKET;
+  const port = Number(process.env.FERRYX_AGENT_STATE_PORT);
+  const token = process.env.FERRYX_AGENT_STATE_TOKEN;
   const sessionId = process.env.FERRYX_SESSION_ID;
-  if (!socket || !sessionId) { record({ kind: 'report-skipped', state, reason: 'no FERRYX_AGENT_STATE_SOCKET or FERRYX_SESSION_ID' }); return; }
-  const connection = createConnection(socket);
-  connection.on('connect', () => connection.end(`${JSON.stringify({ type: 'agentState', sessionId, state, agent: 'claude' })}\n`));
+  if ((!socket && !(port && token)) || !sessionId) { record({ kind: 'report-skipped', state, reason: 'no agent-state endpoint or FERRYX_SESSION_ID' }); return; }
+  const connection = createConnection(port && token ? { host: '127.0.0.1', port } : socket);
+  connection.on('connect', () => connection.end(`${JSON.stringify({ type: 'agentState', sessionId, state, agent: 'claude', ...(port && token ? { token } : {}) })}\n`));
   connection.on('data', (reply) => record({ kind: 'report-reply', state, reply: String(reply).trim() }));
   connection.on('error', (error) => record({ kind: 'report-failed', state, error: error.message }));
 }
 
 function sendReport(token) {
   const socket = process.env.FERRYX_AGENT_STATE_SOCKET;
+  const port = Number(process.env.FERRYX_AGENT_STATE_PORT);
+  const auth = process.env.FERRYX_AGENT_STATE_TOKEN;
   const sessionId = process.env.FERRYX_SESSION_ID;
   const sections = Array.from({ length: 40 }, (_, i) => `## Section ${i + 1}\n\nMigration check ${i + 1} for ${title}: schema, data and rollback reviewed.`);
   const body = [`# F3 long report ${token}`, '', ...sections, '', `End of report ${token}`].join('\n');
-  if (!socket || !sessionId) { record({ kind: 'report-skipped', token, reason: 'no FERRYX_AGENT_STATE_SOCKET or FERRYX_SESSION_ID' }); return; }
+  if ((!socket && !(port && auth)) || !sessionId) { record({ kind: 'report-skipped', token, reason: 'no agent-state endpoint or FERRYX_SESSION_ID' }); return; }
   const eventId = `f3-report-${token}`;
-  const connection = createConnection(socket);
-  connection.on('connect', () => connection.end(`${JSON.stringify({ type: 'supervisorReport', sessionId, eventId, body })}\n`));
-  connection.on('data', (reply) => record({ kind: 'supervisor-report', token, eventId, bytes: body.length, reply: String(reply).trim() }));
+  const connection = createConnection(port && auth ? { host: '127.0.0.1', port } : socket);
+  let reply = '';
+  connection.on('connect', () => {
+    connection.end(`${JSON.stringify({ type: 'supervisorReport', sessionId, eventId, body, ...(port && auth ? { token: auth } : {}) })}\n`, () =>
+      record({ kind: 'supervisor-report-written', token, eventId, bytes: body.length, transport: port && auth ? 'tcp' : 'socket', sessionId }));
+  });
+  connection.on('data', (chunk) => {
+    reply += chunk.toString('utf8');
+    const newline = reply.indexOf('\n');
+    if (newline !== -1) {
+      record({ kind: 'supervisor-report', token, eventId, bytes: body.length, reply: reply.slice(0, newline).trim() });
+      reply = reply.slice(newline + 1);
+    }
+  });
   connection.on('error', (error) => record({ kind: 'supervisor-report-failed', token, error: error.message }));
 }
 
@@ -89,9 +105,11 @@ function drawFocus() {
 function classify(bytes) {
   if (bytes.includes(0x03)) return 'stop';
   const text = bytes.toString('utf8');
-  const report = /F3-REPORT:([a-z0-9]+)/.exec(text);
-  if (report) return `report:${report[1]}`;
-  if (!drawn) return text.includes('F3-DRAW') ? 'draw' : 'input';
+  controlInput = (controlInput + text).slice(-4096);
+  const report = /F3-REPORT:([a-z0-9]+)[\r\n]/.exec(controlInput);
+  if (report) { controlInput = ''; return `report:${report[1]}`; }
+  if (!drawn && controlInput.includes('F3-DRAW')) { controlInput = ''; return 'draw'; }
+  if (!drawn) return 'input';
   if (mode === 'upstream' || mode === 'focus') return 'input';
   // The option the keys select: a digit, or Enter after N down-arrows from option 1; Esc alone
   // cancels. Option 1 is Yes, option 4 is No.
