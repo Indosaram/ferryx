@@ -12,7 +12,8 @@ const args = process.argv.slice(2);
 const binary = resolve(args[args.indexOf('--binary') + 1]);
 const successor = resolve(args[args.indexOf('--successor') + 1]);
 if (!args.includes('--binary') || !args.includes('--successor')) throw new Error('--binary and --successor required');
-const root = await mkdtemp(join(tmpdir(), 'ferryx-screen-hash-'));
+// macOS's default per-user TMPDIR leaves too little room for handover UDS names.
+const root = await mkdtemp(join(process.platform === 'darwin' ? '/tmp' : tmpdir(), 'fx-hash-'));
 const runtime = join(root, 'rt');
 await mkdir(runtime);
 const signal = AbortSignal.timeout(120_000);

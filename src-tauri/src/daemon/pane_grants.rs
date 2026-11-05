@@ -12,9 +12,8 @@
 //!   (`src_session|src_workspace -> dst_session|dst_workspace|*`, a set of ops); otherwise the
 //!   request is refused `FORBIDDEN` with `PANE_GRANT_REQUIRED` (pane targets) or
 //!   `OWNER_ACTION_REQUIRED` (owner-wide actions);
-//! - `TokenAuthenticated` (Windows loopback) and `Unknown` (in-process pairs) peers keep the
-//!   pre-existing behaviour for every variant gated here until the Windows transport can name
-//!   its peer (todo 12); they may still not change grants.
+//! - `TokenAuthenticated` keeps the documented legacy Windows TCP compatibility, except grant
+//!   changes. `Unknown` never authorizes a mutation.
 //!
 //! Supervisor fence fields never grant pane access: the gate runs before the fence is admitted,
 //! so a refused request never ratchets `supervisor-fence.json`.
@@ -123,6 +122,7 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
     let workspace = |workspace_id: &str| Some(Gate::Workspace { workspace_id: workspace_id.to_owned(), op: GrantOp::Spawn });
     match request {
         DaemonRequest::Write { session_id, .. }
+        | DaemonRequest::RemoteWrite { session_id, .. }
         | DaemonRequest::BeginPaste { session_id }
         | DaemonRequest::PasteWrite { session_id, .. }
         | DaemonRequest::CancelPaste { session_id, .. }
@@ -133,6 +133,11 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
         | DaemonRequest::Suspend { session_id }
         | DaemonRequest::Resume { session_id }
         | DaemonRequest::Resize { session_id, .. }
+        | DaemonRequest::RemoteResize { session_id, .. }
+        | DaemonRequest::RetryRemoteSession { session_id }
+        | DaemonRequest::DetectManualSsh { session_id }
+        | DaemonRequest::DiscoverAgentSession { session_id, .. }
+        | DaemonRequest::AcknowledgeAgentOutcome { session_id }
         | DaemonRequest::SetScrollbackBudget { session_id, .. }
         | DaemonRequest::ResetAgentState { session_id } => session(session_id, GrantOp::Control),
         DaemonRequest::AgentControl { request, host_id, .. } => {
@@ -157,6 +162,17 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
         },
         DaemonRequest::Script { .. } => Some(Gate::OwnerOnly),
         DaemonRequest::SetAgentIntegration { .. }
+        | DaemonRequest::SupervisorMoveHere { .. }
+        | DaemonRequest::SshPassword { .. }
+        | DaemonRequest::MachineSessionMetadata { .. }
+        | DaemonRequest::SyncDesktopLocalProjects { .. }
+        | DaemonRequest::CancelSpawnOperation { .. }
+        | DaemonRequest::PairedTerminalReattach { .. }
+        | DaemonRequest::RetryPairedSession { .. }
+        | DaemonRequest::PairedHostClientAttachKey
+        | DaemonRequest::RemoteAllocateAttachSession
+        | DaemonRequest::RemoteSetActiveSelection { .. }
+        | DaemonRequest::RemoteSetWindowFocused { .. }
         | DaemonRequest::OnboardingSet { .. }
         | DaemonRequest::PluginSetEnabled { .. }
         | DaemonRequest::PluginAttach { .. }
@@ -175,6 +191,7 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
         | DaemonRequest::PrepareHandover
         | DaemonRequest::TransferSessions { .. }
         | DaemonRequest::CommitHandover { .. }
+        | DaemonRequest::AbortHandover
         | DaemonRequest::Shutdown
         | DaemonRequest::RemoteConfigure { .. }
         | DaemonRequest::RemoteCreateMachinePairingCode
@@ -192,7 +209,51 @@ pub fn gate_for(request: &DaemonRequest) -> Option<Gate> {
         | DaemonRequest::AgentControlSettingsSet { .. }
         | DaemonRequest::SetTerminalOsc52Write { .. }
         | DaemonRequest::UploadClipboardImage { .. } => Some(Gate::Admin),
-        _ => None,
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaCreateRemoteSession { .. }
+        | DaemonRequest::QaRemoteOwnerMutation { .. }
+        | DaemonRequest::QaRemoteOwnerReleaseFaultRoute { .. }
+        | DaemonRequest::QaPairedOwnerRetry { .. }
+        | DaemonRequest::QaPairedDropLoopbackTransport { .. }
+        | DaemonRequest::QaPairedCancelPendingDial { .. }
+        | DaemonRequest::QaPairedMutation { .. }
+        | DaemonRequest::QaPairedHostDeliveryArmFence { .. }
+        | DaemonRequest::QaPairedHostDeliverySealFence { .. } => Some(Gate::Admin),
+        #[cfg(feature = "local-split-qa")]
+        DaemonRequest::QaRemoteOwnerAudit { .. }
+        | DaemonRequest::QaRemoteOwnerWaitState { .. }
+        | DaemonRequest::QaRemoteOwnerWaitRefusals { .. }
+        | DaemonRequest::QaPairedOwnerAudit { .. }
+        | DaemonRequest::QaPairedOwnerWaitState { .. }
+        | DaemonRequest::QaPairedRouteReceipt { .. }
+        | DaemonRequest::QaPairedColdDescriptor { .. }
+        | DaemonRequest::QaPairedDialAudit { .. }
+        | DaemonRequest::QaPairedHostDeliveryAudit { .. } => None,
+        DaemonRequest::Handshake { .. } | DaemonRequest::Ping
+        | DaemonRequest::MachineSessionDetail { .. } | DaemonRequest::MachineGateway
+        | DaemonRequest::MachineMetadataSubscribe { .. } | DaemonRequest::SpawnOperationStatus { .. }
+        | DaemonRequest::RemoteSessionDetails { .. } | DaemonRequest::ListSessions
+        | DaemonRequest::DescribeLiveSessions | DaemonRequest::DescribeSession { .. }
+        | DaemonRequest::DescribeScreenHash { .. } | DaemonRequest::Attach { .. }
+        | DaemonRequest::LoadSession | DaemonRequest::LayoutGet { .. }
+        | DaemonRequest::LayoutGetScoped { .. } | DaemonRequest::Panes { .. }
+        | DaemonRequest::OnboardingGet | DaemonRequest::RemoteGetStatus
+        | DaemonRequest::GetCapabilities | DaemonRequest::PluginsList
+        | DaemonRequest::PluginView { .. } | DaemonRequest::GetAgentIntegration
+        | DaemonRequest::SupervisorSnapshot | DaemonRequest::SupervisorReadV1 { .. }
+        | DaemonRequest::ResourceUsage | DaemonRequest::AgentPromptGet { .. }
+        | DaemonRequest::PairedHostList | DaemonRequest::PairedHostReachabilityList
+        | DaemonRequest::PairedHostRouteList | DaemonRequest::PairedRecoveryOutcome { .. }
+        | DaemonRequest::PairedTerminalDescriptor { .. } | DaemonRequest::PairedHostRead { .. }
+        | DaemonRequest::RemoteListDevices | DaemonRequest::RemoteGetActiveSelection
+        | DaemonRequest::SubscribeRemoteEvents | DaemonRequest::SubscribeDag { .. }
+        | DaemonRequest::UnsubscribeDag { .. } | DaemonRequest::AgentControlSettingsGet
+        | DaemonRequest::RemoteDesktopHostGet => None,
+        // These have their own operation-aware supervisor authorization in server.rs.
+        DaemonRequest::SupervisorDispatch { .. } | DaemonRequest::SupervisorSetPaused { .. }
+        | DaemonRequest::SupervisorGoal { .. } | DaemonRequest::SupervisorEngine { .. }
+        | DaemonRequest::SupervisorRequestV1 { .. }
+        | DaemonRequest::SupervisorSetup { .. } => None,
     }
 }
 
@@ -345,9 +406,9 @@ pub fn decide(
 ) -> Result<(), Refusal> {
     let src = match class {
         PeerClass::Owner => return Ok(()),
-        // Unidentified peers keep today's behaviour for every newly gated request (Windows
-        // loopback until todo 12, in-process pairs); they never change grants.
-        PeerClass::TokenAuthenticated | PeerClass::Unknown => {
+        // Only the release-gated legacy TCP exception retains token-only authorization.
+        PeerClass::Unknown => return Err(owner_only()),
+        PeerClass::TokenAuthenticated => {
             return match gate {
                 Gate::OwnerOnly => Err(owner_only()),
                 _ => Ok(()),
@@ -416,6 +477,30 @@ fn owner_only() -> Refusal {
 mod tests {
     use super::*;
     use crate::agent_control::AgentControlOp;
+
+    #[test]
+    fn remote_mutations_and_handover_abort_require_authority() {
+        let grants = PaneGrants::default();
+        let requests = [
+            (DaemonRequest::RemoteWrite { session_id: "b".into(), generation: 7, data: vec![1] }, GrantOp::Write),
+            (DaemonRequest::RemoteResize { session_id: "b".into(), generation: 7, cols: 80, rows: 24 }, GrantOp::Control),
+            (DaemonRequest::RetryRemoteSession { session_id: "b".into() }, GrantOp::Control),
+        ];
+        for (request, op) in requests {
+            let gate = gate_for(&request).unwrap();
+            assert_eq!(gate, Gate::Session { session_id: "b".into(), op });
+            assert!(decide(&pane("a"), &gate, &grants, |_| None).is_err());
+            assert!(decide(&PeerClass::Unknown, &gate, &grants, |_| None).is_err());
+            assert!(decide(&PeerClass::TokenAuthenticated, &gate, &grants, |_| None).is_ok());
+            grants.add(PaneGrant { from: "a".into(), to: "b".into(), ops: [op].into() }).unwrap();
+            assert!(decide(&pane("a"), &gate, &grants, |_| None).is_ok());
+            grants.remove("a", "b").unwrap();
+        }
+        let gate = gate_for(&DaemonRequest::AbortHandover).unwrap();
+        assert_eq!(gate, Gate::Admin);
+        assert!(decide(&pane("a"), &gate, &grants, |_| None).is_err());
+        assert!(decide(&PeerClass::Unknown, &gate, &grants, |_| None).is_err());
+    }
 
     fn pane(id: &str) -> PeerClass {
         PeerClass::Pane { session_id: id.into(), why: "test".into() }

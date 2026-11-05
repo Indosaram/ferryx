@@ -993,7 +993,23 @@ mod p09_tests {
                 .map(|path| std::fs::read_to_string(path).unwrap())
                 .collect::<String>();
         }
-        std::fs::read_to_string(&target.file).unwrap_or_default()
+        let text = std::fs::read_to_string(&target.file).unwrap_or_default();
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => {
+                fn strings(value: &serde_json::Value, out: &mut String) {
+                    match value {
+                        serde_json::Value::String(text) => { out.push_str(text); out.push('\n'); },
+                        serde_json::Value::Array(values) => for value in values { strings(value, out); },
+                        serde_json::Value::Object(values) => for value in values.values() { strings(value, out); },
+                        _ => {},
+                    }
+                }
+                let mut decoded = String::new();
+                strings(&value, &mut decoded);
+                decoded
+            },
+            Err(_) => text,
+        }
     }
 
     #[test]

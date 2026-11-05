@@ -123,7 +123,7 @@ function entryPoints() {
 
 const CORE_ENTRIES = {
   sidebarViews: ["Worktrees", "Inbox"],
-  settingsSections: ["General", "Appearance", "Terminal", "Keyboard Shortcuts", "Agents", "Permissions", "Remote"],
+  settingsSections: ["General", "Appearance", "Terminal", "Import", "Keyboard Shortcuts", "Agents", "Pane access", "Scripting", "Permissions", "Remote"],
   newBrowserTab: false,
   dagBadge: false,
 };
@@ -134,8 +134,11 @@ const ALL_ENTRIES = {
     "General",
     "Appearance",
     "Terminal",
+    "Import",
     "Keyboard Shortcuts",
     "Agents",
+    "Pane access",
+    "Scripting",
     "Browser",
     "Notifications",
     "Permissions",

@@ -10,7 +10,7 @@ use super::sys::ffi::{
     ghostty_free,
 };
 use super::sys::types::{
-    GhosttyFormatter, GhosttyFormatterScreenExtra, GhosttyFormatterTerminalExtra,
+    GhosttyFormatter, GhosttyFormatterScreenExtra, GhosttyFormatterTerminalExtra, GhosttySelection,
     GhosttyFormatterTerminalOptions, GhosttyTerminalImpl,
 };
 
@@ -23,6 +23,7 @@ struct Extras {
 fn format(
     handle: NonNull<GhosttyTerminalImpl>,
     extras: Extras,
+    selection: Option<&GhosttySelection>,
 ) -> Result<Vec<u8>, NativeTerminalError> {
     let options = GhosttyFormatterTerminalOptions {
         size: std::mem::size_of::<GhosttyFormatterTerminalOptions>(),
@@ -48,7 +49,7 @@ fn format(
                 charsets: extras.trailing,
             },
         },
-        selection: std::ptr::null(),
+        selection: selection.map_or(std::ptr::null(), std::ptr::from_ref),
     };
     let mut formatter: GhosttyFormatter = std::ptr::null_mut();
     // SAFETY: Category: Foreign Handle Allocation.
@@ -100,9 +101,30 @@ fn format(
 pub fn reconstruction_bytes(
     handle: NonNull<GhosttyTerminalImpl>,
 ) -> Result<Vec<u8>, NativeTerminalError> {
-    let leading_and_content = format(handle, Extras { leading: true, trailing: false })?;
-    let content = format(handle, Extras::default())?;
-    let content_and_trailing = format(handle, Extras { leading: false, trailing: true })?;
+    reconstruction_bytes_with_scrollback(handle, usize::MAX)
+}
+
+pub(super) fn reconstruction_bytes_with_scrollback(
+    handle: NonNull<GhosttyTerminalImpl>,
+    limit: usize,
+) -> Result<Vec<u8>, NativeTerminalError> {
+    let history = query_scrollback_rows(handle)?;
+    let rows = usize::from(query_rows(handle)?);
+    let first = history.saturating_sub(limit);
+    let selection = if first > 0 {
+        Some(GhosttySelection {
+            start: super::selection::screen_ref(handle, 0, first as u32)?,
+            end: super::selection::screen_ref(
+                handle, super::queries::query_cols(handle)? - 1, (history + rows - 1) as u32,
+            )?,
+            ..GhosttySelection::default()
+        })
+    } else {
+        None
+    };
+    let leading_and_content = format(handle, Extras { leading: true, trailing: false }, selection.as_ref())?;
+    let content = format(handle, Extras::default(), selection.as_ref())?;
+    let content_and_trailing = format(handle, Extras { leading: false, trailing: true }, selection.as_ref())?;
     let trailing = content_and_trailing
         .strip_prefix(content.as_slice())
         .ok_or_else(|| {
@@ -111,7 +133,7 @@ pub fn reconstruction_bytes(
 
     // Each emitted CRLF ends one grid row; the last non-blank row has none.
     let emitted_rows = content.windows(2).filter(|pair| pair == b"\r\n").count() + 1;
-    let grid_rows = query_scrollback_rows(handle)? + usize::from(query_rows(handle)?);
+    let grid_rows = history - first + rows;
     let padding = grid_rows.saturating_sub(emitted_rows);
 
     let mut out = Vec::with_capacity(leading_and_content.len() + padding * 2 + trailing.len());

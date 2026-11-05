@@ -5,7 +5,7 @@ This directory defines the Phase 1 build contract and verification harness for e
 ## Source & Toolchain Contract
 
 - **Vendored Submodule**: `src-tauri/vendor/ghostty`
-- **Pinned Commit SHA**: `83fb95624b0439ee660c2679b43b38c8b63769cd`
+- **Pinned Commit SHA**: `216426b657b93d8fadd11d7506615f744581221e` (bounded history spacer-head repair on `83fb95624`)
 - **Required Zig Compiler**: `0.17.0` (`zig version`)
 - **Built Static Artifact**: `libghostty-vt.a` (emitted into Cargo `$OUT_DIR/ghostty_vt/lib`)
 - **Include Directory**: `$OUT_DIR/ghostty_vt/include` (and vendored headers at `vendor/ghostty/include`)
@@ -16,7 +16,7 @@ This directory defines the Phase 1 build contract and verification harness for e
    - `build.rs` delegates compilation to `build_ghostty::build_ghostty_vt()`.
    - All helper paths strictly propagate structured `Result<GhosttyBuildConfig, String>` with zero production `unwrap()` or `expect()`.
    - `verify_zig` validates that `zig` is present in `PATH` (or specified via the `ZIG` environment variable) and that its version starts with `0.17.0`.
-   - `verify_submodule_sha` validates that the vendored submodule exists at `src-tauri/vendor/ghostty`, contains `build.zig`, and resolves to commit `83fb95624b0439ee660c2679b43b38c8b63769cd`.
+   - `verify_submodule_sha` validates that the vendored submodule exists at `src-tauri/vendor/ghostty`, contains `build.zig`, and resolves to commit `216426b657b93d8fadd11d7506615f744581221e`.
    - If missing, mismatching, or uninitialized, actionable remediation commands are printed and the build fails immediately.
 
 2. **No Silent Upstream Downloads**:
