@@ -6811,7 +6811,9 @@ impl DaemonServer {
                         },
                         DaemonRequest::PluginRender { view, html } => {
                             let document = super::plugins::block_document(&name, &html)?;
-                            views.write().insert((name.clone(), view.clone()), document);
+                            if let Err(error) = views.write().insert(name.clone(), view.clone(), document) {
+                                return Ok(serde_json::json!({"code":"PLUGIN_VIEW_BUDGET_EXCEEDED", "message":error.to_string()}));
+                            }
                             let _ = events.send(DaemonRemoteEvent { event: "PluginViewChanged".into(),
                                 payload: serde_json::json!({"plugin":name,"view":view}) });
                             Ok(serde_json::json!({"type":"renderOk"}))
@@ -7990,9 +7992,9 @@ impl DaemonServer {
                     Ok(plugins) => DaemonResponse::PluginsOk { plugins },
                     Err(error) => daemon_error(error),
                 },
-                Ok(DaemonRequest::PluginSetEnabled { name, enabled }) => {
+                Ok(DaemonRequest::PluginSetEnabled { name, enabled, expected }) => {
                     let changed_name = name.clone();
-                    match self.plugins.approve(name, enabled).await {
+                    match self.plugins.approve(name, enabled, expected).await {
                         Ok(()) => match self.start_plugins().await {
                             Ok(()) => match self.plugins.list().await {
                                 Ok(plugins) => {
@@ -8004,7 +8006,9 @@ impl DaemonServer {
                             },
                             Err(error) => daemon_error(error),
                         },
-                        Err(error) => daemon_error(error),
+                        Err(error) => DaemonResponse::Error {
+                            code: Some(error.code().into()), message: error.to_string(), details: None,
+                        },
                     }
                 },
                 Ok(DaemonRequest::PluginRender { .. }) => daemon_error("Plugin render requires stdio identity"),
