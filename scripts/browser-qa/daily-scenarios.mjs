@@ -720,8 +720,11 @@ function inDuplicateSubmenu(parent) {
   return (word) => word.top + word.height / 2 >= y - 12 && word.top <= y + 160 && Math.abs(word.left - x) <= 420 && Math.abs(word.left - x) >= 60;
 }
 
-/** Runs one real-input check body inside an audit step and records it. */
-async function run(ctx, name, description, body) {
+/**
+ * Runs one real-input check body inside an audit step and records it. `options` goes to
+ * ctx.step (e.g. { capMs } for a step whose own bounded waits exceed the default cap).
+ */
+async function run(ctx, name, description, body, options = {}) {
   let outcome = null;
   await ctx.step(name, description, [[name, async () => {
     try {
@@ -732,7 +735,7 @@ async function run(ctx, name, description, body) {
       outcome = { ok: false, stderr: String(error?.stack ?? error).slice(0, 1500) };
     }
     return outcome;
-  }]]);
+  }]], null, options);
   // A skipped (budget) or abandoned (cap) step has no outcome: report it as not ok.
   return outcome ?? { ok: false, stderr: "step skipped or timed out" };
 }
@@ -1059,10 +1062,11 @@ export async function dailyWebviewBefore(ctx) {
     g2.activate_b = await activateTab(ctx, daily.tabB, null);
     ctx.host.focus();
     await ctx.chromeFocusClick();
-    // 8s, not 2.5s: one banded OCR frame takes several seconds, so 2.5s read a single frame,
-    // and linux run 41931931004 (screenshot 13) had the menu open while that frame missed it;
-    // the next icons were then clicked (Focus, Zoom in) with the menu still open.
-    const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 8000)) !== null);
+    // The menu's "Show all history" wraps onto two lines, so OCR reads "Show" and "all" as
+    // separate words, and the "Zoom in" tooltip covers "RECENT" (linux run 41950937176 probes
+    // 050-056 read the open menu as Show, all, history, Bookmarks, manager, Downloads). The
+    // "Bookmarks manager" item's "manager" is only in this menu.
+    const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent", "manager"], 8000)) !== null);
     g2.history_menu = opened;
     if (!opened.ok) return { ok: false, stderr: "History menu did not open", opened };
     // "Show all history": OCR reads it as separate words.
@@ -1113,7 +1117,7 @@ export async function dailyWebviewBefore(ctx) {
     let tabBtn = await clickWord(ctx, (text) => /^bookmarks$/i.test(text), { timeout: 5000 });
     if (!tabBtn) {
       // The history step did not leave the library open: History menu > Bookmarks manager.
-      const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 8000)) !== null);
+      const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent", "manager"], 8000)) !== null);
       g2.folder_menu = opened;
       if (opened.ok) tabBtn = await clickWord(ctx, (text) => /^manager$/i.test(text) || /bookmarksmanager/i.test(text), { timeout: 5000 });
     }
@@ -1916,7 +1920,10 @@ export async function dailyChromium(ctx) {
     ctx.cli("close", "--browser-id", workTab.browserId);
     if (g8.chromium_tab) ctx.cli("close", "--browser-id", g8.chromium_tab);
     return { ok: Object.values(g11.checks).every(Boolean) };
-  });
+    // Its bounded waits alone sum to about 202s worst case (Settings, menu, work tab 30s, two
+    // navigations, the default tab 33s, cookie reads), so the 240s default cap cut it off on
+    // Linux (runs 41931931004, fe711) before it could report. Same precedent as engine-install.
+  }, { capMs: 420000 });
 }
 
 /** Ensures `dir` exists (output subfolders). */

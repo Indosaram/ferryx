@@ -254,6 +254,8 @@ jobs:
       - name: Run UI audit (Linux, Xvfb + openbox)
         if: matrix.os_name == 'linux'
         timeout-minutes: 75
+        env:
+          FERRYX_UI_AUDIT_BUDGET_MIN: '70'
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"
