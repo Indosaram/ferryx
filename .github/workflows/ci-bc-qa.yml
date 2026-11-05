@@ -270,6 +270,10 @@ jobs:
       - name: Run UI audit (Linux, Xvfb + openbox)
         if: matrix.os_name == 'linux'
         timeout-minutes: 75
+        # 73 Linux steps of real work took 51.8 min (run fe711), so a 50 min budget always
+        # skipped engine-kill and the extension family; 70 stays inside the 75 min step timeout.
+        env:
+          FERRYX_UI_AUDIT_BUDGET_MIN: '70'
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"

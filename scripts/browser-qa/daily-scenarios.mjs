@@ -11,7 +11,7 @@
 // summary.daily.<gap>.checks; check-summary.mjs fails the job on a false or missing gap.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -517,6 +517,15 @@ function addressWord(words) {
 }
 
 /**
+ * The address bar word on the frame at `path`: the regular pass first, then the thin-strip pass
+ * on the same frame. macOS run 41846200603 (probes 047-067, 142-146) never read the URL in the
+ * regular pass, so the toolbar icons were not found; 44px strips read it on every one of them.
+ */
+function addressWordAt(ctx, path, words) {
+  return addressWord(words) ?? (ctx.ocrStrips ? addressWord(ctx.ocrStrips(path)) : null);
+}
+
+/**
  * Column runs on line `y` between x0 and x1 that differ from the line's background (the most
  * common colour near x0), probing 6px above and below so 14px glyphs are not missed.
  */
@@ -558,7 +567,7 @@ function rowRuns(image, y, x0, x1) {
 function toolbarIcons(ctx) {
   const path = ctx.probeShot();
   const words = ctx.ocr(path) ?? [];
-  const url = addressWord(words);
+  const url = addressWordAt(ctx, path, words);
   const label = words.filter((word) => /^\d{2,3}%$/.test(word.text)).sort((a, b) => a.top - b.top)[0] ?? null;
   const anchor = url ?? label;
   if (!anchor) return { icons: [], label: null, via: "neither the address bar nor the zoom readout was read" };
@@ -591,7 +600,7 @@ function toolbarIcons(ctx) {
 /** The toolbar Back button: the third control left of the address box (Back, Forward, Reload). */
 function toolbarBack(ctx) {
   const path = ctx.probeShot();
-  const url = addressWord(ctx.ocr(path) ?? []);
+  const url = addressWordAt(ctx, path, ctx.ocr(path) ?? []);
   if (!url) return null;
   const y = url.top + Math.round(url.height / 2);
   // The box border sits ~10px left of its text; stop before it.
@@ -669,10 +678,25 @@ async function clickToolbarIcon(ctx, index, verify, { spread = 1 } = {}) {
   return { ok: false, tried, icons: icons.length, label };
 }
 
-/** Clicks the OCR word matching `test` (topmost or as picked); returns its centre or null. */
-async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0 } = {}) {
+/**
+ * Clicks the OCR word matching `test` (topmost or as picked); returns its centre or null. When
+ * the regular pass misses, the thin-strip pass reads the same frame: macOS run 41846200603 never
+ * read the highlighted (white on blue) "Duplicate browser tab" menu item (probes 180-182, 275).
+ */
+async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0, where = null, trail = null } = {}) {
+  const match = (word) => test(word.text) && (!where || where(word));
   const hit = await until(() => {
-    const words = screenWords(ctx).filter((word) => test(word.text));
+    const path = ctx.probeShot();
+    const all = ctx.ocr(path) ?? [];
+    let words = all.filter(match);
+    let pass = "regular";
+    if (!words.length && ctx.ocrStrips) {
+      const strips = ctx.ocrStrips(path);
+      words = strips.filter(match);
+      pass = "strips";
+      // Evidence for a miss: what the frame read where the target was expected.
+      if (trail) trail.push({ probe: path.split(/[\\/]/).pop(), pass, matches: words.length, near: strips.filter((word) => !where || where(word)).map((word) => word.text).slice(0, 30) });
+    } else if (trail) trail.push({ probe: path.split(/[\\/]/).pop(), pass, matches: words.length });
     if (!words.length) return null;
     const sorted = pick === "rightmost" ? words.sort((a, b) => b.left - a.left)
       : pick === "bottom" ? words.sort((a, b) => b.top - a.top) : words.sort((a, b) => a.top - b.top || a.left - b.left);
@@ -684,8 +708,23 @@ async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0 } =
   return at;
 }
 
-/** Runs one real-input check body inside an audit step and records it. */
-async function run(ctx, name, description, body) {
+/**
+ * Items of the "Duplicate browser tab" submenu, given the clicked parent item's centre: the
+ * submenu's first item shares the parent's row, the rest follow below it (about 22px a row), and
+ * it opens beside the parent, right of it or (near the screen edge) left of it. Macos run
+ * 41949155327: parent at [484,182] -> Private [674,204]; parent at [859,182] -> work [721,226].
+ * "Private" or "work" elsewhere on screen (a tab title, the Settings profile row) never counts.
+ */
+function inDuplicateSubmenu(parent) {
+  const [x, y] = parent;
+  return (word) => word.top + word.height / 2 >= y - 12 && word.top <= y + 160 && Math.abs(word.left - x) <= 420 && Math.abs(word.left - x) >= 60;
+}
+
+/**
+ * Runs one real-input check body inside an audit step and records it. `options` goes to
+ * ctx.step (e.g. { capMs } for a step whose own bounded waits exceed the default cap).
+ */
+async function run(ctx, name, description, body, options = {}) {
   let outcome = null;
   await ctx.step(name, description, [[name, async () => {
     try {
@@ -696,7 +735,7 @@ async function run(ctx, name, description, body) {
       outcome = { ok: false, stderr: String(error?.stack ?? error).slice(0, 1500) };
     }
     return outcome;
-  }]]);
+  }]], null, options);
   // A skipped (budget) or abandoned (cap) step has no outcome: report it as not ok.
   return outcome ?? { ok: false, stderr: "step skipped or timed out" };
 }
@@ -782,24 +821,44 @@ async function macKeystrokeAnswer(ctx, path) {
   ctx.host.key({ key: "Enter" });
 }
 
-/** Real drag of a file from an OS file source onto screen point `to`. */
-async function dragFileTo(ctx, file, to) {
+/**
+ * Real drag of a file from an OS file source onto screen point `to`. `verify` (async, bounded)
+ * is awaited after the drop while the source is still alive: the drop's data transfer is
+ * asynchronous (Xdnd asks the source for the URI list after the button is released), so the
+ * source must outlive it. Its result is `dropped`; `ok` is true only when it was truthy.
+ * On Linux the GTK source logs its drag signals and a failure names the stage that broke:
+ * NO_DRAG_BEGIN, URI_TRANSFER_FAILED or PAGE_DROP_NO_FILES.
+ */
+async function dragFileTo(ctx, file, to, { verify }) {
   const record = { from: null, helper: null };
   let helper = null;
+  const sourceLog = join(ctx.out, "drag-source.log");
   try {
     if (ctx.platform === "linux") {
       const script = join(ctx.out, "drag-source.py");
       writeFileSync(script, `import sys, gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gdk
-uri = 'file://' + sys.argv[1]
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gtk, Gdk, Gio
+uri = Gio.File.new_for_path(sys.argv[1]).get_uri()
+log = open(sys.argv[2], 'w', buffering=1)
+def note(*parts): log.write(' '.join(str(part) for part in parts) + '\\n')
+def data_get(widget, context, data, info, time):
+    ok = data.set_uris([uri])
+    note('drag-data-get', 'target=' + data.get_target().name(), 'info=' + str(info), 'ok=' + str(ok), 'uris=' + uri)
 w = Gtk.Window(title='QA DRAG SOURCE'); w.set_default_size(260, 140); w.move(40, 40)
 b = Gtk.EventBox(); l = Gtk.Label(); l.set_markup('<span size="xx-large" weight="bold">DRAGME</span>'); b.add(l); w.add(b)
 b.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [], Gdk.DragAction.COPY); b.drag_source_add_uri_targets()
-b.connect('drag-data-get', lambda wd, ctx, data, info, t: data.set_uris([uri]))
+b.connect('drag-begin', lambda widget, context: note('drag-begin'))
+b.connect('drag-data-get', data_get)
+b.connect('drag-failed', lambda widget, context, result: note('drag-failed', result.value_nick) or False)
+b.connect('drag-end', lambda widget, context: note('drag-end'))
+note('ready', uri)
 w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
 `);
-      helper = spawn("python3", [script, file.path], { stdio: "ignore", env: process.env });
+      writeFileSync(sourceLog, "");
+      const stderr = openSync(join(ctx.out, "drag-source.stderr.log"), "w");
+      helper = spawn("python3", [script, file.path, sourceLog], { stdio: ["ignore", "ignore", stderr], env: { ...process.env, GDK_BACKEND: "x11" } });
       const window = await until(() => ctx.run("xdotool", ["search", "--name", "QA DRAG SOURCE"]).stdout.split(/\s+/).filter(Boolean)[0], 15000, 500);
       record.helper = window ?? null;
       if (!window) return { ...record, ok: false, stderr: "drag source window did not appear" };
@@ -825,6 +884,10 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       }, 10000, 800);
       record.from = from;
       if (!from) return { ...record, ok: false, stderr: "the file name was not read in Explorer" };
+      // `explorer /select` only highlights the item; a real left press on it makes Explorer
+      // the foreground window with the item selected before the drag press.
+      ctx.host.click(from[0], from[1]);
+      await sleep(600);
     } else {
       ctx.run("open", ["-R", file.path]);
       await sleep(3500);
@@ -844,9 +907,13 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
     const [x0, y0] = record.from;
     ctx.host.mouseDown(x0, y0);
     await sleep(300);
-    // A short first move past the OS drag threshold, held, so the source starts the drag before
-    // the long move.
+    // Short first moves past the OS drag threshold (GTK: more than 8px) while still inside the
+    // source, held, so the source starts the drag before the long move.
     ctx.host.mouseMove(x0 + 8, y0 + 8);
+    await sleep(150);
+    ctx.host.mouseMove(x0 + 12, y0 + 12);
+    await sleep(150);
+    ctx.host.mouseMove(x0 + 18, y0 + 16);
     await sleep(400);
     const steps = 20;
     for (let index = 1; index <= steps; index += 1) {
@@ -855,10 +922,18 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
     }
     await sleep(500);
     ctx.host.mouseUp(to[0], to[1]);
-    return { ...record, ok: true };
+    // The source stays alive until the page shows the drop or `verify` gives up.
+    record.dropped = Boolean(await verify());
+    if (record.dropped) return { ...record, ok: true };
+    if (ctx.platform !== "linux") return { ...record, ok: false, stderr: "DROP_NOT_OBSERVED: the page title did not show the dropped file" };
+    const lines = readFileSync(sourceLog, "utf8").split("\n").filter(Boolean);
+    record.source_log = lines;
+    const served = lines.find((line) => line.startsWith("drag-data-get") && line.includes("ok=True"));
+    if (!lines.includes("drag-begin")) return { ...record, ok: false, stderr: "NO_DRAG_BEGIN: the press and moves did not start a drag in the GTK source" };
+    if (!served) return { ...record, ok: false, stderr: "URI_TRANSFER_FAILED: the drag began but the source never served the URI list" };
+    return { ...record, ok: false, stderr: `PAGE_DROP_NO_FILES: the source served the URI (${served}) but the page saw no files` };
   } finally {
     helper?.kill();
-    await sleep(1500);
     record.file_manager_closed = closeFileManager(ctx);
   }
 }
@@ -961,7 +1036,12 @@ export async function dailyWebviewBefore(ctx) {
       && words.some((next) => /^ta[bt]/.test(ctx_norm(next.text)) && Math.abs(next.top - to.top) < 8 && next.left > to.left && next.left - (to.left + to.width) < 40));
     const rows = { tab: false, bookmark: false, history: false };
     for (let frame = 0; frame < 4 && !(rows.tab && rows.bookmark && rows.history); frame += 1) {
-      const words = screenWords(ctx);
+      const path = ctx.probeShot();
+      const words = ctx.ocr(path) ?? [];
+      // The "Switch to tab" row is small grey monospace text that the regular pass missed on every
+      // frame of macOS run 41957576848 (probes 046-049, row on screen); the strip pass on the same
+      // frame read "Switch", "to", "tab" there. Same predicate, more text read.
+      if (!rows.tab && !switchRow(words) && ctx.ocrStrips) words.push(...ctx.ocrStrips(path));
       rows.tab ||= switchRow(words);
       rows.bookmark ||= has(words, "bravo");
       rows.history ||= has(words, "alpha");
@@ -987,7 +1067,11 @@ export async function dailyWebviewBefore(ctx) {
     g2.activate_b = await activateTab(ctx, daily.tabB, null);
     ctx.host.focus();
     await ctx.chromeFocusClick();
-    const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 2500)) !== null);
+    // The menu's "Show all history" wraps onto two lines, so OCR reads "Show" and "all" as
+    // separate words, and the "Zoom in" tooltip covers "RECENT" (linux run 41950937176 probes
+    // 050-056 read the open menu as Show, all, history, Bookmarks, manager, Downloads). The
+    // "Bookmarks manager" item's "manager" is only in this menu.
+    const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent", "manager"], 8000)) !== null);
     g2.history_menu = opened;
     if (!opened.ok) return { ok: false, stderr: "History menu did not open", opened };
     // "Show all history": OCR reads it as separate words.
@@ -1038,7 +1122,7 @@ export async function dailyWebviewBefore(ctx) {
     let tabBtn = await clickWord(ctx, (text) => /^bookmarks$/i.test(text), { timeout: 5000 });
     if (!tabBtn) {
       // The history step did not leave the library open: History menu > Bookmarks manager.
-      const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent"], 2500)) !== null);
+      const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent", "manager"], 8000)) !== null);
       g2.folder_menu = opened;
       if (opened.ok) tabBtn = await clickWord(ctx, (text) => /^manager$/i.test(text) || /bookmarksmanager/i.test(text), { timeout: 5000 });
     }
@@ -1065,7 +1149,15 @@ export async function dailyWebviewBefore(ctx) {
       // The open <select> list is a native popup on Windows: a click on its "QAFolder" option
       // did nothing (Windows run 41824966041 probe 058: list open, bookmark still on the bar).
       // The keyboard picks the option on every OS; the bookmarks file decides below.
-      const option = await clickWord(ctx, (text) => /qafolder/i.test(text), { timeout: 4000, pick: "bottom" });
+      // Only an option of this select counts: below its line and starting at its column. The
+      // folder's own row title ("QAFolder", left in the list) opens the folder when clicked, which
+      // took the bravo row (and its select) out of view, so the keyboard fallback below typed into
+      // nothing and parentId stayed "bar" (the shared g2-folder failure).
+      const option = await clickWord(ctx, (text) => /qafolder/i.test(text), {
+        timeout: 4000,
+        pick: "bottom",
+        where: (word) => word.top > move.top + move.height && word.left >= move.left - 40,
+      });
       const placed = option ? await until(() => {
         const tree = bookmarksFile(ctx);
         const target = tree.folders.find((entry) => entry.name === "QAFolder");
@@ -1276,9 +1368,8 @@ export async function dailyWebviewBefore(ctx) {
     }, 8000);
     g8.drop_zone = zone;
     if (!zone) return { ok: false, stderr: "DROPZONE not visible" };
-    g8.drag = await dragFileTo(ctx, file, zone);
-    const dropped = await until(() => tab(ctx, daily.tabB)?.title === `dropped:${file.name}:${file.size}`, 8000);
-    g8.checks.drag_in = Boolean(dropped);
+    g8.drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, daily.tabB)?.title === `dropped:${file.name}:${file.size}`, 8000) });
+    g8.checks.drag_in = Boolean(g8.drag.dropped);
     g8.drop_title = tab(ctx, daily.tabB)?.title ?? null;
     ctx.host.focus();
     return { ok: g8.checks.upload_picker && g8.checks.drag_in };
@@ -1600,8 +1691,9 @@ export async function dailyWebviewAfter(ctx) {
     await sleep(1200);
     const duplicate = await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
     await sleep(1000);
-    const privateItem = duplicate ? await clickWord(ctx, (text) => /^Private$/.test(text), { timeout: 5000, pick: "rightmost" }) : null;
-    g11.private_menu = { duplicate, private: privateItem };
+    const privateTrail = [];
+    const privateItem = duplicate ? await clickWord(ctx, (text) => /^Private$/.test(text), { timeout: 5000, where: inDuplicateSubmenu(duplicate), trail: privateTrail }) : null;
+    g11.private_menu = { duplicate, private: privateItem, trail: privateTrail };
     // No menu item was clicked: no tab can appear, so the wait is skipped.
     const privateTab = privateItem
       ? await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.profileId === "private"), 15000)
@@ -1687,9 +1779,8 @@ export async function dailyChromium(ctx) {
       const hit = screenWords(ctx).find((word) => /DROPZONE/i.test(word.text));
       return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
     }, 8000);
-    if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone);
-    const dropped = g8.chromium_drag?.ok ? await until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) : null;
-    g8.checks.drag_in_chromium = Boolean(dropped);
+    if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) });
+    g8.checks.drag_in_chromium = Boolean(g8.chromium_drag?.dropped);
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     ctx.host.focus();
     return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium };
@@ -1776,7 +1867,8 @@ export async function dailyChromium(ctx) {
       await sleep(1200);
       const duplicate = await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
       await sleep(1000);
-      g11.work_menu = { duplicate, work: duplicate ? await clickWord(ctx, (text) => /^work$/i.test(text), { timeout: 5000, pick: "rightmost" }) : null };
+      const workTrail = [];
+      g11.work_menu = { duplicate, work: duplicate ? await clickWord(ctx, (text) => /^work$/i.test(text), { timeout: 5000, where: inDuplicateSubmenu(duplicate), trail: workTrail }) : null, trail: workTrail };
       // Windows run 41824966041 screenshot 60: the Duplicate submenu listed only "Default
       // (current)" and "Private" (the profile was never added), so no "work" item existed.
       if (!g11.work_menu.work) ctx.host.key({ key: "Escape" });
@@ -1788,17 +1880,33 @@ export async function dailyChromium(ctx) {
     g11.work_tab = workTab ?? null;
     g11.checks.work_tab_opened = Boolean(workTab) && workTab.engine === "chromium";
     if (!workTab) return { ok: false, stderr: "no work tab", ...g11.settings };
+    // Each stage is timed into g11.trail, so an abandoned step still says where it was. Linux run
+    // 41931931004 spent its whole 240s cap after the work tab was listed: the work engine only
+    // started (app log) when the step was abandoned, and the tab showed Ferryx's own toolbar
+    // over a blank pane, so nothing below could land.
+    const t0 = Date.now();
+    g11.trail = [];
+    const mark = (stage, extra = {}) => g11.trail.push({ stage, ms: Date.now() - t0, ...extra });
     await sleep(3000);
-    await chromiumNavigate(workTab.browserId, `${fixtureBase}/set-work.html`);
-    await waitWords(ctx, ["workset"], 15000);
+    // The work engine must show its page before anything is typed into it: the fixture title
+    // through the CLI, within 20s, or the step stops here with a named error.
+    g11.work_nav = await chromiumNavigate(workTab.browserId, `${fixtureBase}/set-work.html`);
+    const workSet = await until(() => tab(ctx, workTab.browserId)?.title === "qa-work-set", 20000, 1000);
+    mark("set-work", { title: tab(ctx, workTab.browserId)?.title ?? null, nav: g11.work_nav });
+    if (!workSet) {
+      ctx.cli("close", "--browser-id", workTab.browserId);
+      return { ok: false, stderr: "WORK_ENGINE_NOT_LOADING: the work tab never showed /set-work.html within 20s", trail: g11.trail, ...g11.settings };
+    }
     await chromiumNavigate(workTab.browserId, `${fixtureBase}/cookies.html`);
     const workCookies = await until(() => {
       const value = tab(ctx, workTab.browserId)?.title ?? "";
       return value.startsWith("cookies:") ? value : null;
     }, 10000);
+    mark("work-cookies", { title: workCookies });
     g11.work_cookie_title = workCookies;
     g11.checks.work_cookie_kept = Boolean(workCookies) && workCookies.includes("qa_work");
     const defaultTab = await newChromiumTab();
+    mark("default-tab", { opened: Boolean(defaultTab) });
     if (defaultTab) {
       await chromiumNavigate(defaultTab.browserId, `${fixtureBase}/cookies.html`);
       const defaultCookies = await until(() => {
@@ -1806,6 +1914,7 @@ export async function dailyChromium(ctx) {
         return value.startsWith("cookies:") ? value : null;
       }, 10000);
       g11.default_chromium_cookie_title = defaultCookies;
+      mark("default-cookies", { title: defaultCookies });
       g11.checks.work_cookie_not_in_default = defaultTab.profileId !== "work" && Boolean(defaultCookies) && !defaultCookies.includes("qa_work");
       ctx.cli("close", "--browser-id", defaultTab.browserId);
     }
@@ -1816,7 +1925,10 @@ export async function dailyChromium(ctx) {
     ctx.cli("close", "--browser-id", workTab.browserId);
     if (g8.chromium_tab) ctx.cli("close", "--browser-id", g8.chromium_tab);
     return { ok: Object.values(g11.checks).every(Boolean) };
-  });
+    // Its bounded waits alone sum to about 202s worst case (Settings, menu, work tab 30s, two
+    // navigations, the default tab 33s, cookie reads), so the 240s default cap cut it off on
+    // Linux (runs 41931931004, fe711) before it could report. Same precedent as engine-install.
+  }, { capMs: 420000 });
 }
 
 /** Ensures `dir` exists (output subfolders). */

@@ -653,8 +653,11 @@ function ocrVariants(path) {
     if (!variants.length) variants.push({ file: path, factor: 1, dx: 0, dy: 0 });
     // Measured on run 41327378231 screenshots: 3x gray reads dark-on-light and Windows/macOS
     // settings rows; 2x inverted reads Linux light-on-dark nav and sidebar labels.
-    if (run(imageMagick, [path, ...crop, "-colorspace", "gray", "-resize", "300%", x2]).ok) variants.push({ file: x2, factor: 3, ...base });
-    if (run(imageMagick, [path, ...crop, "-colorspace", "gray", "-negate", "-resize", "200%", neg]).ok) variants.push({ file: neg, factor: 2, ...base });
+    // "-alpha off" first: macOS screencapture writes RGBA, and -negate on an RGBA frame inverts
+    // alpha to 0 as well, so tesseract read 0 words from every macOS .x2n.png (run 41846200603
+    // probes 001-599, mean alpha 0).
+    if (run(imageMagick, [path, "-alpha", "off", ...crop, "-colorspace", "gray", "-resize", "300%", x2]).ok) variants.push({ file: x2, factor: 3, ...base });
+    if (run(imageMagick, [path, "-alpha", "off", ...crop, "-colorspace", "gray", "-negate", "-resize", "200%", neg]).ok) variants.push({ file: neg, factor: 2, ...base });
     return variants;
   }
   if (platform === "win32" && win.ps("upscale", ["-Path", path, "-Text", x2]).ok) {
@@ -671,7 +674,7 @@ const bandDir = join(out, "ocr-bands");
  * frame). Needs ImageMagick; on Windows only the real "magick" (convert.exe there is a disk
  * tool), otherwise the PowerShell upscale variants stay the only extra pass.
  */
-function ocrBands(path) {
+function ocrBands(path, { height: bandHeight = 130, step: bandStep = 100, prefix = "band" } = {}) {
   if (!imageMagick || (platform === "win32" && imageMagick !== "magick")) return [];
   const box = platform === "linux" ? linux.geometry() : null;
   let { width, height } = box ?? {};
@@ -681,16 +684,16 @@ function ocrBands(path) {
     height = header.readUInt32BE(20);
   }
   mkdirSync(bandDir, { recursive: true });
-  const args = [path, ...(box ? ["-crop", `${box.width}x${box.height}+${box.x}+${box.y}`, "+repage"] : []), "-colorspace", "gray"];
+  const args = [path, "-alpha", "off", ...(box ? ["-crop", `${box.width}x${box.height}+${box.x}+${box.y}`, "+repage"] : []), "-colorspace", "gray"];
   const bands = [];
-  for (let y = 0; y < height; y += 100) {
-    const file = join(bandDir, `band-${bands.length}.png`);
-    args.push("(", "-clone", "0", "-crop", `${width}x130+0+${y}`, "+repage", "-resize", "300%", "-write", file, "+delete", ")");
+  for (let y = 0; y < height; y += bandStep) {
+    const file = join(bandDir, `${prefix}-${bands.length}.png`);
+    args.push("(", "-clone", "0", "-crop", `${width}x${bandHeight}+0+${y}`, "+repage", "-resize", "300%", "-write", file, "+delete", ")");
     bands.push({ file, y });
   }
   args.push("null:");
   if (!run(imageMagick, args, { timeout: 60000 }).ok) return [];
-  const list = join(bandDir, "bands.txt");
+  const list = join(bandDir, `${prefix}s.txt`);
   writeFileSync(list, `${bands.map((band) => band.file).join("\n")}\n`);
   const result = run(tesseract, [list, "-", "--psm", "11", "tsv"], { timeout: 120000 });
   if (!result.ok) return [];
@@ -714,13 +717,26 @@ function ocrBands(path) {
   return words;
 }
 /**
+ * Thin strips: 44px tall every 11px, the same pipeline as ocrBands. Single toolbar and menu
+ * lines that neither the full frame nor the 130px bands read are read here: on macOS run
+ * 41846200603 the address bar URL (probes 047-067, 142-146: toolbar anchor lost, so the History
+ * menu, the bookmark folder and the G2 restart checks never ran), the highlighted "Duplicate
+ * browser tab" item of the tab context menu (probes 180-182, 275) and the "uBlock" tab title
+ * (screenshot 63). About 4s a frame, so it runs for step ui_checks and as a fallback after a miss.
+ */
+function ocrStrips(path) {
+  if (!tesseract || !path || !existsSync(path)) return [];
+  return ocrBands(path, { height: 44, step: 11, prefix: "strip" }).map((word) => ({ ...word, strip: true }));
+}
+/**
  * Words on screen. `bands: true` adds the banded pass (ocrBands); only the step ui_check and the
- * daily scenarios ask for it. Run 41801115761 ran it on every probe: per-step time grew up to
+ * daily scenarios ask for it; `strips: true` adds ocrStrips (step ui_check only). Run
+ * 41801115761 ran the bands on every probe: per-step time grew up to
  * 2-4x on Windows (daily-g11-private 69s -> 307s) and the Windows and Linux audits hit the 60 min
  * step timeout before the engine and extension sections (Windows stopped at
  * settings-browser-site-settings, Linux at extension-store-open).
  */
-function ocr(path, { bands = false } = {}) {
+function ocr(path, { bands = false, strips = false } = {}) {
   if (!tesseract || !path || !existsSync(path)) return null;
   const words = [];
   let anyPass = false;
@@ -743,6 +759,7 @@ function ocr(path, { bands = false } = {}) {
     }
   }
   if (anyPass && bands) words.push(...ocrBands(path));
+  if (anyPass && strips) words.push(...ocrStrips(path));
   return anyPass ? words : null;
 }
 
@@ -1250,7 +1267,7 @@ async function step(name, description, actions, expect = null, { capMs = STEP_CA
   if (!shot.ok && record.outcome === "ok") record.outcome = "screenshot_failed";
   if (expect) {
     const extra = record.actions.flatMap((action) => action.seen_text ?? []).map((text) => ({ text }));
-    const words = shot.path ? [...(ocr(shot.path, { bands: true }) ?? []), ...extra] : null;
+    const words = shot.path ? [...(ocr(shot.path, { bands: true, strips: true }) ?? []), ...extra] : null;
     if (!words) {
       record.ui_check = { result: "unavailable", expect };
     } else {
@@ -1922,6 +1939,8 @@ const daily = {
   run,
   // The daily scenarios read inactive tab titles, toolbar and prompt text: banded OCR on.
   ocr: (path) => ocr(path, { bands: true }),
+  // Strip-only pass on the same frame, for a locator that missed its word in `ocr`.
+  ocrStrips,
   probeShot,
   decodePng,
   step,
@@ -2022,12 +2041,15 @@ const engineInstallStarted = () => {
  * Click the Chromium Engine "Download" button: every "Download" word not followed on its line
  * by "size" (the row label), deduped by position, rightmost first. When neither the engine dir
  * nor "Downloading..."/"Installing..." shows up within 10s, the next candidate is clicked.
+ * The banded OCR pass is included: on linux run 41846200603 (probe-209) the full-frame variants
+ * read only the "Download size" label and never the small button text, so the label was clicked
+ * and no install started; the bands read the button at (1485, 525) on the same frame.
  */
 async function clickEngineDownload() {
   const deadline = Date.now() + 8000;
   let candidates = [];
   do {
-    const words = ocr(probeShot()) ?? [];
+    const words = ocr(probeShot(), { bands: true }) ?? [];
     const isLabel = (word) => words.some((next) => /^size$/i.test(next.text) && Math.abs(next.top - word.top) <= 8 && next.left > word.left && next.left - (word.left + word.width) < 40);
     const unique = new Map();
     for (const word of words.filter((entry) => entry.text === "Download")) {
@@ -2147,6 +2169,15 @@ if (platform === "darwin") {
   summary.media_prompt = noDevice
     ? { result: "n/a", reason: "no capture device on the runner", page_title: mediaPageTitle }
     : { result: summary.steps.at(-1).ui_check?.result ?? null, page_title: mediaPageTitle };
+  // Platform-conditional, not a pass: with no capture device WebKit never asks, so there is no
+  // prompt this step could see (hosted macOS runners have no camera or microphone). The prompt
+  // itself is proven by the CDP audit's G5 media checks with a fake device
+  // (scripts/browser-qa/gha-cdp-audit.mjs, media.checks.*). With a device, the check stands.
+  const mediaStep = summary.steps.at(-1);
+  if (noDevice && mediaStep?.name === "media-prompt" && mediaStep.ui_check?.result === "fail") {
+    mediaStep.ui_check = { ...mediaStep.ui_check, result: "n/a", reason: `no capture device: the page reports ${mediaPageTitle}; prompt covered by gha-cdp-audit.mjs G5 media checks` };
+    writeSummary();
+  }
   await step("media-prompt-dismissed", "Block dismisses the media prompt so later steps are not covered", [
     // With no prompt on screen a "Block" elsewhere must not be clicked.
     ["optional click Block", () => (noDevice ? { ok: true, skipped: "no prompt: no capture device" } : clickText("Block"))],
@@ -2598,8 +2629,28 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
       }],
       // Chrome commits Preferences on a 10s timer; the Settings list reads them when no engine runs.
       12000,
+      // After "Add extension" Chromium focuses a New Tab (macOS runs 41846200603 and 41949155327,
+      // screenshot 63 and probes 289-292), so neither Chrome's "added" bubble nor the store page
+      // was on screen and this ui_check failed on every run. The store tab is brought back and its
+      // install button, which reads "Remove from Chrome" only once the extension is installed, is
+      // given OCR-readable colours like "Add to Chrome" above; the ui_check reads it on screen.
+      ["show the store tab's 'Remove from Chrome' button (CLI tab switch + eval)", async () => {
+        if (!storeTab) return { ok: false, stderr: "no store tab" };
+        const switched = cli("tab", "switch", "--browser-id", storeTab.browserId);
+        const script = "(() => { const b = [...document.querySelectorAll('button')].find((e) => /Remove from Chrome/i.test(e.textContent || '')); if (!b) return 'none'; b.scrollIntoView({block: 'center', inline: 'center'}); b.style.setProperty('background', '#ffffff', 'important'); b.style.setProperty('color', '#000000', 'important'); b.querySelectorAll('*').forEach((e) => e.style.setProperty('color', '#000000', 'important')); return b.textContent.trim(); })()";
+        const deadline = Date.now() + 30000;
+        let result = null;
+        do {
+          result = await cliAsync("eval", "--browser-id", storeTab.browserId, "--script", script);
+          if (result.ok && !result.stdout.includes("none")) return { ok: true, switched: switched.ok, button: result.stdout.replace(/"/g, "") };
+          await sleep(2000);
+        } while (Date.now() < deadline);
+        return { ok: false, switched: switched.ok, stderr: `store page shows no 'Remove from Chrome' button (${result?.stdout ?? result?.stderr ?? "no result"})` };
+      }],
+      waitForText(["Remove"], 15000),
     ],
-    { any: ["added", "uBlock"] },
+    // "uBlock" is in the store tab's title before any install, so it no longer counts here.
+    { any: ["added", "Remove"] },
     // The profile wait alone is up to 120 s, after the store page and Chrome's dialog.
     { capMs: 360000 },
   );
