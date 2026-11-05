@@ -7,6 +7,59 @@ are not covered by the user's macOS manual/GUI waiver.
 
 ## Causes and limits
 
+### Windows bd4d3459 CLI link and headless cfg follow-up
+
+Integration was fast-forwarded through `bd4d3459d` before this patch.
+Evidence is in the sibling Windows worktree under
+`.omo/evidence/rex-adoption-20261104/verify-win/bd4d3459/`:
+
+- `runtime-build.ps1:3-6` sets a shared target directory, disables Cargo
+  incremental compilation, and invokes `cargo build --manifest-path
+  src-tauri/Cargo.toml --locked --bin ferryx-cli`. It does not select release
+  or disable default features: this is a dev build with desktop and
+  remote-desktop defaults, not a headless CLI build.
+- Decoded UTF-16 `runtime-build.log:16-20` identifies Microsoft's x64
+  `link.exe`, Visual Studio 18 BuildTools, MSVC `14.51.36231`.
+  Lines 200-204 identify `debug/deps/ferryx_lib.dll`, `/DLL`,
+  `/OPT:REF,NOICF`, `/DEBUG`, `/PDBALTPATH:%_PDB%`, and Natvis inputs.
+  Lines 3025-3029 report LNK1140 and exit 101 compiling the library.
+  The failing output is the library DLL, before a fresh CLI is available.
+- No `/PDBPAGESIZE` is present in that invocation. Add `/PDBPAGESIZE:8192`
+  only for Windows MSVC package links, including the cdylib and executables,
+  without changing `/DEBUG`, stripping symbols, suppressing warnings, or
+  substituting a binary. This raises page-based PDB capacity from 4 GiB to
+  8 GiB and enlarges block maps. It does not prove which internal PDB limit
+  this log reached or that 8 GiB is sufficient; rebuilding remains required.
+- Compatibility reference: Chromium's Windows linker configuration documents
+  support in VS 2022+ link.exe and consumption with circa-22H2 or newer tools:
+  <https://chromium.googlesource.com/chromium/src/build/config/+/refs/heads/main/win/BUILD.gn>.
+  The observed MSVC toolchain is newer than that minimum. No linker switch to
+  LLVM, debug-level reduction, or `/PDB:NONE` is required by this patch.
+- `NATIVE_DEBUG_SEQUENCE` is only consumed by desktop-gated
+  `log_native_switch_debug`; its declaration now has the identical desktop
+  cfg. Headless builds omit the unused counter rather than suppressing lint.
+  Other shared atomics and native run-ID state stay available.
+
+Deferred Windows rebuild, from the patched verification checkout in the same
+MSVC developer environment (not run in this source-only round):
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$env:CARGO_TARGET_DIR = 'C:\Users\sook\ferryx-wt\.target'
+$env:CARGO_INCREMENTAL = '0'
+$env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
+$env:LIBCLANG_PATH = 'C:\Users\sook\ferryx-wt\.llvm\clang+llvm-23.1.4-x86_64-pc-windows-msvc\bin'
+cargo build --manifest-path src-tauri/Cargo.toml --locked --bin ferryx-cli -vv
+if ($LASTEXITCODE -ne 0) { throw "CLI rebuild failed: $LASTEXITCODE" }
+```
+
+This deliberately keeps the failing command's default features and dev
+profile. The build-script change invalidates the package build; no clean or
+older binary is needed. Inspect verbose build-script output for
+`/PDBPAGESIZE:8192`. Existing OpenSSL LNK4099 warnings in the supplied log are
+not repaired or hidden by this patch. Platform argument contract tests were
+added but not executed; headless warning elimination is source-reviewed only.
+
 Evidence paths below are relative to the sibling verification worktrees' shared
 `.omo/evidence/rex-adoption-20261104/` directory.
 
