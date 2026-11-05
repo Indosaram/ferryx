@@ -1,0 +1,6 @@
+ src-tauri/gen/schemas/acl-manifests.json  |  2 +-
+ src-tauri/gen/schemas/capabilities.json   |  2 +-
+ src-tauri/gen/schemas/desktop-schema.json | 54 +++++++++++++++++
+ src-tauri/gen/schemas/linux-schema.json   | 96 +++++++++++++++++++++++++++++++
+ ui/public/llms.txt                        |  3 +
+ 5 files changed, 155 insertions(+), 2 deletions(-)

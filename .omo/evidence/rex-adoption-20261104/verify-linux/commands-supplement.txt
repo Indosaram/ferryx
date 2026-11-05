@@ -1,0 +1,3 @@
+cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-qa --locked
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib cargo run --manifest-path src-tauri/Cargo.toml --example daemon_write_bench --locked
+bash .github/rex-gate/verify-linux/baseline.sh

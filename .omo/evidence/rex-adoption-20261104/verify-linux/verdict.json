@@ -1,0 +1,523 @@
+{
+  "leg": "linux",
+  "head": "35c984684",
+  "evidence_commit": "SELF",
+  "runs": {
+    "frozen": 41917889082,
+    "supplemental_baseline": 41929465914
+  },
+  "verdicts": {
+    "2": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "skill install/status; repeated skill bytes unchanged; takeover preserved; UNKNOWN_AGENT exit 2",
+          "artifact": "gha3/rex-verify-linux-gate/17.log"
+        }
+      ],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "3": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli",
+          "exit": 0,
+          "log": "gha3/rex-verify-linux-gate/9.log"
+        },
+        {
+          "cmd": "bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs && bun scripts/release-workflow-policy.mjs",
+          "exit": 0,
+          "log": "gha3/rex-verify-linux-gate/10.log"
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "4": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "5": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "7": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "hash identical before/after, but RETAINED=9963 violates 10000; exit 1",
+          "artifact": "gha3/rex-verify-linux-gate/14.log"
+        }
+      ],
+      "failure": {
+        "summary": "9963 retained lines instead of 10000; continuation unit assertion 9962 vs 10000",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "8": {
+      "status": "PASS",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "size_ownership and resize-security unit tests pass within failing full suite"
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "OWNERSHIP_OK; phone detach restores desktop geometry",
+          "artifact": "gha3/rex-verify-linux-gate/16.log"
+        },
+        {
+          "scenario": "FAILURE",
+          "observable": "view-only resize 10x10 leaves geometry and owner unchanged",
+          "artifact": "gha3/rex-verify-linux-gate/16.log"
+        }
+      ],
+      "failure": null
+    },
+    "9": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "HAPPY",
+          "observable": "LAYOUT_QA_OK revision=4; stale revision refusal included",
+          "artifact": "gha3/rex-verify-linux-gate/17.log"
+        }
+      ],
+      "failure": {
+        "summary": "migration machine identity changes on reload; invalid second window fixture; predecessor liveness assertion",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "10": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "summary": "layoutSync rejects no-active-pane optimistic layout; HMR identity retention fails; UI full suite 314 failures",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "11": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "FAILURE",
+          "observable": "Bun events?.next is not a function during successor launch; exit 1",
+          "artifact": "gha3/rex-verify-linux-gate/15.log"
+        }
+      ],
+      "failure": {
+        "summary": "detached scopes invalid second window fixture; Bun watch iterator harness fails at detach-attach.mjs:23",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "12": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "summary": "Unix full library contains 10 non-baseline failures",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "14": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "summary": "OSC expectation table does not receive cwd=/tmp",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "16": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "17": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "summary": "screen mirror seed round-trip property fails; release/fuzz compilation blocked by stale helper assets",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "18": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "20": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "21": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "summary": "onboardingPersistence.test.ts:25 expects 3 but receives 4",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "22": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "23": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "FAILURE",
+          "observable": "init.luau logs startup; infinite loop reports SCRIPT_INTERRUPTED; agents list remains responsive",
+          "artifact": "gha3/rex-verify-linux-gate/17.log"
+        }
+      ],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "24": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [
+        {
+          "scenario": "FAILURE",
+          "observable": "ferryx.exec string reports BAD_ARGUMENT; no command executed",
+          "artifact": "gha3/rex-verify-linux-gate/17.log"
+        }
+      ],
+      "failure": {
+        "summary": "useScripting called from deriveFocusedTerminal App.tsx:682, invalid React hook call; shortcuts fail",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "26": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "28": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "29": {
+      "status": "BLOCKED",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": null,
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    },
+    "30": {
+      "status": "FAIL",
+      "acceptance": [
+        {
+          "cmd": "cargo test --manifest-path src-tauri/Cargo.toml --lib --locked",
+          "exit": 101,
+          "log": "gha3/rex-verify-linux-gate/1.log",
+          "note": "Full suite contains unrelated failures; inspect named test outcomes, not suite exit alone."
+        }
+      ],
+      "qa": [],
+      "failure": {
+        "summary": "plugin predecessor liveness assertion fails; browser isolation not proven",
+        "details": "rust-failures.json and ui-failures.json",
+        "smallest_repair_shape": "Repair the violated assertion/contract; no product code was changed by verifier."
+      },
+      "unverified": "Not all assigned live HAPPY/FAILURE scenarios completed; do not mark the todo verified."
+    }
+  },
+  "finals": {
+    "F2": {
+      "status": "FAIL",
+      "clippy_default": {
+        "exit": 0,
+        "log": "gha3/rex-verify-linux-gate/6.log",
+        "baseline_exit": 0,
+        "baseline_log": "gha3/rex-verify-linux-gate/baseline-clippy-default.log"
+      },
+      "clippy_headless": {
+        "exit": 0,
+        "log": "gha3/rex-verify-linux-gate/7.log",
+        "baseline_exit": 101,
+        "baseline_log": "gha3/rex-verify-linux-gate/baseline-clippy-headless.log"
+      },
+      "ui_lint": {
+        "exit": 1,
+        "log": "gha3/rex-verify-linux-gate/4.log",
+        "new_error": "App.tsx:682 useScripting in non-component deriveFocusedTerminal"
+      },
+      "typecheck_test": {
+        "exit": 0,
+        "log": "gha3/rex-verify-linux-gate/5.log"
+      }
+    },
+    "F3(b)": {
+      "status": "PASS",
+      "exit": 0,
+      "log": "gha3/rex-verify-linux-gate/8.log"
+    },
+    "F3(d)": {
+      "status": "PASS",
+      "cmd": "git diff d59508fa9 35c984684 -- scripts/build-ffmpeg-lgpl.sh src-tauri/resources/ffmpeg",
+      "exit": 0,
+      "log": "ffmpeg.diff"
+    },
+    "F3(e)_linux_extra": {
+      "status": "FAIL",
+      "exit": 101,
+      "log": "gha3/rex-verify-linux-gate/19.log",
+      "first_error": "helper asset freshness error: staged sourceFingerprint does not match current helper source fingerprint",
+      "smallest_repair_shape": "Rebuild and stage bundled remote helpers; do not bypass freshness check.",
+      "baseline": "Supplemental baseline release command timed out (124); same failure NOT proven on main."
+    },
+    "F3_manual": {
+      "status": "FAIL",
+      "details": "not all scenarios complete; failed QA retained, no tests-only QA claims"
+    },
+    "F4": {
+      "status": "BLOCKED",
+      "reason": "Not all live evidence exists; consolidated F4 belongs to parent."
+    }
+  },
+  "regressions": [
+    "daemon::handover::spawn_owner_tests::layout_uses_the_committed_decision_not_shared_disk",
+    "daemon::handover::spawn_owner_tests::plugins_approval_survives_handover_without_killing_predecessor",
+    "daemon::handover_socket::tests::ten_thousand_line_continuation_handover_hash_equal",
+    "daemon::layout::detached::parked_scopes_and_other_windows_are_attached",
+    "daemon::layout::tests::scoped_transfer_survives_restart_and_handover",
+    "daemon::layout_migration::tests::parked_workspace_and_worktree_layouts_survive_migration_and_restart",
+    "ipc::tests::test_p12_close_terminates_remote_session_while_detach_preserves_it",
+    "native_terminal::osc_effects::tests::osc_expectation_table",
+    "remote::tests::security::sockets::socket_close_restores_desktop_geometry_only_if_resized",
+    "terminal::fuzz_tests::screen_mirror_feed_and_seed_round_trip",
+    "UI full suite: 314 failed vs same-image baseline 9315 passed",
+    "App.tsx:682 invalid hook call (new seventh lint error)",
+    "screen-hash QA retains 9963 instead of 10000",
+    "detach-attach Bun iterator harness TypeError",
+    "release/fuzz stale bundled helper assets (not proven on baseline)"
+  ],
+  "baseline_failures": {
+    "library": {
+      "count": 20,
+      "log": "supplement/rex-verify-linux-gate/baseline-lib.log",
+      "comparison": "20 matching named failures of 30 candidate default-feature failures; only those matches are baseline"
+    },
+    "ui_lint": {
+      "count": 6,
+      "log": "supplement/rex-verify-linux-gate/baseline-lint.log"
+    },
+    "headless_clippy": {
+      "exit": 101,
+      "log": "gha3/rex-verify-linux-gate/baseline-clippy-headless.log"
+    }
+  },
+  "blocked": [
+    "real-agent CLI login checks: no eligible picker host (exit 3), GitHub runner not logged in",
+    "1800-second libFuzzer and 20000 release proptest do not execute: helper freshness build gate fails",
+    "Linux AppImage/dbus desktop-deep-link manual QA not executed",
+    "Live cross-pane grant, OSC event stream, foreground secret suppression, account relay onboarding, plugin iframe isolation, foreign snapshot two-daemon exchange and crash recovery not completed; named unit tests alone are not QA proof",
+    "No release benchmark A/B: release build blocked and main lacks added benchmark example; debug candidate p95=128us is not the required release delta",
+    "Remaining negative drift/mutation scenarios not executed; product code must not be modified by verifier",
+    "Windows headless supervisor managed_externally=false is delegated to Windows leg; GUI harnesses were built only in default-feature bins/examples gate"
+  ],
+  "cleanup": {
+    "ci_refs_deleted": true,
+    "remote_worktrees_removed": true,
+    "hosts_released": "No persistent host claimed; picker exit 3; ephemeral runners terminated",
+    "evidence": "cleanup.txt"
+  }
+}

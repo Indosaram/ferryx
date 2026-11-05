@@ -1,0 +1,7 @@
+$ bash .github/rex-gate/verify-linux/baseline.sh
+Preparing worktree (detached HEAD d59508fa)
+HEAD is now at d59508fa ci: restrict Rust cache saves to main and disable Zig tarball caching
+Cloning into '/home/runner/work/_temp/rex-base/src-tauri/vendor/ghostty'...
+Submodule path 'src-tauri/vendor/ghostty': checked out '83fb95624b0439ee660c2679b43b38c8b63769cd'
+baseline clippy default EXIT=0
+baseline clippy headless EXIT=101

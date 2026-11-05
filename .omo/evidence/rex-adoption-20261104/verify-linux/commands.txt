@@ -1,0 +1,22 @@
+timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
+timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --lib --locked
+bun run --cwd ui test
+bun run --cwd ui lint
+bun run --cwd ui typecheck:test
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-default-features --locked -- -D warnings
+cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin ferryx-cli --bin ferryx-relay --bin ferryx-account --locked
+bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+bun test scripts/gen-llms-txt.test.mjs scripts/build-latest-json.test.mjs && bun scripts/release-workflow-policy.mjs
+bun ui/scripts/gen-layout-fixtures.ts; git diff --exit-code -- src-tauri/tests/fixtures
+cargo test --manifest-path src-tauri/Cargo.toml --test daemon_handover_transfer_contract --locked
+cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-qa --locked
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/screen-hash-handover.mjs --binary src-tauri/target/debug/ferryx-cli --successor src-tauri/target/debug/ferryx-cli
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-attach.mjs
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/size-ownership.mjs
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux/live-qa.mjs
+cargo check --manifest-path src-tauri/Cargo.toml --features iroh-direct --locked
+cargo build --release --manifest-path src-tauri/Cargo.toml --locked
+LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib PROPTEST_CASES=20000 timeout 1800 cargo test --manifest-path src-tauri/Cargo.toml --release --lib terminal::fuzz_tests --locked
+bash .github/rex-gate/verify-linux/baseline.sh
+rustup toolchain install nightly --profile minimal && cargo install cargo-fuzz --locked && (cd src-tauri && LD_LIBRARY_PATH=$PWD/resources/ffmpeg/sdk/lib cargo +nightly fuzz run screen_mirror -- -max_total_time=1800)

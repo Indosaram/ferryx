@@ -1,0 +1,40 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux/live-qa.mjs
+INTEGRATIONS_INSTALL {"action":"skill install","results":[{"agent":"claude","result":"installed","path":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.claude/skills/ferryx/SKILL.md"},{"agent":"codex","result":"installed","path":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.agents/skills/ferryx/SKILL.md"},{"agent":"grok","result":"not-detected","path":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.grok/skills/ferryx/SKILL.md"},{"agent":"antigravity","result":"not-detected","path":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.gemini/config/skills/ferryx/SKILL.md"},{"agent":"cursor","result":"not-detected","path":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.cursor/skills/ferryx/SKILL.md"},{"agent":"omp","result":"installed","path":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.omp/agent/skills/ferryx/SKILL.md"}]}
+
+INTEGRATIONS_STATUS {"integrationEnabled":true,"agents":[{"id":"omo","detected":false,"hookSupported":false,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":true,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"},{"id":"opencode","detected":false,"hookSupported":false,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":true,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"},{"id":"codex","detected":true,"hookSupported":true,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"installed","skillInstalled":true,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillPath":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.agents/skills/ferryx/SKILL.md"},{"id":"claude","detected":true,"hookSupported":true,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"installed","skillInstalled":true,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillPath":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.claude/skills/ferryx/SKILL.md"},{"id":"antigravity","detected":false,"hookSupported":true,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"absent","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillPath":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.gemini/config/skills/ferryx/SKILL.md"},{"id":"cline","detected":false,"hookSupported":true,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"},{"id":"copilot","detected":false,"hookSupported":false,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"},{"id":"cursor","detected":false,"hookSupported":true,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"absent","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillPath":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.cursor/skills/ferryx/SKILL.md"},{"id":"grok","detected":false,"hookSupported":true,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"absent","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillPath":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.grok/skills/ferryx/SKILL.md"},{"id":"kimi","detected":false,"hookSupported":false,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"},{"id":"gjc","detected":false,"hookSupported":false,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"},{"id":"omp","detected":true,"hookSupported":false,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"installed","skillInstalled":true,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":true,"extensionInstalled":false,"integrationEnabled":true,"skillPath":"/home/runner/work/_temp/tmp/rex-independent-0HRAiu/home/.omp/agent/skills/ferryx/SKILL.md"},{"id":"pi","detected":false,"hookSupported":false,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":true,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"},{"id":"crush","detected":false,"hookSupported":true,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"},{"id":"aider","detected":false,"hookSupported":false,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"},{"id":"droid","detected":false,"hookSupported":false,"hookInstalled":false,"hookStale":false,"hookEnabled":true,"skill":"unsupported","skillInstalled":false,"skillUserEdited":false,"skillEnabled":true,"extensionSupported":false,"extensionInstalled":false,"integrationEnabled":true,"skillFallback":"ferryx-cli api describe agents"}]}
+
+USER_EDIT_PRESERVED
+{"type":"error","code":"UNKNOWN_AGENT","message":"unknown agent `nosuchagent`; see `ferryx-cli integrations status`"}
+UNKNOWN_AGENT_REJECTED 2
+DAEMON FERRYX_DAEMON_READY
+SCRIPT_LOG verifier startup
+
+LAYOUT_QA_BEGIN
+LAYOUT_QA_OK revision=4
+LAYOUT_QA_EXIT 0
+SCRIPT_BAD_ARGUMENT_RELOAD {
+  type: "error",
+  message: "runtime error: BAD_ARGUMENT\nstack traceback:\n\t[C]: in ?\n\t[string \"init.luau\"]:1: in function <[string \"init.luau\"]:1>\n",
+}
+SCRIPT_BAD_ARGUMENT_LOG verifier startup
+runtime error: BAD_ARGUMENT
+stack traceback:
+	[C]: in ?
+	[string "init.luau"]:1: in function <[string "init.luau"]:1>
+
+
+SCRIPT_INFINITE_RELOAD {
+  type: "error",
+  message: "runtime error: SCRIPT_INTERRUPTED",
+}
+SCRIPT_INFINITE_LOG verifier startup
+runtime error: BAD_ARGUMENT
+stack traceback:
+	[C]: in ?
+	[string "init.luau"]:1: in function <[string "init.luau"]:1>
+
+runtime error: SCRIPT_INTERRUPTED
+
+RESPONSIVE {"ok":true,"sessions":[]}
+
+RECORDED_PID_STOPPED 100543

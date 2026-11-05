@@ -1,0 +1,2 @@
+$ bun scripts/gen-llms-txt.mjs --check --cli src-tauri/target/debug/ferryx-cli
+gen-llms-txt: docs/llms.txt is up to date (17 commands)

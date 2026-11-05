@@ -1,0 +1,113 @@
+$ cargo build --manifest-path src-tauri/Cargo.toml --bins --examples --features local-split-qa --locked
+[1m[92m   Compiling[0m ferryx v2026.1101.1 (/home/runner/work/ferryx/ferryx/src-tauri)
+[1m[33mwarning[0m[1m: type `TransportQaOwnerEvent` is more private than the item `DaemonResponse::QaRemoteOwnerAuditOk::events`[0m
+    [1m[94m--> [0msrc/daemon/protocol.rs:1522:9
+     [1m[94m|[0m
+[1m[94m1522[0m [1m[94m|[0m         events: Vec<crate::terminal::remote::TransportQaOwnerEvent>,
+     [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[33mfield `DaemonResponse::QaRemoteOwnerAuditOk::events` is reachable at visibility `pub`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: but type `TransportQaOwnerEvent` is only usable at visibility `pub(crate)`
+    [1m[94m--> [0msrc/terminal/remote.rs:336:1
+     [1m[94m|[0m
+[1m[94m 336[0m [1m[94m|[0m pub(crate) struct TransportQaOwnerEvent {
+     [1m[94m|[0m [1m[92m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+     [1m[94m= [0m[1mnote[0m: `#[warn(private_interfaces)]` on by default
+
+[1m[33mwarning[0m[1m: type `ArmSpec` is more private than the item `QaBarrierChannel::wait_for_release`[0m
+    [1m[94m--> [0msrc/ipc/qa_barrier.rs:1240:5
+     [1m[94m|[0m
+[1m[94m1240[0m [1m[94m|[0m     pub async fn wait_for_release(&self, spec: &ArmSpec) -> ReleaseOutcome {
+     [1m[94m|[0m     [1m[33m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[33mmethod `QaBarrierChannel::wait_for_release` is reachable at visibility `pub`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: but type `ArmSpec` is only usable at visibility `pub(crate)`
+    [1m[94m--> [0msrc/ipc/qa_barrier.rs:512:1
+     [1m[94m|[0m
+[1m[94m 512[0m [1m[94m|[0m pub(crate) struct ArmSpec {
+     [1m[94m|[0m [1m[92m^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: type `RecordedSplit` is more private than the item `split_create_payload`[0m
+    [1m[94m--> [0msrc/ipc/terminal.rs:2198:5
+     [1m[94m|[0m
+[1m[94m2198[0m [1m[94m|[0m [1m[33m/[0m     pub fn split_create_payload(
+[1m[94m2199[0m [1m[94m|[0m [1m[33m|[0m         prepared: &PreparedLocalSplit,
+[1m[94m2200[0m [1m[94m|[0m [1m[33m|[0m         session_id: &str,
+[1m[94m2201[0m [1m[94m|[0m [1m[33m|[0m         daemon_epoch: u64,
+[1m[94m2202[0m [1m[94m|[0m [1m[33m|[0m         session: &DaemonSessionDetails,
+[1m[94m2203[0m [1m[94m|[0m [1m[33m|[0m         recorded: Option<&RecordedSplit>,
+[1m[94m2204[0m [1m[94m|[0m [1m[33m|[0m     ) -> Value {
+     [1m[94m|[0m [1m[33m|______________^[0m [1m[33mfunction `split_create_payload` is reachable at visibility `pub(in crate::ipc::terminal)`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: but type `RecordedSplit` is only usable at visibility `pub(self)`
+    [1m[94m--> [0msrc/ipc/terminal.rs:2107:5
+     [1m[94m|[0m
+[1m[94m2107[0m [1m[94m|[0m     struct RecordedSplit {
+     [1m[94m|[0m     [1m[92m^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: type `RecordedSplit` is more private than the item `cancel_ack_payload`[0m
+    [1m[94m--> [0msrc/ipc/terminal.rs:2426:5
+     [1m[94m|[0m
+[1m[94m2426[0m [1m[94m|[0m [1m[33m/[0m     pub fn cancel_ack_payload(
+[1m[94m2427[0m [1m[94m|[0m [1m[33m|[0m         record: &RecordedSplit,
+[1m[94m2428[0m [1m[94m|[0m [1m[33m|[0m         phase: &str,
+[1m[94m2429[0m [1m[94m|[0m [1m[33m|[0m         duplicate: bool,
+[1m[94m...[0m    [1m[33m|[0m
+[1m[94m2435[0m [1m[94m|[0m [1m[33m|[0m         source_still_present: Option<bool>,
+[1m[94m2436[0m [1m[94m|[0m [1m[33m|[0m     ) -> Value {
+     [1m[94m|[0m [1m[33m|______________^[0m [1m[33mfunction `cancel_ack_payload` is reachable at visibility `pub(in crate::ipc::terminal)`[0m
+     [1m[94m|[0m
+[1m[92mnote[0m: but type `RecordedSplit` is only usable at visibility `pub(self)`
+    [1m[94m--> [0msrc/ipc/terminal.rs:2107:5
+     [1m[94m|[0m
+[1m[94m2107[0m [1m[94m|[0m     struct RecordedSplit {
+     [1m[94m|[0m     [1m[92m^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: fields `client_request_id`, `source_backend_session_id`, `workspace_id`, and `worktree_path` are never read[0m
+   [1m[94m--> [0msrc/ipc/qa_barrier.rs:525:16
+    [1m[94m|[0m
+[1m[94m512[0m [1m[94m|[0m pub(crate) struct ArmSpec {
+    [1m[94m|[0m                   [1m[94m-------[0m [1m[94mfields in this struct[0m
+[1m[94m...[0m
+[1m[94m525[0m [1m[94m|[0m     pub(crate) client_request_id: Option<String>,
+    [1m[94m|[0m                [1m[33m^^^^^^^^^^^^^^^^^[0m
+[1m[94m526[0m [1m[94m|[0m     #[serde(rename = "sourceBackendSessionId", default)]
+[1m[94m527[0m [1m[94m|[0m     pub(crate) source_backend_session_id: Option<String>,
+    [1m[94m|[0m                [1m[33m^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[94m528[0m [1m[94m|[0m     #[serde(rename = "workspaceId", default)]
+[1m[94m529[0m [1m[94m|[0m     pub(crate) workspace_id: Option<String>,
+    [1m[94m|[0m                [1m[33m^^^^^^^^^^^^[0m
+[1m[94m530[0m [1m[94m|[0m     #[serde(rename = "worktreePath", default)]
+[1m[94m531[0m [1m[94m|[0m     pub(crate) worktree_path: Option<String>,
+    [1m[94m|[0m                [1m[33m^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `ArmSpec` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: fields `stop` and `worker` are never read[0m
+   [1m[94m--> [0msrc/terminal/qa_liveness.rs:178:5
+    [1m[94m|[0m
+[1m[94m177[0m [1m[94m|[0m struct LocalOwnerControl {
+    [1m[94m|[0m        [1m[94m-----------------[0m [1m[94mfields in this struct[0m
+[1m[94m178[0m [1m[94m|[0m     stop: std_mpsc::Sender<()>,
+    [1m[94m|[0m     [1m[33m^^^^[0m
+[1m[94m179[0m [1m[94m|[0m     worker: JoinHandle<()>,
+    [1m[94m|[0m     [1m[33m^^^^^^[0m
+
+[1m[33mwarning[0m[1m: function `stop_local_owner_control` is never used[0m
+   [1m[94m--> [0msrc/terminal/qa_liveness.rs:402:15
+    [1m[94m|[0m
+[1m[94m402[0m [1m[94m|[0m pub(crate) fn stop_local_owner_control() {
+    [1m[94m|[0m               [1m[33m^^^^^^^^^^^^^^^^^^^^^^^^[0m
+
+[1m[33mwarning[0m[1m: variant `UnsupportedPlatform` is never constructed[0m
+  [1m[94m--> [0msrc/terminal/qa_liveness/owned_process_identity.rs:10:5
+   [1m[94m|[0m
+[1m[94m 8[0m [1m[94m|[0m pub(super) enum IdentityUnavailable {
+   [1m[94m|[0m                 [1m[94m-------------------[0m [1m[94mvariant in this enum[0m
+[1m[94m 9[0m [1m[94m|[0m     InvalidPid,
+[1m[94m10[0m [1m[94m|[0m     UnsupportedPlatform,
+   [1m[94m|[0m     [1m[33m^^^^^^^^^^^^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `IdentityUnavailable` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+[1m[33mwarning[0m: `ferryx` (lib) generated 8 warnings
+[1m[92m    Finished[0m `dev` profile [unoptimized] target(s) in 2m 29s

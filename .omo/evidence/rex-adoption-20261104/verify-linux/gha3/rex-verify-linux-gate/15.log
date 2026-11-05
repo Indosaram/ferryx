@@ -1,0 +1,15 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun scripts/qa/detach-attach.mjs
+18 | const sockets = [];
+19 | const timeout = () => AbortSignal.timeout(90_000);
+20 | async function launch(legacy) {
+21 |   const controller = new AbortController();
+22 |   const events = legacy ? watch(env.FERRYX_RUNTIME_DIR, { signal: controller.signal }) : null;
+23 |   const changed = events?.next();
+                               ^
+TypeError: events?.next is not a function. (In 'events?.next()', 'events?.next' is undefined)
+      at launch (/home/runner/work/ferryx/ferryx/scripts/qa/detach-attach.mjs:23:27)
+      at /home/runner/work/ferryx/ferryx/scripts/qa/detach-attach.mjs:136:9
+
+::error file=scripts/qa/detach-attach.mjs,line=23,col=27,title=TypeError: events?.next is not a function. (In 'events?.next()'%2C 'events?.next' is undefined)::%0A      at launch (/home/runner/work/ferryx/ferryx/scripts/qa/detach-attach.mjs:23:27)%0A      at /home/runner/work/ferryx/ferryx/scripts/qa/detach-attach.mjs:136:9
+
+Bun v1.4.4 (Linux x64)
