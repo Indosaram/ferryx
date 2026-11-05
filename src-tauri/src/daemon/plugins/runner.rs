@@ -95,6 +95,24 @@ fn execute_inner(bytes: &[u8], ticks: usize, replies: Option<std::sync::mpsc::Re
     Ok(())
 }
 
+pub fn entry() -> Option<i32> {
+    if std::env::args_os().nth(1).is_none_or(|arg| arg != "--plugin-wasm-runner") { return None; }
+    Some(run_stdio())
+}
+
+pub fn run_stdio() -> i32 {
+    let result = (|| {
+        let mut header = [0; 4];
+        std::io::stdin().read_exact(&mut header).map_err(|e| e.to_string())?;
+        let len = u32::from_le_bytes(header) as usize;
+        if len > MAX_MODULE { return Err("module exceeds limit".into()); }
+        let mut bytes = vec![0; len];
+        std::io::stdin().read_exact(&mut bytes).map_err(|e| e.to_string())?;
+        execute(&bytes)
+    })();
+    match result { Ok(()) => 0, Err(error) => { eprintln!("plugin runner: {error}"); 1 } }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,20 +158,3 @@ mod tests {
     }
 }
 
-pub fn entry() -> Option<i32> {
-    if std::env::args_os().nth(1).is_none_or(|arg| arg != "--plugin-wasm-runner") { return None; }
-    Some(run_stdio())
-}
-
-pub fn run_stdio() -> i32 {
-    let result = (|| {
-        let mut header = [0; 4];
-        std::io::stdin().read_exact(&mut header).map_err(|e| e.to_string())?;
-        let len = u32::from_le_bytes(header) as usize;
-        if len > MAX_MODULE { return Err("module exceeds limit".into()); }
-        let mut bytes = vec![0; len];
-        std::io::stdin().read_exact(&mut bytes).map_err(|e| e.to_string())?;
-        execute(&bytes)
-    })();
-    match result { Ok(()) => 0, Err(error) => { eprintln!("plugin runner: {error}"); 1 } }
-}
