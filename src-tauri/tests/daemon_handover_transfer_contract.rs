@@ -308,10 +308,18 @@ impl TestAttachStream {
             if bytes == 0 {
                 break;
             }
-            if let Ok(DaemonStreamMessage::Output { data, .. }) =
-                serde_json::from_str::<DaemonStreamMessage<'static>>(line.trim())
-            {
-                let text = String::from_utf8_lossy(&data);
+            let text = match serde_json::from_str::<DaemonStreamMessage<'static>>(line.trim()) {
+                Ok(DaemonStreamMessage::Output { data, .. }) => {
+                    Some(String::from_utf8_lossy(&data).into_owned())
+                }
+                // A burst can overrun the live broadcast queue. The daemon then delivers
+                // the missed output in a replay frame, including the completion marker.
+                Ok(DaemonStreamMessage::Lagged { history, .. }) => {
+                    Some(String::from_utf8_lossy(&history).into_owned())
+                }
+                _ => None,
+            };
+            if let Some(text) = text {
                 accumulated.push_str(&text);
                 if accumulated.contains(pattern) {
                     return Ok(accumulated);
@@ -1012,16 +1020,18 @@ fn assert_authority_held(daemons: &PrivateDaemons, stage: &str) {
         lock_held_elsewhere(&runtime.join("daemon.lock")),
         "{stage}: the legacy daemon lock was free"
     );
-    let locks = daemons.root.path().join("data/locks");
-    if let Ok(entries) = std::fs::read_dir(&locks) {
-        for entry in entries.flatten() {
-            assert!(
-                lock_held_elsewhere(&entry.path()),
-                "{stage}: the persistent lock {} was free",
-                entry.path().display()
-            );
-        }
-    }
+    // Only the daemon ownership lock is held for the daemon's lifetime. Store
+    // transaction sidecars (for example identity.lock) are released after each write.
+    let persistent = daemons.root.path().join("data/locks").join(if cfg!(debug_assertions) {
+        "daemon-dev.lock"
+    } else {
+        "daemon.lock"
+    });
+    assert!(
+        lock_held_elsewhere(&persistent),
+        "{stage}: the persistent lock {} was free",
+        persistent.display()
+    );
 }
 
 /// todo 8: the v5 successor adopts the predecessor's listeners and locks instead of binding and
@@ -2111,7 +2121,23 @@ async fn layout_survives_handover() {
         DaemonResponse::LayoutOk { view } => assert_eq!(view.layout, before),
         other => panic!("Expected layout, got {other:?}"),
     }
-    assert!(daemons.children[d1].try_wait().unwrap().is_none(), "predecessor was never killed");
+    // v5 transfers local sessions and retires the predecessor; successor readiness
+    // does not imply that the predecessor's asynchronous retirement has completed.
+    let mut predecessor_child = daemons.children.remove(d1);
+    let predecessor_pid = predecessor_child.id();
+    let exited = timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || predecessor_child.wait()),
+    ).await;
+    let status = match exited {
+        Ok(waited) => waited.expect("predecessor wait worker").expect("wait for predecessor"),
+        Err(_) => {
+            // SAFETY: signalling the predecessor spawned by this test on timeout only.
+            unsafe { libc::kill(predecessor_pid as i32, libc::SIGKILL) };
+            panic!("predecessor did not retire after v5 handover");
+        }
+    };
+    assert!(status.success(), "predecessor must retire successfully: {status}");
 }
 
 #[tokio::test]
