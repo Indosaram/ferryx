@@ -400,18 +400,12 @@ impl Ancestry {
     fn walk(peer: PeerProcess, info: &ProcInfo, table: &impl ProcTable) -> Self {
         let mut chain = Vec::new();
         let mut current = info.ppid;
-        let mut child_start = info.start;
         for _ in 0..MAX_ANCESTRY {
             if current <= 1 {
                 return Ancestry { peer, chain, end: WalkEnd::Complete };
             }
             match table.info(current) {
                 Ok(next) => {
-                    if next.start > child_start {
-                        chain.push((current, None));
-                        return Ancestry { peer, chain, end: WalkEnd::Changed { pid: current } };
-                    }
-                    child_start = next.start;
                     chain.push((current, Some(next.start)));
                     if next.ppid == current {
                         return Ancestry { peer, chain, end: WalkEnd::Complete };
@@ -514,6 +508,9 @@ fn classify_with_cutoff(
     }
     let walked = ancestry.as_ref().expect("walked above");
     for &(ancestor, start) in &walked.chain {
+        if start.is_none() && panes.find(|entry| entry.pid == ancestor).is_some() {
+            return Err(format!("restricted ancestor process {ancestor} could not be identified; owner recovery is forbidden"));
+        }
         // A pane whose start time differs is a later process that reused an ancestor's pid.
         let descends = |entry: &PaneEntry| {
             entry.pid == ancestor
@@ -524,6 +521,17 @@ fn classify_with_cutoff(
         };
         if let Some((session_id, _)) = panes.find(descends) {
             return pane(session_id, format!("pane process {ancestor}"));
+        }
+    }
+    // Timestamp inconsistency cannot truncate the search for restricted ancestors, but it
+    // must invalidate owner recovery: the parent pid may now name a different process.
+    let mut child_start = peer.start;
+    for &(ancestor, start) in &walked.chain {
+        if let Some(start) = start {
+            if start > child_start {
+                return Err(format!("ancestor process {ancestor} is newer than its child; owner recovery is forbidden"));
+            }
+            child_start = start;
         }
     }
     match walked.end {
@@ -666,6 +674,40 @@ mod tests {
         assert!(matches!(classify_with_cutoff(peer(220), &mut None, &panes, &procs, Some(1000)), Ok(PeerClass::Pane { .. })));
         procs.procs.remove(&210);
         assert!(classify_with_cutoff(peer(220), &mut None, &panes, &procs, Some(1000)).is_err());
+    }
+
+    #[test]
+    fn newer_intermediate_parent_cannot_hide_live_restricted_ancestor() {
+        let mut procs = Table { procs: HashMap::new(), unreadable: HashSet::new() };
+        let info = |ppid, start| ProcInfo { ppid, pgid: None, session: None, tty: None, start };
+        procs.procs.insert(10, info(20, 100));
+        procs.procs.insert(20, info(30, 300));
+        procs.procs.insert(30, info(932, 200));
+        let panes = PaneRegistry::default();
+        panes.insert("restricted", 30, &procs);
+        let origin = PeerOrigin::Process(PeerProcess { pid: 10, start: 100 });
+        let mut ancestry = Ancestry::at_accept(origin, &procs);
+        assert_eq!(ancestry.as_ref().unwrap().chain,
+            vec![(20, Some(300)), (30, Some(200)), (932, None)]);
+        assert!(matches!(classify_with_cutoff(origin, &mut ancestry, &panes, &procs, Some(250)),
+            Ok(PeerClass::Pane { session_id, .. }) if session_id == "restricted"));
+        panes.remove("restricted");
+        assert!(classify_with_cutoff(origin, &mut ancestry, &panes, &procs, Some(250)).is_err());
+    }
+
+    #[test]
+    fn missing_restricted_ancestor_blocks_even_pre_cutoff_owner_evidence() {
+        let mut procs = Table { procs: HashMap::new(), unreadable: HashSet::new() };
+        let info = |ppid, start| ProcInfo { ppid, pgid: None, session: None, tty: None, start };
+        procs.procs.insert(10, info(20, 100));
+        procs.procs.insert(20, info(1, 50));
+        let panes = PaneRegistry::default();
+        panes.insert("restricted", 20, &procs);
+        procs.procs.remove(&20);
+        let origin = PeerOrigin::Process(PeerProcess { pid: 10, start: 100 });
+        assert!(classify_with_cutoff(origin, &mut None, &panes, &procs, Some(200)).is_err());
+        procs.unreadable.insert(20);
+        assert!(classify_with_cutoff(origin, &mut None, &panes, &procs, Some(200)).is_err());
     }
 
     /// A fake process table: pid -> (ppid, session, tty); missing pids are `Vanished`, pids in
