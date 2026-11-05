@@ -1,0 +1,30 @@
+
+
+ComputerName            : 127.0.0.1
+RemoteAddress           : 127.0.0.1
+RemotePort              : 19730
+NameResolutionResults   : 127.0.0.1
+                          DESKTOP-1LAPJMP
+MatchingIPsecRules      : 
+NetworkIsolationContext : Loopback
+InterfaceAlias          : Loopback Pseudo-Interface 1
+SourceAddress           : 127.0.0.1
+NetRoute (NextHop)      : 0.0.0.0
+TcpTestSucceeded        : True
+
+
+
+
+
+LocalAddress   : 0.0.0.0
+LocalPort      : 19730
+RemoteAddress  : 0.0.0.0
+RemotePort     : 0
+State          : Listen
+AppliedSetting : 
+OwningProcess  : 20752
+CreationTime   : 2026-11-05 ¿ÀÀü 3:26:33
+OffloadState   : InHost
+
+
+

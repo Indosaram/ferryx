@@ -1,0 +1,66 @@
+cargo :    Compiling tokio v1.53.1
+위치 C:\Users\sook\ferryx-wt\rex-win-d831-headless.ps1:10 문자:1
++ cargo build --manifest-path src-tauri/Cargo.toml --no-default-feature ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling tokio v1.53.1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling arrayvec v0.7.8
+   Compiling icu_normalizer v2.3.0
+   Compiling flume v0.11.1
+   Compiling num-bigint-dig v0.8.6
+   Compiling harfrust v0.12.0
+   Compiling polycool v0.4.0
+   Compiling blake2b_simd v1.0.5
+   Compiling tiny-skia v0.12.0
+   Compiling ece v2.3.1
+   Compiling async-web-client v0.6.4
+   Compiling x509-parser v0.18.1
+   Compiling sqlx-sqlite v0.8.6
+   Compiling kurbo v0.13.1
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\src-tauri)
+   Compiling idna_adapter v1.2.2
+   Compiling rsa v0.9.10
+   Compiling idna v1.1.0
+   Compiling svgtypes v0.16.1
+   Compiling wasmparser v0.228.0
+   Compiling url v2.5.8
+   Compiling superboring v0.1.14
+   Compiling portable-pty v0.9.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\src-tauri\vendor\portable-pty)
+   Compiling rusqlite v0.32.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling sqlx-macros-core v0.8.6
+   Compiling usvg v0.48.1
+   Compiling mlua v0.12.2
+   Compiling rustls-acme v0.15.4
+   Compiling jwt-simple v0.12.11
+   Compiling sqlx-macros v0.8.6
+   Compiling wasmi v0.46.0
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper v1.11.0
+   Compiling tokio-stream v0.1.19
+   Compiling tower v0.5.3
+   Compiling resvg v0.48.1
+   Compiling tokio-util v0.7.19
+   Compiling tokio-tungstenite v0.29.0
+   Compiling web-push v0.11.0
+   Compiling sqlx-core v0.8.6
+   Compiling quinn v0.11.11
+   Compiling tower-http v0.6.11
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling axum v0.8.9
+   Compiling reqwest v0.12.28
+   Compiling sqlx v0.8.6
+   Compiling ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-hub)
+warning: static `NATIVE_DEBUG_SEQUENCE` is never used
+  --> src\ipc\debug.rs:34:8
+   |
+34 | static NATIVE_DEBUG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+   |        ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ferryx` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 57s
+EXIT=0

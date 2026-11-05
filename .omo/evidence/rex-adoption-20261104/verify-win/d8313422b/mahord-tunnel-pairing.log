@@ -1,0 +1,13 @@
+[2m2026-11-05T02:11:21.874305Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Initializing headless client session [3mhost[0m[2m=[0m127.0.0.1 [3mtcp_port[0m[2m=[0m29730 [3mudp_port[0m[2m=[0m29731 [3mtimeout_secs[0m[2m=[0mSome(25)
+[2m2026-11-05T02:11:21.874356Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Reconnecting with stored pairing record [3mpairing_id[0m[2m=[0m9929DC13-3841-4182-A399-9E1323F961A2
+[2m2026-11-05T02:11:22.645581Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Handshake completed, session ready [3mhost_name[0m[2m=[0mDESKTOP-1LAPJMP [3mwidth[0m[2m=[0m1920 [3mheight[0m[2m=[0m1080 [3mversion[0m[2m=[0m3
+[2m2026-11-05T02:11:22.645686Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Awaiting UDP media datagrams and decoding frames...
+[2m2026-11-05T02:11:22.646027Z[0m [33m WARN[0m [2mmaho_client[0m[2m:[0m UDP receiver stopped [3merr[0m[2m=[0mI/O failed: Connection refused (os error 61)
+[2m2026-11-05T02:11:22.646056Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Cleaning up session transport... [3mdecoded_frames[0m[2m=[0m0 [3mtarget_frames[0m[2m=[0m1
+[2m2026-11-05T02:11:22.646174Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Headless decode and receiver statistics summary [3mstats[0m[2m=[0m{"frames":0,"p50_us":0,"p95_us":0,"p99_us":0,"max_us":0,"receiver_snapshot":{"udp_authenticated_datagrams":0,"udp_authenticated_bytes":0,"udp_receive_bps":null,"packet_loss_ratio":null,"loss_expected_packets":0,"loss_missing_packets":0,"host_ready_to_encode_us":null,"host_encode_us":null,"host_encode_to_send_complete_us":null,"receive_assembly_us":null}}
+Error: UDP receiver failed
+
+Caused by:
+    0: I/O failed: Connection refused (os error 61)
+    1: Connection refused (os error 61)
+EXIT=1

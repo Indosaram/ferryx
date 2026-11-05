@@ -1,0 +1,24 @@
+
+running 1 test
+ferryx_lib-343f9c021bb9f724.exe : 
+위치 C:\Users\sook\ferryx-wt\rex-win-d831-owner.ps1:4 문자:1
++ & C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-343f9c021bb9f ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+thread 'daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases' (23484) pan
+icked at src\daemon\supervisor_peer.rs:648:9:
+assertion failed: classify_with_cutoff(descendant, &mut None, &panes, &procs,
+        Some(200)).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases ... FAILED
+
+failures:
+
+failures:
+    daemon::supervisor_peer::tests::verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5142 filtered out; finished in 0.00s
+
+EXIT=101

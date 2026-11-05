@@ -1,0 +1,7 @@
+[2m2026-11-05T03:07:07.449795Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Initializing headless client session [3mhost[0m[2m=[0m127.0.0.1 [3mtcp_port[0m[2m=[0m29730 [3mudp_port[0m[2m=[0m29731 [3mtimeout_secs[0m[2m=[0mNone
+[2m2026-11-05T03:07:07.450606Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Reconnecting with stored pairing record [3mpairing_id[0m[2m=[0m9929DC13-3841-4182-A399-9E1323F961A2
+[2m2026-11-05T03:07:07.845921Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Handshake completed, session ready [3mhost_name[0m[2m=[0mDESKTOP-1LAPJMP [3mwidth[0m[2m=[0m1920 [3mheight[0m[2m=[0m1080 [3mversion[0m[2m=[0m3
+[2m2026-11-05T03:07:07.846161Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Awaiting UDP media datagrams and decoding frames...
+[2m2026-11-05T03:07:07.897338Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m decoder initialized from keyframe [3mcodec_kind[0m[2m=[0mH264
+[2m2026-11-05T03:07:07.904327Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Decoded frame progress [3mdecoded_frames[0m[2m=[0m0 [3mtarget_frames[0m[2m=[0m18446744073709551615
+[2m2026-11-05T03:07:07.905507Z[0m [32m INFO[0m [2mmaho_client[0m[2m:[0m Decoded frame progress [3mdecoded_frames[0m[2m=[0m0 [3mtarget_frames[0m[2m=[0m18446744073709551615

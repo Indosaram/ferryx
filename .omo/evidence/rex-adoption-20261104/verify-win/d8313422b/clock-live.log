@@ -1,0 +1,2 @@
+RENDER {"type":"pluginRender","view":"main","html":"<h1>UTC clock</h1><time>03:06:48</time>"}
+EOF_TEARDOWN_EXIT 0

@@ -1,0 +1,48 @@
+
+
+ProcessId      : 30712
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" "daemon" "--root" "\\?\C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62" "--host-id" "ssh-maho-win"
+
+ProcessId      : 28744
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 9676
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 18628
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 21004
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 18120
+ExecutablePath : C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe
+CommandLine    : "C:\Users\sook\.ferryx\versions\2026.1101.1\bin\ferryx-remote-helper.exe" bridge --stdio --root "C:\Us
+                 ers\sook\.ferryx\r\2026.1101.1\26d0342bbcb2b5668c06a1fe64d1ad62"
+
+ProcessId      : 33368
+ExecutablePath : C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-343f9c021bb9f724.exe
+CommandLine    : "C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-343f9c021bb9f724.exe"
+
+ProcessId      : 31456
+ExecutablePath : C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-343f9c021bb9f724.exe
+CommandLine    : "C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-343f9c021bb9f724.exe" --exact daemon::owner_adm
+                 ission::tests::d_fake_daemon_entry --nocapture --test-threads=1
+
+ProcessId      : 19152
+ExecutablePath : C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-343f9c021bb9f724.exe
+CommandLine    : "C:\Users\sook\ferryx-wt\.target\debug\deps\ferryx_lib-343f9c021bb9f724.exe" --exact daemon::session_s
+                 ervice::machine_tests::desktop_inventory_isolated_child --nocapture
+
+
+

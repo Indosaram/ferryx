@@ -1,0 +1,65 @@
+cargo :     Blocking waiting for file lock on build directory
+위치 C:\Users\sook\ferryx-wt\rex-win-r2.ps1:15 문자:1
++ cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targe ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...build directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking spin v0.9.9
+   Compiling ffmpeg-sys-next v9.0.1
+    Checking ferryx-rd-proto v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-proto)
+    Checking leb128fmt v0.1.0
+    Checking lazy_static v1.5.0
+    Checking flume v0.11.1
+    Checking downcast-rs v2.0.2
+    Checking wasmparser v0.228.0
+    Checking ferryx-rd-render v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-rende
+r)
+   Compiling ferryx v2026.1101.1 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\src-tauri)
+    Checking wasmi_collections v0.46.0
+    Checking multi-stash v0.2.0
+    Checking ferryx-browser-engine-protocol v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\browser-eng
+ine-protocol)
+    Checking wasm-encoder v0.263.0
+    Checking symphonia-core v0.5.5
+    Checking num-bigint-dig v0.8.6
+    Checking wasmi_core v0.46.0
+    Checking shared_library v0.1.9
+    Checking sqlx-sqlite v0.8.6
+    Checking sharded-slab v0.1.7
+    Checking x509-parser v0.18.1
+    Checking ece v2.3.1
+    Checking ferryx-rd-net v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-net)
+    Checking wasmi_ir v0.46.0
+    Checking async-web-client v0.6.4
+    Checking wast v263.0.0
+    Checking tracing-subscriber v0.3.23
+    Checking rsa v0.9.10
+    Checking symphonia-metadata v0.5.5
+    Checking symphonia-codec-aac v0.5.5
+    Checking symphonia-codec-pcm v0.5.5
+    Checking rustls-acme v0.15.4
+    Checking symphonia-utils-xiph v0.5.5
+    Checking symphonia-bundle-mp3 v0.5.5
+    Checking symphonia-format-riff v0.5.5
+    Checking symphonia-codec-vorbis v0.5.5
+    Checking symphonia-format-ogg v0.5.5
+    Checking symphonia-format-isomp4 v0.5.5
+    Checking symphonia-bundle-flac v0.5.5
+    Checking superboring v0.1.14
+    Checking sqlx v0.8.6
+    Checking ferryx-rd-host v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-host)
+    Checking portable-pty v0.9.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\src-tauri\vendor\portable-pty)
+    Checking symphonia v0.5.5
+    Checking songbird v0.5.0
+    Checking rodio v0.22.2
+    Checking jwt-simple v0.12.11
+    Checking wat v1.263.0
+    Checking ferryx-hub v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-hub)
+    Checking wasmi v0.46.0
+    Checking web-push v0.11.0
+   Compiling ffmpeg-next v9.0.0
+    Checking ferryx-rd-decode v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-decod
+e)
+    Checking ferryx-rd-app v0.1.0 (C:\Users\sook\ferryx-wt\rex-verify-win-d8313422b\crates\ferryx-rd\ferryx-rd-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 43s
