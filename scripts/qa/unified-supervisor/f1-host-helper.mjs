@@ -212,7 +212,7 @@ export async function supervise(root, args) {
   delete env.F1_HOST_PROC;
   const gitObjects = gitObjectsSource();
   if (!gitObjects.path) throw failure('GIT_OBJECTS_REFUSED', gitObjects.reason);
-  const bwrapArgs = ['--unshare-pid', '--ro-bind', '/', '/', '--tmpfs', '/run', '--tmpfs', '/home/indo',
+  const bwrapArgs = ['--unshare-pid', '--ro-bind', '/', '/', '--tmpfs', '/run', '--tmpfs', '/home',
     '--dir', '/home/indo/code/ferryx/.git', '--ro-bind', gitObjects.path, '/home/indo/code/ferryx/.git/objects',
     '--tmpfs', '/tmp', '--dir', root, '--bind', root, root, '--ro-bind', helperDir, helperDir,
     '--dev-bind', '/dev', '/dev', '--proc', '/proc', '--chdir', root, bun, ...args];
