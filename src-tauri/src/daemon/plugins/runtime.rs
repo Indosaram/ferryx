@@ -34,9 +34,39 @@ where F: FnMut(DaemonRequest) -> Fut, Fut: Future<Output = Result<Value, String>
             }
         }
         if *disabled.borrow() { return Ok(()); }
-        let result = Command::new(&manifest.command[0]).args(&manifest.command[1..])
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
-            .kill_on_drop(true).spawn();
+        let result = {
+            let mut roots = crate::daemon::supervisor_peer::PLUGIN_ROOTS.write();
+            let mut command = Command::new(&manifest.command[0]);
+            command.args(&manifest.command[1..])
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
+                .kill_on_drop(true);
+            #[cfg(unix)]
+            command.process_group(0);
+            let child = command.spawn();
+            match child {
+                Ok(mut child) => {
+                    let identity = child.id().map(|pid| {
+                        let start = match crate::daemon::supervisor_peer::proc_info(pid) {
+                            Ok(info) => info.start,
+                            Err(error) => {
+                                tracing::warn!(pid, ?error, "plugin identity unavailable; retaining pid-wide refusal");
+                                0
+                            },
+                        };
+                        crate::daemon::supervisor_peer::PeerProcess { pid, start }
+                    });
+                    if let Some(identity) = identity {
+                        roots.push(identity);
+                        Ok(child)
+                    } else {
+                        // Never release an unidentified executable into the owner namespace.
+                        child.start_kill().map_err(|error| error.to_string())?;
+                        Err(std::io::Error::other("plugin process identity unavailable"))
+                    }
+                },
+                Err(error) => Err(error),
+            }
+        };
         let mut child = match result {
             Ok(child) => child,
             Err(error) => {

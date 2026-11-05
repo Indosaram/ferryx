@@ -105,6 +105,13 @@ pub trait ProcTable {
 /// The kernel's process table.
 pub struct SystemProcs;
 
+// Serializes process launch with authorization. The write guard spans spawn and registration:
+// even a plugin connecting in its first instruction cannot be mistaken for an owner.
+// Retired roots remain as ancestry tombstones: a surviving descendant must not become Owner
+// just because its plugin parent was reaped. Start times prevent live pid reuse matches.
+pub(crate) static PLUGIN_ROOTS: parking_lot::RwLock<Vec<PeerProcess>> =
+    parking_lot::RwLock::new(Vec::new());
+
 impl ProcTable for SystemProcs {
     fn info(&self, pid: u32) -> Result<ProcInfo, ProcError> {
         proc_info(pid)
@@ -400,12 +407,18 @@ impl Ancestry {
     fn walk(peer: PeerProcess, info: &ProcInfo, table: &impl ProcTable) -> Self {
         let mut chain = Vec::new();
         let mut current = info.ppid;
+        let mut child_start = info.start;
         for _ in 0..MAX_ANCESTRY {
             if current <= 1 {
                 return Ancestry { peer, chain, end: WalkEnd::Complete };
             }
             match table.info(current) {
                 Ok(next) => {
+                    if next.start > child_start {
+                        chain.push((current, None));
+                        return Ancestry { peer, chain, end: WalkEnd::Changed { pid: current } };
+                    }
+                    child_start = next.start;
                     chain.push((current, Some(next.start)));
                     if next.ppid == current {
                         return Ancestry { peer, chain, end: WalkEnd::Complete };
@@ -462,6 +475,18 @@ pub fn classify(
     panes: &PaneRegistry,
     table: &impl ProcTable,
 ) -> Result<PeerClass, String> {
+    let plugins = PLUGIN_ROOTS.read();
+    classify_with_roots(origin, ancestry, panes, table, &plugins, None)
+}
+
+fn classify_with_roots(
+    origin: PeerOrigin,
+    ancestry: &mut Option<Ancestry>,
+    panes: &PaneRegistry,
+    table: &impl ProcTable,
+    plugins: &[PeerProcess],
+    owner_cutoff: Option<u64>,
+) -> Result<PeerClass, String> {
     let peer = match origin {
         PeerOrigin::TokenAuthenticated => return Ok(PeerClass::TokenAuthenticated),
         PeerOrigin::Unknown => return Ok(PeerClass::Unknown),
@@ -473,6 +498,10 @@ pub fn classify(
         Ok(_) => return Err(format!("process {pid} is not the process that connected (its pid was reused); it may not change the supervisor")),
         Err(_) => return Err(format!("process {pid} could not be read; it may not change the supervisor")),
     };
+    if plugins.iter().any(|root| (root.pid == pid && (root.start == 0 || root.start == info.start))
+        || info.pgid == Some(root.pid)) {
+        return Err("PLUGIN_STDIO_REQUIRED: plugins may not use the owner transport".into());
+    }
     let pane = |session_id: String, why: String| Ok(PeerClass::Pane { session_id, why });
     if let Some((session_id, _)) = panes.find(|entry| entry.pid == pid) {
         return pane(session_id, format!("pane process {pid}"));
@@ -497,6 +526,10 @@ pub fn classify(
         *ancestry = Some(Ancestry::walk(peer, &info, table));
     }
     let walked = ancestry.as_ref().expect("walked above");
+    if walked.chain.iter().any(|(pid, start)| plugins.iter().any(|root|
+        root.pid == *pid && (root.start == 0 || start.is_none_or(|start| start == root.start)))) {
+        return Err("PLUGIN_STDIO_REQUIRED: plugin descendants may not use the owner transport".into());
+    }
     for &(ancestor, start) in &walked.chain {
         // A pane whose start time differs is a later process that reused an ancestor's pid.
         let descends = |entry: &PaneEntry| {
@@ -512,13 +545,31 @@ pub fn classify(
     }
     match walked.end {
         WalkEnd::Complete => Ok(PeerClass::Owner),
-        WalkEnd::Changed { pid: current } => Err(format!(
-            "the parent chain of process {pid} changed while it was checked (process {current} exited); retry"
-        )),
+        WalkEnd::Changed { pid: current } => {
+            {
+                #[cfg(windows)]
+                let owner_cutoff = owner_cutoff.or_else(|| table.info(std::process::id()).ok().map(|info| info.start));
+                let panes = panes.panes.read();
+                if let Some(cutoff) = owner_cutoff.filter(|_| panes.values().all(|entry| entry.start.is_some())) {
+                    let cutoff = panes.values().filter_map(|entry| entry.start)
+                        .chain(plugins.iter().map(|root| root.start)).fold(cutoff, u64::min);
+                    if predates_restricted_roots(peer, &walked.chain, cutoff) {
+                        return Ok(PeerClass::Owner);
+                    }
+                }
+            }
+            Err(format!(
+                "the parent chain of process {pid} changed while it was checked (process {current} exited); retry"
+            ))
+        },
         WalkEnd::TooDeep => Err(format!(
             "the parent chain of process {pid} is deeper than {MAX_ANCESTRY}"
         )),
     }
+}
+
+fn predates_restricted_roots(peer: PeerProcess, chain: &[(u32, Option<u64>)], cutoff: u64) -> bool {
+    peer.start < cutoff || chain.iter().any(|(_, start)| start.is_some_and(|start| start < cutoff))
 }
 
 /// Why a peer may not mutate supervisor state, or `None` when it may (see [`classify`]).
@@ -581,6 +632,48 @@ async fn registry_drops_exited_pane() {
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn exited_windows_ssh_ancestor_needs_positive_pre_pane_identity() {
+        assert!(predates_restricted_roots(PeerProcess { pid: 50, start: 100 }, &[], 200));
+        assert!(predates_restricted_roots(PeerProcess { pid: 60, start: 300 }, &[(50, Some(100)), (40, None)], 200));
+        assert!(!predates_restricted_roots(PeerProcess { pid: 60, start: 300 }, &[(50, Some(250)), (40, None)], 200));
+        assert!(!predates_restricted_roots(PeerProcess { pid: 60, start: 300 }, &[(40, None)], 200));
+        assert!(!predates_restricted_roots(PeerProcess { pid: 60, start: 200 }, &[], 200));
+    }
+
+    #[test]
+    fn plugin_roots_descendants_and_retired_groups_never_classify_as_owner() {
+        let mut procs = world();
+        let roots = [PeerProcess { pid: 300, start: 3000 }];
+        procs.procs.insert(300, ProcInfo { ppid: 100, pgid: Some(300), session: None, tty: None, start: 3000 });
+        procs.procs.insert(310, ProcInfo { ppid: 300, pgid: None, session: None, tty: None, start: 3100 });
+        procs.procs.insert(320, ProcInfo { ppid: 1, pgid: Some(300), session: None, tty: None, start: 3200 });
+        let panes = PaneRegistry::default();
+        for pid in [300, 310, 320] {
+            assert!(classify_with_roots(peer(pid), &mut None, &panes, &procs, &roots, None).is_err());
+        }
+        let mut cached = Ancestry::at_accept(peer(310), &procs);
+        procs.procs.remove(&300);
+        assert!(classify_with_roots(peer(310), &mut cached, &panes, &procs, &roots, None).is_err());
+        assert!(classify_with_roots(peer(320), &mut None, &panes, &procs, &roots, None).is_err());
+        procs.procs.get_mut(&310).unwrap().ppid = 300;
+        assert!(classify_with_roots(peer(310), &mut None, &panes, &procs,
+            &[PeerProcess { pid: 300, start: 0 }], None).is_err());
+    }
+
+    #[test]
+    fn exited_ancestor_owner_recovery_uses_real_classifier_without_promoting_panes() {
+        let mut procs = world();
+        procs.procs.remove(&50);
+        let panes = panes_of(200, &procs);
+        assert_eq!(classify_with_roots(peer(70), &mut None, &panes, &procs, &[], Some(1000)), Ok(PeerClass::Owner));
+        procs.procs.get_mut(&220).unwrap().session = None;
+        procs.procs.get_mut(&220).unwrap().tty = None;
+        assert!(matches!(classify_with_roots(peer(220), &mut None, &panes, &procs, &[], Some(1000)), Ok(PeerClass::Pane { .. })));
+        procs.procs.remove(&210);
+        assert!(classify_with_roots(peer(220), &mut None, &panes, &procs, &[], Some(1000)).is_err());
+    }
 
     /// A fake process table: pid -> (ppid, session, tty); missing pids are `Vanished`, pids in
     /// `unreadable` exist but cannot be read.
