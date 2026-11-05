@@ -14,7 +14,7 @@
 // serve config is back to its snapshot.
 import { randomUUID } from 'node:crypto';
 import { rpcProcess } from '../fixtures/native-configured-adapters.mjs';
-import { SESSION_PROFILE_SUFFIX, acceptedReply, configureGateway, gatewayPortFor, hubEnv, relayListenPort, remotePath, rpcCommand, sameServeConfig, serveAddedProblems } from './seams.mjs';
+import { SESSION_PROFILE_SUFFIX, acceptedReply, configureGateway, gatewayPortFor, hubEnv, relayListenPort, remotePath, rpcCommand, sameServeConfig, serveAddedProblems, startupDsrObserved } from './seams.mjs';
 import { LaneBlocked, StepFailed, latch, mutex, stopExact, until } from './steps.mjs';
 
 export function startSession({ config, run, lane }) {
@@ -165,8 +165,9 @@ export function startSession({ config, run, lane }) {
         // These fixture panes have no terminal surface to answer ConPTY's startup DSR.
         // Answer only an observed query; otherwise cmd never starts the fixture child.
         const attached = await until(`ConPTY startup for ${mode}`, () => s.call(`startup-${mode}`, [{ type: 'attach', sessionId: reply.sessionId, afterSequence: 0 }]),
-          (value) => value?.type === 'attachOk' && Buffer.from(value.history ?? '', 'base64').includes(Buffer.from('\x1b[6n')), { deadlineMs: 30_000 });
+          startupDsrObserved, { deadlineMs: 30_000 });
         lane.write('panes', `startup-${mode}.json`, attached);
+        lane.write('known-gap', `startup-${mode}-gap.json`, { gap: 'Harness answers observed ConPTY DSR; this run does not prove unaided pane startup.' });
         const written = await s.call(`startup-answer-${mode}`, [{ type: 'write', sessionId: reply.sessionId, data: Buffer.from('\x1b[1;1R').toString('base64') }]);
         if (written?.type === 'error') throw new StepFailed('FIXTURE_PANES', `ConPTY startup ${mode}: ${JSON.stringify(written)}`);
       }

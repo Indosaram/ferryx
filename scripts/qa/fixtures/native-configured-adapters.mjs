@@ -392,7 +392,7 @@ export function rpcProcess(executable, argv, { mcp = false, signal, processSigna
     if (!item) return;
     pending.delete(message.id);
     item.dispose();
-    if (message.error) item.reject(Object.assign(new Error(message.error.message), { code: message.error.code }));
+    if (message.error) item.reject(Object.assign(new Error(message.error.message), { code: message.error.code, receipt: message.error.receipt }));
     else item.resolve(message.result);
   });
   const rejectAll = (error) => {
@@ -449,8 +449,9 @@ export async function connectNativeMahord({ executable, address, pairingId, nudg
     // Dispatch acknowledges queued events, not host delivery. Observe a later video frame
     // before desktop acceptance reads the captured surface.
     const before = await call('remote_wait_for_screen_change', { timeout_ms: 5000 }, callSignal);
-    const frameId = before.content.map((item) => item.text ?? '').join('\n').match(/frame_id=(\d+)/)?.[1];
-    if (frameId) await call('remote_wait_for_screen_change', { last_frame_id: Number(frameId), timeout_ms: 5000 }, callSignal);
+    const frameId = parseScreenChangeFrame(before);
+    const later = await call('remote_wait_for_screen_change', { last_frame_id: frameId, timeout_ms: 5000 }, callSignal);
+    return parseScreenChangeFrame(later, frameId);
   };
   return {
     child: rpc.child,
@@ -472,6 +473,17 @@ export async function connectNativeMahord({ executable, address, pairingId, nudg
     },
     close: rpc.close,
   };
+}
+
+export function parseScreenChangeFrame(result, previousFrameId) {
+  const text = result.content.map((item) => item.text ?? '').join('\n');
+  if (/^Timeout:/.test(text)) throw Object.assign(new Error(text), { code: 'FRAME_TIMEOUT' });
+  const match = /^Screen changed: frame_id=(\d+), timestamp_ms=\d+, age_ms=\d+$/.exec(text);
+  const frameId = match ? Number(match[1]) : NaN;
+  if (!Number.isSafeInteger(frameId) || frameId < 0 || (previousFrameId !== undefined && frameId <= previousFrameId)) {
+    throw Object.assign(new Error('MahoRD did not return a valid advancing frame id'), { code: 'INVALID_FRAME' });
+  }
+  return frameId;
 }
 
 // Explicit config supplies paths/credentials and an existing isolated forwarding

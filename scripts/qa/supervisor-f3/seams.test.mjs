@@ -7,8 +7,11 @@ import {
   activationScript, globalRetryRule, guiBundleFiles, hubEnv, isolationProblems, namesNonce, newRunId, parseEnvBlock, untypeableShortNames, windowsEnvScript, pageToScreen, relayListenPort, remotePath, rowFocusVerdict, rpcCommand, rulesLineText,
   runLanes, sameServeConfig, serveAddedProblems, typedInto, uniqueSession, webContextFrom, webPageChannel, windowBoundsScript, windowRect,
   ENGINE_MODEL, ENGINE_PROVIDER, engineFiles, ocrShows, inputSourceScript, reportGoalRequest, stubReply, framePoint, panelReadRequest, compactOcrShows, workspaceProblem, qaProjectSeed, terminalTokenShown,
+  singleLineOcrShows, scrollDelta, startupDsrObserved, classifyFixtureInput,
 } from './seams.mjs';
 import { LANE_SCHEMA, RUN_SCHEMA, SCENARIOS, validateRun } from './contract.mjs';
+import './provenance.test.mjs';
+import './native-seams.test.mjs';
 
 const code = (fn) => { try { fn(); } catch (error) { return error.code; } return null; };
 const codeAsync = async (fn) => { try { await fn(); } catch (error) { return error.code; } return null; };
@@ -20,6 +23,30 @@ describe('real surface input and reads', () => {
     expect(terminalTokenShown('xf3token@88ebb', 'f3token088ebb')).toBe(false);
     expect(terminalTokenShown('f3token88ebb', 'f3token088ebb')).toBe(false);
     expect(terminalTokenShown('f3token@88ebbx', 'f3token088ebb')).toBe(false);
+    expect(terminalTokenShown('f3token@88ebb|', 'f3token088ebb')).toBe(true);
+    expect(terminalTokenShown('f3token@88ebc|', 'f3token088ebb')).toBe(false);
+  });
+  test('desktop scroll direction follows each native host convention', () => {
+    expect(scrollDelta('darwin', 'down', 520)).toBe(-520);
+    expect(scrollDelta('win32', 'down', 520)).toBe(520);
+    expect(scrollDelta('darwin', 'up', 900)).toBe(900);
+    expect(scrollDelta('win32', 'up', 900)).toBe(-900);
+    expect(code(() => scrollDelta('linux', 'down', 520))).toBe('SCROLL_PLATFORM');
+  });
+  test('Viewer marker must fit on one OCR line rather than adjacent panel rows', () => {
+    const marker = 'Viewer \u00b7 Supervisor report';
+    expect(singleLineOcrShows('Viewer - Supervisor report Rendered Markdown', marker)).toBe(true);
+    expect(singleLineOcrShows('Open in Viewer\nSupervisor report', marker)).toBe(false);
+    expect(singleLineOcrShows('Open in Viewer\r\nSupervisor report', marker)).toBe(false);
+    expect(singleLineOcrShows('Supervisor report', marker)).toBe(false);
+  });
+  test('startup DSR answer requires the exact query in an attach history', () => {
+    const history = (text) => Buffer.from(text).toString('base64');
+    expect(startupDsrObserved({ type: 'attachOk', history: history('ready\x1b[6n') })).toBe(true);
+    expect(startupDsrObserved({ type: 'attachOk', history: history('\x1b[5n') })).toBe(false);
+    expect(startupDsrObserved({ type: 'attachOk', history: history('\x1b[6') })).toBe(false);
+    expect(startupDsrObserved({ type: 'error', history: history('\x1b[6n') })).toBe(false);
+    expect(startupDsrObserved(null)).toBe(false);
   });
   test('compact OCR tolerates split token glyphs but rejects a different nonce', () => {
     expect(compactOcrShows('F3 check f3tok 1653 3d48:', 'f3tok16533d48')).toBe(true);
@@ -42,6 +69,32 @@ describe('real surface input and reads', () => {
   test('transcript is the app transcript, not a session-specific conversation', () => {
     expect(panelReadRequest('transcript')).toEqual({ type: 'supervisorReadV1', request: { view: 'transcript', cursor: 0 } });
     expect(panelReadRequest('panel')).toEqual({ type: 'supervisorReadV1', request: { view: 'panel' } });
+  });
+});
+
+describe('fixture input buffering', () => {
+  const classify = (text, extra = {}) => classifyFixtureInput({ bytes: Buffer.from(text), controlInput: '', drawn: true, mode: 'upstream', ...extra });
+
+  test.each(['\r', '\n'])('a report token is complete only after its %j terminator', (terminator) => {
+    const prefix = classify('F3-REPORT:abc');
+    expect(prefix.kind).toBe('input');
+    const suffix = classify('123', { controlInput: prefix.controlInput });
+    expect(suffix.kind).toBe('input');
+    const completed = classify(terminator, { controlInput: suffix.controlInput });
+    expect(completed.kind).toBe('report:abc123');
+    expect(completed.controlInput).toBe('');
+  });
+
+  test('a held draw command survives chunk boundaries and clears the control buffer', () => {
+    const prefix = classify('F3-DR', { drawn: false, mode: 'held' });
+    expect(prefix.kind).toBe('input');
+    expect(classify('AW\r', { drawn: false, mode: 'held', controlInput: prefix.controlInput })).toEqual({ kind: 'draw', controlInput: '' });
+    expect(classify('F3-DRAW\r').kind).toBe('input');
+  });
+
+  test('control buffering is bounded and Ctrl-C takes precedence over commands', () => {
+    expect(classify('x'.repeat(5000)).controlInput.length).toBe(4096);
+    expect(classify('F3-REPORT:abc\r\x03').kind).toBe('stop');
   });
 });
 
@@ -410,7 +463,7 @@ describe('all-local run', () => {
 
   test('a smoke run never passes, and a lane left out blocks its scenarios', () => {
     const rev = 'b'.repeat(40);
-    const session = { schema: LANE_SCHEMA, lane: 'session', blocked: null, failure: null, machine: { id: 'm' }, candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, steps: [], cleanup: [] };
+    const session = { schema: LANE_SCHEMA, lane: 'session', blocked: null, failure: null, machine: { id: 'm' }, candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, harness: { headRevision: rev, clean: true, status: '' }, steps: [], cleanup: [] };
     const base = { schema: RUN_SCHEMA, revision: rev, control: { hostname: 'c', head: rev, clean: true, scripts: [{ path: 'a', sha256: 'c'.repeat(64) }] }, session, cross: [] };
     const out = { schema: LANE_SCHEMA, blocked: { code: 'LANE_NOT_IN_RUN' }, steps: [], cleanup: [] };
     const verdict = validateRun({ ...base, lanes: { macos: out, windows: out, iphone: out } });
@@ -474,7 +527,7 @@ describe('macOS GUI launcher bundle', () => {
 describe('session host in the verdict', () => {
   const rev = 'b'.repeat(40);
   const session = (extra = {}) => ({ schema: LANE_SCHEMA, lane: 'session', blocked: null, failure: null, machine: { id: 'm' },
-    candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, steps: [], cleanup: [], ...extra });
+    candidate: { headRevision: rev, clean: true, stamp: `${rev}+e3b0` }, harness: { headRevision: rev, clean: true, status: '' }, steps: [], cleanup: [], ...extra });
   const run = (s) => ({ schema: RUN_SCHEMA, revision: rev, control: { hostname: 'c', head: rev, clean: true, scripts: [{ path: 'a', sha256: 'c'.repeat(64) }] },
     session: s, lanes: {}, cross: [] });
 
@@ -491,6 +544,7 @@ describe('session host in the verdict', () => {
     const harness = 'd'.repeat(40);
     const receipt = { ...run(session()), harnessRevision: harness };
     receipt.control.head = harness;
+    receipt.session.harness.headRevision = harness;
     expect(validateRun(receipt).errors).toEqual([]);
     receipt.session.candidate.headRevision = harness;
     expect(validateRun(receipt).errors.some((error) => error.includes('candidate head'))).toBe(true);

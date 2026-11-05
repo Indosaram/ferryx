@@ -24,6 +24,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
+import { classifyFixtureInput } from './seams.mjs';
 
 const [logDir, mode, title] = process.argv.slice(2);
 if (!logDir || !['decision', 'held', 'upstream', 'focus'].includes(mode) || !/^[a-z0-9]+$/.test(title ?? '')) {
@@ -102,28 +103,11 @@ function drawFocus() {
   report('idle');
 }
 
-function classify(bytes) {
-  if (bytes.includes(0x03)) return 'stop';
-  const text = bytes.toString('utf8');
-  controlInput = (controlInput + text).slice(-4096);
-  const report = /F3-REPORT:([a-z0-9]+)[\r\n]/.exec(controlInput);
-  if (report) { controlInput = ''; return `report:${report[1]}`; }
-  if (!drawn && controlInput.includes('F3-DRAW')) { controlInput = ''; return 'draw'; }
-  if (!drawn) return 'input';
-  if (mode === 'upstream' || mode === 'focus') return 'input';
-  // The option the keys select: a digit, or Enter after N down-arrows from option 1; Esc alone
-  // cancels. Option 1 is Yes, option 4 is No.
-  const digit = /^([1-4])/.exec(text);
-  const arrows = text.split('\x1b[B').length - 1;
-  const index = digit ? Number(digit[1]) : text.endsWith('\r') ? arrows + 1 : text === '\x1b' ? 4 : null;
-  if (index === 1) return 'approve';
-  if (index === 4) return 'reject';
-  return index === null ? 'input' : `option${index}`;
-}
-
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.on('data', (chunk) => {
-  const kind = classify(chunk);
+  const classified = classifyFixtureInput({ bytes: chunk, controlInput, drawn, mode });
+  controlInput = classified.controlInput;
+  const kind = classified.kind;
   record({ kind: 'received', classified: kind, hex: chunk.toString('hex'), nonce });
   if (kind === 'stop') { record({ kind: 'stopped' }); process.exit(130); }
   if (kind === 'draw') { drawn = true; drawDecision(); return; }

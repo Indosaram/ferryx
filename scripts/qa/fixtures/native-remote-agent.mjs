@@ -36,6 +36,10 @@ const inside = (root, path) => {
 };
 const ps = (value) => `'${String(value).replaceAll("'", "''")}'`;
 
+export function tolerableSetupProbeReadError(error) {
+  return error?.code === 'ENOENT' || error instanceof SyntaxError;
+}
+
 export function subscribeSetupProbe(target, signal, timeoutMs = 150000) {
   let dispose;
   const promise = new Promise((resolveProbe, reject) => {
@@ -49,7 +53,7 @@ export function subscribeSetupProbe(target, signal, timeoutMs = 150000) {
       try {
         if (!result && completionPath) {
           try { result = JSON.parse(await readFile(completionPath, 'utf8')); }
-          catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) return finish(error); }
+          catch (error) { if (!tolerableSetupProbeReadError(error)) return finish(error); }
         }
         if (markerPath && wrapperExitCode === null) {
           try {
@@ -84,6 +88,38 @@ export function subscribeSetupProbe(target, signal, timeoutMs = 150000) {
   });
   promise.catch(() => {});
   return { promise, close: () => dispose() };
+}
+
+export async function launchInteractiveGuiTask({ profile, signal }, { invoke = command, persist = persistLaunch } = {}) {
+  const taskName = `FerryxF3Gui-${basename(profile)}`;
+  const launcher = join(profile, 'launch.cmd');
+  const receipt = { taskName, launcher, user: null, created: false, started: false, deleted: false };
+  let launchError;
+  try {
+    receipt.user = (await invoke('whoami', [], signal)).trim();
+    await invoke('schtasks', ['/create', '/tn', taskName, '/tr', `cmd.exe /d /s /c ""${launcher}""`, '/sc', 'ONCE', '/st', '23:59', '/it', '/ru', receipt.user], signal);
+    receipt.created = true;
+    await invoke('schtasks', ['/run', '/tn', taskName], signal);
+    receipt.started = true;
+  } catch (error) {
+    launchError = error;
+    receipt.launchError = { code: error.code, message: error.message };
+  } finally {
+    if (receipt.created) {
+      try {
+        await invoke('schtasks', ['/delete', '/tn', taskName, '/f'], signal);
+        receipt.deleted = true;
+      } catch (error) {
+        receipt.deleteError = { code: error.code, message: error.message };
+      }
+    }
+    try { await persist(join(profile, 'evidence', 'gui-interactive-task.json'), receipt); }
+    catch (error) {
+      throw Object.assign(launchError ? new AggregateError([launchError, error], 'GUI launch and receipt persistence failed') : error, { receipt });
+    }
+  }
+  if (launchError) throw Object.assign(launchError, { receipt });
+  return receipt;
 }
 
 export async function runInteractiveSetupProbe({ profile, gui, script, signal }, {
@@ -1166,23 +1202,7 @@ async function dispatch(method, args, signal) {
     }
     case 'launch-gui-interactive': {
       if (process.platform !== 'win32' || !profiles.has(args.profile)) throw fail('Unknown Windows launcher profile');
-      const taskName = `FerryxF3Gui-${basename(args.profile)}`;
-      const launcher = join(args.profile, 'launch.cmd');
-      const user = (await command('whoami', [], signal)).trim();
-      const receipt = { taskName, launcher, user, created: false, started: false, deleted: false };
-      try {
-        await command('schtasks', ['/create', '/tn', taskName, '/tr', `cmd.exe /d /s /c ""${launcher}""`, '/sc', 'ONCE', '/st', '23:59', '/it', '/ru', user], signal);
-        receipt.created = true;
-        await command('schtasks', ['/run', '/tn', taskName], signal);
-        receipt.started = true;
-      } finally {
-        if (receipt.created) {
-          await command('schtasks', ['/delete', '/tn', taskName, '/f'], signal);
-          receipt.deleted = true;
-        }
-        await persistLaunch(join(args.profile, 'evidence', 'gui-interactive-task.json'), receipt);
-      }
-      return receipt;
+      return launchInteractiveGuiTask({ ...args, signal });
     }
     case 'await-gui-launch': {
       if (!profiles.has(args.profile)) throw fail('Unknown launcher profile');
@@ -1705,7 +1725,7 @@ if (process.argv.includes('--read-only-setup-probe')) {
     const controller = new AbortController(); jobs.set(request.id, controller);
     dispatch(request.method, request.args, controller.signal).then(
       (result) => output({ id: request.id, result }),
-      (error) => output({ id: request.id, error: { code: error.code, message: error.message } }),
+      (error) => output({ id: request.id, error: { code: error.code, message: error.message, receipt: error.receipt } }),
     ).finally(() => jobs.delete(request.id));
   });
 }

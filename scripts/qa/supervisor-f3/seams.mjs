@@ -455,6 +455,36 @@ export const compactOcrShows = (text, phrase) => {
   return key(text).includes(key(phrase));
 };
 
+/** A Viewer title must be present on one OCR line, never assembled from adjacent report rows. */
+export const singleLineOcrShows = (text, phrase) => String(text ?? '').split(/\r?\n/).some((line) => ocrShows(line, phrase));
+
+/** MahoRD forwards dy unchanged; native wheel direction differs between the desktop hosts. */
+export function scrollDelta(platform, direction, pixels) {
+  switch (platform) {
+    case 'darwin': return (direction === 'down' ? -1 : 1) * pixels;
+    case 'win32': return (direction === 'down' ? 1 : -1) * pixels;
+    default: throw new StepFailed('SCROLL_PLATFORM', `unsupported desktop platform ${platform}`);
+  }
+}
+
+/** Only an observed ConPTY cursor-position query authorizes the fixture startup answer. */
+export const startupDsrObserved = (reply) => reply?.type === 'attachOk' && Buffer.from(reply.history ?? '', 'base64').includes(Buffer.from('\x1b[6n'));
+
+/** Pure input classification with an explicit bounded control buffer carried between chunks. */
+export function classifyFixtureInput({ bytes, controlInput, drawn, mode }) {
+  if (bytes.includes(0x03)) return { kind: 'stop', controlInput };
+  const text = bytes.toString('utf8');
+  const buffered = (controlInput + text).slice(-4096);
+  const report = /F3-REPORT:([a-z0-9]+)[\r\n]/.exec(buffered);
+  if (report) return { kind: `report:${report[1]}`, controlInput: '' };
+  if (!drawn && buffered.includes('F3-DRAW')) return { kind: 'draw', controlInput: '' };
+  if (!drawn || mode === 'upstream' || mode === 'focus') return { kind: 'input', controlInput: buffered };
+  const digit = /^([1-4])/.exec(text);
+  const arrows = text.split('\x1b[B').length - 1;
+  const index = digit ? Number(digit[1]) : text.endsWith('\r') ? arrows + 1 : text === '\x1b' ? 4 : null;
+  return { kind: index === 1 ? 'approve' : index === 4 ? 'reject' : index === null ? 'input' : `option${index}`, controlInput: buffered };
+}
+
 /** A whole terminal token, including every nonce glyph. The slashed zero reads as @. */
 export const terminalTokenShown = (text, token) => String(text).split(/\s+/).some((word) => word.replace(/@/g, '0').replace(/\|$/, '') === token);
 

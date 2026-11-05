@@ -60,10 +60,11 @@ function identity({ checkout = CHECKOUT } = {}) {
   if (!isAbsolute(checkout)) throw fail('IDENTITY_REFUSED', 'candidate checkout must be absolute');
   const candidateGit = (...args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8' }).trim();
   const status = candidateGit('status', '--porcelain', '--untracked-files=no');
+  const harnessStatus = git('status', '--porcelain', '--untracked-files=all');
   return {
     machine: { id: machineId(), hostname: hostname(), platform: platform(), release: release(), node: process.version },
     candidate: { checkout, headRevision: candidateGit('rev-parse', 'HEAD'), clean: status === '', status },
-    harness: { checkout: CHECKOUT, headRevision: git('rev-parse', 'HEAD') },
+    harness: { checkout: CHECKOUT, headRevision: git('rev-parse', 'HEAD'), clean: harnessStatus === '', status: harnessStatus },
   };
 }
 

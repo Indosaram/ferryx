@@ -25,7 +25,7 @@ import { FRONTEND_DEV_URL } from '../../lib/qa-scenarios/frontend-server.mjs';
 import { LaneBlocked, StepFailed, markNotRun, runStep, stopExact, until } from './steps.mjs';
 import { scenariosForLane } from './contract.mjs';
 import { acceptedReply, configureGateway, framePoint, panelReadRequest, compactOcrShows, workspaceProblem, ocrShows, reportGoalRequest, decisionsNamingNonce, gatewayPortFor, hubEnv, isolationProblems, globalRetryRule, namesNonce, rowFocusVerdict, rpcCommand, rulesLineText, typedInto, uniqueSession, windowRect } from './seams.mjs';
-import { terminalTokenShown } from './seams.mjs';
+import { terminalTokenShown, singleLineOcrShows, scrollDelta, startupDsrObserved } from './seams.mjs';
 import { decodePng, encodePng, ocrImage } from './png.mjs';
 
 /**
@@ -100,15 +100,20 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const who = await helper.call('identity', { checkout: host.worktree });
       lane.receipt.machine = who.machine;
       lane.receipt.candidate = who.candidate;
+      lane.receipt.harness = who.harness;
     } catch (error) {
       throw new LaneBlocked('HOST_UNAVAILABLE', `ssh ${host.sshDestination} (${host.hostId}): ${error.message}`);
     }
+    lane.write('identity', 'identity.json', { machine: lane.receipt.machine, candidate: lane.receipt.candidate, harness: lane.receipt.harness });
+    const harnessRevision = run.harnessRevision ?? run.revision;
+    if (lane.receipt.harness?.headRevision !== harnessRevision) throw new StepFailed('HARNESS_REVISION_MISMATCH', `${host.hostId} harness is at ${lane.receipt.harness?.headRevision}, expected ${harnessRevision}`);
+    if (lane.receipt.harness.clean !== true) throw new StepFailed('HARNESS_DIRTY', `${host.hostId} harness checkout is not clean: ${lane.receipt.harness.status}`);
     try {
       mahord = await connectNativeMahord({ executable: run.mahordExecutable, address: host.mahordAddress, pairingId: host.pairingId, nudgeMs: host.mahordNudgeMs, display: host.mahordDisplay, codec: host.mahordCodec, signal });
     } catch (error) {
       throw new LaneBlocked('MAHORD_UNAVAILABLE', `MahoRD ${host.mahordAddress} (${host.hostId}): ${error.message}`);
     }
-    lane.write('identity', 'identity.json', { machine: lane.receipt.machine, candidate: lane.receipt.candidate });
+
     if (lane.receipt.candidate.headRevision !== run.revision) throw new StepFailed('REVISION_MISMATCH', `${host.hostId} checkout is at ${lane.receipt.candidate.headRevision}, run revision ${run.revision}`);
 
     // 1. Isolated profile + candidate daemon through the existing native agent. The build
@@ -171,7 +176,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
 
     // 2. GUI through MahoRD only (the same launcher path native-configured-adapters uses).
     gui = await launchGui({ agent, helper, mahord, setup, host, run, lane });
-    if (host.platform === 'win32') await mahord.hotkey(['Meta', 'ArrowUp'], signal);
+
     // Nothing is clicked or typed until the live GUI process is proven to run on this run's
     // isolated profile (never the owner's HOME or data dir), read from the process itself.
     const isolation = { expected: Object.fromEntries(ISOLATED_ENV.map((key) => [key, setup.env[key]])), profile: setup.profile };
@@ -181,6 +186,12 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const isolationIssues = isolationProblems(live, { ...isolation, ownerRoots: live.ownerRoots });
     lane.write('gui-receipt', 'gui-isolation.json', { pid: gui.pid, ...isolation, ownerRoots: live.ownerRoots, envRead: Array.isArray(live.env), openPaths: live.openPaths, problems: isolationIssues });
     if (isolationIssues.length) throw new StepFailed('GUI_NOT_ISOLATED', isolationIssues.join('; '));
+    if (host.platform === 'win32') {
+      const front = await agent.call('setup-target', { profile: setup.profile, gui, boundsOnly: true });
+      lane.write('gui-receipt', 'gui-before-maximize.json', front);
+      if (!front.bounds || front.frontPid !== gui.pid) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} not frontmost before maximize: ${JSON.stringify(front)}`);
+      await mahord.hotkey(['Meta', 'ArrowUp'], signal);
+    }
     // macOS: the run-owned GUI is started by a background launcher, so it never takes the front
     // by itself and the owner's own windows can cover it. It is raised (by its exact pid) before
     // every frame, so every OCR read and every click lands on the run's own window.
@@ -229,17 +240,20 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const shows = ocrShows;
     let frameSize; let windowFrame; let captureSequence = 0;
     const click = (point) => mahord.click(framePoint(point, frameSize.width, frameSize.height), signal);
-    const scrollPanel = (dy) => mahord.scroll({ ...framePoint({ x: windowFrame.x + Math.min(180, windowFrame.width * 0.10), y: windowFrame.y + windowFrame.height * 0.55 }, frameSize.width, frameSize.height), dx: 0, dy }, signal);
+    const scrollPanel = (direction, pixels) => mahord.scroll({ ...framePoint({ x: windowFrame.x + Math.min(180, windowFrame.width * 0.10), y: windowFrame.y + windowFrame.height * 0.55 }, frameSize.width, frameSize.height), dx: 0, dy: scrollDelta(host.platform, direction, pixels) }, signal);
     const frame = async (name, step, { marker = runMarker } = {}) => {
       for (let attempt = 1; ; attempt += 1) {
         await raise();
-        await mahord.waitForFrame(signal);
+        const frameId = await mahord.waitForFrame(signal);
         const bytes = await mahord.screenshot(signal);
         frameSize = { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
         const rect = await windowOf(bytes.readUInt32BE(16));
         windowFrame = rect;
         const captureName = `${name}-${++captureSequence}`;
         const shot = step ? step.artifact('screenshot', `${captureName}.png`, bytes) : lane.write('screenshot', `frames/${captureName}.png`, bytes);
+        const observation = { captureName, frameId, screenshot: shot.path };
+        if (step) step.artifact('frame-observation', `${captureName}.frame.json`, observation);
+        else lane.write('frame-observation', `frames/${captureName}.frame.json`, observation);
         const read = await ocr(run.tesseract, join(run.evidenceDir, shot.path), rect);
         if (name.endsWith('terminal-ready')) {
           const header = await ocr(run.tesseract, join(run.evidenceDir, shot.path),
@@ -249,19 +263,25 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
         }
         if (step) step.artifact('ocr', `${captureName}.ocr.tsv`, read.tsv);
         if (workspaceProblem(read.text)) throw new StepFailed('HARNESS_WORKSPACE_UNAVAILABLE', read.text.slice(0, 1800));
-        if (host.platform !== 'darwin' || !marker || shows(read.text, marker)) return { shot, read, bytes };
+        if (host.platform !== 'darwin' || !marker || shows(read.text, marker)) return { shot, read, bytes, observation };
         if (attempt >= 5) throw new StepFailed('GUI_NOT_FRONT', `frame ${name}: the run window text "${marker}" is not in the cropped frame after ${attempt} captures (a stale or covered frame)`);
         await new Promise((resolveWait) => { setTimeout(resolveWait, 1_000); });
       }
     };
-    const keep = (step, name, seen) => { const captureName = `${name}-${++captureSequence}`; step.artifact('screenshot', `${captureName}.png`, seen.bytes); step.artifact('ocr', `${captureName}.ocr.tsv`, seen.read.tsv); return seen; };
+    const keep = (step, name, seen) => {
+      const captureName = `${name}-${++captureSequence}`;
+      const shot = step.artifact('screenshot', `${captureName}.png`, seen.bytes);
+      step.artifact('frame-observation', `${captureName}.frame.json`, { ...seen.observation, captureName, sourceCaptureName: seen.observation.captureName, screenshot: shot.path });
+      step.artifact('ocr', `${captureName}.ocr.tsv`, seen.read.tsv);
+      return seen;
+    };
     // First launch discovers the other linked checkouts. Dismiss only the import prompt actually
     // observed in the owned window, through the same real MahoRD click used by the clauses.
     const initial = await until('owned supervisor frontend rendered', () => frame('initial-import', null, { marker: null }),
       ({ read }) => shows(read.text, 'Supervisor') || locate(read, "Don't import") !== null, { deadlineMs: 90_000 });
     const dismissImport = locate(initial.read, "Don't import");
     if (dismissImport) {
-      await mahord.click({ x: dismissImport.x, y: dismissImport.y }, signal);
+      await click(dismissImport);
       await until('initial import dialog dismissed', () => frame('import-dismissed', null, { marker: null }),
         ({ read }) => !locate(read, "Don't import"), { deadlineMs: 30_000 });
     }
@@ -280,7 +300,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       return keep(step, name, await until(name, async () => {
         const seen = await frame(`${name}-${++attempt}`);
         await panel(step, `${name}-${attempt}`);
-        if (scroll && !predicate(seen.read)) await scrollPanel(520);
+        if (scroll && !predicate(seen.read)) await scrollPanel('down', 520);
         return seen;
       }, ({ read }) => predicate(read), { deadlineMs: 30_000 }));
     };
@@ -288,7 +308,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const seen = await visible(step, 'composer-visible', (r) => locate(r, 'Tell the supervisor') !== null, { scroll: true });
       await click(locate(seen.read, 'Tell the supervisor'));
       await typeText(text);
-      await frame('composer-after-type', step);
+      await visible(step, 'composer-after-type', (r) => compactOcrShows(r.text, token));
       await mahord.key('Enter', signal);
       await frame('composer-after-enter', step);
     };
@@ -363,8 +383,8 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     });
 
     // F3-D4: the session's long report (sent by the fixture agent through the product's
-    // supervisorReport path) opens in Viewer: before the click its end is not on screen; after
-    // it the full heading and the configured Viewer-only marker are, then the end line.
+    // supervisorReport path) opens in Viewer: before the click its middle is not on screen; after
+    // it the heading, a middle section, and the end with a Viewer-only section are proven.
     await runStep(lane, 'F3-D4', async (step) => {
       const token = `${lane.name.slice(0, 3)}${run.runId.replace(/[^a-z0-9]/g, '').slice(-8)}`;
       const heading = `F3 long report ${token}`;
@@ -386,17 +406,28 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       // The panel's report row shows the first lines and the last line (reportExcerpt), so the
       // proof the report is not open yet is a middle section only the Viewer shows, and no Viewer.
       const middle = 'Migration check 9 for';
+      // Section 2's body is absent from the row excerpt's first three nonblank lines.
+      const headMiddle = 'Migration check 2 for';
       const viewerMarker = 'Viewer · Supervisor report';
-      step.assert('report-not-open-before-viewer', !shows(read.text, middle) && !compactOcrShows(read.text, viewerMarker), { middle, viewerMarker, text: read.text.slice(0, 1500) });
+      step.assert('report-not-open-before-viewer', !shows(read.text, middle) && !singleLineOcrShows(read.text, viewerMarker), { middle, viewerMarker, text: read.text.slice(0, 1500) });
       const open = locate(read, host.viewerLabel ?? 'Open in Viewer');
       if (!open) throw new StepFailed('PRODUCT_GAP_VIEWER_CONTROL', `no "${host.viewerLabel ?? 'Open in Viewer'}" control next to the report`);
       await click(open);
-      const head = keep(step, 'viewer-head', await until('report heading in Viewer', () => frame('viewer-head', undefined, { marker: host.viewerMarker }), ({ read: r }) => compactOcrShows(r.text, heading) && compactOcrShows(r.text, viewerMarker), { deadlineMs: 60_000 }));
-      step.assert('viewer-shows-report-heading', compactOcrShows(head.read.text, heading), { heading, text: head.read.text.slice(0, 1500) });
-      step.assert('viewer-marker-shown', compactOcrShows(head.read.text, viewerMarker), { marker: viewerMarker });
+      const head = keep(step, 'viewer-head', await until('report heading in Viewer', () => frame('viewer-head', undefined, { marker: viewerMarker }), ({ read: r }) => compactOcrShows(r.text, heading) && shows(r.text, headMiddle) && singleLineOcrShows(r.text, viewerMarker), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-heading', compactOcrShows(head.read.text, heading) && shows(head.read.text, headMiddle), { heading, headMiddle, text: head.read.text.slice(0, 1500) });
+      step.assert('viewer-marker-shown', singleLineOcrShows(head.read.text, viewerMarker), { marker: viewerMarker });
+      // The document has focus on open. PageDown navigates the real Viewer without clicking
+      // its table of contents (which can itself show section titles but not their body text).
+      const body = keep(step, 'viewer-middle', await until('report middle in Viewer', async () => {
+        const seen = await frame('viewer-middle', undefined, { marker: viewerMarker });
+        if (!shows(seen.read.text, middle)) await mahord.key('PageDown', signal);
+        return seen;
+      }, ({ read: r }) => shows(r.text, middle) && singleLineOcrShows(r.text, viewerMarker), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-middle', shows(body.read.text, middle) && singleLineOcrShows(body.read.text, viewerMarker), { middle, text: body.read.text.slice(0, 1500) });
       await mahord.hotkey(host.platform === 'darwin' ? ['Meta', 'ArrowDown'] : ['Control', 'End'], signal);
-      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail', undefined, { marker: host.viewerMarker }), ({ read: r }) => compactOcrShows(r.text, end) && shows(r.text, host.viewerMarker), { deadlineMs: 60_000 }));
-      step.assert('viewer-shows-report-end', compactOcrShows(tail.read.text, end) && shows(tail.read.text, host.viewerMarker), { end, marker: host.viewerMarker, text: tail.read.text.slice(0, 1500) });
+      const nearEnd = 'Migration check 40 for';
+      const tail = keep(step, 'viewer-tail', await until('report end in Viewer', () => frame('viewer-tail', undefined, { marker: viewerMarker }), ({ read: r }) => compactOcrShows(r.text, end) && shows(r.text, nearEnd) && singleLineOcrShows(r.text, viewerMarker), { deadlineMs: 60_000 }));
+      step.assert('viewer-shows-report-end', compactOcrShows(tail.read.text, end) && shows(tail.read.text, nearEnd) && singleLineOcrShows(tail.read.text, viewerMarker), { end, nearEnd, marker: viewerMarker, text: tail.read.text.slice(0, 1500) });
     });
     // The Viewer is a modal over the panel; later steps read the panel, so it is closed (Escape,
     // ReportViewer.tsx onKeyDown) whatever D4's outcome.
@@ -419,8 +450,9 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
         panes[key] = { title: pane.title, sessionId: spawned.sessionId };
         if (pane.shell.toLowerCase().endsWith('.cmd')) {
           const attached = await until(`ConPTY startup for ${key}`, () => call(`startup-${key}`, [{ type: 'attach', sessionId: spawned.sessionId, afterSequence: 0 }]),
-            (value) => value?.type === 'attachOk' && Buffer.from(value.history ?? '', 'base64').includes(Buffer.from('\x1b[6n')), { deadlineMs: 30_000 });
+            startupDsrObserved, { deadlineMs: 30_000 });
           step.artifact('fixture-startup', `startup-${key}.json`, attached);
+          step.artifact('known-gap', `startup-${key}-gap.json`, { gap: 'Harness answers observed ConPTY DSR; F3-D6 does not prove unaided pane startup.' });
           await call(`startup-answer-${key}`, [{ type: 'write', sessionId: spawned.sessionId, data: Buffer.from('\x1b[1;1R').toString('base64') }]);
         }
       }
@@ -492,7 +524,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // OCR before and after; the daemon's panel read proves the stored rule.
     await runStep(lane, 'F3-D7', async (step) => {
       const instruction = 'retry every 5 min';
-      await scrollPanel(900);
+      await scrollPanel('down', 900);
       const beforeView = await panel(step, 'rules-before');
       const { read: beforeRead } = await visible(step, 'rules-before', (r) => rulesLineText(r.text) !== null, { scroll: true });
       const beforeLine = rulesLineText(beforeRead.text);
@@ -587,7 +619,20 @@ async function launchGui({ agent, helper, mahord, setup, host, run, lane }) {
   // Handled now so a failed launch step cannot leave it rejecting unobserved; awaited below.
   receipt.catch(() => {});
   if (host.platform === 'win32') {
-    lane.write('gui-receipt', 'gui-interactive-task.json', await agent.call('launch-gui-interactive', { profile: setup.profile }));
+    let task;
+    let launchError;
+    try {
+      task = await agent.call('launch-gui-interactive', { profile: setup.profile });
+    } catch (error) {
+      task = error.receipt;
+      launchError = error;
+    }
+    lane.write('gui-receipt', 'gui-interactive-task.json', task ?? { unavailable: true, error: String(launchError?.message ?? launchError) });
+    if (task?.created && !task.deleted) {
+      lane.receipt.cleanup.push({ resource: 'gui-interactive-task', action: 'reported-not-killed', taskName: task.taskName, deleteError: task.deleteError });
+    }
+    if (launchError) throw launchError;
+    if (task?.created && !task.deleted) throw new StepFailed('GUI_TASK_DELETE', JSON.stringify({ taskName: task.taskName, deleteError: task.deleteError }));
   } else {
     const opened = await helper.call('open-gui-bundle', { profile: setup.profile, bundleId: `dev.ferryx.qa.${run.runId}`, agent: host.remoteAgent, specPath });
     lane.write('gui-receipt', 'gui-bundle.json', opened);

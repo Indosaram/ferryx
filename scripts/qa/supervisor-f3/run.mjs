@@ -111,7 +111,7 @@ async function main() {
   process.on('SIGINT', () => controller.abort(new Error('interrupted')));
   // Short and typeable: see newRunId (unix socket limit, Windows 8.3 launcher path).
   const runId = newRunId(new Date(), randomUUID());
-  const run = { runId, revision: opts.revision, evidenceDir, signal: controller.signal, mahordExecutable: config.mahordExecutable, tesseract: config.tesseract, sshExecutable: config.sshExecutable,
+  const run = { runId, revision: opts.revision, harnessRevision: opts.harnessRevision, evidenceDir, signal: controller.signal, mahordExecutable: config.mahordExecutable, tesseract: config.tesseract, sshExecutable: config.sshExecutable,
     lanes: selectedLanes(config), smoke: opts.smoke === true };
   const lanes = Object.fromEntries(LANES.map((name) => [name, newLane(name, evidenceDir)]));
   const startedAt = new Date().toISOString();

@@ -15,6 +15,8 @@
 //  - every cleanup entry of every lane, blocked or not, must prove the resource is gone; a
 //    run-spawned pid reported-not-killed (or any other outcome) fails the run;
 //  - the control host's checkout must be the run revision and clean, with script hashes recorded;
+//  - unblocked desktop and session harnesses must be at the harness revision (or run revision)
+//    with the whole checkout clean;
 //  - the session host (`run.session`: relay, fixture daemon and panes) must be at the run
 //    revision with a matching build stamp unless it was blocked, and its cleanup (daemon, relay,
 //    profile, relay root, the run's serve endpoint) must prove every resource gone.
@@ -49,7 +51,7 @@ export const SCENARIOS = Object.freeze([
     assertions: ['export-holds-prompt', 'export-holds-reply'], cross: ['both-desktops-pass'] },
   { id: 'F3-D4', clause: 'the long report opens in Viewer', lanes: ['macos', 'windows'],
     artifacts: ['screenshot', 'ocr', 'transcript-read'],
-    assertions: ['report-not-open-before-viewer', 'viewer-shows-report-heading', 'viewer-marker-shown', 'viewer-shows-report-end'], cross: ['both-desktops-pass'] },
+    assertions: ['report-not-open-before-viewer', 'viewer-shows-report-heading', 'viewer-marker-shown', 'viewer-shows-report-middle', 'viewer-shows-report-end'], cross: ['both-desktops-pass'] },
   { id: 'F3-D5', clause: 'a decision answered from the phone leaves the panel on both desktops', lanes: ['macos', 'windows'],
     artifacts: ['screenshot', 'ocr', 'panel-read'],
     assertions: ['phone-answered-card', 'answered-card-gone-from-panel', 'answered-card-gone-from-screen'], cross: ['both-desktops-pass'] },
@@ -109,6 +111,13 @@ function controlDefect(control, revision) {
   return null;
 }
 
+function harnessDefect(lane, revision) {
+  if (!lane || lane.blocked) return null;
+  if (lane.harness?.headRevision !== revision) return `harness head ${lane.harness?.headRevision} is not harness revision ${revision}`;
+  if (lane.harness?.clean !== true) return 'harness checkout is not clean';
+  return null;
+}
+
 function scenarioVerdict(run, scenario) {
   const reasons = [];
   let blocked = false;
@@ -147,9 +156,15 @@ export function validateRun(run, extraErrors = []) {
   if (run?.smoke === true) errors.push('smoke run: proves the transport only, never F3');
   for (const name of LANES) {
     for (const leak of cleanupLeaks(run?.lanes?.[name])) errors.push(`${name} cleanup leak: ${JSON.stringify(leak).slice(0, 400)}`);
+    if (name !== 'iphone') {
+      const harness = harnessDefect(run?.lanes?.[name], run?.harnessRevision ?? run?.revision);
+      if (harness) errors.push(`${name}: ${harness}`);
+    }
   }
   const session = laneDefect(run?.session, run?.revision);
   if (session) errors.push(`session host: ${session}`);
+  const sessionHarness = harnessDefect(run?.session, run?.harnessRevision ?? run?.revision);
+  if (sessionHarness) errors.push(`session host: ${sessionHarness}`);
   for (const leak of cleanupLeaks(run?.session)) errors.push(`session host cleanup leak: ${JSON.stringify(leak).slice(0, 400)}`);
   const scenarios = SCENARIOS.map((scenario) => scenarioVerdict(run, scenario));
   const verdict = errors.length > 0 ? 'fail'
