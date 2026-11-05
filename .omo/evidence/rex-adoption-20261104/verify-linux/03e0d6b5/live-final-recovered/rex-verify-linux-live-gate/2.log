@@ -1,0 +1,11 @@
+$ LD_LIBRARY_PATH=$PWD/src-tauri/resources/ffmpeg/sdk/lib timeout 180 bun .github/rex-gate/verify-linux-live/account-qa.mjs
+FERRYX_ACCOUNT_MODE selfhost: billing, lease and team routes are not served
+FERRYX_ACCOUNT_READY 127.0.0.1:33671
+PUT /api/v1/account/onboarding 401 {"code":"UNAUTHORIZED","message":"missing bearer token"}
+POST /api/account/v1/login/request 202 {"loginHandle":"cec781f8a7e1fed4860bb6020aa970af791c1ad4417b9225afc5a1acf934c11a"}
+POST /api/account/v1/login/consume 200 {"token":"64b62b440424253e92442acb67e1989584d1775b11fee0a5fc5933657ad7c8a5","accountId":"7bab70a4-9c16-4b8d-b129-5e27155c3e90","email":"verifier@example.test"}
+PUT /api/v1/account/onboarding 200 {"completedSteps":["intro"],"dismissed":false,"updatedAt":1793857438}
+GET /api/v1/account/onboarding 200 {"completedSteps":["intro"],"dismissed":false,"updatedAt":1793857438}
+PUT /api/v1/account/onboarding 400 {"code":"MACHINE_STEP_NOT_SYNCABLE","message":"machine steps cannot be synced"}
+ACCOUNT_SYNC_LIVE_OK
+RECORDED_ACCOUNT_PID_STOPPED 30559
