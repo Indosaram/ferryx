@@ -25,15 +25,18 @@ pub async fn cmd_plugins(
     manager: State<'_, Arc<RemoteGatewayManager>>,
     name: Option<String>,
     enabled: Option<bool>,
+    expected: Option<crate::daemon::plugins::Manifest>,
 ) -> Result<Vec<crate::daemon::plugins::registry::Status>, IpcError> {
     let client = manager.daemon_client().ok_or_else(|| IpcError::internal("Daemon unavailable"))?;
     let request = match (name, enabled) {
-        (Some(name), Some(enabled)) => DaemonRequest::PluginSetEnabled { name, enabled },
+        (Some(name), Some(enabled)) => DaemonRequest::PluginSetEnabled { name, enabled, expected },
         (None, None) => DaemonRequest::PluginsList,
         _ => return Err(IpcError::internal("Name and enabled must be supplied together")),
     };
     match client.send_request(request).await? {
         DaemonResponse::PluginsOk { plugins } => Ok(plugins),
+        DaemonResponse::Error { message, code: Some(code), .. } if code == "PLUGIN_APPROVAL_REQUIRED" =>
+            Err(IpcError::new(super::error::IpcErrorCode::PluginApprovalRequired, message)),
         DaemonResponse::Error { message, .. } => Err(IpcError::internal(message)),
         response => Err(IpcError::internal(format!("Unexpected plugin response: {response:?}"))),
     }

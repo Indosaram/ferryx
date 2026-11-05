@@ -19,11 +19,25 @@ pub async fn supervise<F, Fut>(
     manifest: Manifest,
     approvals: &Approvals,
     grants: Arc<PaneGrants>,
+    disabled: watch::Receiver<bool>,
+    events: mpsc::UnboundedSender<Event>,
+    dispatch: F,
+) -> Result<(), String>
+where F: FnMut(DaemonRequest) -> Fut, Fut: Future<Output = Result<Value, String>>,
+{
+    supervise_with_cleanup(manifest, approvals, grants, disabled, events, dispatch, || {}).await
+}
+
+pub async fn supervise_with_cleanup<F, Fut, C>(
+    manifest: Manifest,
+    approvals: &Approvals,
+    grants: Arc<PaneGrants>,
     mut disabled: watch::Receiver<bool>,
     events: mpsc::UnboundedSender<Event>,
     mut dispatch: F,
+    mut cleanup: C,
 ) -> Result<(), String>
-where F: FnMut(DaemonRequest) -> Fut, Fut: Future<Output = Result<Value, String>>,
+where F: FnMut(DaemonRequest) -> Fut, Fut: Future<Output = Result<Value, String>>, C: FnMut(),
 {
     if !approvals.enabled(&manifest) || *disabled.borrow() { return Ok(()); }
     for restart in 0..=3u8 {
@@ -110,6 +124,7 @@ where F: FnMut(DaemonRequest) -> Fut, Fut: Future<Output = Result<Value, String>
             child.kill().await.map_err(|e| e.to_string())?;
         }
         child.wait().await.map_err(|e| e.to_string())?;
+        cleanup();
         if stopped { return Ok(()); }
         if events.send(Event::Exited { restart }).is_err() { return Err("plugin observer closed".into()); }
     }
