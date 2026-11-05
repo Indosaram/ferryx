@@ -643,6 +643,37 @@ mod tests {
     }
 
     #[test]
+    fn verify_win_peer_11476_exited_ssh_ancestor_932_owner_and_pane_cases() {
+        // verify-win/pipe-final-qa.log records these pids and the vanished ancestor, not
+        // creation times. Times below are explicit scenarios, not reconstructed evidence.
+        let mut procs = Table { procs: HashMap::new(), unreadable: HashSet::new() };
+        let info = |ppid, start| ProcInfo { ppid, pgid: None, session: None, tty: None, start };
+        procs.procs.insert(11476, info(932, 100));
+        procs.procs.insert(22324, info(932, 200));
+        procs.procs.insert(30000, info(22324, 300));
+        let panes = PaneRegistry::default();
+        panes.insert("pane-a", 30000, &procs);
+        let owner = PeerOrigin::Process(PeerProcess { pid: 11476, start: 100 });
+        let mut ancestry = Ancestry::at_accept(owner, &procs);
+        assert!(matches!(ancestry.as_ref().unwrap().end, WalkEnd::Changed { pid: 932 }));
+        assert_eq!(classify_with_roots(owner, &mut ancestry, &panes, &procs, &[], Some(200)), Ok(PeerClass::Owner));
+
+        procs.procs.insert(31000, info(30000, 400));
+        let descendant = PeerOrigin::Process(PeerProcess { pid: 31000, start: 400 });
+        assert!(matches!(classify_with_roots(descendant, &mut None, &panes, &procs, &[], Some(200)),
+            Ok(PeerClass::Pane { session_id, .. }) if session_id == "pane-a"));
+        procs.procs.remove(&30000);
+        assert!(classify_with_roots(descendant, &mut None, &panes, &procs, &[], Some(200)).is_err());
+
+        procs.procs.get_mut(&11476).unwrap().start = 500;
+        let later_owner = PeerOrigin::Process(PeerProcess { pid: 11476, start: 500 });
+        assert!(classify_with_roots(later_owner, &mut None, &panes, &procs, &[], Some(200)).is_err());
+        procs.procs.insert(932, info(1, 600));
+        assert!(classify_with_roots(later_owner, &mut None, &panes, &procs, &[], Some(200)).is_err());
+        assert!(classify_with_roots(owner, &mut ancestry, &panes, &procs, &[], Some(200)).is_err());
+    }
+
+    #[test]
     fn plugin_roots_descendants_and_retired_groups_never_classify_as_owner() {
         let mut procs = world();
         let roots = [PeerProcess { pid: 300, start: 3000 }];

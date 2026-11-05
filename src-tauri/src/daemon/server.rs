@@ -2689,6 +2689,82 @@ mod agent_integration_tests {
         serving.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn remote_mutation_grants_protect_live_legacy_target_and_forward_exactly_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = tempfile::Builder::new().prefix("fx-gate").tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = data.path().join("legacy.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (receipts, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let receipt_lifetime = receipts.clone();
+        let target = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+                    let response = match request {
+                        DaemonRequest::Handshake { version, .. } => serde_json::json!({
+                            "type":"handshakeOk", "version":version, "pid":1, "epoch":1
+                        }),
+                        DaemonRequest::RemoteWrite { session_id, generation, data } => {
+                            receipts.send((session_id, generation, Some(data), None)).unwrap();
+                            serde_json::json!({"type":"writeOk"})
+                        },
+                        DaemonRequest::RemoteResize { session_id, generation, cols, rows } => {
+                            receipts.send((session_id, generation, None, Some((cols, rows)))).unwrap();
+                            serde_json::json!({"type":"resizeOk"})
+                        },
+                        other => panic!("unexpected live target request: {other:?}"),
+                    };
+                    write.write_all(format!("{response}\n").as_bytes()).await.unwrap();
+                }
+            }
+        });
+        let server = Arc::new(server_at(data.path()));
+        server.session_router.add_legacy_peer(Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket, vec!["remote-victim".into()])));
+        let registry = server.terminal_service.pty_manager().pane_registry();
+        registry.insert("source", std::process::id(), &super::super::supervisor_peer::SystemProcs);
+        let (client, peer) = UnixStream::pair().unwrap();
+        let serving = tokio::spawn(Arc::clone(&server).handle_client_with_origin(peer,
+            super::super::supervisor_peer::identify(Some(std::process::id())), None));
+        let (read, mut write) = client.into_split();
+        let mut reader = BufReader::new(read);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            for (request, op, expected) in [
+                (DaemonRequest::RemoteWrite { session_id: "remote-victim".into(), generation: 17, data: b"owned-input".to_vec() },
+                    super::super::pane_grants::GrantOp::Write, ("remote-victim".to_string(), 17, Some(b"owned-input".to_vec()), None)),
+                (DaemonRequest::RemoteResize { session_id: "remote-victim".into(), generation: 17, cols: 103, rows: 37 },
+                    super::super::pane_grants::GrantOp::Control, ("remote-victim".to_string(), 17, None, Some((103, 37)))),
+            ] {
+                let denied = exchange(&mut write, &mut reader, request.clone()).await;
+                assert!(matches!(denied, DaemonResponse::Error { code: Some(ref code), .. } if code == "FORBIDDEN"), "{denied:?}");
+                assert!(matches!(received.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+                server.pane_grants.add(super::super::pane_grants::PaneGrant {
+                    from: "source".into(), to: "remote-victim".into(), ops: [op].into(),
+                }).unwrap();
+                let admitted = exchange(&mut write, &mut reader, request.clone()).await;
+                assert!(matches!((&request, admitted),
+                    (DaemonRequest::RemoteWrite { .. }, DaemonResponse::WriteOk)
+                    | (DaemonRequest::RemoteResize { .. }, DaemonResponse::ResizeOk)));
+                assert_eq!(received.recv().await.unwrap(), expected);
+                server.pane_grants.remove("source", "remote-victim").unwrap();
+                let denied = exchange(&mut write, &mut reader, request).await;
+                assert!(matches!(denied, DaemonResponse::Error { code: Some(ref code), .. } if code == "FORBIDDEN"));
+                assert!(matches!(received.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+            }
+        }).await.expect("live legacy target exchanges complete");
+        registry.remove("source");
+        drop(write);
+        drop(reader);
+        serving.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), target).await.unwrap().unwrap();
+        drop(receipt_lifetime);
+    }
+
     #[test]
     fn plugin_owner_socket_child() {
         use std::io::{BufRead, Write};
