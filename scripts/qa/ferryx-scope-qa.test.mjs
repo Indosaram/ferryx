@@ -2,6 +2,7 @@ import { test, expect } from 'bun:test';
 import { validateRoot, validateEvidence, prepare, cleanup } from './ferryx-scope-fixtures.mjs';
 import { symlinkSync, unlinkSync, rmdirSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { collectChild, spawnChild } from './ferryx-scope-lifecycle.mjs';
 
 test('rejects an unsafe root before accessing resources', async () => {
@@ -24,7 +25,10 @@ test('rejects a fixture child symlink without deleting its target', () => {
   const fixture = prepare();
   const home = join(fixture.root, 'home');
   rmdirSync(home);
-  symlinkSync('/Users/indo', home);
+  // The redirect must point at a directory that exists here: a dangling link makes realpathSync
+  // throw ENOENT, which tests the filesystem rather than the UNSAFE_CHILD rule. Hardcoding
+  // /Users/indo did exactly that on the Ubuntu runner, where no such path exists.
+  symlinkSync(homedir(), home);
   try {
     // When validating, then reject before resource access.
     expect(() => validateRoot(fixture.root)).toThrow('UNSAFE_CHILD');

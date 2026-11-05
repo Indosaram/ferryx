@@ -132,6 +132,32 @@ test("release-local: importing module has no side effects", async () => {
   assert.equal(typeof mod.verifyRemoteRelease, "function");
 });
 
+/**
+ * The release CLI refuses prepare/build/assemble/publish when CI or GITHUB_ACTIONS is set, which is
+ * exactly right for real runs and fatal for a test that must exercise those stages. Every CI
+ * provider exports one of the two, so a suite that inspects the caller's environment instead of
+ * clearing it passes locally and fails on the runner. Mutating cases run under this env.
+ */
+function ciFreeEnv(extra = {}) {
+  const env = { ...process.env, ...extra };
+  delete env.CI;
+  delete env.GITHUB_ACTIONS;
+  return env;
+}
+
+/** Run `fn` with the CI markers removed from this process, for in-process stage calls. */
+async function withoutCIMarkers(fn) {
+  const saved = { CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  try {
+    return await fn();
+  } finally {
+    if (saved.CI !== undefined) process.env.CI = saved.CI;
+    if (saved.GITHUB_ACTIONS !== undefined) process.env.GITHUB_ACTIONS = saved.GITHUB_ACTIONS;
+  }
+}
+
 test("release-local: rejects mutating stages under GITHUB_ACTIONS=true and CI=true", () => {
   const mutatingStages = ["prepare", "build", "assemble", "publish"];
 
@@ -178,7 +204,7 @@ test("prepare: rejects invalid calendar date tags and revision overflow", () => 
         "--out",
         "/tmp/ferryx-unused-run",
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: ciFreeEnv() },
     );
     assert.notEqual(res.status, 0);
     assert.match(res.stderr + res.stdout, /Invalid/i);
@@ -205,7 +231,7 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
         "--out",
         outDir,
       ],
-      { encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } },
+      { encoding: "utf8", env: ciFreeEnv({ PATH: `${join(tmp, "bin")}:${process.env.PATH}` }) },
     );
 
     assert.equal(res.status, 0, `stderr: ${res.stderr}`);
@@ -246,7 +272,7 @@ test("prepare: creates deterministic plan, prepare-state, and fails closed on cl
         "--out",
         outDir,
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: ciFreeEnv() },
     );
     assert.notEqual(resClobber.status, 0);
     assert.match(resClobber.stderr + resClobber.stdout, /already exists/i);
@@ -261,20 +287,20 @@ test("build: accepts an untouched prepared plan digest", async () => {
   try {
     const outDir = join(tmp, "run");
     const configPath = writeCheckoutHostConfig(tmp);
-    prepareRelease({
+    await withoutCIMarkers(() => prepareRelease({
       configPath,
       tag: "v2026.0908.1",
       commit: "HEAD",
       outDir,
       changelog: () => "fixture release notes",
-    });
+    }));
     await assert.rejects(
-      () => buildRelease({
+      () => withoutCIMarkers(() => buildRelease({
         configPath,
         runDir: outDir,
         host: "macbook",
         runner: async () => undefined,
-      }),
+      })),
       /runner returned no result/i,
     );
   } finally {
@@ -354,7 +380,7 @@ test("publish: enforces double approval gate and rejects unapproved invocation",
 
     // Case 1: Missing --approve-publish flag
     await assert.rejects(
-      () => publishRelease({ runDir, approvePublish: false }),
+      () => withoutCIMarkers(() => publishRelease({ runDir, approvePublish: false })),
       /Publication requires explicit --approve-publish flag/i,
     );
 
@@ -363,7 +389,7 @@ test("publish: enforces double approval gate and rejects unapproved invocation",
     delete process.env.FERRYX_APPROVE_PUBLISH;
     try {
       await assert.rejects(
-        () => publishRelease({ runDir, approvePublish: true }),
+        () => withoutCIMarkers(() => publishRelease({ runDir, approvePublish: true })),
         /FERRYX_APPROVE_PUBLISH=1 environment variable/i,
       );
     } finally {
@@ -511,13 +537,13 @@ process.exit(1);
     // Mock lsRemoteCommand simulating git ls-remote output for plan.tag
     const mockLsRemote = () => `${plan.commitSha}\trefs/tags/${plan.tag}\n`;
 
-    const result = await publishRelease({
+    const result = await withoutCIMarkers(() => publishRelease({
       runDir,
       approvePublish: true,
       ghCommand: fakeGhPath,
       lsRemoteFn: mockLsRemote,
       env: { FERRYX_APPROVE_PUBLISH: "1" },
-    });
+    }));
 
     assert.equal(result.published, true);
     assert.equal(result.tag, plan.tag);

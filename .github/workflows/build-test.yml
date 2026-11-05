@@ -238,6 +238,12 @@ jobs:
         with:
           bun-version: latest
 
+      # The release provenance contracts generate, sign and verify a real checksum signature. They
+      # are the only check that the published SHA256SUMS is actually signed, so they must run here
+      # rather than be skipped: install the signer instead of letting it surface as six failures.
+      - name: Install minisign (release provenance contracts)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+
       - name: Install dependencies
         run: |
           bun install --frozen-lockfile || bun install
