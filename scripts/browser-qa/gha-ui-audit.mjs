@@ -3050,6 +3050,34 @@ async function teardown() {
     engine: summary.engine.checks ?? summary.engine.skipped,
     daily: Object.fromEntries(Object.entries(summary.daily ?? {}).map(([name, record]) => [name, record.checks])),
     agent: Object.fromEntries(Object.entries(summary.agent).map(([engine, record]) => [engine, { ok: record.ok ?? false, checks: record.checks }])),
+    // A gap that failed carries the evidence that explains it (which point was clicked, what the
+    // dialog answered, where the navigation went). Echo it for failing gaps only, so the CI log
+    // answers "why" without the multi-GB artefact. Values are cut to keep the line bounded.
+    failed_gap_evidence: Object.fromEntries(
+      Object.entries(summary.daily ?? {})
+        .filter(([, record]) => Object.values(record.checks ?? {}).includes(false))
+        .map(([name, record]) => [
+          name,
+          JSON.stringify(
+            Object.fromEntries(
+              Object.entries(record).filter(([key]) => key !== "checks"),
+            ),
+          ).slice(0, 2000),
+        ]),
+    ),
+    // The ui-audit-windows artefact is 2.3 GB, so a failure there cannot be read from CI output
+    // without a full download. Echo what each non-ok step recorded -- its error and the actions
+    // that refused input -- so the log alone says why a step did not pass. No check moves.
+    failed_steps: summary.steps
+      .filter((record) => record.outcome !== "ok")
+      .map((record) => ({
+        name: record.name,
+        outcome: record.outcome,
+        ...(record.error ? { error: record.error.slice(0, 500) } : {}),
+        failed_actions: (record.actions ?? [])
+          .filter((action) => action.ok === false)
+          .map((action) => ({ label: action.label, status: action.status, error: String(action.error ?? "").slice(0, 400) })),
+      })),
     ...(dragMask
       ? {
           drag_mask: {
