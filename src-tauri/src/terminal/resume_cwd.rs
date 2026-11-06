@@ -29,7 +29,12 @@ pub(crate) fn resolve_agent_resume_cwd(
         }) => (agent_type, provider_session),
         _ => return Ok(None),
     };
-    if !agent_type.trim().eq_ignore_ascii_case("omo") {
+    let agent = agent_type.trim().to_ascii_lowercase();
+    // Only the agents whose own session store records a cwd can be searched here: omo and maho
+    // both write `<ts>_<id>.jsonl` with a `cwd` header (registry: a store-backed discovery).
+    let store_backed = crate::agent_detect::registry::discovery(&agent)
+        == Some(crate::agent_detect::registry::Discovery::EnvironmentThenOpenFiles);
+    if !store_backed {
         return Ok(None);
     }
     if provider_session.transcript_path.is_some() {
@@ -51,19 +56,26 @@ pub(crate) fn resolve_agent_resume_cwd(
         }
     }
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        let config = PathBuf::from(home).join(".omo");
-        roots.push(config.join("agent/sessions"));
-        roots.push(config.join("sessions"));
-        match fs::read_dir(config.join("profiles")) {
-            Ok(profiles) => {
-                for profile in profiles.flatten() {
-                    if profile.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        roots.push(profile.path().join("agent/sessions"));
+        let home = PathBuf::from(home);
+        // Every store spelling the agent's registry entry lists, relative to the home directory:
+        // omo keeps `~/.omo/agent/sessions` (and the older `~/.omo/sessions`), maho
+        // `~/.maho/agent/sessions`.
+        for marker in crate::agent_detect::registry::store_markers(&agent).unwrap_or(&[]) {
+            roots.push(home.join(marker.trim_matches('/')));
+        }
+        if agent == "omo" {
+            let config = home.join(".omo");
+            match fs::read_dir(config.join("profiles")) {
+                Ok(profiles) => {
+                    for profile in profiles.flatten() {
+                        if profile.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                            roots.push(profile.path().join("agent/sessions"));
+                        }
                     }
                 }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => {}
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => {}
         }
     }
     roots.sort();
@@ -75,9 +87,9 @@ pub(crate) fn resolve_agent_resume_cwd(
 /// (`spawn_machine`). Each has a process-bound discovery adapter: it answers from the pane's own
 /// agent process (its open session file or its resume argv). Providers whose adapter falls back to
 /// newest-transcript/CWD guessing (antigravity, opencode, pi) stay out.
-pub(crate) const MACHINE_RESUME_AGENTS: [&str; 13] = [
-    "omo", "claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "gjc", "omp", "grok",
-    "droid", "cline", "crush",
+pub(crate) const MACHINE_RESUME_AGENTS: [&str; 14] = [
+    "omo", "maho", "claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "gjc", "omp",
+    "grok", "droid", "cline", "crush",
 ];
 
 /// Admitted agents whose store records no working directory, so a remote spawn can never prove
@@ -102,8 +114,10 @@ pub(crate) fn verify_machine_resume_cwd(
     provider: &AgentProviderSession,
     requested: &Path,
 ) -> Result<PathBuf, &'static str> {
-    let resolved = if agent == "omo" && machine_spawn_admits_agent(agent) && provider.transcript_path.is_none() {
-        // omo keeps its richer root search (env overrides, profiles).
+    let store_backed = crate::agent_detect::registry::discovery(agent)
+        == Some(crate::agent_detect::registry::Discovery::EnvironmentThenOpenFiles);
+    let resolved = if store_backed && machine_spawn_admits_agent(agent) && provider.transcript_path.is_none() {
+        // omo and maho keep the richer root search (env overrides, profiles).
         let startup = TerminalStartup::AgentResume { agent_type: agent.into(), provider_session: provider.clone() };
         resolve_agent_resume_cwd(Some(&startup))
             .map_err(|_| "AGENT_TRANSCRIPT_UNVERIFIED")

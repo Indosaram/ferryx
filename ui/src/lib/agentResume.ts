@@ -15,7 +15,7 @@ export const PROVIDER_TRANSCRIPT_PATH_MAX_LENGTH = 4096;
 export const RESUMABLE_TUI_AGENTS = [
   "claude", "codex", "antigravity", "opencode", "pi", "prime-agent",
   "mimo-code", "droid", "grok", "devin", "omp", "omo", "kimi", "gjc",
-  "copilot", "cursor", "cursor-agent", "cline", "crush",
+  "copilot", "cursor", "cursor-agent", "cline", "crush", "maho",
 ] as const;
 
 export type ResumableTuiAgent = (typeof RESUMABLE_TUI_AGENTS)[number];
@@ -39,6 +39,9 @@ const RESUME_BUILDERS: Readonly<Record<string, ResumeArgvBuilder>> = {
   devin: { key: "session_id", binary: "devin", args: (id) => ["--resume", id] },
   omp: { key: "session_id", binary: "omp", args: (id, _s, p) => ["--resume", p?.trim() || id] },
   omo: { key: "session_id", binary: "omo", args: (id) => ["--session", id] },
+  // maho code is its own agent: the native mhc binary owns its conversations
+  // (~/.maho/agent/sessions), so a resume spawns mhc rather than omo.
+  maho: { key: "session_id", binary: "mhc", args: (id) => ["--session", id] },
   kimi: { key: "session_id", binary: "kimi", args: (id) => ["--session", id] },
   gjc: { key: "session_id", binary: "gjc", args: (id) => ["--resume", id] },
   copilot: { key: "session_id", binary: "copilot", args: (id) => ["--resume", id] },
@@ -59,6 +62,7 @@ export const AUTHORITATIVE_RECONNECT_AGENTS = [
   "cursor-agent",
   "kimi",
   "omo",
+  "maho",
   "gjc",
   "antigravity",
   "opencode",
