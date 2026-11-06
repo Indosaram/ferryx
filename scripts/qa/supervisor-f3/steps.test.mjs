@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { newLane, runStep } from './steps.mjs';
 
+// runStep() returns the step it fills in, not a promise; the caller awaits the step itself.
 function withLane(body) {
   const dir = mkdtempSync(join(tmpdir(), 'f3-steps-'));
   try {
@@ -38,7 +39,6 @@ describe('runStep artifact receipts', () => {
       }),
       dir,
     }));
-    await step;
     const forPath = step.artifacts.filter((entry) => entry.path.endsWith('typed-token-line.ocr.tsv'));
     expect(forPath).toHaveLength(1);
     expect(readFileSync(join(dir, forPath[0].path), 'utf8')).toBe('attempt 3\n');
@@ -54,7 +54,6 @@ describe('runStep artifact receipts', () => {
       }),
       dir,
     }));
-    await step;
     expect(step.artifacts.length).toBeGreaterThan(0);
     for (const entry of step.artifacts) expect(matchesDisk(dir, entry)).toBe(true);
   });
@@ -65,7 +64,6 @@ describe('runStep artifact receipts', () => {
         ctx.artifact('png', 'a.png', 'a');
         ctx.artifact('png', 'b.png', 'b');
       }));
-    await step;
     expect(step.artifacts.map((entry) => entry.path.split(/[\\/]/).pop())).toEqual(['a.png', 'b.png']);
   });
 });
