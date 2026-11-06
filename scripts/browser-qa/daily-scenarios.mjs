@@ -1656,7 +1656,11 @@ export async function dailyWebviewBefore(ctx) {
       }
       ctx.host.focus();
       return { ok: g9.checks.print_dialog && g9.checks.print_cancelled && g9.checks.pdf_saved };
-    });
+      // Run 42145006089 spent the whole 240 s default cap here waiting for a print dialog that
+      // never appeared, and that lost time pushed engine-kill and the extension family past the
+      // audit budget. A dialog that does open is slow to render on a cold runner, so the step gets
+      // 6 min of its own; the assertions below it are unchanged.
+    }, { capMs: 360000 });
   }
 
   // Back to a plain page so the restart restores a simple tab B.
