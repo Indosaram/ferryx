@@ -189,6 +189,7 @@ pub async fn triage_instructions_with_lessons(pool: &SqlitePool) -> Result<(Stri
         pool,
         crate::supervisor::lessons::LessonDomain::Report,
         crate::report_feedback::LESSON_PROJECT,
+        &[],
     )
     .await?;
     let ids = match lessons {

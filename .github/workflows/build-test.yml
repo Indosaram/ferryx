@@ -1,8 +1,8 @@
 name: CI Build & Check
 
 # Phase 1 precheck: lint gates plus the Rust unit and integration suites, on a standard GitHub-hosted ARM64 macOS
-# runner. Everything else in this file (the ubuntu UI job and the Linux/Windows cargo legs) is
-# kept but runs only on manual dispatch, so a pull request gets one fast macOS job.
+# runner, plus a separate MCP declaration/dispatch contract gate. The ubuntu UI job and the
+# Linux/Windows cargo legs are kept but run only on manual dispatch.
 on:
   pull_request:
     branches:
@@ -212,6 +212,58 @@ jobs:
           for directory in src-tauri/target remote-helper/target; do
             if [ -d "$directory" ]; then du -sh "$directory"; fi
           done
+
+  # These leaf-crate suites pin MCP tool declarations to their dispatch arms separately
+  # from src-tauri tests: a declaration without an arm produces "unknown tool" in production.
+  mcp-contract:
+    name: MCP declaration and dispatch contracts (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - name: 'Checkout repository (submodules: recursive)'
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./crates/ferryx-hub -> target
+            ./crates/ferryx-rd -> target
+          shared-key: macos-mcp-contract-no-debuginfo-v1
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # ferryx-rd-app's default features use the pinned SDK at .cargo/config.toml's FFMPEG_DIR.
+      - name: Fetch FFmpeg SDK (remote-desktop)
+        run: bun scripts/fetch-ffmpeg.mjs --target aarch64-apple-darwin
+
+      - name: Test hub MCP declaration and dispatch contracts
+        run: cargo test --manifest-path crates/ferryx-hub/Cargo.toml --lib 'mcp::'
+
+      - name: Test remote-desktop MCP dispatch contracts
+        # Report both suites even when the hub contract fails; either failure keeps the job red.
+        if: ${{ success() || failure() }}
+        # The leaf test binary has no Tauri build script to add the SDK's runtime search path.
+        env:
+          DYLD_FALLBACK_LIBRARY_PATH: ${{ github.workspace }}/src-tauri/resources/ffmpeg/sdk/lib
+        run: cargo test --manifest-path crates/ferryx-rd/ferryx-rd-app/Cargo.toml --features agent --lib dispatch_contract
 
   # =========================================================================
   # LEGACY MATRIX: MANUAL DISPATCH ONLY
