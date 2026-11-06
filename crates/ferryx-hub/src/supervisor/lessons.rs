@@ -216,7 +216,14 @@ pub async fn record(
     draft: LessonDraft<'_>,
     resolves: impl Fn(&str) -> bool,
 ) -> Result<Option<Lesson>, sqlx::Error> {
-    let LessonDraft { domain, project, rule, rationale, keywords, evidence_ref } = draft;
+    let LessonDraft {
+        domain,
+        project,
+        rule,
+        rationale,
+        keywords,
+        evidence_ref,
+    } = draft;
     let rule = rule.trim();
     if rule.is_empty() || rule.chars().count() > MAX_RULE_CHARS {
         return Ok(None);
@@ -225,6 +232,17 @@ pub async fn record(
     if evidence_ref.is_empty() || !resolves(evidence_ref) {
         return Ok(None);
     }
+    let mut normalized = Vec::new();
+    for keyword in keywords.to_lowercase().split(',') {
+        let keyword: String = keyword.trim().chars().take(32).collect();
+        if !keyword.is_empty() && !normalized.contains(&keyword) {
+            normalized.push(keyword);
+            if normalized.len() == 12 {
+                break;
+            }
+        }
+    }
+    let keywords = normalized.join(", ");
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     sqlx::query(
@@ -257,9 +275,22 @@ fn fenced_line(rule: &str) -> String {
     format!("- {}", flat.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
-/// Picks the lessons one block carries: pinned first, then effective by `helped - hurt`, then
-/// at most [`MAX_INJECTED_CANDIDATES`] newest candidates; at most [`MAX_INJECTED_LINES`] in all.
-fn select(lessons: Vec<Lesson>) -> Vec<Lesson> {
+/// Picks pinned, effective, then candidate lessons, ranking keyword overlap first inside
+/// each tier. Ties keep recency order, and effective ties first use `helped - hurt`.
+/// At most [`MAX_INJECTED_CANDIDATES`] candidates and [`MAX_INJECTED_LINES`] in all.
+fn select(lessons: Vec<Lesson>, situation: &[&str]) -> Vec<Lesson> {
+    let situation: Vec<String> = situation.iter().map(|text| text.to_lowercase()).collect();
+    let overlap = |lesson: &Lesson| {
+        lesson
+            .keywords
+            .to_lowercase()
+            .split(',')
+            .map(str::trim)
+            .filter(|keyword| {
+                !keyword.is_empty() && situation.iter().any(|text| text.contains(keyword))
+            })
+            .count()
+    };
     let mut pinned = Vec::new();
     let mut effective = Vec::new();
     let mut candidates = Vec::new();
@@ -272,13 +303,19 @@ fn select(lessons: Vec<Lesson>) -> Vec<Lesson> {
             candidates.push(lesson);
         }
     }
-    pinned.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let by_overlap_then_recency = |a: &Lesson, b: &Lesson| {
+        overlap(b)
+            .cmp(&overlap(a))
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    };
+    pinned.sort_by(by_overlap_then_recency);
     effective.sort_by(|a, b| {
-        (b.helped - b.hurt)
-            .cmp(&(a.helped - a.hurt))
+        overlap(b)
+            .cmp(&overlap(a))
+            .then_with(|| (b.helped - b.hurt).cmp(&(a.helped - a.hurt)))
             .then_with(|| b.created_at.cmp(&a.created_at))
     });
-    candidates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    candidates.sort_by(by_overlap_then_recency);
     candidates.truncate(MAX_INJECTED_CANDIDATES);
     pinned
         .into_iter()
@@ -295,7 +332,7 @@ pub async fn injection_block(
     domain: LessonDomain,
     project: &str,
 ) -> Result<Option<String>, sqlx::Error> {
-    Ok(injection_block_with_ids(pool, domain, project)
+    Ok(injection_block_with_ids(pool, domain, project, &[])
         .await?
         .map(|(block, _)| block))
 }
@@ -306,6 +343,7 @@ pub async fn injection_block_with_ids(
     pool: &SqlitePool,
     domain: LessonDomain,
     project: &str,
+    situation: &[&str],
 ) -> Result<Option<(String, Vec<String>)>, sqlx::Error> {
     retire_stale(pool, Utc::now()).await?;
     let rows = sqlx::query(&format!(
@@ -317,7 +355,7 @@ pub async fn injection_block_with_ids(
     .fetch_all(pool)
     .await?;
     let lessons = rows.iter().map(lesson_of).collect::<Result<Vec<_>, _>>()?;
-    let chosen = select(lessons);
+    let chosen = select(lessons, situation);
     if chosen.is_empty() {
         return Ok(None);
     }
@@ -418,7 +456,16 @@ pub async fn goal_failed(
         return Ok(None);
     };
     let resolves = |reference: &str| reference == subject;
-    reflect(pool, judge, LessonDomain::Goal, &project, summary, &subject, resolves).await
+    reflect(
+        pool,
+        judge,
+        LessonDomain::Goal,
+        &project,
+        summary,
+        &subject,
+        resolves,
+    )
+    .await
 }
 
 /// Report-domain injections older than [`REPORT_SETTLE_DAYS`] days before `now` that nobody
@@ -522,7 +569,12 @@ pub async fn reflect(
         cause that would change how similar future work in this project is done; otherwise \
         answer \"no_lesson\".";
     let choice = judge
-        .choice(Purpose::LessonReflect, &state, instructions, &REFLECT_OPTIONS)
+        .choice(
+            Purpose::LessonReflect,
+            &state,
+            instructions,
+            &REFLECT_OPTIONS,
+        )
         .await?;
     if choice.as_str() != "lesson" || choice.is_capped {
         return Ok(None);
@@ -704,7 +756,180 @@ mod tests {
     }
 
     fn lesson_lines(block: &str) -> Vec<&str> {
-        block.lines().filter(|line| line.starts_with("- ")).collect()
+        block
+            .lines()
+            .filter(|line| line.starts_with("- "))
+            .collect()
+    }
+
+    async fn ranked_lesson(
+        pool: &SqlitePool,
+        rule: &str,
+        keywords: &str,
+        tier: &str,
+        helped: i64,
+        age: i64,
+    ) -> Lesson {
+        let row = record(
+            pool,
+            LessonDraft {
+                domain: LessonDomain::Goal,
+                project: PROJECT,
+                rule,
+                rationale: "ranking fixture",
+                keywords,
+                evidence_ref: "goal:ranking",
+            },
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let created = (Utc::now() - Duration::hours(age)).to_rfc3339();
+        let (pinned, state) = if tier == "pinned" {
+            (1, "candidate")
+        } else {
+            (0, tier)
+        };
+        set(
+            pool,
+            &row.id,
+            &format!(
+                "pinned = {pinned}, state = '{state}', helped = {helped}, created_at = '{created}'"
+            ),
+        )
+        .await;
+        row
+    }
+
+    #[tokio::test]
+    async fn empty_situation_preserves_legacy_block_and_order() {
+        let pool = pool().await;
+        let fixtures = [
+            ("candidate old", "candidate", 0, 8),
+            ("effective low", "effective", 3, 1),
+            ("pinned old", "pinned", 0, 7),
+            ("effective high old", "effective", 5, 6),
+            ("candidate new", "candidate", 0, 2),
+            ("pinned new", "pinned", 0, 3),
+            ("effective high new", "effective", 5, 4),
+            ("candidate excluded", "candidate", 0, 9),
+        ];
+        let mut rows = Vec::new();
+        for (rule, tier, helped, age) in fixtures {
+            rows.push(ranked_lesson(&pool, rule, "cargo", tier, helped, age).await);
+        }
+        let order = [5, 2, 6, 3, 1, 4, 0];
+        // Reference the original selection keys, independently of the new selector.
+        let expected_ids: Vec<String> = order.iter().map(|&i| rows[i].id.clone()).collect();
+        let mut expected_lines = vec![INJECTION_HEADER.to_owned(), FENCE_OPEN.to_owned()];
+        expected_lines.extend(order.iter().map(|&i| fenced_line(&rows[i].rule)));
+        expected_lines.push(FENCE_CLOSE.to_owned());
+        let expected = expected_lines.join("\n");
+        let (block, ids) = injection_block_with_ids(&pool, LessonDomain::Goal, PROJECT, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(block.as_bytes(), expected.as_bytes());
+        assert_eq!(ids, expected_ids);
+        assert_eq!(
+            injection_block(&pool, LessonDomain::Goal, PROJECT)
+                .await
+                .unwrap(),
+            Some(block)
+        );
+    }
+
+    #[tokio::test]
+    async fn overlap_never_crosses_tiers_or_removes_mismatches() {
+        let pool = pool().await;
+        let pinned = ranked_lesson(&pool, "pinned", "unrelated", "pinned", 0, 3).await;
+        let effective = ranked_lesson(&pool, "effective", "cargo", "effective", 2, 2).await;
+        let candidate =
+            ranked_lesson(&pool, "candidate", "cargo, test, lib", "candidate", 0, 1).await;
+        let (_, ids) =
+            injection_block_with_ids(&pool, LessonDomain::Goal, PROJECT, &["cargo test --lib"])
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                pinned.id.clone(),
+                effective.id.clone(),
+                candidate.id.clone()
+            ]
+        );
+        let (_, mismatched) =
+            injection_block_with_ids(&pool, LessonDomain::Goal, PROJECT, &["nothing matches"])
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(mismatched, ids);
+    }
+
+    #[tokio::test]
+    async fn keyword_overlap_ranks_within_each_tier_and_matches_korean_substrings() {
+        for tier in ["pinned", "effective", "candidate"] {
+            let pool = pool().await;
+            let relevant = ranked_lesson(&pool, "relevant", "cargo, test", tier, 2, 3).await;
+            let other = ranked_lesson(&pool, "other", "unrelated", tier, 9, 1).await;
+            let (_, ids) =
+                injection_block_with_ids(&pool, LessonDomain::Goal, PROJECT, &["CARGO TEST --lib"])
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(ids, vec![relevant.id, other.id]);
+        }
+        let pool = pool().await;
+        let korean = ranked_lesson(&pool, "substring", "검증", "candidate", 0, 3).await;
+        let other = ranked_lesson(&pool, "other", "unrelated", "candidate", 0, 1).await;
+        let (_, ids) =
+            injection_block_with_ids(&pool, LessonDomain::Goal, PROJECT, &["검증을 실행하세요"])
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(ids, vec![korean.id, other.id]);
+    }
+
+    #[tokio::test]
+    async fn recorded_keywords_are_normalized_truncated_and_capped() {
+        let pool = pool().await;
+        let long = "가".repeat(33);
+        let keywords = format!(
+            " Cargo, TEST ,cargo, , {long}, {}, a,b,c,d,e,f,g,h,i,j,k",
+            "가".repeat(32)
+        );
+        let row = record(
+            &pool,
+            LessonDraft {
+                domain: LessonDomain::Goal,
+                project: PROJECT,
+                rule: "normalize keywords",
+                rationale: "fixture",
+                keywords: &keywords,
+                evidence_ref: "goal:keywords",
+            },
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT keywords FROM supervisor_lessons WHERE id = ?")
+                .bind(&row.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored,
+            format!(
+                "cargo, test, {}, a, b, c, d, e, f, g, h, i",
+                "가".repeat(32)
+            )
+        );
+        assert_eq!(row.keywords, stored);
+        assert_eq!(stored.split(", ").count(), 12);
     }
 
     #[tokio::test]
@@ -712,7 +937,12 @@ mod tests {
         let pool = pool().await;
         for n in 0..12 {
             let row = lesson(&pool, PROJECT, &format!("effective rule {n}")).await;
-            set(&pool, &row.id, &format!("state = 'effective', helped = {}", n + 2)).await;
+            set(
+                &pool,
+                &row.id,
+                &format!("state = 'effective', helped = {}", n + 2),
+            )
+            .await;
         }
         for n in 0..3 {
             lesson(&pool, PROJECT, &format!("candidate rule {n}")).await;
@@ -835,9 +1065,24 @@ mod tests {
         let old = (now - Duration::days(STALE_DAYS + 1)).to_rfc3339();
         let recent = (now - Duration::days(STALE_DAYS - 1)).to_rfc3339();
         set(&pool, &stale.id, &format!("last_injected_at = '{old}'")).await;
-        set(&pool, &fresh.id, &format!("last_injected_at = '{recent}', created_at = '{old}'")).await;
-        set(&pool, &useless.id, &format!("injected = {USELESS_INJECTIONS}")).await;
-        set(&pool, &almost.id, &format!("injected = {}", USELESS_INJECTIONS - 1)).await;
+        set(
+            &pool,
+            &fresh.id,
+            &format!("last_injected_at = '{recent}', created_at = '{old}'"),
+        )
+        .await;
+        set(
+            &pool,
+            &useless.id,
+            &format!("injected = {USELESS_INJECTIONS}"),
+        )
+        .await;
+        set(
+            &pool,
+            &almost.id,
+            &format!("injected = {}", USELESS_INJECTIONS - 1),
+        )
+        .await;
         set(&pool, &pinned.id, &format!("last_injected_at = '{old}'")).await;
         assert!(pin(&pool, &pinned.id).await.unwrap());
         assert_eq!(retire_stale(&pool, now).await.unwrap(), 2);
@@ -1046,9 +1291,13 @@ mod tests {
         assert_eq!(get(&pool, &rule.id).await.unwrap().unwrap().helped, 1);
 
         // A second completed goal promotes the candidate.
-        note_injected(&pool, &goal_subject("goal-2"), std::slice::from_ref(&rule.id))
-            .await
-            .unwrap();
+        note_injected(
+            &pool,
+            &goal_subject("goal-2"),
+            std::slice::from_ref(&rule.id),
+        )
+        .await
+        .unwrap();
         goal_completed(&pool, "goal-2").await.unwrap();
         let after = get(&pool, &rule.id).await.unwrap().unwrap();
         assert_eq!((after.helped, after.state), (2, LessonState::Effective));
@@ -1112,9 +1361,17 @@ mod tests {
         .await
         .unwrap();
         assert!(unresolved.is_none());
-        let blank = reflect(&pool, &judge, LessonDomain::Report, PROJECT, summary, " ", |_| true)
-            .await
-            .unwrap();
+        let blank = reflect(
+            &pool,
+            &judge,
+            LessonDomain::Report,
+            PROJECT,
+            summary,
+            " ",
+            |_| true,
+        )
+        .await
+        .unwrap();
         assert!(blank.is_none());
         assert!(list(&pool, PROJECT).await.unwrap().is_empty());
         let calls: i64 =
@@ -1137,14 +1394,30 @@ mod tests {
         .await
         .unwrap();
         assert!(declined.is_none());
-        let written = reflect(&pool, &judge, LessonDomain::Report, PROJECT, summary, "report:1", |_| true)
-            .await
-            .unwrap()
-            .unwrap();
+        let written = reflect(
+            &pool,
+            &judge,
+            LessonDomain::Report,
+            PROJECT,
+            summary,
+            "report:1",
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(written.rule, "Ask before muting a cron.");
-        let again = reflect(&pool, &judge, LessonDomain::Report, PROJECT, summary, "report:1", |_| true)
-            .await
-            .unwrap();
+        let again = reflect(
+            &pool,
+            &judge,
+            LessonDomain::Report,
+            PROJECT,
+            summary,
+            "report:1",
+            |_| true,
+        )
+        .await
+        .unwrap();
         assert!(again.is_none(), "one lesson per evidence");
         assert_eq!(rule_from_summary(&"y".repeat(500)).chars().count(), MAX_RULE_CHARS);
         assert_eq!(rule_from_summary("v1.2 broke it. Pin it."), "v1.2 broke it.");
