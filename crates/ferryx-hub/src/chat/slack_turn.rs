@@ -795,7 +795,9 @@ fn follow_ups(pool: &SqlitePool, turn: &SessionTurn) -> tokio::sync::mpsc::Unbou
             // The session lock orders it after the reply of the turn that started the work.
             let lock = session_lock(&turn.key.storage_key());
             let _turn = lock.lock().await;
-            emit(&pool, &turn, &text).await;
+            // Same delivery path as a turn's own reply: the report gate decides whether the
+            // owner sees it, and a background run opens no commitment of its own.
+            emit_result(&pool, &turn, &text, Commitments::default(), true).await;
             if turn.reply_channel.is_some() {
                 if let Err(error) = super::transcript::record(
                     &pool,
