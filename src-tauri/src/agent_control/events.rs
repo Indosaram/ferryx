@@ -778,15 +778,10 @@ pub fn classify_screen(
         },
         None,
     );
-    let agent = provider
-        .and_then(|report| report.agent.clone())
-        .filter(|id| !id.trim().is_empty())
-        .or_else(|| {
-            detection
-                .as_ref()
-                .map(|found| found.manifest_id.clone())
-                .filter(|id| !id.is_empty())
-        });
+    let agent = crate::agent_detect::resolve_agent_identity(
+        provider.and_then(|report| report.agent.as_deref()),
+        detection.as_ref().map(|found| found.manifest_id.as_str()),
+    );
     let pending = agent.as_ref().and_then(|agent| {
         crate::remote::reference_chat::prompts::detect_reference_prompt_in_session(
             agent,

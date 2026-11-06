@@ -11,9 +11,82 @@ pub use manifest::{
 pub use matcher::{CompiledMatcherNode, MatcherError, MatcherNode};
 pub use region::{Region, RegionError, RegionView, ScreenInput};
 
+/// Identities a shared runtime reports for itself rather than for the agent running on top of it.
+///
+/// The senpi-family extension is installed once per engine directory, so its self-report can only
+/// name the engine (`omo`, `pi`) or, when the report carries no name at all, the extension
+/// manifest id. Every other id is the agent's own.
+const ENGINE_OWNED_IDENTITIES: [&str; 3] = ["omo", "pi", "ferryx-extension"];
+
+pub fn is_engine_owned_identity(id: &str) -> bool {
+    let id = id.trim();
+    ENGINE_OWNED_IDENTITIES
+        .iter()
+        .any(|known| id.eq_ignore_ascii_case(known))
+}
+
+/// Which agent a session is running, given what the agent reported and what its screen shows.
+///
+/// A self-report normally wins: only the agent knows what it is. It loses in exactly one case,
+/// when it names the engine that hosts it, because then it says nothing about the agent and the
+/// screen is the only remaining evidence.
+pub fn resolve_agent_identity(reported: Option<&str>, detected: Option<&str>) -> Option<String> {
+    let reported = reported.map(str::trim).filter(|id| !id.is_empty());
+    let detected = detected.map(str::trim).filter(|id| !id.is_empty());
+    match reported {
+        Some(reported) if is_engine_owned_identity(reported) => {
+            detected.or(Some(reported)).map(str::to_string)
+        }
+        Some(reported) => Some(reported.to_string()),
+        None => detected.map(str::to_string),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_self_report_yields_to_the_screen() {
+        // The senpi-family extension is installed per engine directory, so an `omo` report is the
+        // engine talking, not the agent on top of it; the screen is the only remaining evidence.
+        assert_eq!(
+            resolve_agent_identity(Some("omo"), Some("codex")).as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            resolve_agent_identity(Some("pi"), Some("cline")).as_deref(),
+            Some("cline")
+        );
+        // A report that carries no agent name at all arrives as the extension's manifest id.
+        assert_eq!(
+            resolve_agent_identity(Some("ferryx-extension"), Some("grok")).as_deref(),
+            Some("grok")
+        );
+    }
+
+    #[test]
+    fn an_agents_own_report_outranks_the_screen() {
+        // A hook agent names itself, and that is strictly better evidence than a footer.
+        assert_eq!(
+            resolve_agent_identity(Some("claude"), Some("omo")).as_deref(),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn an_engine_report_without_a_screen_stays_as_reported() {
+        // No screen evidence is not a reason to forget the session is an agent at all.
+        for reported in ["omo", "pi"] {
+            assert_eq!(
+                resolve_agent_identity(Some(reported), None).as_deref(),
+                Some(reported)
+            );
+        }
+        assert_eq!(resolve_agent_identity(None, Some("droid")).as_deref(), Some("droid"));
+        assert_eq!(resolve_agent_identity(None, None), None);
+        assert_eq!(resolve_agent_identity(Some("  "), Some(" ")), None);
+    }
 
     // 1. priority ordering — two rules match, higher priority wins
     #[test]

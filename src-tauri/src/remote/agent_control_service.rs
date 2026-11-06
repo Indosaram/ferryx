@@ -130,11 +130,10 @@ async fn observe_entry(
         };
         crate::agent_detect::default_engine().detect(&input, None)
     });
-    let agent = provider
-        .as_ref()
-        .and_then(|report| report.agent.clone())
-        .filter(|id| !id.trim().is_empty())
-        .or_else(|| detection.as_ref().map(|found| found.manifest_id.clone()).filter(|id| !id.is_empty()));
+    let agent = crate::agent_detect::resolve_agent_identity(
+        provider.as_ref().and_then(|report| report.agent.as_deref()),
+        detection.as_ref().map(|found| found.manifest_id.as_str()),
+    );
     let readable = screen.as_ref().is_some_and(|snapshot| snapshot.is_answerable());
     let pending = match (&agent, &screen) {
         (Some(agent), Some(snapshot))
