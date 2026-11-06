@@ -933,6 +933,13 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
         return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
       }, 10000, 800);
       record.from = from;
+      // Windows run 42079091681 failed here with from: null and nothing recorded, so there was no
+      // way to tell "Explorer never opened" from "it opened and OCR missed the name". Record the
+      // windows and the frame the drag source was read from whenever the name is not found.
+      if (!from) {
+        record.windows = ctx.host.windowRows ? ctx.host.windowRows("topwindows").slice(0, 12) : null;
+        record.words = screenWords(ctx).map((word) => word.text).slice(0, 40);
+      }
       if (!from) return { ...record, ok: false, stderr: "the file name was not read in Explorer" };
       // `explorer /select` only highlights the item; a real left press on it makes Explorer
       // the foreground window with the item selected before the drag press.
