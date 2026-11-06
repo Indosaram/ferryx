@@ -333,12 +333,15 @@ jobs:
 
       - name: Run UI audit (Windows)
         if: matrix.os_name == 'windows'
-        timeout-minutes: 75
-        # Run 42079091681 spent the 50 min default before engine-install, so 12 steps were
-        # skipped (engine never started, which false-cascades every Chromium check). Windows
-        # needs the same headroom Linux already has: 70 stays inside the 75 min step timeout.
+        timeout-minutes: 170
+        # Run 42145006089 still exhausted a 70 min budget: it reached the gate at 03:05:45Z with
+        # 10 steps unrun (first_skipped_step engine-kill), so engine_kill_closes_tabs and all five
+        # extension checks were false only because they never executed, and daily-g9-print hit the
+        # 240 s per-step cap. Windows needs more than 70 min of real work; 165 stays inside both
+        # this step's 170 and the job's 180 min ceiling. The budget is a stop-loss, not a result:
+        # nothing here weakens a check, it only lets every check run.
         env:
-          FERRYX_UI_AUDIT_BUDGET_MIN: '70'
+          FERRYX_UI_AUDIT_BUDGET_MIN: '165'
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"
