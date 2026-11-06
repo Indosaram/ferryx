@@ -664,6 +664,111 @@ async fn admission_and_correction_record_distinct_turns_without_recounting_lesso
 }
 
 #[tokio::test]
+async fn a_correction_ranks_lessons_by_its_instruction_before_newer_unrelated_lessons() {
+    use crate::supervisor::lessons::{record, LessonDomain, LessonDraft};
+
+    let pool = owner_pool().await;
+    let (goal, lane) = admit(&pool, "m-correction-situation", Some(1)).await;
+    let project = goal_of(&pool, &goal).await.unwrap().unwrap().project_id;
+    let control = idle_control();
+    let dispatch = dispatcher(&pool, control.clone(), PANE);
+    dispatch.drain().await;
+    let _repo = use_clean_repo(&pool, &lane, "NOT READY").await;
+    // Add lessons after admission so only the correction can select them. Fixed timestamps
+    // make recency order deterministic; only the correction instruction mentions verify.sh.
+    let fixtures = [
+        (
+            "Run the failed verifier after correcting its input",
+            "verify.sh",
+            "2026-11-07T00:00:00Z",
+        ),
+        (
+            "Check unrelated documentation before reporting",
+            "documentation",
+            "2026-11-07T01:00:00Z",
+        ),
+        (
+            "Review unrelated styles before reporting",
+            "styles",
+            "2026-11-07T02:00:00Z",
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (rule, keywords, created_at) in fixtures {
+        let lesson = record(
+            &pool,
+            LessonDraft {
+                domain: LessonDomain::Goal,
+                project: &project,
+                rule,
+                rationale: "correction situation fixture",
+                keywords,
+                evidence_ref: &format!("goal:{goal}"),
+            },
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        sqlx::query(
+            "UPDATE supervisor_lessons SET created_at = ?, last_injected_at = ? WHERE id = ?",
+        )
+        .bind(created_at)
+        .bind(Utc::now().to_rfc3339())
+        .bind(&lesson.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(lesson.id);
+    }
+
+    settle(&pool, PANE, 1_000).await;
+    let scheduler = completion_scheduler(
+        &pool,
+        ScriptedModel::new(&[ASSESS_CONTINUE]),
+        control.clone(),
+    );
+    timeout(DEADLINE, scheduler.tick(epoch()))
+        .await
+        .unwrap()
+        .unwrap();
+    let correction = ready_dispatches(&pool, 10).await.unwrap();
+    assert_eq!(correction.len(), 1);
+    let selected: Vec<&str> = correction[0]
+        .instruction
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .collect();
+    assert_eq!(
+        selected,
+        vec![
+            format!("- {}", fixtures[0].0),
+            format!("- {}", fixtures[2].0)
+        ],
+        "the matching lesson must beat both newer unrelated candidates"
+    );
+    let mut expected = vec![ids[0].clone(), ids[2].clone()];
+    expected.sort();
+    let injected: Vec<String> = sqlx::query_scalar(
+        "SELECT lesson_id FROM lesson_turn_injections WHERE turn_ref = ? ORDER BY lesson_id",
+    )
+    .bind(&correction[0].request_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(injected, expected);
+
+    let results = dispatch.drain().await;
+    assert!(
+        matches!(results.as_slice(), [DispatchResult::Transmitted { .. }]),
+        "{results:?}"
+    );
+    let text = sends_text(&control).pop().unwrap();
+    let sent: Vec<&str> = text.lines().filter(|line| line.starts_with("- ")).collect();
+    assert_eq!(sent, selected);
+}
+
+#[tokio::test]
 async fn a_verifier_failure_runs_a_correction_without_the_owner_and_stops_at_the_budget() {
     let pool = owner_pool().await;
     let (goal, lane) = admit(&pool, "m-1", Some(1)).await;
@@ -1736,9 +1841,16 @@ async fn assert_settling_turn_outcome(completed: bool) {
     let control = idle_control();
     let dispatch = dispatcher(&pool, control.clone(), PANE);
     // An unrelated held goal's turn must remain open.
-    transition_goal(&pool, &other, 1, RunState::Ready, RunState::Paused, Some("owner hold"))
-        .await
-        .unwrap();
+    transition_goal(
+        &pool,
+        &other,
+        1,
+        RunState::Ready,
+        RunState::Paused,
+        Some("owner hold"),
+    )
+    .await
+    .unwrap();
     dispatch.drain().await;
     let repo = use_clean_repo(&pool, &lane, "NOT READY").await;
     let answers = if completed {
@@ -1761,7 +1873,11 @@ async fn assert_settling_turn_outcome(completed: bool) {
     let expected = if completed { "helped" } else { "hurt" };
     assert_eq!(
         goal_state(&pool, &goal).await.0,
-        if completed { RunState::Completed } else { RunState::AwaitingOwner }
+        if completed {
+            RunState::Completed
+        } else {
+            RunState::AwaitingOwner
+        }
     );
     let rows: Vec<(String,)> = sqlx::query_as(
         "SELECT i.outcome FROM lesson_turn_injections i
@@ -1792,23 +1908,24 @@ async fn assert_settling_turn_outcome(completed: bool) {
     .await
     .unwrap();
     assert_eq!(rollup, (expected.into(), 1));
-    let counts: (i64, i64) = sqlx::query_as(
-        "SELECT helped, hurt FROM supervisor_lessons WHERE id = ?",
-    )
-    .bind(&lesson.id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let counts: (i64, i64) =
+        sqlx::query_as("SELECT helped, hurt FROM supervisor_lessons WHERE id = ?")
+            .bind(&lesson.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(counts, if completed { (1, 0) } else { (0, 1) });
     // A later scheduler pass cannot count the same rollup again.
-    scheduler.tick(epoch() + chrono::Duration::seconds(2)).await.unwrap();
-    let after: (i64, i64) = sqlx::query_as(
-        "SELECT helped, hurt FROM supervisor_lessons WHERE id = ?",
-    )
-    .bind(&lesson.id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    scheduler
+        .tick(epoch() + chrono::Duration::seconds(2))
+        .await
+        .unwrap();
+    let after: (i64, i64) =
+        sqlx::query_as("SELECT helped, hurt FROM supervisor_lessons WHERE id = ?")
+            .bind(&lesson.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(after, counts);
 }
 
