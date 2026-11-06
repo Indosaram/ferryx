@@ -2436,8 +2436,19 @@ if (engineZip && summary.engine.checks.installed_from_settings) {
     "Mod+L inside the Chromium tab, type the local fixture URL, Enter (CLI navigate as fallback)",
     [
       focus,
+      // Windows gives the engine pane keyboard focus only from the mouse hook the product
+      // installs (see platform.rs focus_on_click): a child window is never activated on its own,
+      // so Mod+L after a bare window focus leaves the keys with Ferryx. chromium-typing clicks
+      // first and passes on the same run; this step waited for a focus that never came (run
+      // 42161639757). Click the page before reaching for the address bar on every platform: the
+      // click is harmless where focus already moved.
+      ["click page", async () => {
+        const words = ocr(probeShot());
+        const hint = findWord(words, "fixture:") ?? findWord(words, "CEF");
+        return hint ? host.click(hint.x, hint.y + 60) : host.click(760, 520);
+      }],
+      waitForEngineFocus("engine window takes keyboard focus after the click"),
       key("Mod+L", { key: "l", mods: ["mod"] }),
-      waitForEngineFocus("engine window takes keyboard focus after Mod+L"),
       ["type URL", () => host.type(`${fixtureBase}/fixture.html`)],
       ["screenshot after typing the URL", () => {
         const shot = screenshot("chromium-typed-url");
