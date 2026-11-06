@@ -48,8 +48,12 @@ pub struct AgentSpec {
     /// The agent id the rest of Ferryx uses (discovery, resume, machine admission, UI).
     pub id: &'static str,
     pub display_name: &'static str,
-    /// Executable and entry-point basenames that launch this agent, lowercase.
+    /// Executable and entry-point basenames that launch this agent, lowercase. These name the
+    /// agent both in a pane's foreground process and in a launch argv.
     pub command_names: &'static [&'static str],
+    /// Names accepted only in a launch argv, never as a pane's foreground executable: a binary
+    /// the agent's CLI shares with an unrelated program that a pane may also be running.
+    pub argv_only_names: &'static [&'static str],
     /// Extra ids this agent answers to.
     pub aliases: &'static [&'static str],
     /// Package directories that identify the agent behind a generic entry point (\`cli.js\`).
@@ -84,6 +88,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "claude",
         display_name: "Claude Code",
         command_names: &["claude"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -102,6 +107,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "codex",
         display_name: "Codex",
         command_names: &["codex"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -120,6 +126,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "copilot",
         display_name: "Copilot",
         command_names: &["copilot"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -137,7 +144,10 @@ pub const AGENTS: &[AgentSpec] = &[
     AgentSpec {
         id: "cursor",
         display_name: "Cursor",
-        command_names: &["cursor-agent", "cursor"],
+        command_names: &["cursor-agent", "agent"],
+        // A pane running the bare `cursor` binary is the Cursor editor, not its agent, so that
+        // name is argv-only: `cursor --resume <id>` still identifies a resumed agent.
+        argv_only_names: &["cursor"],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -156,6 +166,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "kimi",
         display_name: "Kimi",
         command_names: &["kimi"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -174,6 +185,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "omo",
         display_name: "OMO",
         command_names: &["omo"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &["omo-ai"],
         argv_markers: &["/omo.js", "/senpi/dist/cli.js"],
@@ -192,6 +204,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "maho",
         display_name: "Maho",
         command_names: &["mhc"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -210,6 +223,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "gjc",
         display_name: "Gajae Code",
         command_names: &["gjc"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &["/gjc.js"],
@@ -228,6 +242,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "antigravity",
         display_name: "Antigravity",
         command_names: &["agy"],
+        argv_only_names: &[],
         aliases: &["agy", "antigravity-cli"],
         package_names: &[],
         argv_markers: &[],
@@ -246,6 +261,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "opencode",
         display_name: "OpenCode",
         command_names: &["opencode"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -264,6 +280,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "pi",
         display_name: "Pi",
         command_names: &["pi", "pi.js"],
+        argv_only_names: &[],
         aliases: &["senpi"],
         package_names: &["@code-yeongyu/senpi"],
         argv_markers: &["/pi-coding-agent"],
@@ -282,6 +299,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "omp",
         display_name: "OMP",
         command_names: &["omp"],
+        argv_only_names: &[],
         aliases: &["oh-my-pi"],
         package_names: &["oh-my-pi", "omp"],
         argv_markers: &[],
@@ -300,6 +318,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "grok",
         display_name: "Grok",
         command_names: &["grok"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -318,6 +337,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "droid",
         display_name: "Droid",
         command_names: &["droid"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -336,6 +356,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "cline",
         display_name: "Cline",
         command_names: &["cline"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -354,6 +375,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "crush",
         display_name: "Crush",
         command_names: &["crush"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -372,6 +394,7 @@ pub const AGENTS: &[AgentSpec] = &[
         id: "aider",
         display_name: "Aider",
         command_names: &["aider"],
+        argv_only_names: &[],
         aliases: &[],
         package_names: &[],
         argv_markers: &[],
@@ -503,6 +526,17 @@ mod tests {
             .map(|spec| spec.id)
             .collect();
         assert_eq!(marked, ["claude", "omp", "cline", "crush"]);
+    }
+
+    #[test]
+    fn the_cursor_editor_binary_names_the_agent_only_in_a_launch_argv() {
+        // A pane running the Cursor editor is not a cursor-agent pane; only `cursor --resume <id>`
+        // identifies a resumed agent, which is what argv matching reads.
+        let cursor = by_id("cursor").expect("cursor must be listed");
+        assert!(cursor.command_names.contains(&"cursor-agent"));
+        assert!(!cursor.command_names.contains(&"cursor"));
+        assert!(cursor.argv_only_names.contains(&"cursor"));
+        assert!(resolve("cursor-agent").is_some_and(|spec| spec.id == "cursor"));
     }
 
     #[test]

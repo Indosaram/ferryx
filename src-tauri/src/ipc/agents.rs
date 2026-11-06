@@ -278,6 +278,9 @@ fn args_match_agent(agent_type: &str, args: &str) -> bool {
     let name_matches = spec
         .command_names
         .iter()
+        // An argv-only name is a binary the agent's CLI shares with an unrelated program, so it
+        // identifies the agent in a launch argv and nowhere else.
+        .chain(spec.argv_only_names.iter())
         // A launcher variant is a binary that hosts this agent, so a pane still running the
         // pre-split launcher (an omo session on the mhc binary) stays discoverable.
         .chain(spec.launch_variants.iter().map(|(_, binary)| binary))

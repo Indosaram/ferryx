@@ -409,13 +409,12 @@ fn package_agents() -> Vec<(&'static str, &'static str)> {
 /// Agent executable or entry-point names, lowercase because the comparison ignores case. The
 /// registry is the single source: a new agent appears in pane detection by being added there.
 fn agent_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = crate::agent_detect::registry::AGENTS
+    // Only `command_names`: an `argv_only_names` entry is a binary the agent's CLI shares with an
+    // unrelated program (cursor's editor), so a pane running it is not this agent.
+    crate::agent_detect::registry::AGENTS
         .iter()
         .flat_map(|spec| spec.command_names.iter().copied())
-        .collect();
-    // `agent` is cursor's other launcher name and stays a plain alias rather than its own entry.
-    names.push("agent");
-    names
+        .collect()
 }
 
 /// The agent name a launcher binary is recognized by, mapped to the agent id the rest of Ferryx
