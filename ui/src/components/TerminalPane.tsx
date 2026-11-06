@@ -38,6 +38,7 @@ type TerminalPaneProps = {
   session: TerminalSession;
   sessions?: Readonly<Record<string, TerminalSession>> | readonly TerminalSession[];
   active: boolean;
+  inputActive?: boolean;
   activity?: TerminalActivity;
   needsAttention?: boolean;
   searchOpen?: boolean;
@@ -103,6 +104,7 @@ export function TerminalPane({
   session,
   sessions,
   active,
+  inputActive = active,
   activity,
   needsAttention,
   searchOpen,
@@ -391,7 +393,7 @@ export function TerminalPane({
           sessionId={session.id}
           session={session}
           splitAttempt={splitIntent ? { frontendSessionId: session.id, generation: splitIntent.generation } : undefined}
-          active={active}
+          active={inputActive}
           activity={activity}
           needsAttention={needsAttention}
           onRefreshSessionIdentity={onRefreshSessionIdentity}

@@ -6813,6 +6813,12 @@ impl DaemonServer {
                         Err(error) => crate::remote::server::agent_control_service::error_response(error),
                     }
                 }
+                Ok(DaemonRequest::ReferenceChatIdentity) => DaemonResponse::ReferenceChatIdentityOk {
+                    identity: crate::remote::server::desktop_reference_chat_identity(&self.remote_state),
+                },
+                Ok(DaemonRequest::ReferenceChat { request }) => DaemonResponse::ReferenceChatOk {
+                    reply: crate::remote::server::desktop_reference_chat(&self.remote_state, request).await,
+                },
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),

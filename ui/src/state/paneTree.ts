@@ -2,7 +2,9 @@ export type PaneDirection = "horizontal" | "vertical";
 
 export type PaneLeafKind = "terminal" | "browser" | "dag";
 
-export type PaneLeafNode = { type: "leaf"; leafId: string; kind?: PaneLeafKind };
+export type PaneView = "terminal" | "chat";
+
+export type PaneLeafNode = { type: "leaf"; leafId: string; kind?: PaneLeafKind; view?: PaneView };
 
 export type PaneSplitNode = {
   type: "split";
@@ -154,12 +156,14 @@ export function findSiblingLeafId(root: PaneNode, targetLeafId: string): string 
  */
 export function swapLeaves(root: PaneNode, sourceLeafId: string, targetLeafId: string): PaneNode {
   if (sourceLeafId === targetLeafId) return root;
-  if (!containsLeaf(root, sourceLeafId) || !containsLeaf(root, targetLeafId)) return root;
+  const source = findLeaf(root, sourceLeafId);
+  const target = findLeaf(root, targetLeafId);
+  if (!source || !target) return root;
 
   const swap = (node: PaneNode): PaneNode => {
     if (node.type === "leaf") {
-      if (node.leafId === sourceLeafId) return { type: "leaf", leafId: targetLeafId };
-      if (node.leafId === targetLeafId) return { type: "leaf", leafId: sourceLeafId };
+      if (node.leafId === sourceLeafId) return target;
+      if (node.leafId === targetLeafId) return source;
       return node;
     }
     const first = swap(node.first);
@@ -169,6 +173,17 @@ export function swapLeaves(root: PaneNode, sourceLeafId: string, targetLeafId: s
   };
 
   return swap(root);
+}
+
+export function findLeaf(root: PaneNode, leafId: string): PaneLeafNode | null {
+  if (root.type === "leaf") return root.leafId === leafId ? root : null;
+  return findLeaf(root.first, leafId) ?? findLeaf(root.second, leafId);
+}
+
+export function setLeafView(root: PaneNode, leafId: string, view: PaneView): PaneNode {
+  return mapLeaf(root, leafId, (leaf) =>
+    (leaf.view ?? "terminal") === view ? leaf : { ...leaf, view },
+  );
 }
 
 /** Resets every split in the tree to an even 0.5 ratio. */

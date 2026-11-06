@@ -335,6 +335,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     await act(async () => {
       await result.current.openTab(worktree, "Claude", {
         sessionId: "agent-backend",
+        agentType: "claude",
         daemonEpoch: "epoch-9",
         incarnation: "life:agent-backend",
       });
@@ -343,8 +344,36 @@ describe("useWorkspaceStore terminal ownership", () => {
     const session = Object.values(result.current.state.sessions).find(
       (candidate) => candidate.backendSessionId === "agent-backend",
     );
-    expect(session).toMatchObject({ daemonEpoch: "epoch-9", incarnation: "life:agent-backend" });
+    expect(session).toMatchObject({ agentType: "claude", daemonEpoch: "epoch-9", incarnation: "life:agent-backend" });
     expect(services.spawnTerminal).not.toHaveBeenCalled();
+  });
+
+  it("opens a chat tab in the rendered store without replacing its backend on view changes", async () => {
+    const { services } = createServices();
+    const { result, unmount } = renderHook(() =>
+      useWorkspaceStore({ workspaceId: "ws-main", initialWorktrees: [worktree], services }),
+    );
+    let tabId = "";
+    await act(async () => {
+      tabId = openedTab(await result.current.openTab(worktree, "Chat", {
+        sessionId: "chat-backend", agentType: "claude", daemonEpoch: "epoch-chat", incarnation: "life:chat",
+      }, undefined, "chat"));
+    });
+    const pane = result.current.state.layout.layoutsByTabId[tabId];
+    expect(pane.root).toMatchObject({ type: "leaf", view: "chat" });
+    const leafId = pane.activeLeafId;
+    if (!leafId) throw new Error("expected active chat leaf");
+    const sessionId = pane.sessionIdsByLeafId[leafId];
+    const session = result.current.state.sessions[sessionId];
+    for (const view of ["terminal", "chat"] as const) {
+      act(() => result.current.setPaneView(tabId, leafId, view));
+      expect(result.current.state.layout.layoutsByTabId[tabId].root).toMatchObject({ view });
+      expect(result.current.state.sessions[sessionId]).toBe(session);
+      expect(session.backendSessionId).toBe("chat-backend");
+    }
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+    expect(services.closeTerminal).not.toHaveBeenCalled();
+    unmount();
   });
 
   it("forwards a per-tab shell override to the backend spawn", async () => {

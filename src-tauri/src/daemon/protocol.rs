@@ -1292,6 +1292,85 @@ pub enum DaemonRequest {
         request_id: String,
         approve: bool,
     },
+    ReferenceChatIdentity,
+    #[serde(rename_all = "camelCase")]
+    ReferenceChat {
+        request: DesktopReferenceChatRequest,
+    },
+}
+
+/// The allowlist: files, control, screen and payload kinds do not deserialize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DesktopReferenceChatKind {
+    History,
+    Prompt,
+    Submit,
+    Stop,
+    Answer,
+}
+
+impl DesktopReferenceChatKind {
+    pub fn is_read(self) -> bool {
+        matches!(self, Self::History | Self::Prompt)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopReferenceChatRequest {
+    pub kind: DesktopReferenceChatKind,
+    pub request_id: String,
+    #[serde(deserialize_with = "deserialize_desktop_reference_target")]
+    pub target: crate::remote::reference_chat::types::ReferenceTargetRef,
+    #[serde(default)]
+    pub registry_id: Option<String>,
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// Accepts the frontend's nested `{target, providerSessionId}` and the flattened Rust wire.
+fn deserialize_desktop_reference_target<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::remote::reference_chat::types::ReferenceTargetRef, D::Error> {
+    use crate::remote::reference_chat::types::ReferenceTargetRef;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Nested {
+        target: crate::scoped_contracts::TargetRef,
+        #[serde(default)]
+        provider_session_id: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Nested(Nested),
+        Flat(ReferenceTargetRef),
+    }
+    Ok(match Wire::deserialize(deserializer)? {
+        Wire::Nested(Nested { target, provider_session_id: Some(provider) })
+            if !provider.trim().is_empty() =>
+        {
+            ReferenceTargetRef::with_provider_session(target, provider)
+        }
+        Wire::Nested(Nested { target, .. }) => ReferenceTargetRef::without_provider_session(target),
+        Wire::Flat(target) => target,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopReferenceChatReply {
+    pub status: u16,
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopReferenceChatIdentity {
+    pub host_id: String,
+    pub owner_id: String,
+    pub epoch: String,
 }
 
 /// One connected remote desktop viewer.
@@ -1802,6 +1881,14 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     RemoteDesktopHostState {
         state: RdHostState,
+    },
+    #[serde(rename_all = "camelCase")]
+    ReferenceChatIdentityOk {
+        identity: DesktopReferenceChatIdentity,
+    },
+    #[serde(rename_all = "camelCase")]
+    ReferenceChatOk {
+        reply: DesktopReferenceChatReply,
     },
     #[serde(rename_all = "camelCase")]
     Error {

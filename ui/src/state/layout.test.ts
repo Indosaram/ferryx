@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { BrowserTab, FileTab, TabGroupLayoutNode, TerminalTab } from "../lib/types";
 import { createLayoutState, defaultContentForTab, focusedPaneSessionId, layoutReducer } from "./layout";
-import { computeLeafRects, resolveSeam } from "./paneTree";
+import { computeLeafRects, findLeaf, resolveSeam } from "./paneTree";
 
 function tab(id: string, sessionId: string): TerminalTab {
   return { id, label: id, sessionId };
@@ -20,6 +20,46 @@ it("stores file rename intent separately and carries it into a pane", () => {
   const cleared = layoutReducer(renamed, { type: "RENAME_TAB", tabId: file.id, label: "" });
   expect(cleared.tabs[0]).not.toHaveProperty("customLabel");
   expect(cleared.tabs[0].label).toBe("index.ts");
+});
+
+describe("pane view", () => {
+  it("creates a chat tab in chat view on every reduction", () => {
+    const initial = createLayoutState();
+    for (let reduction = 0; reduction < 2; reduction += 1) {
+      const next = layoutReducer(initial, {
+        type: "ADD_TAB", tab: tab("chat", "session-chat"), sessionId: "session-chat", view: "chat",
+      });
+      const pane = next.layoutsByTabId.chat;
+      expect(pane.root).toMatchObject({ type: "leaf", view: "chat" });
+      expect(Object.values(pane.sessionIdsByLeafId)).toEqual(["session-chat"]);
+    }
+  });
+
+  it("changes the presentation without replacing session bindings", () => {
+    const initial = createLayoutState([tab("a", "session-a")], "a");
+    const pane = initial.layoutsByTabId.a;
+    if (!pane.activeLeafId) throw new Error("expected active pane");
+    const next = layoutReducer(initial, {
+      type: "SET_PANE_VIEW", tabId: "a", leafId: pane.activeLeafId, view: "chat",
+    });
+    expect(findLeaf(next.layoutsByTabId.a.root, pane.activeLeafId)?.view).toBe("chat");
+    expect(next.layoutsByTabId.a.sessionIdsByLeafId).toBe(pane.sessionIdsByLeafId);
+    expect(next.tabs).toBe(initial.tabs);
+  });
+
+  it("retains the selected view when a chat split becomes a separate tab", () => {
+    const initial = createLayoutState([tab("a", "session-a")], "a");
+    const split = layoutReducer(initial, {
+      type: "SPLIT_PANE", tabId: "a", direction: "horizontal", newLeafId: "chat-leaf",
+      sessionId: "session-chat", view: "chat",
+    });
+    const detached = layoutReducer(split, {
+      type: "DETACH_PANE_TO_TAB", sourceTabId: "a", leafId: "chat-leaf", newTab: tab("b", "session-chat"),
+    });
+    expect(detached.layoutsByTabId.b.root).toEqual({ type: "leaf", leafId: "chat-leaf", view: "chat" });
+    expect(detached.layoutsByTabId.b.sessionIdsByLeafId["chat-leaf"]).toBe("session-chat");
+    expect(findLeaf(detached.layoutsByTabId.a.root, "chat-leaf")).toBeNull();
+  });
 });
 
 describe("divider run equalization", () => {

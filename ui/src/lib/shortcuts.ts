@@ -8,6 +8,7 @@ let shortcutRegistration = 0;
 
 export type ShortcutActionId =
   | "tab.newTerminal"
+  | "tab.newChat"
   | "tab.newBrowser"
   | "tab.reopenClosed"
   | "tab.close"
@@ -83,6 +84,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Tabs",
     binding: { key: "t", mod: true },
     source: "original",
+  },
+  {
+    id: "tab.newChat",
+    title: "New chat tab (last used agent)",
+    group: "Tabs",
+    binding: { key: "t", mod: true, alt: true },
+    source: "ferryx",
   },
   {
     id: "tab.newBrowser",

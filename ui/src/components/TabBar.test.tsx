@@ -668,6 +668,104 @@ describe("TabBar", () => {
     expect(onLaunchAgent).toHaveBeenCalledWith(agents[0]);
   });
 
+  describe("pane chat entry points", () => {
+    const agents = [
+      { name: "claude", command: "claude", args: "" },
+      { name: "aider", command: "aider", args: "" },
+      { name: "codex", command: "codex", args: "--x", enabled: false },
+      { name: "pi", command: "pi", args: "" },
+    ];
+
+    function newChatSubmenu() {
+      return menuItems().find((item) => item.kind === "submenu" && item.label === "New Chat") as
+        | { items: Array<{ id: string; label: string; shortcut?: string }> }
+        | undefined;
+    }
+
+    it("lists only enabled chat-capable agents, last used first, next to New Terminal", () => {
+      localStorage.setItem("ferryx.paneChat.lastAgent", "pi");
+      const onNewChat = vi.fn();
+      render(
+        <TabBar
+          tabs={[terminalTab("tab-a", "main")]}
+          activeTabId="tab-a"
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          agents={agents}
+          onNewChat={onNewChat}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      const items = menuItems();
+      expect(items[0]).toEqual(expect.objectContaining({ id: "new-terminal" }));
+      expect(items[1]).toEqual(expect.objectContaining({ kind: "submenu", label: "New Chat" }));
+      const submenu = newChatSubmenu()!;
+      expect(submenu.items.map((item) => item.id)).toEqual(["new-chat:pi", "new-chat:claude"]);
+      expect(submenu.items[0].shortcut).toBeTruthy();
+      expect(submenu.items[1].shortcut).toBeUndefined();
+
+      clickMenuItem("new-chat:claude");
+      expect(onNewChat).toHaveBeenCalledWith(agents[0]);
+    });
+
+    it("hides New Chat when the host gates it off or no agent supports chat", () => {
+      const { unmount } = render(
+        <TabBar
+          tabs={[terminalTab("tab-a", "main")]}
+          activeTabId="tab-a"
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          agents={agents}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      expect(newChatSubmenu()).toBeUndefined();
+      unmount();
+
+      render(
+        <TabBar
+          tabs={[terminalTab("tab-a", "main")]}
+          activeTabId="tab-a"
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          agents={[{ name: "aider", command: "aider", args: "" }]}
+          onNewChat={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "New tab" }));
+      expect(newChatSubmenu()).toBeUndefined();
+    });
+
+    it("offers split chat right/down for terminal tabs only and forwards the agent", () => {
+      const onSplitChat = vi.fn();
+      render(
+        <TabBar
+          tabs={[terminalTab("tab-a", "main"), { id: "tab-b", kind: "browser", label: "web", browserId: "b", url: "about:blank", title: null, loading: false, canGoBack: false, canGoForward: false } as WorkspaceTab]}
+          activeTabId="tab-a"
+          onActivate={vi.fn()}
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          agents={agents}
+          onSplitChat={onSplitChat}
+        />,
+      );
+
+      fireEvent.contextMenu(getTab("main"));
+      clickMenuItem("split-chat-down:claude");
+      expect(onSplitChat).toHaveBeenCalledWith("tab-a", "vertical", agents[0]);
+      fireEvent.contextMenu(getTab("main"));
+      clickMenuItem("split-chat-right:pi");
+      expect(onSplitChat).toHaveBeenLastCalledWith("tab-a", "horizontal", agents[3]);
+
+      fireEvent.contextMenu(getTab("web"));
+      expect(findEntryRecursively(menuItems(), "split-chat-right:claude")).toBeUndefined();
+    });
+  });
+
   it("memoizes SortableTab with React.memo", () => {
     const isMemo = typeof SortableTab === "object" && (SortableTab as any)?.$$typeof === Symbol.for("react.memo");
     const source = fs.readFileSync(path.resolve(__dirname, "tab-dnd/SortableTab.tsx"), "utf8");

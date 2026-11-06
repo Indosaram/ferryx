@@ -679,6 +679,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             }
             | DaemonRequest::AgentControlSettingsGet
             | DaemonRequest::SupervisorSettings { enabled: None }
+            | DaemonRequest::ReferenceChatIdentity
     )
 }
 
@@ -826,6 +827,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteDesktopHostGet => "remoteDesktopHostGet",
         DaemonRequest::RemoteDesktopHostSet { .. } => "remoteDesktopHostSet",
         DaemonRequest::RemoteDesktopHostRespond { .. } => "remoteDesktopHostRespond",
+        DaemonRequest::ReferenceChatIdentity => "referenceChatIdentity",
+        DaemonRequest::ReferenceChat { .. } => "referenceChat",
     }
 }
 
@@ -1020,6 +1023,8 @@ const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// and let the daemon report the outcome. Matches the CLI's `GOAL_CLI_TIMEOUT`.
 const SUPERVISOR_GOAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 const REMOTE_DESKTOP_SET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// Outlasts the reference input queue's 45 s submit deadline so the daemon reports the outcome.
+const REFERENCE_CHAT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
     match request {
@@ -1040,6 +1045,7 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
         DaemonRequest::SupervisorMoveHere { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // Turning the remote desktop host on probes capture and binds; the host bounds that at 30 s.
         DaemonRequest::RemoteDesktopHostSet { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
+        DaemonRequest::ReferenceChat { .. } => REFERENCE_CHAT_REQUEST_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }
@@ -3419,6 +3425,22 @@ impl DaemonClient {
 
     pub async fn send_request(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
         self.send_on_connection(&self.connection, req).await
+    }
+
+    /// One request on its own fresh connection, dropped afterwards: a long reference-chat
+    /// mutation never holds the shared general or interactive connection. A read that failed
+    /// before any reply is retried once; a mutation that may have been delivered is not.
+    pub async fn send_request_one_shot(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
+        let retry_safe = request_is_retry_safe(&req);
+        let mut conn = self.connect_and_handshake().await?;
+        match conn.request(&req).await {
+            Ok(resp) => Ok(resp),
+            Err(error) if !error.may_have_been_delivered || retry_safe => {
+                let mut fresh = self.connect_and_handshake().await?;
+                fresh.request(&req).await.map_err(|error| error.into_ipc_error(&req, !retry_safe))
+            }
+            Err(error) => Err(error.into_ipc_error(&req, true)),
+        }
     }
 
     /// The owner speaks another data protocol (todo 9). Nothing is sent over the data protocol and

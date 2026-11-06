@@ -67,7 +67,7 @@ import type {
   WorktreeIdentity,
 } from "../lib/types";
 import { createLayoutState, getFocusedGroupId, getGroupForTab, getTabsForGroup, layoutReducer } from "./layout";
-import { collectLeafIds, type PaneDirection, type ResolvedSeam } from "./paneTree";
+import { collectLeafIds, type PaneDirection, type PaneView, type ResolvedSeam } from "./paneTree";
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
 import { hasRecentObservationInteraction } from "../lib/observationInteraction";
 import { formatRecoveryKey, RecoveryScheduler, type AuthorityCorrectionReceipt, type RecoveryClock } from "../lib/sessionRecovery";
@@ -681,6 +681,8 @@ export type WorkspaceServices = {
 
 export type SplitPaneOptions = {
   position?: "first" | "second";
+  view?: PaneView;
+  agentType?: string;
   content?: PaneContent;
   /** Host-validated startup for the new pane. A continuation does not mutate the source pane. */
   startup?: SpawnTerminalRequest["startup"];
@@ -693,6 +695,7 @@ export type TabSplitEdge = "left" | "right" | "top" | "bottom";
  *  identity reported by the detailed spawn rather than a bare session id. */
 export type PreSpawnedBackend = {
   sessionId: string;
+  agentType?: string;
   daemonEpoch: string | null;
   incarnation: string | null;
   /** Attach generation the session last had in another window. The new pane attaches with a
@@ -716,7 +719,7 @@ export type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
   | { type: "RESTORE_WORKSPACE"; state: WorkspaceState }
   | { type: "SELECT_WORKTREE"; path: string }
-  | { type: "ADD_TAB_WITH_SESSION"; tab: WorkspaceTab; session?: TerminalSession; targetWorktreePath?: string; activate?: boolean }
+  | { type: "ADD_TAB_WITH_SESSION"; tab: WorkspaceTab; session?: TerminalSession; targetWorktreePath?: string; activate?: boolean; view?: PaneView }
   | {
       type: "CLOSE_TAB";
       tabId: string;
@@ -736,6 +739,7 @@ export type WorkspaceAction =
       position?: "first" | "second";
       newLeafId: string;
       content?: PaneContent;
+      view?: PaneView;
       session: TerminalSession;
     }
   | { type: "MOVE_TAB_TO_GROUP"; sourceTabId: string; targetGroupId: string; targetIndex?: number }
@@ -768,6 +772,7 @@ export type WorkspaceAction =
       leafId: string;
     }
   | { type: "FOCUS_PANE"; tabId: string; leafId: string }
+  | { type: "SET_PANE_VIEW"; tabId: string; leafId: string; view: PaneView }
   | {
       type: "SET_PANE_RATIO";
       tabId: string;
@@ -1349,6 +1354,7 @@ export function useWorkspaceStore({
         workspaceId,
         worktree: worktreeIdentity(worktree),
         backendSessionId,
+        ...(backendOverride?.agentType ? { agentType: backendOverride.agentType } : {}),
         ...(daemonEpoch !== null ? { daemonEpoch } : {}),
         ...(incarnation !== null ? { incarnation } : {}),
         ...(backendOverride?.attemptGeneration !== undefined
@@ -1383,7 +1389,7 @@ export function useWorkspaceStore({
   );
 
   const openTab = useCallback(
-    async (worktree: Worktree, label?: string, backendOverride?: PreSpawnedBackend, shell?: string) => {
+    async (worktree: Worktree, label?: string, backendOverride?: PreSpawnedBackend, shell?: string, view?: PaneView) => {
       const capturedWorktreePath = worktree.path;
       switchDebug("terminal.open.start", {
         workspaceId,
@@ -1403,7 +1409,7 @@ export function useWorkspaceStore({
             if (!originSnapshot.worktrees.some((candidate) => candidate.path === capturedWorktreePath)) {
               dispatchToOwner({ type: "SET_WORKTREES", worktrees: [...originSnapshot.worktrees, worktree] }, workspaceId);
             }
-            dispatchToOwner({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath }, workspaceId);
+            dispatchToOwner({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath, view }, workspaceId);
             dispatchToOwner({ type: "SELECT_WORKTREE", path: capturedWorktreePath }, workspaceId);
             return binding.tab.id;
           }
@@ -1422,7 +1428,7 @@ export function useWorkspaceStore({
       if (!stateRef.current.worktrees.some((candidate) => candidate.path === capturedWorktreePath)) {
         dispatch({ type: "SET_WORKTREES", worktrees: [...stateRef.current.worktrees, worktree] });
       }
-      dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath });
+      dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath, view });
       dispatch({ type: "SELECT_WORKTREE", path: capturedWorktreePath });
       switchDebug("terminal.open.complete", {
         workspaceId,
@@ -1894,6 +1900,7 @@ export function useWorkspaceStore({
         !isPairedWorkspaceId(sourceSession.workspaceId || workspaceId);
       const session: LocalSplitSession = {
         id: localSessionId,
+        ...(options.agentType ? { agentType: options.agentType } : {}),
         cwd: sourceSession.cwd,
         worktreePath: sessionWorktreePath(sourceSession),
         workspaceId: sourceSession.workspaceId || workspaceId,
@@ -1923,6 +1930,7 @@ export function useWorkspaceStore({
           position: options.position,
           newLeafId,
           content: options.content,
+          view: options.view,
           session,
         });
       });
@@ -2286,6 +2294,10 @@ export function useWorkspaceStore({
     [dispatch],
   );
   const focusPane = useCallback((tabId: string, leafId: string) => dispatch({ type: "FOCUS_PANE", tabId, leafId }), [dispatch]);
+  const setPaneView = useCallback(
+    (tabId: string, leafId: string, view: PaneView) => dispatch({ type: "SET_PANE_VIEW", tabId, leafId, view }),
+    [dispatch],
+  );
   const setPaneRatio = useCallback(
     (
       tabId: string,
@@ -2748,6 +2760,7 @@ export function useWorkspaceStore({
     renameTab,
     setTabPinned,
     focusPane,
+    setPaneView,
     setPaneRatio,
     equalizePaneRun,
     setTabGroupRatio,
@@ -3510,7 +3523,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
 
       if (targetWorktreePath && state.activeWorktreePath && targetWorktreePath !== state.activeWorktreePath) {
         const targetLayout = state.worktreeLayouts?.[targetWorktreePath] ?? createLayoutState();
-        const updatedLayout = layoutReducer(targetLayout, { type: "ADD_TAB", tab: action.tab, sessionId, activate: action.activate });
+        const updatedLayout = layoutReducer(targetLayout, { type: "ADD_TAB", tab: action.tab, sessionId, activate: action.activate, view: action.view });
         return {
           ...state,
           sessions,
@@ -3524,7 +3537,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       return {
         ...state,
         sessions,
-        layout: layoutReducer(state.layout, { type: "ADD_TAB", tab: action.tab, sessionId, activate: action.activate }),
+        layout: layoutReducer(state.layout, { type: "ADD_TAB", tab: action.tab, sessionId, activate: action.activate, view: action.view }),
       };
     }
     case "REORDER_TAB":
@@ -3547,6 +3560,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         position: action.position,
         newLeafId: action.newLeafId,
         content: action.content,
+        view: action.view,
         sessionId: action.session.id,
       });
       if (layout === state.layout) {
@@ -3739,6 +3753,10 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         }
       }
       return state;
+    }
+    case "SET_PANE_VIEW": {
+      const layout = layoutReducer(state.layout, action);
+      return layout === state.layout ? state : { ...state, layout };
     }
     case "FOCUS_PANE": {
       const layout = layoutReducer(state.layout, { type: "FOCUS_PANE", tabId: action.tabId, leafId: action.leafId });

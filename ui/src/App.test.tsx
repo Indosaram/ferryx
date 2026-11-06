@@ -412,6 +412,7 @@ vi.mock("./components/TerminalSplitView", () => {
       searchLeafId,
       agents,
       onLaunchAgent,
+      onNewChat,
       onAddBrowserTab,
       onClosePane,
       onCloseTab,
@@ -421,6 +422,7 @@ vi.mock("./components/TerminalSplitView", () => {
       searchLeafId?: string | null;
       agents?: Array<{ name: string; command: string; args: string }>;
       onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
+      onNewChat?: (agent: { name: string; command: string; args: string }) => void;
       onAddBrowserTab?: (url?: string) => void;
       onClosePane?: (tabId: string, leafId: string) => void;
       onCloseTab?: (tabId: string) => void;
@@ -446,6 +448,11 @@ vi.mock("./components/TerminalSplitView", () => {
           {agents?.map((agent) => (
             <button key={agent.name} type="button" onClick={() => onLaunchAgent?.(agent)}>
               Launch {agent.name}
+            </button>
+          ))}
+          {onNewChat && agents?.map((agent) => (
+            <button key={`chat-${agent.name}`} type="button" onClick={() => onNewChat(agent)}>
+              Chat {agent.name}
             </button>
           ))}
         </div>
@@ -3171,6 +3178,28 @@ describe("App project workspace flow", () => {
     // Typing the command raced shell startup on Windows; the agent must never be typed in.
     expect(native.writeTerminal).not.toHaveBeenCalled();
     expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a new chat with its initial view and daemon identity in one store call", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-chat-session",
+      daemonEpoch: "epoch-chat",
+      session: { cwd: req.cwd, incarnation: "inc-chat" },
+    }));
+    render(<App />);
+    const button = await screen.findByRole("button", { name: "Chat claude" });
+    fireEvent.click(button);
+    await waitFor(() => expect(workspace.openTab).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "/repo/main" }),
+      "Claude",
+      { sessionId: "spawn-chat-session", agentType: "claude", daemonEpoch: "epoch-chat", incarnation: "inc-chat" },
+      undefined,
+      "chat",
+    ));
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+    expect(native.writeTerminal).not.toHaveBeenCalled();
   });
 
   it("closes the spawned agent backend when its tab is discarded", async () => {
