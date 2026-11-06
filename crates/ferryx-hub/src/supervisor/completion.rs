@@ -593,11 +593,24 @@ impl CompletionDriver {
             .map(|binding| binding.host_id)
             .unwrap_or_default();
         let asked = instruction.trim().to_owned();
-        let instruction = format!(
+        let mut instruction = format!(
             "{}\n\n{}",
             instruction.trim(),
             grant_text(cwd.as_deref().unwrap_or(""), &binding_host, &grant)
         );
+        let turn_block = super::lessons::injection_block_with_ids_for_turn(
+            &self.pool,
+            super::lessons::LessonDomain::Goal,
+            &goal.project_id,
+            &[],
+        )
+        .await?;
+        let mut injected_lessons = Vec::new();
+        if let Some((block, ids)) = turn_block {
+            instruction.push_str("\n\n");
+            instruction.push_str(&block);
+            injected_lessons = ids;
+        }
         let mut tx = self.pool.begin_write().await?;
         let now = require_goal(&mut tx, &goal.goal_id).await?;
         if check_revision(&now, goal.revision).is_err() || now.run_state != RunState::Verifying {
@@ -718,6 +731,12 @@ impl CompletionDriver {
         )
         .await?;
         tx.commit().await?;
+        if let Err(error) =
+            super::lessons::note_turn_injected(&self.pool, &dispatch.request_id, &injected_lessons)
+                .await
+        {
+            tracing::warn!(%error, request_id = %dispatch.request_id, "turn lessons were not recorded");
+        }
         super::changes::announce(&goal.goal_id);
         wakes::poke();
         super::dispatcher::poke();

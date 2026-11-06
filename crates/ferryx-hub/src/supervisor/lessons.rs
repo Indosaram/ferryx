@@ -382,6 +382,34 @@ pub async fn injection_block_with_ids(
     Ok(Some((block.join("\n"), ids)))
 }
 
+/// Selects lessons for a corrective turn without advancing goal-level injection counts.
+pub async fn injection_block_with_ids_for_turn(
+    pool: &SqlitePool,
+    domain: LessonDomain,
+    project: &str,
+    situation: &[&str],
+) -> Result<Option<(String, Vec<String>)>, sqlx::Error> {
+    retire_stale(pool, Utc::now()).await?;
+    let rows = sqlx::query(&format!(
+        "SELECT {COLUMNS} FROM supervisor_lessons
+         WHERE domain = ? AND project = ? AND state != 'retired'"
+    ))
+    .bind(domain.as_str())
+    .bind(project)
+    .fetch_all(pool)
+    .await?;
+    let lessons = rows.iter().map(lesson_of).collect::<Result<Vec<_>, _>>()?;
+    let chosen = select(lessons, situation);
+    if chosen.is_empty() {
+        return Ok(None);
+    }
+    let mut block = vec![INJECTION_HEADER.to_owned(), FENCE_OPEN.to_owned()];
+    block.extend(chosen.iter().map(|lesson| fenced_line(&lesson.rule)));
+    block.push(FENCE_CLOSE.to_owned());
+    let ids = chosen.into_iter().map(|lesson| lesson.id).collect();
+    Ok(Some((block.join("\n"), ids)))
+}
+
 /// Records that `ids` were injected into the work `subject_ref`. A lesson injected into the
 /// same subject twice keeps its first row.
 pub async fn note_injected(
@@ -408,6 +436,31 @@ pub async fn note_injected(
     tx.commit().await
 }
 
+/// Records lessons once per dispatch turn.
+pub async fn note_turn_injected(
+    pool: &SqlitePool,
+    turn_ref: &str,
+    ids: &[String],
+) -> Result<(), sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin_write().await?;
+    for id in ids {
+        sqlx::query(
+            "INSERT OR IGNORE INTO lesson_turn_injections(turn_ref, lesson_id, injected_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(turn_ref)
+        .bind(id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
+}
+
 /// Settles every unsettled injection of `subject_ref` with `outcome` and feeds it to
 /// [`observe`]. Returns the settled lesson ids; a subject settles once.
 pub async fn settle(
@@ -425,6 +478,29 @@ pub async fn settle(
     .bind(outcome.as_str())
     .bind(&now)
     .bind(subject_ref)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    observe(pool, &ids, outcome).await?;
+    Ok(ids)
+}
+
+/// Settles each open turn injection once and observes its outcome.
+pub async fn settle_turns(
+    pool: &SqlitePool,
+    turn_ref: &str,
+    outcome: Outcome,
+) -> Result<Vec<String>, sqlx::Error> {
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin_write().await?;
+    let ids: Vec<String> = sqlx::query_scalar(
+        "UPDATE lesson_turn_injections SET outcome = ?, settled_at = ?
+         WHERE turn_ref = ? AND settled_at IS NULL
+         RETURNING lesson_id",
+    )
+    .bind(outcome.as_str())
+    .bind(&now)
+    .bind(turn_ref)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -830,6 +906,39 @@ mod tests {
         )
         .await;
         row
+    }
+
+    #[tokio::test]
+    async fn turn_injections_are_idempotent_and_settle_once() {
+        let pool = pool().await;
+        let first = ranked_lesson(&pool, "first", "tests", "candidate", 0, 1).await;
+        let second = ranked_lesson(&pool, "second", "tests", "candidate", 0, 2).await;
+        let ids = vec![first.id, second.id];
+        note_turn_injected(&pool, "turn-1", &ids).await.unwrap();
+        note_turn_injected(&pool, "turn-1", &ids).await.unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lesson_turn_injections WHERE turn_ref = 'turn-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
+        let mut settled = settle_turns(&pool, "turn-1", Outcome::Helped)
+            .await
+            .unwrap();
+        settled.sort();
+        let mut expected = ids;
+        expected.sort();
+        assert_eq!(settled, expected);
+        assert!(settle_turns(&pool, "turn-1", Outcome::Hurt)
+            .await
+            .unwrap()
+            .is_empty());
+        let helped: i64 = sqlx::query_scalar("SELECT SUM(helped) FROM supervisor_lessons")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(helped, 2);
     }
 
     #[tokio::test]

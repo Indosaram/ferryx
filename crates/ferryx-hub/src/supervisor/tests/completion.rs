@@ -576,6 +576,94 @@ async fn a_failing_ferryx_check_never_completes_even_when_cited() {
 }
 
 #[tokio::test]
+async fn admission_and_correction_record_distinct_turns_without_recounting_lessons() {
+    use crate::supervisor::lessons::{record, LessonDomain, LessonDraft};
+
+    let pool = owner_pool().await;
+    let project: String = sqlx::query_scalar("SELECT project_id FROM supervisor_projects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for rule in [
+        "Run the verifier before reporting success",
+        "Check the result file",
+    ] {
+        let lesson = record(
+            &pool,
+            LessonDraft {
+                domain: LessonDomain::Goal,
+                project: &project,
+                rule,
+                rationale: "completion fixture",
+                keywords: "verify",
+                evidence_ref: "goal:fixture",
+            },
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        ids.push(lesson.id);
+    }
+    let (goal, lane) = admit(&pool, "m-turn-lessons", Some(1)).await;
+    let first: String =
+        sqlx::query_scalar("SELECT request_id FROM supervisor_dispatches WHERE goal_id = ?")
+            .bind(&goal)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let injected: Vec<String> = sqlx::query_scalar(
+        "SELECT lesson_id FROM lesson_turn_injections WHERE turn_ref = ? ORDER BY lesson_id",
+    )
+    .bind(&first)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    ids.sort();
+    assert_eq!(injected, ids);
+
+    let control = idle_control();
+    let dispatch = dispatcher(&pool, control.clone(), PANE);
+    dispatch.drain().await;
+    let _repo = use_clean_repo(&pool, &lane, "NOT READY").await;
+    let scheduler = completion_scheduler(
+        &pool,
+        ScriptedModel::new(&[ASSESS_CONTINUE]),
+        control.clone(),
+    );
+    settle(&pool, PANE, 1_000).await;
+    timeout(DEADLINE, scheduler.tick(epoch()))
+        .await
+        .unwrap()
+        .unwrap();
+    let correction = ready_dispatches(&pool, 10).await.unwrap();
+    assert_eq!(correction.len(), 1);
+    assert_ne!(correction[0].request_id, first);
+    let second: Vec<String> = sqlx::query_scalar(
+        "SELECT lesson_id FROM lesson_turn_injections WHERE turn_ref = ? ORDER BY lesson_id",
+    )
+    .bind(&correction[0].request_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(second, ids);
+    let counts: Vec<i64> = sqlx::query_scalar("SELECT injected FROM supervisor_lessons")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(counts, vec![1, 1]);
+    dispatch.drain().await;
+    let text = sends_text(&control).pop().unwrap();
+    for rule in [
+        "Run the verifier before reporting success",
+        "Check the result file",
+    ] {
+        assert!(text.contains(rule), "{text}");
+    }
+}
+
+#[tokio::test]
 async fn a_verifier_failure_runs_a_correction_without_the_owner_and_stops_at_the_budget() {
     let pool = owner_pool().await;
     let (goal, lane) = admit(&pool, "m-1", Some(1)).await;
