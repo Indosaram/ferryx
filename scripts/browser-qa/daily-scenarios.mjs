@@ -932,13 +932,24 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       record.from_via = from ? "ocr" : record.from ? "window geometry" : null;
       if (!record.from) return { ...record, ok: false, stderr: "DRAGME not read on screen" };
     } else if (ctx.platform === "win32") {
+      // Explorer opens behind Ferryx: run 42161639757 read the Ferryx window's own text here
+      // ("Worktrees", "Inbox", the supervisor copy) and never saw the file name, though the
+      // CabinetWClass window was in the window list. Diff the folder windows around /select so the
+      // one this call opened (or reused) is the one raised, not an unrelated Explorer window.
+      const folders = () => (ctx.host.windowRows?.("topwindows") ?? []).filter((row) => row.class === "CabinetWClass");
+      const before = new Set(folders().map((row) => row.hwnd));
       ctx.run("explorer.exe", [`/select,${file.path}`]);
       await sleep(4000);
+      const opened = folders();
+      const folder = opened.find((row) => !before.has(row.hwnd)) ?? opened.at(-1) ?? null;
+      if (folder) ctx.host.ps("focus", ["-Hwnd", String(folder.hwnd)]);
+      await sleep(1200);
       const from = await until(() => {
         const hit = screenWords(ctx).find((word) => /upload-fixture|upload-?fix|fixture[.,]txt/i.test(word.text));
         return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
       }, 10000, 800);
       record.from = from;
+      record.folder = folder ?? null;
       // Windows run 42079091681 failed here with from: null and nothing recorded, so there was no
       // way to tell "Explorer never opened" from "it opened and OCR missed the name". Record the
       // windows and the frame the drag source was read from whenever the name is not found.
