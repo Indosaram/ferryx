@@ -348,7 +348,8 @@ impl CompletionDriver {
                 if reason == StopReason::NoFurtherProgress
                     && matches!(held, Ok(Verification::Held { .. }))
                 {
-                    self.lessons_hurt(&goal.goal_id, &summary).await;
+                    self.lessons_hurt(&goal.goal_id, &summary, Some(&run.request_id))
+                        .await;
                 }
                 held
             }
@@ -501,8 +502,8 @@ impl CompletionDriver {
 
     /// The goal ended without converging: its injected lessons hurt, and the judge is asked
     /// once whether `summary` teaches a lesson. Lesson bookkeeping never fails the decision.
-    async fn lessons_hurt(&self, goal_id: &str, summary: &str) {
-        match super::lessons::goal_failed(&self.pool, &self.judge, goal_id, summary).await {
+    async fn lessons_hurt(&self, goal_id: &str, summary: &str, turn_ref: Option<&str>) {
+        match super::lessons::goal_failed(&self.pool, &self.judge, goal_id, summary, turn_ref).await {
             Ok(Some(lesson)) => {
                 tracing::info!(goal = %goal_id, lesson = %lesson.id, "a lesson was recorded");
             }
@@ -692,7 +693,15 @@ impl CompletionDriver {
             if detail.starts_with(TURN_LIMIT) {
                 let summary =
                     format!("{asked} (the turn budget ran out with {unproven} unproven)");
-                self.lessons_hurt(&goal.goal_id, &summary).await;
+                let turn_ref: Option<String> = sqlx::query_scalar(
+                    "SELECT request_id FROM supervisor_dispatches
+                     WHERE goal_id = ? AND state = 'settled' ORDER BY id DESC LIMIT 1",
+                )
+                .bind(&goal.goal_id)
+                .fetch_optional(&self.pool)
+                .await?;
+                self.lessons_hurt(&goal.goal_id, &summary, turn_ref.as_deref())
+                    .await;
             }
             return Ok(Verification::Held {
                 state: RunState::AwaitingOwner,
@@ -840,7 +849,9 @@ impl CompletionDriver {
         .await?;
         tx.commit().await?;
         super::changes::announce(&goal.goal_id);
-        if let Err(error) = super::lessons::goal_completed(&self.pool, &goal.goal_id).await {
+        if let Err(error) =
+            super::lessons::goal_completed(&self.pool, &goal.goal_id, Some(&run.request_id)).await
+        {
             tracing::warn!(%error, goal = %goal.goal_id, "injected lessons were not marked helped");
         }
         wakes::poke();

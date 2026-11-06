@@ -485,7 +485,7 @@ pub async fn settle(
     Ok(ids)
 }
 
-/// Settles each open turn injection once and observes its outcome.
+/// Settles each open turn injection once without changing goal-level counters.
 pub async fn settle_turns(
     pool: &SqlitePool,
     turn_ref: &str,
@@ -504,13 +504,43 @@ pub async fn settle_turns(
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
-    observe(pool, &ids, outcome).await?;
     Ok(ids)
 }
 
+/// Closes earlier dispatch turns of the same goal without crediting their lessons.
+async fn settle_goal_turns(
+    pool: &SqlitePool,
+    turn_ref: Option<&str>,
+    outcome: Outcome,
+) -> Result<(), sqlx::Error> {
+    let Some(turn_ref) = turn_ref else {
+        return Ok(());
+    };
+    settle_turns(pool, turn_ref, outcome).await?;
+    sqlx::query(
+        "UPDATE lesson_turn_injections SET outcome = 'neutral', settled_at = ?
+         WHERE settled_at IS NULL AND turn_ref IN (
+             SELECT earlier.request_id FROM supervisor_dispatches earlier
+             JOIN supervisor_dispatches settling ON settling.goal_id = earlier.goal_id
+             WHERE settling.request_id = ? AND earlier.id < settling.id
+         )",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .bind(turn_ref)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// A goal completed: its injected lessons helped.
-pub async fn goal_completed(pool: &SqlitePool, goal_id: &str) -> Result<Vec<String>, sqlx::Error> {
-    settle(pool, &goal_subject(goal_id), Outcome::Helped).await
+pub async fn goal_completed(
+    pool: &SqlitePool,
+    goal_id: &str,
+    turn_ref: Option<&str>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let ids = settle(pool, &goal_subject(goal_id), Outcome::Helped).await?;
+    settle_goal_turns(pool, turn_ref, Outcome::Helped).await?;
+    Ok(ids)
 }
 
 /// A goal ended without converging: its injected lessons hurt, and the judge is asked once
@@ -521,9 +551,11 @@ pub async fn goal_failed(
     judge: &Judge,
     goal_id: &str,
     summary: &str,
+    turn_ref: Option<&str>,
 ) -> HubResult<Option<Lesson>> {
     let subject = goal_subject(goal_id);
     settle(pool, &subject, Outcome::Hurt).await?;
+    settle_goal_turns(pool, turn_ref, Outcome::Hurt).await?;
     let project: Option<String> =
         sqlx::query_scalar("SELECT project_id FROM supervisor_goals WHERE goal_id = ?")
             .bind(goal_id)
@@ -931,6 +963,18 @@ mod tests {
         expected.sort();
         assert_eq!(settled, expected);
         assert!(settle_turns(&pool, "turn-1", Outcome::Hurt)
+            .await
+            .unwrap()
+            .is_empty());
+        // Turn attribution does not promote lessons; the goal rollup observes once.
+        let before: i64 = sqlx::query_scalar("SELECT SUM(helped) FROM supervisor_lessons")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, 0);
+        note_injected(&pool, "goal:turn-fixture", &expected).await.unwrap();
+        settle(&pool, "goal:turn-fixture", Outcome::Helped).await.unwrap();
+        assert!(settle(&pool, "goal:turn-fixture", Outcome::Helped)
             .await
             .unwrap()
             .is_empty());
@@ -1420,13 +1464,13 @@ mod tests {
         note_injected(&pool, &goal_subject(goal), std::slice::from_ref(&rule.id))
             .await
             .unwrap();
-        assert_eq!(goal_completed(&pool, goal).await.unwrap(), vec![rule.id.clone()]);
+        assert_eq!(goal_completed(&pool, goal, None).await.unwrap(), vec![rule.id.clone()]);
         let rows = injections_of(&pool, &goal_subject(goal)).await;
         assert_eq!(rows, vec![(rule.id.clone(), Some("helped".to_owned()))]);
         assert_eq!(get(&pool, &rule.id).await.unwrap().unwrap().helped, 1);
 
         // A subject settles once.
-        assert!(goal_completed(&pool, goal).await.unwrap().is_empty());
+        assert!(goal_completed(&pool, goal, None).await.unwrap().is_empty());
         assert_eq!(get(&pool, &rule.id).await.unwrap().unwrap().helped, 1);
 
         // A second completed goal promotes the candidate.
@@ -1437,7 +1481,7 @@ mod tests {
         )
         .await
         .unwrap();
-        goal_completed(&pool, "goal-2").await.unwrap();
+        goal_completed(&pool, "goal-2", None).await.unwrap();
         let after = get(&pool, &rule.id).await.unwrap().unwrap();
         assert_eq!((after.helped, after.state), (2, LessonState::Effective));
     }
@@ -1453,7 +1497,7 @@ mod tests {
             let goal = submit(&pool, message_id).await;
             let subject = goal_subject(&goal);
             assert_eq!(injections_of(&pool, &subject).await.len(), 1);
-            let written = goal_failed(&pool, &judge, &goal, "verify.sh kept failing.")
+            let written = goal_failed(&pool, &judge, &goal, "verify.sh kept failing.", None)
                 .await
                 .unwrap();
             assert!(written.is_none());
@@ -1473,6 +1517,7 @@ mod tests {
             &Judge::forced("lesson"),
             &goal,
             "Run verify.sh after every edit. The worker skipped it twice.",
+            None,
         )
         .await
         .unwrap()
