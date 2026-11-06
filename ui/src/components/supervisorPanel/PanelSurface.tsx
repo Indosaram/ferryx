@@ -25,6 +25,8 @@ import { TranscriptSection } from './TranscriptSection';
 import type { TranscriptSource } from '../../lib/supervisorPanel/useTranscript';
 import { toComposerResult } from './composerResult';
 import type { ActionLogLine, GlyphState, MentionOption } from './types';
+import { useSessionMute } from '../../remote/sessionMute';
+import { isTauriRuntime, setSessionPushMuted } from '../../lib/tauri';
 
 export type PanelSurfaceProps = {
   snapshot: PanelSnapshot;
@@ -155,6 +157,35 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
   const [pausing, setPausing] = useState(false);
   const [pausingLanes, setPausingLanes] = useState<ReadonlySet<string>>(() => new Set());
   const [seed, setSeed] = useState<{ text: string; nonce: number } | null>(null);
+  // D13: per-session mute from the row menu. The phone client supplies the gateway call through
+  // context; the desktop has no such context and calls `setSessionPushMuted` directly. Null when
+  // neither is available, which hides the menu item rather than offering a control that does nothing.
+  const muteFromContext = useSessionMute();
+  const muteSession = useMemo(() => {
+    if (muteFromContext) return muteFromContext;
+    if (!isTauriRuntime()) return null;
+    return async (sessionRef: string, muted: boolean) => {
+      try {
+        await setSessionPushMuted(sessionRef, muted);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+  }, [muteFromContext]);
+  const [mutedRefs, setMutedRefs] = useState<ReadonlySet<SessionRef>>(() => new Set());
+  const toggleMuted = async (sessionRef: SessionRef) => {
+    if (!muteSession) return;
+    const muted = !mutedRefs.has(sessionRef);
+    const applied = await muteSession(sessionRef, muted);
+    if (!applied) return;
+    setMutedRefs((current) => {
+      const next = new Set(current);
+      if (muted) next.add(sessionRef);
+      else next.delete(sessionRef);
+      return next;
+    });
+  };
   const titleOf = useMemo(() => new Map(snapshot.sessions.map((s) => [s.sessionRef, s])), [snapshot.sessions]);
   const mentions: MentionOption[] = useMemo(
     () => snapshot.sessions.map((s) => ({ sessionRef: s.sessionRef, title: s.title, computer: s.hostLabel })),
@@ -244,6 +275,15 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
                 computer={row.hostLabel}
                 state={SESSION_GLYPH[row.glyph]}
                 onOpen={() => actions.openSession(row.sessionRef)}
+                onStop={() => void report(actions.stop(row.sessionRef))}
+                mute={
+                  muteSession
+                    ? {
+                        muted: mutedRefs.has(row.sessionRef),
+                        onToggleMuted: () => void toggleMuted(row.sessionRef),
+                      }
+                    : undefined
+                }
                 goal={
                   goal
                     ? {

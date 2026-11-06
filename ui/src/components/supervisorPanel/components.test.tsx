@@ -10,6 +10,7 @@ import { DecisionCard } from './DecisionCard';
 import { HandlingRow } from './Rows';
 import { SupervisorPanelShowcase } from './SupervisorPanelShowcase';
 import type { ActionLogLine, DecisionCardProps, MentionOption } from './types';
+import { SessionMuteContext } from '../../remote/sessionMute';
 
 afterEach(cleanup);
 
@@ -260,7 +261,11 @@ describe('PanelSurface', () => {
     expect(screen.getAllByTestId('session-goal')).toHaveLength(1);
     expect(screen.getByTestId('session-goal')).toHaveTextContent('Get tests green');
     fireEvent.click(screen.getByRole('button', { name: 'Actions for Worktree list refresh' }));
-    expect(screen.getAllByRole('menuitem')).toHaveLength(1);
+    // D10 always offers Stop; D13's mute item appears only where the client can mute, and this
+    // render has no mute context (the desktop supplies none under vitest), so it is absent here.
+    // D14 adds pause/resume because this session carries a goal.
+    expect(screen.getByTestId('session-row-stop')).toBeTruthy();
+    expect(screen.queryByTestId('session-row-mute')).toBeNull();
     fireEvent.click(screen.getByRole('menuitem', { name: 'Pause supervisor' }));
     await waitFor(() => expect(setLanePaused).toHaveBeenCalledWith('ledger', true));
     rerender(
@@ -269,6 +274,29 @@ describe('PanelSurface', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Actions for Worktree list refresh' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Resume supervisor' }));
     await waitFor(() => expect(setLanePaused).toHaveBeenLastCalledWith('ledger', false));
+  });
+
+  it('stops a session and mutes its phone alerts from the row menu (D10, D13)', async () => {
+    const stop = vi.fn(async () => ({ ok: true }) as const);
+    const actions = { ...(inert as object), stop } as never;
+    // The desktop provides no mute context; isTauriRuntime() is false under vitest, so the phone
+    // client's gateway call is supplied here the way RemoteApp supplies it.
+    const mute = vi.fn(async () => true);
+    render(
+      <SessionMuteContext.Provider value={mute}>
+        <PanelSurface snapshot={{ ...panelSnapshotFixture, decisions: [], handling: [] }} actions={actions} nowMs={NOW} />
+      </SessionMuteContext.Provider>,
+    );
+    const row = screen.getAllByTestId('session-row').find((r) => r.textContent?.includes('Worktree list refresh'));
+    expect(row).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Worktree list refresh' }));
+    // Every row carries Stop and mute even without a legacy goal.
+    fireEvent.click(screen.getByTestId('session-row-mute'));
+    await waitFor(() => expect(mute).toHaveBeenCalledWith('mac:wtlist', true));
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Worktree list refresh' }));
+    expect(screen.getByTestId('session-row-mute')).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByTestId('session-row-stop'));
+    await waitFor(() => expect(stop).toHaveBeenCalledWith('mac:wtlist'));
   });
 
   it('shows a refused lane pause where the owner acted', async () => {

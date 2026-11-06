@@ -591,9 +591,18 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const view = await until('the answered cards gone from the panel', () => panel(null), gone, { deadlineMs: 60_000 });
       step.artifact('panel-read', 'answered.panel.json', view);
       step.assert('answered-card-gone-from-panel', gone(view), { answers, decisions: view.decisions });
-      const offScreen = ({ read: r }) => answers.every((a) => !namesNonce(r.text, shared.decisionTitle, a.nonce));
+      // The card renders its command on one ellipsized line, so the nonce (which sits at the end of
+      // the command) never reaches the screen: `namesNonce` on window text would pass on a desktop
+      // that still showed the card, which is vacuous. The screen is judged instead by the card's own
+      // heading for a session that has no other card, after a positive control proved the heading is
+      // readable there; a surviving card keeps rendering that heading and fails this.
+      const heading = `Decision for ${shared.decisionTitle}`;
+      const cardOnScreen = (r) => ocrShows(r.text, heading);
+      const before = keep(step, 'answered-before', await until('the answered card still identified on screen', () => frame('card-heading'), cardOnScreen, { deadlineMs: 30_000 }).catch(() => null));
+      if (before) step.assert('card-heading-readable-before', cardOnScreen(before.read), { heading, text: before.read.text.slice(0, 1500) });
+      const offScreen = ({ read: r }) => !cardOnScreen(r);
       const shown = keep(step, 'answered', await until('the answered cards gone from screen', () => frame('answered'), offScreen, { deadlineMs: 60_000 }));
-      step.assert('answered-card-gone-from-screen', offScreen(shown), { answers, text: shown.read.text.slice(0, 1500) });
+      step.assert('answered-card-gone-from-screen', offScreen(shown), { heading, answers, text: shown.read.text.slice(0, 1500) });
     });
   } catch (error) {
     if (error instanceof LaneBlocked) lane.receipt.blocked = { code: error.code, detail: error.detail, at: new Date().toISOString() };

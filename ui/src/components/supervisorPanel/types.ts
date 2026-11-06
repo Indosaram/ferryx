@@ -52,9 +52,18 @@ export interface SessionRowProps extends TouchProps {
   onOpen: () => void;
   /**
    * A legacy supervisor goal is a property of its session (D14): shown under the row, with
-   * pause/resume as the row menu's one item. Absent for a session without one.
+   * pause/resume among the row menu's items. Absent for a session without one.
    */
   goal?: SessionGoalProps;
+  /** D10: the row menu stops this session's work; absent when no action names it. */
+  onStop?: () => void;
+  /** D13: per-session mute from the row menu; absent where the client cannot mute. */
+  mute?: SessionMuteProps;
+}
+
+export interface SessionMuteProps {
+  muted: boolean;
+  onToggleMuted: () => void;
 }
 
 export interface SessionGoalProps {
