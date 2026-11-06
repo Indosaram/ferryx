@@ -324,7 +324,13 @@ pub async fn cmd_browser_vault_save_pending<R: tauri::Runtime>(
     app: AppHandle<R>,
     prompt_id: String,
 ) -> Result<VaultItemSummary, IpcError> {
-    with_store(&app, move |store, prompts| prompts.accept(store, &prompt_id, Instant::now())).await
+    let id = prompt_id.clone();
+    let saved = with_store(&app, move |store, prompts| prompts.accept(store, &prompt_id, Instant::now())).await;
+    match &saved {
+        Ok(item) => tracing::info!(prompt_id = %id, item_id = %item.id, "saved a password from a save prompt"),
+        Err(error) => tracing::warn!(prompt_id = %id, code = %error.code, message = %error.message, "could not save a password from a save prompt"),
+    }
+    saved
 }
 
 #[tauri::command]
@@ -359,6 +365,7 @@ pub(crate) fn handle_form_submitted<R: tauri::Runtime>(
             with_store(&app, move |store, prompts| prompts.offer(store, &id, login, Instant::now())).await;
         match offered {
             Ok(Some(prompt)) => {
+                tracing::info!(browser_id = %browser_id, prompt_id = %prompt.prompt_id, update = prompt.update, "offered to save a password");
                 let _ = app.emit(BROWSER_VAULT_SAVE_PROMPT_EVENT, prompt);
             }
             Ok(None) => {}

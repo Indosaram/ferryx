@@ -334,6 +334,11 @@ jobs:
       - name: Run UI audit (Windows)
         if: matrix.os_name == 'windows'
         timeout-minutes: 75
+        # Run 42079091681 spent the 50 min default before engine-install, so 12 steps were
+        # skipped (engine never started, which false-cascades every Chromium check). Windows
+        # needs the same headroom Linux already has: 70 stays inside the 75 min step timeout.
+        env:
+          FERRYX_UI_AUDIT_BUDGET_MIN: '70'
         shell: bash
         run: |
           out="$RUNNER_TEMP/ui-audit"

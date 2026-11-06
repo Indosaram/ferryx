@@ -67,7 +67,12 @@ if (!["full", "drag-mask"].includes(scenario)) throw new Error(`unknown --scenar
 // Wall-clock budget for the whole audit. The CI step timeout (75 min) kills the driver before
 // teardown, which loses the totals (Windows run 41824966041 stopped in daily-g11-profiles), so
 // past the budget every later step is recorded as skipped and the run goes on to teardown.
-const budgetMinutes = Number(option("budget-minutes") ?? process.env.FERRYX_UI_AUDIT_BUDGET_MIN ?? 50);
+// 70 min, measured on run 41846200603: Windows spent 50.0 min on the 57 steps before
+// chromium-typing (11.7 of them in its 7 failing steps) and skipped 16; those 16 took 6.4 min on
+// macOS, and Windows runs the 45 steps both passed 2.39x slower (31.7 vs 13.3 min), so about
+// 15 min there. With the failing steps at passing speed that is about 60 min of real steps;
+// Linux spent 51.2 min. 70 stays under the 75 min step timeout.
+const budgetMinutes = Number(option("budget-minutes") ?? process.env.FERRYX_UI_AUDIT_BUDGET_MIN ?? 70);
 if (!(budgetMinutes > 0)) throw new Error(`--budget-minutes must be a positive number (got ${budgetMinutes})`);
 // Default cap for one step's actions; a step with a longer known wait passes its own.
 const STEP_CAP_MS = 240000;
@@ -416,6 +421,15 @@ const win = {
     const [hwnd, className, pid, left, top, right, bottom, root] = result.stdout.trim().split(/\s+/);
     return { hwnd: Number(hwnd), className, pid: Number(pid), rect: [Number(left), Number(top), Number(right), Number(bottom)], root: Number(root) };
   },
+  /**
+   * The foreground window and the window under the cursor, as "hwnd:<class>@<pid>". A click on a
+   * window that is not foreground is first consumed by activation, so the caller can tell that
+   * apart from a click that arrived and ran no handler. Windows only, null elsewhere.
+   */
+  foreground() {
+    const result = this.ps("foreground");
+    return result.ok ? result.stdout.trim() || null : null;
+  },
   rightClick(x, y) {
     return this.ps("rclick", ["-Width", String(x), "-Height", String(y)]);
   },
@@ -442,6 +456,17 @@ const win = {
   },
   screenshot(path) {
     return this.ps("shot", ["-Path", path]);
+  },
+  /** Rows of "kind hwnd pid class title" (focuschain / topwindows), each with its process name. */
+  windowRows(action) {
+    const rows = this.ps(action).stdout.split(/\r?\n/).map((line) => line.split("\t")).filter((cells) => cells.length >= 4)
+      .map(([kind, hwnd, pid, cls, title = ""]) => ({ kind, hwnd: Number(hwnd), pid: Number(pid), class: cls, title }));
+    const names = new Map();
+    for (const line of run("tasklist", ["/FO", "CSV", "/NH"]).stdout.split(/\r?\n/)) {
+      const match = /^"([^"]+)","(\d+)"/.exec(line.trim());
+      if (match) names.set(Number(match[2]), match[1]);
+    }
+    return rows.map((row) => ({ ...row, process: names.get(row.pid) ?? null }));
   },
   scale: () => 1,
 };
@@ -475,8 +500,22 @@ public static class FxInput {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  /** The foreground window and the window under the cursor as "hwnd:<class>@<pid>". */
+  public static string Foreground() {
+    var fg = GetForegroundWindow();
+    var name = new System.Text.StringBuilder(128);
+    uint pid = 0;
+    if (fg != IntPtr.Zero) { GetWindowThreadProcessId(fg, out pid); GetClassName(fg, name, 128); }
+    POINT p; GetCursorPos(out p);
+    var under = WindowFromPoint(p);
+    var underName = new System.Text.StringBuilder(128);
+    uint underPid = 0;
+    if (under != IntPtr.Zero) { GetWindowThreadProcessId(under, out underPid); GetClassName(under, underName, 128); }
+    return ((long)fg).ToString() + ":" + name.ToString() + "@" + pid.ToString() + " under " + ((long)under).ToString() + ":" + underName.ToString() + "@" + underPid.ToString();
+  }
   /** Which window owns screen point (x, y): its hwnd, class, pid and rect. */
   public static string Hit(int x, int y) {
     var p = new POINT(); p.X = x; p.Y = y;
@@ -499,6 +538,33 @@ public static class FxInput {
     if (!GetGUIThreadInfo(thread, ref info) || info.hwndFocus == IntPtr.Zero) return "0 0";
     uint pid; GetWindowThreadProcessId(info.hwndFocus, out pid);
     return ((long)info.hwndFocus).ToString() + " " + pid.ToString();
+  }
+  [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder text, int max);
+  static string Describe(IntPtr h) {
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    var cls = new System.Text.StringBuilder(128); GetClassName(h, cls, 128);
+    var title = new System.Text.StringBuilder(160); GetWindowText(h, title, 160);
+    return ((long)h).ToString() + "\t" + pid.ToString() + "\t" + cls.ToString() + "\t" + title.ToString().Replace("\t", " ").Replace("\r", " ").Replace("\n", " ");
+  }
+  /** "fg<TAB>hwnd<TAB>pid<TAB>class<TAB>title" for the foreground window, then "focus<TAB>..."
+   * for the keyboard focus HWND and each parent up its chain. */
+  public static string FocusChain() {
+    IntPtr fg = GetForegroundWindow();
+    uint ignored;
+    uint thread = GetWindowThreadProcessId(fg, out ignored);
+    var lines = new System.Collections.Generic.List<string>();
+    lines.Add("fg\t" + Describe(fg));
+    var info = new GUITHREADINFO(); info.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+    IntPtr h = GetGUIThreadInfo(thread, ref info) ? info.hwndFocus : IntPtr.Zero;
+    for (int depth = 0; h != IntPtr.Zero && depth < 32; depth++) { lines.Add("focus\t" + Describe(h)); h = GetParent(h); }
+    return string.Join("\n", lines);
+  }
+  /** "top<TAB>hwnd<TAB>pid<TAB>class<TAB>title" for every visible top-level window, in z-order. */
+  public static string TopWindows() {
+    var lines = new System.Collections.Generic.List<string>();
+    EnumWindows((h, l) => { if (IsWindowVisible(h)) lines.Add("top\t" + Describe(h)); return true; }, IntPtr.Zero);
+    return string.Join("\n", lines);
   }
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
@@ -573,6 +639,7 @@ switch ($Action) {
   "type" { [void][FxInput]::Focus($handle); $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
   "click" { $n = [FxInput]::Click($Width, $Height); if ($n -eq 0) { exit 4 } }
   "hit" { Write-Output ([FxInput]::Hit($Width, $Height)) }
+  "foreground" { Write-Output ([FxInput]::Foreground()) }
   "rclick" { [void][FxInput]::SetCursorPos($Width, $Height); $n = [FxInput]::Button($Width, $Height, 0x0008) + [FxInput]::Button($Width, $Height, 0x0010); if ($n -eq 0) { exit 4 } }
   "typeraw" { $n = [FxInput]::Type($Text); if ($n -eq 0) { exit 4 } }
   "keysraw" { $n = [FxInput]::Chord([uint16[]]($Codes -split "," | ForEach-Object { [uint16]$_ })); if ($n -eq 0) { exit 4 } }
@@ -581,6 +648,8 @@ switch ($Action) {
   "up" { $n = [FxInput]::Button($Width, $Height, 0x0004); if ($n -eq 0) { exit 4 } }
   "closedialogs" { Write-Output ([FxInput]::CloseDialogs([uint32]$ProcessId)) }
   "focusowner" { Write-Output ([FxInput]::FocusOwner()) }
+  "focuschain" { Write-Output ([FxInput]::FocusChain()) }
+  "topwindows" { Write-Output ([FxInput]::TopWindows()) }
   "wheel" { $n = [FxInput]::Wheel($Width, $Height, [int]$Codes); if ($n -eq 0) { exit 4 } }
   "resize" { if (-not [FxInput]::SetWindowPos($handle, [IntPtr]::Zero, 40, 40, $Width, $Height, 0x0004)) { exit 5 } }
   "upscale" {
@@ -1032,11 +1101,14 @@ writeFileSync(agentAuthority, JSON.stringify({ settings: { requirePairing: false
 summary.agent_access = { requirePairing: false, file: agentAuthority };
 
 let app = null;
+/** The log file of the running app (app.log, then the restart logs). */
+let currentAppLog = "app.log";
 // Session files outside the isolation dirs, before the app ever ran (G1: nothing is written there).
 const startedAtMs = Date.now();
 const outsideBefore = Object.fromEntries(outsideSessionFiles(platform).map((path) => [path, statOrNull(path)]));
 /** Starts the app with the isolated env; its exit is recorded unless the harness restarted it. */
 function launchApp(logName) {
+  currentAppLog = logName;
   const log = openSync(join(out, logName), "w");
   const child = spawn(binary, [], { env, stdio: ["ignore", log, log], cwd: dirs.tmp, detached: platform !== "win32" });
   child.on("exit", (code, signal) => {
@@ -1691,8 +1763,20 @@ function engineKeyboardFocus() {
     const front = Number(mac.osa('tell application "System Events" to get unix id of first process whose frontmost is true').stdout);
     return { engine: enginePids().includes(front), detail: { frontmost_pid: front, ferryx_pid: mac.pid } };
   }
-  const [hwnd, pid] = win.ps("focusowner").stdout.split(/\s+/).filter(Boolean).slice(-2).map(Number);
-  return { engine: Boolean(pid) && enginePids().includes(pid), detail: { focus_hwnd: hwnd ?? null, focus_pid: pid ?? null, ferryx_pid: win.pid } };
+  // The engine's pane is a child HWND of the Ferryx window owned by an engine process: the focus
+  // HWND must be an engine window and its parent chain must reach this Ferryx window's handle.
+  // Windows run 41846200603 had focus on hwnd 458840 / pid 1560 (neither engine nor Ferryx), so
+  // the chain and the foreground window are recorded with their process names.
+  const rows = win.windowRows("focuschain");
+  const chain = rows.filter((row) => row.kind === "focus");
+  const foreground = rows.find((row) => row.kind === "fg") ?? null;
+  const engines = enginePids();
+  const inFerryx = chain.some((row) => String(row.hwnd) === String(win.hwnd));
+  const engine = chain.length > 0 && engines.includes(chain[0].pid) && inFerryx;
+  return {
+    engine,
+    detail: { focus_hwnd: chain[0]?.hwnd ?? null, focus_pid: chain[0]?.pid ?? null, ferryx_pid: win.pid, ferryx_hwnd: win.hwnd, engine_pids: engines, in_ferryx_window: inFerryx, foreground, focus_chain: chain },
+  };
 }
 
 // ---------------------------------------------------------------- drag-mask scenario
@@ -1979,6 +2063,7 @@ const daily = {
   startedAtMs,
   outsideBefore,
   closeDialogs: () => (platform === "win32" ? win.closeDialogs() : { ok: true }),
+  appLogName: () => currentAppLog,
   chromeFocusClick: () => chromeFocus[1](),
 };
 // Settings is open: these run on the page, so close it first; they need the system webview.
