@@ -300,12 +300,26 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // A first launch from the installer raises the Store migration toast with duration Infinity,
     // anchored over the panel's lower half: the rules line and the Export row never appear while
     // it is open. It is a real product surface, so the run dismisses it with the same real click
-    // the owner uses ("Got it") rather than reading around it.
-    const storeToast = locate(initial.read, 'Got it');
-    if (storeToast) {
-      await click(storeToast);
-      await until('store migration toast dismissed', () => frame('store-toast-dismissed', null, { marker: null }),
-        ({ read }) => locate(read, 'Got it') === null, { deadlineMs: 30_000 });
+    // the owner uses ("Got it") rather than reading around it. The toast is raised only after the
+    // frontend's `cmd_distribution_channel` round trip resolves, so it is normally absent from the
+    // first rendered frame and can appear during any later clause; every wait that needs the
+    // panel's lower half therefore clears it first.
+    const dismissStoreMigrationToast = async (step = null, name = 'store-toast') => {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const seen = await frame(name, step, { marker: null });
+        const gotIt = locate(seen.read, 'Got it');
+        if (!gotIt) return false;
+        await click(gotIt);
+        await until('store migration toast dismissed', () => frame('store-toast-dismissed', step, { marker: null }),
+          ({ read }) => locate(read, 'Got it') === null, { deadlineMs: 30_000 });
+      }
+      throw new StepFailed('STORE_TOAST_NOT_DISMISSED', 'the Store migration toast kept covering the panel after three real "Got it" clicks');
+    };
+    // The notice appears on its own schedule, so give it a bounded window to show up before the
+    // first clause reads the panel; a run that never raises it simply clears the window unclicked.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      if (await dismissStoreMigrationToast()) break;
+      await new Promise((resolveWait) => { setTimeout(resolveWait, 1_000); });
     }
     const panel = async (step, name = 'poll') => {
       const reply = await call(`panel-${name}`, [panelReadRequest('panel')]);
@@ -327,6 +341,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       }, ({ read }) => predicate(read), { deadlineMs: 30_000 }));
     };
     const sendComposer = async (step, text, token) => {
+      await dismissStoreMigrationToast(step, 'composer-store-toast');
       const seen = await visible(step, 'composer-visible', (r) => locate(r, 'Tell the supervisor') !== null, { scroll: true });
       await click(locate(seen.read, 'Tell the supervisor'));
       await typeText(text);
