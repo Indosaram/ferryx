@@ -191,7 +191,7 @@ fn wide_character_at_history_boundary_survives_seed_round_trip() {
     assert_eq!(mirror.grid_text_for_test(), vec![" \u{4e2d}", "x", ""]);
 
     let seed = mirror.seed().unwrap();
-    let mut rebuilt = ScreenMirror::from_seed(&seed).unwrap();
+    let rebuilt = ScreenMirror::from_seed(&seed).unwrap();
     assert_eq!(
         rebuilt.grid_text_for_test(),
         mirror.grid_text_for_test(),
