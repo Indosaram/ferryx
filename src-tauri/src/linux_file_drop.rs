@@ -18,6 +18,7 @@
 //! `allowsFileAccess()` to `PLATFORM(COCOA)`), so delivering there would change nothing. A drop
 //! over a non-Chromium area is left unconsumed.
 
+use base64::Engine as _;
 use gtk::gdk;
 use gtk::prelude::*;
 use tauri::Manager;
