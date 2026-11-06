@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LayoutState, TerminalSession } from "../lib/types";
+import { normalizeLayout } from "../state/layout";
 import type { PaneView } from "../state/paneTree";
 import { TerminalSplitView, type RenderChatPane } from "./TerminalSplitView";
 
@@ -136,5 +137,22 @@ describe("TerminalSplitView pane chat view", () => {
     expect(screen.queryByTestId("chat-pane")).toBeNull();
     expect(screen.queryByTestId("pane-view-toggle")).toBeNull();
     expect(screen.getByTestId("pane-terminal-layer")).not.toHaveClass("invisible");
+  });
+
+  it("renders a persisted chat pane after the disk round trip and layout normalization", () => {
+    const persisted = JSON.parse(JSON.stringify(layout("chat"))) as LayoutState;
+    const restored = normalizeLayout(persisted);
+
+    render(
+      <TerminalSplitView
+        layout={restored}
+        sessions={{ "session-1": agentSession() }}
+        chatViewAvailable
+        renderChatPane={renderChatPane}
+      />,
+    );
+
+    expect(screen.getByTestId("chat-pane")).toHaveAttribute("data-session-id", "session-1");
+    expect(screen.getByTestId("pane-terminal-layer")).toHaveClass("invisible");
   });
 });
