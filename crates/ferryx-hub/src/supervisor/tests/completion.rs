@@ -1707,3 +1707,117 @@ fn a_permission_prompt_always_goes_to_the_owner() {
         );
     }
 }
+
+async fn assert_settling_turn_outcome(completed: bool) {
+    use crate::supervisor::lessons::{record, LessonDomain, LessonDraft};
+
+    let pool = owner_pool().await;
+    let project: String = sqlx::query_scalar("SELECT project_id FROM supervisor_projects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let lesson = record(
+        &pool,
+        LessonDraft {
+            domain: LessonDomain::Goal,
+            project: &project,
+            rule: "Run the verifier before reporting success",
+            rationale: "settlement fixture",
+            keywords: "verify",
+            evidence_ref: "goal:fixture",
+        },
+        |_| true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (goal, lane) = admit(&pool, "m-settlement", Some(1)).await;
+    let (other, _) = admit(&pool, "m-other", None).await;
+    let control = idle_control();
+    let dispatch = dispatcher(&pool, control.clone(), PANE);
+    // An unrelated held goal's turn must remain open.
+    transition_goal(&pool, &other, 1, RunState::Ready, RunState::Paused, Some("owner hold"))
+        .await
+        .unwrap();
+    dispatch.drain().await;
+    let repo = use_clean_repo(&pool, &lane, "NOT READY").await;
+    let answers = if completed {
+        vec![ASSESS_CONTINUE, ASSESS_COMPLETE, CONVERGED]
+    } else {
+        vec![ASSESS_CONTINUE, ASSESS_CONTINUE, "{}"]
+    };
+    let scheduler = completion_scheduler(&pool, ScriptedModel::new(&answers), control);
+    settle(&pool, PANE, 1_000).await;
+    scheduler.tick(epoch()).await.unwrap();
+    dispatch.drain().await;
+    if completed {
+        std::fs::write(repo.0.join("result.txt"), "READY").unwrap();
+    }
+    settle(&pool, PANE, 2_000).await;
+    scheduler
+        .tick(epoch() + chrono::Duration::seconds(1))
+        .await
+        .unwrap();
+    let expected = if completed { "helped" } else { "hurt" };
+    assert_eq!(
+        goal_state(&pool, &goal).await.0,
+        if completed { RunState::Completed } else { RunState::AwaitingOwner }
+    );
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT i.outcome FROM lesson_turn_injections i
+         JOIN supervisor_dispatches d ON d.request_id = i.turn_ref
+         WHERE d.goal_id = ? ORDER BY d.id",
+    )
+    .bind(&goal)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![("neutral".into(),), (expected.into(),)]);
+    let other_settled: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM lesson_turn_injections i
+         JOIN supervisor_dispatches d ON d.request_id = i.turn_ref
+         WHERE d.goal_id = ? AND i.settled_at IS NOT NULL",
+    )
+    .bind(&other)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(other_settled, 0);
+    let rollup: (String, i64) = sqlx::query_as(
+        "SELECT outcome, COUNT(*) FROM lesson_injections
+         WHERE subject_ref = ? AND settled_at IS NOT NULL",
+    )
+    .bind(format!("goal:{goal}"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rollup, (expected.into(), 1));
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT helped, hurt FROM supervisor_lessons WHERE id = ?",
+    )
+    .bind(&lesson.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, if completed { (1, 0) } else { (0, 1) });
+    // A later scheduler pass cannot count the same rollup again.
+    scheduler.tick(epoch() + chrono::Duration::seconds(2)).await.unwrap();
+    let after: (i64, i64) = sqlx::query_as(
+        "SELECT helped, hurt FROM supervisor_lessons WHERE id = ?",
+    )
+    .bind(&lesson.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, counts);
+}
+
+#[tokio::test]
+async fn completed_goal_credits_last_turn_and_closes_earlier_turn_neutral() {
+    assert_settling_turn_outcome(true).await;
+}
+
+#[tokio::test]
+async fn turn_limit_hurts_latest_settled_turn_without_double_counting_rollup() {
+    assert_settling_turn_outcome(false).await;
+}
