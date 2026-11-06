@@ -503,7 +503,8 @@ impl CompletionDriver {
     /// The goal ended without converging: its injected lessons hurt, and the judge is asked
     /// once whether `summary` teaches a lesson. Lesson bookkeeping never fails the decision.
     async fn lessons_hurt(&self, goal_id: &str, summary: &str, turn_ref: Option<&str>) {
-        match super::lessons::goal_failed(&self.pool, &self.judge, goal_id, summary, turn_ref).await {
+        match super::lessons::goal_failed(&self.pool, &self.judge, goal_id, summary, turn_ref).await
+        {
             Ok(Some(lesson)) => {
                 tracing::info!(goal = %goal_id, lesson = %lesson.id, "a lesson was recorded");
             }
@@ -603,7 +604,7 @@ impl CompletionDriver {
             &self.pool,
             super::lessons::LessonDomain::Goal,
             &goal.project_id,
-            &[],
+            &[&asked],
         )
         .await?;
         let mut injected_lessons = Vec::new();
