@@ -2153,11 +2153,13 @@ mod tests {
             source: None,
             parts,
             abandoned: None,
+            id: None,
+            meta: None,
         }
     }
 
     fn text(text: &str) -> reference_types::ReferencePart {
-        reference_types::ReferencePart::Text { text: text.to_string(), phase: None }
+        reference_types::ReferencePart::Text { text: text.to_string(), phase: None, id: None }
     }
 
     #[test]
@@ -2172,7 +2174,7 @@ mod tests {
         assert_eq!(last_assistant_line_of(&turns).as_deref(), Some("Second line"));
         let long = vec![turn(Assistant, vec![text(&"x".repeat(500))])];
         assert_eq!(last_assistant_line_of(&long).map(|line| line.chars().count()), Some(LAST_ASSISTANT_LINE_MAX_CHARS));
-        let no_text = vec![turn(Assistant, vec![reference_types::ReferencePart::Thinking { text: "hmm".into() }])];
+        let no_text = vec![turn(Assistant, vec![reference_types::ReferencePart::Thinking { text: "hmm".into(), id: None }])];
         assert_eq!(last_assistant_line_of(&no_text), None);
     }
 
