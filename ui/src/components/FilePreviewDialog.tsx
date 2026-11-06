@@ -382,7 +382,7 @@ export function FilePreviewDialog({
         data-testid="file-preview-dialog"
         tabIndex={-1}
         className={cn(
-          "flex h-full max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl",
+          "flex h-full max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-border bg-popover shadow-elevation-4",
           "focus-visible:outline-none",
         )}
         onMouseDown={(event) => event.stopPropagation()}

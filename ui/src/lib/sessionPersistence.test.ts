@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { localSplitIntent, type LocalSplitSession } from "./localSplitLifecycle";
 import { getGroupForTab, layoutReducer, normalizeLayout } from "../state/layout";
+import { findLeaf } from "../state/paneTree";
 import { workspaceReducer, type WorkspaceState } from "../state/workspaceStore";
 import { saveBrowserSettings } from "./browserSettings";
 import { resetSessionLifecycleForTests, restoreSessionRecentScrollback } from "./sessionLifecycle";
@@ -346,6 +347,19 @@ describe("sessionPersistence v3 serialization and migration", () => {
       worktreePath: "/workspace/main",
       cwd: "/workspace/main/packages/api",
     });
+  });
+
+  it("restores a chat pane view without changing its backend session", () => {
+    const state = workspaceState();
+    state.layout = layoutReducer(state.layout, {
+      type: "SET_PANE_VIEW", tabId: "tab-1", leafId: "leaf-1", view: "chat",
+    });
+    const saved = serializeWorkspaceState("default", "/workspace/main", state);
+    const restored = deserializeWorkspaceState("default", saved, { complete: false, sessions: [] });
+    expect(restored).not.toBeNull();
+    if (!restored) throw new Error("expected restored workspace");
+    expect(findLeaf(restored.layout.layoutsByTabId["tab-1"].root, "leaf-1")?.view).toBe("chat");
+    expect(restored.sessions["sess-1"].backendSessionId).toBe("backend-1");
   });
 
   it("does not serialize terminal sessions that no tab or pane references", () => {

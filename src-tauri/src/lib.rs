@@ -1889,6 +1889,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::system_resources::cmd_system_resources,
         crate::ipc::agent_prompt::cmd_agent_prompt_get,
         crate::ipc::agent_prompt::cmd_agent_prompt_answer,
+        crate::ipc::reference_chat::cmd_desktop_reference_chat_identity,
+        crate::ipc::reference_chat::cmd_desktop_reference_chat,
         cmd_project_register,
         cmd_sync_desktop_local_projects,
         cmd_sync_desktop_sidebar,

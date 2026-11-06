@@ -15,6 +15,7 @@ import {
 import { copyTextToClipboard } from "../lib/clipboard";
 import { disambiguateFileTabLabels } from "../lib/fileTabLabels";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
+import { chatSupportedAgents, loadLastChatAgentId, orderChatAgents } from "../lib/paneChatPreferences";
 import {
   requestSessionLifecycleAction,
   useSleepingSessionIds,
@@ -67,6 +68,10 @@ type TabBarProps = {
   onOpenSettings?: () => void;
   agents?: Array<{ name: string; command: string; args: string; enabled?: boolean; available?: boolean }>;
   onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
+  /** Local-only: opens a new tab running `agent` with its pane in chat view. Omit to hide New Chat. */
+  onNewChat?: (agent: { name: string; command: string; args: string }) => void;
+  /** Local-only: splits the tab's focused pane with `agent` in chat view. Omit to hide Split Chat. */
+  onSplitChat?: (tabId: string, direction: "horizontal" | "vertical", agent: { name: string; command: string; args: string }) => void;
   defaultAgentId?: string | null;
   actions?: ReactNode;
   showAdd?: boolean;
@@ -154,6 +159,8 @@ export function TabBar({
   onOpenSettings,
   agents,
   onLaunchAgent,
+  onNewChat,
+  onSplitChat,
   defaultAgentId,
   actions,
   showAdd = true,
@@ -212,6 +219,16 @@ export function TabBar({
     };
   }, []);
 
+  const chatAgents = useCallback(
+    () =>
+      orderChatAgents(
+        chatSupportedAgents((agents ?? []).filter((agent) => agent.enabled !== false && agent.available !== false)),
+        loadLastChatAgentId(),
+        defaultAgentId,
+      ),
+    [agents, defaultAgentId],
+  );
+
   const openMenu = (
     command: Parameters<typeof openNativePopupMenu>[0],
     items: NativeMenuEntry[],
@@ -242,6 +259,20 @@ export function TabBar({
         shortcut: shortcutLabel("tab.newTerminal", isMac, shortcutOverrides),
       },
     ];
+    const newChatAgents = onNewChat ? chatAgents() : [];
+    if (newChatAgents.length > 0) {
+      items.push({
+        kind: "submenu",
+        label: "New Chat",
+        items: newChatAgents.map((agent, index) => ({
+          kind: "item" as const,
+          id: `new-chat:${agent.name}`,
+          label: agent.name.charAt(0).toUpperCase() + agent.name.slice(1),
+          icon: `agent:${agent.name}`,
+          ...(index === 0 ? { shortcut: shortcutLabel("tab.newChat", isMac, shortcutOverrides) } : {}),
+        })),
+      });
+    }
     if (isWindows) {
       items.push({
         kind: "submenu",
@@ -318,6 +349,9 @@ export function TabBar({
     }
     if (onAddMarkdown) actions["new-markdown"] = () => onAddMarkdown();
     if (onAddMobileEmulator) actions["new-mobile-emulator"] = () => onAddMobileEmulator();
+    for (const agent of newChatAgents) {
+      actions[`new-chat:${agent.name}`] = () => onNewChat?.(agent);
+    }
     if (onLaunchAgent) {
       for (const agent of launchable) {
         actions[`agent:${agent.name}`] = () => onLaunchAgent(agent);
@@ -379,6 +413,28 @@ export function TabBar({
         enabled: canSplitTerminal,
       });
       actions["split-down"] = () => onSplitDown(tab.id);
+    }
+    const splitChatAgents = onSplitChat && canSplitTerminal ? chatAgents() : [];
+    if (onSplitChat && splitChatAgents.length > 0) {
+      const splits: Array<["horizontal" | "vertical", string, string]> = [
+        ["horizontal", "right", "Split chat right"],
+        ["vertical", "down", "Split chat down"],
+      ];
+      for (const [direction, edge, label] of splits) {
+        items.push({
+          kind: "submenu",
+          label,
+          items: splitChatAgents.map((agent) => ({
+            kind: "item" as const,
+            id: `split-chat-${edge}:${agent.name}`,
+            label: agent.name.charAt(0).toUpperCase() + agent.name.slice(1),
+            icon: `agent:${agent.name}`,
+          })),
+        });
+        for (const agent of splitChatAgents) {
+          actions[`split-chat-${edge}:${agent.name}`] = () => onSplitChat(tab.id, direction, agent);
+        }
+      }
     }
     if (onMoveTabToSplit) {
       items.push({ kind: "separator" });
@@ -513,7 +569,7 @@ export function TabBar({
       return;
     }
     void listOtherWindows().catch(() => [] as string[]).then(openWithWindows);
-  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onMoveTabToWindow, listOtherWindows, onResetAgentState, onSplitDown, onSplitRight, onTogglePin, sessionIdForLifecycle, filePathsForTab, onReloadFileTab, onOpenFileExternally, onRevealFileTab]);
+  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onMoveTabToWindow, listOtherWindows, onResetAgentState, onSplitDown, onSplitRight, onSplitChat, chatAgents, onTogglePin, sessionIdForLifecycle, filePathsForTab, onReloadFileTab, onOpenFileExternally, onRevealFileTab]);
 
   const handleCommitRename = useCallback((tabId: string) => {
     const cancelled = renameCancelledRef.current;

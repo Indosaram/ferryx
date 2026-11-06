@@ -80,6 +80,7 @@ export interface MobileChatWorkspaceProps {
   readonly draftUnsaved?: boolean;
   readonly stagedFiles?: readonly ReferenceFileReceipt[];
   readonly onAttachFiles?: (files: readonly File[], caret: number) => void;
+  readonly showAttachments?: boolean;
   readonly onRemoveStagedFile?: (attachmentId: string) => void;
   readonly attaching?: boolean;
   readonly attachError?: string | null;
@@ -276,6 +277,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   draftUnsaved = false,
   stagedFiles,
   onAttachFiles,
+  showAttachments,
   onRemoveStagedFile,
   attaching = false,
   attachError = null,
@@ -659,6 +661,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             draftUnsaved={draftUnsaved}
             attachments={stagedFiles}
             onAttachFiles={onAttachFiles}
+            showAttachments={showAttachments}
             onRemoveAttachment={onRemoveStagedFile}
             attaching={attaching}
             attachError={attachError}

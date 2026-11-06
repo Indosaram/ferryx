@@ -67,6 +67,7 @@ export interface MobileChatComposerProps {
   readonly attachments?: readonly ReferenceFileReceipt[];
   /** Stage files on the owning host; caret is where the mention is inserted. */
   readonly onAttachFiles?: (files: readonly File[], caret: number) => void;
+  readonly showAttachments?: boolean;
   readonly onRemoveAttachment?: (attachmentId: string) => void;
   readonly attaching?: boolean;
   readonly attachError?: string | null;
@@ -170,6 +171,7 @@ export const MobileChatComposer = React.forwardRef<
   draftUnsaved = false,
   attachments = [],
   onAttachFiles,
+  showAttachments = true,
   onRemoveAttachment,
   attaching = false,
   attachError = null,
@@ -948,7 +950,7 @@ export const MobileChatComposer = React.forwardRef<
           {/* Stop sits at the left edge, Send at the right: a slip never turns an answer into a stop */}
           <div className="flex items-center justify-between gap-3 px-1 pb-1">
             <div className="flex items-center gap-1">
-              <button
+              {showAttachments ? <button
                 type="button"
                 data-testid="attach-file-button"
                 aria-label="Attach file"
@@ -959,7 +961,7 @@ export const MobileChatComposer = React.forwardRef<
                 className="flex size-11 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 <Plus aria-hidden="true" className="size-5" />
-              </button>
+              </button> : null}
               {dictationProbe.available && (
                 <button
                   type="button"

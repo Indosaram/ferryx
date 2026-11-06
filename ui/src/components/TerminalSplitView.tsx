@@ -18,7 +18,7 @@ import {
 } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { getEventCoordinates } from "@dnd-kit/utilities";
-import { Columns2, Copy, Rows2, X } from "lucide-react";
+import { Columns2, Copy, MessageSquare, Rows2, SquareTerminal, X } from "lucide-react";
 import { continuationOutcomeUnknown, continuationUnknownHeld } from "../lib/agentResume";
 import { getContinuationAffordance } from "../lib/agentResumeAffordance";
 import type { AgentContinueMode, SpawnTerminalRequest } from "../lib/tauri";
@@ -53,6 +53,7 @@ import {
   resolveSeam,
   type PaneDirection,
   type PaneNode,
+  type PaneView,
   type ResolvedSeam,
 } from "../state/paneTree";
 import { BrowserPane } from "./BrowserPane";
@@ -62,6 +63,7 @@ import { RemoteDesktopPane } from "./RemoteDesktopPane";
 import { DagGraphView } from "./dag/DagGraphView";
 import { TabBar } from "./TabBar";
 import { NativeTerminalVisibilityProvider } from "../lib/nativeTerminalVisibility";
+import { isChatSupportedAgent } from "../lib/paneChatPreferences";
 import { useAttentionFrameEnabled } from "../lib/notificationSettings";
 import { PaneEdgeDropZones } from "./tab-dnd/PaneEdgeDropZones";
 import { resolveSplitEdgeForPoint } from "./tab-dnd/SplitEdgeDropZone";
@@ -181,6 +183,29 @@ export function createWorkspaceCollisionDetection(
 type SplitPaneOptions = {
   position?: "first" | "second";
   startup?: SpawnTerminalRequest["startup"];
+  view?: PaneView;
+};
+
+type ChatAgent = { name: string; command: string; args: string };
+
+export type RenderChatPaneArgs = {
+  tabId: string;
+  leafId: string;
+  session: TerminalSession;
+  agentType?: string | null;
+  active: boolean;
+  visible: boolean;
+  onShowTerminal: () => void;
+};
+
+export type RenderChatPane = (args: RenderChatPaneArgs) => React.ReactNode;
+
+type PaneChatProps = {
+  /** Gates entering chat view; leaving it is always offered. */
+  chatViewAvailable?: boolean;
+  onSetPaneView?: (tabId: string, leafId: string, view: PaneView) => void;
+  /** Supplied by the owner of the chat pane. Without it no pane enters chat view. */
+  renderChatPane?: RenderChatPane;
 };
 
 type TerminalSplitViewProps = {
@@ -221,6 +246,8 @@ type TerminalSplitViewProps = {
   onOpenSettings?: () => void;
   agents?: Array<{ name: string; command: string; args: string }>;
   onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
+  onNewChat?: (agent: ChatAgent) => void;
+  onSplitChat?: (tabId: string, direction: PaneDirection, agent: ChatAgent) => void;
   defaultAgentId?: string | null;
   onNavigateBrowserTab?: (tabId: string, url: string, browserId?: string) => void;
   onReloadBrowserTab?: (tabId: string, browserId?: string, options?: BrowserReloadOptions) => void;
@@ -250,7 +277,7 @@ type TerminalSplitViewProps = {
     reason: string,
     bindingKey?: string | null,
   ) => void;
-};
+} & PaneChatProps;
 
 type DragFocusSnapshot = {
   activeTabId: string | null;
@@ -282,6 +309,11 @@ export function TerminalSplitView({
   onOpenSettings,
   agents,
   onLaunchAgent,
+  onNewChat,
+  onSplitChat,
+  chatViewAvailable = false,
+  onSetPaneView,
+  renderChatPane,
   defaultAgentId,
   onNavigateBrowserTab = () => undefined,
   onReloadBrowserTab = () => undefined,
@@ -526,6 +558,11 @@ export function TerminalSplitView({
     onOpenSettings,
     agents,
     onLaunchAgent,
+    onNewChat,
+    onSplitChat,
+    chatViewAvailable,
+    onSetPaneView,
+    renderChatPane,
     defaultAgentId,
     onNavigateBrowserTab,
     onReloadBrowserTab,
@@ -601,6 +638,7 @@ export function TerminalSplitView({
             onOpenSettings={onOpenSettings}
             agents={agents}
             onLaunchAgent={onLaunchAgent}
+            onNewChat={onNewChat}
             defaultAgentId={defaultAgentId}
             leadingSpacer={leadingSpacer}
           />
@@ -715,6 +753,8 @@ type TabGroupViewProps = {
   onOpenSettings?: () => void;
   agents?: Array<{ name: string; command: string; args: string }>;
   onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
+  onNewChat?: (agent: ChatAgent) => void;
+  onSplitChat?: (tabId: string, direction: PaneDirection, agent: ChatAgent) => void;
   defaultAgentId?: string | null;
   onNavigateBrowserTab: (tabId: string, url: string, browserId?: string) => void;
   onReloadBrowserTab: (tabId: string, browserId?: string, options?: BrowserReloadOptions) => void;
@@ -752,7 +792,7 @@ type TabGroupViewProps = {
   onResetAgentState?: (tabId: string) => void;
   browserPanesVisible: boolean;
   dropFeedbackLeafId: string | null;
-};
+} & PaneChatProps;
 
 function TabGroupView({
   groupId,
@@ -779,6 +819,11 @@ function TabGroupView({
   onOpenSettings,
   agents,
   onLaunchAgent,
+  onNewChat,
+  onSplitChat,
+  chatViewAvailable,
+  onSetPaneView,
+  renderChatPane,
   defaultAgentId,
   onNavigateBrowserTab,
   onReloadBrowserTab,
@@ -914,6 +959,15 @@ function TabGroupView({
               }
             : undefined
         }
+        onNewChat={
+          onNewChat
+            ? (agent) => {
+                focusGroup();
+                onNewChat(agent);
+              }
+            : undefined
+        }
+        onSplitChat={onSplitChat}
         leadingSpacer={leadingSpacer}
       />
 
@@ -959,6 +1013,9 @@ function TabGroupView({
                     onEqualizePaneRun={onEqualizePaneRun}
                     onSwapPanes={onSwapPanes}
                     onFocusPane={onFocusPane}
+                    chatViewAvailable={chatViewAvailable}
+                    onSetPaneView={onSetPaneView}
+                    renderChatPane={renderChatPane}
                   />
                 </div>
               );
@@ -1013,7 +1070,7 @@ type PaneRendererProps = {
   onEqualizePaneRun: (tabId: string, path: string) => void;
   onSwapPanes: (tabId: string, sourceLeafId: string, targetLeafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
-};
+} & PaneChatProps;
 
 const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) {
   const { node, tab, tabLayout, sessions, path, browserPanesVisible, dropFeedbackLeafId, onNavigateBrowserTab, onReloadBrowserTab } = props;
@@ -1028,6 +1085,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
     return (
       <PaneLeafView
         leafId={node.leafId}
+        view={node.view ?? "terminal"}
         tab={tab}
         content={content}
         session={session}
@@ -1051,6 +1109,9 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         onSplitPane={props.onSplitPane}
         onClosePane={props.onClosePane}
         onFocusPane={props.onFocusPane}
+        chatViewAvailable={props.chatViewAvailable}
+        onSetPaneView={props.onSetPaneView}
+        renderChatPane={props.renderChatPane}
       />
     );
   }
@@ -1085,6 +1146,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
 
 type PaneLeafViewProps = {
   leafId: string;
+  view: PaneView;
   tab: WorkspaceTab;
   content: PaneContent;
   session: TerminalSession;
@@ -1113,10 +1175,11 @@ type PaneLeafViewProps = {
   onSplitPane: (tabId: string, leafId: string, direction: PaneDirection, options?: SplitPaneOptions) => void;
   onClosePane: (tabId: string, leafId: string) => void;
   onFocusPane: (tabId: string, leafId: string) => void;
-};
+} & PaneChatProps;
 
 const PaneLeafView = React.memo(function PaneLeafView({
   leafId,
+  view,
   tab,
   content,
   session,
@@ -1140,6 +1203,9 @@ const PaneLeafView = React.memo(function PaneLeafView({
   onSplitPane,
   onClosePane,
   onFocusPane,
+  chatViewAvailable = false,
+  onSetPaneView,
+  renderChatPane,
 }: PaneLeafViewProps) {
   const [isHoveredTop, setIsHoveredTop] = React.useState(false);
   const [isFocusedWithin, setIsFocusedWithin] = React.useState(false);
@@ -1171,6 +1237,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
 
   const focusPaneInput = React.useCallback(() => {
     onFocusPane(tab.id, leafId);
+    if (view === "chat") return;
     const focusSink = () => {
       const sink = leafRef.current?.querySelector<HTMLTextAreaElement>(
         'textarea[data-testid="native-terminal-focus-sink"]',
@@ -1188,7 +1255,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
       focusTimerRef.current = null;
       focusSink();
     }, 40);
-  }, [leafId, onFocusPane, tab.id]);
+  }, [leafId, onFocusPane, tab.id, view]);
 
   // Drop feedback blocks interaction only in the targeted pane. The visibility
   // policy keeps macOS surfaces below the DOM feedback and yields on other platforms.
@@ -1225,6 +1292,14 @@ const PaneLeafView = React.memo(function PaneLeafView({
       },
     );
   };
+
+  // The terminal stays mounted under the chat view so its PTY binding and scrollback survive a toggle.
+  const chatShown = view === "chat" && content.kind === "terminal" && Boolean(renderChatPane);
+  const paneIsAgent = content.kind === "terminal" &&
+    isChatSupportedAgent(session?.agentType ?? activity?.agentType);
+  const showViewToggle = Boolean(onSetPaneView && renderChatPane) && content.kind === "terminal" &&
+    (chatShown || (chatViewAvailable && paneIsAgent));
+  const toggleView = () => onSetPaneView?.(tab.id, leafId, chatShown ? "terminal" : "chat");
 
   return (
     <NativeTerminalVisibilityProvider visible={tabVisible} occluded={showsDropFeedback}>
@@ -1342,7 +1417,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
           }
         }}
       >
-        <div className="flex items-center gap-0.5">
+      <div className="flex items-center gap-0.5">
           {content.kind === "terminal" ? (
             <IconButton
               label="Copy Debug Info"
@@ -1358,6 +1433,22 @@ const PaneLeafView = React.memo(function PaneLeafView({
               }}
             >
               <Copy className="size-3" />
+            </IconButton>
+          ) : null}
+          {showViewToggle ? (
+            <IconButton
+              label={chatShown ? "Show terminal" : "Show chat"}
+              data-testid="pane-view-toggle"
+              data-pane-view={chatShown ? "chat" : "terminal"}
+              size="sm"
+              className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleView();
+              }}
+            >
+              {chatShown ? <SquareTerminal className="size-3" /> : <MessageSquare className="size-3" />}
             </IconButton>
           ) : null}
         </div>
@@ -1414,7 +1505,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
 
       {/* Browser panes keep their own toolbar at the top; clear the h-5 hover overlay off it. */}
       <div
-        className={`h-full w-full min-h-0 flex-1 overflow-hidden ${content.kind === "browser" ? "pt-5" : ""}`}
+        className={`relative h-full w-full min-h-0 flex-1 overflow-hidden ${content.kind === "browser" ? "pt-5" : ""}`}
         data-testid="pane-content"
       >
         {(() => {
@@ -1439,22 +1530,46 @@ const PaneLeafView = React.memo(function PaneLeafView({
                     ? onOpenNewShell
                     : (onReconnectLocalSession ?? onOpenNewShell);
               return (
-                <TerminalPane
-                  session={session}
-                  sessions={sessions}
-                  active={isActive}
-                  activity={activity}
-                  needsAttention={needsAttention || flashToken !== null}
-                  searchOpen={searchOpen}
-                  onCloseSearch={onCloseSearch}
-                  onReconnect={onReconnect}
-                  onRefreshSessionIdentity={onRefreshSessionIdentity}
-                  onOpenNewShell={onOpenNewShell}
-                  onBackendSessionUnavailable={onBackendSessionUnavailable}
-                  continuationModes={continuation?.availableModes}
-                  onContinueInNewPane={continueInNewPane}
-                  continuationHeld={continuationHeld}
-                />
+                <>
+                  <div
+                    className={`h-full w-full min-h-0 ${chatShown ? "invisible" : ""}`}
+                    data-testid="pane-terminal-layer"
+                    aria-hidden={chatShown || undefined}
+                  >
+                    <NativeTerminalVisibilityProvider visible={tabVisible && !chatShown} occluded={showsDropFeedback}>
+                      <TerminalPane
+                        session={session}
+                        sessions={sessions}
+                        active={isActive}
+                        inputActive={isActive && !chatShown}
+                        activity={activity}
+                        needsAttention={needsAttention || flashToken !== null}
+                        searchOpen={searchOpen && !chatShown}
+                        onCloseSearch={onCloseSearch}
+                        onReconnect={onReconnect}
+                        onRefreshSessionIdentity={onRefreshSessionIdentity}
+                        onOpenNewShell={onOpenNewShell}
+                        onBackendSessionUnavailable={onBackendSessionUnavailable}
+                        continuationModes={continuation?.availableModes}
+                        onContinueInNewPane={continueInNewPane}
+                        continuationHeld={continuationHeld}
+                      />
+                    </NativeTerminalVisibilityProvider>
+                  </div>
+                  {chatShown && renderChatPane ? (
+                    <div className="absolute inset-0 z-10 bg-terminal pt-5" data-testid="pane-chat-layer">
+                      {renderChatPane({
+                        tabId: tab.id,
+                        leafId,
+                        session,
+                        agentType: session.agentType ?? activity?.agentType,
+                        active: isActive,
+                        visible: tabVisible,
+                        onShowTerminal: () => onSetPaneView?.(tab.id, leafId, "terminal"),
+                      })}
+                    </div>
+                  ) : null}
+                </>
               );
             }
             case "browser": {

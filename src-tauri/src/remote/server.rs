@@ -4311,6 +4311,9 @@ pub(super) fn authenticate_machine_request(
     state: &RemoteGatewayState,
     headers: &HeaderMap,
 ) -> Result<DeviceInfo, Box<Response>> {
+    if let Ok(device) = DESKTOP_REFERENCE_TRUST.try_with(DeviceInfo::clone) {
+        return Ok(device);
+    }
     let token = extract_token(headers)
         .ok_or_else(|| Box::new(machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED")))?;
     state
@@ -6887,7 +6890,12 @@ fn reference_chat_authorize(
     let auth = Arc::clone(&state.auth_manager);
     let state = Arc::clone(state);
     let target = target.clone();
+    // Captured now: the submit and answer transactions run on spawned tasks the scope does not reach.
+    let desktop_trusted = DESKTOP_REFERENCE_TRUST.try_with(|_| ()).is_ok();
     Box::new(move || {
+        if desktop_trusted {
+            return reference_chat_ensure_provider(&state, &target);
+        }
         let token = token.clone().ok_or_else(|| {
             reference_chat_scope(ScopeErrorCode::Unauthorized, "the caller's token is gone")
         })?;
@@ -8579,6 +8587,184 @@ async fn reference_chat_delete_file(
     )
         .into_response()
 }
+
+// ---------------------------------------------------------------------------------------------
+// Desktop bridge
+// ---------------------------------------------------------------------------------------------
+
+tokio::task_local! {
+    /// Set only by [desktop_reference_chat], which the daemon reaches from its owner-only local
+    /// socket. No HTTP request runs inside this scope, so no header can supply it.
+    static DESKTOP_REFERENCE_TRUST: DeviceInfo;
+}
+
+fn desktop_reference_device() -> DeviceInfo {
+    DeviceInfo {
+        id: "desktop-local".to_string(),
+        name: "Ferryx desktop".to_string(),
+        permission: DevicePermission::Control,
+        access_scope: DeviceAccessScope::Machine,
+        created_at: 0,
+        last_seen_at: 0,
+        revoked: false,
+        installation_id: None,
+        attach_public_key: None,
+        account_machine_id: None,
+    }
+}
+
+pub(crate) fn desktop_reference_chat_identity(
+    state: &RemoteGatewayState,
+) -> crate::daemon::protocol::DesktopReferenceChatIdentity {
+    crate::daemon::protocol::DesktopReferenceChatIdentity {
+        host_id: reference_files::reference_host_id(),
+        owner_id: state.reference_owner_id.clone(),
+        epoch: state
+            .daemon_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+            .to_string(),
+    }
+}
+
+/// Serves one allowlisted desktop chat-lens request through the same reference-chat handlers,
+/// input queue and owner/epoch/provider fences the HTTP routes use.
+pub(crate) async fn desktop_reference_chat(
+    state: &Arc<RemoteGatewayState>,
+    request: crate::daemon::protocol::DesktopReferenceChatRequest,
+) -> crate::daemon::protocol::DesktopReferenceChatReply {
+    let response = DESKTOP_REFERENCE_TRUST
+        .scope(
+            desktop_reference_device(),
+            desktop_reference_chat_route(Arc::clone(state), request),
+        )
+        .await;
+    desktop_reference_chat_reply(response).await
+}
+
+async fn desktop_reference_chat_route(
+    state: Arc<RemoteGatewayState>,
+    request: crate::daemon::protocol::DesktopReferenceChatRequest,
+) -> Response {
+    use crate::daemon::protocol::DesktopReferenceChatKind as Kind;
+    let session_id = request.target.target.backend_session_id.clone();
+    if request.kind.is_read() {
+        let query = match desktop_reference_read_query(&request) {
+            Ok(query) => query,
+            Err(error) => return reference_chat_refusal(&error),
+        };
+        return match request.kind {
+            Kind::History => {
+                reference_chat_history(State(state), AxumPath(session_id), Ok(Query(query)), HeaderMap::new())
+                    .await
+            }
+            _ => {
+                reference_chat_prompt(State(state), AxumPath(session_id), Ok(Query(query)), HeaderMap::new())
+                    .await
+            }
+        };
+    }
+    let envelope = serde_json::json!({
+        "requestId": request.request_id,
+        "target": request.target.target,
+        "providerSessionId": request.target.provider_session_id,
+        "registryId": request.registry_id,
+        "params": request.params,
+    });
+    let body = match serde_json::to_vec(&envelope) {
+        Ok(body) => body,
+        Err(error) => {
+            return reference_chat_error(
+                ScopeErrorCode::InvalidRequest,
+                format!("the mutation envelope is not writable: {error}"),
+            )
+        }
+    };
+    let http = match axum::http::Request::builder()
+        .method(axum::http::Method::POST)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body))
+    {
+        Ok(http) => http,
+        Err(error) => {
+            return reference_chat_error(
+                ScopeErrorCode::InvalidRequest,
+                format!("the mutation request is not buildable: {error}"),
+            )
+        }
+    };
+    match request.kind {
+        Kind::Submit => reference_chat_submit(State(state), AxumPath(session_id), http).await,
+        Kind::Stop => reference_chat_stop(State(state), AxumPath(session_id), http).await,
+        _ => reference_chat_answer(State(state), AxumPath(session_id), http).await,
+    }
+}
+
+fn desktop_reference_read_query(
+    request: &crate::daemon::protocol::DesktopReferenceChatRequest,
+) -> Result<ReferenceChatReadQuery, ScopeError> {
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct ReadParams {
+        #[serde(default)]
+        cursor: Option<reference_types::ReferenceHistoryCursor>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        after: Option<serde_json::Value>,
+    }
+    let params = match &request.params {
+        serde_json::Value::Null => ReadParams::default(),
+        value => serde_json::from_value::<ReadParams>(value.clone()).map_err(|error| {
+            reference_chat_scope(
+                ScopeErrorCode::InvalidRequest,
+                format!("the read params are not readable: {error}"),
+            )
+        })?,
+    };
+    let after = match params.after {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => Some(text),
+        Some(value) => Some(value.to_string()),
+    };
+    let target = &request.target.target;
+    Ok(ReferenceChatReadQuery {
+        host_id: Some(target.host_id.clone()),
+        owner_id: Some(target.owner_id.clone()),
+        epoch: Some(target.epoch.0.to_string()),
+        backend_session_id: Some(target.backend_session_id.clone()),
+        provider_session_id: request.target.provider_session_id.clone(),
+        registry_id: request.registry_id.clone(),
+        limit: params.limit,
+        cursor: params.cursor.as_ref().map(|cursor| cursor.offset),
+        cursor_stream: params.cursor.map(|cursor| cursor.stream_id),
+        after,
+        payload_ref: None,
+    })
+}
+
+async fn desktop_reference_chat_reply(
+    response: Response,
+) -> crate::daemon::protocol::DesktopReferenceChatReply {
+    let status = response.status().as_u16();
+    let body = match axum::body::to_bytes(response.into_body(), REFERENCE_CHAT_MUTATION_MAX_BYTES).await {
+        Ok(bytes) if bytes.is_empty() => serde_json::Value::Null,
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+        }),
+        Err(error) => serde_json::json!({
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": format!("the reference-chat response could not be read: {error}"),
+                "retryable": false,
+            }
+        }),
+    };
+    crate::daemon::protocol::DesktopReferenceChatReply { status, body }
+}
+
+#[cfg(test)]
+#[path = "desktop_reference_chat_tests.rs"]
+mod desktop_reference_chat_tests;
 
 /// The web origin (`scheme://host[:port]`) of a URL; `ws`/`wss` map to `http`/`https`.
 fn web_origin(url: &str) -> Option<String> {

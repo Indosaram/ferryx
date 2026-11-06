@@ -2570,6 +2570,24 @@ impl Default for NativeTerminalSurfaceHostState {
     }
 }
 
+/// The agent that this session's own screen names, if any.
+///
+/// The shared senpi-family extension can only report the engine hosting it (`omo`, `pi`) or,
+/// when it reports no name at all, the extension manifest id. In those cases the screen is the
+/// only remaining evidence of which agent is actually running, so the identity is read from it
+/// here — once per report, never once per output chunk.
+fn detect_agent_on_screen(session: &mut NativeTerminalSession) -> Option<String> {
+    let snapshot = session.terminal.render_snapshot().ok()?;
+    let rows = (0..snapshot.rows as usize)
+        .map(|row| snapshot.row_text(row))
+        .collect();
+    let title = session.terminal.title().unwrap_or_default();
+    let input = crate::agent_detect::ScreenInput { rows, title };
+    crate::agent_detect::default_engine()
+        .detect(&input, session.last_agent_activity)
+        .map(|found| found.manifest_id)
+}
+
 fn take_native_terminal_events(
     session: &mut NativeTerminalSession,
     session_id: &str,
@@ -5152,7 +5170,7 @@ impl NativeTerminalSurfaceHostState {
                             _ => None,
                         };
                         if let Some(reported) = reported {
-                            let changed = {
+                            let (changed, resolved_agent) = {
                                 let handle = session_handle(&sessions, &session_id_owned);
                                 let mut session_guard = handle.as_ref().map(|handle| handle.lock());
                                 match session_guard
@@ -5194,9 +5212,24 @@ impl NativeTerminalSurfaceHostState {
                                         // way: a released session that keeps its old activity here
                                         // would replay it from the exited agent's leftover screen.
                                         sess.last_agent_activity = Some(reported);
-                                        !(!is_snapshot && repeats && !provider_rotated)
+                                        // The reporting extension names the engine that hosts it,
+                                        // never the agent running on top of it, so its id is only
+                                        // usable once the screen has nothing to say.
+                                        let needs_screen_identity = agent
+                                            .as_deref()
+                                            .is_none_or(crate::agent_detect::is_engine_owned_identity);
+                                        let detected = if needs_screen_identity {
+                                            detect_agent_on_screen(sess)
+                                        } else {
+                                            None
+                                        };
+                                        let resolved = crate::agent_detect::resolve_agent_identity(
+                                            agent.as_deref(),
+                                            detected.as_deref(),
+                                        );
+                                        (!(!is_snapshot && repeats && !provider_rotated), resolved)
                                     }
-                                    None => false,
+                                    None => (false, None),
                                 }
                             };
                             if changed {
@@ -5208,7 +5241,7 @@ impl NativeTerminalSurfaceHostState {
                                             session_id: session_id_owned.clone(),
                                             state: state.to_string(),
                                             rule_id: String::new(),
-                                            manifest_id: agent
+                                            manifest_id: resolved_agent
                                                 .as_deref()
                                                 .unwrap_or(AGENT_EXTENSION_MANIFEST_ID)
                                                 .to_string(),

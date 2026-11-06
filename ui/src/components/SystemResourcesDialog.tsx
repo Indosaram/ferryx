@@ -393,7 +393,7 @@ export function SystemResourcesDialog({
         aria-modal="true"
         aria-label="System resources"
         data-testid="system-resources-dialog"
-        className="relative flex max-h-[80vh] w-full max-w-2xl animate-enter flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+        className="relative flex max-h-[80vh] w-full max-w-2xl animate-enter flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-elevation-4"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
@@ -466,7 +466,7 @@ export function SystemResourcesDialog({
 
         {killTarget ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/40 p-6">
-            <div role="alertdialog" aria-modal="true" aria-label="Kill session" className="w-full max-w-sm rounded-lg border border-border bg-card p-4 shadow-xl">
+            <div role="alertdialog" aria-modal="true" aria-label="Kill session" className="w-full max-w-sm rounded-lg border border-border bg-popover p-4 shadow-elevation-3">
               <h2 className="text-sm font-semibold text-foreground">Kill {killTarget.sessionId}?</h2>
               <p className="mt-1 text-xs text-muted-foreground">
                 Force-quits this terminal and every process in it. Unsaved work in the pane is lost. This can't be undone.

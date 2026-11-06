@@ -25,6 +25,18 @@
 
   --radius: 0.5rem;
 
+  /* Radius ramp ends (2px). sm/md/lg already derive from --radius; xl/2xl/3xl keep
+     Tailwind's own 12/16/24px, so only the small end is a new token. */
+  --radius-xs: 0.125rem;
+
+  /* Motion and hairline primitives. A dialog or menu decelerates on expo; a control
+     that springs back on release uses --spring. */
+  --ease-out-quart: cubic-bezier(0.165, 0.84, 0.44, 1);
+  --ease-out-expo: cubic-bezier(0.19, 1, 0.22, 1);
+  --spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --surface-hairline: #00000012;
+  --surface-highlight: #ffffffbf;
+
   /* Ferryx brand tone: charcoal desktop palette (not the stock #0a0a0a base) */
   --background: #23262d;
   --background-rgb: 35 38 45;
@@ -34,8 +46,12 @@
   --card-rgb: 23 23 23;
   --card-foreground: #fafafa;
   --card-foreground-rgb: 250 250 250;
-  --popover: #171717;
-  --popover-rgb: 23 23 23;
+  /* Floating layer: one step above the terminal surface (#282c34) and clearly
+     separated from chrome (--card #171717). A scrimmed dialog was previously
+     #171717 on #16181d, i.e. 1.01:1 - invisible as a shape. This fill measures
+     1.38:1 against the same scrim. */
+  --popover: #2e323b;
+  --popover-rgb: 46 50 59;
   --popover-foreground: #fafafa;
   --popover-foreground-rgb: 250 250 250;
   --primary: #e5e5e5;
@@ -52,6 +68,10 @@
   --muted-foreground-rgb: 161 161 161;
   --accent: #404040;
   --accent-rgb: 64 64 64;
+  /* Hover inside a floating surface. Deliberately lighter than the popover
+     fill: #404040 on #2e323b is only 1.24:1, so hover would read as a dead pixel. */
+  --surface-hover: #40454f;
+  --surface-hover-rgb: 64 69 79;
   --accent-foreground: #fafafa;
   --accent-foreground-rgb: 250 250 250;
   --destructive: #ff6568;
@@ -111,6 +131,45 @@
   --status-success-rgb: 134 239 172;
   --status-idle: #737373;
   --status-idle-rgb: 115 115 115;
+
+  /* Status container layer. -solid mirrors the flat --status-X hex above (which stays
+     the literal source of truth because the contract tests pin it as hex); -container is
+     mix(solid, canvas, 0.14) and -border is the solid itself. Nothing consumes these yet:
+     the ad-hoc bg-status-XX/NN sites migrate in a separate sweep. Dark text on these
+     containers is -solid itself (6.47 / 9.29 / 10.68 contrast); idle keeps --status-idle
+     because 3.71 would be too low for body text. */
+  --status-working-solid: #60a5fa;
+  --status-working-solid-rgb: 96 165 250;
+  --status-working-container: #2c384a;
+  --status-working-container-rgb: 44 56 74;
+  --status-working-border: #60a5fa;
+  --status-working-border-rgb: 96 165 250;
+  --status-working-on-container: #60a5fa;
+  --status-working-on-container-rgb: 96 165 250;
+  --status-warning-solid: #fbbf24;
+  --status-warning-solid-rgb: 251 191 36;
+  --status-warning-container: #413b2c;
+  --status-warning-container-rgb: 65 59 44;
+  --status-warning-border: #fbbf24;
+  --status-warning-border-rgb: 251 191 36;
+  --status-warning-on-container: #fbbf24;
+  --status-warning-on-container-rgb: 251 191 36;
+  --status-success-solid: #86efac;
+  --status-success-solid-rgb: 134 239 172;
+  --status-success-container: #31423f;
+  --status-success-container-rgb: 49 66 63;
+  --status-success-border: #86efac;
+  --status-success-border-rgb: 134 239 172;
+  --status-success-on-container: #86efac;
+  --status-success-on-container-rgb: 134 239 172;
+  --status-idle-solid: #737373;
+  --status-idle-solid-rgb: 115 115 115;
+  --status-idle-container: #2e3137;
+  --status-idle-container-rgb: 46 49 55;
+  --status-idle-border: #737373;
+  --status-idle-border-rgb: 115 115 115;
+  --status-idle-on-container: #a1a1a1;
+  --status-idle-on-container-rgb: 161 161 161;
 
   /* Mobile chat surface (remote phone client; T3 Code parity palette) */
   --chat-screen: #0a0a0a;
@@ -401,6 +460,42 @@ html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-pr
   --input-alpha: 1;
   --status-idle: #8a8a8a;
   --status-idle-rgb: 138 138 138;
+  /* Container layer mirrors the desktop shape so the remote client never diverges:
+     -solid is the flat hue, -container is mix(solid, screen, 0.14), -border is the
+     solid. Dark text on these containers is -solid itself (4.94 idle .. 10.68
+     success). Nothing consumes them yet. */
+  --status-working-solid: #60a5fa;
+  --status-working-solid-rgb: 96 165 250;
+  --status-working-container: #16202c;
+  --status-working-container-rgb: 22 32 44;
+  --status-working-border: #60a5fa;
+  --status-working-border-rgb: 96 165 250;
+  --status-working-on-container: #60a5fa;
+  --status-working-on-container-rgb: 96 165 250;
+  --status-warning-solid: #fbbf24;
+  --status-warning-solid-rgb: 251 191 36;
+  --status-warning-container: #2c230e;
+  --status-warning-container-rgb: 44 35 14;
+  --status-warning-border: #fbbf24;
+  --status-warning-border-rgb: 251 191 36;
+  --status-warning-on-container: #fbbf24;
+  --status-warning-on-container-rgb: 251 191 36;
+  --status-success-solid: #86efac;
+  --status-success-solid-rgb: 134 239 172;
+  --status-success-container: #1b2a21;
+  --status-success-container-rgb: 27 42 33;
+  --status-success-border: #86efac;
+  --status-success-border-rgb: 134 239 172;
+  --status-success-on-container: #86efac;
+  --status-success-on-container-rgb: 134 239 172;
+  --status-idle-solid: #8a8a8a;
+  --status-idle-solid-rgb: 138 138 138;
+  --status-idle-container: #1c1c1c;
+  --status-idle-container-rgb: 28 28 28;
+  --status-idle-border: #8a8a8a;
+  --status-idle-border-rgb: 138 138 138;
+  --status-idle-on-container: #8a8a8a;
+  --status-idle-on-container-rgb: 138 138 138;
 }
 
 /* The remote client is a reading surface: transcript, errors and paths stay copyable even
@@ -436,6 +531,38 @@ html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-pr
   --status-success-rgb: 22 101 52;
   --status-idle: #5b6472;
   --status-idle-rgb: 91 100 114;
+  --status-working-solid: #1e40af;
+  --status-working-solid-rgb: 30 64 175;
+  --status-working-container: #edf0f9;
+  --status-working-container-rgb: 237 240 249;
+  --status-working-border: #1e40af;
+  --status-working-border-rgb: 30 64 175;
+  --status-working-on-container: #1e40af;
+  --status-working-on-container-rgb: 30 64 175;
+  --status-warning-solid: #92400e;
+  --status-warning-solid-rgb: 146 64 14;
+  --status-warning-container: #f6f0ec;
+  --status-warning-container-rgb: 246 240 236;
+  --status-warning-border: #92400e;
+  --status-warning-border-rgb: 146 64 14;
+  --status-warning-on-container: #92400e;
+  --status-warning-on-container-rgb: 146 64 14;
+  --status-success-solid: #166534;
+  --status-success-solid-rgb: 22 101 52;
+  --status-success-container: #ecf3ef;
+  --status-success-container-rgb: 236 243 239;
+  --status-success-border: #166534;
+  --status-success-border-rgb: 22 101 52;
+  --status-success-on-container: #166534;
+  --status-success-on-container-rgb: 22 101 52;
+  --status-idle-solid: #5b6472;
+  --status-idle-solid-rgb: 91 100 114;
+  --status-idle-container: #f2f3f4;
+  --status-idle-container-rgb: 242 243 244;
+  --status-idle-border: #5b6472;
+  --status-idle-border-rgb: 91 100 114;
+  --status-idle-on-container: #5b6472;
+  --status-idle-on-container-rgb: 91 100 114;
 }
 
 @keyframes pane-inbox-flash {

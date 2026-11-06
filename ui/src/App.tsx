@@ -13,6 +13,7 @@ import { useExternalWorktreePrompt } from "./state/useExternalWorktreePrompt";
 import { Sidebar } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
+import { LocalChatPane } from "./components/LocalChatPane";
 import { TERMINAL_COPY_MODE_EVENT, type TerminalCopyModeEventDetail } from "./components/TerminalCopyMode";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharingIndicator";
@@ -101,6 +102,7 @@ import {
   splitAgentArgs,
   type AgentSettings,
 } from "./lib/agentsSettings";
+import { chatSupportedAgents, loadLastChatAgentId, pickChatAgent, saveLastChatAgentId } from "./lib/paneChatPreferences";
 import {
   ACTIVE_PROJECT_STORAGE_KEY,
   getMigratedItem,
@@ -203,7 +205,7 @@ import {
 } from "./lib/types";
 import { registerWindowCloseGuard, startUpdatePolling } from "./lib/updater";
 import { maybeShowWindowsStoreMigrationNotice } from "./lib/windowsStoreMigration";
-import { collectLeafIds, type PaneDirection } from "./state/paneTree";
+import { collectLeafIds, type PaneDirection, type PaneView } from "./state/paneTree";
 import { usePendingWorktree } from "./state/pendingWorktree";
 import { findDirectionalLeafId, type PaneFocusDirection } from "./state/paneGeometry";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
@@ -889,6 +891,8 @@ function WorkspaceApp({
   activeProjectRef.current = activeProject;
 
   const [agentSettings, setAgentSettings] = useState<AgentSettings>(loadAgentSettings);
+  const agentSettingsRef = useRef(agentSettings);
+  agentSettingsRef.current = agentSettings;
   const [agentDetections, setAgentDetections] = useState<AgentDetection[]>([]);
 
   useEffect(() => {
@@ -967,6 +971,7 @@ function WorkspaceApp({
     renameTab,
     setTabPinned,
     focusPane,
+    setPaneView,
     setPaneRatio,
     setTabGroupRatio,
     equalizePaneRun,
@@ -2826,7 +2831,11 @@ function WorkspaceApp({
   // Starts an agent in a new tab of the given worktree of the active project, which need not be
   // the active worktree (a freshly created one is not selected yet).
   const launchAgentInWorktree = useCallback(
-    async (targetWorktree: Worktree, agent: { name: string; command: string; args: string }) => {
+    async (
+      targetWorktree: Worktree,
+      agent: { name: string; command: string; args: string },
+      options: { view?: PaneView } = {},
+    ) => {
       if (activeRemoteHostRef.current) return;
       if (
         (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
@@ -2871,9 +2880,10 @@ function WorkspaceApp({
         // leaves the tab blank and unable to accept input.
         const tabId = await openTab(targetWorktree, label, {
           sessionId: backendSessionId,
+          ...(options.view === "chat" ? { agentType: agent.name } : {}),
           daemonEpoch: spawned.daemonEpoch ?? null,
           incarnation: spawned.session?.incarnation ?? null,
-        });
+        }, ...(options.view === "chat" ? [undefined, "chat"] as const : [] as const));
         // openTab does not own a pre-spawned backend, so a discarded tab would orphan the PTY.
         if (tabId === null) {
           await closeTerminal(backendSessionId);
@@ -2881,6 +2891,9 @@ function WorkspaceApp({
         }
         if (typeCommand) {
           await writeTerminal({ sessionId: backendSessionId, data: `${fullCommand}\r` });
+        }
+        if (options.view === "chat") {
+          saveLastChatAgentId(agent.name);
         }
       } catch (error) {
         reportRuntimeError(error);
@@ -2897,6 +2910,40 @@ function WorkspaceApp({
     },
     [launchAgentInWorktree],
   );
+
+  // Chat view reads the agent's local native history, so it is offered only for local projects.
+  const chatViewAvailable =
+    !activeRemoteHost &&
+    activeProject.target?.kind !== "ssh" &&
+    activeProject.target?.kind !== "pairedDaemon" &&
+    !isRemoteWorkspaceId(activeProject.workspaceId) &&
+    !isPairedWorkspaceId(activeProject.workspaceId);
+  const chatViewAvailableRef = useRef(chatViewAvailable);
+  chatViewAvailableRef.current = chatViewAvailable;
+
+  const handleNewChat = useCallback(
+    async (agent: { name: string; command: string; args: string }) => {
+      if (!chatViewAvailableRef.current) return;
+      const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
+      if (!targetWorktree) return;
+      await launchAgentInWorktree(targetWorktree, agent, { view: "chat" });
+    },
+    [launchAgentInWorktree],
+  );
+
+  const handleNewChatShortcut = useCallback(() => {
+    if (!chatViewAvailableRef.current) return;
+    const agent = pickChatAgent(
+      chatSupportedAgents(getLaunchableAgents(resolvedAgentsRef.current)),
+      loadLastChatAgentId(),
+      agentSettingsRef.current.defaultAgentId,
+    );
+    if (!agent) {
+      toast.warning("No chat-capable agent is enabled. Enable one in Agent settings.");
+      return;
+    }
+    void handleNewChat(agent);
+  }, [handleNewChat]);
 
   // Resolves a dialog's agent choice against the agents launchable right now.
   const launchAgentByIdInWorktree = useCallback(
@@ -3713,7 +3760,7 @@ function WorkspaceApp({
   );
 
   const handleSplitPane = useCallback(
-    (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second"; startup?: SpawnTerminalRequest["startup"] }) => {
+    (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second"; startup?: SpawnTerminalRequest["startup"]; view?: PaneView; agentType?: string }) => {
       if (activeRemoteHostRef.current) return;
       if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
       if (
@@ -3727,6 +3774,34 @@ function WorkspaceApp({
       void pending.catch(reportRuntimeError);
     },
     [reportRuntimeError, splitPane],
+  );
+
+  const handleSplitChat = useCallback(
+    (tabId: string, direction: PaneDirection, agent: { name: string; command: string; args: string }) => {
+      if (!chatViewAvailableRef.current) return;
+      const command = agent.command.trim();
+      if (!command) return;
+      const tabLayout = stateRef.current.layout.layoutsByTabId?.[tabId];
+      if (!tabLayout) return;
+      const leafId = tabLayout.activeLeafId ?? collectLeafIds(tabLayout.root)[0];
+      if (!leafId) return;
+      saveLastChatAgentId(agent.name);
+      handleSplitPane(tabId, leafId, direction, {
+        startup: { kind: "agentLaunch", command, args: splitAgentArgs(agent.args) },
+        view: "chat",
+        agentType: agent.name,
+      });
+    },
+    [handleSplitPane],
+  );
+
+  const handleSetPaneView = useCallback(
+    (tabId: string, leafId: string, view: PaneView) => {
+      // Leaving chat is always allowed; entering it is local-only.
+      if (view === "chat" && !chatViewAvailableRef.current) return;
+      setPaneView(tabId, leafId, view);
+    },
+    [setPaneView],
   );
 
   useEffect(() => {
@@ -4261,6 +4336,7 @@ function WorkspaceApp({
       }
       return {
         "tab.newTerminal": handleAddTerminalTab,
+        "tab.newChat": chatViewAvailable ? handleNewChatShortcut : undefined,
         "tab.newBrowser": () => void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError),
         "tab.reopenClosed": handleReopenClosedBrowserTab,
         "tab.close": handleCloseActiveSurface,
@@ -4316,6 +4392,8 @@ function WorkspaceApp({
       activeRemoteHost,
       createBrowserTab,
       handleAddTerminalTab,
+      chatViewAvailable,
+      handleNewChatShortcut,
       handleCloseActiveSurface,
       handleCyclePaneFocus,
       handleDirectionalPaneFocus,
@@ -4543,6 +4621,11 @@ function WorkspaceApp({
             onOpenSettings={handleOpenSettings}
             agents={launchableAgents}
             onLaunchAgent={handleLaunchAgent}
+            onNewChat={chatViewAvailable ? handleNewChat : undefined}
+            onSplitChat={chatViewAvailable ? handleSplitChat : undefined}
+            onSetPaneView={handleSetPaneView}
+            chatViewAvailable={chatViewAvailable}
+            renderChatPane={(args) => <LocalChatPane {...args} />}
             defaultAgentId={agentSettings.defaultAgentId}
             onNavigateBrowserTab={handleNavigateBrowserTab}
             onReloadBrowserTab={handleReloadBrowserTab}

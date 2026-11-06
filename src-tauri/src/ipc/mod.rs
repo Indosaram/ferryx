@@ -55,6 +55,8 @@ pub mod project;
 pub mod project_remote;
 pub mod remote;
 #[cfg(feature = "desktop")]
+pub mod reference_chat;
+#[cfg(feature = "desktop")]
 pub mod remote_auto_trust;
 #[cfg(feature = "desktop")]
 pub mod remote_drop;

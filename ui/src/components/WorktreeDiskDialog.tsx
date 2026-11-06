@@ -379,7 +379,7 @@ export function WorktreeDiskDialog({
         role="dialog"
         aria-label="Worktree Disk Management"
         aria-modal="true"
-        className="flex max-h-[85vh] w-full max-w-4xl flex-col animate-enter overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+        className="flex max-h-[85vh] w-full max-w-4xl flex-col animate-enter overflow-hidden rounded-xl border border-border bg-popover shadow-elevation-4"
         onMouseDown={(event) => event.stopPropagation()}
       >
         {/* Header */}

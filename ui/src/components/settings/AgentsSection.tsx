@@ -185,7 +185,7 @@ function RemoveAgentIntegrationDialog({
         role="dialog"
         aria-label="Remove agent integration"
         aria-modal="true"
-        className="w-full max-w-md animate-enter overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+        className="w-full max-w-md animate-enter overflow-hidden rounded-xl border border-border bg-popover shadow-elevation-4"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-center gap-2 border-b border-border px-4 py-3 text-sm font-semibold text-foreground">

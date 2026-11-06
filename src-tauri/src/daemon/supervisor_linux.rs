@@ -576,6 +576,16 @@ fn unit_is_busy(systemctl: &dyn Systemctl, name: &str) -> Result<bool, String> {
     Ok(!matches!(state.trim(), "inactive" | "failed"))
 }
 
+/// Whether systemd has unit `name` loaded. Only `LoadState=not-found` is unloaded; a failed query
+/// counts as loaded, so its runtime generation is never pruned.
+pub(crate) fn unit_loaded(systemctl: &dyn Systemctl, name: &str) -> bool {
+    let unit = format!("{name}.service");
+    match systemctl.run(&["show", "-p", "LoadState", "--value", &unit]) {
+        Ok(state) => state.trim() != "not-found",
+        Err(_) => true,
+    }
+}
+
 /// Starts generation unit `name` when it is idle: writes `content` to `path`, reloads systemd when
 /// the file changed, then `start --no-block`. A busy unit gets no `systemctl` mutation and no
 /// rewrite. Never `enable --now`, `restart` or `stop`. Returns whether a start was issued.

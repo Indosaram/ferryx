@@ -238,7 +238,7 @@ export function AgentHistoryDialog({
         role="dialog"
         aria-label="Past conversations"
         aria-modal="true"
-        className="flex max-h-[85vh] w-full max-w-5xl flex-col animate-enter overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+        className="flex max-h-[85vh] w-full max-w-5xl flex-col animate-enter overflow-hidden rounded-xl border border-border bg-popover shadow-elevation-4"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-center justify-between border-b border-border px-5 py-3.5">

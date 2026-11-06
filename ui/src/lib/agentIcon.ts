@@ -27,6 +27,9 @@ export const SUPPORTED_AGENT_LOGOS = {
   kimi: kimiLogo,
   cline: clineLogo,
   omo: omoLogo,
+  // maho code shares the maho brand mark with omo, so it reuses the same asset rather than
+  // shipping a near-identical copy; a dedicated mark is a drop-in replacement here.
+  maho: omoLogo,
   aider: aiderLogo,
   crush: crushLogo,
   droid: droidLogo,
@@ -56,6 +59,7 @@ const ADAPTIVE_MONOCHROME_LOGOS: ReadonlySet<string> = new Set([
   "pi",
   "droid",
   "omo",
+  "maho",
 ]);
 
 function canonicalAgentType(value?: string | null): string | null {
