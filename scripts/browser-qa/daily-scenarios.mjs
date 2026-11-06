@@ -847,10 +847,16 @@ async function answerOpenDialog(ctx, path) {
     ctx.host.key({ key: "Enter" });
     return { via: "keystrokes", chooser };
   } else if (ctx.platform === "win32") {
-    // The common file dialog focuses its File name box; SendInput types into the foreground.
+    // The common file dialog focuses its File name box; SendInput types into the foreground. This
+    // path is what makes the system-webview picker pass (`upload_picker` = true in run 42145006089),
+    // so it types unconditionally as before. The foreground is recorded because a picker click that
+    // missed would send the path into the app instead, which is how a later step ends up acting on
+    // the wrong window.
+    const fg = ctx.win.windowRows("focuschain").find((row) => row.kind === "fg") ?? null;
     ctx.win.ps("typeraw", ["-Text", path]);
     await sleep(400);
     ctx.win.ps("keysraw", ["-Codes", "13"]);
+    return { via: "keystrokes", foreground: fg };
   }
   return { via: "keystrokes" };
 }
