@@ -307,13 +307,17 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const dismissStoreMigrationToast = async (step = null, name = 'store-toast') => {
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         const seen = await frame(name, step, { marker: null });
-        const gotIt = locate(seen.read, 'Got it');
-        if (!gotIt) return false;
-        await click(gotIt);
+        // The toast's own "Got it" action is the owner's path, but its small label is the one
+        // string on this panel tesseract cannot read back reliably at this frame scale, so the
+        // panel's own "Clear all" pill is the documented fallback: it dismisses every toast, and
+        // sonner runs the toast's onDismiss, which is the same persistence the button performs.
+        const target = locate(seen.read, 'Got it') ?? locate(seen.read, 'Clear all');
+        if (!target) return false;
+        await click(target);
         await until('store migration toast dismissed', () => frame('store-toast-dismissed', step, { marker: null }),
-          ({ read }) => locate(read, 'Got it') === null, { deadlineMs: 30_000 });
+          ({ read }) => locate(read, 'Got it') === null && locate(read, 'moving to the Microsoft') === null, { deadlineMs: 30_000 });
       }
-      throw new StepFailed('STORE_TOAST_NOT_DISMISSED', 'the Store migration toast kept covering the panel after three real "Got it" clicks');
+      throw new StepFailed('STORE_TOAST_NOT_DISMISSED', 'the Store migration toast kept covering the panel after three real dismissal clicks');
     };
     // The notice appears on its own schedule, so give it a bounded window to show up before the
     // first clause reads the panel; a run that never raises it simply clears the window unclicked.
