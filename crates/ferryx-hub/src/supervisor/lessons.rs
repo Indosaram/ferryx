@@ -13,11 +13,13 @@
 //! or when it was injected [`USELESS_INJECTIONS`] times without ever helping. Pinned lessons
 //! are the owner's choice and are only retired explicitly.
 //!
-//! Measuring (A2): every injection into a piece of work is a `lesson_injections` row keyed by
-//! the work's subject (`goal:<goal_id>`, `report:<id>`). When the work ends, [`settle`] records
-//! its outcome once and feeds it to [`observe`]: a completed goal is `Helped`, a goal that
-//! ends without converging is `Hurt`, and a report nobody objected to within
-//! [`REPORT_SETTLE_DAYS`] days is `Helped` ([`sweep_report_outcomes`]).
+//! Measuring (A2): goal rollup and report outcomes use `lesson_injections` rows keyed by the
+//! work's subject (`goal:<goal_id>`, `report:<id>`). Per-turn bookkeeping uses separate
+//! `lesson_turn_injections` rows; a corrective turn may have turn rows without a goal rollup
+//! row. When the work ends, [`settle`] records its rollup outcome once and feeds it to
+//! [`observe`]: a completed goal is `Helped`, a goal that ends without converging is `Hurt`,
+//! and a report nobody objected to within [`REPORT_SETTLE_DAYS`] days is `Helped`
+//! ([`sweep_report_outcomes`]).
 //!
 //! Writing (A1): [`reflect`] asks the judge one closed `LessonReflect` question (lesson or no
 //! lesson), then authors a reusable rule with `LessonAuthor`, falling back to the summary's
@@ -972,8 +974,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(before, 0);
-        note_injected(&pool, "goal:turn-fixture", &expected).await.unwrap();
-        settle(&pool, "goal:turn-fixture", Outcome::Helped).await.unwrap();
+        note_injected(&pool, "goal:turn-fixture", &expected)
+            .await
+            .unwrap();
+        settle(&pool, "goal:turn-fixture", Outcome::Helped)
+            .await
+            .unwrap();
         assert!(settle(&pool, "goal:turn-fixture", Outcome::Helped)
             .await
             .unwrap()
@@ -1464,7 +1470,10 @@ mod tests {
         note_injected(&pool, &goal_subject(goal), std::slice::from_ref(&rule.id))
             .await
             .unwrap();
-        assert_eq!(goal_completed(&pool, goal, None).await.unwrap(), vec![rule.id.clone()]);
+        assert_eq!(
+            goal_completed(&pool, goal, None).await.unwrap(),
+            vec![rule.id.clone()]
+        );
         let rows = injections_of(&pool, &goal_subject(goal)).await;
         assert_eq!(rows, vec![(rule.id.clone(), Some("helped".to_owned()))]);
         assert_eq!(get(&pool, &rule.id).await.unwrap().unwrap().helped, 1);
@@ -1556,10 +1565,17 @@ mod tests {
             r#"{"rule":"Run focused tests before reporting success.","keywords":"cargo, tests","rationale":"Focused checks catch regressions early."}"#,
         );
         let written = reflect(
-            &pool, &judge, LessonDomain::Goal, PROJECT,
-            "A worker skipped verification. The regression escaped.", "goal:authored", |_| true,
+            &pool,
+            &judge,
+            LessonDomain::Goal,
+            PROJECT,
+            "A worker skipped verification. The regression escaped.",
+            "goal:authored",
+            |_| true,
         )
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
         let stored = get(&pool, &written.id).await.unwrap().unwrap();
         assert_eq!(stored.rule, "Run focused tests before reporting success.");
         assert_eq!(stored.keywords, "cargo, tests");
@@ -1573,9 +1589,17 @@ mod tests {
         let judge = author_judge("not a JSON response");
         let summary = "Verification was skipped. A regression escaped.";
         let written = reflect(
-            &pool, &judge, LessonDomain::Goal, PROJECT, summary, "goal:broken", |_| true,
+            &pool,
+            &judge,
+            LessonDomain::Goal,
+            PROJECT,
+            summary,
+            "goal:broken",
+            |_| true,
         )
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(written.rule, rule_from_summary(summary));
         assert_eq!(get(&pool, &written.id).await.unwrap(), Some(written));
     }
@@ -1586,8 +1610,15 @@ mod tests {
         let judge = Judge::scripted(|_, _, _| "lesson".to_owned());
         let summary = "Verification was skipped. A regression escaped.";
         let result = reflect(
-            &pool, &judge, LessonDomain::Goal, PROJECT, summary, "goal:unavailable", |_| true,
-        ).await;
+            &pool,
+            &judge,
+            LessonDomain::Goal,
+            PROJECT,
+            summary,
+            "goal:unavailable",
+            |_| true,
+        )
+        .await;
         assert!(matches!(&result, Ok(Some(_))), "{result:?}");
         let written = result.unwrap().unwrap();
         assert_eq!(written.rule, rule_from_summary(summary));
@@ -1602,12 +1633,21 @@ mod tests {
         for (index, rule) in ["", "   ", long.as_str()].into_iter().enumerate() {
             let text = serde_json::json!({
                 "rule": rule, "keywords": " Cargo, TESTS, cargo, ", "rationale": "observed failure"
-            }).to_string();
+            })
+            .to_string();
             let judge = author_judge(&text);
             let written = reflect(
-                &pool, &judge, LessonDomain::Goal, PROJECT, summary,
-                &format!("goal:invalid-{index}"), |_| true,
-            ).await.unwrap().unwrap();
+                &pool,
+                &judge,
+                LessonDomain::Goal,
+                PROJECT,
+                summary,
+                &format!("goal:invalid-{index}"),
+                |_| true,
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert_eq!(written.rule, rule_from_summary(summary));
             assert_eq!(written.keywords, "cargo, tests");
         }
