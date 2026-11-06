@@ -618,23 +618,22 @@ describe('OCR text matching', () => {
     expect(ocrShows('Conversation Export transcript', 'supv-f3-mac-3428ce97')).toBe(false);
   });
 
-  test("the F3-D5 screen predicate tells the answered card from the next one the fixture draws", () => {
+  test("the F3-D5 screen predicate tells the answered card from the next one and from the sibling session", () => {
     // What a desktop frame actually paints for the decision card: its question, which the fixture
-    // names per migration (fixture-agent.mjs), so the daemon keeps it verbatim as `question`
-    // (prompt_claude.rs clean_line). The command line is ellipsized before the nonce, and the
-    // aria-label is never painted, so neither can identify the card.
-    const onScreen = (text, nonce) => ocrShows(text, `proceed with migration ${nonce}`);
-    const cardFor = (nonce) => `Do you want to proceed with migration ${nonce}?\n❯ 1. Yes\n2. Yes, and always allow access to this database from this project\n3. No`;
-    const answered = cardFor(19);
-    const next = cardFor(20);
+    // names per session and nonce (fixture-agent.mjs), so the daemon keeps it verbatim as `question`
+    // (prompt_claude.rs clean_line). The command is ellipsized before the nonce and the aria-label is
+    // never painted, so neither can identify the card.
+    const onScreen = (text, title, nonce) => ocrShows(text, `${title} migration ${nonce}`);
+    const cardFor = (title, nonce) => `Do you want to proceed with ${title} migration ${nonce}?\n❯ 1. Yes\n2. Yes, and always allow access to this database from this project\n3. No`;
     // The answered card is identified while it is up ...
-    expect(onScreen(answered, 19)).toBe(true);
-    // ... and the frame after the answer, which paints the NEXT card, must fail that predicate.
-    // This is the case the earlier predicate got wrong: both frames share the command head.
-    expect(onScreen(next, 19)).toBe(false);
-    // The aria-label and the nonce-behind-the-ellipsis cannot be the signal.
-    expect(ocrShows(answered, 'Decision for A repo')).toBe(false);
-    expect(namesNonce(answered, 'f3decision', 19)).toBe(false);
-    expect(ocrShows('sqlx migrate run --database-url postgres://pro...', 'proceed with migration 19')).toBe(false);
+    expect(onScreen(cardFor('f3decision', 1), 'f3decision', 1)).toBe(true);
+    // ... the successor card the fixture draws (nonce 2) must fail that ...
+    expect(onScreen(cardFor('f3decision', 2), 'f3decision', 1)).toBe(false);
+    // ... and so must the sibling session's card, which also starts at nonce 1. Without the session
+    // title in the question these two collide, which is what the earlier predicate got wrong.
+    expect(onScreen(cardFor('f3push', 1), 'f3decision', 1)).toBe(false);
+    // The aria-label and the nonce behind the ellipsis cannot be the signal either.
+    expect(ocrShows(cardFor('f3decision', 1), 'Decision for A repo')).toBe(false);
+    expect(namesNonce(cardFor('f3decision', 1), 'f3decision', 1)).toBe(false);
   });
 });

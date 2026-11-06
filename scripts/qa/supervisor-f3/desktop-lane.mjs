@@ -365,6 +365,14 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const view = await until('decision card in this desktop panel', () => panel(null), (v) => (v?.decisions ?? []).some((d) => d.sessionRef === card.sessionRef), { deadlineMs: 120_000 });
       step.artifact('panel-read', 'decision.panel.json', view);
       const shown = keep(step, 'decision', await until('decision card text on screen', () => frame('decision'), ({ read }) => read.text.includes(card.commandFragment), { deadlineMs: 60_000 }));
+      // D5 judges the screen after the phone answers, but by then the card is gone, so the control
+      // that proves its detector works must be taken here, while D1 has just proved the card is up.
+      // Identifying it by its question (which the fixture names per session and nonce) is what D5
+      // uses; a desktop that cannot read it here would make D5 vacuously pass, so record whether it
+      // could rather than failing D1, whose own assertions are about the command and the options.
+      const cardQuestion = card.decision?.prompt?.question ?? '';
+      const questionShown = cardQuestion !== '' && ocrShows(shown.read.text, cardQuestion);
+      shared.record('F3-D1', `${lane.name}-card-question`, { cardQuestion, questionShown, text: shown.read.text.slice(0, 1500) });
       const decision = view.decisions.find((d) => d.sessionRef === card.sessionRef);
       shared.record('F3-D1', lane.name, { sessionRef: decision.sessionRef, promptId: decision.promptId, question: decision.question, command: decision.command });
       step.assert('card-is-the-fleet-decision', decision.promptId === card.promptId, { decision, card });
@@ -586,9 +594,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // lane) is gone from this desktop's panel read and from its screen. Waits for the phone.
     await runStep(lane, 'F3-D5', async (step) => {
       if (!run.lanes.includes('iphone')) throw new LaneBlocked('LANE_NOT_IN_RUN', 'no iPhone lane in this run answers a decision');
-      // The positive control is taken FIRST, while the cards are provably still up: after the phone
-      // answers, a correct desktop has already removed them and a control frame proves nothing.
-      const control = keep(step, 'answered-control', await frame('answered-control'));
+      // The positive control is recorded by F3-D1 while the card is provably on screen; see there.
       await shared.phoneAnswersDone;
       const answers = shared.phoneAnswers;
       step.assert('phone-answered-card', answers.length > 0 && answers.every((a) => Number.isInteger(a.nonce)), { answers });
@@ -596,20 +602,17 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const view = await until('the answered cards gone from the panel', () => panel(null), gone, { deadlineMs: 60_000 });
       step.artifact('panel-read', 'answered.panel.json', view);
       step.assert('answered-card-gone-from-panel', gone(view), { answers, decisions: view.decisions });
-      // The card never paints its `aria-label`, and its command is ellipsized before the nonce, so
-      // neither can say which card is on screen. What it does paint is its question, and the fixture
-      // names the migration in it (fixture-agent.mjs: "Do you want to proceed with migration N?"),
-      // which the daemon's parser keeps verbatim as `question` (prompt_claude.rs:783 clean_line). So
-      // each answered card is identified on screen by its own nonce inside the question, with a
-      // mandatory positive control taken BEFORE the phone answers: if a nonce cannot be read while
-      // the card is provably up, this step fails instead of passing vacuously.
+      // D1 took the positive control while the card was provably up, because by the time the phone
+      // has answered a correct desktop has already removed it. Each card is identified by its own
+      // question, which the fixture names per session and nonce (f3decision and f3push both start at
+      // nonce 1, so the nonce alone would collide).
       const answeredNonces = answers.map((a) => a.nonce);
-      const onScreen = (r, nonce) => ocrShows(r.text, `proceed with migration ${nonce}`);
-      const visibleThen = answeredNonces.filter((n) => onScreen(control.read, n));
-      if (visibleThen.length === 0) {
-        throw new StepFailed('CARD_QUESTION_UNREADABLE', `no answered card's question is readable on screen before the phone answered, so the on-screen half of F3-D5 would prove nothing (looked for ${answeredNonces.map((n) => `migration ${n}`).join(', ')})`);
+      const onScreen = (r, nonce) => ocrShows(r.text, `${shared.decisionTitle} migration ${nonce}`);
+      const control = shared.observed['F3-D1']?.[`${lane.name}-card-question`];
+      if (!control?.questionShown) {
+        throw new StepFailed('CARD_QUESTION_UNREADABLE', `F3-D1 could not read this desktop's card question "${control?.cardQuestion ?? ''}" on screen, so the on-screen half of F3-D5 would prove nothing`);
       }
-      step.assert('card-question-readable-before-answer', visibleThen.length > 0, { visibleThen, text: control.read.text.slice(0, 1500) });
+      step.assert('card-question-readable-before-answer', control.questionShown === true, { control });
       const offScreen = ({ read: r }) => !answeredNonces.some((n) => onScreen(r, n));
       const shown = keep(step, 'answered', await until('the answered cards gone from screen', () => frame('answered'), offScreen, { deadlineMs: 60_000 }));
       step.assert('answered-card-gone-from-screen', offScreen(shown), { answeredNonces, text: shown.read.text.slice(0, 1500) });
