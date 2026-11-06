@@ -38,7 +38,11 @@ import { decodePng, encodePng, ocrImage } from './png.mjs';
 async function ocr(tesseract, pngPath, rect = null, singleLine = false) {
   let input = pngPath; let map = (x, y) => ({ x, y }); let scale = 1;
   if (rect) {
-    const image = ocrImage(readFileSync(pngPath), rect, singleLine ? 3 : 2);
+    // Scale 3, never 2: at 2 the nearest-neighbour doubling merges the last glyph of a token
+    // with the punctuation after it (f3tok025137b7: reads as f3tok025137b/), so a correct
+    // screenshot never matches its own token. 1, 3 and 4 read it exactly; 3 keeps the boxes small
+    // enough for the click mapping and is what the single-line path already used.
+    const image = ocrImage(readFileSync(pngPath), rect, 3);
     if (singleLine) {
       const gray = decodePng(image.png);
       for (let i = 0; i < gray.px.length; i += 1) gray.px[i] = Math.max(0, Math.min(255, (gray.px[i] - 20) * 255 / 190));
@@ -292,6 +296,16 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       await click(dismissImport);
       await until('initial import dialog dismissed', () => frame('import-dismissed', null, { marker: null }),
         ({ read }) => !locate(read, "Don't import"), { deadlineMs: 30_000 });
+    }
+    // A first launch from the installer raises the Store migration toast with duration Infinity,
+    // anchored over the panel's lower half: the rules line and the Export row never appear while
+    // it is open. It is a real product surface, so the run dismisses it with the same real click
+    // the owner uses ("Got it") rather than reading around it.
+    const storeToast = locate(initial.read, 'Got it');
+    if (storeToast) {
+      await click(storeToast);
+      await until('store migration toast dismissed', () => frame('store-toast-dismissed', null, { marker: null }),
+        ({ read }) => locate(read, 'Got it') === null, { deadlineMs: 30_000 });
     }
     const panel = async (step, name = 'poll') => {
       const reply = await call(`panel-${name}`, [panelReadRequest('panel')]);

@@ -561,15 +561,15 @@ describe('session host in the verdict', () => {
 });
 
 describe('frame OCR input', () => {
-  test('a frame is cut to the run window, inverted to dark-on-light and doubled, boxes mapping back', () => {
+  test('a frame is cut to the run window, inverted to dark-on-light and tripled, boxes mapping back', () => {
     // 4x2 RGB frame: white text pixel (255) on dark (20) at (2,1).
     const gray = Buffer.from([20, 20, 20, 20, 20, 20, 255, 20]);
     const rgb = Buffer.alloc(8 * 3); gray.forEach((v, i) => rgb.fill(v, i * 3, i * 3 + 3));
     const frame = encodePng(4, 2, 3, rgb);
-    const image = ocrImage(frame, { x: 1, y: 0, width: 3, height: 2 }, 2);
+    const image = ocrImage(frame, { x: 1, y: 0, width: 3, height: 2 }, 3);
     const out = decodePng(image.png);
-    expect([out.width, out.height, out.channels]).toEqual([6, 4, 1]);
-    expect(out.px[2 * 6 + 2]).toBe(0); // the white pixel is now black
+    expect([out.width, out.height, out.channels]).toEqual([9, 6, 1]);
+    expect(out.px[3 * 9 + 3]).toBe(0); // the white pixel is now black
     expect(out.px[0]).toBe(235); // the dark background is now light
     expect(image.origin).toEqual({ x: 1, y: 0 });
   });
