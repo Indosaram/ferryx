@@ -360,6 +360,8 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     await runStep(lane, 'F3-D1', async (step) => {
       step.artifact('gui-receipt', 'gui-launch.json', gui);
       const card = await shared.decisionCard();
+      // D5 judges the screen by this fragment; D1 has just asserted it is readable there.
+      shared.decisionCardPainted = card;
       const view = await until('decision card in this desktop panel', () => panel(null), (v) => (v?.decisions ?? []).some((d) => d.sessionRef === card.sessionRef), { deadlineMs: 120_000 });
       step.artifact('panel-read', 'decision.panel.json', view);
       const shown = keep(step, 'decision', await until('decision card text on screen', () => frame('decision'), ({ read }) => read.text.includes(card.commandFragment), { deadlineMs: 60_000 }));
@@ -591,18 +593,24 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const view = await until('the answered cards gone from the panel', () => panel(null), gone, { deadlineMs: 60_000 });
       step.artifact('panel-read', 'answered.panel.json', view);
       step.assert('answered-card-gone-from-panel', gone(view), { answers, decisions: view.decisions });
-      // The card renders its command on one ellipsized line, so the nonce (which sits at the end of
-      // the command) never reaches the screen: `namesNonce` on window text would pass on a desktop
-      // that still showed the card, which is vacuous. The screen is judged instead by the card's own
-      // heading for a session that has no other card, after a positive control proved the heading is
-      // readable there; a surviving card keeps rendering that heading and fails this.
-      const heading = `Decision for ${shared.decisionTitle}`;
-      const cardOnScreen = (r) => ocrShows(r.text, heading);
-      const before = keep(step, 'answered-before', await until('the answered card still identified on screen', () => frame('card-heading'), cardOnScreen, { deadlineMs: 30_000 }).catch(() => null));
-      if (before) step.assert('card-heading-readable-before', cardOnScreen(before.read), { heading, text: before.read.text.slice(0, 1500) });
+      // The card paints its command on one ellipsized line, so the nonce (at the end of the
+      // command) never reaches the screen and `namesNonce` on window text would pass on a desktop
+      // that still showed the card - vacuous. It also never paints its `aria-label`; the header is
+      // the session name. What it does paint, and what F3-D1 already asserts on screen, is the head
+      // of the command (`commandFragment`). So the screen is judged by that fragment, with a
+      // mandatory positive control taken BEFORE the phone answers: if the fragment cannot be seen
+      // while the card is provably up, this step fails instead of passing vacuously.
+      const paint = shared.decisionCardPainted;
+      const fragment = paint.commandFragment;
+      const cardOnScreen = (r) => ocrShows(r.text, fragment);
+      const control = keep(step, 'answered-control', await frame('answered-control'));
+      if (!cardOnScreen(control.read)) {
+        throw new StepFailed('CARD_FRAGMENT_UNREADABLE', `the decision card's command head "${fragment}" is not readable on screen while the card is up, so the on-screen half of F3-D5 would prove nothing`);
+      }
+      step.assert('card-fragment-readable-before-answer', cardOnScreen(control.read), { fragment, text: control.read.text.slice(0, 1500) });
       const offScreen = ({ read: r }) => !cardOnScreen(r);
       const shown = keep(step, 'answered', await until('the answered cards gone from screen', () => frame('answered'), offScreen, { deadlineMs: 60_000 }));
-      step.assert('answered-card-gone-from-screen', offScreen(shown), { heading, answers, text: shown.read.text.slice(0, 1500) });
+      step.assert('answered-card-gone-from-screen', offScreen(shown), { fragment, answers, text: shown.read.text.slice(0, 1500) });
     });
   } catch (error) {
     if (error instanceof LaneBlocked) lane.receipt.blocked = { code: error.code, detail: error.detail, at: new Date().toISOString() };

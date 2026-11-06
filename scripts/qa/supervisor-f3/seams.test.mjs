@@ -617,4 +617,18 @@ describe('OCR text matching', () => {
     expect(ocrShows('Section 19 Migration check 19 for x', 'Migration check 9 for')).toBe(false);
     expect(ocrShows('Conversation Export transcript', 'supv-f3-mac-3428ce97')).toBe(false);
   });
+
+  test("the F3-D5 screen predicate distinguishes a card that is still up from one that is gone", () => {
+    // What a desktop frame actually paints for the decision card: the command's head on one
+    // ellipsized line (DecisionCard.tsx `truncate`). F3-D5 must be able to fail on this.
+    const fragment = 'sqlx migrate run';
+    const cardUp = 'Do you want to proceed?\nsqlx migrate run --database-url postgres://pro...\nYes No';
+    const cardGone = '1 running - handled 1 thing today\n2 decisions for you. The rest is running.';
+    expect(ocrShows(cardUp, fragment)).toBe(true);
+    expect(ocrShows(cardGone, fragment)).toBe(false);
+    // The aria-label is never painted, so it cannot be the signal.
+    expect(ocrShows(cardUp, 'Decision for A repo')).toBe(false);
+    // The nonce sits past the ellipsis too: the old predicate could not fail on the same frame.
+    expect(namesNonce(cardUp, 'f3decision', 19)).toBe(false);
+  });
 });
