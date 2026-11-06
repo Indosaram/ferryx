@@ -1518,7 +1518,11 @@ export async function dailyWebviewBefore(ctx) {
     // The failing stage goes into the step record (it was only inside daily.g8.drag before).
     await probeInput(ctx, "after-g8-drag");
     return { ok: g8.checks.upload_picker && g8.checks.drag_in, stderr: g8.checks.upload_picker ? g8.drag?.stderr : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
-  });
+    // Two visits with their own retries, two probeInput round trips and six OCR waits add up past
+    // the default 240 s cap on Windows, where every screen read spawns a helper (run 42204359085
+    // hit "actions still running after 240000 ms" with no failing action recorded). The checks
+    // are unchanged; this only gives the step the time its own waits declare.
+  }, { capMs: 420000 });
 
   if (ctx.platform !== "darwin") {
     const g6 = gap(ctx, "g6", ["prompt_allowed", "os_notification"]);
