@@ -754,6 +754,7 @@ async fn admit_scoped(
         pool,
         super::lessons::LessonDomain::Goal,
         &scope.project_id,
+        &[&work.title, &work.instruction, source.body],
     )
     .await
     {
