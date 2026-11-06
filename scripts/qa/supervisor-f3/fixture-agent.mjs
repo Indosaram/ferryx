@@ -82,7 +82,9 @@ function drawDecision() {
   process.stdout.write([
     '', `● Running the ${title} migration`, `  ⎿  $ ${command}`, '────────────────────────────────────────',
     ' Bash command', `   ${command}`, `   Apply migration ${nonce} to the production database`,
-    ' Do you want to proceed?', ' ❯ 1. Yes', '   2. Yes, and always allow access to this database from this project',
+    // The question names its own migration: the card paints it, so the screen can tell one
+    // answered card from the next one the fixture draws (F3-D5). Every other line is unchanged.
+    ` Do you want to proceed with migration ${nonce}?`, ' ❯ 1. Yes', '   2. Yes, and always allow access to this database from this project',
     '   3. Yes, and switch to auto mode · auto mode handles these prompts for you', '   4. No', ' Esc to cancel · Tab to amend', '',
   ].join('\r\n'));
   record({ kind: 'prompt-drawn', nonce, command });

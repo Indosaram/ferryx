@@ -586,6 +586,9 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // lane) is gone from this desktop's panel read and from its screen. Waits for the phone.
     await runStep(lane, 'F3-D5', async (step) => {
       if (!run.lanes.includes('iphone')) throw new LaneBlocked('LANE_NOT_IN_RUN', 'no iPhone lane in this run answers a decision');
+      // The positive control is taken FIRST, while the cards are provably still up: after the phone
+      // answers, a correct desktop has already removed them and a control frame proves nothing.
+      const control = keep(step, 'answered-control', await frame('answered-control'));
       await shared.phoneAnswersDone;
       const answers = shared.phoneAnswers;
       step.assert('phone-answered-card', answers.length > 0 && answers.every((a) => Number.isInteger(a.nonce)), { answers });
@@ -593,24 +596,23 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const view = await until('the answered cards gone from the panel', () => panel(null), gone, { deadlineMs: 60_000 });
       step.artifact('panel-read', 'answered.panel.json', view);
       step.assert('answered-card-gone-from-panel', gone(view), { answers, decisions: view.decisions });
-      // The card paints its command on one ellipsized line, so the nonce (at the end of the
-      // command) never reaches the screen and `namesNonce` on window text would pass on a desktop
-      // that still showed the card - vacuous. It also never paints its `aria-label`; the header is
-      // the session name. What it does paint, and what F3-D1 already asserts on screen, is the head
-      // of the command (`commandFragment`). So the screen is judged by that fragment, with a
-      // mandatory positive control taken BEFORE the phone answers: if the fragment cannot be seen
-      // while the card is provably up, this step fails instead of passing vacuously.
-      const paint = shared.decisionCardPainted;
-      const fragment = paint.commandFragment;
-      const cardOnScreen = (r) => ocrShows(r.text, fragment);
-      const control = keep(step, 'answered-control', await frame('answered-control'));
-      if (!cardOnScreen(control.read)) {
-        throw new StepFailed('CARD_FRAGMENT_UNREADABLE', `the decision card's command head "${fragment}" is not readable on screen while the card is up, so the on-screen half of F3-D5 would prove nothing`);
+      // The card never paints its `aria-label`, and its command is ellipsized before the nonce, so
+      // neither can say which card is on screen. What it does paint is its question, and the fixture
+      // names the migration in it (fixture-agent.mjs: "Do you want to proceed with migration N?"),
+      // which the daemon's parser keeps verbatim as `question` (prompt_claude.rs:783 clean_line). So
+      // each answered card is identified on screen by its own nonce inside the question, with a
+      // mandatory positive control taken BEFORE the phone answers: if a nonce cannot be read while
+      // the card is provably up, this step fails instead of passing vacuously.
+      const answeredNonces = answers.map((a) => a.nonce);
+      const onScreen = (r, nonce) => ocrShows(r.text, `proceed with migration ${nonce}`);
+      const visibleThen = answeredNonces.filter((n) => onScreen(control.read, n));
+      if (visibleThen.length === 0) {
+        throw new StepFailed('CARD_QUESTION_UNREADABLE', `no answered card's question is readable on screen before the phone answered, so the on-screen half of F3-D5 would prove nothing (looked for ${answeredNonces.map((n) => `migration ${n}`).join(', ')})`);
       }
-      step.assert('card-fragment-readable-before-answer', cardOnScreen(control.read), { fragment, text: control.read.text.slice(0, 1500) });
-      const offScreen = ({ read: r }) => !cardOnScreen(r);
+      step.assert('card-question-readable-before-answer', visibleThen.length > 0, { visibleThen, text: control.read.text.slice(0, 1500) });
+      const offScreen = ({ read: r }) => !answeredNonces.some((n) => onScreen(r, n));
       const shown = keep(step, 'answered', await until('the answered cards gone from screen', () => frame('answered'), offScreen, { deadlineMs: 60_000 }));
-      step.assert('answered-card-gone-from-screen', offScreen(shown), { fragment, answers, text: shown.read.text.slice(0, 1500) });
+      step.assert('answered-card-gone-from-screen', offScreen(shown), { answeredNonces, text: shown.read.text.slice(0, 1500) });
     });
   } catch (error) {
     if (error instanceof LaneBlocked) lane.receipt.blocked = { code: error.code, detail: error.detail, at: new Date().toISOString() };

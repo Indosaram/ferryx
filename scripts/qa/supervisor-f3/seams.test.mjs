@@ -618,17 +618,23 @@ describe('OCR text matching', () => {
     expect(ocrShows('Conversation Export transcript', 'supv-f3-mac-3428ce97')).toBe(false);
   });
 
-  test("the F3-D5 screen predicate distinguishes a card that is still up from one that is gone", () => {
-    // What a desktop frame actually paints for the decision card: the command's head on one
-    // ellipsized line (DecisionCard.tsx `truncate`). F3-D5 must be able to fail on this.
-    const fragment = 'sqlx migrate run';
-    const cardUp = 'Do you want to proceed?\nsqlx migrate run --database-url postgres://pro...\nYes No';
-    const cardGone = '1 running - handled 1 thing today\n2 decisions for you. The rest is running.';
-    expect(ocrShows(cardUp, fragment)).toBe(true);
-    expect(ocrShows(cardGone, fragment)).toBe(false);
-    // The aria-label is never painted, so it cannot be the signal.
-    expect(ocrShows(cardUp, 'Decision for A repo')).toBe(false);
-    // The nonce sits past the ellipsis too: the old predicate could not fail on the same frame.
-    expect(namesNonce(cardUp, 'f3decision', 19)).toBe(false);
+  test("the F3-D5 screen predicate tells the answered card from the next one the fixture draws", () => {
+    // What a desktop frame actually paints for the decision card: its question, which the fixture
+    // names per migration (fixture-agent.mjs), so the daemon keeps it verbatim as `question`
+    // (prompt_claude.rs clean_line). The command line is ellipsized before the nonce, and the
+    // aria-label is never painted, so neither can identify the card.
+    const onScreen = (text, nonce) => ocrShows(text, `proceed with migration ${nonce}`);
+    const cardFor = (nonce) => `Do you want to proceed with migration ${nonce}?\n❯ 1. Yes\n2. Yes, and always allow access to this database from this project\n3. No`;
+    const answered = cardFor(19);
+    const next = cardFor(20);
+    // The answered card is identified while it is up ...
+    expect(onScreen(answered, 19)).toBe(true);
+    // ... and the frame after the answer, which paints the NEXT card, must fail that predicate.
+    // This is the case the earlier predicate got wrong: both frames share the command head.
+    expect(onScreen(next, 19)).toBe(false);
+    // The aria-label and the nonce-behind-the-ellipsis cannot be the signal.
+    expect(ocrShows(answered, 'Decision for A repo')).toBe(false);
+    expect(namesNonce(answered, 'f3decision', 19)).toBe(false);
+    expect(ocrShows('sqlx migrate run --database-url postgres://pro...', 'proceed with migration 19')).toBe(false);
   });
 });
