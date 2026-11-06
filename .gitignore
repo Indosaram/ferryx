@@ -22,6 +22,10 @@ Thumbs.db
 .omo/
 .evidence/
 .qa/
+# Isolated profiles the F3/F1 QA harnesses create inside the candidate checkout. Run-owned
+# runtime state, never source: without this the harness's own provenance gate sees its relay
+# profile as an untracked change and refuses the run it just started.
+.native-qa/
 task-2/
 /recovery-*.md
 /PARITY.md
