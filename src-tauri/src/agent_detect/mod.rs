@@ -1,6 +1,7 @@
 pub mod engine;
 pub mod manifest;
 pub mod matcher;
+pub mod registry;
 pub mod region;
 
 pub use engine::{default_engine, AgentActivity, Detection, DetectionEngine, SHIPPED_MANIFESTS};

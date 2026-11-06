@@ -591,7 +591,7 @@ const PROVIDER_SESSION_PROBE_INTERVAL_MS = 2_000;
 /** Manifest ids whose provider session the daemon can discover from the pane's process tree. */
 export const PROVIDER_SESSION_PROBE_AGENTS: readonly string[] = [
   "claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc", "antigravity",
-  "opencode", "omp", "grok", "droid", "cline", "crush",
+  "opencode", "omp", "grok", "droid", "cline", "crush", "maho",
 ];
 
 /**

@@ -2045,17 +2045,19 @@ pub(crate) enum IngressOutcome {
 /// (0/45 lsof samples on the TUI and hub pids) and carries no `--id` in argv.
 /// crush (re-explore-7 G2): every session lives in one shared `.crush/crush.db`, so no open file
 /// names one session, and a fresh launch has no `--session` in argv.
-const AGENTS_WITHOUT_PROCESS_BOUND_SESSION: [&str; 4] = ["claude", "omp", "cline", "crush"];
-
 pub(crate) fn agent_has_no_process_bound_session(agent: &str) -> bool {
-    AGENTS_WITHOUT_PROCESS_BOUND_SESSION.contains(&agent)
+    // Which agents leave no process-bound session is their registry entry, not a list here.
+    crate::agent_detect::registry::no_process_bound_session(agent)
 }
 
 pub(crate) fn provider_has_no_process_bound_session(agent: &str, provider: &AgentProviderSession) -> bool {
     // Native mhc opens its JSONL only for each append (maho-core/session_manager.rs),
     // so an idle or fresh session has no persistent transcript handle to discover.
+    // That only follows for an agent the launcher can host: a provider whose registry entry
+    // does not list `mhc` keeps whatever its own CLI does.
     agent_has_no_process_bound_session(agent)
-        || (agent == "omo" && provider.launcher == Some(crate::daemon::protocol::AgentLauncher::Mhc))
+        || (provider.launcher == Some(crate::daemon::protocol::AgentLauncher::Mhc)
+            && crate::agent_detect::registry::launch_binary(agent, "mhc").is_some())
 }
 
 /// The discovered id that may bind (and veto) a report. For an agent with no process-bound

@@ -8,7 +8,7 @@ pub enum AgentResumeError {
     RemoteSshRequiresWorkspace,
     #[error("Unsupported agent type: {0}")]
     UnsupportedAgent(String),
-    #[error("The mhc launcher is only valid for omo sessions")]
+    #[error("The mhc launcher is only valid for sessions it launched")]
     InvalidLauncher,
     #[error("Invalid provider session id: {0}")]
     InvalidSessionId(String),
@@ -108,9 +108,20 @@ pub fn resolve_agent_resume_plan(
     provider_session: &AgentProviderSession,
 ) -> Result<ShellCommandPlan, AgentResumeError> {
     let norm_agent = agent_type.trim().to_ascii_lowercase();
-    if provider_session.launcher.is_some() && norm_agent != "omo" {
-        return Err(AgentResumeError::InvalidLauncher);
-    }
+    // A launcher is the wire name of the binary that owns the conversation, so only an agent whose
+    // registry entry lists it may carry one (omo and maho for `mhc`).
+    let launcher_binary = match provider_session.launcher {
+        None => None,
+        Some(launcher) => {
+            let wire = match launcher {
+                crate::daemon::protocol::AgentLauncher::Mhc => "mhc",
+            };
+            Some(
+                crate::agent_detect::registry::launch_binary(&norm_agent, wire)
+                    .ok_or(AgentResumeError::InvalidLauncher)?,
+            )
+        }
+    };
     let validated_id = validate_agent_session_id(&provider_session.id)?;
     let validated_transcript =
         validate_transcript_path(provider_session.transcript_path.as_deref())?;
@@ -211,14 +222,28 @@ pub fn resolve_agent_resume_plan(
                 args: vec!["--resume".to_string(), target],
             })
         }
-        "omo" => {
+        "omo" | "maho" => {
             ensure_key(AgentProviderSessionKey::SessionId)?;
+            let resume_plan =
+                crate::agent_detect::registry::resume_plan(&norm_agent).map(|(program, args)| {
+                    (
+                        program.to_string(),
+                        args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+                    )
+                });
             Ok(ShellCommandPlan {
-                program: match provider_session.launcher {
-                    Some(crate::daemon::protocol::AgentLauncher::Mhc) => "mhc",
-                    None => "omo",
-                }.to_string(),
-                args: vec!["--session".to_string(), validated_id],
+                // The launcher binary wins, so a maho session resumes `mhc` and an omo session
+                // recorded before the split keeps resuming the binary that owns its conversation.
+                program: launcher_binary
+                    .map(str::to_string)
+                    .or_else(|| resume_plan.as_ref().map(|(program, _)| program.clone()))
+                    .unwrap_or_else(|| norm_agent.clone()),
+                args: resume_plan
+                    .map(|(_, args)| args)
+                    .unwrap_or_else(|| vec!["--session".to_string()])
+                    .into_iter()
+                    .chain(std::iter::once(validated_id))
+                    .collect(),
             })
         }
         "kimi" => {
