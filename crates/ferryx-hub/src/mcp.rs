@@ -927,6 +927,33 @@ mod tests {
         assert!(tools.iter().any(|tool| tool["name"] == "agents.stop"));
     }
 
+    #[tokio::test]
+    async fn every_declared_tool_reaches_a_dispatch_arm() {
+        crate::holder::set_standby(None);
+        let control = Arc::new(RecordingControl::default());
+        *control.result.lock().unwrap() = json!({"sessions": []});
+        let context = McpContext {
+            control,
+            launcher: Arc::new(FixedLauncher::new("pane")),
+            pool: crate::storage::memory().await.unwrap(),
+            meta_session_id: "meta".into(),
+            tracker_token: "t".into(),
+            owner_route: None,
+        };
+        let tools = tool_list();
+        assert_eq!(tools.len(), 19);
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
+            let response = dispatch(
+                &context,
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name": name, "arguments": {}}}),
+            )
+            .await;
+            let message = response["error"]["message"].as_str().unwrap_or("");
+            assert!(!message.contains("unknown tool"), "{name}: {response}");
+        }
+    }
+
     #[test]
     fn tool_list_names_the_lane_goal_tools() {
         let names: Vec<String> = tool_list()
