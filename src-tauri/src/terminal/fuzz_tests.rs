@@ -166,6 +166,39 @@ fn malformed_stream_seed_round_trip_regression() {
     assert_eq!(seed_hash(&again.seed().unwrap()), seed_hash(&reseed));
 }
 
+/// Exact minimized seed round-trip failure found by `screen_mirror_feed_and_seed_round_trip`
+/// at 20,000 cases on two hosts (GitHub Actions Linux, cols=19, 4,755 successes; maho-win
+/// Windows, cols=4, 647 successes). A wide character that wraps at the right edge leaves a
+/// `spacer_head` on the row it left; reading that row with an unwrapping selection joined the
+/// continuation row, so the same character appeared on both rows. The grid itself was never
+/// corrupt, and both sides now read back identically.
+/// Kept as a deterministic regression so the property test cannot only be trusted at 20k cases.
+#[test]
+fn wide_character_at_history_boundary_survives_seed_round_trip() {
+    let chunks: [&[u8]; 5] = [
+        b"\x1b[2;5r",
+        b"\x1bX\x1b\\",
+        &[204, 129, 32, 228, 184, 173, 230, 150, 135],
+        b"x\r\nx\r\nx\r\nx\r\n",
+        b"",
+    ];
+    let mut mirror = ScreenMirror::new(4, 3).unwrap();
+    for chunk in chunks {
+        mirror.feed(chunk);
+    }
+
+    // A soft-wrapped row must be read as one physical row, not joined to its continuation.
+    assert_eq!(mirror.grid_text_for_test(), vec![" \u{4e2d}", "x", ""]);
+
+    let seed = mirror.seed().unwrap();
+    let mut rebuilt = ScreenMirror::from_seed(&seed).unwrap();
+    assert_eq!(
+        rebuilt.grid_text_for_test(),
+        mirror.grid_text_for_test(),
+        "seed replay must reproduce the visible grid row for row"
+    );
+}
+
 /// Narrowest grid whose scrollback row count is bounded by `2 * MIRROR_SCROLLBACK_LINES`.
 /// libghostty prunes scrollback a whole page at a time, and a page holds more rows the
 /// narrower the grid, so a 2-column mirror can keep several thousand rows over the limit.

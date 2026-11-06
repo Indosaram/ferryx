@@ -276,6 +276,10 @@ pub fn selection_text(
 }
 
 /// Plain text of one grid row in screen coordinates (scrollback first), trailing blanks trimmed.
+///
+/// The row is emitted physically: a soft-wrapped row is not joined to its
+/// continuation, so callers that hash or compare rows stay aligned with the
+/// grid. Joining a wrapped line is [`selection_text`]'s job.
 pub fn screen_row_text(
     handle: NonNull<GhosttyTerminalImpl>,
     row: u32,
@@ -284,6 +288,7 @@ pub fn screen_row_text(
     let selection = GhosttySelection {
         start: screen_ref(handle, 0, row)?,
         end: screen_ref(handle, cols.saturating_sub(1), row)?,
+        rectangle: true,
         ..GhosttySelection::default()
     };
     Ok(format_selection(handle, Some(&selection), true)?.unwrap_or_default())
