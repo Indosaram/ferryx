@@ -1317,6 +1317,10 @@ async function step(name, description, actions, expect = null, { capMs = STEP_CA
     const scope = { name, expired: false };
     const actionLog = [];
     let failed = false;
+    // The label of the action that is running now, so a step abandoned at its cap says which
+    // wait ate the time: run 42204359085 reported "actions still running after 240000 ms" with an
+    // empty failed_actions, so the 240 s could have been any of the four waits in daily-g8-upload.
+    let running = null;
     const body = stepScope.run(scope, async () => {
       for (const entry of actions) {
         if (typeof entry === "number") {
@@ -1324,8 +1328,10 @@ async function step(name, description, actions, expect = null, { capMs = STEP_CA
           continue;
         }
         const [label, action] = entry;
+        running = label;
         const result = await action();
         assertStepLive();
+        running = null;
         const { ok, status, stderr, ...rest } = result ?? { ok: false, stderr: "no result" };
         const detail = Object.fromEntries(Object.entries(rest).filter(([key]) => !["stdout"].includes(key)));
         actionLog.push({ label, ok, ...(ok ? {} : { status, error: stderr }), ...detail });
@@ -1343,6 +1349,7 @@ async function step(name, description, actions, expect = null, { capMs = STEP_CA
         scope.expired = true;
         record.outcome = "step_timeout";
         record.error = `actions still running after ${capMs} ms; abandoned`;
+        record.running_action = running;
         // The abandoned body ends on its next sleep or input (StepExpired); nothing reads it.
         body.catch(() => {});
       } else if (failed) {

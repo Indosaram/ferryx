@@ -1935,6 +1935,10 @@ export async function dailyChromium(ctx) {
     const pick = await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
     if (pick && ctx.host.hit) g8.chromium_pick_hit = ctx.host.hit(...pick);
     // No UPLOADPICK click, no dialog: typing the path would go into the page or the address bar.
+    // Whether the engine opened its own chooser at all: run 42204359085 recorded the keystrokes'
+    // foreground as the Ferryx Tauri window, so the path may have gone into the app instead of a
+    // dialog. Record the top-level windows the click produced, before anything types.
+    g8.chromium_windows_after_click = ctx.platform === "win32" ? ctx.win.windowRows("topwindows").slice(0, 12) : null;
     g8.chromium_picker_answer = pick ? await answerOpenDialog(ctx, file.path) : { via: "none", stderr: "UPLOADPICK not clicked" };
     const picked = pick ? await until(() => tab(ctx, created.browserId)?.title === `picked:${file.name}:${file.size}`, 12000) : null;
     g8.checks.upload_picker_chromium = Boolean(picked);
