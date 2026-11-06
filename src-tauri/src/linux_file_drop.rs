@@ -264,9 +264,9 @@ mod tests {
         let path = dir.join("upload-fixture.txt");
         std::fs::write(&path, b"0123456789").unwrap();
         let script = file_drop_script(&[path.to_string_lossy().into_owned()], (845.0, 817.0));
-        assert!(script.contains(`name: "upload-fixture.txt"`));
+        assert!(script.contains("name: \"upload-fixture.txt\""));
         // 10 bytes of '0123456789' as base64, so files[0].size is the real 10.
-        assert!(script.contains(`bytes: "MDEyMzQ1Njc4OQ=="`));
+        assert!(script.contains("bytes: \"MDEyMzQ1Njc4OQ==\""));
         assert!(script.contains("new DataTransfer()"));
         assert!(script.contains("'drop'"));
         assert!(script.contains("elementFromPoint(845, 817)"));
