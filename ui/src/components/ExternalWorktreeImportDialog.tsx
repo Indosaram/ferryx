@@ -108,7 +108,7 @@ export function ExternalWorktreeImportDialog({ workspaceId, worktrees, projects,
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="w-full max-w-[480px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+        className="w-full max-w-[480px] overflow-hidden rounded-lg border border-border bg-popover shadow-elevation-4"
       >
         <div className="flex h-9 items-center border-b border-border px-3">
           <FolderGit2 className="mr-2 size-3.5 text-muted-foreground" />

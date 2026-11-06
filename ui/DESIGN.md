@@ -13,13 +13,13 @@ utilities. Components reference the **Tailwind semantic name**, never a hex valu
 | Token | Utility | Use |
 |---|---|---|
 | `--background` `#23262d` | `bg-background` | App shell behind panes |
-| `--card` `#171717` | `bg-card` | Titlebars, inactive tabs, tab strips, dialogs |
+| `--card` `#171717` | `bg-card` | Chrome: titlebars, inactive tabs, tab strips. Never a floating surface |
 | `--accent` `#404040` | `bg-accent` | Active tab and interactive hover surfaces |
 | `--terminal` `#282c34` | `bg-terminal` | Terminal viewport only; never application chrome |
 | `--terminal-divider` `#5c6068` | `var(--terminal-divider)` | Opaque 1px separator between split terminal panes |
 | `--worktree-sidebar` `#2a2a2a` | `bg-worktree-sidebar` | Sidebar surface (the project tree lives here) |
 | `--worktree-sidebar-accent` `#353535` | `bg-worktree-sidebar-accent` | Selected / active row fill |
-| `--popover` `#171717` | `bg-popover` | Floating surfaces |
+| `--popover` `#2e323b` | `bg-popover` | Floating surfaces: dialogs, sheets, menus, command palette. One step above `--terminal`, clearly above chrome. Compose it with `floatingSurface()` (`src/lib/surface.ts`), which adds `border-border` + `shadow-elevation-4` |
 
 ### Text
 | Token | Utility | Use |
@@ -555,3 +555,33 @@ Cut-outs use `stroke-background`. Unknown state renders idle with the detail "St
   `role="listbox"` of sessions (`bg-popover border border-border rounded-lg`) with "title · computer".
 - Setup card: one `rounded-xl border border-border bg-card p-4` with a heading, one sentence and a
   single primary "Turn on" button; shown instead of every other section.
+
+### Floating surfaces, elevation and motion
+
+A floating surface (dialog, sheet, menu, command palette) is `bg-popover` plus
+`border-border` plus an elevation shadow - never `bg-card`. `bg-card` is chrome:
+titlebars, inactive tabs, tab strips. The reason is measured, not stylistic: a modal
+sits on a 45-80% black scrim, and charcoal's old `#171717` popover measured **1.01:1**
+against that scrim, i.e. the dialog had no visible shape. `#2e323b` measures 1.38:1 on
+the same scrim (dark `#333333` measures 1.41:1).
+
+| Token | Utility | Use |
+|---|---|---|
+| `--surface-hover` `#40454f` | `bg-surface-hover` | Hover inside a floating surface. Deliberately lighter than `--popover` (1.33:1); `--accent` `#404040` measures only 1.24:1 there and reads as a dead pixel |
+| elevation 1-4 | `shadow-elevation-1`..`-4` | One hairline + one ambient step per level. Dialogs use 4, menus/selects 2, inline alerts 3. Light mode separates layers by shadow; dark themes lean on tone |
+| `--radius-xs` `0.125rem` | `rounded-xs` | Dense chips. `md`/`lg` derive from `--radius`; `xl`/`2xl`/`3xl` keep Tailwind's 12/16/24px |
+| `--ease-out-quart` / `--ease-out-expo` / `--spring` | `ease-out-quart` / `ease-out-expo` / `ease-spring` | Decelerating surfaces; `--spring` is for a control that springs back on release |
+| `--surface-hairline` `#00000012` / `--surface-highlight` `#ffffffbf` | - | The 1px edge and top highlight that make a raised layer read on light and dark fills |
+
+Accent focus rings must clear 3:1 against both `--card` and `--background` **and**
+differ from their own `--primary`; `button.tsx` draws `ring-1` with no offset, so a
+ring equal to the fill shows no focus indicator. In light mode every accent therefore
+carries a ring one shade darker than its primary, and its own `--primary-foreground`
+(emerald keeps dark text; the other four use `#fafafa`).
+
+`--status-X` stays a literal hex used as flat text/fill. `--status-X-solid` repeats that
+hex, and `--status-X-container` / `-border` / `-on-container` are the tinted container
+layer: container is `mix(solid, canvas, 0.14)` in dark and `0.08` in light. Both
+`.remote-app-root` blocks carry the same set so the remote client cannot diverge.
+Nothing consumes the container tokens yet; migrating the `bg-status-*/NN` sites is a
+separate sweep.

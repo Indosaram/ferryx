@@ -350,7 +350,7 @@ export function AddProjectDialog({
           role="dialog"
           aria-modal="true"
           aria-label="Add Project"
-          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-popover shadow-elevation-4"
         >
           <div className="flex h-9 items-center border-b border-border px-3">
             <FolderGit2 className="mr-2 size-3.5 text-muted-foreground" />
@@ -433,7 +433,7 @@ export function AddProjectDialog({
           aria-modal="true"
           aria-label="Add Project"
           aria-busy="true"
-          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-popover shadow-elevation-4"
         >
           <div className="flex h-9 items-center border-b border-border px-3">
             <FolderGit2 className="mr-2 size-3.5 text-muted-foreground" />
@@ -474,7 +474,7 @@ export function AddProjectDialog({
           role="dialog"
           aria-modal="true"
           aria-label="Add Project"
-          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+          className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-popover shadow-elevation-4"
         >
           <div className="flex h-9 items-center border-b border-border px-3">
             <FolderGit2 className="mr-2 size-3.5 text-muted-foreground" />
@@ -535,7 +535,7 @@ export function AddProjectDialog({
           role="dialog"
           aria-modal="true"
           aria-label="Add Project"
-          className="flex max-h-[calc(100dvh-3rem)] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+          className="flex max-h-[calc(100dvh-3rem)] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-popover shadow-elevation-4"
           onSubmit={handleRemoteSubmit}
         >
           <div className="flex h-9 items-center border-b border-border px-3">
@@ -699,7 +699,7 @@ export function AddProjectDialog({
         role="dialog"
         aria-modal="true"
         aria-label="Add Project"
-        className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+        className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-popover shadow-elevation-4"
         onSubmit={handleManualSubmit}
       >
         <div className="flex h-9 items-center border-b border-border px-3">
@@ -964,7 +964,7 @@ export function AddWorktreeDialog({
         role="dialog"
         aria-modal="true"
         aria-label="Add Worktree"
-        className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+        className="w-full max-w-[420px] overflow-hidden rounded-lg border border-border bg-popover shadow-elevation-4"
       >
       <form aria-label="Add Worktree" onSubmit={submit}>
         <div className="flex h-9 items-center border-b border-border px-3">
@@ -1182,7 +1182,7 @@ export function RemoveProjectDialog({ project, onClose, onConfirm }: RemoveProje
         role="dialog"
         aria-modal="true"
         aria-label="Remove Project"
-        className="w-full max-w-[400px] overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+        className="w-full max-w-[400px] overflow-hidden rounded-lg border border-border bg-popover shadow-elevation-4"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="flex h-9 items-center border-b border-border px-3">

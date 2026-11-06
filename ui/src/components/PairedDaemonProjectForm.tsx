@@ -36,7 +36,7 @@ export function PairedDaemonProjectForm({ onBack, onClose, onRegistered, initial
   const key = JSON.stringify([hostId, host?.generation, issue]);
   // Remounting discards selected paths, cached listings, negotiated capabilities and pending UI adoption.
   return <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-6" role="presentation">
-    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Add Paired Daemon Project" className="w-full max-w-[480px] space-y-3 rounded-lg border border-border bg-card p-3 shadow-2xl">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Add Paired Daemon Project" className="w-full max-w-[480px] space-y-3 rounded-lg border border-border bg-popover p-3 shadow-elevation-4">
       <h2 className="text-[13px] font-medium">Add Paired Daemon Project</h2>
       <p className="text-xs text-muted-foreground">Browse folders on the paired machine without SSH. Pair or manage machines in Settings &gt; Remote Access.</p>
       <PairedFolder key={key} host={host} issue={issue} onClose={onClose} onBack={onBack} onRegistered={onRegistered} onBusyChange={setRegistering}

@@ -27,6 +27,7 @@ export default {
         "muted-foreground": opaque("muted-foreground"),
         accent: opaque("accent"),
         "accent-foreground": opaque("accent-foreground"),
+        "surface-hover": opaque("surface-hover"),
         destructive: opaque("destructive"),
         "destructive-foreground": opaque("destructive-foreground"),
         border: translucent("border"),
@@ -98,10 +99,24 @@ export default {
         agent: "12rem",
         error: "28rem",
       },
+      boxShadow: {
+        // Elevation ramp. Light mode separates layers by shadow; dark themes lean on
+        // tone (see --popover). One hairline + one ambient step per level.
+        "elevation-1": "0 1px 2px 0 rgb(0 0 0 / 0.24), 0 1px 3px 0 rgb(0 0 0 / 0.12)",
+        "elevation-2": "0 2px 4px -1px rgb(0 0 0 / 0.26), 0 4px 8px -2px rgb(0 0 0 / 0.16)",
+        "elevation-3": "0 4px 8px -2px rgb(0 0 0 / 0.28), 0 8px 16px -4px rgb(0 0 0 / 0.18)",
+        "elevation-4": "0 8px 16px -4px rgb(0 0 0 / 0.30), 0 16px 32px -8px rgb(0 0 0 / 0.22)",
+      },
       borderRadius: {
+        xs: "var(--radius-xs)",
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
+      },
+      transitionTimingFunction: {
+        "out-quart": "var(--ease-out-quart)",
+        "out-expo": "var(--ease-out-expo)",
+        spring: "var(--spring)",
       },
       keyframes: {
         enter: {
