@@ -21,6 +21,7 @@
 use gtk::gdk;
 use gtk::prelude::*;
 use tauri::Manager;
+use webkit2gtk::WebViewExt;
 
 /// The XDND target a file manager advertises for a local file drag.
 const URI_LIST: &str = "text/uri-list";
@@ -115,23 +116,33 @@ fn json_string(value: &str) -> String {
 /// `drop`) with a `DataTransfer` whose `files` holds one entry per dropped path, named after the
 /// file, so a handler that reads `dataTransfer.files` behaves identically on both engines.
 fn file_drop_script(paths: &[String], point: (f64, f64)) -> String {
-    let names: Vec<String> = paths
+    // The page is given the file's real bytes, not an empty placeholder: a handler that reads
+    // `files[0].size` or the contents must see what the file manager actually dropped.
+    let files: Vec<String> = paths
         .iter()
         .map(|path| {
             let name = std::path::Path::new(path)
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.clone());
-            format!("{{ name: {}, size: 0 }}", json_string(&name))
+            let bytes = base64::engine::general_purpose::STANDARD
+                .encode(std::fs::read(path).unwrap_or_default());
+            format!("{{ name: {}, bytes: {} }}", json_string(&name), json_string(&bytes))
         })
         .collect();
+    let files = files.join(",");
     let paths = paths.iter().map(|path| json_string(path)).collect::<Vec<_>>().join(",");
     format!(
         r#"(() => {{
   const paths = [{paths}];
-  const files = [{names}];
+  const files = [{files}];
   const data = new DataTransfer();
-  for (const file of files) data.items.add(new File([], file.name));
+  for (const file of files) {{
+    const raw = atob(file.bytes);
+    const buffer = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) buffer[i] = raw.charCodeAt(i);
+    data.items.add(new File([buffer], file.name));
+  }}
   data.setData('text/uri-list', paths.map((p) => 'file://' + p).join('\r\n'));
   const target = document.elementFromPoint({x}, {y}) || document.body;
   for (const type of ['dragenter', 'dragover', 'drop']) {{
