@@ -2088,7 +2088,14 @@ await section("media", async (record) => {
   // Windows run 42145006089: `window.askMedia is not a function` and `attempts: []`. cdpAttach
   // matches a target by URL alone, so it can attach before the document's inline script has run.
   // Wait for the fixture's own global instead of assuming the first evaluate lands after parse.
-  const ready = await until(async () => (await cdp.evaluate("typeof window.askMedia === 'function'", { awaitPromise: false })) === true, 15000, 300);
+  const ready = await until(async () => {
+    try {
+      return (await cdp.evaluate("typeof window.askMedia === 'function'", { awaitPromise: false, timeout: 5000 })) === true;
+    } catch {
+      // A context swap or evaluate timeout is exactly the race being waited out, not a result.
+      return false;
+    }
+  }, 15000, 300);
   if (!ready) throw new Error("the media fixture's script never became ready (window.askMedia missing)");
   /** Asks for camera+mic; answers a Ferryx prompt with `answer` (a real click) when one shows. */
   const attempt = async (label, answer) => {
