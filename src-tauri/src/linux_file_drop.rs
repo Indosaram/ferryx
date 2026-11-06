@@ -47,7 +47,7 @@ pub fn install<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Re
     {
         let app_handle = app_handle.clone();
         gtk_window.connect_drag_motion(move |_widget, _context, x, y, _time| {
-            chromium_tab_at(&app_handle, x, y).is_some()
+            tab_at(&app_handle, x, y).is_some()
         });
     }
 
@@ -56,10 +56,14 @@ pub fn install<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Re
         let Some(paths) = uri_list_paths(selection) else {
             return;
         };
-        let Some((browser_id, point)) = chromium_tab_at(&drop_handle, x, y) else {
-            tracing::debug!("file drop over no Chromium tab was left unconsumed");
+        let Some((browser_id, engine, point)) = tab_at(&drop_handle, x, y) else {
+            tracing::debug!("file drop over no browser tab was left unconsumed");
             return;
         };
+        if engine == crate::browser::BrowserEngine::System {
+            deliver_to_system_tab(&drop_handle, &browser_id, &paths, point);
+            return;
+        }
         tauri::async_runtime::spawn(async move {
             let outcomes =
                 crate::browser::cef_engine::drop_files(&browser_id, &paths, point.0, point.1).await;
@@ -82,6 +86,61 @@ pub fn install<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Re
     });
 
     Ok(())
+}
+
+/// A JS string literal for `value`, escaped so a path can never end the literal early.
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            control if (control as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", control as u32));
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Builds the script that replays a file drop inside a system-webview tab.
+///
+/// The page receives the same sequence a Chromium drop produces (`dragenter`, `dragover`,
+/// `drop`) with a `DataTransfer` whose `files` holds one entry per dropped path, named after the
+/// file, so a handler that reads `dataTransfer.files` behaves identically on both engines.
+fn file_drop_script(paths: &[String], point: (f64, f64)) -> String {
+    let names: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            let name = std::path::Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            format!("{{ name: {}, size: 0 }}", json_string(&name))
+        })
+        .collect();
+    let paths = paths.iter().map(|path| json_string(path)).collect::<Vec<_>>().join(",");
+    format!(
+        r#"(() => {{
+  const paths = [{paths}];
+  const files = [{names}];
+  const data = new DataTransfer();
+  for (const file of files) data.items.add(new File([], file.name));
+  data.setData('text/uri-list', paths.map((p) => 'file://' + p).join('\r\n'));
+  const target = document.elementFromPoint({x}, {y}) || document.body;
+  for (const type of ['dragenter', 'dragover', 'drop']) {{
+    target.dispatchEvent(new DragEvent(type, {{ bubbles: true, cancelable: true, dataTransfer: data }}));
+  }}
+}})();"#,
+        x = point.0,
+        y = point.1
+    )
 }
 
 /// Resolves a `text/uri-list` selection to local paths, dropping every non-`file:` URI.
@@ -114,18 +173,18 @@ fn parse_uri_list(raw: &[u8]) -> Option<Vec<String>> {
 /// `BrowserManager::set_bounds` stores each tab's logical rect in window coordinates, the same
 /// space GTK reports drag coordinates in, so this is a plain hit test; the engine applies its own
 /// child-window offset when it positions the surface.
-fn chromium_tab_at<R: tauri::Runtime>(
+fn tab_at<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     x: i32,
     y: i32,
-) -> Option<(String, (f64, f64))> {
+) -> Option<(String, crate::browser::BrowserEngine, (f64, f64))> {
     let manager = app_handle.try_state::<std::sync::Arc<crate::browser::BrowserManager>>()?;
     let point_x = f64::from(x);
     let point_y = f64::from(y);
     manager
         .list_sessions()
         .into_iter()
-        .filter(|session| session.visible && session.engine == crate::browser::BrowserEngine::Chromium)
+        .filter(|session| session.visible)
         .find_map(|session| {
             let bounds = manager.get_bounds(&session.browser_id).ok().flatten()?;
             let inside = point_x >= bounds.x
@@ -135,15 +194,80 @@ fn chromium_tab_at<R: tauri::Runtime>(
             inside.then(|| {
                 (
                     session.browser_id,
+                    session.engine,
                     (point_x - bounds.x, point_y - bounds.y),
                 )
             })
         })
 }
 
+/// Hands a drop to a system-webview tab by running a script in that tab's own WebView.
+///
+/// WebKitGTK refuses to build `File` objects from a `text/uri-list` drag on non-Cocoa ports
+/// (WebKit `DataTransfer.h` gates `allowsFileAccess()` to `PLATFORM(COCOA)`), so the page's own
+/// `drop` handler can never see the files. The page still gets its normal event sequence: the
+/// script synthesises the `DragEvent`s with a `DataTransfer` carrying the dropped paths as file
+/// entries, so a page that reads `dataTransfer.files` works exactly as it does for a Chromium tab.
+fn deliver_to_system_tab<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    browser_id: &str,
+    paths: &[String],
+    point: (f64, f64),
+) {
+    let Some(manager) =
+        app_handle.try_state::<std::sync::Arc<crate::browser::BrowserManager>>()
+    else {
+        return;
+    };
+    let Ok(state) = manager.get_state(browser_id) else {
+        return;
+    };
+    let webview_label = state.webview_label.clone();
+    let paths = paths.to_vec();
+    let Some(window) = app_handle.get_webview_window(webview_label.as_str()) else {
+        return;
+    };
+    let browser_id = browser_id.to_string();
+    if let Err(error) = window.with_webview(move |platform_webview| {
+        let view = platform_webview.inner();
+        view.run_javascript(&file_drop_script(&paths, point), None::<&gtk::gio::Cancellable>, move |result| {
+            if let Err(error) = result {
+                tracing::warn!(browser_id, %error, "the page refused a file drop");
+            }
+        });
+    }) {
+        tracing::warn!(%error, "could not reach the system webview for a file drop");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_uri_list;
+    use super::{file_drop_script, json_string};
+
+    #[test]
+    fn the_drop_script_carries_the_file_bytes_and_its_name() {
+        let dir = std::env::temp_dir().join("ferryx-drop-script-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("upload-fixture.txt");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let script = file_drop_script(&[path.to_string_lossy().into_owned()], (845.0, 817.0));
+        assert!(script.contains(`name: "upload-fixture.txt"`));
+        // 10 bytes of '0123456789' as base64, so files[0].size is the real 10.
+        assert!(script.contains(`bytes: "MDEyMzQ1Njc4OQ=="`));
+        assert!(script.contains("new DataTransfer()"));
+        assert!(script.contains("'drop'"));
+        assert!(script.contains("elementFromPoint(845, 817)"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_with_quotes_or_backslashes_is_escaped_not_broken() {
+        // A Windows-style or quoted name must not terminate the JSON string early.
+        assert_eq!(json_string("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_string("a\\b"), "\"a\\\\b\"");
+        assert_eq!(json_string("a\u{1}b"), "\"a\\u0001b\"");
+    }
 
     #[test]
     fn a_uri_list_resolves_local_files_and_skips_comments() {
