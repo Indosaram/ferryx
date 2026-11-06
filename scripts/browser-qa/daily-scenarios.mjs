@@ -1664,14 +1664,16 @@ export async function dailyWebviewBefore(ctx) {
     ctx.host.focus();
     const wants = screenWords(ctx).find((word) => /^wants$/i.test(word.text));
     const allowAt = wants ? findAllowButton(ctx, wants) : null;
+    // This step runs after g6's own scope closed, so its hit is recorded on this step's record
+    // rather than on g6 (referencing g6 here threw "g6 is not defined" in run 42079091681).
+    const allowHit = allowAt && ctx.host.hit ? ctx.host.hit(...allowAt) : null;
     if (allowAt) {
-      if (ctx.host.hit) g6.allow_click_hit = ctx.host.hit(...allowAt);
       ctx.host.click(...allowAt);
     }
     const activate = await activateTab(ctx, daily.tabB, null);
     const shown = await visit(ctx, `${fixtureBase}/qa/second.html`, "SECONDTAB");
     daily.tabB = tabAt(ctx, "/qa/second.html")?.browserId ?? daily.tabB;
-    return { ok: Boolean(shown), activate, prompt_answered: allowAt };
+    return { ok: Boolean(shown), activate, prompt_answered: allowAt, allow_click_hit: allowHit };
   });
   daily.beforeRestart = ctx.sessions().list.map((entry) => ({ browserId: entry.browserId, url: entry.url }));
   g1.before_restart = daily.beforeRestart;
