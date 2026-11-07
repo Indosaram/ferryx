@@ -830,7 +830,7 @@ function ocrStrips(path) {
  * step timeout before the engine and extension sections (Windows stopped at
  * settings-browser-site-settings, Linux at extension-store-open).
  */
-function ocr(path, { bands = false, strips = false } = {}) {
+function ocr(path, { bands = false, strips = false, outside = false } = {}) {
   if (!tesseract || !path || !existsSync(path)) return null;
   const words = [];
   let anyPass = false;
@@ -854,6 +854,25 @@ function ocr(path, { bands = false, strips = false } = {}) {
   }
   if (anyPass && bands) words.push(...ocrBands(path));
   if (anyPass && strips) words.push(...ocrStrips(path));
+  // A popup menu can be drawn outside the window crop (Linux run 42368667682 probe-265: the
+  // Duplicate submenu sat at x=1694 while the window ended at 1600, so no cropped pass could read
+  // "work"). The frame is read uncropped only after a cropped pass succeeded, and only when
+  // `outside` is asked for, so the extra tesseract call stays off the hot path.
+  if (anyPass && outside && platform === "linux") {
+    const result = run(tesseract, [path, "-", "--psm", "11", "tsv"], { timeout: 120000 });
+    if (result.ok) {
+      const lines = result.stdout.split(/\r?\n/);
+      const header = lines.shift()?.split("\t") ?? [];
+      const col = (name) => header.indexOf(name);
+      for (const cells of lines.map((line) => line.split("\t"))) {
+        if (cells.length < header.length || !cells[col("text")]?.trim() || Number(cells[col("conf")]) <= 0) continue;
+        const left = Number(cells[col("left")]);
+        const top = Number(cells[col("top")]);
+        if (words.some((word) => word.left === left && word.top === top)) continue;
+        words.push({ text: cells[col("text")].trim(), left, top, width: Number(cells[col("width")]), height: Number(cells[col("height")]) });
+      }
+    }
+  }
   return anyPass ? words : null;
 }
 
@@ -2057,6 +2076,7 @@ const daily = {
   ocr: (path) => ocr(path, { bands: true }),
   // Strip-only pass on the same frame, for a locator that missed its word in `ocr`.
   ocrStrips,
+  ocrOutside: (path) => ocr(path, { outside: true }),
   probeShot,
   decodePng,
   step,
