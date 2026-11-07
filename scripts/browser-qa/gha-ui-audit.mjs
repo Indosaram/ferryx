@@ -651,7 +651,9 @@ switch ($Action) {
   "focuschain" { Write-Output ([FxInput]::FocusChain()) }
   "topwindows" { Write-Output ([FxInput]::TopWindows()) }
   "wheel" { $n = [FxInput]::Wheel($Width, $Height, [int]$Codes); if ($n -eq 0) { exit 4 } }
-  "resize" { if (-not [FxInput]::SetWindowPos($handle, [IntPtr]::Zero, 40, 40, $Width, $Height, 0x0004)) { exit 5 } }
+  # A maximised window ignores SetWindowPos size changes, so restore it first (SW_RESTORE = 9);
+  # the Explorer drag source opened maximised and covered the page's drop point.
+  "resize" { [void][FxInput]::ShowWindow($handle, 9); Start-Sleep -Milliseconds 150; if (-not [FxInput]::SetWindowPos($handle, [IntPtr]::Zero, 40, 40, $Width, $Height, 0x0004)) { exit 5 } }
   "upscale" {
     # Writes <Text> (3x grayscale) and <Text>.neg.png (2x grayscale inverted): light-on-dark UI
     # text OCRs far better inverted.
