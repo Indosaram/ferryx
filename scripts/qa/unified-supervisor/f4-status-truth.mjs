@@ -183,7 +183,10 @@ async function bringUp(label, hub) {
   };
   const ws = await daemon.call('register-workspace', { type: 'registerWorkspace', workspaceId: WORKSPACE, repoRoot: realpathSync(join(base, 'ws')) });
   const control = await daemon.call('agent-control-on', { type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] });
-  const configured = await daemon.call('gateway-configure', { type: 'remoteConfigure', config: { mode: 'localNetwork', port: 0, allowControl: true } });
+  // Port 0 means "the default port" to the daemon, which collides with any Ferryx desktop already
+  // listening; claim a free ephemeral port first so this run owns its gateway.
+  const gatewayPort = await new Promise((resolvePort) => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const port = server.port; server.stop(true); resolvePort(port); });
+  const configured = await daemon.call('gateway-configure', { type: 'remoteConfigure', config: { mode: 'localNetwork', port: gatewayPort, allowControl: true } });
   const status = await daemon.call('gateway-status', { type: 'remoteGetStatus' });
   const bound = status?.status?.boundAddress ?? null;
   if (ws?.type !== 'registerWorkspaceOk' || control?.type !== 'agentControlSettingsOk' || configured?.type !== 'remoteConfigureOk' || !bound) {
