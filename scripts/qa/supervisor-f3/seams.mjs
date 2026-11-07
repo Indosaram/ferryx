@@ -490,7 +490,7 @@ export const terminalTokenShown = (text, token) => String(text).split(/\s+/).som
 
 export const workspaceProblem = (text) => /workspace unavailable|couldn.t open this project|invalid.repo.root/i.test(text);
 
-export const qaProjectSeed = (repo) => `<script>if(location.hostname==='127.0.0.1'){localStorage.clear();localStorage.setItem('ferryx.projects',${JSON.stringify(JSON.stringify([{ workspaceId: 'f3', repoRoot: repo, gitRoot: repo }]))});localStorage.setItem('ferryx.active-project','f3');localStorage.setItem('ferryx.terminal.settings',JSON.stringify({fontSize:24}));}</script>`;
+export const qaProjectSeed = (repo) => `<script>if(location.hostname==='127.0.0.1'){localStorage.clear();localStorage.setItem('ferryx.projects',${JSON.stringify(JSON.stringify([{ workspaceId: 'f3', repoRoot: repo, gitRoot: repo }]))});localStorage.setItem('ferryx.active-project','f3');localStorage.setItem('ferryx.terminal.settings',JSON.stringify({fontSize:24}));localStorage.setItem('ferryx.onboarding.v1',JSON.stringify({version:1,completedSteps:['intro','features','agents','cli','project','supervisor','try','phone','account'],dismissed:true}));}</script>`;
 
 export const framePoint = (point, width, height) => ({ x: point.x / width, y: point.y / height, normalized: true });
 
