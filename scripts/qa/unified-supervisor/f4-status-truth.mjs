@@ -117,11 +117,14 @@ function waitUntil(dir, check, deadlineMs, label) {
   return new Promise((resolveWait, rejectWait) => {
     let watcher = null;
     let done = false;
-    const finish = (fn, value) => { if (done) return; done = true; clearTimeout(timer); try { watcher?.close(); } catch { /* closed */ } fn(value); };
+    const finish = (fn, value) => { if (done) return; done = true; clearTimeout(timer); clearInterval(poll); try { watcher?.close(); } catch { /* closed */ } fn(value); };
     const evaluate = () => { try { const value = check(); if (value) finish(resolveWait, value); } catch { /* the next change re-reads */ } };
     const timer = setTimeout(() => finish(rejectWait, fail('DEADLINE_EXCEEDED', `${label} was not observed within ${deadlineMs}ms`)), deadlineMs);
     mkdirSync(dir, { recursive: true });
     watcher = watch(dir, evaluate);
+    // fs.watch on macOS coalesces or drops appends to a file inside the watched directory, so a
+    // change event is not guaranteed; the bounded poll keeps the same predicates authoritative.
+    const poll = setInterval(evaluate, 250);
     evaluate();
   });
 }
