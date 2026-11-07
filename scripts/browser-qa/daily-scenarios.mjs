@@ -13,7 +13,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 
 /** The gaps each platform must report (G6 notifications and G9 print run on Linux and Windows). */
@@ -940,8 +940,18 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       const before = new Set(folders().map((row) => row.hwnd));
       ctx.run("explorer.exe", [`/select,${file.path}`]);
       await sleep(4000);
-      const opened = folders();
-      const folder = opened.find((row) => !before.has(row.hwnd)) ?? opened.at(-1) ?? null;
+      let opened = folders();
+      let folder = opened.find((row) => !before.has(row.hwnd)) ?? opened.at(-1) ?? null;
+      // Run 42241235674 had no CabinetWClass at all: `/select,` can be swallowed (an existing
+      // Explorer process owns the shell, or the window opens and closes before the poll). Opening
+      // the containing folder is the step that actually puts the file on screen, and the drag
+      // source only needs the name, not the selection highlight.
+      if (!folder) {
+        ctx.run("explorer.exe", [dirname(file.path)]);
+        await sleep(4000);
+        opened = folders();
+        folder = opened.find((row) => !before.has(row.hwnd)) ?? opened.at(-1) ?? null;
+      }
       if (folder) ctx.host.ps("focus", ["-Hwnd", String(folder.hwnd)]);
       await sleep(1200);
       const from = await until(() => {
