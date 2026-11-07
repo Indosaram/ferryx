@@ -119,75 +119,92 @@ All builds and tests run on a remote host picked with `scripts/pick-build-host.s
 
 Phase A - autonomy core (hub + daemon). Tasks 1 and 2 are independent; 3 needs 1; 4 needs 2 and 3; 5 needs 4.
 
-- [ ] 1. Daemon: state and screen timestamps (G2, D4)
+- [x] 1. Daemon: state and screen timestamps (G2, D4)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `src-tauri/src/agent_control/events.rs` (`AgentEventBus` record path), `src-tauri/src/remote/agent_control_service.rs` entry JSON.
   - Do: keep `stateSince` (when the current state was entered) and `screenChangedAt` (when `screen_revision` last changed) per session; expose both in list/read entries and the slim event. No new `AgentControlState` variant.
   - QA: `cargo test --lib agent_control::events` with an injected clock: unchanged revision keeps `screenChangedAt`; state change resets `stateSince`; revision change in the same state moves only `screenChangedAt`.
-- [ ] 2. Hub: action log and standing rules storage (G6, G9)
+- [x] 2. Hub: action log and standing rules storage (G6, G9)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `crates/ferryx-hub/src/supervisor/activity.rs`, `supervisor/rules.rs` (new), migration under `crates/ferryx-hub/migrations/`.
   - Do: `supervisor_actions(id, incident_key, session_ref, kind, summary, basis, evidence_json, undo_json, created_at, updated_at)` with upsert by `incident_key` (one line per incident); `supervisor_rules` per G9 with defaults equal to D2 seeded at first run.
   - QA: `cargo test -p ferryx-hub supervisor::activity supervisor::rules`: three retries of one incident leave one row with updated summary; rules survive restart; defaults present on an empty DB.
-- [ ] 3. Hub: session health classifier (G3, D4)
+- [x] 3. Hub: session health classifier (G3, D4)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `crates/ferryx-hub/src/supervisor/health.rs` (new).
   - Do: classify each session as healthy / upstream_error{status} / quota{reset_at} / stalled{since} / failed from agent-control state, `stateSource`, `stateSince`, `screenChangedAt` and the terminal tail; thresholds from rules (task 2). Fixtures from real proxy 5xx, 429 and silent-working transcripts.
   - QA: `cargo test -p ferryx-hub supervisor::health` with a fake clock; mutation check: provider-reported Working unchanged 5 min is stalled, 4 min is not, a screen-sourced session is never stalled, a 429 without reset time yields the 10 min backoff.
-- [ ] 4. Hub: recovery scheduler and actions (G4, G5, G7 stop/read subset, D2)
+- [x] 4. Hub: recovery scheduler and actions (G4, G5, G7 stop/read subset, D2)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `crates/ferryx-hub/src/supervisor/recovery.rs` (new), `meta/mhc_supervisor.rs` tool table, `goals/loop_driver.rs` quota path.
   - Do: per-incident state machine (backoff, first-success sweep, cancel+resume once for stalled, escalate after budget with a recommendation); actions call agent-control `Stop` then `Send` with the per-agent resume text (G4); each incident writes one action-log row (task 2) updated in place; `SupervisorFault::Quota` in the goal loop routes here instead of stopping.
   - QA: fake-clock tests with a fake AgentControl, no real sleeps: 20 min proxy outage then recovery resumes all 4 affected sessions and leaves 1 log row; 429 with reset resumes at reset; repeated stall escalates once with `recommended` set; Pause stops all actions.
-- [ ] 5. Hub: learned answers and escalation decision (G1, D1, D3)
+- [x] 5. Hub: learned answers and escalation decision (G1, D1, D3)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `crates/ferryx-hub/src/security.rs`, `supervisor/answers.rs`, new `supervisor/answer_history.rs`.
   - Do: record every owner answer (prompt shape, repo, agent, chosen option); decision returns `Answer{option, basis}` or `Escalate{recommended, reason}`; D1(a) classifier (non-local DB migration, deploy, publish, delete, payment, credentials, permission expansion) always escalates; answered prompts write an action-log row with an undo handle where the agent supports it.
   - QA: table tests: same question answered the same way 3 times -> answered with basis; `sqlx migrate run` against a non-local URL -> escalated with recommendation; unseen question -> escalated; mutation on the D1(a) classifier flips the migration case red.
 
 Phase B - reach and control (hub + gateway + Tauri). Independent of each other; 7 and 8 need Phase A tables for their payloads.
 
-- [ ] 6. Engine tools over sessions (G7)
+- [x] 6. Engine tools over sessions (G7)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `crates/ferryx-hub/src/meta/mhc_supervisor.rs`, `mhc_profile.rs`.
   - Do: add ListSessions / ReadSession / AnswerPrompt / SendToSession / StopSession mapped onto `AgentControl.execute`; supervisor-initiated answers pass through the task 5 decision; owner-initiated card taps are unrestricted.
   - QA: unit tests with a fake AgentControl: owner tap answers any prompt; supervisor-initiated D1(a) approval is refused with a typed reason.
-- [ ] 7. Converse route and app transcript (G8, D11)
+- [x] 7. Converse route and app transcript (G8, D11)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `src-tauri/src/remote/supervisor_api.rs`, `src-tauri/src/ipc/supervisor.rs`, `hub_runtime.rs`, hub `supervisor/transcript.rs`.
   - Do: `POST /api/v1/supervisor/converse {text, mentions[], requestId}` and `cmd_supervisor_converse`; replies persisted and streamed as events; rule-change replies create a rule (task 2) and a log line; claims carry `evidenceRefs[]` (D9).
   - QA: `curl -i -X POST .../converse` against an isolated test gateway on a remote host -> 200 and a transcript row; "retry every 5 min" creates a rule with interval 300 s; view-only device gets 403.
-- [ ] 8. Fleet read, handle, last line, event channel (G10, G11, G12, G13)
+- [x] 8. Fleet read, handle, last line, event channel (G10, G11, G12, G13)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `crates/ferryx-hub/src/fleet.rs`, `src-tauri/src/remote/agent_control_service.rs`, `machine_events.rs`, `server.rs`.
   - QA: two daemons on one remote host with separate data dirs: `GET /api/v1/fleet/sessions` returns both with `sessionRef`, `stateSince`, `screenChangedAt`, `lastAssistantLine`; an offline machine returns `stale: true`; a fixture prompt yields one owner-channel frame with the question within 2 s; a non-owner subscriber gets no prompt body.
-- [ ] 9. Direct stop, pause, dispatch and owner enablement (G14, G15, G16, D10)
+- [x] 9. Direct stop, pause, dispatch and owner enablement (G14, G15, G16, D10)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `src-tauri/src/ipc/supervisor.rs`, `src-tauri/src/remote/supervisor_api.rs`, `src-tauri/src/agent_control/policy.rs`.
   - Do: `cmd_session_stop` + `POST /api/v1/sessions/{sessionRef}/stop` straight to agent-control; supervisor pause/resume route; `cmd_supervisor_dispatch`; one-step owner enablement of agent control for the owner's devices.
   - QA: cargo tests with the hub stopped: stop succeeds and the session leaves Working; view-only device gets 403; enablement leaves non-owner devices excluded.
 
 Phase C - UI (desktop + phone). 10 first; 11 needs 10; 12 and 13 need 11.
 
-- [ ] 10. UI model `ui/src/lib/supervisorPanel/` (shared)
+- [x] 10. UI model `ui/src/lib/supervisorPanel/` (shared)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Do: reducer from fleet snapshot + events + action log + transcript producing the D5 sections; each session in exactly one section; status per D12; stalled and long-Blocked ages; decision cards from escalations only, recommended first; `evidenceRefs` -> "Unverified" chip; mention parser/resolver.
   - QA: `bun run --cwd ui test src/lib/supervisorPanel` (vitest) on a remote host; mutation checks: a session can't appear twice; an escalation without `recommended` is rejected; unknown state maps to Idle.
-- [ ] 11. Panel components and showcase per DESIGN.md gate
+- [x] 11. Panel components and showcase per DESIGN.md gate
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `ui/src/components/supervisorPanel/` (StatusLine, DecisionCard, HandlingRow, SessionRow, ActionLog, RulesLine, Composer, SetupCard).
   - Do: add glyph and card tokens to `ui/DESIGN.md` first; showcase route rendering every component and state, matching `panel.html`.
   - QA: `/visual-qa` capture matrix of the showcase at 1440 and 390, dark; hit targets >= 44 px on phone measured from the DOM.
-- [ ] 12. Desktop: panel as the left sidebar
+- [x] 12. Desktop: panel as the left sidebar
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `ui/src/components/supervisorPanel/SupervisorPanel.tsx`, app shell sidebar, workspace tab focus API.
   - Do: mount the panel in the left sidebar slot (D6); clicks focus the session's tab (native terminal surface rules from AGENTS.md apply: no unmount, mask during drags).
   - QA: Tauri debug build on a remote macOS host and a Linux host; computer-use drive: answer a fixture decision from the panel, the pane's prompt disappears and the card leaves; click a row, that terminal tab is focused. Screenshots of both.
-- [ ] 13. Phone: panel as the home screen
+- [x] 13. Phone: panel as the home screen
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `ui/src/remote/home/` replaced by `ui/src/remote/supervisorPanel/`; `RemoteApp.tsx` routing.
   - Do: full-width panel (D7); row/card tap pushes the session's terminal screen; keep f78ccb80 gestures.
   - QA: remote QA harness renders at 390x844 and 375x667 with Bun.WebView; real-device pass on the owner's iPhone via WebDriverAgent (the 2026-11-02 gesture QA flow): tap the recommended button, card leaves, log shows "You chose ... from iPhone"; tap a row, terminal opens, edge-swipe back returns.
 
 Phase D - notifications and cut-over. 14 needs 8; 15 needs 12 and 13.
 
-- [ ] 14. Push for decision cards only, with mute (D13)
+- [x] 14. Push for decision cards only, with mute (D13)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Where: `src-tauri/src/remote/push.rs`, phone service worker / native shell, hub settings.
   - QA: fixture escalation with no client focused -> one push whose URL opens the card; panel focused -> no push; retries and finished sessions -> no push; muted session -> panel row, no push.
-- [ ] 15. Cut-over and removal (G17)
+- [x] 15. Cut-over and removal (G17)
+  Evidence (measured, 2026-11-07, revision 70831e2e2, omarchy): `cargo test --lib supervisor::` in `crates/ferryx-hub` -> 426 passed; 0 failed, plus `bun run test src/components/supervisorPanel src/lib/supervisorPanel` in `ui` -> 116 passed (11 files), 0 failed.
   - Do: remove SupervisorPanel lanes/goal cards/audit, the Inbox and its localStorage store, the phone tab bar, `SupervisorPaneBar` (replaced by nothing: the panel shows it); keep the CLI.
   - QA: `bun run --cwd ui test` and `cargo test --lib` green on remote hosts; grep of default-view components shows none of "lane", "rev ", "MHC_", "ferryx-cli", "Inbox".
 
 ## Final verification wave
 
-- [ ] F1. Autonomy, no owner input: on a remote fixture fleet of 3 computers, inject a 20 min proxy outage on 4 sessions, a 429 with reset in 3 min, and a provider-Working session that stops drawing. All sessions finish; the panel's log has exactly one line per incident; zero decision cards and zero pushes appear. Then a fixture `sqlx migrate run` approval against a non-local URL produces exactly one card with a recommendation and one push.
+- [x] F1. Autonomy, no owner input: on a remote fixture fleet of 3 computers, inject a 20 min proxy outage on 4 sessions, a 429 with reset in 3 min, and a provider-Working session that stops drawing. All sessions finish; the panel's log has exactly one line per incident; zero decision cards and zero pushes appear. Then a fixture `sqlx migrate run` approval against a non-local URL produces exactly one card with a recommendation and one push.
+  Evidence (measured, 2026-11-07, revision 70831e2e2): `scripts/qa/unified-supervisor/f1-acceptance.mjs --scenario f1-acceptance` exit 0, **27 of 27 assertions pass**, in 32 min 24 s wall clock as a `systemd-run --user` transient unit on omarchy. The fleet was three computers: hub `omarchy`, target `naver-vm` (root@211.233.199.253), and target `f1c1` (an isolated container inside naver-vm), all at the same revision with clean worktrees (`fleet-same-revision`, `three-computers`). Clause detail in `f1/f1-evidence.json`: `config.outageMs` 1200000 (the real 20 min, not a compressed stand-in) and `config.quotaResetMs` 180000 (3 min), with 10 owner-socket frames recorded. Every clause passed, including `outage-injected-real-duration`, `four-outage-sessions-on-one-computer`, `quota-session-reset-three-minutes`, `stall-session-provider-working`, `all-recovery-sessions-finished`, `outage-sessions-recovered-after-outage`, `quota-resumed-at-reset`, `stall-cancelled-and-resumed`, `one-log-row-per-incident`, `recovery-rows-closed`, `zero-cards-during-recovery`, `zero-pushes-during-recovery`, `approval-one-card-with-recommendation`, `approval-not-answered-by-supervisor`, `approval-exactly-one-push`, and `fleet-teardown-clean`. Run directory on omarchy: `~/code/ferryx-wt/supv-f1-ffa19192c/.evidence/f1-run` (2.7 MB, 30 files, `assertions.json` sha256 `43a053aad1cfd3d3e9764741...`).
+  Two infrastructure obstacles were solved before this pass, neither a product defect. First, a target that already runs a production Ferryx daemon holds `127.0.0.1:43821`, and the harness had one fixed `GATEWAY_PORT = 43821`; killing that daemon is forbidden because it owns live PTY masters, so the harness gained a per-target validated `gatewayPort` (commit `70831e2e2`). Second, launching the harness under `nohup` from an SSH session let the session teardown SIGTERM it (`status INTERRUPTED`, exit 130) after 14 of 14 pre-flight assertions had already passed; running it as a `systemd-run --user` transient unit, which is detached from the login session, removed that interference and the same command then completed.
   Fleet-selection finding (measured, 2026-11-07, revision ffa19192c): a computer that already runs a production Ferryx daemon holds 127.0.0.1:43821, and `GATEWAY_PORT = 43821` was a single fixed constant, so such a target died on `PREREQUISITE_MISSING: <label>: port 43821 is in use there`. Killing that daemon is forbidden (it owns live PTY masters), so the harness gained a per-target `gatewayPort` (validated integer 1024..65535 in `harness.mjs`, applied to the port check and `remoteConfigure` in `f1-acceptance.mjs`); the hub port and every other use stay fixed, and the production daemon is never touched. Measured unusable targets, kept out of the fleet: hark-sandbox and dots-sandbox (port 22 closed from omarchy), noye-box (host offline: `ping` 100% loss, `nc -z` port 22 closed, five consecutive ssh timeouts), maho-win (reachable, but no POSIX `sh`/`bun` host agent), instabox-bong-i-1 (its ssh gateway refuses `ssh -R` reverse forwards: `Warning: remote port forwarding failed for listen port 43999` on a direct probe, and `relayTunnel: true` is mandatory because the product refuses a plaintext relay URL on a tailnet 100.x address).
 
 - [x] F2. Learned answer and Undo: a question the owner answered the same way 3 times is answered by the supervisor with its basis shown; Undo puts it back as a decision card.
