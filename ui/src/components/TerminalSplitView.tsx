@@ -80,8 +80,7 @@ import {
   type WorkspaceDropData,
 } from "./tab-dnd/tabDragTypes";
 import { TerminalPane } from "./TerminalPane";
-import { SupervisorPaneBarView } from "./supervisor/SupervisorPaneBar";
-import { actingSessionIds, paneSupervision, useSupervisor } from "../lib/supervisor";
+import { actingSessionIds, useSupervisor } from "../lib/supervisor";
 import { IconButton } from "./ui/IconButton";
 
 const MIN_PANE_SIZE_PX = 80;
@@ -1270,11 +1269,6 @@ const PaneLeafView = React.memo(function PaneLeafView({
   );
   const flashSessionId = content.kind === "terminal" ? session.id : null;
   const flashToken = usePaneFlashToken(flashSessionId);
-  const { snapshot: supervisor, now: supervisorNow } = useSupervisor();
-  const supervision =
-    content.kind === "terminal"
-      ? paneSupervision(supervisor, session?.backendSessionId, supervisorNow, activity?.state === "waiting")
-      : null;
   // A browser pane draws its own toolbar (address bar) at the top of its content, so the pane
   // toolbar is a permanent strip above it instead of an overlay that would cover those controls.
   const toolbarInset = content.kind === "browser" ? PANE_TOOLBAR_PX : 0;
@@ -1525,7 +1519,6 @@ const PaneLeafView = React.memo(function PaneLeafView({
         </div>
       </div>
 
-      {supervision ? <SupervisorPaneBarView state={supervision} now={supervisorNow} onTakeOver={focusPaneInput} /> : null}
       {/* Browser panes keep their own toolbar at the top; the inset clears the hover overlay so
           it never covers the address bar. */}
       <div
