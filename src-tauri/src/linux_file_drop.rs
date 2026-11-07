@@ -18,7 +18,7 @@
 //! `allowsFileAccess()` to `PLATFORM(COCOA)`), so delivering there would change nothing. A drop
 //! over a non-Chromium area is left unconsumed.
 
-use crate::system_file_drop::{file_drop_script, json_string};
+use crate::system_file_drop::file_drop_script;
 use gtk::gdk;
 use gtk::prelude::*;
 use tauri::Manager;
@@ -115,8 +115,8 @@ fn parse_uri_list(raw: &[u8]) -> Option<Vec<String>> {
     (!paths.is_empty()).then_some(paths)
 }
 
-/// Finds the visible Chromium tab under a GTK widget point, returning it with tab-relative
-/// CSS-pixel coordinates.
+/// Finds the visible tab under a GTK widget point, returning it with tab-relative CSS-pixel
+/// coordinates and the pane origin those coordinates are relative to.
 ///
 /// `BrowserManager::set_bounds` stores each tab's logical rect in window coordinates, the same
 /// space GTK reports drag coordinates in, so this is a plain hit test; the engine applies its own
@@ -125,7 +125,7 @@ fn tab_at<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     x: i32,
     y: i32,
-) -> Option<(String, crate::browser::BrowserEngine, (f64, f64))> {
+) -> Option<(String, crate::browser::BrowserEngine, (f64, f64), (f64, f64))> {
     let manager = app_handle.try_state::<std::sync::Arc<crate::browser::BrowserManager>>()?;
     let point_x = f64::from(x);
     let point_y = f64::from(y);
