@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { dragDropPositionToLogical } from "./NativeTerminalPane";
+import { isMacShortcutPlatform } from "../lib/shortcuts";
 import { save } from "@tauri-apps/plugin-dialog";
 import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, RefreshCw, X } from "lucide-react";
 
@@ -393,6 +396,54 @@ export function BrowserPane({
       disposed = true;
     };
   }, [isPrivatePane, liveTab.url, visible]);
+
+  // A file dropped from the OS lands on the window, not on this page: Windows and Linux
+  // consume the drop at app level, so the browser tab never hears about it and the files are
+  // discarded. Take the app-level drop when it is inside this pane and let the backend hand it
+  // to the tab (Chromium through DevTools, the platform webview through a replayed DragEvent).
+  useEffect(() => {
+    if (!isTauri() || !visible) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ paths?: string[]; position: { x: number; y: number } }>(
+      "tauri://drag-drop",
+      (event) => {
+        if (disposed) return;
+        const el = containerRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        // The event carries a physical position; the pane rect and the tab bounds are logical.
+        const scale =
+          typeof window !== "undefined" && typeof window.devicePixelRatio === "number"
+            ? window.devicePixelRatio
+            : 1;
+        const logical = dragDropPositionToLogical(
+          event.payload.position,
+          scale,
+          isMacShortcutPlatform(),
+        );
+        const x = logical.x;
+        const y = logical.y;
+        const inside = x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+        if (!inside) return;
+        const paths = event.payload.paths ?? [];
+        if (paths.length === 0) return;
+        void invoke("cmd_browser_drop_paths", { paths, x, y }).catch(
+          () => false,
+        );
+      },
+    )
+      .then((off) => {
+        if (disposed) off();
+        else unlisten = off;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [visible]);
+
 
   useEffect(() => {
     const el = containerRef.current;

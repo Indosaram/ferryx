@@ -30,6 +30,8 @@ pub mod ipc;
 pub mod macos_file_drop;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod linux_file_drop;
+#[cfg(feature = "desktop")]
+pub mod system_file_drop;
 pub mod native_terminal;
 pub mod notification;
 pub mod paired_host;
@@ -2136,6 +2138,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::browser_system::cmd_browser_apply_site_zoom,
         ipc::browser_system::cmd_browser_print,
         ipc::browser_system::cmd_browser_save_pdf,
+        ipc::browser_system::cmd_browser_drop_paths,
         ipc::browser_system::cmd_browser_set_download_preferences,
         ipc::browser_system::cmd_browser_download_pause,
         ipc::browser_system::cmd_browser_download_to_folder,

@@ -259,6 +259,89 @@ static CEF_FIND_QUERIES: LazyLock<Mutex<std::collections::HashMap<String, String
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 static CEF_FIND_COUNTS: LazyLock<Mutex<std::collections::HashMap<String, u32>>> = LazyLock::new(Default::default);
 
+/// Whether a drop at (x, y) lands inside a tab rect at (left, top) with width x height.
+///
+/// Edge-inclusive on the origin and edge-exclusive on the far side, so two adjacent panes
+/// can never both claim the point between them.
+fn drop_point_inside(point: (f64, f64), rect: (f64, f64, f64, f64)) -> bool {
+    let (x, y) = point;
+    let (left, top, width, height) = rect;
+    x >= left && x < left + width && y >= top && y < top + height
+}
+
+/// Routes a file drop the shell already received to the browser tab under the point x, y.
+///
+/// On Windows the OS drop is consumed at app level: Tauri's drag_drop_enabled defaults to true
+/// and turning it off would break terminal drag-in, because the terminal pane reads the same
+/// app-level event. A drop over a browser pane therefore reached no page and its files were
+/// discarded. The web UI calls this with the pointer position it was given; the tab under that
+/// point takes the files through the engine it uses. Returns true when a tab accepted them.
+#[tauri::command]
+pub async fn cmd_browser_drop_paths<R: Runtime>(
+    app: AppHandle<R>,
+    manager: State<'_, Arc<BrowserManager>>,
+    paths: Vec<String>,
+    x: f64,
+    y: f64,
+) -> Result<bool, IpcError> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    let target = manager
+        .list_sessions()
+        .into_iter()
+        .filter(|session| session.visible)
+        .find_map(|session| {
+            let bounds = manager.get_bounds(&session.browser_id).ok().flatten()?;
+            let rect = (bounds.x, bounds.y, bounds.width, bounds.height);
+            drop_point_inside((x, y), rect).then(|| {
+                (
+                    session.browser_id,
+                    session.webview_label,
+                    session.engine,
+                    x - bounds.x,
+                    y - bounds.y,
+                    bounds.x,
+                    bounds.y,
+                )
+            })
+        });
+    let Some((browser_id, webview_label, engine, local_x, local_y, origin_x, origin_y)) =
+        target
+    else {
+        return Ok(false);
+    };
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if engine == crate::browser::BrowserEngine::Chromium {
+        let outcomes =
+            crate::browser::cef_engine::drop_files(&browser_id, &paths, local_x, local_y).await;
+        let failed = outcomes.iter().filter(|(_, result)| result.is_err()).count();
+        if failed > 0 {
+            tracing::warn!(browser_id, failed, "the Chromium engine refused part of a file drop");
+        }
+        return Ok(true);
+    }
+    // The platform webview cannot receive an OS drop as Files, and both Windows and Linux
+    // consume the drop before a child webview sees it, so the page is given the same
+    // DataTransfer a real drop would carry.
+    let Some(webview) = app.get_webview(&webview_label) else {
+        return Ok(false);
+    };
+    // local_x and local_y are relative to the tab; elementFromPoint takes viewport pixels,
+    // so the pane origin is added back. A system tab fills its pane, so this is page space.
+    let script = crate::system_file_drop::file_drop_script(
+        &paths,
+        (origin_x + local_x, origin_y + local_y),
+    );
+    webview.eval(script).map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::InternalError,
+            format!("could not deliver the file drop to the tab: {error}"),
+        )
+    })?;
+    Ok(true)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Print and Save as PDF
 // ---------------------------------------------------------------------------------------------
@@ -749,6 +832,20 @@ mod tests {
     use super::*;
     use crate::browser::download::DownloadRegistry;
     use ferryx_browser_engine_protocol::{DownloadFailure, DownloadState};
+
+    #[test]
+    fn a_drop_belongs_to_exactly_one_pane_at_a_shared_edge() {
+        let left = (0.0, 0.0, 100.0, 50.0);
+        let right = (100.0, 0.0, 100.0, 50.0);
+        // The edge belongs to the right pane only, so a drop on the divider is never doubled.
+        assert!(drop_point_inside((99.9, 25.0), left));
+        assert!(!drop_point_inside((100.0, 25.0), left));
+        assert!(drop_point_inside((100.0, 25.0), right));
+        // Outside the vertical span, inside nothing.
+        assert!(!drop_point_inside((50.0, 50.0), left));
+        assert!(!drop_point_inside((50.0, 50.0), right));
+        assert!(drop_point_inside((50.0, 49.9), left));
+    }
 
     #[test]
     fn concurrent_site_zoom_saves_all_succeed() {
