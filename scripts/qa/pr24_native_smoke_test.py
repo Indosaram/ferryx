@@ -143,6 +143,28 @@ class SkipSetupGuardTests(unittest.TestCase):
                 smoke.guarded_skip_setup_point(1278, 850, expected, owner, window, active)
 
 
+class SkipSetupAffordanceTests(unittest.TestCase):
+    # Constants measured from the two reviewed 1278x850 startup frames of the same build:
+    # wizard showing -> 113 colors, mean luma 0.112054; main UI -> 1 color, mean luma 0.154248.
+    # The discriminator is color diversity, not brightness.
+    def test_reviewed_wizard_region_reads_as_present(self):
+        self.assertTrue(smoke.skip_setup_affordance_present(113, 0.112054))
+
+    def test_reviewed_main_ui_region_reads_as_absent(self):
+        self.assertFalse(smoke.skip_setup_affordance_present(1, 0.154248))
+
+    def test_flat_brighter_region_is_not_treated_as_the_button(self):
+        # A blank light panel must not be mistaken for the antialiased label.
+        self.assertFalse(smoke.skip_setup_affordance_present(1, 0.93))
+        self.assertFalse(smoke.skip_setup_affordance_present(2, 0.5))
+
+    def test_non_normalized_luma_is_rejected(self):
+        for luma in [-0.01, 1.01, float('nan'), float('inf')]:
+            with self.subTest(luma=luma):
+                with self.assertRaisesRegex(RuntimeError, 'invalid skip-setup region luma'):
+                    smoke.skip_setup_affordance_present(1, luma)
+
+
 class SparsePostStartupTests(unittest.TestCase):
     def test_reviewed_empty_workspace_is_post_startup_valid_only(self):
         metrics = smoke.parse_capture_metrics('1022 680 329 0.0135897')

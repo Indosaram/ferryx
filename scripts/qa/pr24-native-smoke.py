@@ -136,6 +136,19 @@ def guarded_skip_setup_point(width, height, expected_pid, owner_pid, window_id, 
     return 530, 716
 
 
+def skip_setup_affordance_present(colors, mean_luma):
+    # The first-run wizard only appears when shouldAutoOpenOnboarding() says so, and it opens
+    # 1200 ms after mount. A launch that lands on the main UI is a legitimate state, so the
+    # smoke must not click a coordinate that is empty there; it must report which state it saw.
+    # Measured in the 140x34 box at the calibrated point of both reviewed 1278x850 frames:
+    # wizard renders the antialiased "Skip setup" label (113 distinct colors, mean luma 11.2%),
+    # the main UI renders an unbroken dark panel (1 color). Diversity, not brightness, is the
+    # discriminator: the empty panel is brighter (15.4%) than the button.
+    if not (0.0 <= mean_luma <= 1.0):
+        raise RuntimeError('invalid skip-setup region luma')
+    return colors >= 8
+
+
 def xprop_window_ids(output, property_name):
     match = re.fullmatch(re.escape(property_name) + r"\(WINDOW\): window id #\s*(.*)", output.strip())
     if not match:
@@ -458,18 +471,37 @@ def main():
                                str(evidence / '01-startup.png')], env=env).stdout.strip()
         if screenshot_size != '1278 850':
             raise RuntimeError('Skip setup screenshot geometry differs from reviewed client')
-        # Exactly one visible normal-UI Skip setup click. Never enter account details,
-        # submit Sign in/Continue, or fabricate onboarding state through IPC/storage.
-        run(['xdotool', 'mousemove', '--sync', '--window', window, str(x), str(y),
-             'click', '1'], env=env)
-        result['setup_action'] = {'action': 'visible Skip setup click', 'window': window,
-                                  'client_x': x, 'client_y': y}
-        time.sleep(2)
-        capture('01b-setup-skipped')
-        skipped_changes = changed_pixels(pixel_frames['01-startup'], pixel_frames['01b-setup-skipped'])
-        result['setup_action']['changed_pixels'] = skipped_changes
-        if skipped_changes < 500:
-            raise RuntimeError('Skip setup click did not produce sufficient visible change')
+        region = run(['convert', str(evidence / '01-startup.png'), '-crop', '140x34+460+699',
+                      '+repage', '-format', '%k %[fx:mean]', 'info:'], env=env).stdout.split()
+        region_colors, region_luma = int(region[0]), float(region[1])
+        wizard_present = skip_setup_affordance_present(region_colors, region_luma)
+        result['setup_action'] = {'window': window, 'client_x': x, 'client_y': y,
+                                  'region_colors': region_colors,
+                                  'region_mean_luma': region_luma,
+                                  'wizard_present': wizard_present}
+        if wizard_present:
+            # Exactly one visible normal-UI Skip setup click. Never enter account details,
+            # submit Sign in/Continue, or fabricate onboarding state through IPC/storage.
+            run(['xdotool', 'mousemove', '--sync', '--window', window, str(x), str(y),
+                 'click', '1'], env=env)
+            result['setup_action']['action'] = 'visible Skip setup click'
+            time.sleep(2)
+            capture('01b-setup-skipped')
+            skipped_changes = changed_pixels(pixel_frames['01-startup'],
+                                             pixel_frames['01b-setup-skipped'])
+            result['setup_action']['changed_pixels'] = skipped_changes
+            if skipped_changes < 500:
+                raise RuntimeError('Skip setup click did not produce sufficient visible change')
+        else:
+            # No wizard in this launch: the reviewed empty region proves main UI is already up.
+            # Record the state instead of clicking blind; every later interaction assertion
+            # still runs against real pixels, so this cannot turn a broken launch into a pass.
+            result['setup_action']['action'] = 'skip-setup-affordance-absent'
+            result['setup_action']['detail'] = (
+                'first-run wizard was not showing; main UI already reached, no click emitted')
+            capture('01b-setup-skipped')
+            result['setup_action']['changed_pixels'] = changed_pixels(
+                pixel_frames['01-startup'], pixel_frames['01b-setup-skipped'])
         run(['xdotool', 'key', '--clearmodifiers', 'ctrl+o'], env=env)
         time.sleep(1)
         capture('02-add-project-key')
