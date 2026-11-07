@@ -1878,9 +1878,9 @@ export async function dailyWebviewAfter(ctx) {
     if (!title) return { ok: false, stderr: "tab title not read" };
     ctx.host.rightClick(title.left + Math.round(title.width / 2), title.top + Math.round(title.height / 2));
     await sleep(1200);
-    const duplicate = await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
-    await sleep(1000);
     const privateTrail = [];
+    const duplicate = await clickWord(ctx, (text) => /^duplicate/i.test(text), { timeout: 5000, trail: privateTrail });
+    await sleep(1000);
     const privateItem = duplicate ? await clickWord(ctx, (text) => /^Private$/.test(text), { timeout: 5000, where: inDuplicateSubmenu(duplicate), trail: privateTrail }) : null;
     g11.private_menu = { duplicate, private: privateItem, trail: privateTrail };
     // No menu item was clicked: no tab can appear, so the wait is skipped.
@@ -2064,7 +2064,7 @@ export async function dailyChromium(ctx) {
     if (title) {
       ctx.host.rightClick(title.left + Math.round(title.width / 2), title.top + Math.round(title.height / 2));
       await sleep(1200);
-      const duplicate = await clickWord(ctx, (text) => /^Duplicate$/.test(text), { timeout: 5000 });
+      const duplicate = await clickWord(ctx, (text) => /^duplicate/i.test(text), { timeout: 5000 });
       await sleep(1000);
       const workTrail = [];
       g11.work_menu = { duplicate, work: duplicate ? await clickWord(ctx, (text) => /^work$/i.test(text), { timeout: 5000, where: inDuplicateSubmenu(duplicate), trail: workTrail }) : null, trail: workTrail };

@@ -34,8 +34,9 @@ import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
-import { printBrowser } from "./lib/browserSystem";
+import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { printBrowser, stepBrowserZoom } from "./lib/browserSystem";
+import { useBrowserLibrarySync } from "./lib/browserLibrarySync";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
@@ -1172,6 +1173,9 @@ function WorkspaceApp({
       : undefined,
   });
   reportRuntimeErrorRef.current = reportRuntimeError;
+  // Without this the host's history recorder never learns history is on: it starts disabled, so
+  // no visit is ever written and the library stays empty (audit run 42341850075).
+  useBrowserLibrarySync(isNativeRuntime, reportRuntimeError);
 
   useEffect(() => {
     setSshTabOperation(null);
@@ -3075,16 +3079,9 @@ function WorkspaceApp({
   const handleBrowserZoom = useCallback(
     async (browserId: string, direction: "in" | "out" | "reset") => {
       try {
-        if (direction === "reset") {
-          await setBrowserZoom(browserId, 1.0);
-          return;
-        }
-        const state = await getBrowserState(browserId);
-        const current = typeof state?.zoomFactor === "number" && !isNaN(state.zoomFactor) ? state.zoomFactor : 1.0;
-        const next = direction === "in"
-          ? Math.min(5.0, Number((current + 0.1).toFixed(2)))
-          : Math.max(0.25, Number((current - 0.1).toFixed(2)));
-        await setBrowserZoom(browserId, next);
+        // The host owns the zoom ladder and the per-site record: stepping here instead would walk
+        // 10% increments past 110% and never remember the site's zoom (audit run 42341850075).
+        await stepBrowserZoom(browserId, direction);
       } catch (err) {
         reportRuntimeError(err);
       }
@@ -4158,6 +4155,7 @@ function WorkspaceApp({
 
     void onSplitRightMenu(() => {
       if (activeRemoteHostRef.current) return;
+      if (routeSplitEventToBrowserRef.current("right")) return;
       handleSplitActive("horizontal");
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -4166,6 +4164,7 @@ function WorkspaceApp({
 
     void onSplitDownMenu(() => {
       if (activeRemoteHostRef.current) return;
+      if (routeSplitEventToBrowserRef.current("down")) return;
       handleSplitActive("vertical");
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -4229,6 +4228,20 @@ function WorkspaceApp({
       detail: { browserId: shortcutBrowserId, action },
     }) satisfies BrowserShortcutDomEvent);
   };
+  /**
+   * The macOS monitor claims Cmd+D and emits menu_split_right, so a browser tab never sees the
+   * bookmark chord itself. Browser actions deliberately pre-empt app chords (shortcuts.ts),
+   * so on a browser tab that event means bookmark-page. Cmd+Shift+D has no browser binding, so
+   * the down direction still falls through to the split handler, which refuses browser tabs.
+   * Returns true when the browser took the event.
+   */
+  const routeSplitEventToBrowser = (direction: "right" | "down"): boolean => {
+    if (direction === "down" || !browserShortcutsActive) return false;
+    dispatchBrowserShortcut("bookmark-page");
+    return true;
+  };
+  const routeSplitEventToBrowserRef = useRef(routeSplitEventToBrowser);
+  routeSplitEventToBrowserRef.current = routeSplitEventToBrowser;
 
   // Child browser webviews own OS focus, so the main window never sees these
   // The embedded browser webview owns native keyboard focus while active, which
