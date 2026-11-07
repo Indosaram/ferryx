@@ -645,7 +645,7 @@ function toolbarIcons(ctx) {
     // The browser pane here is ~640px wide, under BROWSER_TOOLBAR_COMPACT_WIDTH (720), so the
     // toolbar renders no zoom group at all (BrowserToolbar.tsx:971 `compact ? null`) and the
     // readout this scan keys on genuinely is not on screen: screenshot 14 of run 42352352939
-    // shows five runs at 867/903/931/962/993 -- bookmark star, History, Extensions, external,
+    // shows five runs at 867/907/937/967/997 -- bookmark star, History, Extensions, external,
     // overflow. Every earlier attempt returned "zoom readout run not found" with 0 icons, so the
     // History menu (`clickToolbarIcon(ctx, 1, ...)`) and the bookmark folder never opened.
     // History is index 1 in both layouts: uncompact counts [zoom in, History, ...] because the
