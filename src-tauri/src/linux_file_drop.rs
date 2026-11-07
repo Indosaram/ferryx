@@ -22,7 +22,6 @@ use crate::system_file_drop::file_drop_script;
 use gtk::gdk;
 use gtk::prelude::*;
 use tauri::Manager;
-use webkit2gtk::WebViewExt;
 
 /// The XDND target a file manager advertises for a local file drag.
 const URI_LIST: &str = "text/uri-list";
@@ -174,21 +173,19 @@ fn deliver_to_system_tab<R: tauri::Runtime>(
         return;
     };
     let webview_label = state.webview_label.clone();
-    let paths = paths.to_vec();
-    let Some(window) = app_handle.get_webview_window(webview_label.as_str()) else {
+    // A browser tab is a child webview added to the main window, so it is not a window:
+    // look it up as a webview or the lookup always misses.
+    let Some(webview) = app_handle.get_webview(webview_label.as_str()) else {
+        tracing::warn!(browser_id, %webview_label, "no webview for the dropped-on tab");
         return;
     };
     let browser_id = browser_id.to_string();
-    if let Err(error) = window.with_webview(move |platform_webview| {
-        let view = platform_webview.inner();
-        view.run_javascript(&file_drop_script(&paths, point), None::<&gtk::gio::Cancellable>, move |result| {
-            if let Err(error) = result {
-                tracing::warn!(browser_id, %error, "the page refused a file drop");
-            }
-        });
-    }) {
-        tracing::warn!(%error, "could not reach the system webview for a file drop");
-    }
+    let script = file_drop_script(paths, point);
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = crate::ipc::browser::eval_webview(webview, script).await {
+            tracing::warn!(browser_id, %error, "the page refused a file drop");
+        }
+    });
 }
 
 #[cfg(test)]
