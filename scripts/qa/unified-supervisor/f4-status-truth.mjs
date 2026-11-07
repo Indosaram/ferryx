@@ -141,6 +141,9 @@ async function bringUp(label, hub) {
     PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8', TERM: 'xterm-256color', USER: process.env.USER ?? 'qa',
     HOME: join(base, 'home'), TMPDIR: join(base, 'tmp'), FERRYX_DATA_DIR: join(base, 'data'), FERRYX_RUNTIME_DIR: join(base, 'runtime'),
     FERRYX_HUB_DB: join(base, 'hub', 'hub.sqlite'), FERRYX_HUB: hub ? 'on' : 'off', FERRYX_HUB_QUIET_HOURS: 'off', SHELL: '/bin/bash', RUST_LOG: 'info',
+    // The daemon binds its gateway to a fixed product port unless a QA run id is present, which
+    // would collide with any Ferryx desktop already listening; the run id lets it take ours below.
+    FERRYX_QA_RUN_ID: label,
   };
   for (const dir of [env.HOME, env.TMPDIR, env.FERRYX_RUNTIME_DIR, join(base, 'ws', 'project'), join(base, 'panes'), join(base, 'bin')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(join(env.HOME, '.bashrc'), '');
@@ -186,6 +189,9 @@ async function bringUp(label, hub) {
   // Port 0 means "the default port" to the daemon, which collides with any Ferryx desktop already
   // listening; claim a free ephemeral port first so this run owns its gateway.
   const gatewayPort = await new Promise((resolvePort) => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const port = server.port; server.stop(true); resolvePort(port); });
+  // The daemon prefers FERRYX_QA_GATEWAY_PORT over the request's own port when the QA run id is
+  // set, and that env is fixed at spawn time, so pass the chosen port to the daemon it starts.
+  process.env.FERRYX_QA_GATEWAY_PORT = String(gatewayPort);
   const configured = await daemon.call('gateway-configure', { type: 'remoteConfigure', config: { mode: 'localNetwork', port: gatewayPort, allowControl: true } });
   const status = await daemon.call('gateway-status', { type: 'remoteGetStatus' });
   const bound = status?.status?.boundAddress ?? null;
