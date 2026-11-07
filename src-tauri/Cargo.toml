@@ -129,7 +129,7 @@ tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
 portable-pty = { version = "0.9", path = "vendor/portable-pty" }
 base64 = "0.23"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 bytes = "1.12"
 libc = "0.2"
 # kimi keys its session folders by md5(cwd); the history reader re-derives it to recover the cwd.
@@ -253,6 +253,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSData",
     "NSEnumerator",
     "NSJSONSerialization",
+    "NSProcessInfo",
+    "NSURLRequest",
 ] }
 objc2-authentication-services = { version = "0.3.2", default-features = false, features = [
     "std",
@@ -273,6 +275,10 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKFrameInfo",
     "WKSecurityOrigin",
     "WKWebViewConfiguration",
+    "objc2-app-kit",
+    "WKUIDelegate",
+    "WKDownload",
+    "WKDownloadDelegate",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
@@ -313,11 +319,12 @@ windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_System_Threading",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Security_Cryptography",
 ] }
 # Trusted browser bridge (src/browser/bridge/windows.rs). Same versions wry 0.55 already
 # pulls in (Cargo.lock: webview2-com 0.38.2, windows 0.61.3), so no second copy is built.
 webview2-com = "0.38"
-windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", default-features = false, optional = true }
