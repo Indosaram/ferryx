@@ -5,6 +5,7 @@ import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
 import { withTimeout } from "./lib/withTimeout";
 
 import { CommandPalette } from "./components/CommandPalette";
+import { BrowserAgentApprovalCard } from "./components/BrowserAgentApprovalCard";
 import { EmptyWorkspaceView } from "./components/EmptyWorkspaceView";
 import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog, type WorktreeAgentLaunch } from "./components/ProjectDialogs";
@@ -4462,6 +4463,7 @@ function WorkspaceApp({
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
+      {isNativeRuntime ? <BrowserAgentApprovalCard /> : null}
       <ShortcutHints
         preset={shortcutPreset}
         enabledActions={resolvedShortcuts(shortcutOverrides, shortcutPreset).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
