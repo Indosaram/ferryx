@@ -90,13 +90,15 @@ fn lines_of(turns: &[ReferenceTurn]) -> Vec<String> {
         .iter()
         .flat_map(|turn| {
             turn.parts.iter().filter_map(|part| match part {
-                ReferencePart::Text { text, .. } | ReferencePart::Thinking { text } => Some(text.clone()),
+                ReferencePart::Text { text, .. } | ReferencePart::Thinking { text, .. } => Some(text.clone()),
                 _ => None,
             })
         })
         .filter(|text| !text.trim().is_empty())
         .collect()
 }
+
+pub(crate) mod panel_autonomy;
 
 struct DaemonBridge {
     client: DaemonClient,
@@ -905,6 +907,70 @@ fn hub_control(op: ferryx_hub::control::ControlOp, check: bool) -> i32 {
     }
 }
 
+/// Why the desktop's hub start over the control socket did not start the hub.
+#[derive(Debug, thiserror::Error)]
+pub enum HubControlStartError {
+    /// No hub answers on the control socket (the daemon has not opened it).
+    #[error("the supervisor hub is not reachable on its control socket: {0}")]
+    Unreachable(String),
+    /// The hub answered and refused (handed over, or the stop flag was not cleared).
+    #[error("{0}")]
+    Refused(String),
+    /// This platform has no unix control socket.
+    #[error("hub control uses a unix socket, which this platform does not have")]
+    Unsupported,
+}
+
+impl HubControlStartError {
+    /// The stable wire code a refusal carries.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unreachable(_) => "SUPERVISOR_UNAVAILABLE",
+            Self::Refused(_) => "INVALID_STATE",
+            Self::Unsupported => "UNSUPPORTED",
+        }
+    }
+}
+
+/// `ferryx hub start` for the desktop's setup card: the same `start` line on the hub control
+/// socket, never a daemon restart. Returns whether this call started the hub, as
+/// [`start_supervisor`] does: `false` when the `status` read first already saw it running.
+/// Blocking (it runs its own runtime); call it through `crate::ipc::run_blocking`.
+pub fn start_hub_over_control_socket() -> Result<bool, HubControlStartError> {
+    let path = ferryx_hub::control::control_socket(&home_dir());
+    #[cfg(unix)]
+    {
+        use ferryx_hub::control::{reply_ok, send_control, ControlOp};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| HubControlStartError::Unreachable(error.to_string()))?;
+        runtime.block_on(async move {
+            let unreachable = |error: HubError| HubControlStartError::Unreachable(error.to_string());
+            let status = send_control(&path, ControlOp::Status).await.map_err(unreachable)?;
+            let was_running = serde_json::from_str::<Value>(status.trim())
+                .ok()
+                .and_then(|value| value.get("running").and_then(Value::as_bool))
+                .unwrap_or(false);
+            let reply = send_control(&path, ControlOp::Start).await.map_err(unreachable)?;
+            if !reply_ok(&reply) {
+                let message = serde_json::from_str::<Value>(reply.trim())
+                    .ok()
+                    .and_then(|value| value.get("error").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_else(|| "the hub refused to start".to_owned());
+                return Err(HubControlStartError::Refused(message));
+            }
+            tracing::info!(started = !was_running, "supervisor hub start requested by the desktop");
+            Ok(!was_running)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(HubControlStartError::Unsupported)
+    }
+}
+
 /// The plain-text `status_hint` line `hub status` prints on standby, naming the holder and this
 /// machine's pairing to it (`supervisor_lease.holderPairing`, e.g. "not paired to holder").
 #[cfg(any(unix, test))]
@@ -990,6 +1056,12 @@ hub_slot! {
     /// The opened hub and its running generation, for the desktop's Supervisor view. Swappable:
     /// a promotion that imports a staged hub database replaces the hub (see [`promote_generation`]).
     SUPERVISOR_VIEW: SupervisorView
+}
+
+hub_slot! {
+    /// The autonomy service over the current hub's stores (with its recovery scheduler, session
+    /// tools and paired-host fleet). Swapped with the hub: see [`panel_autonomy::install`].
+    PANEL_AUTONOMY: panel_autonomy::Installed
 }
 
 /// The current hub and running slot, `None` until this daemon opened the hub.
@@ -1294,6 +1366,18 @@ pub async fn supervisor_worker_report((session_id, event_id, body): (String, Str
         Ok(report) => {
             let mut value = json!(report);
             value["ok"] = json!(true);
+            // The owner reads the report in the app transcript: one supervisor row per report,
+            // keyed by its wake event so a replayed report never stores a second copy.
+            let stored = ferryx_hub::supervisor::transcript::store_report(
+                &hub.pool,
+                &report.wake_event_id,
+                &body,
+                ferryx_hub::supervisor::transcript::now_ms(),
+            )
+            .await;
+            if let Err(failure) = stored {
+                tracing::warn!(%failure, "a worker report was not stored in the app transcript");
+            }
             value
         }
         Err(error) => json!({"ok": false, "code": error.code(), "message": error.to_string()}),
@@ -1303,6 +1387,19 @@ pub async fn supervisor_worker_report((session_id, event_id, body): (String, Str
 /// True once this daemon opened the hub, so the Supervisor view has lanes to show.
 pub fn supervisor_available() -> bool {
     supervisor_view().is_some()
+}
+
+/// Tells every Supervisor view to read again after a worker report was accepted and stored.
+/// A refused report (`ok: false`) stored nothing, so it announces nothing. Returns whether it did.
+pub fn announce_worker_report(state: &RemoteGatewayState, reply: &Value) -> bool {
+    if reply.get("ok").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
+        json!({ "supervisorReport": true }),
+    );
+    true
 }
 
 hub_slot! {
@@ -2232,6 +2329,8 @@ async fn close_for_staged_swap(
         return Ok(false);
     }
     seal_staged_database(incoming.clone()).await?;
+    // Nothing may keep using the stores of the pool about to close.
+    panel_autonomy::uninstall();
     // Resolves once every connection of the old pool is closed, so the swap can rename the file.
     ferryx_hub::storage::close_fully(pool).await;
     Ok(true)
@@ -2261,6 +2360,7 @@ async fn promote_generation() -> Option<Generation> {
                 }
                 launch.hub = hub;
                 publish_hub(&launch, &running);
+                panel_autonomy::install(&launch).await;
                 tracing::info!(path = %database.display(), "hub reopened on the staged database");
             }
             Err(error) => {
@@ -3106,6 +3206,180 @@ pub async fn set_lane_paused_gated(
     Ok(changed)
 }
 
+/// Capability a daemon advertises once it serves the direct supervisor controls: the global
+/// pause, the enablement settings and the action undo (`SupervisorGlobalPause`,
+/// `SupervisorSettings`, `SupervisorActionUndo`, `AgentControlEnableOwner`).
+pub const SUPERVISOR_CONTROL_CAPABILITY: &str = "supervisorControlV1";
+
+/// Why a direct supervisor control did not run.
+#[derive(Debug, thiserror::Error)]
+pub enum SupervisorControlError {
+    #[error("the supervisor hub is not open in this daemon")]
+    Unavailable,
+    /// Enabling is bound to the owner's home, and neither `OMO_HOME` nor a home directory is set.
+    #[error("no owner home directory: set OMO_HOME or HOME")]
+    NoOwnerHome,
+    #[error("{0}")]
+    Storage(String),
+    #[error("{0}")]
+    Undo(ferryx_hub::supervisor::undo::UndoError),
+}
+
+impl SupervisorControlError {
+    /// The stable wire code a refusal carries.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "SUPERVISOR_UNAVAILABLE",
+            Self::NoOwnerHome => "INVALID_REQUEST",
+            Self::Storage(_) => "INTERNAL",
+            Self::Undo(error) => error.code(),
+        }
+    }
+}
+
+/// The pool the direct controls read and write: the hub's, or the test hub's.
+async fn control_pool(
+    state: &RemoteGatewayState,
+) -> Result<ferryx_hub::goals::SqlitePool, SupervisorControlError> {
+    supervisor_service(state)
+        .await
+        .map(|(pool, _, _)| pool)
+        .map_err(|_| SupervisorControlError::Unavailable)
+}
+
+fn control_storage(error: impl std::fmt::Display) -> SupervisorControlError {
+    SupervisorControlError::Storage(error.to_string())
+}
+
+/// The owner pauses (`true`) or resumes (`false`) every supervisor action at once. This is the
+/// hub-wide flag ([`ferryx_hub::control::set_paused`]), not one lane's pause. It never goes
+/// through the engine and never touches a PTY. Returns whether the flag changed.
+pub async fn set_supervisor_paused(
+    state: &RemoteGatewayState,
+    paused: bool,
+    by: &str,
+) -> Result<bool, SupervisorControlError> {
+    let pool = control_pool(state).await?;
+    let was = ferryx_hub::control::is_paused(&pool).await.map_err(control_storage)?;
+    ferryx_hub::control::set_paused(&pool, paused).await.map_err(control_storage)?;
+    tracing::info!(by, paused, "supervisor pause changed");
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
+        json!({ "paused": paused, "by": by }),
+    );
+    Ok(was != paused)
+}
+
+/// The persisted supervisor settings as the owner sees them. `enabled` is the effective answer:
+/// the owner turned it on AND this daemon resolves the same owner home (`OMO_HOME`, else
+/// `<home>/.omo`). `requested` is the stored switch alone. `removeAll` defaults off.
+/// With `enabled` set, the switch is saved first (stamping the current owner home).
+pub async fn supervisor_settings(
+    state: &RemoteGatewayState,
+    enabled: Option<bool>,
+) -> Result<Value, SupervisorControlError> {
+    use ferryx_hub::supervisor::settings;
+    let pool = control_pool(state).await?;
+    let home = settings::current_owner_home();
+    if let Some(enabled) = enabled {
+        let home = home.as_deref().ok_or(SupervisorControlError::NoOwnerHome)?;
+        settings::set_enabled(&pool, enabled, home).await.map_err(control_storage)?;
+        crate::remote::server::agent_control_service::publish_supervisor_changed(
+            state,
+            json!({ "enabled": enabled }),
+        );
+    }
+    let saved = settings::load(&pool).await.map_err(control_storage)?;
+    let effective = settings::is_enabled(&pool, home.as_deref()).await.map_err(control_storage)?;
+    Ok(json!({
+        "enabled": effective,
+        "requested": saved.enabled,
+        "removeAll": saved.remove_all,
+        "ownerHome": saved.owner_home,
+        "currentOwnerHome": home,
+    }))
+}
+
+/// Whether an undo handle of this kind belongs to the autonomy service (an autonomous answer
+/// taken back) rather than the action log and rule store (`restoreRule`).
+fn undo_belongs_to_autonomy(kind: &str) -> bool {
+    kind == ferryx_hub::supervisor::autonomy::RESTORE_DECISION
+}
+
+/// The one hub an undo acts on: its pool and the autonomy service opened over that same hub,
+/// both resolved before anything is read. A standby, a daemon without a hub, or a hub whose
+/// autonomy service is not open is `SUPERVISOR_UNAVAILABLE`. The routes' test hub is a hub with
+/// no autonomy service: only its rule undo runs.
+fn undo_hub(
+    state: &RemoteGatewayState,
+) -> Result<
+    (ferryx_hub::goals::SqlitePool, Option<Arc<ferryx_hub::supervisor::autonomy::Autonomy>>),
+    SupervisorControlError,
+> {
+    if standby_refusal().is_some() {
+        return Err(SupervisorControlError::Unavailable);
+    }
+    #[cfg(test)]
+    if let Some((pool, _)) = state.supervisor_test_hub.read().clone() {
+        return Ok((pool, None));
+    }
+    let _ = state;
+    let (hub, _) = supervisor_view().ok_or(SupervisorControlError::Unavailable)?;
+    let autonomy = panel_autonomy::installed_for(&hub).ok_or(SupervisorControlError::Unavailable)?;
+    Ok((hub.pool.clone(), Some(autonomy)))
+}
+
+/// The panel's Undo on one action-log line: runs the entry's undo handle. `restoreDecision`
+/// goes to the installed autonomy service (it reopens the decision card); every other kind goes
+/// through the T2 action log and rule store (`restoreRule`). Both clear the handle once, so a
+/// second undo is `NOT_FOUND`. A handle nobody can reverse is `UNSUPPORTED`; a spent or missing
+/// one is `NOT_FOUND`; a hub without its autonomy service is `SUPERVISOR_UNAVAILABLE`, checked
+/// before the log is read (see [`undo_hub`]).
+pub async fn undo_supervisor_action(
+    state: &RemoteGatewayState,
+    id: i64,
+) -> Result<(), SupervisorControlError> {
+    use ferryx_hub::supervisor::panel_contract::ActionLog;
+    use ferryx_hub::supervisor::undo::{ActionUndo, LoggedUndo};
+    use ferryx_hub::supervisor::{activity::SqliteActionLog, rules::SqliteRuleStore};
+    let (pool, autonomy) = undo_hub(state)?;
+    let log = SqliteActionLog::new(pool.clone());
+    let decision = log
+        .list_today(0)
+        .await
+        .map_err(control_storage)?
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .and_then(|entry| entry.undo)
+        .is_some_and(|handle| undo_belongs_to_autonomy(&handle.kind));
+    if decision {
+        let autonomy = autonomy.ok_or(SupervisorControlError::Unavailable)?;
+        autonomy.undo(id).await.map_err(SupervisorControlError::Undo)?;
+        crate::remote::server::agent_control_service::publish_supervisor_changed(
+            state,
+            json!({ "actionId": id }),
+        );
+        return Ok(());
+    }
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64)
+    };
+    let rules = SqliteRuleStore::open(pool.clone(), now_ms()).await.map_err(control_storage)?;
+    let undo = LoggedUndo::new(
+        Arc::new(log),
+        Arc::new(rules),
+        Arc::new(now_ms),
+    );
+    undo.undo(id).await.map_err(SupervisorControlError::Undo)?;
+    crate::remote::server::agent_control_service::publish_supervisor_changed(
+        state,
+        json!({ "actionId": id }),
+    );
+    Ok(())
+}
+
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorGoal`.
 pub const SUPERVISOR_GOAL_CAPABILITY: &str = "supervisorGoalV1";
 
@@ -3414,6 +3688,117 @@ pub async fn supervisor_conversation(
     request::conversation(&pool, &context, project_id, after).await
 }
 
+/// Capability a daemon advertises once it serves `DaemonRequest::SupervisorConverseV1`.
+pub const SUPERVISOR_CONVERSE_CAPABILITY: &str = "supervisorConverseV1";
+
+/// The installed mhc engine as one app request's conversation: the turn registers the owner's
+/// message with `app_work::converse`, so the work tools the turn calls (submit and the session
+/// tools) act for the installation's owner and only while this turn is live.
+struct AppTurnEngine {
+    supervisor: ferryx_hub::meta::mhc_supervisor::MhcSupervisor,
+    request_id: String,
+    owner_text: String,
+}
+
+#[async_trait]
+impl ferryx_hub::supervisor::transcript::AppConversation for AppTurnEngine {
+    async fn converse(
+        &self,
+        scope: &ferryx_hub::meta::mhc_profile::ConversationScope,
+        message: &str,
+    ) -> Result<String, ferryx_hub::meta::mhc_fault::SupervisorFault> {
+        debug_assert_eq!(scope, &ferryx_hub::supervisor::app_work::app_scope());
+        ferryx_hub::supervisor::app_work::converse(&self.supervisor, &self.request_id, &self.owner_text, message).await
+    }
+}
+
+/// The supervisor conversation the app channel talks to for one request: the installed mhc
+/// engine, through the turn-token helper.
+fn app_conversation(
+    state: &RemoteGatewayState,
+    input: &ferryx_hub::supervisor::transcript::ConverseInput,
+) -> Option<Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>> {
+    #[cfg(test)]
+    if let Some(engine) = state.supervisor_test_engine.read().clone() {
+        return Some(engine);
+    }
+    let _ = state;
+    ferryx_hub::meta::mhc_supervisor::installed().map(|supervisor| {
+        Arc::new(AppTurnEngine {
+            supervisor,
+            request_id: input.request_id.clone(),
+            owner_text: input.text.trim().to_owned(),
+        }) as Arc<dyn ferryx_hub::supervisor::transcript::AppConversation>
+    })
+}
+
+/// The standing-rule store `supervisor_converse` writes rule changes to: the current hub's,
+/// once its autonomy service is installed. Without one a rule change is refused, never faked.
+fn rule_store(
+    state: &RemoteGatewayState,
+) -> Option<Arc<dyn ferryx_hub::supervisor::panel_contract::RuleStore>> {
+    #[cfg(test)]
+    if let Some(store) = state.supervisor_test_rules.read().clone() {
+        return Some(store);
+    }
+    let _ = state;
+    panel_autonomy::rule_store()
+}
+
+/// One owner message from the panel composer and the supervisor's reply, both stored in the app
+/// transcript. Without the engine nothing is stored and the answer is `MHC_NOT_RUNNING`.
+/// The reply tells the Supervisor views to refetch, and so does every row stored while the turn
+/// runs: the owner's message is announced at once, not after the whole turn.
+pub async fn supervisor_converse(
+    state: &RemoteGatewayState,
+    caller: SupervisorCaller,
+    input: ferryx_hub::supervisor::transcript::ConverseInput,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    use ferryx_hub::supervisor::request::RequestFailure;
+    use ferryx_hub::supervisor::transcript;
+    let (pool, owner, _) = supervisor_service(state).await?;
+    if owner.is_none() {
+        return Err(RequestFailure::new(
+            "UNAUTHORIZED",
+            "this installation has no single supervisor owner",
+        ));
+    }
+    let Some(engine) = app_conversation(state, &input) else {
+        return Err(RequestFailure::new(
+            "MHC_NOT_RUNNING",
+            "no mhc supervisor engine is installed in this daemon; nothing was stored",
+        ));
+    };
+    let rules = rule_store(state);
+    let announce = || {
+        let mut payload = json!({ "supervisorConverse": input.request_id });
+        if let SupervisorCaller::Remote { device_id } = &caller {
+            if let Some(fields) = payload.as_object_mut() {
+                fields.insert("by".into(), json!(format!("remote:{device_id}")));
+            }
+        }
+        crate::remote::server::agent_control_service::publish_supervisor_changed(state, payload);
+    };
+    let ctx = transcript::Converse {
+        pool: &pool,
+        engine: engine.as_ref(),
+        rules: rules.as_deref(),
+        flights: &state.supervisor_flights,
+        now: &transcript::now_ms,
+        changed: &announce,
+    };
+    transcript::converse(&ctx, &input).await
+}
+
+/// One page of the app transcript after `cursor` (a message id; 0 starts from the beginning).
+pub async fn supervisor_transcript(
+    state: &RemoteGatewayState,
+    cursor: i64,
+) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
+    let (pool, _, _) = supervisor_service(state).await?;
+    ferryx_hub::supervisor::transcript::page(&pool, cursor, ferryx_hub::supervisor::transcript::PAGE_LIMIT).await
+}
+
 /// The owner's native memory receipts with their provenance, read from the installed mhc
 /// engine. A closed hub is SUPERVISOR_UNAVAILABLE; a daemon without the engine is
 /// MEMORY_UNAVAILABLE, never an empty success.
@@ -3445,7 +3830,7 @@ pub const SUPERVISOR_READ_CAPABILITY: &str = "supervisorReadV1";
 /// The desktop's read of the unified supervisor besides the snapshot: the same conversation
 /// page and memory view the remote `GET /api/v1/supervisor/{conversation,memory}` routes serve.
 pub async fn supervisor_read(
-    state: &RemoteGatewayState,
+    state: &Arc<RemoteGatewayState>,
     request: crate::daemon::protocol::SupervisorReadAction,
 ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
     use crate::daemon::protocol::SupervisorReadAction;
@@ -3454,8 +3839,171 @@ pub async fn supervisor_read(
             supervisor_conversation(state, SupervisorCaller::Desktop, &project_id, after.unwrap_or(0)).await
         }
         SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
+        SupervisorReadAction::Transcript { cursor } => supervisor_transcript(state, cursor.unwrap_or(0)).await,
+        SupervisorReadAction::Panel => Ok(json!(supervisor_panel(state).await)),
+        SupervisorReadAction::Fleet => Ok(json!({ "sessions": panel_autonomy::fleet_sessions(state).await })),
         SupervisorReadAction::Role => Ok(supervisor_role()),
     }
+}
+
+/// The label the panel shows for this computer.
+const LOCAL_FLEET_LABEL: &str = "This computer";
+
+/// The panel's log window: action entries updated in the last day.
+const PANEL_LOG_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// This computer's sessions in the fleet shape (`GET /api/v1/fleet/sessions`).
+///
+/// This computer only, mapped exactly as the hub's `fleet::merge_sessions` maps one machine of
+/// many. A failed local list is a stale, empty machine rather than an error. Readers of the
+/// whole fleet use [`panel_autonomy::fleet_sessions`], which adds the paired hosts.
+pub async fn local_fleet_sessions(state: &Arc<RemoteGatewayState>) -> Vec<ferryx_hub::supervisor::panel_contract::FleetSession> {
+    let host_id = crate::remote::reference_chat::files::reference_host_id();
+    let entry = match crate::remote::server::agent_control_service::handle(state, AgentControlOp::List).await {
+        Ok(result) => ferryx_hub::fleet::InventoryEntry {
+            host_id: host_id.clone(),
+            sessions: result
+                .get("sessions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            error: None,
+            stale: false,
+        },
+        Err(error) => ferryx_hub::fleet::InventoryEntry {
+            host_id: host_id.clone(),
+            sessions: Vec::new(),
+            error: Some(error.message),
+            stale: true,
+        },
+    };
+    let labels = std::collections::HashMap::from([(host_id, LOCAL_FLEET_LABEL.to_string())]);
+    ferryx_hub::fleet::merge_sessions(&labels, &[entry], unix_ms())
+}
+
+/// One local session in the fleet shape, read now, with its pending prompt and last assistant
+/// line. Only owner-scoped event frames carry it.
+pub async fn local_fleet_session(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+) -> Option<ferryx_hub::supervisor::panel_contract::FleetSession> {
+    let read = crate::remote::server::agent_control_service::handle(
+        state,
+        AgentControlOp::Read { session_id: session_id.to_string() },
+    )
+    .await
+    .ok()?;
+    let entry = read.get("session")?.clone();
+    let host_id = crate::remote::reference_chat::files::reference_host_id();
+    let one = ferryx_hub::fleet::InventoryEntry {
+        host_id: host_id.clone(),
+        sessions: vec![entry],
+        error: None,
+        stale: false,
+    };
+    let labels = std::collections::HashMap::from([(host_id, LOCAL_FLEET_LABEL.to_string())]);
+    ferryx_hub::fleet::merge_sessions(&labels, &[one], unix_ms()).pop()
+}
+
+/// The supervisor pause flag the panel reports. The pause route sets it.
+static PANEL_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Event types of the owner panel channel besides `panel.session` (see
+/// `docs/plans/SUPERVISOR_PANEL_CONTRACT.md`).
+pub const PANEL_DECISION_EVENT: &str = "panel.decision";
+pub const PANEL_ACTION_EVENT: &str = "panel.action";
+pub const PANEL_RULES_EVENT: &str = "panel.rules";
+
+/// Owner-scoped panel frames on their way to owner event sockets. The supervisor workers that
+/// own decisions, the action log and rules call the `publish_panel_*` functions below; the
+/// machine events socket forwards each frame to owner subscribers only, so a prompt body never
+/// reaches any other device. A frame with no subscriber is dropped: a client re-reads
+/// `GET /api/v1/supervisor/panel` when it connects.
+static PANEL_EVENTS: std::sync::LazyLock<tokio::sync::broadcast::Sender<Value>> =
+    std::sync::LazyLock::new(|| tokio::sync::broadcast::channel(256).0);
+
+/// A receiver of the owner panel frames published from now on.
+pub fn subscribe_panel_events() -> tokio::sync::broadcast::Receiver<Value> {
+    PANEL_EVENTS.subscribe()
+}
+
+/// An escalation appeared (`Some`) or was resolved (`None`) for `session_ref`.
+pub fn publish_panel_decision(
+    session_ref: &ferryx_hub::supervisor::panel_contract::SessionRef,
+    decision: Option<&ferryx_hub::supervisor::panel_contract::Escalation>,
+) {
+    let _ = PANEL_EVENTS.send(json!({
+        "type": PANEL_DECISION_EVENT,
+        "sessionRef": session_ref,
+        "decision": decision,
+    }));
+}
+
+/// One session's fresh fleet entry (`panel.session`), for a change that does not move its state
+/// word, such as the agent dying while its screen still shows work.
+pub fn publish_panel_session(session: &ferryx_hub::supervisor::panel_contract::FleetSession) {
+    let _ = PANEL_EVENTS.send(json!({
+        "type": "panel.session",
+        "sessionRef": session.session_ref,
+        "session": session,
+    }));
+}
+
+/// An action-log entry was created or updated in place.
+pub fn publish_panel_action(action: &ferryx_hub::supervisor::panel_contract::ActionEntry) {
+    let _ = PANEL_EVENTS.send(json!({ "type": PANEL_ACTION_EVENT, "action": action }));
+}
+
+/// The standing rules list changed; `rules` is the whole new list.
+pub fn publish_panel_rules(rules: &[ferryx_hub::supervisor::panel_contract::StandingRule]) {
+    let _ = PANEL_EVENTS.send(json!({ "type": PANEL_RULES_EVENT, "rules": rules }));
+}
+
+/// Sets the supervisor pause flag the panel reports.
+pub fn set_panel_paused(paused: bool) {
+    PANEL_PAUSED.store(paused, std::sync::atomic::Ordering::Release);
+}
+
+/// Whether the hub is open and its generation running in this daemon.
+async fn hub_running(state: &RemoteGatewayState) -> bool {
+    let Some((_, running)) = supervisor_view() else {
+        #[cfg(test)]
+        return state.supervisor_test_hub.read().is_some();
+        #[cfg(not(test))]
+        {
+            let _ = state;
+            return false;
+        }
+    };
+    running.lock().await.is_some() && !HUB_TASKS.is_retired()
+}
+
+/// Everything the Supervisor panel renders, in one snapshot. With no hub running it asks for
+/// setup (`setupRequired`); the fleet still lists this computer's sessions.
+pub async fn supervisor_panel(state: &Arc<RemoteGatewayState>) -> ferryx_hub::supervisor::panel_contract::PanelSnapshot {
+    let sessions = panel_autonomy::fleet_sessions(state).await;
+    // What the panel reads besides the fleet: the current hub's stores, or empty sections.
+    let sources = panel_autonomy::panel_sources();
+    // The pause the owner set is the hub's persisted flag; the in-process one only covers a
+    // daemon whose hub is not open.
+    let paused = match supervisor_service(state).await {
+        Ok((pool, _, _)) => ferryx_hub::control::is_paused(&pool).await.unwrap_or(false),
+        Err(_) => PANEL_PAUSED.load(std::sync::atomic::Ordering::Acquire),
+    };
+    ferryx_hub::fleet::assemble_panel(
+        &sources,
+        sessions,
+        paused,
+        hub_running(state).await,
+        unix_ms() - PANEL_LOG_WINDOW_MS,
+    )
+    .await
 }
 
 /// This daemon's supervisor role for a local reader: `standby` with the holder, or serving.
@@ -4053,6 +4601,9 @@ where
             None
         }
     };
+    // Autonomy first: the panel sources, the rule store and the engine's session tools exist
+    // before any generation (or the engine) can use them.
+    panel_autonomy::install(&launch).await;
     let lease = bound.as_ref().map(|(gate, _)| Arc::clone(gate));
     set_lease_gate(lease.clone());
     let standby = lease.as_ref().is_some_and(|lease| !lease.allows_hub());
@@ -4246,6 +4797,24 @@ fn spawn_supervisor_wakes(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
     tokio::spawn(scheduler.run(ferryx_hub::supervisor::wakes::wake_signal()))
 }
 
+/// The supervisor's recovery scheduler for this hub generation: it watches the fleet for
+/// upstream errors, quota stops and stalls, and retries goal lanes whose model hit a quota.
+/// Without an installed autonomy service there is nothing to run. The scheduler reads the
+/// owner's persisted pause itself, through the decision gate, on every tick.
+fn spawn_supervisor_recovery(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    let scheduler = panel_autonomy::recovery();
+    let quota = panel_autonomy::quota_recovery();
+    let pool = launch.hub.pool.clone();
+    let bridge = launch.bridge.clone();
+    tokio::spawn(async move {
+        let (Some(scheduler), Some(quota)) = (scheduler, quota) else {
+            return;
+        };
+        scheduler.set_loop_retry(Arc::new(panel_autonomy::GoalRetry::new(pool, bridge, quota)));
+        scheduler.run(std::time::Duration::from_secs(15)).await;
+    })
+}
+
 /// Forwards the store's goal-change announcements ([`ferryx_hub::supervisor::changes`]) to the
 /// desktop and phone Supervisor views as `supervisor_changed {goalId}`, so a goal the
 /// dispatcher, a worker receipt or the wake scheduler moved is refetched without an owner
@@ -4324,6 +4893,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
                             observation.session_id.clone(),
                         );
                     }
+                    panel_autonomy::observed(watch_server.remote_state(), &observation);
                     let run = state_run(&mut runs, &observation);
                     if let Err(error) = on_agent_event(&watch_hub, watch_bridge.as_ref(), &mut agents, omo_polled, run, observation).await {
                         tracing::debug!(%error, "hub observer event was not applied");
@@ -4346,6 +4916,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     tasks.push(spawn_supervisor_dispatcher(launch, idle));
     tasks.push(spawn_supervisor_change_forwarder(launch));
     tasks.push(spawn_supervisor_wakes(launch));
+    tasks.push(spawn_supervisor_recovery(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {
@@ -4435,12 +5006,23 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         // Every engine call (decision, convergence, conversation, ingest) is recorded with its
         // cause and usage in this hub's `supervisor_model_calls`.
         runtime.set_usage_sink(launch.hub.pool.clone()).await;
-        // Slack owner conversations call the typed work tools; admission acts only for the
-        // authenticated Slack turn in flight for the calling scope.
+        // The app conversation calls the typed work tools as the installation's owner
+        // (`AppWorkTools`, independent of Slack); Slack owner conversations go to the Slack
+        // handler, which acts only for the authenticated Slack turn in flight.
+        let sessions = panel_autonomy::session_tools();
+        let mut work_tools = ferryx_hub::supervisor::app_work::AppWorkTools::new(launch.hub.pool.clone());
+        if let Some(sessions) = &sessions {
+            work_tools = work_tools.with_sessions(sessions.clone());
+        }
         #[cfg(feature = "hub-slack")]
-        runtime.set_work_handler(std::sync::Arc::new(
-            ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone()),
-        ));
+        {
+            let mut slack = ferryx_hub::chat::slack_supervisor::SlackWorkTools::new(launch.hub.pool.clone());
+            if let Some(sessions) = sessions {
+                slack = slack.with_sessions(sessions);
+            }
+            work_tools = work_tools.with_fallback(std::sync::Arc::new(slack));
+        }
+        runtime.set_work_handler(std::sync::Arc::new(work_tools));
         tasks.push(tokio::spawn(runtime.clone().supervise()));
         // Automatic cutover and owner memory seeding run as this generation's task: only on
         // the lease holder, and a stand-down ends them with the generation.
@@ -4921,7 +5503,17 @@ fn settle_goal_turn(server: Arc<DaemonServer>, hub: Arc<Hub>, bridge: Arc<Daemon
             }
         };
         let judge = ferryx_hub::judge::Judge::from_config(ferryx_hub::judge::typesafe_from_env());
-        match ferryx_hub::goals::r#loop::on_turn_settled(&hub.pool, &judge, bridge.as_ref(), &lane_key, true).await {
+        let quota = panel_autonomy::quota_recovery();
+        match ferryx_hub::goals::r#loop::on_turn_settled_with(
+            &hub.pool,
+            &judge,
+            bridge.as_ref(),
+            &lane_key,
+            true,
+            quota.as_deref(),
+        )
+        .await
+        {
             Ok(Some(outcome)) => server.remote_state().emit_desktop_event(
                 crate::remote::server::agent_control_service::SUPERVISOR_CHANGED_EVENT,
                 json!({
@@ -5426,6 +6018,29 @@ mod tests {
             .filter_map(|entry| entry.ok())
             .any(|entry| entry.file_name().to_string_lossy().contains(".pre-move-"));
         assert!(!swapped, "the live database was not moved aside");
+    }
+
+    #[test]
+    fn only_an_accepted_worker_report_tells_the_views_to_read_again() {
+        let daemon = crate::daemon::server::DaemonServer::new_with_paths(None, None);
+        let state = daemon.remote_state();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let sink = Arc::clone(&seen);
+        state.set_desktop_event_sink(Arc::new(move |event, payload| {
+            sink.lock().unwrap().push((event.to_owned(), payload));
+        }));
+
+        let refused = json!({"ok": false, "code": "NOT_FOUND", "message": "not bound"});
+        assert!(!announce_worker_report(state, &refused));
+        assert!(!announce_worker_report(state, &json!({"laneKey": "x"})));
+        assert!(seen.lock().unwrap().is_empty(), "a refused report announces nothing");
+
+        let accepted = json!({"ok": true, "wakeEventId": "lane_event:3", "duplicate": false});
+        assert!(announce_worker_report(state, &accepted));
+        let events = seen.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, crate::remote::server::agent_control_service::SUPERVISOR_CHANGED_EVENT);
+        assert_eq!(events[0].1["supervisorReport"], true);
     }
 
     #[test]
@@ -6946,6 +7561,67 @@ mod tests {
         follower.abort();
     }
 
+    /// After a promotion reopens the hub on a staged database, the supervisor's autonomy, its
+    /// undo and its standing rules act on the reopened hub, not the closed standby pool: the
+    /// pause flag reads as set by the owner (not "unreadable, so paused"), the rules list, and
+    /// an autonomous answer's undo reaches autonomy over the new hub's log.
+    #[tokio::test]
+    async fn after_a_promotion_autonomy_undo_and_rules_act_on_the_reopened_hub() {
+        use ferryx_hub::supervisor::activity::SqliteActionLog;
+        use ferryx_hub::supervisor::panel_contract::{ActionEntry, ActionKind, ActionLog, SessionRef, UndoHandle};
+        use ferryx_hub::supervisor::undo::UndoError;
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("hub.sqlite");
+        let local = ferryx_hub::storage::connect(&database).await.unwrap();
+        let imported = ferryx_hub::storage::connect(&staged_database(&database).unwrap()).await.unwrap();
+        // Stopped, so the promotion reopens the hub and runs no generation.
+        ferryx_hub::control::mark_stopped(&imported).await.unwrap();
+        ferryx_hub::storage::close_fully(&imported).await;
+        let config = HubConfig { database_path: Some(database.clone()), ..HubConfig::default() };
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(local.clone(), config, &effects);
+        let state = Arc::clone(launch.server.remote_state());
+        panel_autonomy::install(&launch).await;
+        publish_hub(&launch, &Arc::new(tokio::sync::Mutex::new(None)));
+
+        assert!(promote_generation().await.is_none(), "the imported hub is stopped");
+
+        assert!(local.is_closed(), "the standby's pool was closed for the swap");
+        let (hub, _) = supervisor_view().unwrap();
+        assert!(!hub.pool.is_closed());
+        let autonomy = panel_autonomy::installed().expect("autonomy over the reopened hub");
+        assert!(!autonomy.gate().paused().await, "the pause flag is read from an open hub");
+        assert!(panel_autonomy::recovery().is_some());
+        let rules = rule_store(&state).expect("the reopened hub's rules");
+        assert_eq!(rules.list().await.unwrap().len(), 4, "the default rules of the reopened hub");
+        let stored = SqliteActionLog::new(hub.pool.clone())
+            .upsert_incident(ActionEntry {
+                id: 0,
+                incident_key: "answer-1".into(),
+                session_ref: Some(SessionRef::new("local", "s-1")),
+                kind: ActionKind::Answered,
+                summary: "Answered npm".into(),
+                basis: "you chose npm before".into(),
+                evidence: Vec::new(),
+                undo: Some(UndoHandle {
+                    kind: ferryx_hub::supervisor::autonomy::RESTORE_DECISION.into(),
+                    payload: json!({ "sessionRef": "local:s-1", "promptId": "p1", "screenRevision": "rev-1", "optionIndex": 0 }),
+                }),
+                live: false,
+                created_at_ms: 10,
+                updated_at_ms: 10,
+            })
+            .await
+            .unwrap();
+        // Autonomy over the reopened hub finds the entry; no answer of its own is on record, so
+        // the screen moved on (STALE), not a storage failure on a closed pool.
+        match undo_supervisor_action(&state, stored.id).await {
+            Err(SupervisorControlError::Undo(UndoError::Stale(id))) => assert_eq!(id, stored.id),
+            other => panic!("undo after a promotion answered {other:?}"),
+        }
+        hub.pool.close().await;
+    }
+
     /// Promotion with a staged database: the hub reopens on it before the first generation,
     /// which sees a goal that exists only in the imported database.
     #[tokio::test]
@@ -7302,5 +7978,92 @@ mod tests {
         assert!(*decisions.borrow(), "the holder generation was not stood down");
         follower.abort();
         set_lease_gate(None);
+    }
+
+    /// The desktop's Turn on where there is no control socket (Windows): `SupervisorHubStart`
+    /// over the daemon wire starts the stopped hub in process for the owner's own process, and
+    /// a second start reports it already ran. Starting clears the owner's Stop, so a connection
+    /// whose process is not identified (a pane could be behind it) is refused and the hub stays
+    /// stopped.
+    #[tokio::test]
+    async fn the_daemon_wire_hub_start_starts_the_stopped_hub_for_the_owner_only() {
+        use crate::daemon::supervisor_peer::PeerOrigin;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        set_lease_gate(None);
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::control::mark_stopped(&pool).await.unwrap();
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(pool.clone(), HubConfig::default(), &effects);
+        let running = Arc::new(tokio::sync::Mutex::new(None));
+        publish_hub(&launch, &running);
+        let server = Arc::clone(&launch.server);
+        let exchange = |origin: Option<PeerOrigin>| {
+            let server = Arc::clone(&server);
+            async move {
+                let (client, server_side) = tokio::io::duplex(64 * 1024);
+                let serving = tokio::spawn({
+                    let server = Arc::clone(&server);
+                    async move {
+                        match origin {
+                            Some(origin) => server.handle_client_with_origin(server_side, origin).await,
+                            None => server.handle_client(server_side).await,
+                        }
+                    }
+                });
+                let mut frame = json!({"type": "supervisorHubStart"});
+                if let Some(token) = server.transport_token() {
+                    frame["token"] = json!(token);
+                }
+                let (read_half, mut write_half) = tokio::io::split(client);
+                write_half.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+                let mut line = String::new();
+                tokio::io::BufReader::new(read_half).read_line(&mut line).await.unwrap();
+                serving.abort();
+                serde_json::from_str::<DaemonResponse>(line.trim()).unwrap()
+            }
+        };
+
+        match exchange(None).await {
+            DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("FORBIDDEN")),
+            other => panic!("an unidentified peer's start answered {other:?}"),
+        }
+        assert_eq!(effects.counts().2, 0, "a refused start runs nothing");
+        assert!(ferryx_hub::control::is_stopped(&pool).await.unwrap(), "the owner's stop stands");
+
+        let owner = own_process_origin().await;
+        assert!(matches!(owner, PeerOrigin::Process(_)), "{owner:?}");
+        match exchange(Some(owner)).await {
+            DaemonResponse::SupervisorControlOk { result } => assert_eq!(result, json!({"started": true})),
+            other => panic!("the owner's first start answered {other:?}"),
+        }
+        assert_eq!(effects.counts().2, 1, "one generation runs");
+        assert!(running.lock().await.is_some());
+        assert!(!ferryx_hub::control::is_stopped(&pool).await.unwrap(), "the owner's stop is cleared");
+        match exchange(Some(owner)).await {
+            DaemonResponse::SupervisorControlOk { result } => assert_eq!(result, json!({"started": false})),
+            other => panic!("the owner's second start answered {other:?}"),
+        }
+        assert_eq!(effects.counts().2, 1, "an already running hub is not started again");
+    }
+
+    /// This test process as the daemon identifies a peer: the kernel's process table on unix,
+    /// the owner of a real loopback connection on Windows.
+    async fn own_process_origin() -> crate::daemon::supervisor_peer::PeerOrigin {
+        #[cfg(unix)]
+        {
+            crate::daemon::supervisor_peer::identify(Some(std::process::id()))
+        }
+        #[cfg(windows)]
+        {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (client, accepted) = tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
+            let _client = client.unwrap();
+            let stream = accepted.unwrap().0;
+            let (peer, local) = (stream.peer_addr().unwrap(), stream.local_addr().unwrap());
+            tokio::task::spawn_blocking(move || crate::daemon::supervisor_peer_win::sys::identify(peer, local))
+                .await
+                .unwrap()
+        }
     }
 }

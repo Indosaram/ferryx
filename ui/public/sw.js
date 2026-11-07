@@ -80,6 +80,32 @@ self.addEventListener('fetch', (event) => {
 // carries only the agent name, worktree, state, title and body; `agent_id` is the backend
 // session id, so one notification per session is kept (tag) and a tap opens that session.
 const TEST_ALERT_TAG = 'ferryx-test';
+const DECISION_TAG = 'ferryx-decision';
+
+// A decision push carries its own deep link (`/?panel=decision&session=<sessionRef>`). Only a
+// path that resolves to this origin is followed: `//host` and `/\host` are what a browser reads
+// as another origin, and a control character is never part of a path we issued.
+function deepLink(data) {
+  const raw = typeof data.url === 'string' ? data.url : '';
+  if (!raw.startsWith('/') || /[\\\u0000-\u001f]/.test(raw)) return '';
+  try {
+    const url = new URL(raw, self.location.origin);
+    if (url.origin !== self.location.origin) return '';
+    return url.pathname + url.search + url.hash;
+  } catch (_) {
+    return '';
+  }
+}
+
+// A decision alert never falls back to `#session=`: its agent_id is a `<hostId>:<sessionId>`
+// ref, which the session route would read as a backend id and open the wrong (or no) session.
+const PANEL_URL = '/?panel=decision';
+
+function alertUrl(data, sessionId) {
+  const link = deepLink(data);
+  if (link) return link;
+  return data.state === 'decision' ? PANEL_URL : sessionUrl(sessionId);
+}
 
 function sessionUrl(sessionId) {
   return sessionId ? '/#session=' + encodeURIComponent(sessionId) : '/';
@@ -92,12 +118,16 @@ function notificationFromPush(payload) {
     title: typeof data.title === 'string' && data.title ? data.title : 'Ferryx',
     options: {
       body: typeof data.body === 'string' && data.body ? data.body : 'An agent on your computer needs you.',
-      tag: sessionId || TEST_ALERT_TAG,
+      tag: sessionId || (data.state === 'decision' ? DECISION_TAG : TEST_ALERT_TAG),
       renotify: true,
       icon: '/icon-192.png',
       badge: '/badge-mono.png',
       actions: sessionId ? [{ action: 'open', title: 'Open' }] : [],
-      data: { sessionId, state: typeof data.state === 'string' ? data.state : '', url: sessionUrl(sessionId) },
+      data: {
+        sessionId,
+        state: typeof data.state === 'string' ? data.state : '',
+        url: alertUrl(data, sessionId),
+      },
     },
   };
 }
@@ -120,12 +150,15 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const data = event.notification.data || {};
   const sessionId = typeof data.sessionId === 'string' ? data.sessionId : '';
-  const url = new URL(sessionUrl(sessionId), self.location.origin).href;
+  const decision = data.state === 'decision';
+  const path = alertUrl(data, sessionId);
+  const url = new URL(path, self.location.origin).href;
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windows) => {
       const open = windows.find((client) => new URL(client.url).origin === self.location.origin);
       if (open) {
-        if (sessionId) open.postMessage({ type: 'ferryx:open-session', sessionId });
+        if (decision) open.postMessage({ type: 'ferryx:open-url', url: path });
+        else if (sessionId) open.postMessage({ type: 'ferryx:open-session', sessionId });
         return open.focus();
       }
       return self.clients.openWindow(url);

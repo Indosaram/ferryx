@@ -1,5 +1,5 @@
-// The signed-in phone opens on the supervisor home; a lane opens its session screen, whose back
-// control (and the platform back) returns to that home. Account transport is faked at the tunnel.
+// The signed-in phone opens on the Supervisor panel (the setup card while no hub runs); "+" opens
+// the Worktrees screen. Account transport is faked at the tunnel.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -61,9 +61,11 @@ function fakeSocket(): TunnelWebSocket {
 }
 
 let supervisorCalls: string[] = [];
+let hubRunning = true;
 
 beforeEach(() => {
   supervisorCalls = [];
+  hubRunning = true;
   clearStoredAccountSessionToken();
   clearStoredAccountOrigin();
   remoteHostStore.reset();
@@ -121,7 +123,12 @@ beforeEach(() => {
       }
       if (path.startsWith("/api/v1/supervisor")) {
         supervisorCalls.push(`${init?.method ?? "GET"} ${path}`);
-        return path === "/api/v1/supervisor/pause" ? json({ laneKey: "lane-1", paused: true, changed: true }) : json(SUPERVISOR);
+        if (path === "/api/v1/supervisor/start") {
+          hubRunning = true;
+          return json({ started: true });
+        }
+        if (path === "/api/v1/supervisor/pause") return json({ laneKey: "lane-1", paused: true, changed: true });
+        return json({ ...SUPERVISOR, hub: { available: true, running: hubRunning } });
       }
       if (path.startsWith("/api/v1/workspace/state")) return json(WORKSPACE_STATE);
       if (path === "/api/v1/workspace/projects") {
@@ -173,49 +180,47 @@ afterEach(() => {
 });
 
 describe("RemoteApp phone home", () => {
-  it("opens on the Supervisor tab with the machine's lanes and no session chrome", async () => {
+  it("opens on the Supervisor panel with no tab bar, Inbox or lanes list", async () => {
     render(<RemoteApp />);
     const home = await screen.findByTestId("mobile-home");
-    expect(home).toHaveAttribute("data-destination", "supervisor");
-    expect(screen.getByTestId("mobile-home-tab-supervisor")).toHaveAttribute("aria-selected", "true");
-    const card = await screen.findByTestId("supervisor-lane-card", undefined, { timeout: 3000 });
-    expect(card).toHaveAttribute("data-machine-id", "mach-1");
-    expect(card).toHaveAttribute("data-lane-key", "lane-1");
-    expect(supervisorCalls).toContain("GET /api/v1/supervisor");
+    expect(home).toHaveAttribute("data-home", "panel");
     expect(screen.queryByTestId("mobile-top-bar")).toBeNull();
-  });
-
-  it("opens the lane's session without the tab bar and returns to the home with Back", async () => {
-    render(<RemoteApp />);
-    const open = await screen.findByTestId("supervisor-lane-open", undefined, { timeout: 3000 });
-    // The lane opens only once the machine has listed the session among the account options.
-    await waitFor(() => {
-      act(() => fireEvent.click(open));
-      expect(screen.queryByTestId("mobile-home")).toBeNull();
-    }, { timeout: 3000 });
-    expect(await screen.findByTestId("mobile-top-bar")).toBeInTheDocument();
+    // Nothing from the retired home is reachable.
     expect(screen.queryByTestId("mobile-home-tabs")).toBeNull();
-    // Supervised session: the strip sits under the top bar.
-    const strip = await screen.findByTestId("supervisor-session-strip", undefined, { timeout: 3000 });
-    expect(strip).toHaveAttribute("data-state", "watching");
-
-    // Back pops the pushed session entry with history.back(), whose popstate lands later; wait
-    // for it here so it cannot arrive inside the next test and flip that test's tab.
-    const popped = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
-    act(() => fireEvent.click(screen.getByTestId("mobile-session-back")));
-    await act(async () => { await popped; });
-    const home = await screen.findByTestId("mobile-home");
-    expect(home).toHaveAttribute("data-destination", "supervisor");
-    // The session stays open: the home offers a way back to it.
-    expect(within(home).getByTestId("mobile-home-resume")).toBeInTheDocument();
+    expect(screen.queryByTestId("inbox-home")).toBeNull();
+    expect(screen.queryByTestId("supervisor-lane-card")).toBeNull();
+    expect(screen.queryByTestId("supervisor-home")).toBeNull();
   });
 
-  it("switches destinations from the tab bar", async () => {
+  it("shows the one setup card, not the previous home, while no computer runs the supervisor", async () => {
     render(<RemoteApp />);
-    act(() => fireEvent.click(screen.getByTestId("mobile-home-tab-inbox")));
-    expect(await screen.findByTestId("inbox-home")).toBeInTheDocument();
-    act(() => fireEvent.click(screen.getByTestId("mobile-home-tab-worktrees")));
-    expect(await screen.findByTestId("worktrees-home")).toBeInTheDocument();
+    // This machine's snapshot names no supervisor identity and serves no panel route (404).
+    const card = await screen.findByTestId("setup-card", undefined, { timeout: 3000 });
+    expect(card).toHaveTextContent(/Turn on the supervisor on /);
+    for (const section of ["Needs you", "Handling", "Sessions"]) expect(screen.queryByRole("region", { name: section })).toBeNull();
+    // The setup card can render from the machine snapshot before the panel fetch is recorded,
+    // so this waits for the call instead of asserting on whatever the first paint captured.
+    await waitFor(() => expect(supervisorCalls).toContain("GET /api/v1/supervisor"));
+  });
+
+  it("turns the supervisor on through the hub start route on the one computer that can run it", async () => {
+    // The machine reports a hub that is available but not running.
+    hubRunning = false;
+    render(<RemoteApp />);
+    const card = await screen.findByTestId("setup-card", undefined, { timeout: 3000 });
+    await waitFor(() => expect(supervisorCalls).toContain("GET /api/v1/supervisor"));
+    await act(async () => fireEvent.click(within(card).getByRole("button", { name: "Turn on" })));
+    await waitFor(() => expect(supervisorCalls).toContain("POST /api/v1/supervisor/start"));
+  });
+
+  it("opens the Worktrees screen from + and returns to the panel", async () => {
+    render(<RemoteApp />);
+    const plus = await screen.findByTestId("phone-panel-start-session");
+    act(() => fireEvent.click(plus));
+    const start = await screen.findByTestId("mobile-home");
+    expect(start).toHaveAttribute("data-destination", "worktrees");
+    act(() => fireEvent.click(screen.getByTestId("phone-panel-start-back")));
+    expect(await screen.findByTestId("phone-supervisor-home")).toBeInTheDocument();
     act(() => fireEvent.click(screen.getByTestId("account-open")));
     expect(await screen.findByTestId("account-delete-open")).toBeInTheDocument();
   });

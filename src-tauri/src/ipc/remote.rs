@@ -654,6 +654,42 @@ fn sanitize_session_id(value: Option<String>) -> Option<String> {
     }
 }
 
+/// An exited pane's provider session, same shape a sessions row publishes. A path-like or
+/// control-bearing id is dropped rather than failing the whole selection.
+fn sanitize_published_provider_session(
+    session: Option<crate::daemon::protocol::AgentProviderSession>,
+) -> Option<crate::daemon::protocol::AgentProviderSession> {
+    let session = session?;
+    let id = session.id.trim();
+    if !crate::agent_transcript::is_valid_session_id(id) {
+        return None;
+    }
+    let transcript_path = session.transcript_path.as_deref().and_then(|path| {
+        let trimmed = path.trim();
+        if trimmed.is_empty()
+            || trimmed.len() > 4096
+            || trimmed.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let path = std::path::Path::new(trimmed);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return None;
+        }
+        Some(trimmed.to_string())
+    });
+    Some(crate::daemon::protocol::AgentProviderSession {
+        key: session.key,
+        id: id.to_string(),
+        transcript_path,
+        launcher: session.launcher,
+    })
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_set_active_selection<R: tauri::Runtime>(
@@ -713,6 +749,8 @@ pub async fn cmd_remote_set_active_selection<R: tauri::Runtime>(
                     worktree_slug: sanitize_worktree_text(tab.worktree_slug),
                     worktree_label: sanitize_worktree_text(tab.worktree_label),
                     session_id: sanitize_session_id(tab.session_id),
+                    running: tab.running,
+                    provider_session: sanitize_published_provider_session(tab.provider_session),
                 })
                 .collect(),
         })
@@ -756,6 +794,23 @@ pub async fn cmd_remote_set_window_focused(
         RemoteGatewayManagerInner::State { state, .. } => {
             state.set_desktop_window_focused(focused);
             Ok(())
+        }
+    }
+}
+
+/// Mutes or unmutes phone push for one session (`<hostId>:<sessionId>`). The session still
+/// shows in the panel; only its decision pushes stop.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_session_mute(
+    manager: State<'_, Arc<RemoteGatewayManager>>,
+    session_ref: String,
+    muted: bool,
+) -> Result<(), IpcError> {
+    match &manager.inner {
+        RemoteGatewayManagerInner::Daemon(client) => client.session_mute(&session_ref, muted).await,
+        RemoteGatewayManagerInner::State { state, .. } => {
+            state.set_session_push_muted(&session_ref, muted).await
         }
     }
 }

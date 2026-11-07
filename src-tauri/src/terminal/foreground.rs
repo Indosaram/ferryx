@@ -373,19 +373,10 @@ const INLINE_CODE_FLAGS: [&str; 3] = ["-c", "-e", "--eval"];
 /// Entry-point basenames too generic to name an agent on their own (`dist/bundle/cli.js`).
 const GENERIC_ENTRY_POINTS: [&str; 3] = ["cli", "index", "main"];
 
-/// Package directories that identify the agent behind a generic entry point. Order matters:
-/// omo runs the senpi bundle with an `omo-ai` extension, so `omo-ai` must win over senpi.
-const PACKAGE_AGENTS: [(&str, &str); 4] = [
-    ("omo-ai", "omo"),
-    ("@code-yeongyu/senpi", "pi"),
-    ("oh-my-pi", "omp"),
-    ("omp", "omp"),
-];
-
 /// The agent a generic entry point belongs to: the first package directory that appears as
 /// whole path segments anywhere in the argument list, with either path separator.
 fn package_agent(tokens: &[&str]) -> Option<&'static str> {
-    PACKAGE_AGENTS.iter().find_map(|&(package, agent)| {
+    package_agents().iter().find_map(|&(package, agent)| {
         let expected: Vec<&str> = package.split('/').collect();
         tokens
             .iter()
@@ -402,27 +393,29 @@ fn package_agent(tokens: &[&str]) -> Option<&'static str> {
     })
 }
 
-/// Agent executable or entry-point names, lowercase because the comparison ignores case.
-const AGENT_NAMES: [&str; 18] = [
-    "claude",
-    "codex",
-    "omo",
-    "opencode",
-    "cursor-agent",
-    "agent",
-    "gjc",
-    "grok",
-    "kimi",
-    "copilot",
-    "cline",
-    "antigravity",
-    "agy",
-    "pi",
-    "omp",
-    "aider",
-    "crush",
-    "droid",
-];
+/// Package directories that identify the agent behind a generic entry point, in table order:
+/// omo runs the senpi bundle with an `omo-ai` extension, so `omo-ai` must come before senpi.
+fn package_agents() -> Vec<(&'static str, &'static str)> {
+    crate::agent_detect::registry::AGENTS
+        .iter()
+        .flat_map(|spec| {
+            spec.package_names
+                .iter()
+                .map(move |package| (*package, spec.id))
+        })
+        .collect()
+}
+
+/// Agent executable or entry-point names, lowercase because the comparison ignores case. The
+/// registry is the single source: a new agent appears in pane detection by being added there.
+fn agent_names() -> Vec<&'static str> {
+    // Only `command_names`: an `argv_only_names` entry is a binary the agent's CLI shares with an
+    // unrelated program (cursor's editor), so a pane running it is not this agent.
+    crate::agent_detect::registry::AGENTS
+        .iter()
+        .flat_map(|spec| spec.command_names.iter().copied())
+        .collect()
+}
 
 /// The agent name a launcher binary is recognized by, mapped to the agent id the rest of Ferryx
 /// uses (discovery, resume, machine admission). cursor's binary is `agent` or `cursor-agent`,
@@ -430,8 +423,9 @@ const AGENT_NAMES: [&str; 18] = [
 fn canonical_agent_name(matched: &'static str) -> &'static str {
     match matched {
         "agent" => "cursor-agent",
-        "agy" => "antigravity",
-        other => other,
+        other => crate::agent_detect::registry::resolve(other)
+            .map(|spec| spec.id)
+            .unwrap_or(other),
     }
 }
 
@@ -467,7 +461,7 @@ pub(crate) fn agent_identity(command: &str) -> Option<&'static str> {
         program
     };
     let name = agent_name(candidate);
-    AGENT_NAMES
+    agent_names()
         .iter()
         .copied()
         .find(|known| name.eq_ignore_ascii_case(known))

@@ -235,6 +235,13 @@ test('setup discovery validates persisted launch provenance and exact live ident
     inspect: async () => ({ ...gui, exited: false, processStart: 'replaced' }),
   }), /exact live identity/);
   assert.equal(scripts.length, 2);
+  const geometry = { probe: 'setup-bounds', frontPid: gui.pid,
+    bounds: { x: 80, y: 70, width: 1280, height: 880 }, screen: { width: 1920, height: 1080 } };
+  const boundsDeps = { ...deps, run: async () => JSON.stringify(geometry) };
+  assert.deepEqual(await inspectSetupTarget({ ...request, boundsOnly: true }, boundsDeps), geometry);
+  await assert.rejects(inspectSetupTarget({ ...request, boundsOnly: true }, {
+    ...boundsDeps, run: async () => JSON.stringify({ ...geometry, frontPid: gui.pid + 1 }),
+  }), /not foreground/);
 });
 
 test('setup refusal exports raw probes, candidates and exact rejection conditions from the owned profile', async () => {
@@ -688,9 +695,9 @@ function fixture() {
   const spec = { worktreeRoot: '/checkout/worktrees', worktree: '/checkout/worktrees/recovery', profile,
     binary: '/checkout/worktrees/recovery/bin/ferryx', binarySha256: 'hash', runId: 'run-1',
     operationId: 'op-1', candidate: 'candidate-1', hostId: 'host-1', receiptPath: `${profile}/receipts/gui-launch.json`,
-    env: { FERRYX_QA_ISOLATED: '1', FERRYX_DATA_DIR: `${profile}/data`, FERRYX_RUNTIME_DIR: `${profile}/runtime`,
-      FERRYX_SESSION_DIR: `${profile}/session`, FERRYX_QA_BARRIER_DIR: `${profile}/barriers`,
-      FERRYX_QA_RUN_ID: 'run-1', FERRYX_QA_OPERATION_ID: 'op-1', HOME: `${profile}/home`, USERPROFILE: `${profile}/home` } };
+    env: { FERRYX_QA_ISOLATED: '1', FERRYX_DATA_DIR: join(profile, 'data'), FERRYX_RUNTIME_DIR: join(profile, 'runtime'),
+      FERRYX_SESSION_DIR: join(profile, 'session'), FERRYX_QA_BARRIER_DIR: join(profile, 'barriers'),
+      FERRYX_QA_RUN_ID: 'run-1', FERRYX_QA_OPERATION_ID: 'op-1', HOME: join(profile, 'home'), USERPROFILE: join(profile, 'home') } };
   const child = Object.assign(new EventEmitter(), { pid: 71 });
   const killed = [];
   child.kill = (signal) => { killed.push({ pid: child.pid, signal }); return true; };

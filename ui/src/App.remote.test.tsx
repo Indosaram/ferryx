@@ -123,6 +123,8 @@ function seed(projects: RegisteredProject[], active = projects[0]?.workspaceId) 
   if (active) localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, active);
 }
 async function mount() { await act(async () => { render(<App />); }); }
+// The sidebar opens on the Supervisor panel; the project tree is one tab away.
+async function showWorktrees() { await act(async () => { fireEvent.click(screen.getByRole("tab", { name: "Worktrees" })); }); }
 // 7e8fdfb7 uses detailed spawn for new tabs so their durable identity is available immediately.
 beforeEach(() => {
   localStorage.clear(); resetWorkspaceRestore(); vi.clearAllMocks(); hosts.current = [];
@@ -502,6 +504,7 @@ describe("App SSH project lifecycle", () => {
     native.spawnTerminalDetailed.mockReturnValueOnce(spawn.promise);
 
     // When the user selects the SSH root, each unresolved stage stays busy.
+    await showWorktrees();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand repo (build)" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: /repo build|\/srv\/repo SSH root/ })); });
     expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
@@ -564,6 +567,7 @@ describe("App SSH project lifecycle", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New Terminal" })); });
 
     // When: the user switches project before the spawn returns, so the new tab is discarded.
+    await showWorktrees();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "other" })); });
     await act(async () => {
       spawn.resolve({ sessionId: "late", daemonEpoch: "epoch", session: { sessionId: "late", incarnation: "life:late", cwd: "/local", cols: 80, rows: 24, running: true } });
@@ -580,6 +584,7 @@ describe("App SSH project lifecycle", () => {
     native.registerRemoteProject.mockReturnValueOnce(registration.promise);
     await mount();
     expect(screen.getByTestId("ssh-workspace-status")).toHaveAttribute("aria-busy", "true");
+    await showWorktrees();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "local" })); });
     await act(async () => {
       registration.reject({ code: "SSH_CONNECT_FAILED", message: "Connection refused" });
@@ -661,6 +666,7 @@ describe("App SSH project lifecycle", () => {
       ? [{ path: "C:/Users/sook", head: "", branch: "master", bare: false, detached: false, locked: null, prunable: null }]
       : []);
     await mount();
+    await showWorktrees();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand roblox-game-forge (build)" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "roblox-game-forge build" })); });
 
@@ -769,6 +775,7 @@ describe("App SSH project lifecycle", () => {
     const restore = deferred<null>();
     native.loadSession.mockReturnValueOnce(restore.promise);
     native.registerRemoteProject.mockReturnValueOnce(registration.promise);
+    await showWorktrees();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Expand repo (build)" })); });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "repo build" })); });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe(remote.workspaceId);
@@ -810,6 +817,7 @@ describe("App SSH project lifecycle", () => {
     const registration = deferred<RegisteredRemoteProject>();
     native.registerRemoteProject.mockReturnValue(registration.promise);
     await mount();
+    await showWorktrees();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "local" })); });
     await act(async () => { registration.resolve({ ...registered, workspaceId: "ssh:changed", repoRoot: "/remote/changed" }); await registration.promise; });
     expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("local");

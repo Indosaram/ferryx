@@ -5,22 +5,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { isStandbyRole } from "../../lib/supervisorModel";
-import type { SetupActions } from "../../lib/supervisorSetupModel";
 import type { SupervisorConnection, SupervisorMoveResult, UnifiedSupervisorClient, UnifiedSupervisorView } from "../../lib/unifiedSupervisor";
 import type { AccountConnection } from "../accountSession";
 import {
   adoptRemoteArchivedGoals,
   moveRemoteSupervisor,
-  adoptRemoteAll,
-  fetchRemoteDevicePermission,
   remoteUnifiedClient,
-  runRemoteSetup,
   setRemoteLanePaused,
   standbyHolderOf,
+  startRemoteSupervisor,
   SUPERVISOR_OFFLINE,
   useRemoteSupervisor,
   type AdoptArchivedResult,
-  type DevicePermission,
+  type HubStartResult,
   type LanePauseResult,
   type RemoteSupervisorLane,
   type SupervisorFetch,
@@ -45,11 +42,15 @@ export type PhoneSupervisor = {
   readonly moveHere: (machineId: string, force: boolean) => Promise<SupervisorMoveResult>;
   /** Adopts open goals of a standby machine's archived supervisor into the account supervisor. */
   readonly adoptArchived: (machineId: string, goalIds: readonly string[]) => Promise<AdoptArchivedResult>;
-  /** Setup actions for one machine; null unless this device has Control on it (view-only: text only). */
-  readonly setupActions: (machineId: string) => SetupActions | null;
+  /** Starts a stopped hub on a machine that may run the account supervisor (never a standby's). */
+  readonly startHub: (machineId: string) => Promise<HubStartResult>;
   readonly resync: (machineId?: string) => void;
+  /** One machine's request function, or null while no tunnel to it is open. */
+  readonly fetchFor: (machineId: string) => SupervisorFetch | null;
   /** The one account supervisor host, live or last seen; null before any machine named one. */
   readonly host: UnifiedHostView | null;
+  /** The account supervisor host as a list (`host` or nothing): a standby's own hub is never in it. */
+  readonly unified: UnifiedHostView[];
 };
 
 /** One supervisor host as the phone reaches it. `view` is the last one seen while it is not live. */
@@ -136,6 +137,22 @@ export function accountHost(
     view,
     client: connection === "live" ? clientFor(holderId) : null,
   };
+}
+
+/**
+ * The supervisor hosts the panel may pin: the one account host. Older daemons report no lease
+ * role, so while none does every live machine naming a supervisor claims it, and several
+ * claimants pin nothing rather than guessing one.
+ */
+export function panelClaimants(machines: readonly SupervisorMachineView[], host: UnifiedHostView | null): UnifiedHostView[] {
+  if (!host) return [];
+  if (machines.some((machine) => machine.snapshot?.hub.role != null)) return [host];
+  const others = machines.flatMap((machine): UnifiedHostView[] => {
+    const view = machine.snapshot?.supervisor;
+    if (machine.machineId === host.machineId || machine.state !== "ok" || !view?.identity) return [];
+    return [{ machineId: machine.machineId, label: machine.label, connection: "live", error: null, view, client: null }];
+  });
+  return [host, ...others];
 }
 
 export function usePhoneSupervisor({ enabled, discovery, active, bus }: PhoneSupervisorInput): PhoneSupervisor {
@@ -261,48 +278,21 @@ export function usePhoneSupervisor({ enabled, discovery, active, bus }: PhoneSup
     [fetchFor, resync],
   );
 
-  // This device's permission per machine, read once per link; unknown never offers a change.
-  const [permissions, setPermissions] = useState<Readonly<Record<string, DevicePermission | null>>>({});
-  const setupNeeded = machines.filter((machine) => machine.snapshot?.setup && machine.snapshot.setup.nextAction !== "none");
-  const permissionKey = setupNeeded.map((machine) => `${machine.machineId}:${fetchFor(machine.machineId) ? "1" : "0"}`).join("|");
-  const permissionInputs = useRef({ setupNeeded, fetchFor });
-  permissionInputs.current = { setupNeeded, fetchFor };
-  useEffect(() => {
-    let live = true;
-    const inputs = permissionInputs.current;
-    for (const machine of inputs.setupNeeded) {
-      const fetchLike = inputs.fetchFor(machine.machineId);
-      if (!fetchLike) continue;
-      void fetchRemoteDevicePermission(fetchLike).then((permission) => {
-        if (live) setPermissions((prev) => (prev[machine.machineId] === permission ? prev : { ...prev, [machine.machineId]: permission }));
-      });
-    }
-    return () => {
-      live = false;
-    };
-  }, [permissionKey]);
-
-  const setupActions = useCallback(
-    (machineId: string): SetupActions | null => {
-      const linked = fetchFor(machineId);
-      if (!linked || permissions[machineId] !== "control") return null;
-      // Setup runs on the lease holder only: a standby's 409 names the holder and switches to it.
-      const fetchLike = watchStandby(linked);
-      return {
-        run: async (opts) => {
-          const result = await runRemoteSetup(fetchLike, opts);
-          resync(machineId);
-          return result;
-        },
-        adopt: async () => {
-          const result = await adoptRemoteAll(fetchLike);
-          resync(machineId);
-          return result;
-        },
-      };
+  const startHub = useCallback(
+    async (machineId: string): Promise<HubStartResult> => {
+      const fetchLike = fetchFor(machineId);
+      if (!fetchLike) {
+        return { kind: "error", code: SUPERVISOR_OFFLINE, message: "This computer is not connected right now.", status: null };
+      }
+      // A standby's 409 names the holder, so the home switches to it.
+      const result = await startRemoteSupervisor(watchStandby(fetchLike));
+      if (result.kind === "ok") resync(machineId);
+      return result;
     },
-    [fetchFor, permissions, resync, watchStandby],
+    [fetchFor, resync, watchStandby],
   );
 
-  return { machines, lanes: feed.lanes, now: feed.now, setPaused, moveHere, adoptArchived, setupActions, resync, host };
+  const unified = useMemo(() => panelClaimants(machines, host), [machines, host]);
+
+  return { machines, lanes: feed.lanes, now: feed.now, setPaused, moveHere, adoptArchived, startHub, resync, fetchFor, host, unified };
 }

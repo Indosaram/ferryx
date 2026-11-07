@@ -145,6 +145,15 @@ impl Fixture {
                 Err(err) => panic!("fixture session close failed for {session_id}: {err:?}"),
             }
         }
+        // The host's agent-stamp writer writes into `host/` after a batching window; it must be
+        // finished before the caller removes the directory.
+        let host_state = Arc::clone(&self.host_state);
+        crate::ipc::run_blocking(move || {
+            host_state.finish_agent_stamp_writer();
+            Ok(())
+        })
+        .await
+        .unwrap();
         self.tasks.shutdown().await;
     }
 }
@@ -514,6 +523,117 @@ async fn loopback_relay_round_trips_agent_control_list_send_and_read() {
                 .iter()
                 .any(|record| record.op == "send" && record.device_id != "owner"),
             "the remote send is audited with the paired device id: {audit:?}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    fixture.close().await;
+    outcome.unwrap();
+}
+
+/// The HTTP gateway's stop for a paired computer's pane, through a real paired host over the
+/// relay: the receipt names the paired host, the host typed the interrupt, and the gateway
+/// side wrote exactly one audit line, under the calling device (not "owner").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gateway_stop_for_a_paired_session_ref_is_forwarded_and_audited_once_under_the_device() {
+    let root = tempfile::tempdir().unwrap();
+    let host_root = root.path().join("remote-workspace");
+    std::fs::create_dir_all(&host_root).unwrap();
+    let host_root = std::fs::canonicalize(&host_root).unwrap();
+
+    let fixture = Fixture::new(root.path()).await.unwrap();
+    let outcome = async {
+        let host_view = fixture.pair().await?;
+        let workspace_id = register_workspace(&fixture.host_state, &host_root).await?;
+        let created = MachineClient::new()
+            .execute(
+                &fixture.paired_service,
+                OperationRequest {
+                    host_id: host_view.host_id.clone(),
+                    generation: host_view.generation,
+                    operation: Operation::CreateSession {
+                        request: m::CreateSessionRequest {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            workspace_id,
+                            worktree: None,
+                            cols: 80,
+                            rows: 24,
+                            inherit_from_session_id: None,
+                            cwd_relative: None,
+                            startup: m::Startup::Shell,
+                        },
+                    },
+                },
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("create session: {error:?}"))?;
+        let session = match created.result {
+            OperationResult::CreateSession(session) => session,
+            other => anyhow::bail!("expected a session, got {other:?}"),
+        };
+
+        // The desktop's own gateway, sharing the paired-host inventory the fixture paired.
+        let desktop_root = root.path().join("desktop-gateway");
+        let mut desktop = DaemonServer::new_with_paths(
+            Some(desktop_root.join("config")),
+            Some(desktop_root.join("auth")),
+        );
+        desktop.set_paired_hosts_for_test(fixture.paired_service.clone());
+        let state = Arc::clone(desktop.remote_state());
+        state.agent_control_policy.set_enabled(true);
+        let auth = &state.auth_manager;
+        let pin = auth
+            .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let (token, _) = auth
+            .exchange_pairing_code(&pin, "phone")
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let device = auth.validate_token(&token).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        state.agent_control_policy.restrict_to([device.id.clone()]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let router = crate::remote::server::create_remote_router(Arc::clone(&state));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()?
+            // A paired computer's id is a URL, so its ref is one percent-encoded path segment.
+            .post(format!(
+                "http://{addr}/api/v1/sessions/{}/stop",
+                url::form_urlencoded::byte_serialize(
+                    format!("{}:{}", host_view.host_id, session.target.session_id).as_bytes()
+                )
+                .collect::<String>()
+            ))
+            .bearer_auth(&token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("")
+            .send()
+            .await?;
+        let status = response.status().as_u16();
+        let body: serde_json::Value = response.json().await?;
+        server.abort();
+        anyhow::ensure!(status == 200, "{status}: {body}");
+        assert_eq!(body["receipt"]["stage"], "accepted", "{body}");
+        assert_eq!(body["receipt"]["target"]["hostId"], host_view.host_id, "the receipt names the paired host: {body}");
+
+        let audit = state.agent_control_audit.recent();
+        assert_eq!(audit.len(), 1, "exactly one gateway-side audit line: {audit:?}");
+        assert_eq!((audit[0].op.as_str(), audit[0].device_id.as_str(), audit[0].code.as_str()), ("stop", device.id.as_str(), "OK"));
+        assert!(audit[0].request_id.is_some(), "a request id was minted before the forward");
+        let host_stops: Vec<_> = fixture
+            .host_state
+            .agent_control_audit
+            .recent()
+            .into_iter()
+            .filter(|record| record.op == "stop")
+            .collect();
+        assert_eq!(host_stops.len(), 1, "the paired host executed exactly one stop: {host_stops:?}");
+        assert_eq!(
+            host_stops[0].request_id, audit[0].request_id,
+            "the id minted at the gateway is the id the host executed"
         );
         Ok::<_, anyhow::Error>(())
     }

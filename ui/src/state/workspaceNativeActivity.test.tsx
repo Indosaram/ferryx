@@ -4,7 +4,7 @@ import { clearWorkspaceSnapshot, getWorkspaceSnapshot } from "./workspaceSnapsho
 import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
 import { setLocalSplitPersistence } from "../lib/localSplitLifecycle";
 import { emitNativeTerminalPresentation, getDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "../lib/nativeTerminalLifecycle";
-import { noteObservationInteraction } from "../lib/notificationCenter/activityRecording";
+import { noteObservationInteraction } from "../lib/observationInteraction";
 
 import type { NativeTerminalAgentStatePayload, NativeTerminalBellPayload, NativeTerminalTitlePayload, Worktree } from "../lib/types";
 

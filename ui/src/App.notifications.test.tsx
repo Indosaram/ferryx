@@ -19,7 +19,7 @@ if (typeof window === "undefined") {
   globalThis.removeEventListener = dom.window.removeEventListener.bind(dom.window);
 }
 
-const { act, cleanup, fireEvent, render, renderHook, within } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import("@testing-library/react");
 const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
 
@@ -55,6 +55,13 @@ function deferred<T>() {
 const grantedPermission = {
   status: "granted" as const, granted: true, canRequest: false,
   canOpenSettings: true, description: "",
+};
+
+// The Supervisor panel's snapshot and event feed, which the collapsed sidebar's badge counts.
+const panel = {
+  load: vi.fn<() => Promise<import("./lib/supervisorPanel/contract").PanelSnapshot>>(),
+  subscribe: vi.fn<(handler: (event: import("./lib/supervisorPanel/contract").PanelEvent) => void) => Promise<() => void>>(),
+  handlers: [] as Array<(event: import("./lib/supervisorPanel/contract").PanelEvent) => void>,
 };
 
 const native = {
@@ -107,7 +114,6 @@ const native = {
   }),
 };
 
-const { noteObservationInteraction } = await import("./lib/notificationCenter/activityRecording");
 
 vi.mock("./lib/tauri", () => ({
   listExternalWorktrees: vi.fn(async () => []),
@@ -210,6 +216,8 @@ vi.mock("./lib/tauri", () => ({
   playNotificationSound: native.playNotificationSound,
   onNotificationActivated: native.onNotificationActivated,
   takeNotificationActivations: native.takeNotificationActivations,
+  getSupervisorPanel: panel.load,
+  onSupervisorPanelEvent: panel.subscribe,
 }));
 
 const workspaceStoreModule = await import("./state/workspaceStore");
@@ -229,6 +237,7 @@ const markTabUnread = vi.fn();
 const markWorktreeUnread = vi.fn();
 const markSessionActivitySeen = vi.fn();
 const dispatchWorkspaceAction = vi.fn();
+const adoptBackendSession = vi.fn();
 // The real store memoizes this callback. Recreating it per render would restart
 // restoration whenever the subscribed restore status changes.
 const restoreWorkspace = vi.fn();
@@ -259,7 +268,7 @@ const storeState = {
     ],
   },
   sessions: {
-    "sess-1": { id: "sess-1", cwd: "/repo/main", worktreePath: "/repo/main" },
+    "sess-1": { id: "sess-1", cwd: "/repo/main", worktreePath: "/repo/main", backendSessionId: "backend-sess-1" },
     "sess-2": { id: "sess-2", cwd: "/repo/feature", worktreePath: "/repo/feature" },
   },
   worktrees: [
@@ -285,20 +294,14 @@ vi.mock("./state/workspaceRuntime", () => ({
 
 let sidebarProps: {
   onResetAgentState?: (worktree: import("./lib/types").Worktree) => Promise<void>;
-  attention?: import("./components/Sidebar").SidebarAttention;
+  onFocusSupervisorSession?: (sessionRef: string) => void;
+  attention?: unknown;
 } = {};
 vi.mock("./components/Sidebar", () => ({
   SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY: "ferryx.sidebar.collapsedProjects",
   Sidebar: (props: typeof sidebarProps) => {
     sidebarProps = props;
-    const attention = props.attention;
-    return (
-      <div data-testid="mock-sidebar" data-inbox-open={String(attention?.inboxOpen ?? false)}>
-        {attention?.inboxOpen ? (
-          <AttentionInbox rows={attention.rows} onOpen={attention.onOpen} onDismiss={attention.onDismiss} />
-        ) : null}
-      </div>
-    );
+    return <div data-testid="mock-sidebar" />;
   },
 }));
 
@@ -322,10 +325,6 @@ vi.mock("./components/TerminalSplitView", () => ({
   },
 }));
 
-// The factory must not close over ordinary module-scope bindings: `vi.mock` is hoisted above
-// them, and `workspaceStore` now imports this store at module scope, so the factory runs before
-// a plain `const` would be initialised. `vi.hoisted` lifts the box alongside the mock.
-const inboxBox = vi.hoisted(() => ({ current: null as ReturnType<typeof import("./lib/notificationCenter/notificationCenterStore").createNotificationCenterStore> | null }));
 const flashedSessions = vi.hoisted(() => [] as string[]);
 const paneFlashSessions = () => [...flashedSessions];
 vi.mock("./lib/paneFlash", async (importOriginal) => ({
@@ -333,16 +332,8 @@ vi.mock("./lib/paneFlash", async (importOriginal) => ({
   flashPane: (sessionId: string) => { flashedSessions.push(sessionId); },
 }));
 
-vi.mock("./lib/notificationCenter/notificationCenterStore", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./lib/notificationCenter/notificationCenterStore")>();
-  if (!inboxBox.current) inboxBox.current = actual.createNotificationCenterStore();
-  return { ...actual, get notificationCenterStore() { return inboxBox.current!; } };
-});
-const inboxModule = await vi.importActual<typeof import("./lib/notificationCenter/notificationCenterStore")>("./lib/notificationCenter/notificationCenterStore");
-if (!inboxBox.current) inboxBox.current = inboxModule.createNotificationCenterStore();
-let inbox = inboxBox.current;
-const { notificationEntryId } = await import("./lib/notificationCenter/types");
-const { AttentionInbox } = await import("./features/ferryx/attention/AttentionInbox");
+const { emptyPanelSnapshot } = await import("./lib/supervisorPanel/emptySnapshot");
+const { panelSnapshotFixture } = await import("./lib/supervisorPanel/fixtures");
 const { App } = await import("./App");
 const { getWorkspaceRestoreStatus, resetWorkspaceRestore } = await import("./state/workspaceRestore");
 const { getWorkspaceSnapshot, setWorkspaceSnapshot, clearWorkspaceSnapshot } = await import("./state/workspaceSnapshotCache");
@@ -405,10 +396,15 @@ describe("App notification coordinator wiring", () => {
   beforeEach(() => {
     flashedSessions.length = 0;
     resetWorkspaceRestore();
-    inbox.dispose();
     localStorage.clear();
-    inbox = inboxModule.createNotificationCenterStore();
-    inboxBox.current = inbox;
+    panel.handlers.length = 0;
+    panel.load.mockReset();
+    panel.load.mockResolvedValue(emptyPanelSnapshot());
+    panel.subscribe.mockReset();
+    panel.subscribe.mockImplementation(async (handler) => {
+      panel.handlers.push(handler);
+      return () => undefined;
+    });
     sidebarProps = {};
     saveNotificationSettings({ enabled: true, terminalBell: true, agentTaskComplete: true });
     native.isTauriRuntime.mockReset();
@@ -459,6 +455,8 @@ describe("App notification coordinator wiring", () => {
     markWorktreeUnread.mockReset();
     markSessionActivitySeen.mockReset();
     dispatchWorkspaceAction.mockReset();
+    adoptBackendSession.mockReset();
+    adoptBackendSession.mockResolvedValue("tab-adopted");
     restoreWorkspace.mockReset();
     native.onNotificationActivated.mockClear();
     native.takeNotificationActivations.mockClear();
@@ -520,6 +518,7 @@ describe("App notification coordinator wiring", () => {
         };
       },
       dispatchWorkspaceAction,
+      adoptBackendSession,
     } as any));
   });
 
@@ -866,283 +865,217 @@ describe("App notification coordinator wiring", () => {
     expect(markWorktreeUnread).not.toHaveBeenCalled();
   });
 
-  describe("notification center recording and seen bridge", () => {
-    const target: ActivityNotificationTarget = {
-      workspaceId: "default", workspaceLabel: "Project", sessionId: "sess-1", tabId: "tab-1",
-      worktreePath: "/repo/main", worktreeLabel: "main", agentLabel: "Codex",
-      terminalTitle: "Task", state: "done",
+  describe("supervisor panel navigation and the collapsed badge", () => {
+    // A Supervisor panel row names its session `<hostId>:<backendSessionId>`; the desktop focuses
+    // the open pane behind it through the same path a notification uses. A session no open pane
+    // runs has a backend id nothing resolves, so its row can lead nowhere.
+    const openBackendIds: Record<string, string> = { "default/sess-1": "backend-sess-1", "other/sess-remote": "backend-other" };
+    const backendOf = (workspaceId: string, sessionId: string) =>
+      openBackendIds[`${workspaceId}/${sessionId}`] ?? `backend-gone-${workspaceId}-${sessionId}`;
+    const clickRow = async (workspaceId: string, sessionId: string) => {
+      await act(async () => { sidebarProps.onFocusSupervisorSession!(`mac:${backendOf(workspaceId, sessionId)}`); });
     };
-    const seedUnread = (workspaceId = "default", sessionId = "sess-1") => {
-      inbox.recordActivity({ workspaceId, sessionId, labels: {}, subject: "agent",
-        previousState: "working", state: "done", occurredAt: 100, observed: false });
-      return { workspaceId, sessionId, revision: inbox.getSnapshot().entries[0].revision };
-    };
-    const rowFor = (clicked: ReturnType<typeof seedUnread>) => {
-      const row = sidebarProps.attention?.rows.find(
-        (candidate) => candidate.workspaceId === clicked.workspaceId && candidate.sessionId === clicked.sessionId,
-      );
-      expect(row).toBeDefined();
-      return { ...row!, revision: clicked.revision };
-    };
-    const clickRow = async (clicked: ReturnType<typeof seedUnread>) => {
-      const row = rowFor(clicked);
-      await act(async () => { sidebarProps.attention!.onOpen(row); });
-    };
-    const openInbox = () => act(() => { sidebarProps.attention!.onInboxOpenChange(true); });
 
-    it("records focused observed done as seen despite the focus gate", async () => {
-      currentActivityTargets = [target];
-      // Focus alone no longer counts as observation - a window can be frontmost while the user
-      // reads on another monitor - so an actually-present user is seeded here.
-      noteObservationInteraction(Date.now());
+    it("focuses the pane behind a clicked panel row", async () => {
       await act(async () => { render(<App />); });
-      await nativeFocusTrackingReady;
-      nativeFocusChanged?.({ payload: true });
-      act(() => { emitActivityTargets(); });
-      expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({
-        workspaceId: "default", sessionId: "sess-1", reason: "done", subject: "agent",
-        labels: { workspaceLabel: "Project", worktreeLabel: "main", agentLabel: "Codex", terminalTitle: "Task" },
-        read: { seen: true, seenAt: expect.any(Number) },
-      })]);
-      expect(native.dispatchNotification).not.toHaveBeenCalled();
-    });
-
-    it("records unfocused done as unread independently of desktop dispatch outcome", async () => {
-      currentActivityTargets = [target];
-      const dispatchResult = deferred<import("./lib/types").DispatchNotificationResult>();
-      native.dispatchNotification.mockReturnValue(dispatchResult.promise);
-      await act(async () => { render(<App />); });
-      await nativeFocusTrackingReady;
-      nativeFocusChanged?.({ payload: false });
-      act(() => { emitActivityTargets(); });
-      expect(inbox.getSnapshot().entries[0]?.read).toEqual({ unread: true });
-      expect(native.dispatchNotification).toHaveBeenCalledTimes(1);
-      await act(async () => { dispatchResult.resolve({ submitted: true }); });
-    });
-
-    it("records focused background tabs as unread and rejects suppressed baseline events", async () => {
-      currentActivityTargets = [{ ...target, sessionId: "sess-2", tabId: "tab-2" },
-        { ...target, notificationSuppressed: true }];
-      await act(async () => { render(<App />); });
-      await nativeFocusTrackingReady;
-      nativeFocusChanged?.({ payload: true });
-      act(() => { emitActivityTargets(); });
-      expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({ sessionId: "sess-2", read: { unread: true } })]);
-      expect(native.dispatchNotification).not.toHaveBeenCalled();
-    });
-
-    it("records focused bells with fallback workspace identity and filters throttled bells", async () => {
-      await act(async () => { render(<App />); });
-      await nativeFocusTrackingReady;
-      nativeFocusChanged?.({ payload: true });
-      act(() => { emitTerminalBell(); emitTerminalBell(); });
-      expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({
-        workspaceId: "default", sessionId: "sess-1", reason: "bell", subject: "terminal",
-        revision: 1, read: { seen: true, seenAt: expect.any(Number) },
-      })]);
-      expect(native.dispatchNotification).not.toHaveBeenCalled();
-    });
-
-    it("acknowledges the clicked revision only after focusing a live target", async () => {
-      const clicked = seedUnread();
-      const acknowledge = vi.spyOn(inbox, "markEntriesRead");
-      await act(async () => { render(<App />); });
-      await clickRow(clicked);
+      await clickRow("default", "sess-1");
       expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
-      expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("default", "sess-1"), expectedRevision: clicked.revision }]);
-      expect(dispatchWorkspaceAction.mock.invocationCallOrder.at(-1)).toBeLessThan(acknowledge.mock.invocationCallOrder[0]);
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
-    });
-
-    it("does not acknowledge a newer occurrence when a stale revision is clicked", async () => {
-      const clicked = seedUnread();
-      await act(async () => { render(<App />); });
-      inbox.recordActivity({ workspaceId: "default", sessionId: "sess-1", labels: {}, subject: "agent",
-        previousState: "done", state: "waiting", occurredAt: 200, observed: false });
-      await clickRow(clicked);
-      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
-      expect(inbox.getSnapshot().entries[0]).toMatchObject({ revision: 2, read: { unread: true } });
+      expect(paneFlashSessions()).toEqual(["sess-1"]);
     });
 
     it.each([ ["ghost", "sess-1"], ["default", "closed"], ["other", "closed"] ])(
-      "drops a row whose target %s/%s is gone instead of navigating", async (workspaceId, sessionId) => {
+      "does not navigate when target %s/%s is gone", async (workspaceId, sessionId) => {
         seedTwoProjects();
         setWorkspaceSnapshot("other", parkedProjectSnapshot(null));
-        const clicked = seedUnread(workspaceId, sessionId);
-        const acknowledge = vi.spyOn(inbox, "markEntriesRead");
         await act(async () => { render(<App />); });
         dispatchWorkspaceAction.mockClear();
-        await clickRow(clicked);
+        await clickRow(workspaceId, sessionId);
         expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
-        expect(acknowledge).not.toHaveBeenCalled();
-        expect(inbox.getSnapshot().entries).toEqual([]);
-        expect(sidebarProps.attention?.rows).toEqual([]);
+        expect(paneFlashSessions()).toEqual([]);
       },
     );
 
-    it("acknowledges a cross-project click after the target workspace mounts", async () => {
+    // A session an agent or the supervisor started on this computer has no pane yet: its row
+    // attaches it as the active tab by backend id (nothing is spawned), instead of a dead end.
+    it("attaches a local daemon session that no pane shows as the active tab", async () => {
+      native.listTerminalSessions.mockResolvedValue([{ sessionId: "backend-new", worktreePath: null, running: true }]);
+      const info = vi.spyOn(toast, "info");
+      // Adoption waits for the active project's restore, like a window-move adoption does.
       seedTwoProjects();
-      setWorkspaceSnapshot("other", parkedProjectSnapshot("sess-remote"));
-      const clicked = seedUnread("other", "sess-remote");
-      const acknowledge = vi.spyOn(inbox, "markEntriesRead");
       await act(async () => { render(<App />); });
-      await clickRow(clicked);
-      expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("other");
-      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-remote" });
-      expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("other", "sess-remote"), expectedRevision: clicked.revision }]);
-      expect(dispatchWorkspaceAction.mock.invocationCallOrder.at(-1)).toBeLessThan(acknowledge.mock.invocationCallOrder[0]);
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+      await waitFor(() => expect(getWorkspaceRestoreStatus("default")).toBe("restored"));
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("local:backend-new"); });
+      await waitFor(() => expect(adoptBackendSession).toHaveBeenCalledTimes(1));
+      expect(adoptBackendSession).toHaveBeenCalledWith(
+        expect.objectContaining({ path: expect.any(String) }),
+        expect.objectContaining({ sessionId: "backend-new" }),
+        undefined,
+        { activate: true },
+      );
+      expect(info).not.toHaveBeenCalledWith("That session is not open on this computer");
+      info.mockRestore();
     });
 
-    it.each(["newer occurrence", "closed target"])("handles %s while a cross-project target is mounting", async (change) => {
+    it("keeps the dead end for another computer's session that no pane shows", async () => {
+      const info = vi.spyOn(toast, "info");
+      await act(async () => { render(<App />); });
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("mac:backend-elsewhere"); });
+      expect(info).toHaveBeenCalledWith("That session is not open on this computer");
+      expect(adoptBackendSession).not.toHaveBeenCalled();
+      info.mockRestore();
+    });
+
+    it("says a project must be open instead of waiting when no worktree can hold the tab", async () => {
+      seedTwoProjects();
+      setWorkspaceSnapshot("default", { ...parkedProjectSnapshot(null), workspaceId: "default", worktrees: [], activeWorktreePath: null });
+      native.listTerminalSessions.mockResolvedValue([{ sessionId: "backend-new", worktreePath: null, running: true }]);
+      const info = vi.spyOn(toast, "info");
+      await act(async () => { render(<App />); });
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("local:backend-new"); });
+      expect(info).toHaveBeenCalledWith("Open a project to show this session");
+      expect(adoptBackendSession).not.toHaveBeenCalled();
+      info.mockRestore();
+    });
+
+    it("does not open a local session inside an SSH project", async () => {
+      localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
+        { workspaceId: "default", repoRoot: ".", gitRoot: null },
+        { workspaceId: "ssh:build:orca", repoRoot: "/srv/orca", target: { kind: "ssh", hostId: "build" } },
+      ]));
+      localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "ssh:build:orca");
+      native.listTerminalSessions.mockResolvedValue([{ sessionId: "backend-new", worktreePath: null, running: true }]);
+      const info = vi.spyOn(toast, "info");
+      await act(async () => { render(<App />); });
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("local:backend-new"); });
+      expect(info).toHaveBeenCalledWith("Open a project on this computer to show this session");
+      expect(adoptBackendSession).not.toHaveBeenCalled();
+      info.mockRestore();
+    });
+
+    it("says an exited session is no longer running, not that it was moved", async () => {
+      native.listTerminalSessions.mockResolvedValue([{ sessionId: "backend-new", worktreePath: null, running: false }]);
+      const warning = vi.spyOn(toast, "warning");
+      seedTwoProjects();
+      await act(async () => { render(<App />); });
+      await waitFor(() => expect(getWorkspaceRestoreStatus("default")).toBe("restored"));
+      await act(async () => { sidebarProps.onFocusSupervisorSession!("local:backend-new"); });
+      await waitFor(() => expect(warning).toHaveBeenCalledWith("That session is no longer running."));
+      expect(warning).not.toHaveBeenCalledWith("A terminal moved to this window is no longer running.");
+      expect(adoptBackendSession).not.toHaveBeenCalled();
+      warning.mockRestore();
+    });
+
+    it("focuses a cross-project row after the target workspace mounts", async () => {
       seedTwoProjects();
       setWorkspaceSnapshot("other", parkedProjectSnapshot("sess-remote"));
-      const clicked = seedUnread("other", "sess-remote");
-      const acknowledge = vi.spyOn(inbox, "markEntriesRead");
+      await act(async () => { render(<App />); });
+      await clickRow("other", "sess-remote");
+      expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("other");
+      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-remote" });
+    });
+
+    it("does not focus a cross-project row that closed while its workspace was mounting", async () => {
+      seedTwoProjects();
+      setWorkspaceSnapshot("other", parkedProjectSnapshot("sess-remote"));
       await act(async () => { render(<App />); });
       const original = storeSpy.getMockImplementation();
       let changed = false;
       storeSpy.mockImplementation((options: { workspaceId: string }) => {
         if (options.workspaceId === "other" && !changed) {
           changed = true;
-          if (change === "closed target") setWorkspaceSnapshot("other", parkedProjectSnapshot(null));
-          else inbox.recordActivity({ workspaceId: "other", sessionId: "sess-remote", labels: {}, subject: "agent",
-            previousState: "done", state: "waiting", occurredAt: 200, observed: false });
+          setWorkspaceSnapshot("other", parkedProjectSnapshot(null));
         }
         return original(options);
       });
       dispatchWorkspaceAction.mockClear();
-      await clickRow(clicked);
+      await clickRow("other", "sess-remote");
       expect(changed).toBe(true);
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-      if (change === "closed target") {
-        expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
-        expect(acknowledge).not.toHaveBeenCalled();
-      } else {
-        expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-remote" });
-        expect(acknowledge).toHaveBeenCalledWith([{ id: notificationEntryId("other", "sess-remote"), expectedRevision: clicked.revision }]);
-        expect(inbox.getSnapshot().entries[0].revision).toBe(2);
-      }
-    });
-
-    it("lists the unread completion in the sidebar inbox and removes it once the row is opened", async () => {
-      currentActivityTargets = [target];
-      const view = render(<App />);
-      await act(async () => { await nativeFocusTrackingReady; });
-      nativeFocusChanged?.({ payload: false });
-      act(() => { emitActivityTargets(); });
-      openInbox();
-      const rows = view.getAllByTestId("attention-row");
-      expect(rows).toHaveLength(1);
-      expect(rows[0].dataset.attentionState).toBe("done");
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-
-      dispatchWorkspaceAction.mockClear();
-      fireEvent.click(rows[0]);
-
-      expect(dispatchWorkspaceAction).toHaveBeenCalledWith({ type: "FOCUS_EXISTING_SESSION", sessionId: "sess-1" });
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
-      expect(view.queryAllByTestId("attention-row")).toHaveLength(0);
-      expect(view.getByTestId("attention-inbox-empty")).toBeInTheDocument();
-      expect(paneFlashSessions()).toEqual(["sess-1"]);
-    });
-
-    it("dismisses a row from the inbox without navigating", async () => {
-      currentActivityTargets = [target];
-      const view = render(<App />);
-      await act(async () => { await nativeFocusTrackingReady; });
-      nativeFocusChanged?.({ payload: false });
-      act(() => { emitActivityTargets(); });
-      openInbox();
-      dispatchWorkspaceAction.mockClear();
-
-      fireEvent.click(within(view.getByTestId("attention-inbox")).getByRole("button", { name: /^Dismiss / }));
-
       expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
-      expect(view.queryAllByTestId("attention-row")).toHaveLength(0);
-      expect(paneFlashSessions()).toEqual([]);
-      // The pane frame reads activity.seen, so dismissing must clear it too.
-      expect(markSessionActivitySeen).toHaveBeenCalledWith("sess-1", "default");
     });
 
-    it("dismiss-all clears every listed session's pane attention", async () => {
-      seedUnread("default", "sess-1");
-      seedUnread("other", "sess-2");
-      await act(async () => { render(<App />); });
-      markSessionActivitySeen.mockClear();
-      act(() => { sidebarProps.attention!.onDismissAll(); });
-      expect(inbox.getSnapshot().entries.every((entry) => "seen" in entry.read)).toBe(true);
-      expect(markSessionActivitySeen.mock.calls).toEqual(expect.arrayContaining([["sess-1", "default"], ["sess-2", "other"]]));
+    it("mounts the Supervisor panel as the sidebar and offers no Inbox state", async () => {
+      const view = render(<App />);
+      expect(typeof sidebarProps.onFocusSupervisorSession).toBe("function");
+      expect(sidebarProps.attention).toBeUndefined();
+      expect(view.queryByTestId("attention-inbox")).toBeNull();
     });
 
     // Defect 2: non-mac platforms use ctrlKey instead of metaKey
-    it("keeps the worktree list as the default and toggles the inbox with the notifications shortcut", async () => {
+    it("reveals the collapsed sidebar with the notifications shortcut instead of opening an inbox", async () => {
       const isMac = isMacShortcutPlatform();
       const view = render(<App />);
-      const shortcut = () => act(() => {
+      const key = (code: string, shift: boolean) => act(() => {
         window.dispatchEvent(new KeyboardEvent("keydown", {
-          key: "i", code: "KeyI", metaKey: isMac, ctrlKey: !isMac, shiftKey: true, bubbles: true, cancelable: true,
+          key: code.slice(-1).toLowerCase(), code, metaKey: isMac, ctrlKey: !isMac, shiftKey: shift, bubbles: true, cancelable: true,
         }));
       });
-      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("false");
-
-      shortcut();
-      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("true");
-
-      shortcut();
-      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("false");
-    });
-
-    it("shows the attention count on the collapsed sidebar and reopens the inbox from it", async () => {
-      const isMac = isMacShortcutPlatform();
-      currentActivityTargets = [target];
-      const view = render(<App />);
-      await act(async () => { await nativeFocusTrackingReady; });
-      nativeFocusChanged?.({ payload: false });
-      act(() => { emitActivityTargets(); });
-      act(() => {
-        window.dispatchEvent(new KeyboardEvent("keydown", {
-          key: "b", code: "KeyB", metaKey: isMac, ctrlKey: !isMac, bubbles: true, cancelable: true,
-        }));
-      });
+      key("KeyB", false);
       expect(view.queryByTestId("mock-sidebar")).toBeNull();
-      expect(view.getByTestId("collapsed-attention-badge")).toHaveTextContent("1");
 
-      fireEvent.click(view.getByRole("button", { name: "Open inbox (1)" }));
+      key("KeyI", true);
+      expect(view.getByTestId("mock-sidebar")).toBeInTheDocument();
 
-      expect(view.getByTestId("mock-sidebar").dataset.inboxOpen).toBe("true");
-      expect(view.getAllByTestId("attention-row")).toHaveLength(1);
+      // Already open: the shortcut leaves it open.
+      key("KeyI", true);
+      expect(view.getByTestId("mock-sidebar")).toBeInTheDocument();
     });
 
-    it("preserves unread history across unmount and restart from persisted storage", async () => {
-      currentActivityTargets = [target];
-      await act(async () => { render(<App />); });
+    const collapse = () => act(() => {
+      const isMac = isMacShortcutPlatform();
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "b", code: "KeyB", metaKey: isMac, ctrlKey: !isMac, bubbles: true, cancelable: true,
+      }));
+    });
+
+    it("counts the panel's decisions on the collapsed sidebar and reopens the sidebar from it", async () => {
+      panel.load.mockResolvedValue(panelSnapshotFixture);
+      const view = render(<App />);
+      await act(async () => { await Promise.all(panel.load.mock.results.map((result) => result.value)); });
+      collapse();
+      expect(view.queryByTestId("mock-sidebar")).toBeNull();
+      expect(view.getByTestId("collapsed-attention-badge")).toHaveTextContent(String(panelSnapshotFixture.decisions.length));
+
+      fireEvent.click(view.getByRole("button", { name: `Open supervisor (${panelSnapshotFixture.decisions.length})` }));
+
+      expect(view.getByTestId("mock-sidebar")).toBeInTheDocument();
+    });
+
+    it("follows panel decision events and ignores agent completions, which are not decisions", async () => {
+      currentActivityTargets = [{
+        workspaceId: "default", workspaceLabel: "Project", sessionId: "sess-1", tabId: "tab-1",
+        worktreePath: "/repo/main", worktreeLabel: "main", agentLabel: "Codex", terminalTitle: "Task", state: "done",
+      }];
+      panel.load.mockResolvedValue({ ...panelSnapshotFixture, decisions: [] });
+      const view = render(<App />);
+      await act(async () => { await Promise.all(panel.load.mock.results.map((result) => result.value)); });
       await nativeFocusTrackingReady;
       nativeFocusChanged?.({ payload: false });
       act(() => { emitActivityTargets(); });
-      expect(inbox.getSnapshot().entries[0]?.read).toEqual({ unread: true });
-      cleanup();
-      inbox.dispose();
-      inbox = inboxModule.createNotificationCenterStore();
-    inboxBox.current = inbox;
-      await act(async () => { render(<App />); });
-      expect(inbox.getSnapshot().entries).toEqual([expect.objectContaining({ sessionId: "sess-1", revision: 1, read: { unread: true } })]);
+      collapse();
+      // A finished agent is a desktop notification, not a decision for the owner.
+      expect(view.queryByTestId("collapsed-attention-badge")).toBeNull();
+      expect(view.getByRole("button", { name: "Open supervisor" })).toBeInTheDocument();
+
+      const [decision] = panelSnapshotFixture.decisions;
+      act(() => { panel.handlers.forEach((handler) => handler({ type: "panel.decision", sessionRef: decision.sessionRef, decision })); });
+      expect(view.getByTestId("collapsed-attention-badge")).toHaveTextContent("1");
+
+      act(() => { panel.handlers.forEach((handler) => handler({ type: "panel.decision", sessionRef: decision.sessionRef, decision: null })); });
+      expect(view.queryByTestId("collapsed-attention-badge")).toBeNull();
     });
 
-    it("marks inbox entry read when session is interacted via custom event", async () => {
-      seedUnread("default", "sess-1");
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-
+    it("writes no per-desktop notification history to storage", async () => {
+      currentActivityTargets = [{
+        workspaceId: "default", workspaceLabel: "Project", sessionId: "sess-1", tabId: "tab-1",
+        worktreePath: "/repo/main", worktreeLabel: "main", agentLabel: "Codex", terminalTitle: "Task", state: "done",
+      }];
       await act(async () => { render(<App />); });
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-
-      act(() => {
-        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
-          detail: { sessionId: "sess-1" },
-        }));
-      });
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
+      await nativeFocusTrackingReady;
+      nativeFocusChanged?.({ payload: false });
+      act(() => { emitActivityTargets(); emitTerminalBell(); });
+      window.dispatchEvent(new Event("pagehide"));
+      const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i) ?? "");
+      expect(keys.filter((key) => key.includes("notifications.history"))).toEqual([]);
     });
   });
 
@@ -1217,193 +1150,6 @@ describe("App notification coordinator wiring", () => {
       expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).not.toBe("other");
       expect(localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY)).toBe("default");
       expect(dispatchWorkspaceAction).not.toHaveBeenCalled();
-    });
-
-    it("clears inbox entry on user interaction even when session has no agent activity", async () => {
-      // Seed an unread inbox entry with subject "agent" (e.g. from an agent whose activity was not detected or cleared)
-      // for a valid session sess-1 in the current workspace, but with NO entry in activityBySessionId.
-      inbox.recordActivity({
-        workspaceId: "default",
-        sessionId: "sess-1",
-        labels: { terminalTitle: "Terminal 1", agentLabel: "Codex" },
-        subject: "agent",
-        previousState: "working",
-        state: "done",
-        occurredAt: 100,
-        observed: false,
-      });
-      expect(inbox.getSnapshot().entries).toHaveLength(1);
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-
-      await act(async () => { render(<App />); });
-
-      // Verify still unread before interaction
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-
-      // Dispatch session interaction event (as NativeTerminalPane would on sendInput/sendPaste/focus)
-      act(() => {
-        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
-          detail: { sessionId: "sess-1" },
-        }));
-      });
-
-      // Under current implementation, syncInbox only checks activity.seen === true,
-      // and state.activityBySessionId?.["sess-1"] is undefined, so the inbox entry stays unread.
-      // This assertion FAILS on baseline, proving the defect.
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
-    });
-
-    it("does not clear inbox entry of another session or background pane when interaction happens in focused pane", async () => {
-      // Seed two unread entries: sess-1 (focused) and sess-2 (background / other split)
-      inbox.recordActivity({
-        workspaceId: "default",
-        sessionId: "sess-1",
-        labels: { terminalTitle: "Terminal 1", agentLabel: "Codex" },
-        subject: "agent",
-        previousState: "working",
-        state: "done",
-        occurredAt: 100,
-        observed: false,
-      });
-      inbox.recordActivity({
-        workspaceId: "default",
-        sessionId: "sess-2",
-        labels: { terminalTitle: "Terminal 2", agentLabel: "Claude" },
-        subject: "agent",
-        previousState: "working",
-        state: "done",
-        occurredAt: 100,
-        observed: false,
-      });
-      expect(inbox.getSnapshot().entries).toHaveLength(2);
-
-      await act(async () => { render(<App />); });
-
-      expect(inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-1")?.read).toEqual({ unread: true });
-      expect(inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-2")?.read).toEqual({ unread: true });
-
-      // Dispatch session interaction event for sess-1 only
-      act(() => {
-        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
-          detail: { sessionId: "sess-1" },
-        }));
-      });
-
-      const entry1 = inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-1");
-      const entry2 = inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-2");
-      expect(entry1?.read).toMatchObject({ seen: true });
-      expect(entry2?.read).toEqual({ unread: true });
-    });
-
-    it("uses frontend workspaceId rather than remote session.workspaceId when acknowledging", async () => {
-      // Identity triad test: frontend workspace is "default", but the session is a remote session
-      // where session.workspaceId = "daemon:remote-host-uuid:/repo/remote".
-      // We configure storeState with remote session "sess-remote-1".
-      const remoteSessionId = "sess-remote-1";
-      const remoteSession = {
-        id: remoteSessionId,
-        cwd: "/remote/repo",
-        worktreePath: "/remote/repo",
-        workspaceId: "daemon:remote-uuid-1234:/remote/repo",
-        backendSessionId: "backend-remote-1",
-      };
-      const origStoreImplementation = storeSpy.getMockImplementation();
-      storeSpy.mockImplementation((options: { workspaceId?: string }) => {
-        const base = origStoreImplementation(options);
-        return {
-          ...base,
-          state: {
-            ...base.state,
-            sessions: {
-              ...base.state.sessions,
-              [remoteSessionId]: remoteSession,
-            },
-          },
-        };
-      });
-
-      inbox.recordActivity({
-        workspaceId: "default",
-        sessionId: remoteSessionId,
-        labels: { terminalTitle: "Remote Terminal", agentLabel: "Codex" },
-        subject: "agent",
-        previousState: "working",
-        state: "done",
-        occurredAt: 100,
-        observed: false,
-      });
-      expect(inbox.getSnapshot().entries).toHaveLength(1);
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-
-      await act(async () => { render(<App />); });
-
-      expect(inbox.getSnapshot().entries[0].read).toEqual({ unread: true });
-
-      act(() => {
-        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
-          detail: { sessionId: remoteSessionId },
-        }));
-      });
-
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
-    });
-
-    it("does not acknowledge newer revision if a later notification arrives after interaction", async () => {
-      // Seed activityBySessionId sess-1 with { state: "done", seen: true, isAgent: true, title: "" }
-      // via storeSpy before render to cover that the removed stale syncInbox bridge does not auto-ack.
-      const original = storeSpy.getMockImplementation();
-      storeSpy.mockImplementation((options: { workspaceId: string }) => {
-        const base = original(options);
-        return {
-          ...base,
-          state: {
-            ...base.state,
-            activityBySessionId: {
-              "sess-1": { state: "done", seen: true, isAgent: true, title: "" },
-            },
-          },
-        };
-      });
-
-      inbox.recordActivity({
-        workspaceId: "default",
-        sessionId: "sess-1",
-        labels: { terminalTitle: "Terminal 1", agentLabel: "Codex" },
-        subject: "agent",
-        previousState: "working",
-        state: "done",
-        occurredAt: 100,
-        observed: false,
-      });
-      const initialEntry = inbox.getSnapshot().entries[0];
-      expect(initialEntry.revision).toBe(1);
-
-      await act(async () => { render(<App />); });
-
-      // User interacts with sess-1 pane, acknowledging revision 1
-      act(() => {
-        window.dispatchEvent(new CustomEvent("ferryx:session-interacted", {
-          detail: { sessionId: "sess-1" },
-        }));
-      });
-      expect(inbox.getSnapshot().entries[0].read).toMatchObject({ seen: true });
-
-      // Later, a new notification arrives for the SAME session sess-1 while activity.seen is true from earlier
-      act(() => {
-        inbox.recordBell({
-          workspaceId: "default",
-          sessionId: "sess-1",
-          labels: { terminalTitle: "Terminal 1" },
-          subject: "terminal",
-          occurredAt: 300,
-          observed: false,
-        });
-      });
-
-      // The new occurrence (revision 2) must remain unread and NOT be swallowed by stale seen: true
-      const updatedEntry = inbox.getSnapshot().entries.find((e) => e.sessionId === "sess-1");
-      expect(updatedEntry?.revision).toBe(2);
-      expect(updatedEntry?.read).toEqual({ unread: true });
     });
   });
 });

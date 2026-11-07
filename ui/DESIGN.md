@@ -13,13 +13,13 @@ utilities. Components reference the **Tailwind semantic name**, never a hex valu
 | Token | Utility | Use |
 |---|---|---|
 | `--background` `#23262d` | `bg-background` | App shell behind panes |
-| `--card` `#171717` | `bg-card` | Titlebars, inactive tabs, tab strips, dialogs |
+| `--card` `#171717` | `bg-card` | Chrome: titlebars, inactive tabs, tab strips. Never a floating surface |
 | `--accent` `#404040` | `bg-accent` | Active tab and interactive hover surfaces |
 | `--terminal` `#282c34` | `bg-terminal` | Terminal viewport only; never application chrome |
 | `--terminal-divider` `#5c6068` | `var(--terminal-divider)` | Opaque 1px separator between split terminal panes |
 | `--worktree-sidebar` `#2a2a2a` | `bg-worktree-sidebar` | Sidebar surface (the project tree lives here) |
 | `--worktree-sidebar-accent` `#353535` | `bg-worktree-sidebar-accent` | Selected / active row fill |
-| `--popover` `#171717` | `bg-popover` | Floating surfaces |
+| `--popover` `#2e323b` | `bg-popover` | Floating surfaces: dialogs, sheets, menus, command palette. One step above `--terminal`, clearly above chrome. Compose it with `floatingSurface()` (`src/lib/surface.ts`), which adds `border-border` + `shadow-elevation-4` |
 
 ### Text
 | Token | Utility | Use |
@@ -190,7 +190,7 @@ The settings redesign originated from the audit documented in `ui/docs/settings-
 The sidebar presents **one nested tree**, not two disjoint lists:
 
 ```
-[ Worktrees | Inbox 3 ]                  <- SegmentedControl
+[ Supervisor | Worktrees ]               <- SegmentedControl (Supervisor panel is the default)
 [ Filter worktrees      ]                <- Input
 Projects 4                               <- SectionHeader, count = project groups
 +- v ferryx                    [+] [...] <- project row; + and ... on hover only
@@ -229,8 +229,8 @@ Rules:
 8. **Project name click selects and expands; it never collapses.** Only the chevron collapses.
 9. **Project hover actions are exactly `+` and `...`** (`IconButton` sm). `...` opens the native
    project menu (Past conversations, Remove Project); no DOM dropdown in the sidebar.
-10. **Anatomy, top to bottom**: `SegmentedControl` Worktrees / Inbox (Inbox carries the attention
-    count), a filter `Input` ("Filter worktrees", Escape clears, not persisted), `SectionHeader`
+10. **Anatomy, top to bottom**: `SegmentedControl` Supervisor / Worktrees (the Supervisor panel
+    opens by default; there is no Inbox view), a filter `Input` ("Filter worktrees", Escape clears, not persisted), `SectionHeader`
     "Projects N", the tree, and a footer reading `<n> running · <m> needs input` in
     `text-[10px] text-muted-foreground`. Each footer part is omitted at zero; both zero = empty footer.
     A non-empty filter forces projects with a matching worktree expanded.
@@ -469,34 +469,21 @@ Applies to the remote web client below 768px when signed in to an account
 
 ### Navigation
 
-- Three home destinations behind a bottom tab bar: Supervisor (default after sign-in),
-  Inbox, Worktrees. `MobileHomeTabBar`: `role="tablist"`, 56px (`h-14`) plus `.pb-safe`,
-  icon above a one-word text label, roving tabindex with Arrow keys. Inbox shows a count
-  badge on `bg-status-warning` when sessions wait; the count is also in the tab's
-  accessible name.
-- Opening a session from any destination shows the Session screen (the existing
-  `MobileTopBar` plus chat/terminal body). The tab bar is hidden there so the composer and
-  keyboard keep the full height. `MobileTopBar` gains a back control (`mobile-session-back`).
-- `usePhoneNavigation` *replaces* the history entry on a tab switch and *pushes* one only on
-  entering a session or opening an overlay (§6 History). `popstate` closes the topmost overlay,
-  then returns from a session to the destination it came from; back from a home tab leaves the
-  app instead of replaying earlier tab taps.
+- The Supervisor panel is the home (§14); there is no tab bar, no Inbox and no lanes list. "+" on
+  the panel opens the Worktrees screen (the drawer's inventory inline, with New terminal and New
+  worktree) where a session is started; "Back to the supervisor" returns. With no hub running the
+  panel body is the single setup card ("Turn on the supervisor on <computer>").
+- Opening a session from the panel or the Worktrees screen shows the Session screen (the existing
+  `MobileTopBar` plus chat/terminal body). `MobileTopBar` carries a back control
+  (`mobile-session-back`).
+- `usePhoneNavigation` *replaces* the history entry when "+" or Back switches home screens and
+  *pushes* one only on entering a session or opening an overlay (§6 History). `popstate` closes
+  the topmost overlay, then returns from a session to the home screen it came from.
 
 ### Surfaces
 
-- Supervisor: header card (`bg-chat-surface-raised`) with a sentence-case status whose unit
-  matches the list below it (for example "Watching 3 lanes"), never a bare enum such as
-  `off` or `watching 4`, and one sentence. Then one section per machine, with a state note when it is loading, offline,
-  not connected, unsupported ("Update Ferryx on this computer to see its supervisor") or
-  has the hub stopped. Lane cards show the name (cwd leaf · title), one status slot (paused
-  > typing > needs you > hub status), Goal, "Stopped: <reason>", and a 44px Pause/Resume
-  button. A typing lane uses `bg-chat-surface-raised` plus a text label and icon (never
-  `bg-accent`, which is a desktop token with no light-theme value on the chat palette). Then a
-  "Recent" list of the last 3 actions with "Show all"; each row names its computer, opens its
-  session, and shows humanised text (no op names, refusal codes or session-id prefixes).
-- Inbox: needs-you sessions from every machine. Waiting and supervisor-held come first,
-  then finished; each row states why in text ("Waiting for your answer", "Supervisor paused
-  this lane", "Finished"). The dot colour only repeats that text.
+- Panel: see §14. A legacy supervisor goal is a property of its session row (a "Supervisor: <goal>"
+  line); pause/resume is the row menu's item.
 - Worktrees: the drawer's inventory rendered inline (`RemoteWorkspaceMirror inline`) with
   New terminal and New worktree, plus an Account button. Sign out lives only in the Account
   sheet (one place, confirmed, out of the thumb zone); the sheet holds the email, Sign out and
@@ -510,13 +497,91 @@ Applies to the remote web client below 768px when signed in to an account
 
 ### Test ids
 
-`mobile-home` (`data-destination`), `mobile-home-tabs`, `mobile-home-tab-{supervisor,inbox,
-worktrees}`, `mobile-home-inbox-count`, `mobile-home-resume`, `supervisor-home`,
-`supervisor-home-headline`, `supervisor-machine-<machineId>`, `supervisor-lane-card`
-(`data-lane-key`, `data-machine-id`), `supervisor-lane-pause`, `supervisor-recent-action`,
-`inbox-home`, `inbox-row` (`data-machine-id`, `data-session-id`), `worktrees-home`,
+`mobile-home` (`data-home`: `panel` or `panel-start`), `phone-supervisor-home`,
+`phone-panel-start-session`, `phone-panel-start-back`, `mobile-home-resume`,
 `remote-worktrees-inline`, `account-open`, `account-delete-open`, `account-delete-email`,
 `account-delete-confirm`, `account-delete-error` (`data-code`), `supervisor-session-strip`
 (`data-state`), `supervisor-take-over`, `supervisor-resume`, `mobile-session-back`.
 
 No new tokens: every colour is an existing `chat-*`, `status-*` or `accent` token.
+
+## 14. Supervisor panel
+
+Applies to `ui/src/components/supervisorPanel/` (desktop left panel, phone home). Same components on
+both surfaces: the desktop scale is the default, `touch` switches to the phone rules of §6 (44px
+targets, `text-sm` / `text-xs` rem sizes, 16px composer text). Only shared semantic tokens appear
+(`bg-card`, `bg-secondary`, `bg-muted`, `text-foreground`, `text-muted-foreground`, `border-border`,
+`border-input`, `bg-primary`, `status-*`, `destructive`); inside `.remote-app-root` these already
+follow the chat palette. No new tokens.
+
+### State glyphs (D12)
+Shape carries the state, colour only repeats it; every glyph is `role="img"` with the state word as
+its `aria-label` and sits at `size-4` (`size-5` is not used; the hit area grows, not the glyph).
+| State | Word | Shape | Token |
+|---|---|---|---|
+| needs | Needs you | filled triangle with an exclamation cut-out | `text-status-warning` |
+| working | Working | open ring with a gap (static, no spinner) | `text-status-working` |
+| done | Finished | filled disc with a check cut-out | `text-status-success` |
+| failed | Failed | filled disc with a cross cut-out | `text-destructive` |
+| idle | Idle | small filled dot | `text-status-idle` |
+Cut-outs use `stroke-background`. Unknown state renders idle with the detail "Status unknown".
+
+### Decision card
+- Surface `rounded-xl border border-border bg-card p-3`, `gap-2` between parts. The border is the
+  plain `border-border`: urgency is carried by the needs glyph in the header row, never by a tinted
+  or amber border (§6 "no accent outline on a rounded card").
+- Header row (one button, opens the terminal): needs glyph, session name `font-medium`, `· computer`,
+  trailing underlined "Terminal" in `text-muted-foreground`.
+- Question `font-medium` (`text-[15px]` desktop, `text-base` phone). Command: one `font-mono`
+  line on `bg-muted rounded-md px-2 py-1.5`, `truncate`, full text in `title`; omitted when null.
+- **Recommendation line**: the S mark, then the reason in `text-muted-foreground`. The S mark is a
+  `size-5 rounded-md bg-primary text-primary-foreground text-xs font-semibold` tile with no gradient
+  and no glow; it is decorative (`aria-hidden`) and the line is prefixed by a `sr-only` "Recommended:".
+- Buttons: the recommended option is first and the only primary (`bg-primary text-primary-foreground`);
+  the rest are `bg-secondary border border-input`. `min-h-8` desktop, `min-h-11 flex-1` phone, `gap-2`.
+- A card without a recommended option and reason is never rendered.
+
+### Rows, log and the rest
+- Session and handling rows: glyph, title (`font-medium truncate`), one `text-muted-foreground`
+  detail line, computer name at the end. A handling row has a sibling Stop button (never nested in the
+  row button), `aria-label="Stop <title>"`, `min-h-11 min-w-11` on phone.
+- Action log: two lines by default, "All N" / "Less" toggle; a line is one sentence, a muted time, a
+  "Why" disclosure (`aria-expanded`, basis in words) and "Undo" when reversible. Unverified claims
+  carry a grey "Unverified" chip (`bg-muted text-muted-foreground`), never a colour.
+- Rules line: `text-muted-foreground` sentence on a `border-t border-border` rule with a trailing
+  "Change" link-button.
+- Composer: `border border-input bg-card rounded-xl` box, borderless textarea ("Tell the
+  supervisor anything"), `size-8` (`size-11` phone) Send in `bg-primary`. `@` opens a
+  `role="listbox"` of sessions (`bg-popover border border-border rounded-lg`) with "title · computer".
+- Setup card: one `rounded-xl border border-border bg-card p-4` with a heading, one sentence and a
+  single primary "Turn on" button; shown instead of every other section.
+
+### Floating surfaces, elevation and motion
+
+A floating surface (dialog, sheet, menu, command palette) is `bg-popover` plus
+`border-border` plus an elevation shadow - never `bg-card`. `bg-card` is chrome:
+titlebars, inactive tabs, tab strips. The reason is measured, not stylistic: a modal
+sits on a 45-80% black scrim, and charcoal's old `#171717` popover measured **1.01:1**
+against that scrim, i.e. the dialog had no visible shape. `#2e323b` measures 1.38:1 on
+the same scrim (dark `#333333` measures 1.41:1).
+
+| Token | Utility | Use |
+|---|---|---|
+| `--surface-hover` `#40454f` | `bg-surface-hover` | Hover inside a floating surface. Deliberately lighter than `--popover` (1.33:1); `--accent` `#404040` measures only 1.24:1 there and reads as a dead pixel |
+| elevation 1-4 | `shadow-elevation-1`..`-4` | One hairline + one ambient step per level. Dialogs use 4, menus/selects 2, inline alerts 3. Light mode separates layers by shadow; dark themes lean on tone |
+| `--radius-xs` `0.125rem` | `rounded-xs` | Dense chips. `md`/`lg` derive from `--radius`; `xl`/`2xl`/`3xl` keep Tailwind's 12/16/24px |
+| `--ease-out-quart` / `--ease-out-expo` / `--spring` | `ease-out-quart` / `ease-out-expo` / `ease-spring` | Decelerating surfaces; `--spring` is for a control that springs back on release |
+| `--surface-hairline` `#00000012` / `--surface-highlight` `#ffffffbf` | - | The 1px edge and top highlight that make a raised layer read on light and dark fills |
+
+Accent focus rings must clear 3:1 against both `--card` and `--background` **and**
+differ from their own `--primary`; `button.tsx` draws `ring-1` with no offset, so a
+ring equal to the fill shows no focus indicator. In light mode every accent therefore
+carries a ring one shade darker than its primary, and its own `--primary-foreground`
+(emerald keeps dark text; the other four use `#fafafa`).
+
+`--status-X` stays a literal hex used as flat text/fill. `--status-X-solid` repeats that
+hex, and `--status-X-container` / `-border` / `-on-container` are the tinted container
+layer: container is `mix(solid, canvas, 0.14)` in dark and `0.08` in light. Both
+`.remote-app-root` blocks carry the same set so the remote client cannot diverge.
+Nothing consumes the container tokens yet; migrating the `bg-status-*/NN` sites is a
+separate sweep.

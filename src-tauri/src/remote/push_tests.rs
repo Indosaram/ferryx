@@ -1,8 +1,7 @@
 //! Phone push against a local mock push service (an axum server on loopback). The mock holds
 //! the browser's half of the keys, so it decrypts what the daemon sent.
 use super::*;
-use crate::agent_control::events::ObservationDraft;
-use crate::agent_control::{AgentStateSource, AgentTier};
+use ferryx_hub::supervisor::push_policy::{DECISION_BATCH_WINDOW, PANEL_PRESENCE_STALE};
 use crate::remote::state::RemoteGatewayState;
 use axum::{extract::State as AxState, http::StatusCode, routing::post, Router};
 use base64::Engine;
@@ -116,39 +115,44 @@ fn paired_device(state: &RemoteGatewayState) -> String {
     device.id
 }
 
-fn draft(session: &str, state: AgentControlState) -> ObservationDraft {
-    ObservationDraft {
-        session_id: session.into(),
-        state,
-        state_source: AgentStateSource::Provider,
-        tier: AgentTier::Native,
-        prompt_id: None,
-        kind: None,
-        screen_revision: None,
-        workspace_id: None,
-    }
+const REF: &str = "mac:s1";
+
+fn panel_frame(session_ref: &str, prompt_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "panel.decision",
+        "sessionRef": session_ref,
+        "decision": {
+            "sessionRef": session_ref,
+            "prompt": {
+                "promptId": prompt_id,
+                "kind": "approval",
+                "question": "Run the migration?",
+                "command": null,
+                "options": ["Yes", "No"],
+                "screenRevision": null
+            },
+            "recommendedIndex": 1,
+            "reason": "It touches a remote database.",
+            "createdAtMs": 1
+        }
+    })
+}
+
+fn subscribed_phone(state: &RemoteGatewayState, mock: &MockPush) {
+    let device = paired_device(state);
+    state.push.store.subscribe(&device, mock.subscription("a", true, FinishedMode::Off)).unwrap();
 }
 
 #[tokio::test]
-async fn waiting_transition_sends_one_encrypted_post_without_terminal_content() {
+async fn a_new_escalation_with_no_focused_client_sends_one_push_with_a_deep_link() {
     let dir = tempfile::tempdir().unwrap();
     let state = gateway(dir.path());
     let mut mock = MockPush::start(StatusCode::CREATED).await;
-    let device = paired_device(&state);
-    state
-        .push
-        .store
-        .subscribe(&device, mock.subscription("a", true, FinishedMode::Off))
-        .unwrap();
+    subscribed_phone(&state, &mock);
 
-    let mut turns = TurnTracker::default();
-    let t0 = Instant::now();
-    assert_eq!(turns.observe("s1", AgentControlState::Working, t0), None);
-    let kind = turns.observe("s1", AgentControlState::Blocked, t0).expect("needs input");
-    assert_eq!(kind, PushKind::NeedsInput);
-    assert_eq!(state.dispatch_push("s1", kind).await, 1);
-    // A repeated blocked reading is the same wait, not a second alert.
-    assert_eq!(turns.observe("s1", AgentControlState::Blocked, t0), None);
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 1);
+    // The same card announced again is not a second push.
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 0);
 
     let received = mock.received();
     assert_eq!(received.len(), 1, "exactly one POST");
@@ -156,73 +160,27 @@ async fn waiting_transition_sends_one_encrypted_post_without_terminal_content() 
     assert!(received[0].authorization.as_deref().is_some_and(|v| v.starts_with("vapid t=")));
     assert!(serde_json::from_slice::<serde_json::Value>(&received[0].body).is_err(), "body is ciphertext");
     let payload = mock.decrypt(&received[0]);
-    assert_eq!(payload["state"], "waiting_input");
-    assert_eq!(payload["agent_id"], "s1");
-    let keys: Vec<_> = payload.as_object().unwrap().keys().cloned().collect();
-    for key in &keys {
+    assert_eq!(payload["state"], "decision");
+    assert_eq!(payload["agent_id"], REF);
+    assert_eq!(payload["url"], "/?panel=decision&session=mac%3As1");
+    for key in payload.as_object().unwrap().keys() {
         assert!(
-            ["agent_id", "agent_name", "worktree", "state", "title", "body"].contains(&key.as_str()),
+            ["agent_id", "agent_name", "worktree", "state", "title", "body", "url"].contains(&key.as_str()),
             "unexpected payload field {key}"
         );
     }
 }
 
 #[tokio::test]
-async fn long_turns_mode_sends_only_after_a_long_turn() {
+async fn a_focused_desktop_sends_no_decision_push_and_a_stale_report_counts_as_unfocused() {
     let dir = tempfile::tempdir().unwrap();
     let state = gateway(dir.path());
     let mut mock = MockPush::start(StatusCode::CREATED).await;
-    let device = paired_device(&state);
-    state
-        .push
-        .store
-        .subscribe(&device, mock.subscription("a", false, FinishedMode::LongTurns))
-        .unwrap();
-
-    let mut turns = TurnTracker::default();
-    let t0 = Instant::now();
-    turns.observe("s1", AgentControlState::Working, t0);
-    let short = turns
-        .observe("s1", AgentControlState::Idle, t0 + Duration::from_secs(10))
-        .expect("a finished turn");
-    assert_eq!(short, PushKind::Finished(Duration::from_secs(10)));
-    assert_eq!(state.dispatch_push("s1", short).await, 0);
-    assert!(mock.received().is_empty(), "a 10s turn sends nothing in longTurns mode");
-
-    let t1 = t0 + Duration::from_secs(20);
-    turns.observe("s1", AgentControlState::Working, t1);
-    turns.observe("s1", AgentControlState::Working, t1 + Duration::from_secs(30));
-    let long = turns
-        .observe("s1", AgentControlState::Idle, t1 + Duration::from_secs(90))
-        .expect("a finished turn");
-    assert_eq!(long, PushKind::Finished(Duration::from_secs(90)), "timed from the turn's first Working");
-    assert_eq!(state.dispatch_push("s1", long).await, 1);
-    let received = mock.received();
-    assert_eq!(received.len(), 1);
-    assert_eq!(mock.decrypt(&received[0])["state"], "finished");
-
-    // Idle without a turn in progress is not a finished turn.
-    assert_eq!(turns.observe("s1", AgentControlState::Idle, t1 + Duration::from_secs(95)), None);
-    assert!(FinishedMode::EveryTurn.allows(Duration::from_secs(1)));
-    assert!(!FinishedMode::Off.allows(Duration::from_secs(600)));
-}
-
-#[tokio::test]
-async fn focused_desktop_sends_nothing_and_a_stale_report_counts_as_unfocused() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = gateway(dir.path());
-    let mut mock = MockPush::start(StatusCode::CREATED).await;
-    let device = paired_device(&state);
-    state
-        .push
-        .store
-        .subscribe(&device, mock.subscription("a", true, FinishedMode::EveryTurn))
-        .unwrap();
+    subscribed_phone(&state, &mock);
 
     state.set_desktop_window_focused(true);
-    assert_eq!(state.dispatch_push("s1", PushKind::NeedsInput).await, 0);
-    assert_eq!(state.dispatch_push("s1", PushKind::Finished(Duration::from_secs(120))).await, 0);
-    assert!(mock.received().is_empty(), "focused desktop suppresses every push");
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 0);
+    assert!(mock.received().is_empty(), "a focused desktop suppresses the push");
 
     let now = Instant::now();
     assert!(desktop_focus_suppresses(Some((true, now)), now + Duration::from_secs(119)));
@@ -231,8 +189,212 @@ async fn focused_desktop_sends_nothing_and_a_stale_report_counts_as_unfocused() 
     assert!(!desktop_focus_suppresses(None, now));
 
     state.set_desktop_window_focused(false);
-    assert_eq!(state.dispatch_push("s1", PushKind::NeedsInput).await, 1);
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p2")).await, 1);
     assert_eq!(mock.received().len(), 1);
+}
+
+#[tokio::test]
+async fn retries_progress_finished_sessions_and_resolved_cards_send_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+
+    let frames = [
+        // A recovery retry and its in-place updates.
+        serde_json::json!({"type": "panel.action", "action": {"id": "a1", "sessionRef": REF, "kind": "retry"}}),
+        // A session that finished, or whose state changed.
+        serde_json::json!({"type": "panel.session", "session": {"sessionRef": REF, "state": "idle"}}),
+        serde_json::json!({"type": "panel.rules", "rules": []}),
+        // A card that was answered or withdrawn.
+        serde_json::json!({"type": "panel.decision", "sessionRef": REF, "decision": null}),
+        // A decision frame with no usable escalation.
+        serde_json::json!({"type": "panel.decision", "sessionRef": REF, "decision": {"reason": "x"}}),
+        serde_json::json!({"type": "supervisorChanged"}),
+    ];
+    for frame in &frames {
+        assert_eq!(state.handle_panel_frame(frame).await, 0, "{frame}");
+    }
+    assert!(mock.received().is_empty());
+
+    // A resolved card re-arms its session: the next escalation with the same prompt id is new.
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 1);
+    let resolved = serde_json::json!({"type": "panel.decision", "sessionRef": REF, "decision": null});
+    assert_eq!(state.handle_panel_frame(&resolved).await, 0);
+    assert!(state.decision_gate.is_new_card(REF, "p1"), "a resolved card re-arms its session");
+}
+
+#[tokio::test]
+async fn a_muted_session_sends_no_push_and_the_mute_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+
+    state.set_session_push_muted(REF, true).await.unwrap();
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 0);
+    assert!(mock.received().is_empty(), "a muted session gets no push");
+
+    let reloaded = PushStore::load(Some(dir.path().join(PUSH_SUBSCRIPTIONS_FILE)));
+    assert!(reloaded.is_session_muted(REF), "the mute is persisted beside the subscriptions");
+    assert_eq!(reloaded.list_subscriptions().len(), 1, "muting keeps the subscriptions");
+
+    // Another session still pushes.
+    assert_eq!(state.handle_panel_frame(&panel_frame("mac:s2", "p1")).await, 1);
+
+    state.set_session_push_muted(REF, false).await.unwrap();
+    assert!(!state.push.store.is_session_muted(REF));
+    assert!(!PushStore::load(Some(dir.path().join(PUSH_SUBSCRIPTIONS_FILE))).is_session_muted(REF));
+    assert!(state.set_session_push_muted("no-colon", true).await.is_err(), "a malformed ref is refused");
+}
+
+#[tokio::test]
+async fn a_second_card_inside_the_window_is_held_and_flushed_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+
+    let t0 = Instant::now();
+    assert_eq!(state.push_decision("mac:s1", "p1", t0).await, 1);
+    assert_eq!(state.push_decision("mac:s2", "p1", t0 + Duration::from_secs(5)).await, 0, "held");
+    assert_eq!(state.push_decision("mac:s3", "p1", t0 + Duration::from_secs(6)).await, 0, "held");
+    assert_eq!(mock.received().len(), 1);
+
+    assert_eq!(state.flush_decision_batch(t0 + DECISION_BATCH_WINDOW).await, 1);
+    let received = mock.received();
+    assert_eq!(received.len(), 1, "the held cards go out as one push");
+    let payload = mock.decrypt(&received[0]);
+    assert_eq!(payload["url"], "/?panel=decision");
+    assert_eq!(payload["body"], "2 sessions need a decision");
+    assert_eq!(state.flush_decision_batch(t0 + DECISION_BATCH_WINDOW).await, 0, "nothing left to flush");
+}
+
+#[tokio::test]
+async fn a_phone_showing_the_panel_holds_the_push_and_the_card_never_comes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+    let phone = paired_device(&state);
+
+    state.set_panel_visible(&phone, true);
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 0, "the panel is in front of the owner");
+    assert!(mock.received().is_empty());
+
+    // Leaving the panel does not turn the card the owner already saw into a push.
+    state.set_panel_visible(&phone, false);
+    assert_eq!(state.handle_panel_frame(&panel_frame(REF, "p1")).await, 0);
+    assert!(mock.received().is_empty());
+    // A different card does push once nobody shows the panel.
+    assert_eq!(state.handle_panel_frame(&panel_frame("mac:s2", "p1")).await, 1);
+    assert_eq!(mock.received().len(), 1);
+}
+
+#[tokio::test]
+async fn any_one_client_showing_the_panel_is_enough_and_a_stale_report_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+    let now = Instant::now();
+
+    state.panel_presence.report("phone", true, now);
+    state.panel_presence.report("tablet", true, now);
+    state.panel_presence.report("phone", false, now);
+    assert!(state.panel_shown(now), "the tablet still shows the panel");
+    assert!(state.panel_presence.shown(now + PANEL_PRESENCE_STALE - Duration::from_secs(1)));
+    assert!(!state.panel_presence.shown(now + PANEL_PRESENCE_STALE), "a silent client stops counting");
+
+    // The desktop window counts as a client too.
+    let quiet = gateway(dir.path());
+    assert!(!quiet.panel_shown(now));
+    quiet.set_desktop_window_focused(true);
+    assert!(quiet.panel_shown(Instant::now()));
+}
+
+#[tokio::test]
+async fn a_card_held_by_the_window_is_dropped_if_the_panel_is_shown_at_the_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+    let phone = paired_device(&state);
+
+    let t0 = Instant::now();
+    assert_eq!(state.push_decision("mac:s1", "p1", t0).await, 1);
+    assert_eq!(state.push_decision("mac:s2", "p1", t0 + Duration::from_secs(5)).await, 0, "held");
+    state.set_panel_visible(&phone, true);
+    assert_eq!(state.flush_decision_batch(Instant::now() + DECISION_BATCH_WINDOW).await, 0);
+    assert_eq!(mock.received().len(), 1, "only the first push went out");
+}
+
+#[tokio::test]
+async fn a_card_muted_while_held_is_dropped_at_the_flush_and_the_rest_still_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+
+    let t0 = Instant::now();
+    assert_eq!(state.push_decision("mac:s1", "p1", t0).await, 1);
+    assert_eq!(state.push_decision("mac:s2", "p1", t0 + Duration::from_secs(5)).await, 0);
+    assert_eq!(state.push_decision("mac:s3", "p1", t0 + Duration::from_secs(6)).await, 0);
+    state.set_session_push_muted("mac:s2", true).await.unwrap();
+    assert_eq!(state.flush_decision_batch(t0 + DECISION_BATCH_WINDOW).await, 1);
+    let received = mock.received();
+    assert_eq!(received.len(), 2);
+    let payload = mock.decrypt(&received[1]);
+    assert_eq!(payload["agent_id"], "mac:s3", "the flush names the one card left, not the muted one");
+    assert_eq!(payload["url"], "/?panel=decision&session=mac%3As3");
+}
+
+/// The consumer loop: frames on the panel channel reach push with no test shim. The muted
+/// session's frame comes first and one consumer handles frames in order, so the first delivery
+/// being the second session proves the muted one sent nothing; the extra frame kinds in between
+/// (rules, retry action, finished session) must not send either.
+#[tokio::test]
+async fn the_panel_channel_feeds_push_and_a_muted_session_stays_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+    state.set_session_push_muted("chan:muted", true).await.unwrap();
+    let (frames, source) = tokio::sync::broadcast::channel(16);
+    state.start_panel_push_from(source);
+    // A second start is a no-op: one consumer, so nothing is delivered twice.
+    state.start_panel_push_from(frames.subscribe());
+
+    frames.send(serde_json::json!({"type": "panel.rules", "rules": []})).unwrap();
+    frames
+        .send(serde_json::json!({"type": "panel.action", "action": {"id": 1, "sessionRef": "chan:loud", "kind": "retried"}}))
+        .unwrap();
+    frames
+        .send(serde_json::json!({"type": "panel.session", "session": {"sessionRef": "chan:loud", "state": "idle"}}))
+        .unwrap();
+    frames.send(panel_frame("chan:muted", "p1")).unwrap();
+    frames.send(panel_frame("chan:loud", "p1")).unwrap();
+
+    let delivery = tokio::time::timeout(Duration::from_secs(10), mock.deliveries.recv())
+        .await
+        .expect("the panel channel reaches push")
+        .expect("mock alive");
+    let payload = mock.decrypt(&delivery);
+    assert_eq!(payload["agent_id"], "chan:loud");
+    assert_eq!(payload["url"], "/?panel=decision&session=chan%3Aloud");
+    assert!(mock.received().is_empty(), "nothing else was sent");
+}
+
+#[test]
+fn deep_links_open_the_card_and_name_no_terminal_content() {
+    assert_eq!(ferryx_hub::supervisor::push_policy::decision_deep_link("mac:s1"), "/?panel=decision&session=mac%3As1");
+    let one = decision_notification(&["mac:s1".to_string()], "Claude Code", Some("feature-x"));
+    assert_eq!(one.state, "decision");
+    assert_eq!(one.body, "Claude Code in feature-x");
+    assert_eq!(one.url.as_deref(), Some("/?panel=decision&session=mac%3As1"));
+    let many = decision_notification(&["mac:s1".to_string(), "win:s2".to_string()], "", None);
+    assert_eq!(many.url.as_deref(), Some("/?panel=decision"));
+    assert_eq!(many.agent_id, "");
 }
 
 #[tokio::test]
@@ -276,7 +438,7 @@ async fn an_expired_device_gets_no_push_and_is_pruned_on_restart() {
         + 60;
     state.auth_manager.set_test_clock(later);
     assert!(state.auth_manager.live_device(&device).is_none());
-    assert_eq!(state.dispatch_push("s1", PushKind::NeedsInput).await, 0);
+    assert_eq!(state.dispatch_decision_push(&[REF.to_string()]).await, 0);
     assert!(mock.received().is_empty(), "no POST for an unpaired device");
 
     // A device missing from the auth store at startup has its subscriptions dropped.
@@ -309,11 +471,11 @@ async fn fan_out_follows_session_visibility_per_access_scope() {
     state.push.store.subscribe(&machine.id, machine_mock.subscription("x", true, FinishedMode::Off)).unwrap();
     *state.machine_owned_override.write() = Some(Arc::new(|id: &str| id.starts_with("machine-")));
 
-    assert_eq!(state.dispatch_push("machine-1", PushKind::NeedsInput).await, 1);
+    assert_eq!(state.dispatch_decision_push(&["mac:machine-1".to_string()]).await, 1);
     assert_eq!(machine_mock.received().len(), 1, "a Machine Control device gets its machine session");
     assert!(mirror_mock.received().is_empty(), "a Mirror device never sees a machine session");
 
-    assert_eq!(state.dispatch_push("desktop-1", PushKind::NeedsInput).await, 1);
+    assert_eq!(state.dispatch_decision_push(&["mac:desktop-1".to_string()]).await, 1);
     assert_eq!(mirror_mock.received().len(), 1, "a Mirror device gets a mirrored session");
     assert!(machine_mock.received().is_empty(), "a Machine device does not get mirrored sessions");
 }
@@ -327,84 +489,12 @@ async fn gone_answer_deletes_the_subscription() {
         let device = paired_device(&state);
         state.push.store.subscribe(&device, mock.subscription("a", true, FinishedMode::Off)).unwrap();
 
-        assert_eq!(state.dispatch_push("s1", PushKind::NeedsInput).await, 1);
+        assert_eq!(state.dispatch_decision_push(&[REF.to_string()]).await, 1);
         assert_eq!(mock.received().len(), 1);
         assert!(state.push.store.list_subscriptions().is_empty(), "{answer} deletes the subscription");
         let reloaded = PushStore::load(Some(dir.path().join(PUSH_SUBSCRIPTIONS_FILE)));
         assert!(reloaded.list_subscriptions().is_empty());
     }
-}
-
-#[tokio::test]
-async fn published_agent_events_drive_the_dispatcher() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = gateway(dir.path());
-    let mut mock = MockPush::start(StatusCode::CREATED).await;
-    let device = paired_device(&state);
-    state.push.store.subscribe(&device, mock.subscription("a", true, FinishedMode::Off)).unwrap();
-    state.start_push_dispatch();
-
-    state.agent_events.publish(draft("s1", AgentControlState::Working));
-    state.agent_events.publish(draft("s1", AgentControlState::Blocked));
-    let delivery = tokio::time::timeout(Duration::from_secs(10), mock.deliveries.recv())
-        .await
-        .expect("the dispatcher sends within the bound")
-        .expect("a delivery");
-    assert_eq!(mock.decrypt(&delivery)["state"], "waiting_input");
-}
-
-#[tokio::test]
-async fn a_stalled_push_service_does_not_hold_up_later_alerts() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = gateway(dir.path());
-    let keys = MockPush::start(StatusCode::CREATED).await;
-    // A push service that accepts the request and then never answers until released.
-    let (tx, mut arrivals) = mpsc::unbounded_channel::<()>();
-    let release = Arc::new(tokio::sync::Notify::new());
-    let app = Router::new()
-        .route(
-            "/push/{id}",
-            post(
-                |AxState((tx, release)): AxState<(mpsc::UnboundedSender<()>, Arc<tokio::sync::Notify>)>| async move {
-                    let _ = tx.send(());
-                    release.notified().await;
-                    StatusCode::CREATED
-                },
-            ),
-        )
-        .with_state((tx, Arc::clone(&release)));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let device = paired_device(&state);
-    let mut subscription = keys.subscription("stall", true, FinishedMode::Off);
-    subscription.endpoint = format!("http://{addr}/push/stall");
-    state.push.store.subscribe(&device, subscription).unwrap();
-    state.start_push_dispatch();
-
-    state.agent_events.publish(draft("s1", AgentControlState::Blocked));
-    state.agent_events.publish(draft("s2", AgentControlState::Blocked));
-    // The first send is still parked in the service; the second must arrive anyway, well
-    // before the 15 s send timeout would free a serial dispatcher.
-    for _ in 0..2 {
-        tokio::time::timeout(Duration::from_secs(10), arrivals.recv())
-            .await
-            .expect("both alerts reach the push service while the first is stalled")
-            .expect("an arrival");
-    }
-    release.notify_waiters();
-    server.abort();
-}
-
-#[test]
-fn unknown_between_two_blocked_readings_is_one_wait() {
-    let mut turns = TurnTracker::default();
-    let t0 = Instant::now();
-    assert_eq!(turns.observe("s", AgentControlState::Blocked, t0), Some(PushKind::NeedsInput));
-    assert_eq!(turns.observe("s", AgentControlState::Unknown, t0), None);
-    assert_eq!(turns.observe("s", AgentControlState::Blocked, t0), None, "no second alert");
-    assert_eq!(turns.observe("s", AgentControlState::Working, t0), None);
-    assert_eq!(turns.observe("s", AgentControlState::Blocked, t0), Some(PushKind::NeedsInput));
 }
 
 #[test]

@@ -35,10 +35,17 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
+use super::history_parse::{
+    reference_apply_native_tool_status, reference_assign_result_status, reference_bounded_tool_input,
+    reference_diff_part, reference_native_model, reference_native_patch_body, reference_native_tool_status,
+    reference_finalize_work_status, reference_native_task_status, reference_note_turn_meta,
+    reference_parent_call_id, reference_push_orphan_result,
+    reference_stamp_tool_call, reference_usage_from_object,
+};
 use super::types::{
     ReferenceImageRef, ReferenceNativeHistoryKind, ReferencePart, ReferenceSkillActivity,
-    ReferenceSkillEvidence, ReferenceSkillStatus, ReferenceTaskResult, ReferenceTaskStatus,
-    ReferenceTurn, ReferenceTurnRole, ReferenceTurnSource,
+    ReferenceSkillEvidence, ReferenceSkillStatus, ReferenceTaskResult, ReferenceTurn,
+    ReferenceTurnRole, ReferenceTurnSource,
 };
 
 /// Enough turns for a conversation. Upstream `MAX_TURNS`; a page reader passes `usize::MAX`
@@ -281,6 +288,8 @@ pub struct OmoToolResult {
     pub id: String,
     pub text: String,
     pub error: bool,
+    /// Native lifecycle word, when the result recorded one.
+    pub status: Option<String>,
     /// Media types of the images the result carries, in order.
     pub images: Vec<String>,
 }
@@ -336,6 +345,7 @@ pub fn omo_pi_results(message: &Value) -> Vec<OmoToolResult> {
                 id: id.to_string(),
                 text: omo_result_text(block.get("content")),
                 error: block.bool("isError") == Some(true),
+                status: block.string("status").map(str::to_string),
                 images,
             })
         })
@@ -356,7 +366,8 @@ pub fn omo_pi_notice(entry: &Value) -> Option<ReferencePart> {
     if text.is_empty() {
         return None;
     }
-    Some(ReferencePart::Notice { text, source: row.string("customType").map(str::to_string) })
+    Some(ReferencePart::Notice { text, source: row.string("customType").map(str::to_string),
+ id: None, })
 }
 
 /// The `<system-notice>` envelope is chrome; the message is what it wraps.
@@ -436,10 +447,8 @@ pub fn omo_task_results(entry: &Value, titles: &HashMap<String, String>) -> Opti
             let result = record_label(task.get("final_response"))
                 .or_else(|| record_label(task.get("error")))
                 .unwrap_or_default();
-            let status = match raw.as_str() {
-                "completed" => ReferenceTaskStatus::Completed,
-                "cancelled" | "canceled" | "aborted" => ReferenceTaskStatus::Cancelled,
-                _ => ReferenceTaskStatus::Failed,
+            let Some(status) = reference_native_task_status(raw.as_str()) else {
+                continue;
             };
             let title = titles
                 .get(&id)
@@ -470,6 +479,7 @@ pub fn omo_task_results(entry: &Value, titles: &HashMap<String, String>) -> Opti
                     tokens: amount(stats.get("total_tokens")).or_else(|| amount(task.get("tokens"))),
                     result,
                     result_cut: if result_cut { Some(true) } else { None },
+                    parent_call_id: reference_parent_call_id(value),
                 },
             );
         }
@@ -677,23 +687,34 @@ fn assistant_turn(turns: &mut Vec<ReferenceTurn>, timestamp: &Option<String>, se
             source: None,
             parts: Vec::new(),
             abandoned: None,
+            id: None,
+            meta: None,
         });
     }
     turns.len() - 1
 }
 
 fn apply_omo_tool_results(
-    turns: &mut [ReferenceTurn],
+    turns: &mut Vec<ReferenceTurn>,
     pending: &mut HashMap<String, (usize, usize)>,
     results: &[OmoToolResult],
     tool_images: bool,
 ) {
     for result in results {
         let Some((turn_index, part_index)) = pending.remove(&result.id) else {
+            reference_push_orphan_result(turns, None, &result.id, result.text.clone(), result.error);
             continue;
         };
-        let Some(ReferencePart::Tool { name, output, error, images, output_ref, output_size, .. }) =
-            turns.get_mut(turn_index).and_then(|turn| turn.parts.get_mut(part_index))
+        let Some(ReferencePart::Tool {
+            name,
+            output,
+            error,
+            images,
+            output_ref,
+            output_size,
+            status,
+            ..
+        }) = turns.get_mut(turn_index).and_then(|turn| turn.parts.get_mut(part_index))
         else {
             continue;
         };
@@ -703,6 +724,12 @@ fn apply_omo_tool_results(
         *output_size = trimmed.output_size;
         if result.error {
             *error = Some(true);
+        }
+        reference_assign_result_status(status, result.error);
+        if let Some(raw) = result.status.as_deref() {
+            if let Some(mapped) = reference_native_tool_status(raw) {
+                *status = Some(mapped);
+            }
         }
         if tool_images && !result.images.is_empty() {
             // addressed by the call it answers: a nested result shares its entry with other
@@ -728,6 +755,8 @@ fn runtime_turn(timestamp: Option<&str>, parts: Vec<ReferencePart>) -> Reference
         source: Some(ReferenceTurnSource::Runtime),
         parts,
         abandoned: None,
+        id: None,
+        meta: None,
     }
 }
 
@@ -778,7 +807,8 @@ pub fn parse_omo_transcript(
             continue;
         }
         if let Some(tasks) = omo_task_results(&entry, task_titles) {
-            turns.push(runtime_turn(timestamp.as_deref(), vec![ReferencePart::TaskResult { tasks }]));
+            turns.push(runtime_turn(timestamp.as_deref(), vec![ReferencePart::TaskResult { tasks,
+ id: None, }]));
             continue;
         }
         // A compaction is a tree entry, not a message, so it reaches the chat only through
@@ -789,7 +819,8 @@ pub fn parse_omo_transcript(
                 if !summary.trim().is_empty() {
                     turns.push(runtime_turn(
                         timestamp.as_deref(),
-                        vec![ReferencePart::Compact { text: summary }],
+                        vec![ReferencePart::Compact { text: summary,
+ id: None, }],
                     ));
                 }
             }
@@ -846,14 +877,16 @@ pub fn parse_omo_transcript(
                     .join(" "),
                 None => prompt.clone(),
             };
-            let mut turn_parts = vec![ReferencePart::Text { text: asked, phase: None }];
+            let mut turn_parts = vec![ReferencePart::Text { text: asked, phase: None,
+ id: None, }];
             if let Some(invocation) = &invocation {
                 turn_parts.extend(
                     invocation
                         .skills
                         .iter()
                         .cloned()
-                        .map(|skill| ReferencePart::Skill { skill }),
+                        .map(|skill| ReferencePart::Skill { skill,
+ id: None, }),
                 );
             }
             turns.push(ReferenceTurn {
@@ -863,6 +896,8 @@ pub fn parse_omo_transcript(
                 source: None,
                 parts: turn_parts,
                 abandoned: None,
+                id: None,
+                meta: None,
             });
             continue;
         }
@@ -872,19 +907,27 @@ pub fn parse_omo_transcript(
             if timestamp.is_some() {
                 turns[turn_index].ended_at = timestamp.clone();
             }
+            reference_note_turn_meta(
+                &mut turns[turn_index],
+                ReferenceNativeHistoryKind::Omo,
+                reference_native_model(message_row.get("model")),
+                message_row.get("usage").and_then(reference_usage_from_object),
+            );
             if let Some(blocks) = message_row.array("content") {
                 for block in blocks {
                     let block = Row::of(block);
                     match block.string("type") {
                         Some("text") => {
                             if let Some(text) = block.string("text").filter(|text| !text.is_empty()) {
-                                turns[turn_index].parts.push(ReferencePart::Text { text: text.to_string(), phase: None });
+                                turns[turn_index].parts.push(ReferencePart::Text { text: text.to_string(), phase: None,
+ id: None, });
                             }
                         }
                         Some("thinking") => {
                             let thinking = block.string("thinking").or_else(|| block.string("text")).unwrap_or("");
                             if !thinking.is_empty() {
-                                turns[turn_index].parts.push(ReferencePart::Thinking { text: thinking.to_string() });
+                                turns[turn_index].parts.push(ReferencePart::Thinking { text: thinking.to_string(),
+ id: None, });
                             }
                         }
                         Some("toolCall") => {
@@ -901,19 +944,39 @@ pub fn parse_omo_transcript(
                                 None => omo_tool_summary(name, &input),
                             };
                             let part_index = turns[turn_index].parts.len();
+                            let rendered = serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string());
+                            let patch_body = reference_native_patch_body(name, &input);
                             turns[turn_index].parts.push(ReferencePart::Tool {
                                 name: name.to_string(),
                                 summary: summary.chars().take(120).collect(),
-                                input: serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string()),
+                                input: reference_bounded_tool_input(name, &input, rendered),
                                 output: String::new(),
                                 error: None,
                                 skill: None,
                                 output_ref: None,
                                 output_size: None,
                                 images: Vec::new(),
+                                id: None,
+                                call_id: None,
+                                status: None,
+                                output_payload: Box::new(None),
                             });
                             if let Some(id) = block.string("id") {
+                                if let Some(part) = turns[turn_index].parts.last_mut() {
+                                    reference_stamp_tool_call(part, id);
+                                    if let Some(raw) = block.string("status") {
+                                        reference_apply_native_tool_status(part, raw);
+                                    }
+                                }
                                 pending.insert(id.to_string(), (turn_index, part_index));
+                            } else if let Some(part) = turns[turn_index].parts.last_mut() {
+                                reference_stamp_tool_call(part, "");
+                                if let Some(raw) = block.string("status") {
+                                    reference_apply_native_tool_status(part, raw);
+                                }
+                            }
+                            if let Some(body) = patch_body {
+                                turns[turn_index].parts.push(reference_diff_part(&body));
                             }
                         }
                         // unsupported transcript parts are intentionally ignored
@@ -927,7 +990,8 @@ pub fn parse_omo_transcript(
             // its error the chat showed the prompt with no answer at all
             if message_row.string("stopReason") == Some("error") {
                 if let Some(error) = message_row.string("errorMessage").filter(|error| !error.is_empty()) {
-                    turns[turn_index].parts.push(ReferencePart::Text { text: format!("Error: {error}"), phase: None });
+                    turns[turn_index].parts.push(ReferencePart::Text { text: format!("Error: {error}"), phase: None,
+ id: None, });
                 }
             }
             settled = message_row.string("stopReason") == Some("stop");
@@ -935,6 +999,7 @@ pub fn parse_omo_transcript(
     }
 
     turns.retain(|turn| !turn.parts.is_empty());
+    reference_finalize_work_status(&mut turns, false);
     if turns.len() > max_turns {
         turns.split_off(turns.len() - max_turns)
     } else {
@@ -1151,6 +1216,7 @@ pub fn is_omo_process(argv: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::types::{ReferenceTaskStatus, ReferenceToolStatus};
 
     const AUTHENTIC: &str = include_str!("fixtures/omo/session-authentic.jsonl");
     const PARTIAL: &str = include_str!("fixtures/omo/session-partial.jsonl");
@@ -1183,7 +1249,7 @@ mod tests {
             ],
             "the fixture's record order decides the turn order"
         );
-        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "add a retry to the uploader".into(), phase: None }]);
+        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "add a retry to the uploader".into(), phase: None, id: None }]);
         assert_eq!(turns[0].started_at.as_deref(), Some("2026-10-06T10:00:05.000Z"));
         assert_eq!(
             part_kinds(&turns[1]),
@@ -1237,7 +1303,8 @@ mod tests {
             .expect("the senpi-task.completion wake is a turn");
         assert_eq!(turn.role, ReferenceTurnRole::User);
         assert_eq!(turn.source, Some(ReferenceTurnSource::Runtime));
-        let ReferencePart::TaskResult { tasks } = &turn.parts[0] else {
+        let ReferencePart::TaskResult { tasks,
+ id: None, } = &turn.parts[0] else {
             panic!("the wake's part is a task result");
         };
         assert_eq!(tasks.len(), 1);
@@ -1263,7 +1330,8 @@ mod tests {
             .expect("the custom_message notice is a part");
         assert_eq!(
             notice,
-            &ReferencePart::Notice { text: "build finished".into(), source: Some("info".into()) }
+            &ReferencePart::Notice { text: "build finished".into(), source: Some("info".into()),
+ id: None, }
         );
     }
 
@@ -1278,7 +1346,8 @@ mod tests {
         assert_eq!(turn.source, Some(ReferenceTurnSource::Runtime));
         assert_eq!(
             turn.parts[0],
-            ReferencePart::Compact { text: "Earlier work established the uploader layout.".into() }
+            ReferencePart::Compact { text: "Earlier work established the uploader layout.".into(),
+ id: None, }
         );
     }
 
@@ -1286,8 +1355,10 @@ mod tests {
     fn a_settled_assistant_message_starts_the_next_turn() {
         let turns = parse(AUTHENTIC);
         let last_two = &turns[turns.len() - 2..];
-        assert_eq!(last_two[0].parts, vec![ReferencePart::Text { text: "Continuing from the summary.".into(), phase: None }]);
-        assert_eq!(last_two[1].parts, vec![ReferencePart::Text { text: "Woken by a monitor.".into(), phase: None }]);
+        assert_eq!(last_two[0].parts, vec![ReferencePart::Text { text: "Continuing from the summary.".into(), phase: None,
+ id: None, }]);
+        assert_eq!(last_two[1].parts, vec![ReferencePart::Text { text: "Woken by a monitor.".into(), phase: None,
+ id: None, }]);
         assert_eq!(last_two[1].started_at.as_deref(), Some("2026-10-06T10:03:20.000Z"));
     }
 
@@ -1295,9 +1366,12 @@ mod tests {
     fn torn_tail_and_non_object_lines_are_skipped_without_losing_the_turns_around_them() {
         let turns = parse(PARTIAL);
         assert_eq!(turns.len(), 3, "the unparseable lines are skipped, not fatal");
-        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "kept".into(), phase: None }]);
-        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "   ".into(), phase: None }]);
-        assert_eq!(turns[2].parts, vec![ReferencePart::Text { text: "plain string content".into(), phase: None }]);
+        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "kept".into(), phase: None,
+ id: None, }]);
+        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "   ".into(), phase: None,
+ id: None, }]);
+        assert_eq!(turns[2].parts, vec![ReferencePart::Text { text: "plain string content".into(), phase: None,
+ id: None, }]);
         assert!(turns[2].parts.iter().all(|part| part.is_inline_text()));
     }
 
@@ -1305,15 +1379,18 @@ mod tests {
     fn a_context_clear_empties_the_conversation_before_it() {
         let turns = parse(CONTEXT_CLEAR);
         assert_eq!(turns.len(), 2, "only the turns after the reset survive");
-        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "second".into(), phase: None }]);
-        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "second answer".into(), phase: None }]);
+        assert_eq!(turns[0].parts, vec![ReferencePart::Text { text: "second".into(), phase: None,
+ id: None, }]);
+        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "second answer".into(), phase: None,
+ id: None, }]);
     }
 
     #[test]
     fn a_failed_assistant_message_keeps_its_error() {
         let turns = parse(STOP_ERROR);
         assert_eq!(turns.len(), 2);
-        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "Error: 401 unauthorized".into(), phase: None }]);
+        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "Error: 401 unauthorized".into(), phase: None,
+ id: None, }]);
         let ReferencePart::Text { text, .. } = &turns[1].parts[0] else {
             panic!("the error is a text part");
         };
@@ -1454,14 +1531,16 @@ mod tests {
         assert_eq!(
             turns[0].parts,
             vec![
-                ReferencePart::Text { text: "/skill:review".into(), phase: None },
+                ReferencePart::Text { text: "/skill:review".into(), phase: None,
+ id: None, },
                 ReferencePart::Skill {
                     skill: ReferenceSkillActivity {
                         name: "review".into(),
                         evidence: ReferenceSkillEvidence::Instructions,
                         status: ReferenceSkillStatus::Loaded,
                         path: Some("/skills/review/SKILL.md".into()),
-                    }
+                    },
+                    id: None,
                 },
             ],
             "the request is the user's text and the skill rides it as its own part"
@@ -1477,7 +1556,8 @@ mod tests {
             parse(&plain)[0].parts,
             vec![ReferencePart::Text {
                 text: "the skill-instruction tag is documented in the README".into(),
-                phase: None
+                phase: None,
+                id: None,
             }]
         );
     }
@@ -1510,7 +1590,8 @@ mod tests {
         let mut titles = HashMap::new();
         let turns = parse_omo_transcript(AUTHENTIC, 2, false, &mut titles);
         assert_eq!(turns.len(), 2);
-        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "Woken by a monitor.".into(), phase: None }]);
+        assert_eq!(turns[1].parts, vec![ReferencePart::Text { text: "Woken by a monitor.".into(), phase: None,
+ id: None, }]);
         assert_eq!(parse_omo_transcript(AUTHENTIC, OMO_MAX_TURNS, false, &mut HashMap::new()).len(), 7);
     }
 
@@ -1619,5 +1700,94 @@ mod tests {
         assert_eq!(omo_session_header("{\"type\":\"session\",\"id\":\"x\",\"cwd\":\"/other\"}", "/home/dev/app"), None);
         assert_eq!(omo_session_header("{\"type\":\"message\"}", "/home/dev/app"), None);
         assert_eq!(omo_session_header("not json", "/home/dev/app"), None);
+    }
+
+    #[test]
+    fn native_work_omo_parent_call_status_and_diff() {
+        let text = concat!(
+            r#"{"type":"message","timestamp":"2026-10-06T13:00:00.000Z","message":{"role":"user","content":"usage 12 tokens status failed"}}"#,
+            "\n",
+            r#"{"type":"message","timestamp":"2026-10-06T13:00:01.000Z","message":{"role":"assistant","model":"deepseek","usage":{"input":3,"output":4,"cacheRead":1,"cacheWrite":2},"content":[{"type":"toolCall","id":"call-parent","name":"Edit","arguments":{"old_string":"a","new_string":"b"}},{"type":"toolResult","toolCallId":"call-parent","status":"failed","content":"no"}]}}"#,
+            "\n",
+            r#"{"type":"custom_message","customType":"omo-senpi:wake","display":false,"timestamp":"2026-10-06T13:00:02.000Z","details":[{"customType":"senpi-task.completion","details":[{"task_id":"t-1","status":"cancelled","parent_call_id":"call-parent","final_response":"stopped"}]}]}"#,
+            "\n",
+        );
+        let turns = parse(text);
+        assert!(turns[0].meta.is_none());
+        let meta = turns[1].meta.as_ref().unwrap();
+        assert_eq!(meta.model.as_deref(), Some("deepseek"));
+        assert_eq!(meta.usage.as_ref().unwrap().input_tokens, Some(3));
+        assert_eq!(meta.usage.as_ref().unwrap().cache_write_tokens, Some(2));
+        let ReferencePart::Tool { status, .. } = turns[1].parts.iter().find(|part| matches!(part, ReferencePart::Tool { .. })).unwrap() else { unreachable!() };
+        assert_eq!(*status, Some(ReferenceToolStatus::Failed));
+        assert!(turns[1].parts.iter().any(|part| matches!(part, ReferencePart::Diff { .. })));
+        let ReferencePart::TaskResult { tasks, .. } = turns.iter().find_map(|turn| turn.parts.iter().find(|part| matches!(part, ReferencePart::TaskResult { .. }))).unwrap() else { unreachable!() };
+        assert_eq!(tasks[0].status, ReferenceTaskStatus::Cancelled);
+        assert_eq!(tasks[0].parent_call_id.as_deref(), Some("call-parent"));
+    }
+
+    fn omo_wake(status: &str) -> Value {
+        json!({
+            "type": "custom_message",
+            "customType": "omo-senpi:wake",
+            "timestamp": "2026-10-06T10:00:00.000Z",
+            "details": [{
+                "customType": "senpi-task.completion",
+                "details": [{ "task_id": "t-x", "status": status, "final_response": "out" }]
+            }]
+        })
+    }
+
+    fn omo_task_status(text: &str) -> ReferenceTaskStatus {
+        let turns = parse(text);
+        let ReferencePart::TaskResult { tasks, .. } = turns
+            .iter()
+            .find_map(|turn| turn.parts.iter().find(|part| matches!(part, ReferencePart::TaskResult { .. })))
+            .expect("task")
+        else {
+            unreachable!()
+        };
+        tasks[0].status
+    }
+
+    #[test]
+    fn omo_unknown_task_word_is_omitted_not_failed() {
+        assert_eq!(omo_task_results(&omo_wake("mystery"), &HashMap::new()), None);
+        let tool = r#"{"type":"message","timestamp":"2026-10-06T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c-unk","name":"bash","arguments":{"command":"echo"},"status":"mystery"}]}}"#;
+        let turns = parse(tool);
+        let ReferencePart::Tool { status, .. } = &turns[0].parts[0] else { panic!("{:?}", turns) };
+        assert_eq!(*status, None);
+    }
+
+    #[test]
+    fn omo_unfinished_task_in_a_closed_stream_is_unverifiable() {
+        let line = serde_json::to_string(&omo_wake("running")).expect("wake");
+        assert_eq!(omo_task_status(&line), ReferenceTaskStatus::Unverifiable);
+        let moved = format!(
+            "{line}\n{{\"type\":\"message\",\"timestamp\":\"2026-10-06T10:00:02.000Z\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"later\"}}]}}}}\n"
+        );
+        assert_eq!(omo_task_status(&moved), ReferenceTaskStatus::Unverifiable);
+    }
+
+    #[test]
+    fn omo_open_tail_task_is_running_only_on_a_live_owning_tail() {
+        let line = serde_json::to_string(&omo_wake("running")).expect("wake");
+        let mut turns = parse(&line);
+        assert_eq!(omo_task_status(&line), ReferenceTaskStatus::Unverifiable);
+        crate::remote::reference_chat::history_parse::reference_finalize_work_status(&mut turns, true);
+        let ReferencePart::TaskResult { tasks, .. } = &turns[0].parts[0] else { panic!("{:?}", turns) };
+        assert_eq!(tasks[0].status, ReferenceTaskStatus::Running);
+    }
+
+    #[test]
+    fn omo_recorded_task_failure_stays_failed() {
+        let tasks = omo_task_results(&omo_wake("failed"), &HashMap::new()).expect("failed task");
+        assert_eq!(tasks[0].status, ReferenceTaskStatus::Failed);
+    }
+
+    #[test]
+    fn omo_recorded_task_cancel_stays_cancelled() {
+        let tasks = omo_task_results(&omo_wake("cancelled"), &HashMap::new()).expect("cancelled task");
+        assert_eq!(tasks[0].status, ReferenceTaskStatus::Cancelled);
     }
 }

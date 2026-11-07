@@ -74,6 +74,10 @@ import {
   getAccountEnrollmentStatus,
   enrollThisMachine,
   type AccountEnrollmentStatus,
+  undoSupervisorAction,
+  supervisorAnswer,
+  startSupervisor,
+  enableAgentControlOwner,
 } from "./tauri";
 import { registerDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "./nativeTerminalLifecycle";
 
@@ -480,6 +484,29 @@ describe("Tauri IPC wrapper contract", () => {
       kind: "agentResume",
       agentType: "claude",
       providerSession: { key: "session_id", id: "provider-1" },
+    });
+  });
+
+  it("forwards agentContinue without client argv", async () => {
+    core.invoke.mockResolvedValue({ sessionId: "backend-continue-1" });
+    const { spawnTerminalDetailed } = await import("./tauri");
+    await spawnTerminalDetailed({
+      workspaceId: "workspace-main",
+      worktree: null,
+      startup: {
+        kind: "agentContinue",
+        agentType: "claude",
+        mode: "fork",
+        providerSession: { key: "session_id", id: "sess-1" },
+        args: ["--dangerously-skip-permissions"],
+      } as never,
+    });
+    const call = core.invoke.mock.calls.at(-1)?.[1] as { request: { startup: unknown } };
+    expect(call.request.startup).toEqual({
+      kind: "agentContinue",
+      agentType: "claude",
+      mode: "fork",
+      providerSession: { key: "session_id", id: "sess-1" },
     });
   });
 
@@ -1139,5 +1166,36 @@ describe("account enrollment API", () => {
       enrollmentCode: "code-123",
       sessionToken: "tok",
     });
+  });
+});
+
+describe("supervisor panel IPC wrappers", () => {
+  beforeEach(() => {
+    core.invoke.mockReset();
+    core.isTauri.mockReturnValue(true);
+  });
+
+  it("keeps the full session ref when answering a supervisor decision", async () => {
+    await supervisorAnswer({ sessionRef: "omarchy:s-1", promptId: "p-1", screenRevision: "r-7", optionIndex: 2 });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_supervisor_answer", {
+      sessionRef: "omarchy:s-1",
+      promptId: "p-1",
+      screenRevision: "r-7",
+      optionIndex: 2,
+    });
+  });
+
+  it("passes an action Undo under the backend's id argument", async () => {
+    await undoSupervisorAction(42);
+    expect(core.invoke).toHaveBeenCalledWith("cmd_supervisor_action_undo", { id: 42 });
+  });
+
+  it("uses owner-only enablement and the hub start command", async () => {
+    await enableAgentControlOwner();
+    await startSupervisor();
+    expect(core.invoke.mock.calls.map(([command]) => command)).toEqual([
+      "cmd_agent_control_enable_owner",
+      "cmd_supervisor_start",
+    ]);
   });
 });

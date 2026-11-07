@@ -1,21 +1,24 @@
 // Test helper: open the worktree picker on whichever phone surface is showing. On the phone
-// home (no session open yet) the picker is the Worktrees tab's inline inventory; on the Session
-// screen it is the "Change workspace context" drawer, exactly as before the home existed.
+// home (no session open yet) the picker is the Worktrees screen the panel's "+" opens; on the
+// Session screen it is the "Change workspace context" drawer.
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 
 export async function openWorkspacePicker(options: { timeout?: number } = {}): Promise<HTMLElement> {
   const trigger = await waitFor(
     () => {
       const found =
-        screen.queryByTestId("mobile-home-tab-worktrees") ??
+        screen.queryByTestId("phone-panel-start-session") ??
+        screen.queryByTestId("remote-worktrees-inline") ??
         screen.queryByRole("button", { name: /Change workspace context/i });
-      if (!found) throw new Error("Neither the Worktrees tab nor the workspace context trigger is rendered");
+      if (!found) throw new Error("Neither the panel's start button nor the workspace context trigger is rendered");
       return found;
     },
     options.timeout === undefined ? undefined : { timeout: options.timeout },
   );
-  const onHome = trigger.getAttribute("data-testid") === "mobile-home-tab-worktrees";
-  if (onHome || trigger.getAttribute("aria-expanded") !== "true") {
+  // The Worktrees screen the panel's "+" opens is already the picker when it is showing.
+  if (trigger.getAttribute("data-testid") === "remote-worktrees-inline") return trigger;
+  const onHome = trigger.getAttribute("data-testid") === "phone-panel-start-session";
+  if (onHome || (trigger.getAttribute("aria-expanded") !== null && trigger.getAttribute("aria-expanded") !== "true")) {
     act(() => {
       fireEvent.click(trigger);
     });

@@ -519,6 +519,8 @@ fn a04_services_have_no_strong_owner_cycle() {
     let gateway = Arc::downgrade(server.remote_state());
     let handover = Arc::downgrade(&server.handover_manager);
     let terminal = Arc::downgrade(server.terminal_service());
+    // Join the writer so its workspace Arc is released before ownership is asserted.
+    server.remote_state().finish_agent_stamp_writer();
     drop(server);
     assert!(sessions.upgrade().is_none());
     assert!(workspaces.upgrade().is_none());

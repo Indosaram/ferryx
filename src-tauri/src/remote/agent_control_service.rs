@@ -99,7 +99,22 @@ struct Observed {
     screen: Option<reference_types::ReferenceScreenSnapshot>,
 }
 
+/// One session's status without its last assistant line. Every mutation path (send, answer,
+/// prompt reads) uses this: it never opens the history store.
 async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Observed, ScopeError> {
+    observe_entry(state, session_id, false).await
+}
+
+/// One session's status with `lastAssistantLine`, for the List and Read ops only.
+async fn observe_with_line(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Observed, ScopeError> {
+    observe_entry(state, session_id, true).await
+}
+
+async fn observe_entry(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    with_last_line: bool,
+) -> Result<Observed, ScopeError> {
     let details = state
         .session_backend
         .describe_session(session_id)
@@ -115,11 +130,10 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         };
         crate::agent_detect::default_engine().detect(&input, None)
     });
-    let agent = provider
-        .as_ref()
-        .and_then(|report| report.agent.clone())
-        .filter(|id| !id.trim().is_empty())
-        .or_else(|| detection.as_ref().map(|found| found.manifest_id.clone()).filter(|id| !id.is_empty()));
+    let agent = crate::agent_detect::resolve_agent_identity(
+        provider.as_ref().and_then(|report| report.agent.as_deref()),
+        detection.as_ref().map(|found| found.manifest_id.as_str()),
+    );
     let readable = screen.as_ref().is_some_and(|snapshot| snapshot.is_answerable());
     let pending = match (&agent, &screen) {
         (Some(agent), Some(snapshot))
@@ -149,14 +163,23 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
     }
     // The bus's timestamps belong to its own latest reading; they only describe this entry's
     // state and screen while that reading still matches them.
-    let seen = state.agent_events.latest(session_id);
+    // `stamps` is the latest reading, or the persisted stamps of a previous run before this
+    // run's first reading, so a restarted daemon still reports the real times.
+    let seen = state.agent_events.stamps(session_id);
     let state_since = seen.as_ref().filter(|seen| seen.state == status.state).and_then(|seen| seen.state_since_ms);
     let screen_revision = screen.as_ref().map(|snapshot| snapshot.revision.clone());
     let screen_changed_at = seen
         .as_ref()
         .filter(|seen| seen.screen_revision == screen_revision)
         .and_then(|seen| seen.screen_changed_at_ms);
-    let entry = serde_json::json!({
+    let last_assistant_line = match &agent {
+        Some(agent) if with_last_line => {
+            let identity = reference_chat_identity(state, &target, Some(agent)).await;
+            last_assistant_line(state, session_id, identity).await
+        }
+        _ => None,
+    };
+    let mut entry = serde_json::json!({
         "sessionId": session_id,
         "running": details.running,
         "cols": details.cols,
@@ -173,8 +196,77 @@ async fn observe(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<Ob
         "screenRevision": screen_revision,
         "screenChangedAt": screen_changed_at,
         "screenReadable": readable,
+        // When this entry was read, so a hub that caches a list can show how old it is.
+        "observedAt": observed_at_ms(),
     });
+    if with_last_line {
+        entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
+    }
+    if state.machine_services.as_ref().is_some_and(|services| services.sessions.agent_control_failed(session_id)) {
+        entry["health"] = serde_json::json!({ "type": "failed", "reason": "the agent exited in the middle of a turn" });
+    }
     Ok(Observed { entry, screen })
+}
+
+fn observed_at_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// The longest `lastAssistantLine` a list or read entry carries.
+const LAST_ASSISTANT_LINE_MAX_CHARS: usize = 200;
+
+/// How many newest turn boundaries are read to find the last assistant message.
+const LAST_ASSISTANT_LINE_TURNS: usize = 4;
+
+/// The last line of the session's newest assistant text, from the same history reader the phone
+/// chat uses. `None` when the store is unavailable, remote, scrollback-only or holds no
+/// assistant text yet; a missing line never fails a list or read.
+async fn last_assistant_line(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    identity: reference_history::ReferenceHistoryIdentity,
+) -> Option<String> {
+    if reference_chat_session_is_remote(state, session_id).await {
+        return None;
+    }
+    let home = reference_chat_history_home(state)?;
+    let siblings = reference_chat_siblings(state, session_id).await;
+    let stream = reference_chat_resolve_history(
+        home,
+        identity.clone(),
+        siblings,
+        reference_history::resolve_reference_history_stream,
+    )
+    .await
+    .ok()?;
+    let page = reference_history::read_reference_history_page(&stream, &identity, LAST_ASSISTANT_LINE_TURNS, None)
+        .await
+        .ok()?;
+    if !page.is_native() {
+        return None;
+    }
+    last_assistant_line_of(&page.turns)
+}
+
+/// The last non-empty line of the newest assistant text part, cut to
+/// [`LAST_ASSISTANT_LINE_MAX_CHARS`] characters.
+fn last_assistant_line_of(turns: &[reference_types::ReferenceTurn]) -> Option<String> {
+    turns
+        .iter()
+        .rev()
+        .filter(|turn| turn.role == reference_types::ReferenceTurnRole::Assistant)
+        .flat_map(|turn| turn.parts.iter().rev())
+        .find_map(|part| match part {
+            reference_types::ReferencePart::Text { text, .. } => text
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| line.chars().take(LAST_ASSISTANT_LINE_MAX_CHARS).collect::<String>()),
+            _ => None,
+        })
 }
 
 async fn live(state: &Arc<RemoteGatewayState>, session_id: &str) -> Result<(), ScopeError> {
@@ -318,9 +410,18 @@ pub(crate) async fn handle_as(
     actor: &str,
     authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
 ) -> Result<serde_json::Value, ScopeError> {
+    // An answer the owner types (a card tap, the phone, Slack, the terminal helper) joins the
+    // answer history once it went through; the supervisor's own answers never do.
+    if let Some(handled) = recovery_card_answer(&op).await {
+        return handled;
+    }
+    let owner_answer = crate::hub_runtime::panel_autonomy::owner_answer_of(&op);
     let result = dispatch(state, op.clone(), authorize).await;
     if result.is_ok() && op.is_input_mutation() {
         crate::hub_runtime::note_agent_control_input(&op);
+    }
+    if let (Ok(_), Some(answer)) = (&result, owner_answer) {
+        tokio::spawn(answer.recorded());
     }
     record_audit(
         state,
@@ -334,6 +435,23 @@ pub(crate) async fn handle_as(
         ),
     );
     result
+}
+
+/// An owner's tap on a recovery card, answered by the recovery scheduler instead of the pane.
+/// `None` for every other op (including answers to real pane prompts).
+pub(crate) async fn recovery_card_answer(op: &AgentControlOp) -> Option<Result<serde_json::Value, ScopeError>> {
+    let AgentControlOp::Answer { prompt_id, answer, .. } = op else {
+        return None;
+    };
+    let result = crate::hub_runtime::panel_autonomy::answer_recovery_card(prompt_id, answer.option_index).await?;
+    Some(result.map(|()| serde_json::json!({ "recovery": "answered" })).map_err(|error| {
+        let code = match &error {
+            ferryx_hub::supervisor::recovery::CardError::NotOpen => ScopeErrorCode::NotFound,
+            ferryx_hub::supervisor::recovery::CardError::BadOption => ScopeErrorCode::InvalidRequest,
+            ferryx_hub::supervisor::recovery::CardError::Failed(_) => ScopeErrorCode::ControlConflict,
+        };
+        reference_chat_scope(code, error.to_string())
+    }))
 }
 
 /// Desktop event the Supervisor view refetches on: a supervisor typed, or was refused.
@@ -377,7 +495,7 @@ async fn dispatch(
             let ids = state.session_backend.list_sessions().await;
             let entries: Vec<serde_json::Value> = stream::iter(ids)
                 .map(|id| async move {
-                    match observe(state, &id).await {
+                    match observe_with_line(state, &id).await {
                         Ok(observed) => observed.entry,
                         // A session that vanished between the list and its read is reported, not dropped.
                         Err(error) => serde_json::json!({
@@ -397,7 +515,7 @@ async fn dispatch(
         }
         AgentControlOp::Read { session_id } => {
             live(state, &session_id).await?;
-            let observed = observe(state, &session_id).await?;
+            let observed = observe_with_line(state, &session_id).await?;
             let mut entry = observed.entry;
             entry["screen"] = match observed.screen {
                 Some(snapshot) => serde_json::json!({
@@ -735,6 +853,8 @@ pub(crate) async fn prompt_answer(
     answer: crate::daemon::protocol::AgentPromptAnswerInput,
     registry_id: Option<String>,
 ) -> Result<crate::scoped_contracts::DeliveryReceipt, ScopeError> {
+    let owner_answer =
+        crate::hub_runtime::panel_autonomy::owner_prompt_answer_of(&session_id, &prompt_id, answer.key.as_deref());
     let answer = reference_answer(answer)?;
     live(state, &session_id).await?;
     let Some(agent) = prompt_agent(state, &session_id, registry_id).await? else {
@@ -776,7 +896,12 @@ pub(crate) async fn prompt_answer(
         runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
     });
     match transaction.await {
-        Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => Ok(receipt),
+        Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => {
+            if let Some(answer) = owner_answer {
+                tokio::spawn(answer.recorded());
+            }
+            Ok(receipt)
+        }
         Ok(reference_input::ReferenceInputOutcome::NotTyped { error }) => Err(error),
         Ok(reference_input::ReferenceInputOutcome::OutcomeUnknown { message, .. }) => {
             Err(reference_chat_scope(ScopeErrorCode::OperationOutcomeUnknown, message))
@@ -842,8 +967,9 @@ async fn forward_once(
     // it as a missing capability instead of an untyped refusal.
     let delivery = matches!(op, AgentControlOp::Deliver { .. });
     let known = hosts.list().await.map_err(|error| ForwardFailure {
-        code: forward_code(&error.code),
-        message: "the paired-host inventory could not be read".into(),
+        // Nothing was sent yet, so this never claims the op may have been applied.
+        code: "INVENTORY_INCOMPLETE".into(),
+        message: format!("the paired-host inventory could not be read: {} ({})", error.code, error.message),
     })?;
     let Some(host) = known.into_iter().find(|host| host.host_id == host_id) else {
         return Err(ForwardFailure {
@@ -1317,23 +1443,261 @@ pub(crate) async fn http_stop(
         Ok(device) => device,
         Err(response) => return response,
     };
+    stop_session(&state, &headers, &device, None, session_id, body).await
+}
+
+/// The agent-control `Stop` for one pane, as one authorized device. `host_id` is the paired
+/// computer that owns the pane, or `None` for this one.
+async fn stop_session(
+    state: &Arc<RemoteGatewayState>,
+    headers: &HeaderMap,
+    device: &DeviceInfo,
+    host_id: Option<String>,
+    session_id: String,
+    body: Result<Json<StopBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
     let body = match body {
         Ok(Json(body)) => body,
         Err(_) => StopBody::default(),
     };
-    let authorize = http_reauthorize(&state, &headers);
-    control_fenced(
-        &state,
-        AgentControlOp::Stop {
-            session_id,
-            request_id: body.request_id,
+    let op = AgentControlOp::Stop {
+        session_id,
+        request_id: body.request_id,
+    };
+    control_ref_op(state, headers, device, host_id, op, body.supervisor_fence, body.supervisor_account).await
+}
+
+/// One op for one authorized device: in-process for a pane on this computer, else forwarded to
+/// the paired computer that owns it through the same paired-host forward the daemon's
+/// `AgentControl { host_id: Some(..) }` request uses. A supervisor fence in the body is
+/// ratcheted here before a local op runs, and carried to the paired computer, which ratchets it
+/// before its op runs; a body without one is a person's or an older hub's and is never fenced.
+async fn control_ref_op(
+    state: &Arc<RemoteGatewayState>,
+    headers: &HeaderMap,
+    device: &DeviceInfo,
+    host_id: Option<String>,
+    op: AgentControlOp,
+    fence: Option<u64>,
+    account: Option<String>,
+) -> Response {
+    let authorize = http_reauthorize(state, headers);
+    match host_id {
+        None => control_fenced(state, op, &device.id, authorize, fence, account).await,
+        Some(host_id) => {
+            let fence = match crate::agent_control::fence::SupervisorFence::from_wire(fence, account) {
+                Ok(fence) => fence,
+                Err(refusal) => return fence_refusal(&refusal),
+            };
+            control_finish(forward_as(state, host_id, op, &device.id, authorize, fence).await)
+        }
+    }
+}
+
+/// Forward one input op for a paired computer's pane, in-process, as one authorized device.
+///
+/// The device is re-authorized right before the forward and the call is audited once under its
+/// id (the daemon's own owner-socket forward is not on this path, so there is no second line or
+/// second `supervisor_changed`). The forward executes once: a lost answer is
+/// `OPERATION_OUTCOME_UNKNOWN` and is never sent again. The request id is minted here when the
+/// caller sent none. An owner answer joins this computer's answer history, looked up under the
+/// paired host's session refs only.
+async fn forward_as(
+    state: &Arc<RemoteGatewayState>,
+    host_id: String,
+    mut op: AgentControlOp,
+    actor: &str,
+    authorize: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>,
+    fence: Option<crate::agent_control::fence::SupervisorFence>,
+) -> Result<serde_json::Value, ScopeError> {
+    match &mut op {
+        AgentControlOp::Stop { request_id, .. } | AgentControlOp::Answer { request_id, .. } => {
+            *request_id = Some(request_id_or_new(request_id.take()));
+        }
+        _ => {}
+    }
+    let owner_answer = crate::hub_runtime::panel_autonomy::forwarded_owner_answer_of(&host_id, &op);
+    forward_with(state, host_id, op, actor, authorize, fence, owner_answer).await
+}
+
+/// The forward itself, with the owner answer to record already claimed (so it can be tested
+/// against an autonomy service of its own instead of the process-wide one). The answer is
+/// recorded only when the paired host accepted the op.
+async fn forward_with(
+    state: &Arc<RemoteGatewayState>,
+    host_id: String,
+    op: AgentControlOp,
+    actor: &str,
+    authorize: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>,
+    fence: Option<crate::agent_control::fence::SupervisorFence>,
+    owner_answer: Option<crate::hub_runtime::panel_autonomy::PendingOwnerAnswer>,
+) -> Result<serde_json::Value, ScopeError> {
+    let result = match authorize() {
+        Err(error) => Err(error),
+        Ok(()) => match state.paired_hosts() {
+            None => Err(reference_chat_scope(
+                ScopeErrorCode::InventoryIncomplete,
+                "this computer has no paired-host service",
+            )),
+            Some(hosts) => forward_once(&hosts, &host_id, op.clone(), fence)
+                .await
+                .map_err(|failure| reference_chat_scope(forward_scope_code(&failure.code), failure.message)),
         },
-        &device.id,
-        authorize,
-        body.supervisor_fence,
-        body.supervisor_account,
-    )
-    .await
+    };
+    if let (Ok(_), Some(answer)) = (&result, owner_answer) {
+        tokio::spawn(answer.recorded());
+    }
+    record_audit(
+        state,
+        AuditRecord::for_op(
+            actor,
+            &op,
+            match &result {
+                Ok(_) => "OK".to_string(),
+                Err(error) => reference_chat_wire_code(error.code).to_string(),
+            },
+        ),
+    );
+    result
+}
+
+/// The phone-facing code for a failed forward. The paired computer's own refusals keep their
+/// typed code (stale screen, provider owned, not found...). Its credential or reachability
+/// failures are this computer's unavailable service, never a 401/403 about the phone's token.
+/// Anything unrecognised after the request left may have been applied, so it is outcome-unknown.
+fn forward_scope_code(code: &str) -> ScopeErrorCode {
+    match code {
+        "INVALID_REQUEST" => ScopeErrorCode::InvalidRequest,
+        "NOT_FOUND" => ScopeErrorCode::NotFound,
+        "TARGET_EXPIRED" => ScopeErrorCode::TargetExpired,
+        "CONTROL_CONFLICT" => ScopeErrorCode::ControlConflict,
+        "REQUEST_CONFLICT" => ScopeErrorCode::RequestConflict,
+        "PROVIDER_OWNED" => ScopeErrorCode::ProviderOwned,
+        "UNSUPPORTED" | "PAIRED_HOST_CAPABILITY_UNAVAILABLE" => ScopeErrorCode::Unsupported,
+        "PAYLOAD_TOO_LARGE" => ScopeErrorCode::PayloadTooLarge,
+        "CAPTURE_UNSUPPORTED" => ScopeErrorCode::CaptureUnsupported,
+        "INVENTORY_INCOMPLETE"
+        | "UNAUTHORIZED"
+        | "FORBIDDEN"
+        | "MACHINE_ACCESS_REQUIRED"
+        | "REPAIR_REQUIRED"
+        | "HOST_UNAVAILABLE"
+        | "PERMISSION_DENIED"
+        | "RATE_LIMITED"
+        | "MACHINE_SERVICE_UNAVAILABLE"
+        | "PAIRED_HOST_STALE_GENERATION"
+        | "PAIRED_HOST_WRONG_MACHINE"
+        | "PAIRED_HOST_REDIRECT_REJECTED" => ScopeErrorCode::InventoryIncomplete,
+        _ => ScopeErrorCode::OperationOutcomeUnknown,
+    }
+}
+
+/// A `<hostId>:<backendSessionId>` handle split for agent control: the paired host that owns the
+/// pane (`None` when it is on this computer) and the backend session id. A handle for another
+/// computer is never typed into a local pane that happens to share the backend id; it is
+/// forwarded to that computer. `local_host_id` is this machine's configured id; the literal
+/// `local` always names this machine.
+pub(crate) fn agent_target(
+    session_ref: &str,
+    local_host_id: &str,
+) -> Result<(Option<String>, String), ScopeError> {
+    let parsed = ferryx_hub::supervisor::panel_contract::SessionRef::parse(session_ref)
+        .map_err(|error| reference_chat_scope(ScopeErrorCode::InvalidRequest, error.to_string()))?;
+    let host = parsed.host_id();
+    let host_id = (host != ferryx_hub::agent_control::LOCAL_HOST_ID && host != local_host_id)
+        .then(|| host.to_owned());
+    Ok((host_id, parsed.backend_session_id().to_owned()))
+}
+
+/// `POST /api/v1/sessions/{sessionRef}/stop`: the provider's interrupt key, straight to agent
+/// control. The hub and the engine are not on this path, so it works while either is down.
+pub(crate) async fn http_session_ref_stop(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    AxumPath(session_ref): AxumPath<String>,
+    body: Result<Json<StopBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let device = match http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let (host_id, session_id) = match agent_target(&session_ref, &reference_files::reference_host_id()) {
+        Ok(target) => target,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    stop_session(&state, &headers, &device, host_id, session_id, body).await
+}
+
+/// `POST /api/v1/supervisor/decisions/{sessionRef}/answer` body: the owner's tap on one option.
+/// `screenRevision` is the stale guard; the screen is re-read before any key is typed.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct DecisionAnswerBody {
+    prompt_id: String,
+    screen_revision: String,
+    option_index: u32,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+/// The agent-control answer an owner's decision tap becomes: exactly one option, no gate.
+pub(crate) fn decision_answer_op(session_id: String, body: DecisionAnswerBody) -> AgentControlOp {
+    AgentControlOp::Answer {
+        session_id,
+        prompt_id: body.prompt_id,
+        screen_revision: body.screen_revision,
+        answer: reference_types::ReferencePromptAnswer {
+            option_index: Some(body.option_index),
+            ..Default::default()
+        },
+        request_id: body.request_id,
+    }
+}
+
+pub(crate) async fn http_decision_answer(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    AxumPath(session_ref): AxumPath<String>,
+    body: Result<Json<DecisionAnswerBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let device = match http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return reference_chat_error(
+                ScopeErrorCode::InvalidRequest,
+                "the body must be {promptId, screenRevision, optionIndex}",
+            )
+        }
+    };
+    // A recovery card belongs to the scheduler, whichever computer its session is on, so it
+    // is answered before the session ref is required to be local.
+    if body.prompt_id.starts_with(ferryx_hub::supervisor::recovery::CARD_PREFIX) {
+        let op = decision_answer_op(session_ref.clone(), body);
+        let result = recovery_card_answer(&op).await.unwrap_or_else(|| {
+            Err(reference_chat_scope(ScopeErrorCode::NotFound, "that recovery card is no longer open"))
+        });
+        record_audit(
+            &state,
+            AuditRecord::for_op(
+                &device.id,
+                &op,
+                match &result {
+                    Ok(_) => "OK".to_string(),
+                    Err(error) => reference_chat_wire_code(error.code).to_string(),
+                },
+            ),
+        );
+        return control_finish(result);
+    }
+    let (host_id, session_id) = match agent_target(&session_ref, &reference_files::reference_host_id()) {
+        Ok(target) => target,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    control_ref_op(&state, &headers, &device, host_id, decision_answer_op(session_id, body), None, None).await
 }
 
 #[cfg(test)]
@@ -1361,6 +1725,399 @@ mod tests {
         assert!(prompt_view(&single, "rev".into()).is_some());
     }
     #[test]
+    fn a_session_ref_names_this_computer_or_the_paired_host_that_owns_the_pane() {
+        assert_eq!(agent_target("local:pane-1", "studio").unwrap(), (None, "pane-1".into()));
+        assert_eq!(
+            agent_target("studio:pane-1", "studio").unwrap(),
+            (None, "pane-1".into()),
+            "this machine's configured host id names it too"
+        );
+        assert_eq!(
+            agent_target("omarchy:pane:1", "studio").unwrap(),
+            (Some("omarchy".into()), "pane:1".into()),
+            "another computer's pane is forwarded to that computer, never typed into a local pane"
+        );
+        for bad in ["nohost", ":pane-1", "studio:", ""] {
+            assert_eq!(
+                agent_target(bad, "studio").unwrap_err().code,
+                ScopeErrorCode::InvalidRequest,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decision_tap_is_exactly_one_option_with_the_stale_guard() {
+        let body: DecisionAnswerBody = serde_json::from_value(serde_json::json!({
+            "promptId": "p1", "screenRevision": "rev-3", "optionIndex": 1
+        }))
+        .unwrap();
+        let AgentControlOp::Answer { session_id, prompt_id, screen_revision, answer, request_id } =
+            decision_answer_op("pane-1".into(), body)
+        else {
+            panic!("a decision tap is an answer");
+        };
+        assert_eq!((session_id.as_str(), prompt_id.as_str(), screen_revision.as_str()), ("pane-1", "p1", "rev-3"));
+        assert_eq!(answer.option_index, Some(1));
+        assert!(answer.is_single_choice());
+        assert_eq!(request_id, None);
+        for bad in [
+            serde_json::json!({"promptId": "p", "optionIndex": 0}),
+            serde_json::json!({"promptId": "p", "screenRevision": "r"}),
+            serde_json::json!({"promptId": "p", "screenRevision": "r", "optionIndex": 0, "customText": "x"}),
+        ] {
+            assert!(serde_json::from_value::<DecisionAnswerBody>(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_forward_failure_never_reaches_the_phone_as_its_own_401_and_unknown_is_outcome_unknown() {
+        for code in ["UNAUTHORIZED", "FORBIDDEN", "MACHINE_ACCESS_REQUIRED", "REPAIR_REQUIRED", "HOST_UNAVAILABLE"] {
+            assert_eq!(forward_scope_code(code), ScopeErrorCode::InventoryIncomplete, "{code}");
+        }
+        assert_eq!(forward_scope_code("REQUEST_CONFLICT"), ScopeErrorCode::RequestConflict);
+        assert_eq!(forward_scope_code("PROVIDER_OWNED"), ScopeErrorCode::ProviderOwned);
+        assert_eq!(forward_scope_code("NOT_FOUND"), ScopeErrorCode::NotFound);
+        assert_eq!(forward_scope_code("OPERATION_OUTCOME_UNKNOWN"), ScopeErrorCode::OperationOutcomeUnknown);
+        assert_eq!(forward_scope_code("PAIRED_HOST_INVALID_RESPONSE"), ScopeErrorCode::OperationOutcomeUnknown);
+    }
+
+    #[tokio::test]
+    async fn a_forward_is_re_authorized_audited_once_under_the_device_and_mints_an_id_even_when_refused() {
+        let (_backend, state) = pane("agent-control-forward-auth", CLAUDE_APPROVAL);
+        let refuse: Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync> =
+            Arc::new(|| Err(reference_chat_scope(ScopeErrorCode::Unauthorized, "the caller's device is no longer authorized")));
+        let before = state.agent_control_audit.recent().len();
+
+        let error = forward_as(
+            &state,
+            "omarchy".into(),
+            AgentControlOp::Stop { session_id: "pane-9".into(), request_id: None },
+            "device-1",
+            refuse,
+            None,
+        )
+        .await
+        .expect_err("the second authorization check refuses");
+
+        assert_eq!(error.code, ScopeErrorCode::Unauthorized);
+        let audit = state.agent_control_audit.recent();
+        assert_eq!(audit.len(), before + 1, "exactly one audit line: {audit:?}");
+        let line = audit.last().unwrap();
+        assert_eq!((line.device_id.as_str(), line.op.as_str(), line.code.as_str()), ("device-1", "stop", "UNAUTHORIZED"));
+        assert!(line.request_id.is_some(), "a stop with no request id gets one before it is forwarded");
+    }
+
+    /// A fake paired host that advertises agent control and serves `extra`, paired through the
+    /// real service. The relay and the host are one axum server on loopback.
+    async fn fake_paired_host(
+        extra: axum::Router,
+    ) -> (
+        tempfile::TempDir,
+        crate::paired_host::service::PairedHostService,
+        crate::paired_host::inventory::HostView,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::routing::{get, post};
+        let root = crate::ipc::run_blocking(|| Ok(tempfile::tempdir().unwrap())).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let router = axum::Router::new()
+            .route(
+                "/api/v1/pair/exchange",
+                post(|| async {
+                    axum::Json(serde_json::json!({"token":"fixture-secret","machineId":"a","device":{"id":"d","name":"d","permission":"control","accessScope":"machine","createdAt":1,"lastSeenAt":1}}))
+                }),
+            )
+            .route(
+                "/host/a/api/v1/capabilities",
+                get(|| async {
+                    axum::Json(serde_json::json!({"apiVersion":1,"machineId":"a","daemonEpoch":"1","platform":"linux","accessScope":"machine","permission":"control","capabilities":["directoryBrowseV1","machineWorkspaceV1","agentControlRemoteV1"],"limits":{"directoryEntries":1000,"terminalSessions":64}}))
+                }),
+            )
+            .merge(extra);
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let service = crate::paired_host::service::PairedHostService::open_test_loopback(root.path().join("data"));
+        let host = service
+            .pair(crate::paired_host::service::PairRequest {
+                relay_origin: origin,
+                pin: crate::paired_host::service::Secret("fixture".into()),
+                display_label: "fixture".into(),
+            })
+            .await
+            .unwrap();
+        (root, service, host, task)
+    }
+
+    async fn close_fake_host(root: tempfile::TempDir, task: tokio::task::JoinHandle<()>) {
+        task.abort();
+        let _ = task.await;
+        crate::ipc::run_blocking(move || {
+            root.close().unwrap();
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    fn allow() -> Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync> {
+        Arc::new(|| Ok(()))
+    }
+
+    /// The paired host received the stop, then its reply was unreadable. The forward is not
+    /// sent again, is outcome-unknown (409), and is audited once under the device.
+    #[tokio::test]
+    async fn a_stop_whose_reply_is_lost_after_delivery_is_outcome_unknown_and_never_resent() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&hits);
+        let host = axum::Router::new().route(
+            "/host/a/api/v1/agent-control/sessions/s-1/stop",
+            axum::routing::post(move || {
+                let counted = Arc::clone(&counted);
+                async move {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (axum::http::StatusCode::OK, "not json")
+                }
+            }),
+        );
+        let (root, service, view, task) = fake_paired_host(host).await;
+        let (_backend, state) = pane("agent-control-lost-reply", CLAUDE_APPROVAL);
+        state.set_paired_hosts(service);
+
+        let error = forward_as(
+            &state,
+            view.host_id.clone(),
+            AgentControlOp::Stop { session_id: "s-1".into(), request_id: None },
+            "device-1",
+            allow(),
+            None,
+        )
+        .await
+        .expect_err("an unreadable reply after delivery is not a success");
+
+        assert_eq!(error.code, ScopeErrorCode::OperationOutcomeUnknown, "{}", error.message);
+        assert_eq!(reference_chat_status(error.code), StatusCode::CONFLICT);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "the host saw exactly one stop");
+        let audit = state.agent_control_audit.recent();
+        assert_eq!(audit.len(), 1, "{audit:?}");
+        assert_eq!(
+            (audit[0].device_id.as_str(), audit[0].op.as_str(), audit[0].code.as_str()),
+            ("device-1", "stop", crate::remote::reference_chat::types::REFERENCE_OUTCOME_UNKNOWN_CODE)
+        );
+        close_fake_host(root, task).await;
+    }
+
+    struct SilentControl;
+
+    #[async_trait::async_trait]
+    impl ferryx_hub::supervisor::panel_contract::SessionControl for SilentControl {
+        async fn stop(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef) -> ferryx_hub::error::Result<()> {
+            Ok(())
+        }
+        async fn send(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: &str) -> ferryx_hub::error::Result<()> {
+            Ok(())
+        }
+        async fn answer(
+            &self,
+            _: &ferryx_hub::supervisor::panel_contract::SessionRef,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> ferryx_hub::error::Result<Option<String>> {
+            Ok(None)
+        }
+        async fn read_tail(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    /// Sends the summary of every action-log write to the test, in order.
+    struct ActionTap(tokio::sync::mpsc::UnboundedSender<String>);
+
+    impl ferryx_hub::supervisor::autonomy::PanelPublisher for ActionTap {
+        fn decision(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: Option<&ferryx_hub::supervisor::panel_contract::Escalation>) {}
+        fn action(&self, action: &ferryx_hub::supervisor::panel_contract::ActionEntry) {
+            let _ = self.0.send(action.summary.clone());
+        }
+        fn rules(&self, _: &[ferryx_hub::supervisor::panel_contract::StandingRule]) {}
+    }
+
+    fn omarchy_blocked() -> ferryx_hub::supervisor::panel_contract::FleetSession {
+        use ferryx_hub::supervisor::panel_contract::{FleetSession, PendingPrompt, SessionRef};
+        FleetSession {
+            session_ref: SessionRef::new("omarchy", "s-1"),
+            host_id: "omarchy".into(),
+            host_label: "omarchy".into(),
+            title: "ferryx".into(),
+            cwd: "/nonexistent/forward-answer-test".into(),
+            agent: "claude".into(),
+            state: "blocked".into(),
+            state_source: "screen".into(),
+            state_since_ms: None,
+            screen_changed_at_ms: None,
+            pending_prompt: Some(PendingPrompt {
+                prompt_id: "p1".into(),
+                kind: "question".into(),
+                question: "Which package manager should I use?".into(),
+                command: None,
+                options: vec!["npm".into(), "pnpm".into()],
+                screen_revision: Some("rev-1".into()),
+            }),
+            last_assistant_line: None,
+            updated_at_ms: 1,
+            stale: false,
+            health: None,
+        }
+    }
+
+    fn forwarded_tap() -> AgentControlOp {
+        AgentControlOp::Answer {
+            session_id: "s-1".into(),
+            prompt_id: "p1".into(),
+            screen_revision: "rev-1".into(),
+            answer: ReferencePromptAnswer { option_index: Some(1), ..Default::default() },
+            request_id: Some("tap-1".into()),
+        }
+    }
+
+    /// A forwarded owner tap joins the answer history exactly when the paired host accepted it:
+    /// recorded once on success, left unsettled on a stale screen and on a lost reply.
+    #[tokio::test]
+    async fn a_forwarded_owner_tap_is_recorded_only_when_the_paired_host_accepted_it() {
+        use axum::routing::post;
+        let answers = axum::Router::new().route(
+            "/host/a/api/v1/agent-control/sessions/s-1/answer",
+            post(|| async {
+                axum::Json(serde_json::json!({"receipt": {"stage": "accepted", "target": {"hostId": "local", "backendSessionId": "s-1"}}}))
+            }),
+        );
+        let conflict = axum::Router::new().route(
+            "/host/a/api/v1/agent-control/sessions/s-2/answer",
+            post(|| async {
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(serde_json::json!({"error": {"code": "REQUEST_CONFLICT", "message": "stale", "retryable": false, "requestId": "3941b9de-b16d-4d9a-ae0a-118f90fd91f4", "details": {}}})),
+                )
+            }),
+        );
+        let lost = axum::Router::new().route(
+            "/host/a/api/v1/agent-control/sessions/s-3/answer",
+            post(|| async { (axum::http::StatusCode::OK, "not json") }),
+        );
+        let (root, service, view, task) = fake_paired_host(answers.merge(conflict).merge(lost)).await;
+        let (_backend, state) = pane("agent-control-forward-history", CLAUDE_APPROVAL);
+        state.set_paired_hosts(service);
+
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let (tap, mut actions) = tokio::sync::mpsc::unbounded_channel();
+        let autonomy = ferryx_hub::supervisor::autonomy::Autonomy::open(pool, Arc::new(SilentControl), Arc::new(ActionTap(tap)))
+            .await
+            .unwrap();
+        let claim = |op: &AgentControlOp| crate::hub_runtime::panel_autonomy::owner_answer_with(&autonomy, Some(&view.host_id), op);
+        // The prompt is tracked under the paired host's own session ref.
+        let track = |session: &str| {
+            let mut tracked = omarchy_blocked();
+            tracked.session_ref = ferryx_hub::supervisor::panel_contract::SessionRef::new(&view.host_id, session);
+            tracked.host_id = view.host_id.clone();
+            tracked
+        };
+        autonomy.observe(&track("s-1")).await;
+
+        let op = forwarded_tap();
+        let pending = claim(&op).expect("the paired host's prompt is tracked");
+        let accepted = forward_with(&state, view.host_id.clone(), op.clone(), "device-1", allow(), None, Some(pending))
+            .await
+            .expect("the paired host accepted the tap");
+        assert_eq!(accepted["receipt"]["stage"], "accepted", "{accepted}");
+        let mut seen = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(summary) = actions.recv().await {
+                seen.push(summary);
+                if seen.iter().any(|summary| summary == "You chose pnpm") {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the owner's choice was recorded");
+        assert_eq!(seen.iter().filter(|summary| *summary == "You chose pnpm").count(), 1, "{seen:?}");
+        assert!(claim(&op).is_none(), "the prompt is settled: learned once");
+        assert_eq!(state.agent_control_audit.recent().len(), 1);
+
+        // A tap the host refuses as stale, and one whose reply is lost, record nothing and leave
+        // the prompt claimable. Each prompt gets its own session id on the fixture host.
+        for (session, expected) in [("s-2", ScopeErrorCode::RequestConflict), ("s-3", ScopeErrorCode::OperationOutcomeUnknown)] {
+            autonomy.observe(&track(session)).await;
+            let mut refused = forwarded_tap();
+            if let AgentControlOp::Answer { session_id, .. } = &mut refused {
+                *session_id = session.into();
+            }
+            let pending = claim(&refused).expect("tracked and unsettled");
+            let error = forward_with(&state, view.host_id.clone(), refused.clone(), "device-1", allow(), None, Some(pending))
+                .await
+                .expect_err("not accepted");
+            assert_eq!(error.code, expected, "{session}: {}", error.message);
+            assert!(claim(&refused).is_some(), "{session}: nothing was recorded, the prompt is still open");
+        }
+        while let Ok(summary) = actions.try_recv() {
+            assert_ne!(summary, "You chose pnpm", "a refused or lost tap recorded an owner choice");
+        }
+        close_fake_host(root, task).await;
+    }
+
+    #[tokio::test]
+    async fn a_stop_by_session_ref_interrupts_the_pane_with_no_hub_open() {
+        let session_id = "agent-control-stop-by-ref";
+        let (backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        // No hub is open in this test, so a stop that needed one could not succeed.
+        assert!(!crate::hub_runtime::supervisor_available());
+        let (host_id, backend_id) = agent_target(&format!("local:{session_id}"), "local").unwrap();
+        assert_eq!(host_id, None);
+
+        let result = handle_as(
+            &state,
+            AgentControlOp::Stop { session_id: backend_id, request_id: None },
+            "device-1",
+            None,
+        )
+        .await
+        .expect("the stop is accepted");
+
+        assert_eq!(result["receipt"]["stage"], "accepted", "{result}");
+        assert_eq!(backend.writes.lock().expect("writes").clone(), vec![b"\x1b".to_vec()]);
+        assert!(backend.signals.lock().expect("signals").is_empty(), "stop never signals the process");
+        let audit = state.agent_control_audit.latest(1);
+        assert_eq!((audit[0].op.as_str(), audit[0].device_id.as_str(), audit[0].code.as_str()), ("stop", "device-1", "OK"));
+    }
+
+    #[tokio::test]
+    async fn a_decision_tap_on_a_stale_screen_is_a_typed_conflict_and_types_nothing() {
+        let session_id = "agent-control-decision-stale";
+        let (backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let (prompt_id, revision) = pending_prompt(&state, session_id).await;
+        let tap = |revision: &str| {
+            let body = DecisionAnswerBody {
+                prompt_id: prompt_id.clone(),
+                screen_revision: revision.to_string(),
+                option_index: 0,
+                request_id: None,
+            };
+            decision_answer_op(session_id.to_string(), body)
+        };
+
+        let stale = handle_as(&state, tap("not-the-current-revision"), "device-1", None)
+            .await
+            .expect_err("a stale revision is refused");
+        assert_eq!(stale.code, ScopeErrorCode::RequestConflict, "{}", stale.message);
+        assert!(backend.writes.lock().expect("writes").is_empty(), "nothing typed on a stale tap");
+        assert_eq!(state.agent_control_audit.latest(1)[0].code, "REQUEST_CONFLICT");
+
+        handle_as(&state, tap(&revision), "device-1", None).await.expect("the current revision is typed");
+        assert!(!backend.writes.lock().expect("writes").is_empty());
+        assert_eq!(state.agent_control_audit.latest(1)[0].op, "answer");
+    }
+
+    #[test]
     fn a_remote_receipt_carries_the_paired_host_id_and_other_results_do_not() {
         let mut receipt = serde_json::json!({
             "receipt": {
@@ -1385,6 +2142,64 @@ mod tests {
         stamp_remote_receipt_host(&mut listed, "https://relay.example/host/other");
         assert!(listed.get("receipt").is_none());
         assert_eq!(listed["sessions"][0]["sessionId"], "pane-1");
+    }
+
+    fn turn(role: reference_types::ReferenceTurnRole, parts: Vec<reference_types::ReferencePart>) -> reference_types::ReferenceTurn {
+        reference_types::ReferenceTurn {
+            role,
+            started_at: None,
+            ended_at: None,
+            source: None,
+            parts,
+            abandoned: None,
+            id: None,
+            meta: None,
+        }
+    }
+
+    fn text(text: &str) -> reference_types::ReferencePart {
+        reference_types::ReferencePart::Text { text: text.to_string(), phase: None, id: None }
+    }
+
+    #[test]
+    fn the_last_assistant_line_is_the_newest_assistant_text_cut_to_the_cap() {
+        use reference_types::ReferenceTurnRole::{Assistant, User};
+        assert_eq!(last_assistant_line_of(&[]), None);
+        let turns = vec![
+            turn(Assistant, vec![text("older answer")]),
+            turn(Assistant, vec![text("First line\n\nSecond line  \n\n")]),
+            turn(User, vec![text("a later user message")]),
+        ];
+        assert_eq!(last_assistant_line_of(&turns).as_deref(), Some("Second line"));
+        let long = vec![turn(Assistant, vec![text(&"x".repeat(500))])];
+        assert_eq!(last_assistant_line_of(&long).map(|line| line.chars().count()), Some(LAST_ASSISTANT_LINE_MAX_CHARS));
+        let no_text = vec![turn(Assistant, vec![reference_types::ReferencePart::Thinking { text: "hmm".into(), id: None }])];
+        assert_eq!(last_assistant_line_of(&no_text), None);
+    }
+
+    #[tokio::test]
+    async fn a_list_entry_carries_the_last_assistant_line_key_null_when_unavailable() {
+        let session_id = "agent-control-last-line";
+        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let listed = handle(&state, AgentControlOp::List).await.expect("list");
+        let entry = &listed["sessions"][0];
+        assert!(entry.get("lastAssistantLine").is_some(), "{listed}");
+        assert!(entry["lastAssistantLine"].is_null(), "a pane with no transcript has no line: {listed}");
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+        assert!(read["session"].get("lastAssistantLine").is_some(), "{read}");
+    }
+
+    #[tokio::test]
+    async fn a_mutation_path_observation_never_reads_the_history_store() {
+        let session_id = "agent-control-no-line-on-mutation";
+        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let plain = observe(&state, session_id).await.expect("observe");
+        assert!(plain.entry.get("lastAssistantLine").is_none(), "{}", plain.entry);
+        let with_line = observe_with_line(&state, session_id).await.expect("observe with line");
+        assert!(with_line.entry.get("lastAssistantLine").is_some(), "{}", with_line.entry);
+        for entry in [&plain.entry, &with_line.entry] {
+            assert!(entry["observedAt"].as_i64().is_some_and(|at| at > 0), "{entry}");
+        }
     }
 
     const CLAUDE_APPROVAL: &str = include_str!("reference_chat/fixtures/claude/prompt/approval-command.screen");

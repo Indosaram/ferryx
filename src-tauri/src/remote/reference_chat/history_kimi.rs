@@ -16,7 +16,9 @@
 
 use serde_json::Value;
 
-use super::history_parse::{reference_timestamp, ReferenceTurnLog};
+use super::history_parse::{
+    reference_native_model, reference_timestamp, reference_usage_from_object, ReferenceTurnLog,
+};
 use super::types::{ReferenceHistoryParser, ReferenceNativeHistoryKind, ReferencePart, ReferenceTurn};
 
 /// The lane's parser: kimi-transcript only; any other kind is refused.
@@ -65,7 +67,12 @@ pub fn parse_kimi_wire(text: &str) -> Vec<ReferenceTurn> {
                     _ => String::new(),
                 };
                 if !prompt.trim().is_empty() {
-                    log.user(at, None, vec![ReferencePart::Text { text: prompt, phase: None }]);
+                    log.user(at, None, vec![ReferencePart::Text { text: prompt, phase: None , id: None}]);
+                    log.annotate(
+                        ReferenceNativeHistoryKind::Kimi,
+                        payload.and_then(|payload| reference_native_model(payload.get("model"))),
+                        payload.and_then(|payload| payload.get("usage")).and_then(reference_usage_from_object),
+                    );
                 }
             }
             Some("ContentPart")
@@ -73,6 +80,11 @@ pub fn parse_kimi_wire(text: &str) -> Vec<ReferenceTurn> {
             {
                 let text = payload.and_then(|payload| payload.get("text")).and_then(Value::as_str).unwrap_or("");
                 log.stream_text(at.as_deref(), text, false);
+                log.annotate(
+                    ReferenceNativeHistoryKind::Kimi,
+                    payload.and_then(|payload| reference_native_model(payload.get("model"))),
+                    payload.and_then(|payload| payload.get("usage")).and_then(reference_usage_from_object),
+                );
             }
             _ => {}
         }
@@ -98,12 +110,12 @@ mod tests {
         let turns = parse(SLASH_COMMAND);
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].role, ReferenceTurnRole::User);
-        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "/usage".into(), phase: None }]);
+        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "/usage".into(), phase: None , id: None}]);
         assert_eq!(turns[0].started_at.as_deref(), Some("2026-02-14T23:19:40.213Z"));
         assert_eq!(turns[1].role, ReferenceTurnRole::Assistant);
         assert_eq!(
             turns[1].parts,
-            [ReferencePart::Text { text: "Unknown slash command \"/usage\".".into(), phase: None }]
+            [ReferencePart::Text { text: "Unknown slash command \"/usage\".".into(), phase: None , id: None}]
         );
     }
 
@@ -111,7 +123,7 @@ mod tests {
     fn kimi_wire_reads_text_block_prompts_and_an_interrupted_step_adds_nothing() {
         let turns = parse(INTERRUPTED);
         assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "Run the shell command: ls".into(), phase: None }]);
+        assert_eq!(turns[0].parts, [ReferencePart::Text { text: "Run the shell command: ls".into(), phase: None , id: None}]);
     }
 
     #[test]
@@ -124,5 +136,16 @@ mod tests {
     fn kimi_parser_refuses_another_family() {
         assert!(parse_reference_kimi_history(ReferenceNativeHistoryKind::Grok, SLASH_COMMAND).is_err());
         assert!(parse_reference_kimi_history(ReferenceNativeHistoryKind::Unavailable, "").is_err());
+    }
+
+    #[test]
+    fn native_work_kimi_usage_comes_only_from_a_usage_object() {
+        let prose = r#"{"timestamp":1,"message":{"type":"TurnBegin","payload":{"user_input":"usage input_tokens 9 status failed model opus"}}}"#;
+        let turns = parse(prose);
+        assert!(turns[0].meta.is_none());
+        let recorded = r#"{"timestamp":1,"message":{"type":"TurnBegin","payload":{"user_input":"hi","model":"kimi","usage":{"input_tokens":8,"output_tokens":1}}}}"#;
+        let turns = parse(recorded);
+        assert_eq!(turns[0].meta.as_ref().unwrap().model.as_deref(), Some("kimi"));
+        assert_eq!(turns[0].meta.as_ref().unwrap().usage.as_ref().unwrap().input_tokens, Some(8));
     }
 }

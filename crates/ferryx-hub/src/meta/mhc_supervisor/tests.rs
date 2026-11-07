@@ -302,6 +302,12 @@ impl Peer {
                     self.emit(json!({"type": "model_changed", "sessionId": handle,
                         "model": {"provider": "other", "id": "other-model"}, "thinkingLevel": "high", "source": "fallback"}));
                     self.assistant(&handle, "answered by another model");
+                } else if message.contains("APP_SESSIONS") {
+                    let durable = self.handles.lock().unwrap()[&handle].clone();
+                    self.emit(json!({"type": "extension_event", "sessionId": handle,
+                        "name": "supervisor.work_request", "data": {
+                            "requestId": "sess-1", "sessionId": durable, "action": "list_sessions",
+                            "payload": {}}}));
                 } else if message.contains("WORK") {
                     let durable = if message.contains("WORK_FORGED") {
                         "not-a-session".to_owned()
@@ -2266,4 +2272,249 @@ async fn owner_memory_requests_go_to_the_owner_ingest_session_with_typed_refusal
     let unknown = supervisor.owner_memory("memory_dump", json!({})).await.unwrap_err();
     assert!(matches!(unknown, MemoryRequestError::Fault(_)));
     assert_eq!(harness.peer.of_type("extension_request").len(), 2);
+}
+
+#[derive(Default)]
+struct FakeControl {
+    calls: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl SessionControl for FakeControl {
+    async fn stop(&self, session: &SessionRef) -> crate::error::Result<()> {
+        self.calls.lock().unwrap().push(format!("stop {session}"));
+        Ok(())
+    }
+
+    async fn send(&self, session: &SessionRef, text: &str) -> crate::error::Result<()> {
+        self.calls.lock().unwrap().push(format!("send {session} {text}"));
+        Ok(())
+    }
+
+    async fn answer(
+        &self,
+        session: &SessionRef,
+        prompt_id: &str,
+        screen_revision: Option<&str>,
+        option_index: usize,
+    ) -> crate::error::Result<Option<String>> {
+        self.calls.lock().unwrap().push(format!(
+            "answer {session} {prompt_id} {screen_revision:?} {option_index}"
+        ));
+        Ok(None)
+    }
+
+    async fn read_tail(&self, session: &SessionRef, lines: usize) -> crate::error::Result<String> {
+        self.calls.lock().unwrap().push(format!("read {session} {lines}"));
+        Ok("tail".to_owned())
+    }
+}
+
+struct FakeFleet(Vec<FleetSession>);
+
+#[async_trait]
+impl FleetSource for FakeFleet {
+    async fn list(&self) -> crate::error::Result<Vec<FleetSession>> {
+        Ok(self.0.clone())
+    }
+}
+
+fn fleet_session(id: &str, question: &str) -> FleetSession {
+    FleetSession {
+        session_ref: SessionRef::new("mac", id),
+        host_id: "mac".into(),
+        host_label: "This Mac".into(),
+        title: "task".into(),
+        cwd: "/work".into(),
+        agent: "claude".into(),
+        state: "blocked".into(),
+        state_source: "provider".into(),
+        state_since_ms: None,
+        screen_changed_at_ms: None,
+        pending_prompt: Some(PendingPrompt {
+            prompt_id: format!("p-{id}"),
+            kind: "approval".into(),
+            question: question.into(),
+            command: None,
+            options: vec!["Allow".into(), "Deny".into()],
+            screen_revision: Some("r1".into()),
+        }),
+        last_assistant_line: None,
+        updated_at_ms: 1,
+        stale: false,
+        health: None,
+    }
+}
+
+fn session_tools() -> (Arc<FakeControl>, SessionTools, Vec<FleetSession>) {
+    let fleet = vec![
+        fleet_session("s1", "Run the unit tests?"),
+        fleet_session("s2", "Deploy to production?"),
+    ];
+    let control = Arc::new(FakeControl::default());
+    let tools = SessionTools::new(control.clone(), Arc::new(FakeFleet(fleet.clone())));
+    (control, tools, fleet)
+}
+
+fn session_call(action: &str, payload: Value) -> WorkToolCall {
+    parse_work_call(&json!({"action": action, "payload": payload})).unwrap()
+}
+
+#[tokio::test]
+async fn list_sessions_returns_the_fleet() {
+    let (_, tools, fleet) = session_tools();
+    let reply = tools.execute(session_call("list_sessions", json!({}))).await.unwrap();
+    assert_eq!(reply, json!({ "sessions": fleet }));
+}
+
+#[tokio::test]
+async fn stop_and_send_reach_session_control_with_the_parsed_ref() {
+    let (control, tools, _) = session_tools();
+    tools
+        .execute(session_call("stop_session", json!({"sessionRef": "mac:s1"})))
+        .await
+        .unwrap();
+    tools
+        .execute(session_call(
+            "send_to_session",
+            json!({"sessionRef": "mac:s1", "text": "continue"}),
+        ))
+        .await
+        .unwrap();
+    tools
+        .execute(session_call("read_session", json!({"sessionRef": "mac:s1", "lines": 9999})))
+        .await
+        .unwrap();
+    assert_eq!(
+        *control.calls.lock().unwrap(),
+        vec![
+            "stop mac:s1".to_owned(),
+            "send mac:s1 continue".to_owned(),
+            format!("read mac:s1 {MAX_READ_LINES}"),
+        ]
+    );
+}
+
+/// A gate that allows option 0 of a prompt whose question does not mention "Deploy".
+struct RoutineOnly;
+
+#[async_trait]
+impl AnswerGate for RoutineOnly {
+    async fn allow(
+        &self,
+        _session: &FleetSession,
+        prompt: &PendingPrompt,
+        option_index: usize,
+    ) -> Result<(), String> {
+        if prompt.question.contains("Deploy") || option_index != 0 {
+            Err("refused".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_supervisor_answer_passes_the_installed_gate_and_is_refused_by_default() {
+    let (control, tools, fleet) = session_tools();
+    let answer = |id: &str| {
+        session_call(
+            "answer_prompt",
+            json!({"sessionRef": format!("mac:{id}"), "promptId": format!("p-{id}"),
+                "screenRevision": "r1", "optionIndex": 0}),
+        )
+    };
+    // With no decision installed nothing is answered by the supervisor.
+    let refused = tools.execute(answer("s1")).await.unwrap_err();
+    assert_eq!(refused.code, "SUPERVISOR_ANSWER_REFUSED");
+    assert!(control.calls.lock().unwrap().is_empty());
+
+    let tools = SessionTools::new(control.clone(), Arc::new(FakeFleet(fleet))).with_gate(Arc::new(RoutineOnly));
+    tools.execute(answer("s1")).await.unwrap();
+    assert_eq!(
+        *control.calls.lock().unwrap(),
+        vec![r#"answer mac:s1 p-s1 Some("r1") 0"#.to_owned()]
+    );
+    let refused = tools.execute(answer("s2")).await.unwrap_err();
+    assert_eq!(refused.code, "SUPERVISOR_ANSWER_REFUSED");
+    assert_eq!(control.calls.lock().unwrap().len(), 1, "nothing was sent");
+    let missing = tools
+        .execute(session_call(
+            "answer_prompt",
+            json!({"sessionRef": "mac:s1", "promptId": "gone", "optionIndex": 0}),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, "SUPERVISOR_PROMPT_NOT_FOUND");
+}
+
+#[test]
+fn an_invalid_session_ref_is_rejected_when_parsing() {
+    let rejection = parse_work_call(&json!({
+        "action": "stop_session", "payload": {"sessionRef": "nohost"}
+    }))
+    .unwrap_err();
+    assert_eq!(rejection.code, "SUPERVISOR_WORK_INVALID");
+}
+
+#[tokio::test]
+async fn an_app_turn_reaches_submit_and_the_session_tools_through_the_engine() {
+    use crate::supervisor::app_work::{self, AppWorkTools};
+    use crate::supervisor::{bind_project_host, create_project, ensure_identity};
+    let pool = crate::storage::memory().await.unwrap();
+    let identity = ensure_identity(&pool, "desktop:owner").await.unwrap();
+    let project = create_project(&pool, &identity.supervisor_id, "ferryx", "github.com/example/ferryx")
+        .await
+        .unwrap();
+    bind_project_host(&pool, &project.project_id, "host-a", "/home/owner/code/ferryx/.git")
+        .await
+        .unwrap();
+    let (_, sessions, fleet) = session_tools();
+    let harness = Harness::new("app-work", all_capabilities());
+    let supervisor = harness.supervisor();
+    supervisor.set_work_handler(Arc::new(
+        AppWorkTools::new(pool.clone()).with_sessions(Arc::new(sessions)),
+    ));
+
+    // The engine's submit call reaches admission for the installation owner: no Slack turn is
+    // registered, and the app scope still gets its goal.
+    let work = "Create result.txt containing READY. Run the verifier.";
+    let reply: Value = serde_json::from_str(
+        &app_work::converse(&supervisor, "app-req-1", work, "WORK please")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    let owner: String = sqlx::query_scalar("SELECT owner_principal FROM supervisor_goals")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, "desktop:owner");
+
+    // A session tool call of the same conversation reaches the session service.
+    let listed: Value = serde_json::from_str(
+        &app_work::converse(&supervisor, "app-req-2", "list them", "APP_SESSIONS")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(listed["ok"], true, "{listed}");
+    assert_eq!(listed["result"], json!({ "sessions": fleet }));
+
+    // The same engine call outside a registered app turn (an untracked converse) cannot submit.
+    let untracked: Value = serde_json::from_str(
+        &supervisor
+            .converse_in_turn(&app_work::app_scope(), None, "WORK again")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(untracked["ok"], false, "{untracked}");
+    assert_eq!(untracked["error"]["code"], "SUPERVISOR_WORK_SCOPE");
+    let goals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_goals")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(goals, 1);
 }

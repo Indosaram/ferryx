@@ -12,6 +12,7 @@ import type {
   spawnTerminalDetailed,
 } from "./tauri";
 import { toIpcError } from "./tauri";
+import { continuationOutcomeUnknown, continuationUnknownHeld, holdContinuationUnknown } from "./agentResume";
 import { registerDurableNativeBinding, subscribeNativeTerminalPresentation } from "./nativeTerminalLifecycle";
 import { switchDebug } from "./switchDebug";
 import { matchesAttachTuple, createAttemptBudget, ATTEMPT_TOTAL_BUDGET_MS, STAGE_ATTACH_OR_LISTENER_MAX_MS, STAGE_CREATE_OR_STATUS_MAX_MS } from "./localSplitContract";
@@ -333,6 +334,16 @@ export class LocalSplitLifecycle {
 
         if (canCreate) {
           if (!current() || performance.now() >= creation) throw failure("create");
+          const continueStartup = this.originalRequest?.startup?.kind === "agentContinue"
+            ? this.originalRequest.startup
+            : null;
+          if (continueStartup && continuationUnknownHeld(continueStartup)) {
+            throw {
+              code: "OPERATION_OUTCOME_UNKNOWN",
+              message: "Continuation outcome is unknown and is not retried.",
+              details: { delivery: "ambiguous" },
+            };
+          }
           this.intent = { ...this.intent, createSent: true };
           this.publish({});
           await bounded(this.persist(), creation, "persistCreateIntent");
@@ -345,6 +356,7 @@ export class LocalSplitLifecycle {
               cwd: prepared.cwd,
               shell: prepared.shell,
               clientRequestId: prepared.identity.requestId,
+              ...(continueStartup ? { startup: continueStartup } : {}),
             },
             {
               createOnly: true,
@@ -357,10 +369,18 @@ export class LocalSplitLifecycle {
             () => {
               if (this.intent.cancelRequested) void this.cancel();
             },
-            () => undefined,
+            (error: unknown) => {
+              if (continueStartup && continuationOutcomeUnknown(error)) holdContinuationUnknown(continueStartup);
+            },
           );
 
-          const result = await bounded(createPromise, creation, "create");
+          let result: Awaited<ReturnType<typeof this.services.create>>;
+          try {
+            result = await bounded(createPromise, creation, "create");
+          } catch (error) {
+            if (continueStartup && continuationOutcomeUnknown(error)) holdContinuationUnknown(continueStartup);
+            throw error;
+          }
           if (!current()) return;
           binding = {
             backendSessionId: result.sessionId,

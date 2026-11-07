@@ -13,6 +13,8 @@ import {
 
 const TERMINAL_CHORD_CASES: readonly [string, ShortcutActionId, KeyboardEventInit][] = [
   ["new terminal tab", "tab.newTerminal", { key: "t", metaKey: true }],
+  ["new chat tab", "tab.newChat", { key: "t", metaKey: true, altKey: true }],
+  ["new chat tab with the macOS Option glyph", "tab.newChat", { key: "†", code: "KeyT", metaKey: true, altKey: true }],
   ["new browser tab", "tab.newBrowser", { key: "b", metaKey: true, shiftKey: true }],
   ["close active tab", "tab.close", { key: "w", metaKey: true }],
   ["next terminal tab primary", "tab.next", { key: "]", code: "BracketRight", metaKey: true, shiftKey: true }],
@@ -103,6 +105,7 @@ describe("shortcut registry", () => {
   it("contains the required frontend actions with platform-aware Mod labels and aliases", () => {
     expect(SHORTCUTS.map((shortcut) => shortcut.id)).toEqual([
       "tab.newTerminal",
+      "tab.newChat",
       "tab.newBrowser",
       "tab.reopenClosed",
       "tab.close",
@@ -315,6 +318,7 @@ describe("shortcut registry", () => {
   it.each(TERMINAL_CHORD_CASES)("routes %s when terminal is focused", (_label, actionId, eventInit) => {
     const handlers: Partial<Record<ShortcutActionId, ReturnType<typeof vi.fn>>> = {
       "tab.newTerminal": vi.fn(),
+      "tab.newChat": vi.fn(),
       "tab.newBrowser": vi.fn(),
       "tab.close": vi.fn(),
       "tab.next": vi.fn(),

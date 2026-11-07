@@ -2,9 +2,8 @@ import { FolderTree, GitBranch, LogOut, PanelLeft, Plus, Server, Terminal as Ter
 import React, { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { IconButton } from "../components/ui/IconButton";
-import { buildRemoteAttentionRows, type AttentionRow } from "../features/ferryx/attention/attentionModel";
 import { buildRemoteInventory, declaresOwnProperty, type RemoteInventoryModel } from "./remoteInventoryView";
-import { RemoteSidebar, type PublishedAttentionTarget, type RemoteSidebarTarget } from "./RemoteSidebar";
+import { RemoteSidebar, type RemoteSidebarTarget } from "./RemoteSidebar";
 import { RemoteTerminalTabStrip, stripTabs, type RemoteStripTab } from "./RemoteTerminalTabStrip";
 import type { RemoteSidebarSection } from "./useRemoteSidebarModel";
 import { useOverlayHistory } from "./home/usePhoneNavigation";
@@ -23,6 +22,15 @@ export type RemoteTerminalTabInfo = {
   workspaceId?: string | null;
   /** Epoch of the session this pane mirrors, when the machine declares one. */
   daemonEpoch?: string | number | null;
+  /** Absent for a live published pane. False is an exited desktop pane. */
+  running?: boolean;
+  /** Provider session published for an exited agent pane. Same shape as a sessions-list row. */
+  providerSession?: {
+    key: "session_id" | "conversation_id";
+    id: string;
+    transcriptPath?: string;
+    launcher?: "mhc";
+  };
 };
 
 export type RemoteTerminalItem = {
@@ -145,6 +153,11 @@ function safeContextText(value: unknown): string | null {
   return text;
 }
 
+function publishableRemoteSessionId(id: string | null | undefined): string | null {
+  if (!id || id.startsWith("standby:")) return null;
+  return id;
+}
+
 function safeEpoch(value: unknown): string | number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
@@ -155,7 +168,7 @@ function safeEpoch(value: unknown): string | number | null {
 function terminal(value: unknown): RemoteTerminalItem | null {
   const item = record(value);
   const sessionId = safeContextText(item?.sessionId);
-  if (!item || !sessionId || item.running === false) return null;
+  if (!item || !sessionId) return null;
   return {
     sessionId,
     running: item.running !== false,
@@ -192,6 +205,8 @@ function tabItem(value: unknown): RemoteTerminalTabInfo | null {
   const worktreeLabel = safeContextText(item?.worktreeLabel ?? item?.worktree_label) ?? undefined;
   const sessionId = safeContextText(item?.sessionId ?? item?.session_id) ?? undefined;
   const daemonEpoch = safeEpoch(item?.daemonEpoch ?? item?.daemon_epoch);
+  const providerSession = publishedTabProviderSession(item?.providerSession ?? item?.provider_session);
+  const running = item?.running === false ? false : item?.running === true ? true : undefined;
   return {
     id,
     label,
@@ -201,6 +216,33 @@ function tabItem(value: unknown): RemoteTerminalTabInfo | null {
     ...(worktreeLabel ? { worktreeLabel } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(daemonEpoch !== null ? { daemonEpoch } : {}),
+    ...(running !== undefined ? { running } : {}),
+    ...(providerSession ? { providerSession } : {}),
+  };
+}
+
+function publishedTabProviderSession(value: unknown): RemoteTerminalTabInfo["providerSession"] {
+  const item = record(value);
+  if (!item) return undefined;
+  const key = item.key === "session_id" || item.key === "conversation_id" ? item.key : null;
+  if (typeof item.id !== "string") return undefined;
+  const id = item.id.trim();
+  if (!key || id.length === 0 || id.length > 128) return undefined;
+  for (const char of id) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return undefined;
+  }
+  const transcriptPath = typeof item.transcriptPath === "string"
+    ? item.transcriptPath
+    : typeof item.transcript_path === "string"
+      ? item.transcript_path
+      : undefined;
+  const launcher = item.launcher === "mhc" ? "mhc" as const : undefined;
+  return {
+    key,
+    id,
+    ...(transcriptPath ? { transcriptPath } : {}),
+    ...(launcher ? { launcher } : {}),
   };
 }
 
@@ -309,23 +351,37 @@ export function normalizeRemoteWorkspaceState(value: unknown): RemoteWorkspaceMo
   const declaredSessionId = safeContextText(
     declaredContext.sessionId ?? state.activeSessionId ?? state.focusedSessionId,
   );
-  const declaredSession = declaredSessionId
-    ? terminal(sessionRows.find((item) => item.sessionId === declaredSessionId)) ?? {
-        sessionId: declaredSessionId,
-        running: true,
+  const selectableSessionId = publishableRemoteSessionId(declaredSessionId);
+  const terminalTabs = tabItems(
+    declaredContext.terminalTabs ?? declaredContext.tabs ?? state.terminalTabs ?? state.tabs,
+  );
+  const activeTabId = safeContextText(
+    declaredContext.tabId ?? declaredContext.activeTabId ?? state.activeTabId ?? state.tabId,
+  );
+  const declaredTab = selectableSessionId
+    ? terminalTabs.find((tab) => tab.sessionId === selectableSessionId)
+    : undefined;
+  const declaredSession: RemoteTerminalItem | null = selectableSessionId
+    ? terminal(sessionRows.find((item) => item.sessionId === selectableSessionId)) ?? {
+        sessionId: selectableSessionId,
+        running: declaredTab?.running === false ? false : true,
+      }
+    : null;
+  const focusedPublishedTab = !selectableSessionId && activeTabId
+    ? terminalTabs.find((tab) => tab.id === activeTabId)
+    : undefined;
+  const focusedPublishedSessionId = publishableRemoteSessionId(focusedPublishedTab?.sessionId);
+  const focusedPublishedTerminal: RemoteTerminalItem | null = focusedPublishedSessionId
+    ? {
+        sessionId: focusedPublishedSessionId,
+        running: focusedPublishedTab?.running !== false,
       }
     : null;
   const legacySingleSession =
     !hasExplicitTerminalDeclaration && sessionRows.length === 1 ? terminal(sessionRows[0]) : null;
-  const activeTerminal = explicitTerminal ?? declaredSession ?? legacySingleSession;
-  const activeTabId = safeContextText(
-    declaredContext.tabId ?? declaredContext.activeTabId ?? state.activeTabId ?? state.tabId,
-  );
+  const activeTerminal = explicitTerminal ?? declaredSession ?? focusedPublishedTerminal ?? legacySingleSession;
   const declaredEpoch =
     activeTerminal?.daemonEpoch ?? safeEpoch(declaredContext.daemonEpoch ?? state.daemonEpoch);
-  const terminalTabs = tabItems(
-    declaredContext.terminalTabs ?? declaredContext.tabs ?? state.terminalTabs ?? state.tabs,
-  );
   const activeWorkspaceId = workspaceId ?? safeContextText(activeTerminal?.workspaceId);
   const activeWorktreeSlug = worktreeSlug;
   const activeWorktreeLabel =
@@ -431,8 +487,8 @@ export function getRemoteDocumentTitle(model: RemoteWorkspaceModel): string {
 }
 
 
-/** The remote supervisor view the sidebar's Supervisor tab shows. */
-export type RemoteSidebarSupervisor = { readonly typing: boolean; readonly content: ReactNode };
+/** The remote supervisor view the sidebar's Supervisor tab shows: the shared panel. */
+export type RemoteSidebarSupervisor = { readonly content: ReactNode };
 
 type RemoteWorkspaceMirrorProps = {
   model: RemoteWorkspaceModel;
@@ -456,6 +512,9 @@ type RemoteWorkspaceMirrorProps = {
   /** Account mode: the Supervisor tab's content; absent hides the tab. */
   supervisor?: RemoteSidebarSupervisor;
   onSidebarViewChange?: (view: SidebarViewId) => void;
+  /** Switches the sidebar view from outside (a decision deep link opens the Supervisor tab);
+   * `nonce` lets the same view be requested again after the person left it. */
+  requestedView?: { readonly view: SidebarViewId; readonly nonce: number } | null;
   /** Inventory loading/offline/error rows, rendered above the tree. */
   pickerStatus?: ReactNode;
   /**
@@ -551,29 +610,6 @@ export function sidebarRowOption(model: RemoteWorkspaceModel, target: RemoteSide
   };
 }
 
-/**
- * The option a desktop-published Inbox row opens, read-only and never creating a terminal: that
- * machine's session by the pane's backend session id, otherwise the pane's worktree, otherwise the
- * workspace (its root worktree first). The row's own `sessionId` is the desktop's local pane id and
- * is never matched against the inventory.
- */
-export function publishedAttentionOption(model: RemoteWorkspaceModel, target: PublishedAttentionTarget): RemoteContextOption {
-  const { machineId, row } = target;
-  const accountMachines = model.options.some((option) => option.machineId !== undefined);
-  const onMachine = (option: RemoteContextOption) =>
-    !option.unavailable && option.workspaceId === row.workspaceId && (!accountMachines || option.machineId === machineId);
-  const attachOnly = (option: RemoteContextOption): RemoteContextOption => ({ ...option, attachOnly: true });
-  const session = row.backendSessionId
-    ? model.options.find((option) => onMachine(option) && option.sessionId === row.backendSessionId)
-    : undefined;
-  if (session) return attachOnly(session);
-  const worktrees = model.options.filter((option) => onMachine(option) && !option.sessionId);
-  const known = (row.worktreeSlug !== undefined ? worktrees.find((option) => option.worktreeSlug === row.worktreeSlug) : undefined) ??
-    worktrees.find((option) => option.worktreeSlug === null) ?? worktrees[0];
-  if (known) return attachOnly(known);
-  return attachOnly({ workspaceId: row.workspaceId, worktreeSlug: null, worktreeLabel: null, ...(accountMachines ? { machineId } : {}) });
-}
-
 const PHONE_ACTION =
   "flex h-11 shrink-0 items-center gap-1.5 rounded-lg bg-chat-surface-raised px-3 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50";
 
@@ -593,6 +629,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
   sidebarSections = [],
   supervisor,
   onSidebarViewChange,
+  requestedView = null,
   pickerStatus,
   inline = false,
   children,
@@ -619,33 +656,26 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
     if (option) selectOption(option);
   };
 
-  const [view, setView] = useState<SidebarViewId>("worktrees");
+  // The Supervisor panel is the wide sidebar's default view whenever it is offered.
+  const [chosenView, setView] = useState<SidebarViewId | null>(null);
+  const view: SidebarViewId = chosenView ?? (supervisor ? "supervisor" : "worktrees");
   useEffect(() => {
-    if (!selectorOpen && !desktopSidebar) setView("worktrees");
+    if (!selectorOpen && !desktopSidebar) setView(null);
   }, [desktopSidebar, selectorOpen]);
   const changeView = (next: SidebarViewId) => {
     setView(next);
     onSidebarViewChange?.(next);
   };
+  const requestedNonce = requestedView?.nonce;
+  useEffect(() => {
+    if (!requestedView || !desktopSidebar) return;
+    if (requestedView.view === "supervisor" && !supervisor) return;
+    setView(requestedView.view);
+    onSidebarViewChange?.(requestedView.view);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by the request nonce; callback identity must not replay it
+  }, [requestedNonce, desktopSidebar]);
 
-  const attentionRows = model.context.workspaceId
-    ? buildRemoteAttentionRows(model.context.workspaceId, model.context.workspaceId, paneTabs, model.context.activeTabId)
-    : [];
-  const openAttentionRow = (row: AttentionRow) => {
-    const tab = paneTabs.find((candidate) => candidate.id === row.id);
-    const option = tab ? paneSelectionOption(model, tab) : null;
-    if (!option) return;
-    selectOption(option);
-    onSelectorOpenChange(false);
-  };
-
-  const openPublishedAttention = (target: PublishedAttentionTarget) => {
-    if (pending !== null) return;
-    onSelectorOpenChange(false);
-    selectOption(publishedAttentionOption(model, target));
-  };
-
-  // The phone drawer is worktrees only: the phone home owns the one Inbox and the one Supervisor.
+  // The phone drawer is worktrees only: the phone home owns the one Supervisor panel.
   const phoneDrawer = !inline && !desktopSidebar;
   const drawerRef = useRef<HTMLDivElement | null>(null);
   const drawerBackdropRef = useRef<HTMLButtonElement | null>(null);
@@ -712,7 +742,7 @@ export const RemoteWorkspaceMirror: React.FC<RemoteWorkspaceMirrorProps> = ({
             selectOption(sidebarRowOption(model, target));
           }}
           view={inline || phoneDrawer ? "worktrees" : view}
-          {...(inline || phoneDrawer ? {} : { onViewChange: changeView, inbox: { rows: attentionRows, onOpen: openAttentionRow }, onOpenPublishedAttention: openPublishedAttention })}
+          {...(inline || phoneDrawer ? {} : { onViewChange: changeView })}
           {...(supervisor && !inline && !phoneDrawer ? { supervisor } : {})}
           status={pickerStatus}
         />

@@ -341,3 +341,28 @@ fn create_session_request_rejects_prefixed_request_ids() {
     let normalized = host_request_id(&format!("restart-s1-{uuid}"));
     assert!(serde_json::from_value::<CreateSessionRequest>(wire(normalized)).is_ok());
 }
+
+#[test]
+fn agent_continue_roundtrips_and_refuses_unknown_keys_and_client_argv() {
+    let value = json!({
+        "kind": "agentContinue",
+        "agentType": "claude",
+        "providerSession": {"key": "session_id", "id": "sess-1"},
+        "mode": "fork"
+    });
+    let parsed: Startup = serde_json::from_value(value.clone()).expect("continue startup");
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), value);
+    assert!(validate_create_startup(&value).is_ok());
+    for extra in ["argv", "args", "command"] {
+        let mut bad = value.clone();
+        bad[extra] = json!(["--dangerously-skip-permissions"]);
+        assert_eq!(validate_create_startup(&bad), Err("INVALID_REQUEST"), "{extra}");
+    }
+    let mut nested = value.clone();
+    nested["providerSession"]["transcriptPath"] = json!("/tmp/secret");
+    assert_eq!(validate_create_startup(&nested), Err("INVALID_REQUEST"));
+    let mut mode = value.clone();
+    mode["mode"] = json!("detach");
+    assert_eq!(validate_create_startup(&mode), Err("INVALID_REQUEST"));
+    assert!(serde_json::from_value::<Startup>(mode).is_err());
+}

@@ -30,6 +30,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+          use-cache: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -38,6 +39,7 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
           shared-key: ubuntu-24-desktop-qa-no-debuginfo-v1
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install build and virtual display dependencies
         run: |
           sudo apt-get update

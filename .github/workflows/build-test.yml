@@ -66,6 +66,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+          use-cache: false
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -82,6 +83,7 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
           shared-key: macos-15-tests-no-debuginfo-v1
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Report disk space before compilation
         run: df -h . "$RUNNER_TEMP"
@@ -236,6 +238,12 @@ jobs:
         with:
           bun-version: latest
 
+      # The release provenance contracts generate, sign and verify a real checksum signature. They
+      # are the only check that the published SHA256SUMS is actually signed, so they must run here
+      # rather than be skipped: install the signer instead of letting it surface as six failures.
+      - name: Install minisign (release provenance contracts)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+
       - name: Install dependencies
         run: |
           bun install --frozen-lockfile || bun install
@@ -263,12 +271,44 @@ jobs:
       - name: Test Frontend UI
         run: bun run --cwd ui test
 
+      # The navbar geometry suite drives a real Chrome, and playwright is not a declared
+      # dependency of this workspace (site/ imports it from ui/node_modules when present).
+      # Install it into a scratch prefix and point the probe at that module, so the gate runs
+      # the real layout measurement instead of failing on an unresolvable import.
+      - name: Install Playwright Chrome for landing-site geometry
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw"
+          cd "$RUNNER_TEMP/pw"
+          printf '{ "name": "pw-scratch", "private": true }\n' > package.json
+          bun add playwright@1.55.1
+          bunx playwright install --with-deps chrome
+          echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/pw/node_modules/playwright/index.mjs" >> "$GITHUB_ENV"
+
       - name: Test Landing Site
         run: bun test --cwd site
 
-      # These packaging and release script tests were previously never executed in CI.
+      # These packaging and release script tests were previously never executed in CI. The
+      # suite spawns real child processes, so it needs a per-test bound and a step bound: on
+      # 2026-11-05 this step sat in_progress for over three hours with no output, and a step
+      # that never returns reports nothing about which test is stuck.
+      #
+      # The six excluded files are Vitest suites (they import from "vitest"); Bun collects them
+      # because they sit under scripts/qa, runs the assertions that happen to be Bun-compatible,
+      # and then never exits once they are done. They belong to
+      # scripts/qa/recovery-continuation-vitest.config.mjs, which no gate invokes yet; running
+      # them here produced a silent hang, not a verdict. Excluding them keeps this step honest
+      # about what it covers instead of letting a stuck file hide the other 69.
       - name: Test Release and Packaging Scripts
-        run: bun test scripts/
+        timeout-minutes: 20
+        run: |
+          bun test scripts/ \
+            --path-ignore-patterns '**/fixture-pty-child.contract.test.mjs' \
+            --path-ignore-patterns '**/native-configured-adapters.contract.test.mjs' \
+            --path-ignore-patterns '**/native-forwarding-transport.contract.test.mjs' \
+            --path-ignore-patterns '**/session-recovery-consistency.test.mjs' \
+            --path-ignore-patterns '**/session-recovery-native.contract.test.mjs' \
+            --path-ignore-patterns '**/session-recovery-provisioned.test.mjs' \
+            --timeout 60000
 
   # =========================================================================
   # 2. RUST BACKEND VALIDATION ACROSS PLATFORMS
@@ -309,6 +349,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.17.0
+          use-cache: false
 
       - name: Install Linux system dependencies
         if: matrix.os_name == 'linux'
@@ -363,6 +404,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Fixture suites commit through git. Hosted runners ship no global identity, so
       # `git commit` inside a fixture repository fails before the assertion under test runs.

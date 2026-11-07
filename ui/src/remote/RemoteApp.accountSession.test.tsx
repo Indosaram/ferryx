@@ -424,9 +424,8 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     render(<RemoteApp />);
 
-    const worktreesTab = await waitFor(() => screen.getByTestId("mobile-home-tab-worktrees"));
+    await waitFor(() => screen.getByTestId("phone-panel-start-session"));
     expect(screen.getByTestId("mobile-home")).toBeDefined();
-    expect(worktreesTab.getAttribute("aria-selected")).toBe("false");
     expect(screen.queryByTestId("remote-worktrees-inline")).toBeNull();
 
     // The phone home is the body here, and the session header's status cluster - which owns
@@ -447,7 +446,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     // terminal before that is a silent no-op - the switch does not exist yet - so the request is
     // made below, after the selection has landed.
     const picker = await openWorkspacePicker();
-    expect(worktreesTab.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("mobile-home").getAttribute("data-destination")).toBe("worktrees");
 
     const optionBtn = await waitFor(() =>
       requireSidebarRow("ws-ferryx", "main", picker)
@@ -1731,7 +1730,7 @@ describe("RemoteApp - Account Session Phone Flow", () => {
 
     // Given discovery finished and left its probe tunnel open for the machine
     await waitFor(() => expect(transports.length).toBeGreaterThan(0));
-    await waitFor(() => expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("phone-panel-start-session")).toBeInTheDocument());
 
     // When the relay drops the idle probe tunnel before the user picks the first worktree
     for (const t of transports) t.isClosed = true;

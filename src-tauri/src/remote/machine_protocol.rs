@@ -10,6 +10,9 @@ pub const CONTROL_JSON_MAX_BYTES: usize = 16 * 1024;
 pub const FILE_READ_CHUNK_MAX_BYTES: u32 = 256 * 1024;
 /// Response cap for one file-read chunk: base64 of [FILE_READ_CHUNK_MAX_BYTES] plus envelope.
 pub const FILE_READ_JSON_MAX_BYTES: usize = 512 * 1024;
+/// Raw bytes one paired file-write chunk may carry. Base64 plus the JSON envelope of a longest
+/// legal path stays under the relay's 64 KiB forwarded-body cap.
+pub const FILE_WRITE_CHUNK_MAX_BYTES: u32 = 32 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
@@ -17,6 +20,43 @@ pub enum DecodeError {
     PayloadTooLarge,
     #[error("INVALID_REQUEST: {0}")]
     InvalidRequest(#[from] serde_json::Error),
+}
+
+/// Create-session startup objects. Unknown keys, including any client argv, are refused.
+/// Provider sessions on this boundary name an id, never a transcript path or a client command.
+pub fn validate_create_startup(value: &serde_json::Value) -> Result<(), &'static str> {
+    let Some(obj) = value.as_object() else {
+        return Err("INVALID_REQUEST");
+    };
+    let Some(kind) = obj.get("kind").and_then(|item| item.as_str()) else {
+        return Err("INVALID_REQUEST");
+    };
+    let allowed: &[&str] = match kind {
+        "shell" => &["kind"],
+        "agentResume" => &["kind", "agentType", "providerSession"],
+        "agentContinue" => &["kind", "agentType", "providerSession", "mode"],
+        _ => return Err("INVALID_REQUEST"),
+    };
+    if obj.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err("INVALID_REQUEST");
+    }
+    if matches!(kind, "agentResume" | "agentContinue") {
+        let Some(provider) = obj.get("providerSession").and_then(|item| item.as_object()) else {
+            return Err("INVALID_REQUEST");
+        };
+        if provider.keys().any(|key| !matches!(key.as_str(), "key" | "id")) {
+            return Err("INVALID_REQUEST");
+        }
+    }
+    if kind == "agentContinue"
+        && !matches!(
+            obj.get("mode").and_then(|item| item.as_str()),
+            Some("fork" | "resume")
+        )
+    {
+        return Err("INVALID_REQUEST");
+    }
+    Ok(())
 }
 
 pub fn decode_json<T: serde::de::DeserializeOwned>(
@@ -481,6 +521,10 @@ pub struct FileReadRequest {
     pub path: String,
     pub offset: u64,
     pub length: u32,
+    /// Set by file copy: refuse a final symlink instead of following it, and skip the
+    /// viewer's whole-file size cap (a copy streams pages to disk).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub copy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -496,6 +540,81 @@ pub struct FileReadResult {
     /// carry the same value. Older hosts omit it and send an empty string.
     #[serde(default)]
     pub version: String,
+}
+
+/// Writes one byte range of a regular file on the paired host. `data` is base64 of at most
+/// [`FILE_WRITE_CHUNK_MAX_BYTES`]. The chunk whose end equals `total_bytes` publishes the file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileWriteRequest {
+    #[serde(deserialize_with = "request_id")]
+    pub request_id: String,
+    pub path: String,
+    pub upload_id: String,
+    pub offset: u64,
+    pub total_bytes: u64,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileWriteResult {
+    pub path: String,
+    pub offset: u64,
+    pub complete: bool,
+}
+
+/// One child of a paired directory listing. A symlink is named, never followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileKind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+/// Lists one page of a directory. `cursor` is the last name of the previous page; names sort
+/// in byte order and the page resumes after that name. Each page stays under the relay body cap.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileListRequest {
+    #[serde(deserialize_with = "request_id")]
+    pub request_id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileListEntry {
+    pub name: String,
+    pub kind: FileKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileListResult {
+    pub path: String,
+    pub entries: Vec<FileListEntry>,
+    pub truncated: bool,
+}
+
+/// Creates the named directory and no parent above it. An existing directory is success.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMkdirRequest {
+    #[serde(deserialize_with = "request_id")]
+    pub request_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMkdirResult {
+    pub path: String,
+    pub created: bool,
 }
 
 #[cfg(test)]

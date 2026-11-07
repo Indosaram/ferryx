@@ -1,0 +1,47 @@
+{
+  "$comment": "All-local F3 run on one machine (here maho-mac): it is the control host, the session host and the macOS desktop. Every host has sshDestination \"local\" (helpers run as direct children), MahoRD drives this machine's own maho-host on 127.0.0.1, and the run-owned relay listens on plain HTTP loopback. The iPhone and Windows lanes are not in this run and are recorded blocked (LANE_NOT_IN_RUN), so this run proves the macOS lane only and never passes F3 as a whole. For Windows use the same shape on maho-win: lanes [\"windows\"], hosts.windows and sessionHost with platform win32, Windows paths, and sessionHost.hostId distinct from the desktop's. binary/cli/relay must be inside the worktree. On darwin the session daemon is the GUI build's `ferryx --daemon` (built with --features local-split-qa): the native agent proves its exact pid with `<binary> qa-exact-pid-probe`, which only `ferryx` implements; the relay is the headless `--no-default-features --features hub-slack` ferryx-relay.",
+  "lanes": ["macos"],
+  "ownerEmail": "owner@example.invalid",
+  "mahordExecutable": "/Users/<user>/code/MahoRD/clients/rust/target/release/maho-client",
+  "tesseract": "/opt/homebrew/bin/tesseract",
+  "sshExecutable": "ssh",
+  "relayOrigin": "http://127.0.0.1:47960",
+  "sessionHost": {
+    "hostId": "maho-mac-session",
+    "platform": "darwin",
+    "sshDestination": "local",
+    "bun": "/Users/<user>/.bun/bin/bun",
+    "worktreeRoot": "/Users/<user>/code/ferryx-wt",
+    "worktree": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>",
+    "hostHelper": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/scripts/qa/supervisor-f3/host-helper.mjs",
+    "remoteAgent": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/scripts/qa/fixtures/native-remote-agent.mjs",
+    "binary": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/.qa/f3-bin/gui/ferryx",
+    "cli": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/.qa/f3-bin/gui/ferryx-cli",
+    "relay": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/.qa/f3-bin/headless/ferryx-relay",
+    "uiDist": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/ui/dist",
+    "buildManifest": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/.qa/f3-bin/gui/candidate-manifest.json",
+    "relayFront": { "kind": "loopback" }
+  },
+  "hosts": {
+    "macos": {
+      "hostId": "maho-mac",
+      "platform": "darwin",
+      "sshDestination": "local",
+      "mahordAddress": "127.0.0.1",
+      "pairingId": "<this machine's MahoRD pairing id>",
+      "bun": "/Users/<user>/.bun/bin/bun",
+      "worktreeRoot": "/Users/<user>/code/ferryx-wt",
+      "worktree": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>",
+      "hostHelper": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/scripts/qa/supervisor-f3/host-helper.mjs",
+      "remoteAgent": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/scripts/qa/fixtures/native-remote-agent.mjs",
+      "binary": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/.qa/f3-bin/gui/ferryx",
+      "cli": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/.qa/f3-bin/gui/ferryx-cli",
+      "uiDist": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/ui/dist",
+      "buildManifest": "/Users/<user>/code/ferryx-wt/supv-f3-mac-<rev8>/.qa/f3-bin/gui/candidate-manifest.json",
+      "mhcBin": "/Users/<user>/.local/bin/mhc",
+      "exportLabel": "Export transcript",
+      "viewerLabel": "Open in Viewer",
+      "viewerMarker": "<text only the Viewer surface shows, e.g. its window title>"
+    }
+  }
+}

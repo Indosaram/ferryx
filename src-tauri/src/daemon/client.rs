@@ -665,6 +665,7 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::LoadSession
             | DaemonRequest::RemoteSetActiveSelection { .. }
             | DaemonRequest::RemoteSetWindowFocused { .. }
+            | DaemonRequest::SessionMute { .. }
             | DaemonRequest::PairedTerminalDescriptor { .. }
             | DaemonRequest::RetryPairedSession { .. }
             | DaemonRequest::PairedRecoveryOutcome { .. }
@@ -677,6 +678,8 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
                 request: crate::daemon::protocol::SupervisorSetupAction::Status
             }
             | DaemonRequest::AgentControlSettingsGet
+            | DaemonRequest::SupervisorSettings { enabled: None }
+            | DaemonRequest::ReferenceChatIdentity
     )
 }
 
@@ -790,6 +793,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteSetActiveSelection { .. } => "remoteSetActiveSelection",
         DaemonRequest::RemoteGetActiveSelection => "remoteGetActiveSelection",
         DaemonRequest::RemoteSetWindowFocused { .. } => "remoteSetWindowFocused",
+        DaemonRequest::SessionMute { .. } => "sessionMute",
         DaemonRequest::SubscribeRemoteEvents => "subscribeRemoteEvents",
         DaemonRequest::UpgradeBinary { .. } => "upgradeBinary",
         DaemonRequest::PrepareHandover => "prepareHandover",
@@ -803,6 +807,11 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::AgentControl { .. } => "agentControl",
         DaemonRequest::AgentControlSettingsGet => "agentControlSettingsGet",
         DaemonRequest::AgentControlSettingsSet { .. } => "agentControlSettingsSet",
+        DaemonRequest::AgentControlEnableOwner => "agentControlEnableOwner",
+        DaemonRequest::SupervisorGlobalPause { .. } => "supervisorGlobalPause",
+        DaemonRequest::SupervisorSettings { .. } => "supervisorSettings",
+        DaemonRequest::SupervisorActionUndo { .. } => "supervisorActionUndo",
+        DaemonRequest::SupervisorHubStart => "supervisorHubStart",
         DaemonRequest::GetAgentIntegration => "getAgentIntegration",
         DaemonRequest::SetAgentIntegration { .. } => "setAgentIntegration",
         DaemonRequest::SupervisorDispatch { .. } => "supervisorDispatch",
@@ -813,10 +822,13 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorMoveHere { .. } => "supervisorMoveHere",
         DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
         DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
+        DaemonRequest::SupervisorConverseV1 { .. } => "supervisorConverseV1",
         DaemonRequest::SupervisorSetup { .. } => "supervisorSetup",
         DaemonRequest::RemoteDesktopHostGet => "remoteDesktopHostGet",
         DaemonRequest::RemoteDesktopHostSet { .. } => "remoteDesktopHostSet",
         DaemonRequest::RemoteDesktopHostRespond { .. } => "remoteDesktopHostRespond",
+        DaemonRequest::ReferenceChatIdentity => "referenceChatIdentity",
+        DaemonRequest::ReferenceChat { .. } => "referenceChat",
     }
 }
 
@@ -1011,16 +1023,29 @@ const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// and let the daemon report the outcome. Matches the CLI's `GOAL_CLI_TIMEOUT`.
 const SUPERVISOR_GOAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 const REMOTE_DESKTOP_SET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// Outlasts the reference input queue's 45 s submit deadline so the daemon reports the outcome.
+const REFERENCE_CHAT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
     match request {
         DaemonRequest::SupervisorGoal { request } if request.mutates() => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // A cancel stops the worker's pane before it answers.
-        DaemonRequest::SupervisorRequestV1 { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        DaemonRequest::SupervisorRequestV1 { .. } | DaemonRequest::SupervisorConverseV1 { .. } => {
+            SUPERVISOR_GOAL_REQUEST_TIMEOUT
+        }
+        // A stop or answer for a paired computer's pane runs the paired mutation: capabilities,
+        // journal and the mutation itself. A flat 15 s would call a slow success outcome-unknown.
+        DaemonRequest::AgentControl {
+            host_id: Some(_),
+            request: crate::agent_control::AgentControlOp::Stop { .. }
+                | crate::agent_control::AgentControlOp::Answer { .. },
+            ..
+        } => DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT,
         // A move waits for the holder's final checkpoint, its transfer and the import.
         DaemonRequest::SupervisorMoveHere { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // Turning the remote desktop host on probes capture and binds; the host bounds that at 30 s.
         DaemonRequest::RemoteDesktopHostSet { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
+        DaemonRequest::ReferenceChat { .. } => REFERENCE_CHAT_REQUEST_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }
@@ -2495,6 +2520,9 @@ impl DaemonClient {
             | Operation::Session { .. }
             | Operation::DagStream { .. }
             | Operation::FileRead { .. }
+            | Operation::FileWrite { .. }
+            | Operation::FileList { .. }
+            | Operation::FileMkdir { .. }
             | Operation::Resources
             | Operation::Operation { .. } => None,
             // Idempotent: a holder's fence push raises a maximum and never types anything.
@@ -3397,6 +3425,22 @@ impl DaemonClient {
 
     pub async fn send_request(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
         self.send_on_connection(&self.connection, req).await
+    }
+
+    /// One request on its own fresh connection, dropped afterwards: a long reference-chat
+    /// mutation never holds the shared general or interactive connection. A read that failed
+    /// before any reply is retried once; a mutation that may have been delivered is not.
+    pub async fn send_request_one_shot(&self, req: DaemonRequest) -> Result<DaemonResponse, IpcError> {
+        let retry_safe = request_is_retry_safe(&req);
+        let mut conn = self.connect_and_handshake().await?;
+        match conn.request(&req).await {
+            Ok(resp) => Ok(resp),
+            Err(error) if !error.may_have_been_delivered || retry_safe => {
+                let mut fresh = self.connect_and_handshake().await?;
+                fresh.request(&req).await.map_err(|error| error.into_ipc_error(&req, !retry_safe))
+            }
+            Err(error) => Err(error.into_ipc_error(&req, true)),
+        }
     }
 
     /// The owner speaks another data protocol (todo 9). Nothing is sent over the data protocol and
@@ -4532,6 +4576,14 @@ impl DaemonClient {
         )
     }
 
+    pub async fn supports_terminal_continue(&self) -> bool {
+        matches!(
+            self.send_request(DaemonRequest::GetCapabilities).await,
+            Ok(DaemonResponse::CapabilitiesOk { capabilities })
+                if capabilities.iter().any(|c| c == crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY)
+        )
+    }
+
     /// Opens a cancellable paste on a local session and returns its id for `PasteWrite` chunks.
     /// Same local-control gate as `write_terminal`.
     pub async fn begin_paste(&self, session_id: &str) -> Result<String, IpcError> {
@@ -5144,6 +5196,25 @@ impl DaemonClient {
             DaemonResponse::RemoteSetActiveSelectionOk => Ok(()),
             DaemonResponse::Error { message, .. } => {
                 Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::new(
+                IpcErrorCode::InternalError,
+                "Unexpected daemon response",
+            )),
+        }
+    }
+
+    pub async fn session_mute(&self, session_ref: &str, muted: bool) -> Result<(), IpcError> {
+        let resp = self
+            .send_request(DaemonRequest::SessionMute {
+                session_ref: session_ref.to_string(),
+                muted,
+            })
+            .await?;
+        match resp {
+            DaemonResponse::SessionMuteOk => Ok(()),
+            DaemonResponse::Error { message, .. } => {
+                Err(IpcError::new(IpcErrorCode::DaemonUpgradeRequired, message))
             }
             _ => Err(IpcError::new(
                 IpcErrorCode::InternalError,
@@ -5840,6 +5911,32 @@ mod tests {
         assert_eq!(request_timeout(&show), std::time::Duration::from_secs(15));
         assert_eq!(request_timeout(&DaemonRequest::SupervisorSnapshot), std::time::Duration::from_secs(15));
         assert_eq!(request_timeout(&DaemonRequest::Ping), std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn a_paired_stop_or_answer_gets_the_paired_mutation_budget_and_a_local_one_does_not() {
+        use crate::agent_control::AgentControlOp;
+        let stop = |host_id: Option<&str>| DaemonRequest::AgentControl {
+            request: AgentControlOp::Stop { session_id: "s".into(), request_id: None },
+            host_id: host_id.map(str::to_owned),
+            supervisor_fence: None,
+            supervisor_account: None,
+        };
+        assert_eq!(request_timeout(&stop(Some("omarchy"))), DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT);
+        assert_eq!(request_timeout(&stop(None)), std::time::Duration::from_secs(15));
+        let answer = DaemonRequest::AgentControl {
+            request: AgentControlOp::Answer {
+                session_id: "s".into(),
+                prompt_id: "p".into(),
+                screen_revision: "r".into(),
+                answer: Default::default(),
+                request_id: None,
+            },
+            host_id: Some("omarchy".into()),
+            supervisor_fence: None,
+            supervisor_account: None,
+        };
+        assert_eq!(request_timeout(&answer), DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT);
     }
     use crate::daemon::server::DaemonServer;
     use crate::remote::state::RemoteNetworkMode;

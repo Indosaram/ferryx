@@ -1,14 +1,10 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { selectActivityNotificationTargets, type ActivityNotificationEvent, selectGlobalUnreadBadgeCount, selectTabActivitySummaries, selectWorktreeActivitySummaries, workspaceReducer, type WorkspaceAction, type WorkspaceState } from "../state/workspaceStore";
 import { TabBar } from "../components/TabBar";
 import { WorktreeList } from "../components/WorktreeList";
 import type { Worktree } from "../lib/types";
-import { AttentionInbox } from "../features/ferryx/attention/AttentionInbox";
-import { buildAttentionRows, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
 import { NotificationCoordinator } from "../lib/notificationCoordinator";
-import { isNotificationTargetObserved, wireActivityRecording, type RecordingListener } from "../lib/notificationCenter/activityRecording";
-import { notificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
 
 const worktreeMain: Worktree = {
   path: "/repo/main",
@@ -95,16 +91,6 @@ export function ActivitySurfaceHarness() {
     // This browser-only QA surface records pre-focus decisions without invoking native IPC.
     isWindowFocused: () => true,
   }));
-  const [activityListeners] = useState(() => new Set<RecordingListener<ActivityNotificationEvent>>());
-
-  useEffect(() => wireActivityRecording({
-    events: (listener) => {
-      activityListeners.add(listener);
-      return () => { activityListeners.delete(listener); };
-    },
-    isObserved: (target) => isNotificationTargetObserved(stateRef.current, target, true),
-    store: notificationCenterStore,
-  }), [activityListeners]);
 
   const dispatch = (action: WorkspaceAction) => {
     const previous = stateRef.current;
@@ -115,9 +101,8 @@ export function ActivitySurfaceHarness() {
     for (const target of selectActivityNotificationTargets(next)) {
       const previousState = previous.activityBySessionId?.[target.sessionId]?.state;
       if (previousState === target.state) continue;
-      const event = { ...target, previousState };
-      const decision = coordinator.handleAgentStateChange({ ...event, nextState: event.state });
-      activityListeners.forEach((listener) => listener(event, decision));
+      const event: ActivityNotificationEvent = { ...target, previousState };
+      coordinator.handleAgentStateChange({ ...event, nextState: event.state });
     }
   };
 
@@ -152,8 +137,6 @@ export function ActivitySurfaceHarness() {
 
   const tabActivity = useMemo(() => selectTabActivitySummaries(state), [state]);
   const worktreeActivity = useMemo(() => selectWorktreeActivitySummaries(state), [state]);
-  const inbox = useSyncExternalStore(notificationCenterStore.subscribe, notificationCenterStore.getSnapshot);
-  const attentionRows = useMemo(() => buildAttentionRows(inbox.entries, liveActivityLookup(state, [])), [inbox, state]);
 
   const scenarios: Array<{ id: string; label: string; run: () => void }> = [
     {
@@ -277,7 +260,6 @@ export function ActivitySurfaceHarness() {
       stateRef.current = initialState();
       setState(stateRef.current);
       coordinator.reset();
-      notificationCenterStore.clearAll();
     } },
   ];
 
@@ -319,19 +301,6 @@ export function ActivitySurfaceHarness() {
           activityByWorktreePath={worktreeActivity}
           onSelect={() => undefined}
           onDelete={() => undefined}
-        />
-      </div>
-
-      <div data-testid="harness-notifications" className="mt-4 flex h-80 w-[300px] flex-col border border-border bg-worktree-sidebar text-worktree-sidebar-foreground">
-        <AttentionInbox
-          rows={attentionRows}
-          onOpen={(row) => {
-            const tab = stateRef.current.layout.tabs.find((candidate) => "sessionId" in candidate && candidate.sessionId === row.sessionId);
-            if (!tab) return;
-            dispatch({ type: "ACTIVATE_TAB", tabId: tab.id } as WorkspaceAction);
-            notificationCenterStore.markEntriesRead([{ id: row.id, expectedRevision: row.revision }]);
-          }}
-          onDismiss={(row) => notificationCenterStore.markEntriesRead([{ id: row.id, expectedRevision: row.revision }])}
         />
       </div>
 

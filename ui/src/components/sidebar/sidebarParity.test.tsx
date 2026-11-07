@@ -37,7 +37,6 @@ import {
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 } from "../../lib/storageKeys";
 import { RemoteSidebar } from "../../remote/RemoteSidebar";
-import { remoteSupervisorTyping } from "../../remote/remoteSidebarLive";
 import type { RemoteSessionInventory } from "../../remote/remoteSessionInventory";
 import { useRemoteSidebarModel, type RemoteSidebarMachine } from "../../remote/useRemoteSidebarModel";
 import { remoteHostStore } from "../../state/remoteHostStore";
@@ -122,7 +121,7 @@ function serializeSidebar(root: Element): string[] {
 const noop = () => undefined;
 const FILTER_QUERY = "settings";
 
-function DesktopSidebar({ inboxOpen = false }: { readonly inboxOpen?: boolean }) {
+function DesktopSidebar() {
   useDesktopSidebarPublisher({
     enabled: true,
     projects: fx.projects,
@@ -133,7 +132,6 @@ function DesktopSidebar({ inboxOpen = false }: { readonly inboxOpen?: boolean })
     activityByWorktreePath: fx.desktopActivity,
     unreadWorktreePaths: fx.desktopUnread,
     agents: fx.desktopAgents,
-    attentionRows: fx.desktopAttention,
   });
   return (
     <Sidebar
@@ -150,7 +148,6 @@ function DesktopSidebar({ inboxOpen = false }: { readonly inboxOpen?: boolean })
       onCreateWorktree={noop}
       onOpenSettings={noop}
       onOpenResources={noop}
-      attention={{ rows: [...fx.desktopAttention], onOpen: noop, onDismiss: noop, onDismissAll: noop, inboxOpen, onInboxOpenChange: noop }}
     />
   );
 }
@@ -178,11 +175,8 @@ function supervisorSnapshot(): SupervisorSnapshot {
   };
 }
 
-/** The remote's own pane-derived inbox rows: one row, where the desktop's notification centre has two. */
-const REMOTE_PANE_ATTENTION = [{ id: "pane-1", revision: 0, workspaceId: "ferryx", sessionId: "pane-1", state: "done" as const, who: "Coder" }];
-
 /** The phone/browser side: one machine whose gateway answers with the desktop's published model. */
-function RemoteSidebarHarness({ machine, view }: { readonly machine: RemoteSidebarMachine; readonly view: "worktrees" | "inbox" }) {
+function RemoteSidebarHarness({ machine }: { readonly machine: RemoteSidebarMachine }) {
   const [supervisors] = useState(() => ({ [machine.machineId]: { snapshot: supervisorSnapshot(), now: Date.now() } }));
   const sections = useRemoteSidebarModel({ machines: [machine], supervisors });
   return (
@@ -191,11 +185,7 @@ function RemoteSidebarHarness({ machine, view }: { readonly machine: RemoteSideb
       density="compact"
       pending={null}
       onSelect={noop}
-      view={view}
-      onViewChange={noop}
-      inbox={{ rows: REMOTE_PANE_ATTENTION, onOpen: noop, onDismiss: noop }}
-      onOpenPublishedAttention={noop}
-      supervisor={{ typing: remoteSupervisorTyping(supervisors), content: null }}
+      view="worktrees"
     />
   );
 }
@@ -235,14 +225,14 @@ afterEach(() => {
   worktreeListingFailureStore.reset();
 });
 
-async function renderBoth(advancedFeatures: boolean, view: "worktrees" | "inbox" = "worktrees") {
+async function renderBoth(advancedFeatures: boolean) {
   seedDesktop(advancedFeatures);
   const publishedModel = new Promise<SidebarModel>((resolve) => {
     tauri.onPublish = (model) => resolve(model as SidebarModel);
   });
-  const desktop = render(<DesktopSidebar inboxOpen={view === "inbox"} />);
+  const desktop = render(<DesktopSidebar />);
   const published = await publishedModel;
-  const remote = render(<RemoteSidebarHarness machine={remoteMachine(published)} view={view} />);
+  const remote = render(<RemoteSidebarHarness machine={remoteMachine(published)} />);
   const remoteSection = await waitFor(() => {
     const section = remote.container.querySelector('[data-testid="remote-sidebar-section"]');
     if (!section?.querySelector('[data-testid="worktree-region"]')) throw new Error("remote sidebar not loaded yet");
@@ -269,8 +259,8 @@ describe("desktop and remote sidebar parity", () => {
     expect(desktopTree.filter((line) => line.includes("aria-expanded=false")).length).toBeGreaterThanOrEqual(1);
     // A remote that lets a stale paired row be clicked must fail, so the fixture shows one.
     expect(desktopTree.filter((line) => line.includes("aria-disabled=true")).length).toBeGreaterThanOrEqual(1);
-    // The Inbox tab count is the desktop's (notification centre), not the remote's pane rows.
-    expect(desktopTree).toContain(`tab name="Inbox (${fx.desktopAttention.length})" testid=- aria-selected=false`);
+    // No Inbox tab and no view tabs: the project tree is the whole sidebar on both apps.
+    expect(desktopTree.some((line) => line.startsWith("tab "))).toBe(false);
     expect(serializeSidebar(trees.remote)).toEqual(desktopTree);
   });
 
@@ -283,19 +273,6 @@ describe("desktop and remote sidebar parity", () => {
 
     const desktopTree = serializeSidebar(trees.desktop);
     expect(desktopTree.filter((line) => line.startsWith("listitem")).length).toBeGreaterThanOrEqual(1);
-    expect(serializeSidebar(trees.remote)).toEqual(desktopTree);
-  });
-
-  it("lists the same Inbox rows on both apps, under the same tab count", async () => {
-    // advancedFeatures false: the publisher skips a model identical to the previous test's (true).
-    const trees = await renderBoth(false, "inbox");
-
-    const desktopTree = serializeSidebar(trees.desktop);
-    const listed = desktopTree.filter((line) => line.includes("testid=attention-row "));
-    // The remote's own pane rows differ in number and content, so a remote listing them fails.
-    expect(listed).toHaveLength(fx.desktopAttention.length);
-    expect(REMOTE_PANE_ATTENTION.length).not.toBe(fx.desktopAttention.length);
-    expect(desktopTree).toContain(`tab name="Inbox (${listed.length})" testid=- aria-selected=true`);
     expect(serializeSidebar(trees.remote)).toEqual(desktopTree);
   });
 });

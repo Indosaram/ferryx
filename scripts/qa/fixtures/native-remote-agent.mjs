@@ -1,4 +1,5 @@
 // Runs only when the sole verifier starts it over SSH. JSONL RPC, no GUI actions.
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { watch } from 'node:fs';
@@ -6,7 +7,7 @@ import { mkdir, readFile, readdir, rm, stat, realpath, open, link, lstat, unlink
 import { createConnection } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { createInterface } from 'node:readline';
-import { resolve, relative, join, isAbsolute } from 'node:path';
+import { resolve, relative, join, isAbsolute, basename } from 'node:path';
 import { BarrierHub, ATTACH_TUPLE_FIELDS, correlateReceipt, requireSevenTupleReceipt } from '../../lib/qa-scenarios/common-harness.mjs';
 import { ensureFrontendServed, FRONTEND_DEV_URL } from '../../lib/qa-scenarios/frontend-server.mjs';
 import { buildWindowsOwnedWindowsScript, buildWindowsNewPaneScript, orderOwnedWindowsForSearch } from '../../lib/qa-scenarios/native-driver.mjs';
@@ -36,6 +37,10 @@ const inside = (root, path) => {
 };
 const ps = (value) => `'${String(value).replaceAll("'", "''")}'`;
 
+export function tolerableSetupProbeReadError(error) {
+  return error?.code === 'ENOENT' || error instanceof SyntaxError;
+}
+
 export function subscribeSetupProbe(target, signal, timeoutMs = 150000) {
   let dispose;
   const promise = new Promise((resolveProbe, reject) => {
@@ -49,7 +54,7 @@ export function subscribeSetupProbe(target, signal, timeoutMs = 150000) {
       try {
         if (!result && completionPath) {
           try { result = JSON.parse(await readFile(completionPath, 'utf8')); }
-          catch (error) { if (error.code !== 'ENOENT') return finish(error); }
+          catch (error) { if (!tolerableSetupProbeReadError(error)) return finish(error); }
         }
         if (markerPath && wrapperExitCode === null) {
           try {
@@ -76,14 +81,63 @@ export function subscribeSetupProbe(target, signal, timeoutMs = 150000) {
     const enqueue = () => { chain = chain.then(inspect); };
     const watchDir = resolve(completionPath ?? markerPath, '..');
     const watcher = watch(watchDir, enqueue);
-    const poll = setInterval(enqueue, 250);
     const timer = setTimeout(() => finish(fail('Interactive setup probe completion deadline; task retained, no process killed')), timeoutMs);
-    dispose = () => { watcher.close(); clearInterval(poll); clearTimeout(timer); signal.removeEventListener('abort', abort); };
+    dispose = () => { watcher.close(); clearTimeout(timer); signal.removeEventListener('abort', abort); };
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) abort(); else enqueue();
   });
   promise.catch(() => {});
   return { promise, close: () => dispose() };
+}
+
+export async function stopSetupProbeWorker({ profile, worker, signal }, {
+  subscribe = subscribeSetupProbe, waitExit = waitWindowsExactPidExit, persist = persistLaunch, invoke = command,
+} = {}) {
+  const { pid, processStart } = worker.owner ?? {};
+  if (!Number.isSafeInteger(pid) || pid <= 0 || !processStart) throw fail('Setup probe worker lacks exact process identity; profile preserved');
+  const subscribed = subscribe({ completionPath: worker.completionPath, markerPath: worker.wrapperMarkerPath }, signal);
+  const exited = waitExit(pid, processStart, signal);
+  const stopped = Promise.all([exited, subscribed.promise]);
+  stopped.catch(() => {});
+  try {
+    await persist(join(profile, 'evidence', 'setup-probes', 'worker-queue', 'zzzz-stop.req.json'), { stop: true });
+    await stopped;
+    await invoke('schtasks', worker.deleteArgs, signal);
+  } finally {
+    subscribed.close();
+  }
+}
+
+export async function launchInteractiveGuiTask({ profile, signal }, { invoke = command, persist = persistLaunch } = {}) {
+  const taskName = `FerryxF3Gui-${basename(profile)}`;
+  const launcher = join(profile, 'launch.cmd');
+  const receipt = { taskName, launcher, user: null, created: false, started: false, deleted: false };
+  let launchError;
+  try {
+    receipt.user = (await invoke('whoami', [], signal)).trim();
+    await invoke('schtasks', ['/create', '/tn', taskName, '/tr', `cmd.exe /d /s /c ""${launcher}""`, '/sc', 'ONCE', '/st', '23:59', '/it', '/ru', receipt.user], signal);
+    receipt.created = true;
+    await invoke('schtasks', ['/run', '/tn', taskName], signal);
+    receipt.started = true;
+  } catch (error) {
+    launchError = error;
+    receipt.launchError = { code: error.code, message: error.message };
+  } finally {
+    if (receipt.created) {
+      try {
+        await invoke('schtasks', ['/delete', '/tn', taskName, '/f'], signal);
+        receipt.deleted = true;
+      } catch (error) {
+        receipt.deleteError = { code: error.code, message: error.message };
+      }
+    }
+    try { await persist(join(profile, 'evidence', 'gui-interactive-task.json'), receipt); }
+    catch (error) {
+      throw Object.assign(launchError ? new AggregateError([launchError, error], 'GUI launch and receipt persistence failed') : error, { receipt });
+    }
+  }
+  if (launchError) throw Object.assign(launchError, { receipt });
+  return receipt;
 }
 
 export async function runInteractiveSetupProbe({ profile, gui, script, signal }, {
@@ -156,7 +210,7 @@ export async function runInteractiveSetupProbe({ profile, gui, script, signal },
     const result = await (fastFirst ? fastFirst.promise : subscribed.promise);
     fastFirst?.close();
     if (subscribe === subscribeSetupProbe && invoke === command) {
-      activeProbeWorkers.set(profile, { wrapperMarkerPath, subscribed, deleteArgs: plan.deleteArgs, taskName: plan.taskName });
+      activeProbeWorkers.set(profile, { owner: result.owner, completionPath, wrapperMarkerPath, deleteArgs: plan.deleteArgs, taskName: plan.taskName });
     }
     report.completed = true;
     report.result = result;
@@ -194,7 +248,7 @@ export function buildSetupProbeSessionScript(gui) {
   ].join('\n');
 }
 
-export async function inspectSetupTarget({ profile, gui, point, hwnd, signal }, {
+export async function inspectSetupTarget({ profile, gui, point, hwnd, boundsOnly = false, signal }, {
   ownedProfiles = profiles, receipts = setupGuiReceipts, platform = process.platform, inspect = probe,
   load = async path => JSON.parse(await readFile(path, 'utf8')),
   run = script => runInteractiveSetupProbe({ profile, gui, script, signal }),
@@ -221,6 +275,28 @@ export async function inspectSetupTarget({ profile, gui, point, hwnd, signal }, 
       throw fail('Setup GUI exact live identity changed');
   };
   await check();
+  if (boundsOnly) {
+    const raw = await run([
+      'Add-Type @"',
+      'using System; using System.Runtime.InteropServices;',
+      'public class FerryxSetupBounds {',
+      ' [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }',
+      ' [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+      ' [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+      ' [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect rect);',
+      ' [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);',
+      '}', '"@;',
+      '$h = [FerryxSetupBounds]::GetForegroundWindow(); $owner = [uint32]0;',
+      '[FerryxSetupBounds]::GetWindowThreadProcessId($h, [ref]$owner) | Out-Null;',
+      '$r = New-Object FerryxSetupBounds+Rect;',
+      "if (![FerryxSetupBounds]::GetWindowRect($h, [ref]$r)) { throw 'Window bounds unreadable' };",
+      "@{ probe = 'setup-bounds'; frontPid = $owner; bounds = @{ x = $r.Left; y = $r.Top; width = $r.Right-$r.Left; height = $r.Bottom-$r.Top }; screen = @{ width = [FerryxSetupBounds]::GetSystemMetrics(0); height = [FerryxSetupBounds]::GetSystemMetrics(1) } } | ConvertTo-Json -Compress -Depth 4;",
+    ].join('\n'));
+    const parsed = parseWindowsProbeLine(raw, 'setup-bounds');
+    await check();
+    if (!parsed.ok || parsed.probe.frontPid !== receipt.pid) throw fail('Run-owned GUI is not foreground');
+    return parsed.probe;
+  }
   if (point) {
     if (!Number.isSafeInteger(hwnd) || hwnd <= 0 || !Number.isFinite(point.x) || !Number.isFinite(point.y)) throw fail('Invalid setup hit-test target');
     const raw = await run([
@@ -663,9 +739,10 @@ export async function collectLaunchEvidence(profile, signal, { ownedProfiles = p
   return files;
 }
 
+import { gitEnv } from '../unified-supervisor/git-env.mjs';
 function command(executable, args, signal) {
   return new Promise((resolveCommand, reject) => {
-    const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, signal });
+    const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, signal, ...(executable === 'git' ? { env: gitEnv() } : {}) });
     let stdout = ''; let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -1043,6 +1120,13 @@ function createNativeBarrierAdapter({ hub, emitReceipt }) {
 
 async function dispatch(method, args, signal) {
   switch (method) {
+    case 'identity': {
+      const resolvedPath = await realpath(fileURLToPath(import.meta.url));
+      const checkout = await realpath(await command('git', ['-C', resolve(resolvedPath, '..'), 'rev-parse', '--show-toplevel'], signal));
+      const headRevision = await command('git', ['-C', checkout, 'rev-parse', 'HEAD'], signal);
+      const status = await command('git', ['-C', checkout, 'status', '--porcelain', '--untracked-files=all'], signal);
+      return { resolvedPath, checkout, headRevision, clean: status === '', status };
+    }
     case 'prepare': {
       const { worktreeRoot, worktree, runId, operationId, binary, uiDist, manifest } = args;
       if (!/^[a-z0-9-]+$/.test(runId) || !inside(worktreeRoot, worktree)) throw fail('Noncanonical worktree/runId');
@@ -1100,6 +1184,10 @@ async function dispatch(method, args, signal) {
       if (!profiles.has(args.profile)) throw fail('Unknown frontend profile');
       const entry = frontendProfiles.get(args.profile);
       if (entry.resource) throw fail('Frontend setup already requested');
+      if (args.uiDist) {
+        if (!inside(args.profile, args.uiDist)) throw fail('Frontend override must be inside the isolated profile');
+        entry.uiDist = args.uiDist;
+      }
       entry.resource = createRemoteFrontend();
       return entry.resource.start({ ...entry, frontend: args.frontend, signal });
     }
@@ -1137,6 +1225,10 @@ async function dispatch(method, args, signal) {
         `(New-Object -ComObject Scripting.FileSystemObject).GetFile('${launcher.replaceAll("'", "''")}').ShortPath`], signal)).trim();
       if (!launcherShortPath || /[-_]/.test(launcherShortPath)) throw fail(`Launcher short path is not typeable: ${launcherShortPath}`);
       return { specPath, launcherShortPath };
+    }
+    case 'launch-gui-interactive': {
+      if (process.platform !== 'win32' || !profiles.has(args.profile)) throw fail('Unknown Windows launcher profile');
+      return launchInteractiveGuiTask({ ...args, signal });
     }
     case 'await-gui-launch': {
       if (!profiles.has(args.profile)) throw fail('Unknown launcher profile');
@@ -1178,10 +1270,10 @@ async function dispatch(method, args, signal) {
       if (live.exited) return { pid: args.pid, processStart: args.processStart, exited: true };
       if (live.processStart !== args.processStart) throw fail('PID incarnation changed before exit subscription');
       const owned = children.get(args.pid);
-      if (owned) await Promise.race([owned.exit, new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))]);
-      else if (process.platform === 'win32') {
+      if (process.platform === 'win32') {
         await waitWindowsExactPidExit(args.pid, args.processStart, signal);
-      } else {
+      } else if (owned) await Promise.race([owned.exit, new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))]);
+      else {
         // pidfd is an exact event subscription, not /proc polling. Recheck start
         // after opening pidfd so PID reuse during subscription is refused.
         await command('python3', ['-c',
@@ -1204,19 +1296,12 @@ async function dispatch(method, args, signal) {
       if (!profiles.has(args.profile)) throw fail('Unowned profile removal refused');
       const worker = activeProbeWorkers.get(args.profile);
       if (worker) {
+        await stopSetupProbeWorker({ profile: args.profile, worker, signal });
         activeProbeWorkers.delete(args.profile);
-        const workerDir = join(args.profile, 'evidence', 'setup-probes', 'worker-queue');
-        try {
-          await persistLaunch(join(workerDir, 'zzzz-stop.req.json'), { stop: true });
-          await Promise.race([worker.subscribed.promise, new Promise((r) => setTimeout(r, 5000))]);
-        } catch {} finally {
-          worker.subscribed.close();
-          try { await command('schtasks', worker.deleteArgs, signal); } catch {}
-          const tasks = pendingSetupTasks.get(args.profile);
-          if (tasks) {
-            tasks.delete(worker.taskName);
-            if (tasks.size === 0) pendingSetupTasks.delete(args.profile);
-          }
+        const tasks = pendingSetupTasks.get(args.profile);
+        if (tasks) {
+          tasks.delete(worker.taskName);
+          if (tasks.size === 0) pendingSetupTasks.delete(args.profile);
         }
       }
       const retained = pendingSetupTasks.get(args.profile);
@@ -1622,6 +1707,7 @@ if (process.argv.includes('--read-only-setup-probe')) {
         try { req = JSON.parse(await readFile(reqPath, 'utf8')); await unlink(reqPath); }
         catch { continue; }
         if (req.stop) { deadline = 0; break; }
+        deadline = Date.now() + 240_000;
         const jobScriptPath = join(workerDir, `${req.id}.ps1`);
         let jobFast = req.script;
         try {
@@ -1658,7 +1744,7 @@ if (process.argv.includes('--read-only-setup-probe')) {
     const controller = new AbortController(); jobs.set(request.id, controller);
     dispatch(request.method, request.args, controller.signal).then(
       (result) => output({ id: request.id, result }),
-      (error) => output({ id: request.id, error: { code: error.code, message: error.message } }),
+      (error) => output({ id: request.id, error: { code: error.code, message: error.message, receipt: error.receipt } }),
     ).finally(() => jobs.delete(request.id));
   });
 }

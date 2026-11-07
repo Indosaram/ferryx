@@ -85,10 +85,11 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import {
   REFERENCE_DEVICE_BINDING_ENV,
   REFERENCE_DEVICE_RECEIPT_SCHEMA,
@@ -414,7 +415,7 @@ class WdaClient {
     return this.request("GET", "/status");
   }
 
-  async startSession(bundleId) {
+  async startSession(bundleId, extraCapabilities = {}) {
     const capabilities = {
       alwaysMatch: {
         platformName: "iOS",
@@ -422,6 +423,7 @@ class WdaClient {
         "appium:usePrebuiltWDA": true,
         "appium:shouldUseSingletonTestManager": true,
         ...(bundleId ? { "appium:bundleId": bundleId } : {}),
+        ...extraCapabilities,
       },
       firstMatch: [{}],
     };
@@ -1875,7 +1877,7 @@ const PREREQ = {};
  * Fail-closed driver verification. The driver is provisioned by the verification host and only
  * READ here: this producer never launches, installs or reconfigures a driver or a device.
  */
-async function prereqProbe() {
+async function prereqProbe(extraCapabilities = {}) {
   WDA = new WdaClient(DEVICE.driverEndpoint);
   let status;
   try {
@@ -1905,7 +1907,7 @@ async function prereqProbe() {
   };
   writeJson("prereq/driver-status.json", PREREQ.driver);
 
-  const session = await WDA.startSession(null);
+  const session = await WDA.startSession(null, extraCapabilities);
   PREREQ.session = { sessionId: session.sessionId, capabilities: session.capabilities };
   writeJson("prereq/driver-session.json", PREREQ.session);
 
@@ -2369,5 +2371,53 @@ async function main() {
   return exitCode;
 }
 
-process.exit(await main());
+/**
+ * Library seam for other real-device producers (scripts/qa/supervisor-f3): binds this file's
+ * WebDriverAgent client, accessibility parser, real-touch and screenshot helpers to one
+ * provisioned device and evidence directory, with the same fail-closed prerequisite probe
+ * (driver status, session, provenance) the QA-08 run uses. It never runs a QA-08 scenario.
+ */
+export async function bindIosDevice({ serial, driverEndpoint, model = null, osVersion = null, evidenceDir, timeoutMs = 20000, capabilities = {} }) {
+  ARGS = { timeoutMs, caseName: "all", scenario: null, fixtureManifest: null };
+  EVIDENCE_DIR = path.resolve(evidenceDir);
+  mkdirSync(EVIDENCE_DIR, { recursive: true });
+  DEVICE = { serial, driverEndpoint, model, osVersion, manifestEntry: { platform: PLATFORM, serial, driverEndpoint } };
+  try {
+    await prereqProbe(capabilities);
+  } catch (error) {
+    // prereqProbe may have opened a WDA session before it threw; never leave it behind.
+    await cleanup().catch(() => {});
+    throw Object.assign(error, { cleanup: RUN.cleanup.receipts });
+  }
+  return {
+    wda: WDA,
+    device: PREREQ.device,
+    session: PREREQ.session,
+    page: IOS,
+    hierarchy: fetchHierarchy,
+    tap: pointerTap,
+    pageTapPoint: resolvePageTap,
+    rectExpr,
+    screenshot,
+    cleanup: async () => { await cleanup(); return RUN.cleanup.receipts; },
+  };
+}
+
+export { RunnerError, EXIT as DEVICE_EXIT };
+
+// Run as the QA-08 producer only when invoked directly; importing it never starts a run. Real
+// paths on both sides, so a symlinked checkout (/tmp -> /private/tmp) or a Windows drive-letter
+// case difference still runs main.
+const invokedDirectly = () => {
+  if (!process.argv[1]) return false;
+  const norm = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+  try {
+    return norm(realpathSync(process.argv[1])) === norm(realpathSync(fileURLToPath(import.meta.url)));
+  } catch {
+    return false;
+  }
+};
+if (invokedDirectly()) {
+  process.exit(await main());
+}
 

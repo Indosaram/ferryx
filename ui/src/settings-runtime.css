@@ -3,14 +3,51 @@
   --background-rgb: 10 10 10;
   --card: #141414;
   --card-rgb: 20 20 20;
-  --popover: #141414;
-  --popover-rgb: 20 20 20;
+  /* Floating layer: #141414 against the 45% scrim over a dark terminal was
+     1.12:1. #333333 measures 1.41:1 (charcoal's equivalent is 1.38:1) while
+     keeping foreground 12.10 and muted 4.89. */
+  --popover: #333333;
+  --popover-rgb: 51 51 51;
+  --surface-hover: #454545;
+  --surface-hover-rgb: 69 69 69;
   --sidebar: #0a0a0a;
   --sidebar-rgb: 10 10 10;
   --worktree-sidebar: #0a0a0a;
   --worktree-sidebar-rgb: 10 10 10;
   --destructive-foreground: #0a0a0a;
   --destructive-foreground-rgb: 10 10 10;
+  --status-working-solid: #60a5fa;
+  --status-working-solid-rgb: 96 165 250;
+  --status-working-container: #16202c;
+  --status-working-container-rgb: 22 32 44;
+  --status-working-border: #60a5fa;
+  --status-working-border-rgb: 96 165 250;
+  --status-working-on-container: #60a5fa;
+  --status-working-on-container-rgb: 96 165 250;
+  --status-warning-solid: #fbbf24;
+  --status-warning-solid-rgb: 251 191 36;
+  --status-warning-container: #2c230e;
+  --status-warning-container-rgb: 44 35 14;
+  --status-warning-border: #fbbf24;
+  --status-warning-border-rgb: 251 191 36;
+  --status-warning-on-container: #fbbf24;
+  --status-warning-on-container-rgb: 251 191 36;
+  --status-success-solid: #86efac;
+  --status-success-solid-rgb: 134 239 172;
+  --status-success-container: #1b2a21;
+  --status-success-container-rgb: 27 42 33;
+  --status-success-border: #86efac;
+  --status-success-border-rgb: 134 239 172;
+  --status-success-on-container: #86efac;
+  --status-success-on-container-rgb: 134 239 172;
+  --status-idle-solid: #737373;
+  --status-idle-solid-rgb: 115 115 115;
+  --status-idle-container: #191919;
+  --status-idle-container-rgb: 25 25 25;
+  --status-idle-border: #737373;
+  --status-idle-border-rgb: 115 115 115;
+  --status-idle-on-container: #a1a1a1;
+  --status-idle-on-container-rgb: 161 161 161;
 }
 
 :root[data-theme="light"] {
@@ -26,6 +63,11 @@
   --popover-rgb: 255 255 255;
   --popover-foreground: #171717;
   --popover-foreground-rgb: 23 23 23;
+  /* Hover inside a floating surface: one step DOWN from the white popover, so the
+     row still reads as a hover without the dark-theme tone leaking into light mode.
+     #e9ebef is 1.19:1 against #ffffff, with fg 15.02 and muted 6.48. */
+  --surface-hover: #e9ebef;
+  --surface-hover-rgb: 233 235 239;
   --primary: #262626;
   --primary-rgb: 38 38 38;
   --primary-foreground: #fafafa;
@@ -84,6 +126,38 @@
   --status-success-rgb: 21 128 61;
   --status-idle: #5b6472;
   --status-idle-rgb: 91 100 114;
+  --status-working-solid: #2563eb;
+  --status-working-solid-rgb: 37 99 235;
+  --status-working-container: #e5ebf8;
+  --status-working-container-rgb: 229 235 248;
+  --status-working-border: #2563eb;
+  --status-working-border-rgb: 37 99 235;
+  --status-working-on-container: #245fe2;
+  --status-working-on-container-rgb: 36 95 226;
+  --status-warning-solid: #a16207;
+  --status-warning-solid-rgb: 161 98 7;
+  --status-warning-container: #efebe6;
+  --status-warning-container-rgb: 239 235 230;
+  --status-warning-border: #a16207;
+  --status-warning-border-rgb: 161 98 7;
+  --status-warning-on-container: #945a06;
+  --status-warning-on-container-rgb: 148 90 6;
+  --status-success-solid: #15803d;
+  --status-success-solid-rgb: 21 128 61;
+  --status-success-container: #e4edea;
+  --status-success-container-rgb: 228 237 234;
+  --status-success-border: #15803d;
+  --status-success-border-rgb: 21 128 61;
+  --status-success-on-container: #137638;
+  --status-success-on-container-rgb: 19 118 56;
+  --status-idle-solid: #5b6472;
+  --status-idle-solid-rgb: 91 100 114;
+  --status-idle-container: #eaebee;
+  --status-idle-container-rgb: 234 235 238;
+  --status-idle-border: #5b6472;
+  --status-idle-border-rgb: 91 100 114;
+  --status-idle-on-container: #57606d;
+  --status-idle-on-container-rgb: 87 96 109;
 }
 
 :root[data-accent="blue"] {
@@ -149,6 +223,76 @@
   --primary-foreground-rgb: 10 10 10;
   --sidebar-primary-foreground: #0a0a0a;
   --sidebar-primary-foreground-rgb: 10 10 10;
+}
+
+/* Light-mode accent variants. The bare :root[data-accent] blocks above are dark-theme values;
+   they tie :root[data-theme="light"] on specificity and come later in the file, so without these
+   the dark accents would win in light mode too. Each ring is a darker shade of its own primary:
+   a ring identical to the fill is invisible on a focused primary button (button.tsx draws
+   focus-visible:ring-1 with no offset), and every ring here clears 3:1 on #ffffff and #f6f7f9. */
+:root[data-theme="light"][data-accent="blue"] {
+  --primary: #2563eb;
+  --primary-rgb: 37 99 235;
+  --ring: #1d4ed8;
+  --ring-rgb: 29 78 216;
+  --sidebar-primary: #2563eb;
+  --sidebar-primary-rgb: 37 99 235;
+  --primary-foreground: #fafafa;
+  --primary-foreground-rgb: 250 250 250;
+  --sidebar-primary-foreground: #fafafa;
+  --sidebar-primary-foreground-rgb: 250 250 250;
+}
+
+:root[data-theme="light"][data-accent="emerald"] {
+  --primary: #059669;
+  --primary-rgb: 5 150 105;
+  --ring: #047857;
+  --ring-rgb: 4 120 87;
+  --sidebar-primary: #059669;
+  --sidebar-primary-rgb: 5 150 105;
+  --primary-foreground: #0a0a0a;
+  --primary-foreground-rgb: 10 10 10;
+  --sidebar-primary-foreground: #0a0a0a;
+  --sidebar-primary-foreground-rgb: 10 10 10;
+}
+
+:root[data-theme="light"][data-accent="purple"] {
+  --primary: #7c3aed;
+  --primary-rgb: 124 58 237;
+  --ring: #6d28d9;
+  --ring-rgb: 109 40 217;
+  --sidebar-primary: #7c3aed;
+  --sidebar-primary-rgb: 124 58 237;
+  --primary-foreground: #fafafa;
+  --primary-foreground-rgb: 250 250 250;
+  --sidebar-primary-foreground: #fafafa;
+  --sidebar-primary-foreground-rgb: 250 250 250;
+}
+
+:root[data-theme="light"][data-accent="amber"] {
+  --primary: #b45309;
+  --primary-rgb: 180 83 9;
+  --ring: #92400e;
+  --ring-rgb: 146 64 14;
+  --sidebar-primary: #b45309;
+  --sidebar-primary-rgb: 180 83 9;
+  --primary-foreground: #fafafa;
+  --primary-foreground-rgb: 250 250 250;
+  --sidebar-primary-foreground: #fafafa;
+  --sidebar-primary-foreground-rgb: 250 250 250;
+}
+
+:root[data-theme="light"][data-accent="rose"] {
+  --primary: #be123c;
+  --primary-rgb: 190 18 60;
+  --ring: #9f1239;
+  --ring-rgb: 159 18 57;
+  --sidebar-primary: #be123c;
+  --sidebar-primary-rgb: 190 18 60;
+  --primary-foreground: #fafafa;
+  --primary-foreground-rgb: 250 250 250;
+  --sidebar-primary-foreground: #fafafa;
+  --sidebar-primary-foreground-rgb: 250 250 250;
 }
 
 :root[data-density="compact"] {

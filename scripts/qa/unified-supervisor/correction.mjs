@@ -1,3 +1,4 @@
+import { gitEnv } from './git-env.mjs';
 // Scenario `correction` (plan todo 10): an owner correction lands before the first dispatch is
 // sent, and a replay of it at the stale revision is refused.
 //
@@ -63,7 +64,7 @@ export async function runCorrection(ctx, deps) {
     ['git-add', [...gitArgs, '-C', repo, 'add', 'verify.sh']],
     ['git-commit', [...gitArgs, '-C', repo, 'commit', '-q', '-m', 'qa fixture verifier']],
   ]) {
-    const result = await ctx.run(label, git, args, { deadlineMs: 30_000 });
+    const result = await ctx.run(label, git, args, { deadlineMs: 30_000, env: gitEnv() });
     if (result.code !== 0) throw new HarnessError('FIXTURE_FAILED', `${label} exited ${result.code}: ${result.stderr}`);
   }
   const gitCommonDir = realpathSync(join(repo, '.git'));

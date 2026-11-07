@@ -1,3 +1,4 @@
+import type { AgentContinueMode, AgentContinueStartup } from "./tauri";
 import type { AgentProviderSession, AgentProviderSessionKey } from "./types";
 export type ResumeCapability = "uuid" | "positional-index" | "chat-id" | "none";
 
@@ -14,7 +15,7 @@ export const PROVIDER_TRANSCRIPT_PATH_MAX_LENGTH = 4096;
 export const RESUMABLE_TUI_AGENTS = [
   "claude", "codex", "antigravity", "opencode", "pi", "prime-agent",
   "mimo-code", "droid", "grok", "devin", "omp", "omo", "kimi", "gjc",
-  "copilot", "cursor", "cursor-agent", "cline", "crush",
+  "copilot", "cursor", "cursor-agent", "cline", "crush", "maho",
 ] as const;
 
 export type ResumableTuiAgent = (typeof RESUMABLE_TUI_AGENTS)[number];
@@ -38,6 +39,9 @@ const RESUME_BUILDERS: Readonly<Record<string, ResumeArgvBuilder>> = {
   devin: { key: "session_id", binary: "devin", args: (id) => ["--resume", id] },
   omp: { key: "session_id", binary: "omp", args: (id, _s, p) => ["--resume", p?.trim() || id] },
   omo: { key: "session_id", binary: "omo", args: (id) => ["--session", id] },
+  // maho code is its own agent: the native mhc binary owns its conversations
+  // (~/.maho/agent/sessions), so a resume spawns mhc rather than omo.
+  maho: { key: "session_id", binary: "mhc", args: (id) => ["--session", id] },
   kimi: { key: "session_id", binary: "kimi", args: (id) => ["--session", id] },
   gjc: { key: "session_id", binary: "gjc", args: (id) => ["--resume", id] },
   copilot: { key: "session_id", binary: "copilot", args: (id) => ["--resume", id] },
@@ -58,6 +62,7 @@ export const AUTHORITATIVE_RECONNECT_AGENTS = [
   "cursor-agent",
   "kimi",
   "omo",
+  "maho",
   "gjc",
   "antigravity",
   "opencode",
@@ -210,4 +215,60 @@ export function buildResumeArgv(ref: AgentSessionRef): string[] | null {
   if (!argv) return null;
 
   return argv;
+}
+
+const FORK_VERIFIED_AGENTS = ["claude", "codex"] as const;
+
+/**
+ * Modes the owning host will build itself. Claude and Codex are fork+resume.
+ * Every other verified resume builder is resume-only; fork stays hidden.
+ * This does not build argv and it does not stop a source pane.
+ */
+export function verifiedContinuationModes(agentType: string): readonly AgentContinueMode[] {
+  const norm = normalizeAgentType(agentType);
+  const modes: AgentContinueMode[] = [];
+  if ((FORK_VERIFIED_AGENTS as readonly string[]).includes(norm)) modes.push("fork");
+  if (norm in RESUME_BUILDERS) modes.push("resume");
+  return modes;
+}
+
+/** Startup DTO for a verified mode. Null when the provider or provenance cannot support it. */
+export function buildAgentContinueStartup(
+  agentType: string,
+  providerSession: AgentProviderSession,
+  mode: AgentContinueMode,
+): AgentContinueStartup | null {
+  if (!verifiedContinuationModes(agentType).includes(mode)) return null;
+  const session = normalizeAgentProviderSession(providerSession);
+  if (!session) return null;
+  if (mode === "resume" && !getAgentResumeArgv(agentType, session)) return null;
+  return {
+    kind: "agentContinue",
+    agentType: normalizeAgentType(agentType),
+    providerSession: session,
+    mode,
+  };
+}
+
+const continuationUnknownHolds = new Set<string>();
+
+export function continuationRequestKey(startup: AgentContinueStartup): string {
+  return `${startup.mode}\0${startup.agentType}\0${startup.providerSession.key}\0${startup.providerSession.id}`;
+}
+
+export function holdContinuationUnknown(startup: AgentContinueStartup): void {
+  continuationUnknownHolds.add(continuationRequestKey(startup));
+}
+
+export function continuationUnknownHeld(startup: AgentContinueStartup): boolean {
+  return continuationUnknownHolds.has(continuationRequestKey(startup));
+}
+
+/** An unknown create is not a settled rejection. Callers must not replay it. */
+export function continuationOutcomeUnknown(error: unknown): boolean {
+  if (!error || typeof error !== "object") return true;
+  const code = (error as { code?: unknown }).code;
+  if (code === undefined || code === "UNKNOWN" || code === "OPERATION_OUTCOME_UNKNOWN") return true;
+  const delivery = (error as { details?: { delivery?: unknown } }).details?.delivery;
+  return delivery === "ambiguous";
 }

@@ -1,4 +1,4 @@
-import { Inbox, PanelLeft } from "lucide-react";
+import { Bot, PanelLeft } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
@@ -10,9 +10,10 @@ import { SshWorkspaceStatus } from "./components/SshWorkspaceStatus";
 import { AddProjectDialog, AddWorktreeDialog, RemoveProjectDialog, type WorktreeAgentLaunch } from "./components/ProjectDialogs";
 import { ExternalWorktreeImportDialog } from "./components/ExternalWorktreeImportDialog";
 import { useExternalWorktreePrompt } from "./state/useExternalWorktreePrompt";
-import { Sidebar, type SidebarAttention } from "./components/Sidebar";
+import { Sidebar } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
+import { LocalChatPane } from "./components/LocalChatPane";
 import { TERMINAL_COPY_MODE_EVENT, type TerminalCopyModeEventDetail } from "./components/TerminalCopyMode";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharingIndicator";
@@ -21,33 +22,25 @@ import { pairedHostInventory } from "./lib/pairedHostInventory";
 import { WorktreeDeleteDialog } from "./components/WorktreeDeleteDialog";
 import { WorktreeDiskDialog } from "./components/WorktreeDiskDialog";
 import { AgentHistoryDialog } from "./components/AgentHistoryDialog";
-import { buildAttentionRows, buildPromptCandidateRows, liveActivityLookup, type AttentionRow } from "./features/ferryx/attention/attentionModel";
-import { desktopAttentionPrompts } from "./features/ferryx/attention/attentionPrompts";
 import { agentHistoryProviderLabel, type AgentHistoryEntry } from "./lib/agentHistory";
 import { ConfirmCloseTabDialog } from "./components/ConfirmCloseTabDialog";
 import { TerminalLinkActions } from "./components/TerminalLinkActions";
 import { TerminalFileLinkActions } from "./components/TerminalFileLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
-import { BrowserAgentApprovalCard } from "./components/BrowserAgentApprovalCard";
 import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
 import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
-import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, navigateBrowser, syncChromiumEngineAvailability, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, onInboundUrls, openExternalUrl, SIGN_IN_HANDOFF_EVENT, takeInboundUrls, trackSignInHandoff, type SignInHandoffDetail, popupOpenerLink, reportBrowserAdoption, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
-import { printBrowser, stepBrowserZoom, useBrowserDownloadPreferencesSync } from "./lib/browserSystem";
-import { BROWSER_ENGINE_CHANGED_EVENT, OPEN_BROWSER_URL_EVENT, OPEN_SETTINGS_EVENT, type OpenBrowserUrlDetail, type OpenSettingsDetail } from "./lib/browserExtensions";
+import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
-import { isNotificationTargetObserved, wireActivityRecording, wireBellRecording, type RecordingListener, type RecordingTarget } from "./lib/notificationCenter/activityRecording";
-import { notificationCenterStore } from "./lib/notificationCenter/notificationCenterStore";
-import { syncSupervisorNotifications, type SupervisorPaneResolver } from "./lib/notificationCenter/supervisorRecording";
-import { notificationEntryId } from "./lib/notificationCenter/types";
-import { getSupervisorSnapshot, startSupervisorFeed, subscribeSupervisorSnapshot } from "./lib/supervisor";
+import { startSupervisorFeed } from "./lib/supervisor";
+import { usePanelDecisionCount } from "./lib/supervisorPanel/usePanelDecisionCount";
 import { getSetupStatus, setupFinished, setupProjectsFrom } from "./lib/supervisorSetup";
 import { DesktopSupervisorSetupBanner } from "./components/supervisor/DesktopSupervisorSetupBanner";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
@@ -109,6 +102,7 @@ import {
   splitAgentArgs,
   type AgentSettings,
 } from "./lib/agentsSettings";
+import { chatSupportedAgents, loadLastChatAgentId, pickChatAgent, saveLastChatAgentId } from "./lib/paneChatPreferences";
 import {
   ACTIVE_PROJECT_STORAGE_KEY,
   getMigratedItem,
@@ -166,11 +160,11 @@ import {
   bootTrace,
   browserRemoteReclaim,
   discoverDagWatchRoots,
-  isStructuredIpcError,
   type AgentDetection,
   type FocusedTerminalPayload,
   type RegisteredProject,
   type RemoteSelectionRequestedPayload,
+  type SpawnTerminalRequest,
 } from "./lib/tauri";
 import { dagRemoteWatchTargets, useDagWatchLifecycle } from "./lib/useDagWatchLifecycle";
 import { getCachedSshHosts } from "./lib/sshHosts";
@@ -183,7 +177,8 @@ import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
-import { getAgentReconnectAffordance } from "./lib/agentResumeAffordance";
+import { findSessionByBackendId, localBackendSessionId } from "./components/supervisorPanel/findSession";
+import { extractNormalizedProviderSession, getAgentReconnectAffordance, isExitedContinuationSource } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { reconnectLocalSession, replaceExitedShellSession } from "./lib/shellReplacement";
@@ -200,7 +195,6 @@ import { createClosedTabStack } from "./lib/closedTabStack";
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import { useDesktopSidebarPublisher } from "./lib/desktopSidebarSync";
-import { withBackendSessions } from "./components/sidebar/sidebarSessionSignals";
 import {
   isTerminalTab,
   worktreeIdentity,
@@ -211,7 +205,7 @@ import {
 } from "./lib/types";
 import { registerWindowCloseGuard, startUpdatePolling } from "./lib/updater";
 import { maybeShowWindowsStoreMigrationNotice } from "./lib/windowsStoreMigration";
-import { collectLeafIds, type PaneDirection } from "./state/paneTree";
+import { collectLeafIds, type PaneDirection, type PaneView } from "./state/paneTree";
 import { usePendingWorktree } from "./state/pendingWorktree";
 import { findDirectionalLeafId, type PaneFocusDirection } from "./state/paneGeometry";
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
@@ -220,19 +214,10 @@ import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspa
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { emptySidebarWorkspaceIds, worktreeHasOpenTabs } from "./state/sidebarWorkspaceState";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
-import { BROWSER_SWITCH_TO_TAB_EVENT, useBrowserLibrarySync, type BrowserSwitchToTabDetail } from "./lib/browserLibrarySync";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
 import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
-type InboxNavigationTarget = NotificationTarget & { revision?: number };
-
-function acknowledgeNotificationTarget(target: InboxNavigationTarget): void {
-  notificationCenterStore.markEntriesRead([{
-    id: notificationEntryId(target.workspaceId, target.sessionId), expectedRevision: target.revision,
-  }]);
-}
-
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
 const loadSettingsDialog = () =>
   import("./components/SettingsDialog").then((m) => ({ default: m.SettingsDialog }));
@@ -378,12 +363,7 @@ const healedLocalWorkspaceIds = new Set<string>();
 // the failure is shown with its reason and a retry instead of only reaching the console.
 export function reportLocalRegistrationFailure(project: RegisteredProject, error: unknown): void {
   const name = project.repoRoot.split(/[\\/]/).filter(Boolean).pop() ?? project.workspaceId;
-  // Structured IPC errors are plain objects, so String(error) would print "[object Object]".
-  const reason = isStructuredIpcError(error)
-    ? error.message || error.code
-    : error instanceof Error
-      ? error.message
-      : String(error);
+  const reason = error instanceof Error ? error.message : String(error);
   toast.error(`Couldn't open project "${name}"`, {
     id: `local-registration:${project.workspaceId}`,
     description: `New terminals in this project will fail until it registers. ${reason}`,
@@ -648,7 +628,7 @@ export function deriveFocusedTerminal(
         ownerLayout.tabs.filter(isTerminalTab).flatMap((tab) => [...getTabSessionIds(snapshot, tab.id)].flatMap((sessionId) => {
           const activity = snapshot.activityBySessionId?.[sessionId];
           const paneSession = snapshot.sessions[sessionId];
-          const backendSessionId = paneSession?.backendSessionId;
+          const backendSessionId = publishableBackendSessionId(paneSession?.backendSessionId);
           if (!backendSessionId || !activity || activity.seen || (activity.state !== "waiting" && activity.state !== "done")) return [];
           const panePath = paneSession.worktreePath ?? paneSession.cwd;
           const paneWorktree = panePath ? snapshot.worktrees.find((wt) => wt.path === panePath) : undefined;
@@ -707,7 +687,6 @@ export function deriveFocusedTerminal(
 
     return paneSessionIds.map(({ leafId, sessionId }, index) => {
       const paneSession = sessionId ? state.sessions[sessionId] : undefined;
-      const backendSessionId = paneSession?.backendSessionId;
       const panePath = paneSession?.worktreePath ?? paneSession?.cwd;
       // Each pane carries its own worktree so the remote can select across worktrees instead of
       // guessing from whichever context is currently mirrored.
@@ -719,14 +698,20 @@ export function deriveFocusedTerminal(
 
       const activity = sessionId ? state.activityBySessionId?.[sessionId] : undefined;
       const baseLabel = remoteTabLabel(staticTabLabel(tab));
+      const exited = paneSession ? isExitedContinuationSource(paneSession) : false;
+      const providerSession = paneSession && exited ? extractNormalizedProviderSession(paneSession) : null;
+      const agentType = activity?.agentType ?? (exited ? paneSession?.agentType ?? undefined : undefined);
+      const publishedSessionId = publishedPaneSessionId(paneSession, exited);
       return {
         id: remotePaneId(tab.id, multiPane ? leafId : null),
         label: multiPane ? `${baseLabel} (${index + 1})` : baseLabel,
         ...(activity && (activity.state === "working" || !activity.seen) ? { activityState: activity.state } : {}),
-        ...(activity?.agentType ? { agentType: activity.agentType } : {}),
+        ...(agentType ? { agentType } : {}),
         ...(paneSlug ? { worktreeSlug: paneSlug } : {}),
         ...(paneLabel ? { worktreeLabel: paneLabel } : {}),
-        ...(backendSessionId ? { sessionId: backendSessionId } : {}),
+        ...(publishedSessionId ? { sessionId: publishedSessionId } : {}),
+        ...(exited ? { running: false as const } : {}),
+        ...(providerSession ? { providerSession } : {}),
       };
     });
   }));
@@ -745,12 +730,26 @@ export function deriveFocusedTerminal(
     ...(sessionAttention.length > 0 ? { sessionAttention } : {}),
     worktreeSlug: worktreeSlug ?? null,
     worktreeLabel: worktreeLabel ?? null,
-    backendSessionId: session?.backendSessionId ?? null,
+    backendSessionId: publishableBackendSessionId(session?.backendSessionId) ?? null,
     activeTabId: focusedEntryId,
     tabId: focusedEntryId,
     tabs: terminalTabs,
     terminalTabs,
   };
+}
+
+function publishableBackendSessionId(id: string | null | undefined): string | undefined {
+  if (!id || isStandbyBackendSessionId(id)) return undefined;
+  return id;
+}
+
+/** Live backend id, or the retained real id of an exited agent pane. Never a standby id. */
+function publishedPaneSessionId(session: TerminalSession | undefined, exited: boolean): string | undefined {
+  if (!session) return undefined;
+  const live = publishableBackendSessionId(session.backendSessionId);
+  if (live) return live;
+  if (!exited || !(session.agentType || session.providerSession || session.agentSessionId)) return undefined;
+  return publishableBackendSessionId(session.lastBackendSessionId);
 }
 
 /** Remote entries address a pane, not just a tab, so a split tab exposes each PTY separately. */
@@ -892,6 +891,8 @@ function WorkspaceApp({
   activeProjectRef.current = activeProject;
 
   const [agentSettings, setAgentSettings] = useState<AgentSettings>(loadAgentSettings);
+  const agentSettingsRef = useRef(agentSettings);
+  agentSettingsRef.current = agentSettings;
   const [agentDetections, setAgentDetections] = useState<AgentDetection[]>([]);
 
   useEffect(() => {
@@ -941,7 +942,6 @@ function WorkspaceApp({
     activityNotificationTargets,
     markTabUnread,
     markWorktreeUnread,
-    markSessionActivitySeen,
     subscribeTerminalBell,
     subscribeActivityNotification,
     parkedActivityVersion,
@@ -971,6 +971,7 @@ function WorkspaceApp({
     renameTab,
     setTabPinned,
     focusPane,
+    setPaneView,
     setPaneRatio,
     setTabGroupRatio,
     equalizePaneRun,
@@ -1012,10 +1013,6 @@ function WorkspaceApp({
   const activityNotificationTargetsRef = useRef(activityNotificationTargets);
   activityNotificationTargetsRef.current = activityNotificationTargets;
 
-  const isNotificationObserved = useCallback((target: RecordingTarget) => isNotificationTargetObserved(
-    stateRef.current, target, getNativeWindowFocused() ?? isWindowForegroundFocused(),
-  ), []);
-
   const handleResetTabAgentState = useCallback(
     async (tabId: string) => {
       const tab = state.layout.tabs.find((t) => t.id === tabId);
@@ -1044,52 +1041,21 @@ function WorkspaceApp({
     [resetWorktreeAgentState],
   );
 
-  useEffect(() => wireActivityRecording({
-    events: (record) => subscribeActivityNotification((event) => {
-      // Activity edges come from this window's own store, so this window owns the session.
-      const backendSessionId = findBackendSessionId(stateRef.current, event.sessionId, event.workspaceId);
-      const decision = coordinatorRef.current!.handleAgentStateChange({
-        ...event,
-        nextState: event.state,
-        backendSessionId: backendSessionId ?? undefined,
-        ownsSession: true,
-      });
-      record({ ...event, workspaceId: event.workspaceId ?? stateRef.current.workspaceId }, decision);
-    }),
-    isObserved: isNotificationObserved,
-  }), [subscribeActivityNotification, isNotificationObserved]);
+  useEffect(() => subscribeActivityNotification((event) => {
+    // Activity edges come from this window's own store, so this window owns the session.
+    const backendSessionId = findBackendSessionId(stateRef.current, event.sessionId, event.workspaceId);
+    coordinatorRef.current!.handleAgentStateChange({
+      ...event,
+      nextState: event.state,
+      backendSessionId: backendSessionId ?? undefined,
+      ownsSession: true,
+    });
+  }), [subscribeActivityNotification]);
 
-  // Supervisor stops and awaiting approvals reach the Inbox from the event-fed snapshot. A lane is
-  // matched to the open pane whose PTY it drives, in the mounted workspace first, then parked ones.
-  useEffect(() => {
-    const resolvePane: SupervisorPaneResolver = (hubSessionId) => {
-      const candidates: WorkspaceState[] = [stateRef.current];
-      for (const [, parked] of listWorkspaceSnapshots()) candidates.push(parked);
-      for (const candidate of candidates) {
-        if (!candidate.workspaceId) continue;
-        const session = Object.values(candidate.sessions).find((value) => value.backendSessionId === hubSessionId);
-        if (!session || !hasNavigableSession(candidate, session.id)) continue;
-        const worktreePath = session.worktreePath ?? session.cwd;
-        const worktree = candidate.worktrees.find((value) => value.path === worktreePath);
-        return {
-          workspaceId: candidate.workspaceId,
-          sessionId: session.id,
-          labels: {
-            workspaceLabel: selectNotificationWorkspaceLabel(candidate),
-            worktreeLabel: worktree ? workspaceName(worktree) : undefined,
-          },
-        };
-      }
-      return null;
-    };
-    const sync = () => { syncSupervisorNotifications(getSupervisorSnapshot(), resolvePane); };
-    const unsubscribe = subscribeSupervisorSnapshot(sync);
-    void startSupervisorFeed();
-    sync();
-    return unsubscribe;
-  }, []);
+  // The supervisor snapshot feeds the setup banner and the panes' supervision; start it once.
+  useEffect(() => { void startSupervisorFeed(); }, []);
 
-  const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget: import("./state/workspaceStore").ActivityNotificationTarget | undefined, record: RecordingListener<RecordingTarget>) => {
+  const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget: import("./state/workspaceStore").ActivityNotificationTarget | undefined) => {
     const targets = activityNotificationTargetsRef.current ?? [];
     const target = eventTarget ?? targets.find(
       (candidate) => candidate.sessionId === sessionId,
@@ -1113,7 +1079,7 @@ function WorkspaceApp({
 
     // The bell resolved against this window's own store (mounted or parked), so it owns the session.
     const backendSessionId = findBackendSessionId(stateRef.current, sessionId, target?.workspaceId);
-    const decision = coordinatorRef.current!.handleTerminalBell({
+    coordinatorRef.current!.handleTerminalBell({
       backendSessionId: backendSessionId ?? undefined,
       ownsSession: true,
       workspaceId: target?.workspaceId,
@@ -1124,38 +1090,15 @@ function WorkspaceApp({
       worktreeLabel,
       terminalTitle,
     });
-    record({
-      workspaceId: target?.workspaceId ?? stateRef.current.workspaceId,
-      workspaceLabel, sessionId, tabId, worktreeLabel: worktreeLabel ?? "",
-      terminalTitle: terminalTitle ?? "", agentLabel: target?.agentLabel,
-    }, decision);
   }, []);
 
   // The bell arrives from the store's global native subscription, not from a pane prop: only the
   // active tab's panes are mounted, and a bell in the tab you are watching is not what notifies.
-  useEffect(() => wireBellRecording({
-    events: (record) => subscribeTerminalBell((sessionId, tabId, target) => handleTerminalBell(sessionId, tabId, target, record)),
-    isObserved: isNotificationObserved,
-  }), [handleTerminalBell, subscribeTerminalBell, isNotificationObserved]);
+  useEffect(
+    () => subscribeTerminalBell((sessionId, tabId, target) => handleTerminalBell(sessionId, tabId, target)),
+    [handleTerminalBell, subscribeTerminalBell],
+  );
 
-  // Acknowledge session notifications when user interacts with a pane (focus, input, paste, navigation)
-  useEffect(() => {
-    const onSessionInteracted = (event: Event) => {
-      const detail = (event as CustomEvent<{ sessionId?: string; revision?: number }>).detail;
-      const sessionId = detail?.sessionId;
-      if (!sessionId || !state.workspaceId) return;
-      if (!state.sessions[sessionId]) return;
-
-      const entryId = notificationEntryId(state.workspaceId, sessionId);
-      const entry = notificationCenterStore.getSnapshot().entries.find((e) => e.id === entryId);
-      if (entry && !("seen" in entry.read)) {
-        notificationCenterStore.markEntriesRead([{ id: entry.id, expectedRevision: entry.revision }]);
-      }
-    };
-
-    window.addEventListener("ferryx:session-interacted", onSessionInteracted);
-    return () => window.removeEventListener("ferryx:session-interacted", onSessionInteracted);
-  }, [state.workspaceId, state.sessions]);
   useEffect(() => {
     switchDebug("workspace.render", {
       activeProjectId: activeProject.workspaceId,
@@ -2260,7 +2203,6 @@ function WorkspaceApp({
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isResourcesOpen, setIsResourcesOpen] = useState(false);
-  const [isInboxOpen, setIsInboxOpen] = useState(false);
   const [onboardingSteps, setOnboardingSteps] = useState<OnboardingStepId[] | null>(null);
   const [onboardingInitialStepIndex, setOnboardingInitialStepIndex] = useState(0);
   const [onboardingDoneSteps, setOnboardingDoneSteps] = useState<readonly OnboardingStepId[]>([]);
@@ -2279,25 +2221,8 @@ function WorkspaceApp({
   const deleteOwnerProject = projects.find((p) => p.workspaceId === deleteOwnerId);
   const [diskManageProject, setDiskManageProject] = useState<RegisteredProject | null>(null);
   const [historyProject, setHistoryProject] = useState<RegisteredProject | null>(null);
-  const notificationInbox = useSyncExternalStore(notificationCenterStore.subscribe, notificationCenterStore.getSnapshot);
-  const attentionRows = useMemo(
-    () => buildAttentionRows(notificationInbox.entries, liveActivityLookup(state, listWorkspaceSnapshots())),
-    // liveActivityLookup reads only the mounted workspace id and its per-session activity map.
-    [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
-  );
-  // Working panes whose daemon may still read a prompt (row 21): the Inbox probes them.
-  const attentionCandidates = useMemo(
-    () => buildPromptCandidateRows(notificationInbox.entries, liveActivityLookup(state, listWorkspaceSnapshots())),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the same inputs attentionRows reads
-    [notificationInbox, state.workspaceId, state.activityBySessionId, parkedActivityVersion],
-  );
-  // Publishes what the Sidebar draws, Inbox rows included (declared here, after attentionRows). The
-  // published rows carry each pane's backend session id so a remote can open that exact pane.
-  const publishedAttentionRows = useMemo(
-    () => withBackendSessions(attentionRows, [[state.workspaceId, state], ...listWorkspaceSnapshots()]),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reads only sessions and worktrees; parkedActivityVersion tracks the parked snapshots
-    [attentionRows, state.workspaceId, state.sessions, state.worktrees, parkedActivityVersion],
-  );
+  // The collapsed sidebar's badge counts the Supervisor panel's decisions for the owner.
+  const supervisorDecisionCount = usePanelDecisionCount();
   useDesktopSidebarPublisher({
     // One desktop sidebar model per app (consumed by remote clients): the primary publishes it.
     enabled: isNativeRuntime && isPrimary,
@@ -2309,7 +2234,6 @@ function WorkspaceApp({
     activityByWorktreePath: worktreeActivity,
     unreadWorktreePaths: state.unreadWorktreePaths,
     agents,
-    attentionRows: publishedAttentionRows,
   });
   const [pendingTabClose, setPendingTabClose] = useState<{
     kind: "pane" | "tab";
@@ -2333,7 +2257,7 @@ function WorkspaceApp({
     slug?: string | null;
     tabId?: string | null;
   } | null>(null);
-  const [pendingNotificationTarget, setPendingNotificationTarget] = useState<InboxNavigationTarget | null>(null);
+  const [pendingNotificationTarget, setPendingNotificationTarget] = useState<NotificationTarget | null>(null);
 
   const focusedTerminalPayload = useMemo(
     () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots()),
@@ -2744,7 +2668,7 @@ function WorkspaceApp({
   }, [handleRemoteSelectionRequested]);
 
   const handleNotificationTarget = useCallback(
-    (target: InboxNavigationTarget) => {
+    (target: NotificationTarget) => {
       if (!target || !target.workspaceId || !target.sessionId) return;
       const project = projectsRef.current.find((candidate) => candidate.workspaceId === target.workspaceId);
       // An unregistered/removed project is stale: never navigate or fall back to another pane.
@@ -2754,7 +2678,6 @@ function WorkspaceApp({
         // no-ops on the same check, but guarding here avoids a needless dispatch.
         if (!hasNavigableSession(stateRef.current, target.sessionId)) return;
         dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId: target.sessionId });
-        acknowledgeNotificationTarget(target);
         return;
       }
       // Cross-project: inspect the target workspace's cached state BEFORE switching. A stale or
@@ -2768,50 +2691,42 @@ function WorkspaceApp({
     [dispatchWorkspaceAction, handleSelectProject],
   );
 
-  const handleOpenAttentionRow = useCallback((row: AttentionRow) => {
-    const project = projectsRef.current.find((candidate) => candidate.workspaceId === row.workspaceId);
-    const liveState = row.workspaceId === activeProjectRef.current.workspaceId
-      ? stateRef.current
-      : getHmrWorkspaceState(row.workspaceId) ?? getWorkspaceSnapshot(row.workspaceId);
-    if (!project || !liveState || !hasNavigableSession(liveState, row.sessionId)) {
-      // A row that can no longer take you anywhere is noise; drop it instead of leaving a dead click.
-      notificationCenterStore.dismissSession(row.workspaceId, row.sessionId);
-      toast.info("Session closed; notification cleared");
+  // A Supervisor panel row names a session by `<hostId>:<backendSessionId>`; focus the pane that
+  // runs it through the same path a notification uses (no unmount, no new surface). A session of
+  // this computer that no pane shows yet (an agent or the supervisor started it) is attached as an
+  // active tab through the window-adoption queue: nothing is spawned or closed.
+  const handleFocusSupervisorSession = useCallback((sessionRef: string) => {
+    const target = findSessionByBackendId(sessionRef, [
+      [activeProjectRef.current.workspaceId, stateRef.current],
+      ...listWorkspaceSnapshots(),
+    ]);
+    if (!target) {
+      const backendSessionId = localBackendSessionId(sessionRef);
+      if (backendSessionId) {
+        // A tab of an SSH or paired project runs on that host: a session of this computer opened
+        // there would be treated as a remote one.
+        const targetKind = activeProjectRef.current.target?.kind;
+        if (targetKind === "ssh" || targetKind === "pairedDaemon") {
+          toast.info("Open a project on this computer to show this session");
+          return;
+        }
+        // A tab needs a worktree of an open project; without one the adoption would wait forever.
+        if (stateRef.current.worktrees.length === 0) {
+          toast.info("Open a project to show this session");
+          return;
+        }
+        setPendingAdoptions((queue) => [
+          ...queue,
+          { backendSessionIds: [backendSessionId], activate: true, attemptGenerations: {}, attempts: 0, origin: "supervisor" },
+        ]);
+        return;
+      }
+      toast.info("That session is not open on this computer");
       return;
     }
-    handleNotificationTarget({ workspaceId: row.workspaceId, sessionId: row.sessionId, revision: row.revision });
-    flashPane(row.sessionId);
+    handleNotificationTarget(target);
+    flashPane(target.sessionId);
   }, [handleNotificationTarget]);
-
-  // The pane frame reads activity.seen while the inbox reads entry.read: a dismissal must clear
-  // both, or the row disappears while the pane keeps glowing.
-  const dismissAttentionRows = useCallback((rows: readonly AttentionRow[]) => {
-    notificationCenterStore.markEntriesRead(rows.map((row) => ({ id: row.id, expectedRevision: row.revision })));
-    for (const row of rows) markSessionActivitySeen(row.sessionId, row.workspaceId);
-  }, [markSessionActivitySeen]);
-
-  // A needs-you row answers its pane's prompt on the daemon session behind that pane; once the
-  // answer is out the row is no longer waiting on the user, so it leaves the Inbox.
-  const attentionPrompts = useMemo(() => desktopAttentionPrompts(
-    (row) => {
-      const liveState = row.workspaceId === activeProjectRef.current.workspaceId
-        ? stateRef.current
-        : getHmrWorkspaceState(row.workspaceId) ?? getWorkspaceSnapshot(row.workspaceId);
-      return liveState?.sessions[row.sessionId]?.backendSessionId ?? null;
-    },
-    (row) => notificationCenterStore.dismissSession(row.workspaceId, row.sessionId),
-  ), []);
-
-  const sidebarAttention = useMemo<SidebarAttention>(() => ({
-    rows: attentionRows,
-    onOpen: handleOpenAttentionRow,
-    onDismiss: (row) => dismissAttentionRows([row]),
-    onDismissAll: () => dismissAttentionRows(attentionRows),
-    prompts: attentionPrompts,
-    candidates: attentionCandidates,
-    inboxOpen: isInboxOpen,
-    onInboxOpenChange: setIsInboxOpen,
-  }), [attentionCandidates, attentionPrompts, attentionRows, dismissAttentionRows, handleOpenAttentionRow, isInboxOpen]);
 
   useEffect(() => {
     if (!pendingNotificationTarget) return;
@@ -2828,7 +2743,6 @@ function WorkspaceApp({
     setPendingNotificationTarget(null);
     if (hasNavigableSession(state, sessionId)) {
       dispatchWorkspaceAction({ type: "FOCUS_EXISTING_SESSION", sessionId });
-      acknowledgeNotificationTarget(pendingNotificationTarget);
     }
   }, [
     activeProject.workspaceId,
@@ -2917,7 +2831,11 @@ function WorkspaceApp({
   // Starts an agent in a new tab of the given worktree of the active project, which need not be
   // the active worktree (a freshly created one is not selected yet).
   const launchAgentInWorktree = useCallback(
-    async (targetWorktree: Worktree, agent: { name: string; command: string; args: string }) => {
+    async (
+      targetWorktree: Worktree,
+      agent: { name: string; command: string; args: string },
+      options: { view?: PaneView } = {},
+    ) => {
       if (activeRemoteHostRef.current) return;
       if (
         (activeProjectRef.current.target?.kind === "ssh" || activeProjectRef.current.target?.kind === "pairedDaemon") &&
@@ -2962,9 +2880,10 @@ function WorkspaceApp({
         // leaves the tab blank and unable to accept input.
         const tabId = await openTab(targetWorktree, label, {
           sessionId: backendSessionId,
+          ...(options.view === "chat" ? { agentType: agent.name } : {}),
           daemonEpoch: spawned.daemonEpoch ?? null,
           incarnation: spawned.session?.incarnation ?? null,
-        });
+        }, ...(options.view === "chat" ? [undefined, "chat"] as const : [] as const));
         // openTab does not own a pre-spawned backend, so a discarded tab would orphan the PTY.
         if (tabId === null) {
           await closeTerminal(backendSessionId);
@@ -2972,6 +2891,9 @@ function WorkspaceApp({
         }
         if (typeCommand) {
           await writeTerminal({ sessionId: backendSessionId, data: `${fullCommand}\r` });
+        }
+        if (options.view === "chat") {
+          saveLastChatAgentId(agent.name);
         }
       } catch (error) {
         reportRuntimeError(error);
@@ -2988,6 +2910,40 @@ function WorkspaceApp({
     },
     [launchAgentInWorktree],
   );
+
+  // Chat view reads the agent's local native history, so it is offered only for local projects.
+  const chatViewAvailable =
+    !activeRemoteHost &&
+    activeProject.target?.kind !== "ssh" &&
+    activeProject.target?.kind !== "pairedDaemon" &&
+    !isRemoteWorkspaceId(activeProject.workspaceId) &&
+    !isPairedWorkspaceId(activeProject.workspaceId);
+  const chatViewAvailableRef = useRef(chatViewAvailable);
+  chatViewAvailableRef.current = chatViewAvailable;
+
+  const handleNewChat = useCallback(
+    async (agent: { name: string; command: string; args: string }) => {
+      if (!chatViewAvailableRef.current) return;
+      const targetWorktree = activeWorktreeRef.current ?? stateRef.current.worktrees[0];
+      if (!targetWorktree) return;
+      await launchAgentInWorktree(targetWorktree, agent, { view: "chat" });
+    },
+    [launchAgentInWorktree],
+  );
+
+  const handleNewChatShortcut = useCallback(() => {
+    if (!chatViewAvailableRef.current) return;
+    const agent = pickChatAgent(
+      chatSupportedAgents(getLaunchableAgents(resolvedAgentsRef.current)),
+      loadLastChatAgentId(),
+      agentSettingsRef.current.defaultAgentId,
+    );
+    if (!agent) {
+      toast.warning("No chat-capable agent is enabled. Enable one in Agent settings.");
+      return;
+    }
+    void handleNewChat(agent);
+  }, [handleNewChat]);
 
   // Resolves a dialog's agent choice against the agents launchable right now.
   const launchAgentByIdInWorktree = useCallback(
@@ -3110,29 +3066,22 @@ function WorkspaceApp({
   const handleBrowserZoom = useCallback(
     async (browserId: string, direction: "in" | "out" | "reset") => {
       try {
-        // The host steps the zoom, remembers it for the page's site and applies it on either engine.
-        await stepBrowserZoom(browserId, direction);
+        if (direction === "reset") {
+          await setBrowserZoom(browserId, 1.0);
+          return;
+        }
+        const state = await getBrowserState(browserId);
+        const current = typeof state?.zoomFactor === "number" && !isNaN(state.zoomFactor) ? state.zoomFactor : 1.0;
+        const next = direction === "in"
+          ? Math.min(5.0, Number((current + 0.1).toFixed(2)))
+          : Math.max(0.25, Number((current - 0.1).toFixed(2)));
+        await setBrowserZoom(browserId, next);
       } catch (err) {
         reportRuntimeError(err);
       }
     },
     [reportRuntimeError],
   );
-
-  const handleBrowserPrint = useCallback(
-    (browserId: string) => {
-      void printBrowser(browserId).catch(reportRuntimeError);
-    },
-    [reportRuntimeError],
-  );
-  useBrowserDownloadPreferencesSync(reportRuntimeError);
-  // Named browser profiles on macOS follow the installed Chromium engine.
-  useEffect(() => {
-    const sync = () => void syncChromiumEngineAvailability();
-    sync();
-    window.addEventListener(BROWSER_ENGINE_CHANGED_EVENT, sync);
-    return () => window.removeEventListener(BROWSER_ENGINE_CHANGED_EVENT, sync);
-  }, []);
 
   const handleClosePane = useCallback(
     (tabId: string, leafId: string) => {
@@ -3518,7 +3467,10 @@ function WorkspaceApp({
   // first and the boot-time queue drained once afterwards, so a request that arrived before this
   // window booted is applied exactly once. Each request waits for its workspace to be mounted,
   // then re-attaches by backendSessionId as a tab; nothing is spawned or closed.
-  const [pendingAdoptions, setPendingAdoptions] = useState<Array<WindowSessionsAdoptPayload & { attempts: number }>>([]);
+  // `origin: "supervisor"` marks a Supervisor panel row's request: nothing was moved between windows.
+  const [pendingAdoptions, setPendingAdoptions] = useState<
+    Array<WindowSessionsAdoptPayload & { attempts: number; origin?: "supervisor" }>
+  >([]);
   const adoptionBusyRef = useRef(false);
   const [adoptionTick, bumpAdoptionTick] = useState(0);
   useEffect(() => {
@@ -3578,7 +3530,13 @@ function WorkspaceApp({
         if (tabId === null) retry.push(entry.backend.sessionId);
         else activateNext = false;
       }
-      if (plan.missing.length > 0) toast.warning("A terminal moved to this window is no longer running.");
+      if (plan.missing.length > 0) {
+        toast.warning(
+          head.origin === "supervisor"
+            ? "That session is no longer running."
+            : "A terminal moved to this window is no longer running.",
+        );
+      }
       // The workspace changed while adopting: the backend already made this window the owner, so
       // try again once it settles rather than leave the session without a tab.
       if (retry.length > 0 && head.attempts < 3) {
@@ -3645,36 +3603,6 @@ function WorkspaceApp({
     setIsSettingsOpen(true);
   }, []);
   handleOpenSettingsRef.current = handleOpenSettings;
-  useEffect(() => {
-    const onOpenSettings = (event: Event) => {
-      const detail = (event as CustomEvent<OpenSettingsDetail>).detail;
-      if (!detail) return;
-      handleOpenSettingsRef.current(detail.section);
-      if (!detail.anchor) return;
-      // The settings dialog loads lazily, so wait for the anchor to mount before scrolling to it.
-      let frames = 0;
-      const scrollToAnchor = () => {
-        const target = document.getElementById(detail.anchor ?? "");
-        if (target) {
-          target.scrollIntoView({ block: "start" });
-          return;
-        }
-        if (++frames < 120) window.requestAnimationFrame(scrollToAnchor);
-      };
-      window.requestAnimationFrame(scrollToAnchor);
-    };
-    window.addEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
-    return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
-  }, []);
-  useEffect(() => {
-    const onOpenBrowserUrl = (event: Event) => {
-      const detail = (event as CustomEvent<OpenBrowserUrlDetail>).detail;
-      if (!detail?.url) return;
-      void createBrowserTab(detail.url, undefined, { profileId: detail.profileId }).catch(reportRuntimeError);
-    };
-    window.addEventListener(OPEN_BROWSER_URL_EVENT, onOpenBrowserUrl);
-    return () => window.removeEventListener(OPEN_BROWSER_URL_EVENT, onOpenBrowserUrl);
-  }, [createBrowserTab, reportRuntimeError]);
   const handleOpenSshSettings = useCallback(() => handleOpenSettings("ssh"), [handleOpenSettings]);
   const handleCloseSettings = useCallback(() => {
     setIsSettingsOpen(false);
@@ -3779,14 +3707,9 @@ function WorkspaceApp({
     preloadSettingsDialog();
     setIsSettingsOpen((current) => !current);
   }, []);
-  const handleToggleNotificationCenter = useCallback(() => {
-    // The inbox lives inside the sidebar, so reaching it from a collapsed sidebar opens both.
-    if (!isSidebarOpen) {
-      setIsInboxOpen(true);
-      toggleSidebar();
-      return;
-    }
-    setIsInboxOpen((open) => !open);
+  // The Supervisor panel is the attention surface now; the old Inbox shortcut reveals the sidebar.
+  const handleRevealSupervisor = useCallback(() => {
+    if (!isSidebarOpen) toggleSidebar();
   }, [isSidebarOpen, toggleSidebar]);
   const handleCloseSearch = useCallback(() => setSearchLeafId(null), []);
   const handleCloseDeleteTarget = useCallback(() => setDeleteTarget(null), []);
@@ -3837,7 +3760,7 @@ function WorkspaceApp({
   );
 
   const handleSplitPane = useCallback(
-    (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second" }) => {
+    (tabId: string, leafId: string, direction: PaneDirection, options?: { position?: "first" | "second"; startup?: SpawnTerminalRequest["startup"]; view?: PaneView; agentType?: string }) => {
       if (activeRemoteHostRef.current) return;
       if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().machineFeaturesEnabled !== true) return;
       if (
@@ -3846,9 +3769,39 @@ function WorkspaceApp({
       ) {
         return;
       }
-      void splitPane(tabId, leafId, direction, options).catch(reportRuntimeError);
+      const pending = splitPane(tabId, leafId, direction, options);
+      if (options?.startup?.kind === "agentContinue") return pending;
+      void pending.catch(reportRuntimeError);
     },
     [reportRuntimeError, splitPane],
+  );
+
+  const handleSplitChat = useCallback(
+    (tabId: string, direction: PaneDirection, agent: { name: string; command: string; args: string }) => {
+      if (!chatViewAvailableRef.current) return;
+      const command = agent.command.trim();
+      if (!command) return;
+      const tabLayout = stateRef.current.layout.layoutsByTabId?.[tabId];
+      if (!tabLayout) return;
+      const leafId = tabLayout.activeLeafId ?? collectLeafIds(tabLayout.root)[0];
+      if (!leafId) return;
+      saveLastChatAgentId(agent.name);
+      handleSplitPane(tabId, leafId, direction, {
+        startup: { kind: "agentLaunch", command, args: splitAgentArgs(agent.args) },
+        view: "chat",
+        agentType: agent.name,
+      });
+    },
+    [handleSplitPane],
+  );
+
+  const handleSetPaneView = useCallback(
+    (tabId: string, leafId: string, view: PaneView) => {
+      // Leaving chat is always allowed; entering it is local-only.
+      if (view === "chat" && !chatViewAvailableRef.current) return;
+      setPaneView(tabId, leafId, view);
+    },
+    [setPaneView],
   );
 
   useEffect(() => {
@@ -4078,20 +4031,6 @@ function WorkspaceApp({
     };
   }, [handleSelectTerminalTab, reportRuntimeError]);
 
-  useBrowserLibrarySync(isTauriRuntime(), reportRuntimeError);
-
-  // The omnibox offers open tabs; picking one shows that tab instead of loading the page again.
-  useEffect(() => {
-    const switchToTab = (event: Event) => {
-      const { browserId } = (event as CustomEvent<BrowserSwitchToTabDetail>).detail ?? {};
-      if (!browserId) return;
-      const owner = stateRef.current.layout.tabs.find((tab) => tab.kind === "browser" && tab.browserId === browserId);
-      if (owner) handleSelectTerminalTab(owner.id);
-    };
-    window.addEventListener(BROWSER_SWITCH_TO_TAB_EVENT, switchToTab);
-    return () => window.removeEventListener(BROWSER_SWITCH_TO_TAB_EVENT, switchToTab);
-  }, [handleSelectTerminalTab]);
-
   // Terminal links and markdown editors route through routeHttpLink, which needs a live
   // opener to reach the built-in browser; without this registration every link silently
   // falls back to the system browser.
@@ -4134,46 +4073,6 @@ function WorkspaceApp({
       if (activeRemoteHostRef.current) return;
       void createBrowserTab(url).catch(reportRuntimeError);
     });
-  }, [createBrowserTab, reportRuntimeError]);
-
-  // Links the OS handed Ferryx as the default browser: queued in the backend until drained, so a
-  // cold launch's URL (queued before this listener existed) opens too.
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    const drain = () => {
-      void takeInboundUrls().then((urls) => {
-        for (const url of urls) void createBrowserTab(url).catch(reportRuntimeError);
-      }, reportRuntimeError);
-    };
-    void onInboundUrls(drain).then((cleanup) => {
-      if (disposed) cleanup();
-      else unlisten = cleanup;
-      drain();
-    }).catch(reportRuntimeError);
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [createBrowserTab, reportRuntimeError]);
-
-  // A system-webview tab an identity provider refused to sign in hands the sign-in to a Chromium
-  // tab of the same profile (new tabs use the Chromium engine once it is installed). The new tab
-  // is tracked so its cookies reach the profile's system-webview tabs once sign-in finishes.
-  useEffect(() => {
-    const onHandoff = (event: Event) => {
-      const detail = (event as CustomEvent<SignInHandoffDetail>).detail;
-      if (!detail?.url) return;
-      const { url, profileId, browserId, idpHost } = detail;
-      void createBrowserTab(url, undefined, { profileId, browserId })
-        .then(async (tabId) => {
-          if (!tabId || !browserId || !profileId || !idpHost) return;
-          await trackSignInHandoff(browserId, profileId, url, idpHost);
-        })
-        .catch(reportRuntimeError);
-    };
-    window.addEventListener(SIGN_IN_HANDOFF_EVENT, onHandoff);
-    return () => window.removeEventListener(SIGN_IN_HANDOFF_EVENT, onHandoff);
   }, [createBrowserTab, reportRuntimeError]);
 
   useEffect(() => {
@@ -4250,16 +4149,6 @@ function WorkspaceApp({
 
     void onSplitRightMenu(() => {
       if (activeRemoteHostRef.current) return;
-      // The macOS window monitor claims Mod+D before the DOM sees it; on a browser tab it means
-      // "bookmark this page".
-      const current = stateRef.current.layout;
-      const activeTab = current.tabs.find((tab) => tab.id === current.activeTabId);
-      if (activeTab?.kind === "browser") {
-        window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, {
-          detail: { browserId: activeTab.browserId, action: "bookmark-page" },
-        }) satisfies BrowserShortcutDomEvent);
-        return;
-      }
       handleSplitActive("horizontal");
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -4325,19 +4214,11 @@ function WorkspaceApp({
     ? shortcutContent.kind === "browser" ? shortcutContent.browser?.browserId ?? shortcutContent.browserId : undefined
     : activeShortcutTab?.kind === "browser" ? activeShortcutTab.browserId : undefined;
   const browserShortcutsActive = Boolean(shortcutBrowserId);
-  /** True when a receiver claimed the action (called preventDefault on the event). */
-  const dispatchBrowserShortcut = (action: BrowserShortcutAction): boolean => {
-    if (!shortcutBrowserId) return false;
-    return !window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, {
+  const dispatchBrowserShortcut = (action: BrowserShortcutAction) => {
+    if (!shortcutBrowserId) return;
+    window.dispatchEvent(new CustomEvent(BROWSER_SHORTCUT_EVENT, {
       detail: { browserId: shortcutBrowserId, action },
-      cancelable: true,
     }) satisfies BrowserShortcutDomEvent);
-  };
-  // The tab's BrowserToolbar applies the zoom and shows it. A Chromium tab draws its own toolbar,
-  // so when no BrowserToolbar claims the event the host steps that tab's zoom instead.
-  const dispatchBrowserZoom = (action: "zoom-in" | "zoom-out" | "zoom-reset", direction: "in" | "out" | "reset") => {
-    if (!shortcutBrowserId || dispatchBrowserShortcut(action)) return;
-    void handleBrowserZoom(shortcutBrowserId, direction);
   };
 
   // Child browser webviews own OS focus, so the main window never sees these
@@ -4372,14 +4253,19 @@ function WorkspaceApp({
         handleReopenClosedBrowserTab();
         return;
       }
-      if (action === "bookmark-page" || action === "zoom-in" || action === "zoom-out" || action === "zoom-reset") {
-        // The sending tab's BrowserToolbar handles this event itself (it owns the star and the
-        // zoom readout). Native chords come only from system-webview guests, which have one.
+      if ((action as string) === "zoom-in") {
+        const targetId = payload.browserId || shortcutBrowserId;
+        if (targetId) void handleBrowserZoom(targetId, "in");
         return;
       }
-      if ((action as string) === "print") {
+      if ((action as string) === "zoom-out") {
         const targetId = payload.browserId || shortcutBrowserId;
-        if (targetId) handleBrowserPrint(targetId);
+        if (targetId) void handleBrowserZoom(targetId, "out");
+        return;
+      }
+      if ((action as string) === "zoom-reset") {
+        const targetId = payload.browserId || shortcutBrowserId;
+        if (targetId) void handleBrowserZoom(targetId, "reset");
         return;
       }
       if (action === "tab-close") {
@@ -4433,7 +4319,7 @@ function WorkspaceApp({
     handleSplitActive,
     handleSelectWorktreeByIndex,
     handleReopenClosedBrowserTab,
-    handleBrowserPrint,
+    handleBrowserZoom,
     createBrowserTab,
     shortcutBrowserId,
     reportRuntimeError,
@@ -4445,11 +4331,12 @@ function WorkspaceApp({
         return {
           "sidebar.left.toggle": toggleSidebar,
           "settings.toggle": handleToggleSettings,
-          "notifications.toggle": handleToggleNotificationCenter,
+          "notifications.toggle": handleRevealSupervisor,
         };
       }
       return {
         "tab.newTerminal": handleAddTerminalTab,
+        "tab.newChat": chatViewAvailable ? handleNewChatShortcut : undefined,
         "tab.newBrowser": () => void createBrowserTab(newBrowserTabUrl()).catch(reportRuntimeError),
         "tab.reopenClosed": handleReopenClosedBrowserTab,
         "tab.close": handleCloseActiveSurface,
@@ -4459,11 +4346,6 @@ function WorkspaceApp({
         "browser.back": browserShortcutsActive ? () => dispatchBrowserShortcut("back") : undefined,
         "browser.forward": browserShortcutsActive ? () => dispatchBrowserShortcut("forward") : undefined,
         "browser.find": browserShortcutsActive ? () => dispatchBrowserShortcut("find") : undefined,
-        "browser.bookmarkPage": browserShortcutsActive ? () => dispatchBrowserShortcut("bookmark-page") : undefined,
-        "browser.print": browserShortcutsActive && shortcutBrowserId ? () => handleBrowserPrint(shortcutBrowserId) : undefined,
-        "browser.zoomIn": browserShortcutsActive ? () => dispatchBrowserZoom("zoom-in", "in") : undefined,
-        "browser.zoomOut": browserShortcutsActive ? () => dispatchBrowserZoom("zoom-out", "out") : undefined,
-        "browser.zoomReset": browserShortcutsActive ? () => dispatchBrowserZoom("zoom-reset", "reset") : undefined,
         "tab.next": () => handleCycleTab(1),
         "tab.previous": () => handleCycleTab(-1),
         "tab.select1": () => handleSelectTerminalTabByIndex(0),
@@ -4484,8 +4366,7 @@ function WorkspaceApp({
         "workspace.select7": () => handleSelectWorktreeByIndex(6),
         "workspace.select8": () => handleSelectWorktreeByIndex(7),
         "workspace.select9": () => handleSelectWorktreeByIndex(8),
-        // Mod+D bookmarks the page while a browser owns shortcuts (browser.bookmarkPage).
-        "terminal.splitRight": browserShortcutsActive ? undefined : () => handleSplitActive("horizontal"),
+        "terminal.splitRight": () => handleSplitActive("horizontal"),
         "terminal.splitDown": () => handleSplitActive("vertical"),
         "terminal.unsplit": handleUnsplitActive,
         "terminal.focusNext": browserShortcutsActive ? undefined : () => handleCyclePaneFocus(1),
@@ -4501,17 +4382,18 @@ function WorkspaceApp({
         "commandPalette.open": handleOpenCommandPalette,
         "window.new": isNativeRuntime ? handleNewWindow : undefined,
         "settings.toggle": handleToggleSettings,
-        "notifications.toggle": handleToggleNotificationCenter,
-        // Mod+= / Mod+- / Mod+0 zoom the page while a browser owns shortcuts (browser.zoom*).
-        "zoom.in": browserShortcutsActive ? undefined : handleZoomIn,
-        "zoom.out": browserShortcutsActive ? undefined : handleZoomOut,
-        "zoom.reset": browserShortcutsActive ? undefined : handleZoomReset,
+        "notifications.toggle": handleRevealSupervisor,
+        "zoom.in": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "in") : handleZoomIn,
+        "zoom.out": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "out") : handleZoomOut,
+        "zoom.reset": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "reset") : handleZoomReset,
       };
     },
     [
       activeRemoteHost,
       createBrowserTab,
       handleAddTerminalTab,
+      chatViewAvailable,
+      handleNewChatShortcut,
       handleCloseActiveSurface,
       handleCyclePaneFocus,
       handleDirectionalPaneFocus,
@@ -4527,7 +4409,7 @@ function WorkspaceApp({
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
-      handleToggleNotificationCenter,
+      handleRevealSupervisor,
       handleToggleSettings,
       handleUnsplitActive,
       handleZoomIn,
@@ -4566,7 +4448,6 @@ function WorkspaceApp({
   return (
     <div className="flex h-screen w-screen select-none overflow-hidden bg-background font-sans text-foreground">
       <Toaster />
-      {isNativeRuntime ? <BrowserAgentApprovalCard /> : null}
       <ShortcutHints
         preset={shortcutPreset}
         enabledActions={resolvedShortcuts(shortcutOverrides, shortcutPreset).filter((shortcut) => shortcutHandlers[shortcut.id]).map((shortcut) => shortcut.id)}
@@ -4615,7 +4496,8 @@ function WorkspaceApp({
           onOpenHistory={setHistoryProject}
           onOpenSettings={handleOpenSettings}
           onOpenResources={() => setIsResourcesOpen(true)}
-          attention={sidebarAttention}
+
+          onFocusSupervisorSession={handleFocusSupervisorSession}
           onToggle={toggleSidebar}
         />
       ) : (
@@ -4629,18 +4511,18 @@ function WorkspaceApp({
             </IconButton>
             <IconButton
               data-shortcut="notifications.toggle"
-              label={attentionRows.length > 0 ? `Open inbox (${attentionRows.length})` : "Open inbox"}
+              label={supervisorDecisionCount > 0 ? `Open supervisor (${supervisorDecisionCount})` : "Open supervisor"}
               className="no-drag relative"
               size="sm"
-              onClick={handleToggleNotificationCenter}
+              onClick={handleRevealSupervisor}
             >
-              <Inbox className="size-3.5" />
-              {attentionRows.length > 0 ? (
+              <Bot className="size-3.5" />
+              {supervisorDecisionCount > 0 ? (
                 <span
                   data-testid="collapsed-attention-badge"
                   className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-status-warning px-1 text-[9px] font-semibold leading-none text-black"
                 >
-                  {attentionRows.length > 9 ? "9+" : attentionRows.length}
+                  {supervisorDecisionCount > 9 ? "9+" : supervisorDecisionCount}
                 </span>
               ) : null}
             </IconButton>
@@ -4739,6 +4621,11 @@ function WorkspaceApp({
             onOpenSettings={handleOpenSettings}
             agents={launchableAgents}
             onLaunchAgent={handleLaunchAgent}
+            onNewChat={chatViewAvailable ? handleNewChat : undefined}
+            onSplitChat={chatViewAvailable ? handleSplitChat : undefined}
+            onSetPaneView={handleSetPaneView}
+            chatViewAvailable={chatViewAvailable}
+            renderChatPane={(args) => <LocalChatPane {...args} />}
             defaultAgentId={agentSettings.defaultAgentId}
             onNavigateBrowserTab={handleNavigateBrowserTab}
             onReloadBrowserTab={handleReloadBrowserTab}

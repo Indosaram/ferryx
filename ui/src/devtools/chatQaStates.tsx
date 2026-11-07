@@ -57,7 +57,7 @@ const MULTI_PROMPT: ReferencePrompt = {
   question: "Which surfaces should the redesign cover?",
   body: null,
   options: [
-    { label: "Phone home (Recommended)", description: "Supervisor, Inbox and Worktrees tabs" },
+    { label: "Phone home (Recommended)", description: "The Supervisor panel, with Worktrees behind the + button" },
     { label: "Session chat", description: "Messages, composer and prompt cards" },
     { label: "Terminal", description: "Tab strip, key dock and line mode" },
     { label: "Account and sign-in", description: null },

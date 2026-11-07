@@ -1,5 +1,5 @@
 // allow: SIZE_OK — Shell resolution and agent resume argv mapping
-use crate::daemon::protocol::{AgentProviderSession, AgentProviderSessionKey, TerminalStartup};
+use crate::daemon::protocol::{AgentProviderSession, AgentProviderSessionKey, ContinueMode, TerminalStartup};
 use portable_pty::CommandBuilder;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -8,7 +8,7 @@ pub enum AgentResumeError {
     RemoteSshRequiresWorkspace,
     #[error("Unsupported agent type: {0}")]
     UnsupportedAgent(String),
-    #[error("The mhc launcher is only valid for omo sessions")]
+    #[error("The mhc launcher is only valid for sessions it launched")]
     InvalidLauncher,
     #[error("Invalid provider session id: {0}")]
     InvalidSessionId(String),
@@ -26,6 +26,8 @@ pub enum AgentResumeError {
     InvalidTranscriptPath(String),
     #[error("Agent launch command is empty")]
     EmptyLaunchCommand,
+    #[error("AGENT_CONTINUE_UNSUPPORTED")]
+    ContinueUnsupported(String),
 }
 
 fn has_unsafe_control_chars(s: &str) -> bool {
@@ -106,9 +108,20 @@ pub fn resolve_agent_resume_plan(
     provider_session: &AgentProviderSession,
 ) -> Result<ShellCommandPlan, AgentResumeError> {
     let norm_agent = agent_type.trim().to_ascii_lowercase();
-    if provider_session.launcher.is_some() && norm_agent != "omo" {
-        return Err(AgentResumeError::InvalidLauncher);
-    }
+    // A launcher is the wire name of the binary that owns the conversation, so only an agent whose
+    // registry entry lists it may carry one (omo and maho for `mhc`).
+    let launcher_binary = match provider_session.launcher {
+        None => None,
+        Some(launcher) => {
+            let wire = match launcher {
+                crate::daemon::protocol::AgentLauncher::Mhc => "mhc",
+            };
+            Some(
+                crate::agent_detect::registry::launch_binary(&norm_agent, wire)
+                    .ok_or(AgentResumeError::InvalidLauncher)?,
+            )
+        }
+    };
     let validated_id = validate_agent_session_id(&provider_session.id)?;
     let validated_transcript =
         validate_transcript_path(provider_session.transcript_path.as_deref())?;
@@ -209,14 +222,28 @@ pub fn resolve_agent_resume_plan(
                 args: vec!["--resume".to_string(), target],
             })
         }
-        "omo" => {
+        "omo" | "maho" => {
             ensure_key(AgentProviderSessionKey::SessionId)?;
+            let resume_plan =
+                crate::agent_detect::registry::resume_plan(&norm_agent).map(|(program, args)| {
+                    (
+                        program.to_string(),
+                        args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+                    )
+                });
             Ok(ShellCommandPlan {
-                program: match provider_session.launcher {
-                    Some(crate::daemon::protocol::AgentLauncher::Mhc) => "mhc",
-                    None => "omo",
-                }.to_string(),
-                args: vec!["--session".to_string(), validated_id],
+                // The launcher binary wins, so a maho session resumes `mhc` and an omo session
+                // recorded before the split keeps resuming the binary that owns its conversation.
+                program: launcher_binary
+                    .map(str::to_string)
+                    .or_else(|| resume_plan.as_ref().map(|(program, _)| program.clone()))
+                    .unwrap_or_else(|| norm_agent.clone()),
+                args: resume_plan
+                    .map(|(_, args)| args)
+                    .unwrap_or_else(|| vec!["--session".to_string()])
+                    .into_iter()
+                    .chain(std::iter::once(validated_id))
+                    .collect(),
             })
         }
         "kimi" => {
@@ -270,6 +297,35 @@ pub fn resolve_agent_resume_plan(
             })
         }
         unsupported => Err(AgentResumeError::UnsupportedAgent(unsupported.to_string())),
+    }
+}
+
+/// Host argv for a continuation. There is no client argv parameter: fork and resume are
+/// selected from the provider and the validated session id alone.
+pub fn resolve_agent_continue_plan(
+    agent_type: &str,
+    provider_session: &AgentProviderSession,
+    mode: ContinueMode,
+) -> Result<ShellCommandPlan, AgentResumeError> {
+    let norm_agent = agent_type.trim().to_ascii_lowercase();
+    match (norm_agent.as_str(), mode) {
+        ("claude", ContinueMode::Fork) => {
+            let mut plan = resolve_agent_resume_plan(agent_type, provider_session)?;
+            plan.args.push("--fork-session".to_string());
+            Ok(plan)
+        }
+        ("codex", ContinueMode::Fork) => {
+            let plan = resolve_agent_resume_plan(agent_type, provider_session)?;
+            let id = plan.args.into_iter().nth(1).ok_or_else(|| {
+                AgentResumeError::InvalidSessionId("codex session id missing".to_string())
+            })?;
+            Ok(ShellCommandPlan {
+                program: "codex".to_string(),
+                args: vec!["fork".to_string(), id],
+            })
+        }
+        (_, ContinueMode::Resume) => resolve_agent_resume_plan(agent_type, provider_session),
+        (_, ContinueMode::Fork) => Err(AgentResumeError::ContinueUnsupported(norm_agent)),
     }
 }
 
@@ -577,6 +633,11 @@ where
             agent_type,
             provider_session,
         }) => resolve_agent_resume_plan(agent_type, provider_session),
+        Some(TerminalStartup::AgentContinue {
+            agent_type,
+            provider_session,
+            mode,
+        }) => resolve_agent_continue_plan(agent_type, provider_session, *mode),
         Some(TerminalStartup::AgentLaunch { command, args }) => {
             if command.trim().is_empty() {
                 return Err(AgentResumeError::EmptyLaunchCommand);
@@ -606,7 +667,12 @@ pub fn resolve_startup_command(
         is_on_path,
         |var| std::env::var(var).ok(),
     )?;
-    if let Some(TerminalStartup::AgentResume { .. } | TerminalStartup::AgentLaunch { .. }) = startup {
+    if let Some(
+        TerminalStartup::AgentResume { .. }
+        | TerminalStartup::AgentContinue { .. }
+        | TerminalStartup::AgentLaunch { .. },
+    ) = startup
+    {
         if !plan.program.contains('/') && !plan.program.contains('\\') {
             if let Some(resolved) =
                 crate::ipc::agents::resolve_binary(&plan.program, &legacy_search_paths())
@@ -1539,6 +1605,65 @@ mod tests {
         let cmd =
             resolve_startup_command(None, Some(&startup)).expect("resolve startup command builder");
         let _ = cmd; // CommandBuilder constructed without executing the process
+    }
+
+    fn provider(id: &str) -> AgentProviderSession {
+        AgentProviderSession {
+            launcher: None,
+            key: AgentProviderSessionKey::SessionId,
+            id: id.to_string(),
+            transcript_path: None,
+        }
+    }
+
+    #[test]
+    fn agent_continue_argv_is_built_by_the_host() {
+        let cases = [
+            (
+                "claude",
+                ContinueMode::Fork,
+                "claude",
+                vec!["--resume", "sess-1", "--fork-session"],
+            ),
+            ("claude", ContinueMode::Resume, "claude", vec!["--resume", "sess-1"]),
+            ("codex", ContinueMode::Fork, "codex", vec!["fork", "sess-1"]),
+            ("codex", ContinueMode::Resume, "codex", vec!["resume", "sess-1"]),
+        ];
+        for (agent, mode, program, args) in cases {
+            let plan = resolve_agent_continue_plan(agent, &provider("sess-1"), mode)
+                .expect("host argv");
+            assert_eq!(plan.program, program);
+            assert_eq!(plan.args, args);
+        }
+        let grok = resolve_agent_continue_plan("grok", &provider("grok-1"), ContinueMode::Resume)
+            .expect("other providers resume through the verified builder");
+        assert_eq!(
+            grok,
+            resolve_agent_resume_plan("grok", &provider("grok-1")).expect("resume builder")
+        );
+        assert!(matches!(
+            resolve_agent_continue_plan("grok", &provider("grok-1"), ContinueMode::Fork),
+            Err(AgentResumeError::ContinueUnsupported(_))
+        ));
+        let wire = serde_json::json!({
+            "kind": "agentContinue",
+            "agentType": "claude",
+            "providerSession": {"key": "session_id", "id": "sess-1"},
+            "mode": "fork",
+            "args": ["--dangerously-skip-permissions"],
+            "argv": ["rm", "-rf"]
+        });
+        let parsed = serde_json::from_value::<TerminalStartup>(wire).expect("extra keys are not argv fields");
+        let plan = resolve_startup_command_pure(None, Some(&parsed), TargetPlatform::Linux, |_| true, |_| None)
+            .expect("host plan");
+        assert_eq!(
+            plan.args,
+            ["--resume", "sess-1", "--fork-session"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+        assert!(!plan.args.iter().any(|arg| arg.contains("dangerously") || arg == "rm"));
     }
 
     #[test]

@@ -273,7 +273,9 @@ vi.mock("./lib/tauri", () => ({
   takeNotificationActivations: native.takeNotificationActivations,
   bootTrace: vi.fn(async () => undefined),
   toIpcError: (error: unknown) => error,
-  isStructuredIpcError: vi.fn((_error: unknown) => false),
+  isStructuredIpcError: (_error: unknown) => false,
+  getSupervisorPanel: vi.fn(async () => ({ decisions: [], handling: [], sessions: [], log: [], rules: [], paused: false, setupRequired: true })),
+  onSupervisorPanelEvent: vi.fn(async () => () => undefined),
 }));
 
 vi.mock("./lib/updater", async (importOriginal) => {
@@ -410,6 +412,7 @@ vi.mock("./components/TerminalSplitView", () => {
       searchLeafId,
       agents,
       onLaunchAgent,
+      onNewChat,
       onAddBrowserTab,
       onClosePane,
       onCloseTab,
@@ -419,6 +422,7 @@ vi.mock("./components/TerminalSplitView", () => {
       searchLeafId?: string | null;
       agents?: Array<{ name: string; command: string; args: string }>;
       onLaunchAgent?: (agent: { name: string; command: string; args: string }) => void;
+      onNewChat?: (agent: { name: string; command: string; args: string }) => void;
       onAddBrowserTab?: (url?: string) => void;
       onClosePane?: (tabId: string, leafId: string) => void;
       onCloseTab?: (tabId: string) => void;
@@ -444,6 +448,11 @@ vi.mock("./components/TerminalSplitView", () => {
           {agents?.map((agent) => (
             <button key={agent.name} type="button" onClick={() => onLaunchAgent?.(agent)}>
               Launch {agent.name}
+            </button>
+          ))}
+          {onNewChat && agents?.map((agent) => (
+            <button key={`chat-${agent.name}`} type="button" onClick={() => onNewChat(agent)}>
+              Chat {agent.name}
             </button>
           ))}
         </div>
@@ -508,7 +517,7 @@ function seedSidebarBrowserTab(workspaceId: string) {
   });
 }
 
-const { App, ensureLocalProjectsRegistered, reportLocalRegistrationFailure, createDesktopLocalProjectSync } = await import("./App");
+const { App, ensureLocalProjectsRegistered, createDesktopLocalProjectSync } = await import("./App");
 const { resetWorkspaceRestore } = await import("./state/workspaceRestore");
 
 afterEach(() => {
@@ -797,25 +806,6 @@ describe("App project workspace flow", () => {
     options.action.onClick();
     await vi.waitFor(() => expect(native.registerProject).toHaveBeenCalledTimes(2));
     expect(toastMocks.error).toHaveBeenCalledTimes(1);
-  });
-
-  it("renders the message of a structured IPC error in the registration failure toast", async () => {
-    const tauri = await import("./lib/tauri");
-    const structured = { code: "WORKSPACE_NOT_FOUND", message: "repository is not registered", details: {} };
-    vi.mocked(tauri.isStructuredIpcError).mockImplementation(
-      (error: unknown) => typeof error === "object" && error !== null && "code" in error && "message" in error,
-    );
-    toastMocks.error.mockClear();
-    try {
-      reportLocalRegistrationFailure({ workspaceId: "heal-struct-a", repoRoot: "/repo/heal-struct-a", gitRoot: null }, structured);
-    } finally {
-      vi.mocked(tauri.isStructuredIpcError).mockImplementation(() => false);
-    }
-
-    expect(toastMocks.error).toHaveBeenCalledTimes(1);
-    const [, options] = toastMocks.error.mock.calls[0] as [string, { description: string }];
-    expect(options.description).not.toContain("[object Object]");
-    expect(options.description).toContain(structured.message);
   });
 
   describe("P05 focused browser shortcut targeting on Windows", () => {
@@ -1297,62 +1287,6 @@ describe("App project workspace flow", () => {
 
       await waitFor(() => expect(workspace.closeTab).toHaveBeenCalledWith("browser-tab-1"));
     } finally {
-      workspace.storeState.layout = prevLayout;
-    }
-  });
-
-  it("routes Cmd+=, Cmd+- and Cmd+0 to the focused browser tab's zoom and to terminal zoom elsewhere", async () => {
-    const browserSystem = await import("./lib/browserSystem");
-    const step = vi.spyOn(browserSystem, "stepBrowserZoom").mockResolvedValue(1);
-    const prevLayout = workspace.storeState.layout;
-    workspace.storeState.layout = {
-      ...prevLayout,
-      activeTabId: "browser-tab-1",
-      tabs: [
-        { id: "browser-tab-1", kind: "browser", label: "Docs", url: "https://example.com", browserId: "browser-1" },
-        ...prevLayout.tabs,
-      ],
-    } as any;
-    const received: string[] = [];
-    let claim = false;
-    const receiver = (event: Event) => {
-      const detail = (event as CustomEvent<{ browserId: string; action: string }>).detail;
-      received.push(`${detail.browserId}:${detail.action}`);
-      if (claim) event.preventDefault();
-    };
-    window.addEventListener("ferryx:browser-shortcut", receiver);
-    let view: ReturnType<typeof render> | undefined;
-    try {
-      await act(async () => { view = render(<App />); });
-
-      // A system-webview tab's BrowserToolbar claims the event and applies the zoom itself.
-      claim = true;
-      fireEvent.keyDown(window, { key: "=", code: "Equal", metaKey: true });
-      fireEvent.keyDown(window, { key: "+", code: "Equal", metaKey: true, shiftKey: true });
-      fireEvent.keyDown(window, { key: "-", code: "Minus", metaKey: true });
-      fireEvent.keyDown(window, { key: "0", code: "Digit0", metaKey: true });
-      expect(received).toEqual(["browser-1:zoom-in", "browser-1:zoom-in", "browser-1:zoom-out", "browser-1:zoom-reset"]);
-      expect(step).not.toHaveBeenCalled();
-
-      // A Chromium tab has no BrowserToolbar to claim it, so the host steps the zoom.
-      claim = false;
-      fireEvent.keyDown(window, { key: "=", code: "Equal", metaKey: true });
-      fireEvent.keyDown(window, { key: "-", code: "Minus", metaKey: true });
-      fireEvent.keyDown(window, { key: "0", code: "Digit0", metaKey: true });
-      expect(step.mock.calls).toEqual([["browser-1", "in"], ["browser-1", "out"], ["browser-1", "reset"]]);
-
-      // With a terminal tab active the chords stay with the terminal font zoom.
-      received.length = 0;
-      step.mockClear();
-      workspace.storeState.layout = { ...workspace.storeState.layout, activeTabId: prevLayout.activeTabId } as any;
-      await act(async () => { view?.rerender(<App />); });
-      fireEvent.keyDown(window, { key: "=", code: "Equal", metaKey: true });
-      fireEvent.keyDown(window, { key: "0", code: "Digit0", metaKey: true });
-      expect(received).toEqual([]);
-      expect(step).not.toHaveBeenCalled();
-    } finally {
-      window.removeEventListener("ferryx:browser-shortcut", receiver);
-      step.mockRestore();
       workspace.storeState.layout = prevLayout;
     }
   });
@@ -3246,6 +3180,28 @@ describe("App project workspace flow", () => {
     expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
   });
 
+  it("opens a new chat with its initial view and daemon identity in one store call", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    native.detectAgents.mockResolvedValue([{ name: "claude", available: true }]);
+    native.spawnTerminalDetailed.mockImplementation(async (req) => ({
+      sessionId: "spawn-chat-session",
+      daemonEpoch: "epoch-chat",
+      session: { cwd: req.cwd, incarnation: "inc-chat" },
+    }));
+    render(<App />);
+    const button = await screen.findByRole("button", { name: "Chat claude" });
+    fireEvent.click(button);
+    await waitFor(() => expect(workspace.openTab).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "/repo/main" }),
+      "Claude",
+      { sessionId: "spawn-chat-session", agentType: "claude", daemonEpoch: "epoch-chat", incarnation: "inc-chat" },
+      undefined,
+      "chat",
+    ));
+    expect(native.spawnTerminalDetailed).toHaveBeenCalledTimes(1);
+    expect(native.writeTerminal).not.toHaveBeenCalled();
+  });
+
   it("closes the spawned agent backend when its tab is discarded", async () => {
     const { closeTerminal } = await import("./lib/tauri");
     vi.mocked(closeTerminal).mockClear();
@@ -4261,6 +4217,105 @@ describe("App project workspace flow", () => {
       expect(result?.terminalTabs?.[2]?.agentType).toBeUndefined();
       expect(result?.terminalTabs?.[2] ? "activityState" in result.terminalTabs[2] : true).toBe(false);
       expect(result?.terminalTabs?.[2] ? "agentType" in result.terminalTabs[2] : true).toBe(false);
+    });
+
+    it("publishes running false and the provider session for an exited agent pane", async () => {
+      const { deriveFocusedTerminal } = await import("./App");
+      const { fillExitedAgentTab } = await import("../../scripts/qa/fixtures/exited-agent-tab.mjs");
+      const { workspaceReducer } = await import("./state/workspaceStore");
+      const running: any = {
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        activeWorktreePath: "/repo/main",
+        layout: {
+          activeTabId: "tab-1",
+          tabs: [
+            { id: "tab-1", label: "claude", sessionId: "sess-exited" },
+            { id: "tab-2", label: "live", sessionId: "sess-live" },
+          ],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "sess-exited": {
+            id: "sess-exited",
+            backendSessionId: "pty-real",
+            cwd: "/repo/main",
+            lifecycle: "running",
+            incarnation: "inc-exited",
+            daemonEpoch: "epoch-exited",
+            agentType: "claude",
+            providerSession: { key: "session_id", id: "prov-exited" },
+          },
+          "sess-live": {
+            id: "sess-live",
+            backendSessionId: "pty-live",
+            cwd: "/repo/main",
+            lifecycle: "running",
+            agentType: "claude",
+            providerSession: { key: "session_id", id: "prov-live" },
+          },
+        },
+        worktrees: [{ path: "/repo/main", branch: "refs/heads/main" }],
+      };
+      const exited = workspaceReducer(running, {
+        type: "SESSION_LIFECYCLE",
+        backendSessionId: "pty-real",
+        lifecycle: "exited",
+        incarnation: "inc-exited",
+        daemonEpoch: "epoch-exited",
+      });
+      expect(exited.sessions["sess-exited"].backendSessionId).toBeNull();
+      expect(exited.sessions["sess-exited"].lastBackendSessionId).toBe("pty-real");
+      const result = deriveFocusedTerminal("orca-lite", exited);
+      expect(result?.backendSessionId).toBeNull();
+      expect(result?.terminalTabs?.[0]).toEqual(fillExitedAgentTab({
+        tabId: "tab-1",
+        label: "claude",
+        agentType: "claude",
+        worktreeLabel: "main",
+        sessionId: "pty-real",
+        providerKey: "session_id",
+        providerSessionId: "prov-exited",
+      }));
+      expect(result?.terminalTabs?.[1]).toEqual({
+        id: "tab-2",
+        label: "live",
+        worktreeLabel: "main",
+        sessionId: "pty-live",
+      });
+      expect(result?.terminalTabs?.[1] ? "running" in result.terminalTabs[1] : true).toBe(false);
+      expect(result?.terminalTabs?.[1] ? "providerSession" in result.terminalTabs[1] : true).toBe(false);
+      const standby: any = {
+        ...running,
+        layout: { ...running.layout, tabs: [{ id: "tab-standby", label: "claude", sessionId: "sess-standby" }], activeTabId: "tab-standby" },
+        sessions: {
+          "sess-standby": {
+            id: "sess-standby",
+            backendSessionId: "standby:sess-standby",
+            lastBackendSessionId: "standby:sess-standby",
+            cwd: "/repo/main",
+            lifecycle: "exited",
+            agentType: "claude",
+            providerSession: { key: "session_id", id: "prov-standby" },
+          },
+        },
+      };
+      const standbyResult = deriveFocusedTerminal("orca-lite", standby);
+      expect(standbyResult?.backendSessionId).toBeNull();
+      expect(standbyResult?.terminalTabs?.[0]?.sessionId).toBeUndefined();
+      expect(JSON.stringify(standbyResult?.terminalTabs?.[0])).not.toContain("standby:");
+      const restored = deriveFocusedTerminal("orca-lite", {
+        ...standby,
+        sessions: {
+          "sess-standby": {
+            ...standby.sessions["sess-standby"],
+            lastBackendSessionId: "pty-real",
+          },
+        },
+      });
+      expect(restored?.backendSessionId).toBeNull();
+      expect(restored?.terminalTabs?.[0]?.sessionId).toBe("pty-real");
+      expect(JSON.stringify(restored?.terminalTabs)).not.toContain("standby:");
     });
 
     it("keeps publishing the terminal inventory with an empty focus when a browser tab is active", async () => {

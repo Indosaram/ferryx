@@ -392,7 +392,7 @@ describe("RemoteAttention Affordance", () => {
     }
   });
 
-  it("keeps the phone drawer to worktrees only and opens the two-state inbox from the top bar", async () => {
+  it("keeps the phone drawer to worktrees only and offers no Inbox anywhere on the session screen", async () => {
     localStorage.setItem("ferryx_remote_token", "test-token");
     const stateWithAttention = {
       ...baseState,
@@ -416,65 +416,16 @@ describe("RemoteAttention Affordance", () => {
     render(<RemoteApp />);
     await switchToTerminalMode();
     await screen.findByTestId("remote-terminal");
+    // The Inbox is gone: the Supervisor panel is the one attention surface.
+    expect(screen.queryByTestId("mobile-inbox-button")).toBeNull();
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i }));
     });
-    // The phone drawer is the worktree list only: the phone has one Inbox, reached from the top bar.
     const drawer = screen.getByRole("dialog", { name: "Workspace context" });
     expect(within(drawer).queryByRole("tab", { name: "Worktrees" })).toBeNull();
     expect(within(drawer).queryByRole("tab", { name: /^Inbox/ })).toBeNull();
     expect(within(drawer).queryAllByTestId("attention-row")).toHaveLength(0);
-    await act(async () => {
-      fireEvent.click(within(drawer).getByRole("button", { name: "Close worktree list" }));
-    });
-
-    await act(async () => { fireEvent.click(screen.getByTestId("mobile-inbox-button")); });
-    const inbox = screen.getByRole("dialog", { name: "Inbox" });
-    // Only the waiting and finished panes are listed, waiting first.
-    expect(within(inbox).getAllByTestId("attention-row").map((row) => row.dataset.attentionState)).toEqual(["needs-you", "done"]);
-    expect(within(inbox).getByText("omo")).toBeInTheDocument();
-    expect(within(inbox).getByTestId("attention-row-text")).toHaveTextContent("Fix login");
-    const before = fetchMock.mock.calls.length;
-
-    await act(async () => { fireEvent.click(within(inbox).getAllByTestId("attention-row")[0]); });
-
-    // A mirrored pane opens on this phone only: the desktop's focus never moves.
-    await waitFor(() => {
-      expect(screen.getByTestId("remote-terminal")).toHaveAttribute("data-session-id", "tab-3-session");
-    });
-    expect(fetchMock.mock.calls.slice(before).some(([input]) => String(input).includes("/api/v1/workspace/select"))).toBe(false);
-    // The sheet plays its exit animation before it unmounts.
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Inbox" })).not.toBeInTheDocument());
-  });
-
-  it("offers no Dismiss on its own Inbox rows when no desktop publishes any", async () => {
-    localStorage.setItem("ferryx_remote_token", "test-token");
-    const stateWithAttention = {
-      ...baseState,
-      activeContext: {
-        ...baseState.activeContext,
-        tabId: "tab-1",
-        terminalTabs: [
-          { id: "tab-1", label: "Editor", sessionId: "tab-1-session" },
-          { id: "tab-2", label: "Fix login", activityState: "done", agentType: "codex", sessionId: "tab-2-session" },
-          { id: "tab-3", label: "omo", activityState: "waiting", agentType: "omo", sessionId: "tab-3-session" },
-        ],
-      },
-    };
-    const fetchMock = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse(stateWithAttention))
-      .mockResolvedValue(jsonResponse({ accepted: true }));
-    vi.stubGlobal("fetch", ticketed(fetchMock));
-    vi.stubGlobal("WebSocket", EventWebSocket);
-
-    render(<RemoteApp />);
-    await switchToTerminalMode();
-    await screen.findByTestId("remote-terminal");
-    await act(async () => { fireEvent.click(screen.getByTestId("mobile-inbox-button")); });
-    const inbox = screen.getByRole("dialog", { name: "Inbox" });
-
-    expect(within(inbox).getAllByTestId("attention-row")).toHaveLength(2);
-    expect(within(inbox).queryAllByRole("button", { name: /^Dismiss/ })).toHaveLength(0);
+    expect(screen.queryByRole("dialog", { name: "Inbox" })).toBeNull();
   });
 
   it("renders attention affordance with accessible name when a background tab enters waiting state", async () => {

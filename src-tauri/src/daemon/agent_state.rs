@@ -223,6 +223,12 @@ impl AgentStateHub {
     pub(crate) fn release_foreground(&self, session_id: &str) {
         let mut retained = self.retained.lock();
         let previous = retained.get(session_id).cloned();
+        // An agent that left the foreground while its own report still said `working` never
+        // finished its turn: a finished or stopped turn reports `idle` first. That is the
+        // telemetry of a killed or crashed agent, carried as `Error` on the released frame.
+        let died_mid_turn = previous.as_ref().is_some_and(|state| {
+            state.state.trim().eq_ignore_ascii_case("working") && state.origin.is_provider_report()
+        });
         let state = AgentState {
             session_id: session_id.to_string(),
             state: "idle".to_string(),
@@ -230,7 +236,7 @@ impl AgentStateHub {
             provider_session: previous.as_ref().and_then(|s| s.provider_session.clone()),
             detail: None,
             origin: AgentStateOrigin::ProcessReleased,
-            outcome: None,
+            outcome: died_mid_turn.then_some(AgentOutcome::Error),
             kind: None,
         };
         tracing::info!(session_id, reason = "foreground_agent_to_shell",
@@ -259,6 +265,8 @@ impl AgentStateHub {
         }
         let state = AgentState {
             origin: AgentStateOrigin::ProcessObserved,
+            // A new agent owns the pane: the previous one's failure is history.
+            outcome: None,
             ..previous
         };
         tracing::info!(
@@ -303,6 +311,10 @@ impl AgentStateHub {
 
     pub fn current(&self, session_id: &str) -> Option<AgentState> {
         self.retained.lock().get(session_id).cloned()
+    }
+
+    pub(crate) fn retained(&self) -> Vec<AgentState> {
+        self.retained.lock().values().cloned().collect()
     }
 
     pub fn remove(&self, session_id: &str) {

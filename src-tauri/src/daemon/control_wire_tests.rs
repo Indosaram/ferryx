@@ -792,6 +792,38 @@ async fn unix_exchange(server: &Arc<DaemonServer>, request: DaemonRequest) -> Da
     serde_json::from_str(line.trim()).unwrap()
 }
 
+/// A recovery card answered over the owner socket for a session on another computer
+/// (`host_id: Some`): the scheduler answers it here, nothing is forwarded to the host.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_recovery_card_tap_for_a_paired_host_session_is_answered_locally() {
+    let server = Arc::new(DaemonServer::new());
+    let card = crate::hub_runtime::panel_autonomy::tests::take_recovery_card().await;
+    let request = DaemonRequest::AgentControl {
+        request: crate::agent_control::AgentControlOp::Answer {
+            session_id: "card2".into(),
+            prompt_id: card.clone(),
+            screen_revision: card.clone(),
+            answer: crate::remote::reference_chat::types::ReferencePromptAnswer {
+                option_index: Some(1),
+                ..Default::default()
+            },
+            request_id: None,
+        },
+        host_id: Some("mac-2".into()),
+        supervisor_fence: None,
+        supervisor_account: None,
+    };
+    match unix_exchange(&server, request.clone()).await {
+        DaemonResponse::AgentControlOk { result } => assert_eq!(result["recovery"], "answered"),
+        other => panic!("answered {other:?}"),
+    }
+    match unix_exchange(&server, request).await {
+        DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("NOT_FOUND")),
+        other => panic!("a consumed card answered {other:?}"),
+    }
+}
+
 fn pause_request() -> DaemonRequest {
     DaemonRequest::SupervisorRequestV1 {
         envelope: serde_json::json!({"requestId": "peer-1", "goalId": "g", "expectedRevision": 1,
@@ -861,6 +893,32 @@ async fn a_supervisor_mutation_from_inside_a_worker_pane_is_forbidden() {
             }
             other => panic!("{request:?} answered {other:?}"),
         }
+    }
+    // T9: a worker must not pause or resume the supervisor, turn it on, widen agent control or
+    // undo its log. Each is refused before the hub or the policy is touched.
+    for request in [
+        DaemonRequest::SupervisorGlobalPause { paused: false },
+        DaemonRequest::SupervisorSettings { enabled: Some(true) },
+        DaemonRequest::SupervisorActionUndo { id: 1 },
+        DaemonRequest::AgentControlEnableOwner,
+        DaemonRequest::SupervisorHubStart,
+    ] {
+        match unix_exchange(&server, request.clone()).await {
+            DaemonResponse::Error { code, message, .. } => {
+                assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}: {message}");
+            }
+            other => panic!("{request:?} answered {other:?}"),
+        }
+    }
+    assert!(
+        !server.remote_state().agent_control_policy.enabled(),
+        "a refused enablement left agent control off"
+    );
+    // Reading the settings changes nothing, so it is never FORBIDDEN from a pane.
+    if let DaemonResponse::Error { code, .. } =
+        unix_exchange(&server, DaemonRequest::SupervisorSettings { enabled: None }).await
+    {
+        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "settings read from a pane");
     }
     assert!(matches!(
         unix_exchange(&server, DaemonRequest::SupervisorSnapshot).await,
@@ -944,7 +1002,14 @@ async fn a_supervisor_mutation_from_outside_the_panes_reaches_the_service() {
 #[tokio::test]
 async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
     let server = Arc::new(DaemonServer::new());
-    for request in [pause_request(), dispatch_submit(), mcp_submit(), setup_run(), setup_adopt_all()] {
+    for request in [
+        pause_request(),
+        dispatch_submit(),
+        mcp_submit(),
+        setup_run(),
+        setup_adopt_all(),
+        DaemonRequest::SupervisorHubStart,
+    ] {
         match data_exchange(&server, request.clone()).await {
             DaemonResponse::Error { code, .. } => {
                 assert_eq!(code.as_deref(), Some("FORBIDDEN"), "{request:?}")
@@ -952,4 +1017,231 @@ async fn a_supervisor_mutation_from_an_unidentified_peer_is_forbidden() {
             other => panic!("{request:?} answered {other:?}"),
         }
     }
+}
+
+/// Windows peer identification on a real loopback connection (supervisor_peer_win): the test
+/// process itself (the desktop app's position) may change the supervisor; a process started
+/// inside a pane the way panes are started is refused, by its parent chain and, with the pane
+/// pids withheld, by the pane job alone.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_loopback_peers_are_told_apart_by_their_owning_process() {
+    use crate::daemon::supervisor_peer::{PaneSet, PeerOrigin};
+    use crate::daemon::supervisor_peer_win::{classify, sys};
+
+    let server = Arc::new(DaemonServer::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let identify_accepted = |stream: &tokio::net::TcpStream| {
+        let (peer, local) = (stream.peer_addr().unwrap(), stream.local_addr().unwrap());
+        sys::identify(peer, local)
+    };
+
+    // (a) The test process connects: its own pid owns the connection and it is not refused.
+    let (own_client, accepted) = tokio::join!(
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        listener.accept()
+    );
+    let _own_client = own_client.unwrap();
+    let own_stream = accepted.unwrap().0;
+    let own = identify_accepted(&own_stream);
+    assert!(
+        matches!(own, PeerOrigin::Process(p) if p.pid == std::process::id()),
+        "the test process owns its connection: {own:?}"
+    );
+    assert_eq!(server.supervisor_peer_refusal(own).await, None, "the desktop app's position is allowed");
+    if let DaemonResponse::Error { code, message, .. } = peer_exchange(&server, own).await {
+        assert_ne!(code.as_deref(), Some("FORBIDDEN"), "{message}");
+    }
+
+    // (b) A process inside a pane connects.
+    let root = tempfile::tempdir().unwrap();
+    let mut command = portable_pty::CommandBuilder::new(
+        std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()),
+    );
+    let script = format!(
+        "$c=[Net.Sockets.TcpClient]::new('127.0.0.1',{port}); Start-Sleep -Seconds 120"
+    );
+    command.args(["/D", "/C", "powershell", "-NoProfile", "-NonInteractive", "-Command", &script]);
+    let (pane_id, _pump) = server
+        .terminal_service
+        .spawn_resolved_with_id(
+            uuid::Uuid::new_v4().to_string(),
+            command,
+            80,
+            24,
+            crate::terminal::pty::ResolvedSpawnContext {
+                root: root.path().to_owned(),
+                cwd: root.path().to_owned(),
+                managed_workspace_id: None,
+            },
+        )
+        .expect("spawn a pane");
+    let pane_pid = server.terminal_service.get_session(&pane_id).unwrap().pid().expect("pane pid");
+    let mut guard = PaneGuard { pids: vec![pane_pid] };
+    let (snapshot, mut output) = server
+        .terminal_service
+        .output_hub()
+        .observe_for_test(&pane_id)
+        .expect("observe the pane");
+    // ConPTY asks for the cursor position before it lets the pane run; answer it while waiting
+    // for the pane's connection.
+    if snapshot.windows(4).any(|w| w == b"\x1b[6n") {
+        server.terminal_service.write_input(&pane_id, b"\x1b[1;1R").unwrap();
+    }
+    let pane_stream = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let mut open = true;
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => break accepted.unwrap().0,
+                chunk = output.recv(), if open => match chunk {
+                    Ok(chunk) if chunk.windows(4).any(|w| w == b"\x1b[6n") => {
+                        server.terminal_service.write_input(&pane_id, b"\x1b[1;1R").unwrap();
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => open = false,
+                },
+            }
+        }
+    })
+    .await
+    .expect("the pane process connected");
+    let pane_origin = identify_accepted(&pane_stream);
+    let PeerOrigin::Process(pane_peer) = pane_origin else {
+        panic!("the pane connection's owner was not resolved: {pane_origin:?}");
+    };
+    guard.pids.push(pane_peer.pid);
+    assert_ne!(pane_peer.pid, std::process::id());
+    assert_ne!(pane_peer.pid, pane_pid, "the connecting process is a descendant of the pane child");
+
+    let refusal = server.supervisor_peer_refusal(pane_origin).await;
+    assert!(refusal.as_deref().is_some_and(|why| why.contains("Ferryx pane")), "{refusal:?}");
+    match peer_exchange(&server, pane_origin).await {
+        DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("FORBIDDEN")),
+        other => panic!("a pane process changed the supervisor: {other:?}"),
+    }
+    // The pane job alone refuses it, as for a pane descendant whose parent chain is gone.
+    let job_only = tokio::task::spawn_blocking(move || {
+        let table = sys::SystemWinProcs::snapshot().expect("process snapshot");
+        classify(pane_origin, &PaneSet::default(), &table)
+    })
+    .await
+    .unwrap();
+    assert!(job_only.as_deref().is_some_and(|why| why.contains("pane job")), "{job_only:?}");
+
+    drop(guard);
+    let _ = server.terminal_service.close_session(&pane_id).await;
+}
+
+/// Every pane joins a pane job even when the daemon itself runs inside a job, as it does under
+/// most launchers (every pane child inherits that job). One job shared by all panes took only the
+/// first pane and then refused every supervisor change.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_every_pane_joins_a_pane_job_when_the_daemon_runs_in_a_job() {
+    use crate::daemon::supervisor_peer::{PeerProcess, ProcTable};
+    use crate::daemon::supervisor_peer_win::{sys, WinProcTable};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    // Run this test process inside a job, as a launcher would, unless it already is in one.
+    let mut in_job = 0;
+    // SAFETY: the current-process pseudo handle and a null job (meaning any job) are valid
+    // arguments; `in_job` is a valid out pointer.
+    assert_ne!(unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) }, 0);
+    if in_job == 0 {
+        // SAFETY: null attributes and name create an unnamed job; null on failure.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        assert!(!job.is_null(), "create a job");
+        // SAFETY: `job` is a fresh, valid job handle owned by nobody else.
+        let job = unsafe { OwnedHandle::from_raw_handle(job) };
+        // SAFETY: both handles are valid for the call. The process stays in the job after the
+        // handle closes.
+        assert_ne!(unsafe { AssignProcessToJobObject(job.as_raw_handle(), GetCurrentProcess()) }, 0);
+    }
+
+    let server = Arc::new(DaemonServer::new());
+    let root = tempfile::tempdir().unwrap();
+    let mut guard = PaneGuard { pids: Vec::new() };
+    let mut panes = Vec::new();
+    for _ in 0..2 {
+        let mut command = portable_pty::CommandBuilder::new(
+            std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()),
+        );
+        command.args(["/D", "/C", "ping", "-n", "60", "127.0.0.1"]);
+        let (pane_id, pump) = server
+            .terminal_service
+            .spawn_resolved_with_id(
+                uuid::Uuid::new_v4().to_string(),
+                command,
+                80,
+                24,
+                crate::terminal::pty::ResolvedSpawnContext {
+                    root: root.path().to_owned(),
+                    cwd: root.path().to_owned(),
+                    managed_workspace_id: None,
+                },
+            )
+            .expect("spawn a pane");
+        let pid = server.terminal_service.get_session(&pane_id).unwrap().pid().expect("pane pid");
+        guard.pids.push(pid);
+        panes.push((pane_id, pid, pump));
+    }
+
+    let pids: Vec<u32> = panes.iter().map(|(_, pid, _)| *pid).collect();
+    let verdicts = tokio::task::spawn_blocking(move || {
+        let table = sys::SystemWinProcs::snapshot().expect("process snapshot");
+        pids.iter()
+            .map(|&pid| {
+                let start = table.info(pid).expect("pane process info").start;
+                table.in_pane_job(PeerProcess { pid, start })
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap();
+    assert_eq!(verdicts, vec![Ok(true), Ok(true)], "every pane is in a pane job");
+
+    drop(guard);
+    for (pane_id, _, _) in &panes {
+        let _ = server.terminal_service.close_session(pane_id).await;
+    }
+}
+
+/// Kills the pane's process trees when the loopback test ends, on success or on a failed
+/// assertion, so nothing it started outlives it.
+#[cfg(windows)]
+struct PaneGuard {
+    pids: Vec<u32>,
+}
+
+#[cfg(windows)]
+impl Drop for PaneGuard {
+    fn drop(&mut self) {
+        for pid in self.pids.iter().rev() {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .output();
+        }
+    }
+}
+
+/// One owner-gated request served as from a connection whose peer is `origin`.
+#[cfg(windows)]
+async fn peer_exchange(
+    server: &Arc<DaemonServer>,
+    origin: crate::daemon::supervisor_peer::PeerOrigin,
+) -> DaemonResponse {
+    let (client, server_side) = tokio::io::duplex(64 * 1024);
+    let handler = Arc::clone(server);
+    let serving = tokio::spawn(async move { handler.handle_client_with_origin(server_side, origin).await });
+    let (read_half, mut write_half) = tokio::io::split(client);
+    let request = DaemonRequest::SupervisorGlobalPause { paused: false };
+    write_half.write_all(request_line(server, &request).as_bytes()).await.unwrap();
+    let mut line = String::new();
+    BufReader::new(read_half).read_line(&mut line).await.unwrap();
+    drop(write_half);
+    serving.abort();
+    serde_json::from_str(line.trim()).unwrap()
 }

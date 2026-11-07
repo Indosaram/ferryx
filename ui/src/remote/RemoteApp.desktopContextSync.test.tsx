@@ -188,6 +188,13 @@ async function openPicker(): Promise<void> {
       fireEvent.click(trigger);
     });
   }
+  // The wide sidebar opens on the Supervisor panel; the worktree rows are one tab away.
+  const worktreesTab = await screen.findByRole("tab", { name: "Worktrees" });
+  if (worktreesTab.getAttribute("aria-selected") !== "true") {
+    act(() => {
+      fireEvent.click(worktreesTab);
+    });
+  }
 }
 
 /* Selects the worktree row; the attached worktree's sessions then fill the terminal tab strip. */

@@ -1,7 +1,6 @@
 // One desktop sidebar state that the desktop and the remote harnesses both render, so their
 // captures can be compared row for row. Data only: each harness turns it into its own inputs.
 import type { ActivitySummary } from "../../lib/activity";
-import type { AttentionRow } from "../../features/ferryx/attention/attentionModel";
 import type { HostEndpoint } from "../../state/remoteHostStore";
 import type { RegisteredProject } from "../../lib/tauri";
 import type { ActiveAgent, Worktree } from "../../lib/types";
@@ -41,7 +40,6 @@ export type SidebarParityFixture = {
   /** The hub supervisor lane typing into one worktree right now (relative to the render clock). */
   readonly supervisorLane: { readonly sessionId: string; readonly cwd: string };
   /** The desktop notification centre's attention rows: its Inbox tab counts these. */
-  readonly desktopAttention: readonly AttentionRow[];
 };
 
 /**
@@ -125,8 +123,4 @@ export const sidebarParityFixture: SidebarParityFixture = {
     worktreePath: `${FERRYX}/.orca-worktrees/ferryx/sidebar-polish-2`,
   }],
   supervisorLane: { sessionId: "hub-lane-1", cwd: `${FERRYX}/.orca-worktrees/ferryx/remote-settings` },
-  desktopAttention: [
-    { id: "inbox-1", revision: 1, workspaceId: "site", sessionId: "site-agent", state: "needs-you", who: "Coder", location: "site", at: 2 },
-    { id: "inbox-2", revision: 1, workspaceId: "ferryx", sessionId: "ferryx-agent", state: "done", who: "Coder", location: "ferryx", at: 1 },
-  ],
 };

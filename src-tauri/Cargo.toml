@@ -51,11 +51,6 @@ name = "native_terminal_macos_background"
 harness = false
 required-features = ["desktop"]
 
-[[test]]
-name = "wry_delegate_classes_macos"
-harness = false
-required-features = ["desktop"]
-
 [build-dependencies]
 # `codegen` generates the app context in build.rs (see build.rs) instead of in generate_context!.
 tauri-build = { version = "2", features = ["codegen"] }
@@ -85,12 +80,6 @@ desktop = [
 # classifier headless harness. Compile-time gated; never enabled in release
 # builds. No code outside #[cfg(feature = "local-split-qa")] is reachable.
 local-split-qa = []
-# Signs the macOS app with Apple's managed browser entitlement (com.apple.developer.web-browser).
-# Off by default: Apple grants it per team on request (docs/browser/APPLE_BROWSER_ENTITLEMENT.md),
-# and a provisioning profile without it makes the signed app fail to launch. Release with
-# `cargo tauri build --features apple-web-browser-entitlement --config entitlements/tauri.web-browser.conf.json`
-# (the bundler, not cargo, signs, so the config carries the entitlements file).
-apple-web-browser-entitlement = []
 # Todo 9 QA only: a genuinely incompatible daemon (DAEMON_PROTOCOL_VERSION 6) used as the old owner
 # against a normal build, so the update-pending path is exercised against a real process.
 qa-protocol-bump = ["local-split-qa"]
@@ -128,7 +117,6 @@ ferryx-rd-host = { path = "../crates/ferryx-rd/ferryx-rd-host", optional = true,
 ferryx-rd-decode = { path = "../crates/ferryx-rd/ferryx-rd-decode", optional = true, features = ["ffmpeg"] }
 ferryx-rd-app = { path = "../crates/ferryx-rd/ferryx-rd-app", optional = true, features = ["ffmpeg"] }
 ferryx-browser-engine-protocol = { path = "../crates/browser-engine-protocol" }
-ferryx-browser-import = { path = "../crates/ferryx-browser-import" }
 async-trait = "0.1"
 tauri = { version = "2", features = ["macos-private-api", "test", "unstable", "image-png", "devtools"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
@@ -139,7 +127,7 @@ tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
 portable-pty = { version = "0.9", path = "vendor/portable-pty" }
 base64 = "0.23"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 bytes = "1.12"
 libc = "0.2"
 # kimi keys its session folders by md5(cwd); the history reader re-derives it to recover the cwd.
@@ -193,6 +181,11 @@ rodio = { version = "0.22", default-features = false, optional = true, features 
 ] }
 notify = "8"
 rusqlite = { version = "0.32", features = ["bundled"] }
+pbkdf2 = { version = "0.12.2", default-features = false, features = ["hmac"] }
+cbc = { version = "0.1.2", features = ["block-padding"] }
+aes = "0.8.4"
+sha1 = "0.10.7"
+dirs = "6"
 tempfile = "3.17"
 quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
@@ -212,10 +205,6 @@ web-push = { version = "=0.11.0", default-features = false }
 ece = "=2.3.1"
 jwt-simple = { version = "=0.12.11", default-features = false, features = ["pure-rust"] }
 openssl = { version = "=0.10.81", features = ["vendored"] }
-# Browser password vault (src/browser/vault): AES-256-GCM record envelopes ported from Maho and
-# zeroizing key material. Both are already in Cargo.lock (ferryx-rd-net, ed25519-dalek).
-aes-gcm = "0.10.3"
-zeroize = { version = "1.9", features = ["zeroize_derive"] }
 
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
@@ -260,20 +249,9 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSData",
     "NSEnumerator",
     "NSJSONSerialization",
-    "NSProcessInfo",
-    "NSURLRequest",
-] }
-# ASWebAuthenticationSession for the in-app "Sign in with macOS" handoff.
-objc2-authentication-services = { version = "0.3.2", default-features = false, features = [
-    "std",
-    "block2",
-    "ASFoundation",
-    "ASWebAuthenticationSession",
-    "ASWebAuthenticationSessionCallback",
 ] }
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",
-    "objc2-app-kit",
     "WKWebView",
     "WKNavigation",
     "WKContentWorld",
@@ -284,9 +262,6 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKFrameInfo",
     "WKSecurityOrigin",
     "WKWebViewConfiguration",
-    "WKUIDelegate",
-    "WKDownload",
-    "WKDownloadDelegate",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
@@ -321,38 +296,28 @@ windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
-    "Win32_Security_Cryptography",
 ] }
 # Trusted browser bridge (src/browser/bridge/windows.rs). Same versions wry 0.55 already
 # pulls in (Cargo.lock: webview2-com 0.38.2, windows 0.61.3), so no second copy is built.
 webview2-com = "0.38"
-windows = { version = "0.61", default-features = false, features = [
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_Foundation",
-    "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Security_Credentials_UI",
-] }
+windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", default-features = false, optional = true }
 webkit2gtk = { version = "2.0.2", default-features = false, optional = true }
 # Reads the trusted bridge's JavaScriptCore values (browser/bridge/linux.rs); same pin as wry.
 javascriptcore = { package = "javascriptcore-rs", version = "=1.1.2", default-features = false, optional = true }
-# Browser vault key in the Secret Service (src/browser/vault/keystore/linux.rs); the same zbus 5
-# notify-rust already pulls in.
-zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 
 [dev-dependencies]
 tempfile = "3.17"
 tokio-test = "0.4"
 tokio = { version = "1.53", features = ["test-util"] }
-
-# tests/wry_delegate_classes_macos.rs builds a wry webview directly; the same wry tauri runs on.
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-wry = { version = "0.55", default-features = false }
 
 [profile.release]
 lto = "thin"

@@ -116,6 +116,40 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 cargo run --manifest-path src-tauri/Cargo.toml -- --daemon
 ```
 
+## REMOTE BUILDS: CODESPACES / CIRCLECI (PREFER THESE)
+
+Use Codespaces or CircleCI when a Linux build must not run on the local machine. Do **not** use Google Cloud Shell for this repo: measured 2026-11-06, a full Linux debug build takes **29 min** and `target/` grows to **5.5 GB**, which does not fit Cloud Shell's 4.8 GB persistent home — every run becomes a cold rebuild, and its 40 min inactivity cap leaves no headroom. Cloud Shell also ends at 100% disk unless `crate-type` is reduced.
+
+Routine development still builds locally on the 16-core Mac, where `target/` is warm and incremental. Remote builds are for clean Linux x86-64 verification only.
+
+```bash
+# Codespaces — 32 GB persistent /workspaces, ssh, sudo. Default machine is
+# basicLinux32gb (2 vCPU / 8 GB); a 4-core standardLinux32gb codespace in the hub is reused if present.
+~/code/project/build-farm/bin/remote-build codespace --project ferryx
+~/code/project/build-farm/bin/remote-build codespace --project ferryx --release
+
+# CircleCI — fresh container per run. The backend already selects resource_class
+# `large` (4 vCPU / 8 GB) when --project ferryx is given.
+~/code/project/build-farm/bin/remote-build circleci --project ferryx
+```
+
+Backend connectivity and full builds verified 2026-11-06:
+
+- **CircleCI `--project ferryx` builds green** — `Finished dev profile [unoptimized] target(s) in 14m 21s`, producing `ferryx` (411 MB), `ferryx-cli`, `ferryx-relay`, `ferryx-account` (`STATUS: success`). It uses resource_class `large` (4 vCPU / 8 GB, measured).
+- **Codespaces works as a build host but is too small for a cold build** — a run compiled `libspa-sys` and `ffmpeg-sys-next` cleanly, then the `ferryx` lib rustc was SIGTERM'd. The hub codespace is 2 vCPU / 8 GB with a 30 min idle timeout, so a ~25 min cold build sits on the edge. Use CircleCI for full builds; Codespaces is for quick probes.
+- **The backend now sends the local recipe** (gist + URL, since CircleCI rejects pipeline parameter values past ~500 chars). Previously `--project` read `recipes/` from the hub repo on GitHub, so local fixes silently did not apply.
+- **CircleCI's default image for recipes is `cimg/base:current`**, not `ubuntu:24.04` — the plain ubuntu image has no `curl`.
+
+- CircleCI `--project` picks up this checkout's `recipes/` even before they are committed. The remote job still clones `Indosaram/ferryx` at the given ref, so source edits must be pushed.
+
+Linux build facts that cost a full experiment to learn — apply them when a remote build fails:
+
+- **Disk is the real limit.** `crate-type = ["staticlib", "cdylib", "rlib"]` builds `libferryx_lib.a` at several GB and fills a 119 GB disk. Set `CARGO_PROFILE_DEV_DEBUG=0` and, on small disks, reduce `crate-type` to `["rlib"]`.
+- **System deps beyond the CI list:** `libpipewire-0.3-dev libspa-0.2-dev` (libspa-sys), `libclang-dev clang` (bindgen), and the ffmpeg dev packages. On Debian multiarch, ffmpeg headers live under `/usr/include/x86_64-linux-gnu/`; symlink `libav*`/`libsw*` into `/usr/include/` if bindgen reports them missing.
+- **Zig 0.17.0 is required** (`REQUIRED_ZIG_VERSION`). Match it exactly; a partial version prefix also fails.
+- **Never delete `.git`.** `build_ghostty.rs` verifies the ghostty submodule SHA with `git rev-parse HEAD`, so a `.git`-less checkout fails with `Failed to resolve git HEAD in submodule`.
+- **Remote builds only see GitHub HEAD.** Uncommitted local edits and untracked files are not included.
+
 ## LOCAL RELEASES
 - Releases are local-only: GitHub Actions may run pull-request checks, while the site deploys
   separately to Cloudflare Workers; hosted workflows must

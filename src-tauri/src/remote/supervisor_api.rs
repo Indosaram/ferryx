@@ -51,10 +51,14 @@ pub(crate) async fn http_observe(
     }
 }
 
+/// `POST /api/v1/supervisor/pause` body. With `laneKey` it pauses or resumes that one lane (the
+/// original contract). Without it the owner pauses or resumes the whole supervisor (`{paused}`,
+/// the frozen panel contract): the hub-wide flag recovery and answers read before they act.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct PauseBody {
-    lane_key: String,
+    #[serde(default)]
+    lane_key: Option<String>,
     paused: bool,
 }
 
@@ -73,6 +77,31 @@ pub(crate) async fn http_snapshot(
         .into_response()
 }
 
+/// `GET /api/v1/supervisor/panel`: the whole panel in one snapshot. Owner only: it carries
+/// prompt bodies, so only a machine Control device agent control admits may read it.
+pub(crate) async fn http_panel(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, true) {
+        return response;
+    }
+    no_store(serde_json::json!(crate::hub_runtime::supervisor_panel(&state).await))
+}
+
+/// `GET /api/v1/fleet/sessions`: `{sessions}` in the fleet shape. Owner only. This gateway has
+/// no path to the hub's paired-host fleet, so the list is this computer's sessions mapped the
+/// same way the hub maps each machine.
+pub(crate) async fn http_fleet_sessions(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, true) {
+        return response;
+    }
+    no_store(serde_json::json!({ "sessions": crate::hub_runtime::panel_autonomy::fleet_sessions(&state).await }))
+}
+
 pub(crate) async fn http_pause(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -85,22 +114,66 @@ pub(crate) async fn http_pause(
     let Ok(Json(body)) = body else {
         return reference_chat_error(
             ScopeErrorCode::InvalidRequest,
-            "the pause body must be {laneKey, paused}",
+            "the pause body must be {paused} or {laneKey, paused}",
         );
     };
     let by = format!("remote:{}", device.id);
-    match crate::hub_runtime::set_lane_paused(&state, &body.lane_key, body.paused, &by).await {
+    let Some(lane_key) = body.lane_key else {
+        return match crate::hub_runtime::set_supervisor_paused(&state, body.paused, &by).await {
+            Ok(changed) => no_store(serde_json::json!({ "paused": body.paused, "changed": changed })),
+            Err(error) => control_refusal(&error),
+        };
+    };
+    match crate::hub_runtime::set_lane_paused(&state, &lane_key, body.paused, &by).await {
         Ok(changed) => (
             StatusCode::OK,
             [(header::CACHE_CONTROL, "no-store")],
             Json(serde_json::json!({
-                "laneKey": body.lane_key,
+                "laneKey": lane_key,
                 "paused": body.paused,
                 "changed": changed,
             })),
         )
             .into_response(),
         Err(error) => pause_refusal(&error),
+    }
+}
+
+/// The machine error envelope one direct-control refusal answers with.
+fn control_refusal(error: &crate::hub_runtime::SupervisorControlError) -> Response {
+    use crate::hub_runtime::SupervisorControlError as Refused;
+    use ferryx_hub::supervisor::undo::UndoError;
+    let status = match error {
+        Refused::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        Refused::NoOwnerHome => StatusCode::BAD_REQUEST,
+        Refused::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        Refused::Undo(UndoError::NotSupported) => StatusCode::UNPROCESSABLE_ENTITY,
+        Refused::Undo(UndoError::Nothing(_)) => StatusCode::NOT_FOUND,
+        Refused::Undo(UndoError::Stale(_)) => StatusCode::CONFLICT,
+        Refused::Undo(UndoError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+        Refused::Undo(UndoError::Failed(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    machine_error_with_details(status, error.code(), &error.to_string(), serde_json::Map::new())
+}
+
+/// `POST /api/v1/supervisor/actions/{id}/undo`: the panel's Undo on one action-log line. Only a
+/// machine Control device the agent-control policy admits may undo; no body.
+pub(crate) async fn http_action_undo(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let device = match agent_control_service::http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Ok(id) = id.parse::<i64>() else {
+        return reference_chat_error(ScopeErrorCode::InvalidRequest, "the action id must be a number");
+    };
+    tracing::info!(device = %device.id, id, "supervisor action undo requested");
+    match crate::hub_runtime::undo_supervisor_action(&state, id).await {
+        Ok(()) => no_store(serde_json::json!({ "undone": id })),
+        Err(error) => control_refusal(&error),
     }
 }
 
@@ -323,6 +396,64 @@ pub(crate) async fn http_conversation(
     )
     .await
     {
+        Ok(page) => no_store(page),
+        Err(failure) => service_refusal(&failure),
+    }
+}
+
+/// `POST /api/v1/supervisor/converse {text, mentions, requestId}`: one owner message answered
+/// by the supervisor on the `app` channel; both rows land in the app transcript. Only a machine
+/// Control device the agent-control policy admits may send it; any other device is 403.
+pub(crate) async fn http_converse(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<
+        Json<ferryx_hub::supervisor::transcript::ConverseInput>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let device = match agent_control_service::http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Ok(Json(input)) = body else {
+        return reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "the body must be {text, mentions, requestId}",
+        );
+    };
+    let caller = crate::hub_runtime::SupervisorCaller::Remote {
+        device_id: device.id.clone(),
+    };
+    match crate::hub_runtime::supervisor_converse(&state, caller, input).await {
+        Ok(answer) => no_store(answer),
+        Err(failure) => service_refusal(&failure),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TranscriptQuery {
+    #[serde(default)]
+    cursor: Option<i64>,
+}
+
+/// `GET /api/v1/supervisor/transcript?cursor=`: one page of the app transcript, oldest first.
+pub(crate) async fn http_transcript(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    query: Result<
+        axum::extract::Query<TranscriptQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, false) {
+        return response;
+    }
+    let Ok(axum::extract::Query(query)) = query else {
+        return reference_chat_error(ScopeErrorCode::InvalidRequest, "the query must be [cursor]");
+    };
+    match crate::hub_runtime::supervisor_transcript(&state, query.cursor.unwrap_or(0)).await {
         Ok(page) => no_store(page),
         Err(failure) => service_refusal(&failure),
     }

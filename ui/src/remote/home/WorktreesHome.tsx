@@ -13,13 +13,15 @@ export type WorktreesHomeProps = {
   readonly children: ReactNode;
   /** Trailing header content; wins over `onOpenAccount`. */
   readonly headerAction?: ReactNode;
+  /** Where the session already open on this phone lives, shown under the header title. */
+  readonly contextTitle?: string | null;
   /** Opens the Account sheet from this header when no `headerAction` is given. */
   readonly onOpenAccount?: () => void;
   /** Pull-to-refresh on the list; defaults to the refresh the phone home provides. */
   readonly onRefresh?: RefreshHandler;
 };
 
-export function WorktreesHome({ children, headerAction, onOpenAccount, onRefresh }: WorktreesHomeProps) {
+export function WorktreesHome({ children, headerAction, contextTitle, onOpenAccount, onRefresh }: WorktreesHomeProps) {
   const trailing = headerAction ?? (onOpenAccount ? <AccountButton onOpen={onOpenAccount} /> : undefined);
   const contextRefresh = useContext(PullToRefreshContext);
   const refresh = onRefresh ?? contextRefresh;
@@ -30,7 +32,7 @@ export function WorktreesHome({ children, headerAction, onOpenAccount, onRefresh
   const pullContent = pullContentProps(pull);
   return (
     <div data-testid="worktrees-home" className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat-screen">
-      <PhoneHomeHeader title="Worktrees" trailing={trailing} />
+      <PhoneHomeHeader title="Worktrees" contextTitle={contextTitle} trailing={trailing} />
       <div ref={scrollRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {refresh ? <PullToRefreshIndicator {...pull} /> : null}
         <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col", pullContent.className)} style={pullContent.style}>

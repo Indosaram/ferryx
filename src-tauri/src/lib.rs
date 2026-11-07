@@ -1065,9 +1065,13 @@ fn install_macos_file_drop_destination<R: tauri::Runtime>(
     if let Err(error) = crate::macos_file_drop::install(raw_window, move |paths, x, y| {
         let payload = serde_json::json!({ "paths": paths, "position": { "x": x, "y": y } });
         if let Err(error) = app_handle.emit_to(label.as_str(), "ferryx://file-drop", payload) {
+            crate::macos_file_drop::trace_note(&format!("emit failed: {error}"));
             tracing::warn!("failed to forward file drop to the frontend: {error}");
+        } else {
+            crate::macos_file_drop::trace_note(&format!("emit: forwarded to window {label}"));
         }
     }) {
+        crate::macos_file_drop::trace_note(&format!("install failed: {error}"));
         tracing::warn!("failed to install the macOS file drop destination: {error}");
     }
 
@@ -1956,11 +1960,14 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_set_active_selection,
         cmd_remote_get_active_selection,
         cmd_remote_set_window_focused,
+        cmd_session_mute,
         cmd_project_initial,
         cmd_boot_trace,
         crate::ipc::system_resources::cmd_system_resources,
         crate::ipc::agent_prompt::cmd_agent_prompt_get,
         crate::ipc::agent_prompt::cmd_agent_prompt_answer,
+        crate::ipc::reference_chat::cmd_desktop_reference_chat_identity,
+        crate::ipc::reference_chat::cmd_desktop_reference_chat,
         cmd_project_register,
         cmd_sync_desktop_local_projects,
         cmd_sync_desktop_sidebar,
@@ -2053,15 +2060,26 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::supervisor::cmd_supervisor_set_paused,
         ipc::agent_control_settings::cmd_agent_control_get,
         ipc::agent_control_settings::cmd_agent_control_set,
+        ipc::agent_control_settings::cmd_agent_control_enable_owner,
         ipc::supervisor::cmd_supervisor_goal,
         ipc::supervisor::cmd_supervisor_request,
         ipc::supervisor::cmd_supervisor_adopt_archived,
         ipc::supervisor::cmd_supervisor_adoptable,
         ipc::supervisor::cmd_supervisor_read,
+        ipc::supervisor::cmd_supervisor_converse,
+        ipc::supervisor::cmd_supervisor_transcript_export,
+        ipc::supervisor::cmd_supervisor_panel,
         ipc::supervisor::cmd_supervisor_move_here,
         ipc::supervisor::cmd_supervisor_setup_status,
         ipc::supervisor::cmd_supervisor_setup_run,
         ipc::supervisor::cmd_supervisor_adopt_all,
+        ipc::supervisor::cmd_session_stop,
+        ipc::supervisor::cmd_supervisor_answer,
+        ipc::supervisor::cmd_supervisor_pause,
+        ipc::supervisor::cmd_supervisor_settings,
+        ipc::supervisor::cmd_supervisor_action_undo,
+        ipc::supervisor::cmd_supervisor_start,
+        ipc::supervisor::cmd_supervisor_dispatch,
         cmd_browser_create,
         cmd_browser_open_devtools,
         cmd_browser_inject_element_picker,

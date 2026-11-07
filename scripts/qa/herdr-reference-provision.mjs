@@ -84,6 +84,7 @@ import {
   ownerHostReceiptRequirement,
   registerWorkspaceOnDaemon,
   workspaceRegistrationFor,
+  isolatedPaneCwd,
   probeProcessIdentity,
   redactUrl,
   repoRoot,
@@ -773,6 +774,14 @@ async function spawnOriginalPty(host, session, ledger, args, transport) {
       throw blocked(registered.reason, registered.detail);
     }
     const requestId = session.clientRequestId || ("herdr-ref-" + session.backendSessionId);
+    // history.rs CONTROL_CONFLICT refuses a cwd shared by another live session.
+    // Each pane gets its own directory under the registered root. The transcript
+    // plant retargets to this same path, and continuation sends it as cwdRelative
+    // so resume_cwd.rs matching_cwd still agrees.
+    const paneCwd = session.cwd && session.cwd !== registration.repoRoot
+      ? session.cwd
+      : isolatedPaneCwd(registration.repoRoot, session.backendSessionId || requestId);
+    mkdirSync(paneCwd, { recursive: true });
     const response = await client.call({
       type: "spawn",
       clientRequestId: requestId,
@@ -781,7 +790,7 @@ async function spawnOriginalPty(host, session, ledger, args, transport) {
       // created. Registering and spawning must name the same id.
       workspaceId: registered.workspaceId,
       worktree: session.worktree || null,
-      cwd: session.cwd || null,
+      cwd: paneCwd,
       cols: session.cols,
       rows: session.rows,
       // The wrapper IS the shell the daemon launches; resolve_shell_command_pure uses a
@@ -899,6 +908,7 @@ async function spawnOriginalPty(host, session, ledger, args, transport) {
         declaredRoot: registration.declaredRoot,
         request: "registerWorkspace",
       },
+      cwd: paneCwd,
     };
   } finally {
     client.close();
@@ -1404,6 +1414,48 @@ async function acquireSshOwnerHostReceipt({ host, create, args, ledger, candidat
 }
 
 
+/**
+ * Registry ids with a native reader. Same set as
+ * `ReferenceNativeHistoryKind::from_registry_id`
+ * (src-tauri/src/remote/reference_chat/types.rs:201-220).
+ */
+export const NATIVE_READER_IDS = Object.freeze([
+  "claude", "codex", "omp", "omo", "gjc", "pi", "copilot",
+  "antigravity", "agy", "kimi", "grok", "cline", "opencode",
+  "cursor", "cursor-agent", "crush",
+]);
+
+export function registryHasNativeReader(registryId) {
+  return NATIVE_READER_IDS.includes(String(registryId || "").trim().toLowerCase());
+}
+
+/**
+ * A local reference-chat host that already has a claude pane and no pane outside
+ * the native-reader set gets one bash pane labelled `droid`. types.rs:1496-1502:
+ * droid has no reader. history.rs:411-424 shows that pane as scrollback, not a
+ * provider-attributed rich row. Hosts without a claude pane are left unchanged.
+ */
+export function withUnsupportedRichPane(host) {
+  const sessions = Array.isArray(host && host.sessions) ? host.sessions.slice() : [];
+  if (!host || host.transport !== "local" || host.spawnSessions !== true) return sessions;
+  const hasClaude = sessions.some((session) => String(session.registryId || session.provider || "").trim().toLowerCase() === "claude");
+  if (!hasClaude) return sessions;
+  if (sessions.some((session) => !registryHasNativeReader(session.registryId || session.provider))) return sessions;
+  const template = sessions[0] || {};
+  sessions.push({
+    registryId: "droid",
+    provider: "droid",
+    cols: template.cols || 80,
+    rows: template.rows || 24,
+    clientRequestId: "herdr-ref-unsupported-rich-" + String(host.id || "local"),
+    workspaceId: template.workspaceId,
+    repoRoot: template.repoRoot,
+    loginArgs: template.loginArgs,
+    realShell: template.realShell,
+  });
+  return sessions;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   mkdirSync(args.out, { recursive: true });
@@ -1639,7 +1691,7 @@ async function main() {
     }
     for (const host of configuredHosts) {
       const hostRecord = hosts.find((entry) => entry.id === host.id);
-      for (const session of host.sessions || []) {
+      for (const session of withUnsupportedRichPane(host)) {
         const row = {
           hostId: host.id,
           // The owner a read or a mutation must carry is the one the OWNING gateway published
@@ -1667,6 +1719,9 @@ async function main() {
           transcriptPath: null,
           transcriptSha256: null,
           transport: host.transport,
+          workspaceId: typeof session.workspaceId === "string" && session.workspaceId.trim().length > 0
+            ? session.workspaceId.trim()
+            : null,
           missingIdentity: [],
         };
         for (const field of ["hostId", "ownerId", "epoch", "backendSessionId", "registryId", "pid", "executablePath", "cols", "rows"]) {
@@ -1728,6 +1783,10 @@ async function main() {
             row.daemonPid = spawned.daemonPid;
             row.daemonTransport = spawned.daemonTransport;
             row.workspaceRegistration = spawned.workspaceRegistration;
+            if (spawned.workspaceRegistration && spawned.workspaceRegistration.workspaceId) {
+              row.workspaceId = spawned.workspaceRegistration.workspaceId;
+            }
+            if (spawned.cwd) row.cwd = spawned.cwd;
             row.spawnedByThisRun = true;
             row.ptyIdentity = spawned.ptyIdentity;
             row.ptyIdentityPath = spawned.ptyIdentityPath;

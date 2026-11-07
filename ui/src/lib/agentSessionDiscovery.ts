@@ -16,6 +16,7 @@ const COPILOT_STORE_RE = new RegExp(`(?:^|/)\\.copilot/session-state/(${UUID_PAT
 const CURSOR_STORE_RE = new RegExp(`(?:^|/)\\.cursor/chats/[^/]+/(${UUID_PATTERN})/store\\.db(?:-(?:wal|shm))?$`);
 const KIMI_STORE_RE = new RegExp(`(?:^|/)\\.kimi/sessions/[^/]+/(${UUID_PATTERN})(?:/|$)`);
 const OMO_STORE_RE = new RegExp(`(?:^|/)\\.omo/sessions/[^/]+/[^/]+_(${UUID_PATTERN})\\.jsonl$`);
+const MAHO_STORE_RE = new RegExp(`(?:^|/)\\.maho/agent/sessions/[^/]+/[^/]+_(${UUID_PATTERN})\\.jsonl$`);
 const GJC_STORE_RE = new RegExp(`(?:^|/)(?:\\.gjc/agent|gjc)(?:/profiles/[^/]+)?/sessions/[^/]+/[^/]+_([0-9a-fA-F-]{8,64})\\.jsonl$`);
 const ANTIGRAVITY_STORE_RE = new RegExp(`(?:^|/)\\.gemini/antigravity-cli/conversations/(${UUID_PATTERN})\\.db(?:-(?:wal|shm))?$`);
 const PI_STORE_RE = new RegExp(`(?:^|/)\\.pi(?:/agent)?/sessions/[^/]+/[^/]+_(${UUID_PATTERN})\\.jsonl$`);
@@ -70,6 +71,10 @@ function matchesAgentCommand(command: string, agentType: string): boolean {
   if (normalizedAgent === "cline") {
     // The detached hub daemon serves every pane, so it never identifies this pane's session.
     return baseName === "cline" && !command.includes("--cline-hub-daemon");
+  }
+  if (normalizedAgent === "maho") {
+    // maho code's launcher binary is mhc; a session reported as maho is that process.
+    return baseName === "mhc";
   }
 
   return baseName === normalizedAgent;
@@ -158,6 +163,10 @@ export function extractSessionIdFromPath(agentType: string, filePath: string): s
     }
     case "omo": {
       const match = OMO_STORE_RE.exec(normalizedPath);
+      return match ? match[1]! : null;
+    }
+    case "maho": {
+      const match = MAHO_STORE_RE.exec(normalizedPath);
       return match ? match[1]! : null;
     }
     case "gjc": {

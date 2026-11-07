@@ -1,0 +1,93 @@
+{
+  "schema": "herdr-reference-chat/qa16-continuation/1",
+  "resumeStartup": {
+    "requestId": "req-resume",
+    "workspaceId": "ws-1",
+    "worktree": null,
+    "cols": 80,
+    "rows": 24,
+    "inheritFromSessionId": null,
+    "cwdRelative": null,
+    "startup": {
+      "kind": "agentContinue",
+      "agentType": "omp",
+      "providerSession": {
+        "key": "sessionId",
+        "id": "provider-1"
+      },
+      "mode": "resume"
+    }
+  },
+  "forkStartup": {
+    "requestId": "req-fork",
+    "workspaceId": "ws-1",
+    "worktree": null,
+    "cols": 80,
+    "rows": 24,
+    "inheritFromSessionId": null,
+    "cwdRelative": null,
+    "startup": {
+      "kind": "agentContinue",
+      "agentType": "claude",
+      "providerSession": {
+        "key": "sessionId",
+        "id": "provider-1"
+      },
+      "mode": "fork"
+    }
+  },
+  "workingRefusal": {
+    "created": false,
+    "code": "AGENT_CONTINUE_CONFLICT",
+    "sourceStopped": false
+  },
+  "claimConflict": {
+    "created": false,
+    "code": "AGENT_CONTINUE_CONFLICT"
+  },
+  "unknownCreate": [
+    {
+      "requestId": "req-unknown",
+      "code": "OPERATION_OUTCOME_UNKNOWN"
+    }
+  ],
+  "inventoryBefore": {
+    "sourceId": "sess-1",
+    "sessions": [
+      {
+        "id": "sess-1",
+        "running": true,
+        "pid": 42,
+        "cwd": "/work",
+        "workspaceId": "ws-1",
+        "providerSessionId": "provider-1",
+        "cols": 80,
+        "rows": 24
+      }
+    ]
+  },
+  "inventoryAfter": {
+    "sessions": [
+      {
+        "id": "sess-1",
+        "running": true,
+        "pid": 42,
+        "cwd": "/work",
+        "workspaceId": "ws-1",
+        "providerSessionId": "provider-1",
+        "cols": 80,
+        "rows": 24
+      },
+      {
+        "id": "sess-2",
+        "running": true,
+        "pid": 43,
+        "cwd": "/work",
+        "workspaceId": "ws-1",
+        "providerSessionId": "provider-2",
+        "cols": 80,
+        "rows": 24
+      }
+    ]
+  }
+}

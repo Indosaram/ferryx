@@ -2454,6 +2454,7 @@ dependencies = [
  "cbc",
  "chacha20poly1305",
  "cookie",
+ "dirs",
  "dispatch2",
  "ece",
  "ed25519-dalek",

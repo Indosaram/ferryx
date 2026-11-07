@@ -301,12 +301,12 @@ async function mountAccountHarness(initial: SessionRow[], chat?: {
   vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({ transport, close: () => {} });
 
   if (chat) {
-    const ready = r25State(() => screen.queryByTestId("mobile-home-tab-worktrees") !== null);
+    const ready = r25State(() => screen.queryByTestId("phone-panel-start-session") !== null);
     render(<RemoteApp />);
     await ready;
   } else {
     render(<RemoteApp />);
-    await waitFor(() => expect(screen.getByTestId("mobile-home-tab-worktrees")).toBeDefined());
+    await waitFor(() => expect(screen.getByTestId("phone-panel-start-session")).toBeDefined());
   }
 
   return {

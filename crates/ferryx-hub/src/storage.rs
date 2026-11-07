@@ -227,6 +227,20 @@ pub fn now_rfc3339() -> String {
 mod tests {
     use super::*;
 
+    /// sqlx keys applied migrations by version: two files sharing a version (a merge of two
+    /// branches that both took the next number) break every database that opens.
+    #[test]
+    fn embedded_migration_versions_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for migration in sqlx::migrate!("./migrations").iter() {
+            assert!(
+                seen.insert(migration.version),
+                "duplicate migration version {}",
+                migration.version
+            );
+        }
+    }
+
     fn sha384(text: &str) -> Vec<u8> {
         use sha2::{Digest, Sha384};
         Sha384::digest(text.as_bytes()).to_vec()

@@ -23,9 +23,11 @@ import {
   ThinkingBlock,
   ToolCallCard,
 } from "./MobileChatComponents";
+import { ReferenceTurnUsage } from "./referenceWorkGroup";
 import type {
   ReferenceAbandonedBranch,
   ReferencePart,
+  ReferenceTurnMeta,
   ReferenceTurnSource,
 } from "./referenceTypes";
 
@@ -57,6 +59,11 @@ export interface MobileChatMessageProps {
   referenceSource?: ReferenceTurnSource | null;
   /** Where a part's bytes live when the page does not carry them. */
   referenceContext?: ReferencePartRenderContext;
+  /**
+   * Turn model and token usage. Absent hides the line. MobileChatWorkspace must pass
+   * `referenceMeta={msg.referenceMeta}`; this file does not read the page itself.
+   */
+  referenceMeta?: ReferenceTurnMeta | null;
 }
 
 /** The "Worked for" time of a running turn, ticking on its own between polls. */
@@ -96,6 +103,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
   referenceAbandoned,
   referenceSource,
   referenceContext,
+  referenceMeta,
   className,
 }) => {
   const isUser = role === "user";
@@ -203,6 +211,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
     if (isRuntime || nobodyTyped) {
       return (
         <article aria-label={turnLabel} className={cn("mb-5 flex flex-col items-start gap-1 w-full", className)}>
+          <ReferenceTurnUsage meta={referenceMeta} />
           <ReferencePartList parts={visibleParts} context={referenceContext} timestamp={timestamp} />
           {hasProse && metaRow}
           <ReferenceTurnSkills parts={richParts} />
@@ -217,6 +226,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
           className
         )}
       >
+        <ReferenceTurnUsage meta={referenceMeta} />
         <div
           data-testid="user-message-bubble"
           className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5 bg-chat-user-bubble text-chat-foreground leading-relaxed text-base break-words select-text"
@@ -276,6 +286,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
         <ReferenceAbandonedBranchDisclosure abandoned={referenceAbandoned} />
       )}
 
+      <ReferenceTurnUsage meta={referenceMeta} />
       <ReferenceTurnSkills parts={richParts} />
 
       {durationLabel && hasWork && (

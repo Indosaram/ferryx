@@ -1,12 +1,16 @@
 import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { CONSENT_TEMPLATE_ID, consentMarkup, initAnalytics } from './analyticsRuntime';
-import { PLATFORMS } from './downloads';
+import { PLATFORMS, detectUserPlatform } from './downloads';
 
 // The download menu is a hydrated React island that unmounts its panel on the same click that
 // follows the link. This exercises the genuine component against the genuine capture listener.
 type JSDOMConstructor = typeof import('../../../ui/node_modules/jsdom/lib/api.js').JSDOM;
 
 const MEASUREMENT_ID = 'G-TESTID1234';
+// The menu picks its primary asset from navigator, so pin a macOS identity: the assertions below
+// name macOS asset URLs and this suite must not change verdict with the host that runs it.
+const MAC_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 let JSDOM: JSDOMConstructor;
 let react: typeof import('react');
@@ -37,10 +41,19 @@ async function mountMenu(variant: 'hero' | 'navbar' | 'compact') {
     `<!doctype html><html><head><template id="${CONSENT_TEMPLATE_ID}" data-measurement-id="${MEASUREMENT_ID}">` +
       consentMarkup({ privacyHref: '/privacy/' }) +
       `</template></head><body><div id="island"></div></body></html>`,
-    { url: 'https://ferryx.dev/', pretendToBeVisual: true },
+    {
+      url: 'https://ferryx.dev/',
+      pretendToBeVisual: true,
+      userAgent: MAC_USER_AGENT,
+    },
   );
   const win = dom.window;
   const doc = win.document;
+  // jsdom derives navigator from the host process, and the userAgent option alone is not the
+  // whole truth (platform feeds detection too), so pin every navigator field the menu reads.
+  Object.defineProperty(win.navigator, 'userAgent', { value: MAC_USER_AGENT, configurable: true });
+  Object.defineProperty(win.navigator, 'platform', { value: 'MacIntel', configurable: true });
+  Object.defineProperty(win.navigator, 'userAgentData', { value: undefined, configurable: true });
   win.localStorage.setItem('ferryx.site.analytics-consent', 'granted');
 
   const globals = globalThis as unknown as Record<string, unknown>;
@@ -86,7 +99,8 @@ async function mountMenu(variant: 'hero' | 'navbar' | 'compact') {
 describe('download menu instrumentation', () => {
   test('the hero primary link reports its own surface', async () => {
     const { doc, click, downloadEvents } = await mountMenu('hero');
-    const primary = doc.querySelector(`a[href="${PLATFORMS.macos.defaultAsset.url}"]`)!;
+    expect(detectUserPlatform()).toBe('macos');
+    const primary = doc.querySelector('[data-ferryx-location="hero_primary"]')!;
     expect(primary.closest('[data-ferryx-location]')?.getAttribute('data-ferryx-location')).toBe('hero_primary');
     await click(primary);
     expect(downloadEvents()).toEqual([
@@ -101,7 +115,7 @@ describe('download menu instrumentation', () => {
 
   test('the navbar primary link reports its own surface', async () => {
     const { doc, click, downloadEvents } = await mountMenu('navbar');
-    const primary = doc.querySelector(`a[href="${PLATFORMS.macos.defaultAsset.url}"]`)!;
+    const primary = doc.querySelector('[data-ferryx-location="navbar_primary"]')!;
     await click(primary);
     expect(downloadEvents()[0]).toMatchObject({ link_location: 'navbar_primary' });
   });

@@ -29,8 +29,8 @@ import {
   loadCollapsedProjects,
   loadSidebarWidth,
   loadWorktreeOrder,
-  MAX_SIDEBAR_WIDTH,
-  MIN_SIDEBAR_WIDTH,
+  DEFAULT_SIDEBAR_RANGE,
+  SUPERVISOR_SIDEBAR_RANGE,
   persistCollapsedProjects,
   persistSidebarWidth,
   persistWorktreeOrder,
@@ -42,15 +42,11 @@ import {
   SIDEBAR_WORKTREE_ORDER_STORAGE_KEY,
 } from "../lib/storageKeys";
 import type { RegisteredProject } from "../lib/tauri";
-import type { AttentionRow } from "../features/ferryx/attention/attentionModel";
-import type { AttentionPrompts } from "../features/ferryx/attention/attentionPrompts";
 import type { ActiveAgent, DirtyState, Worktree } from "../lib/types";
-import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { SidebarDragRow } from "./sidebar-dnd/SidebarDragRow";
 import { pruneWorktreeOrder, readSidebarDragData, worktreeOrdersEqual, type SidebarDragData } from "./sidebar-dnd/sidebarDragData";
 import { projectSortableId, SortableProjectSection } from "./sidebar-dnd/SortableProjectSection";
-import { SupervisorPanel, useSupervisorTyping } from "./supervisor/SupervisorPanel";
-import { setupProjectsFrom } from "../lib/supervisorSetupModel";
+import { SupervisorPanelHost } from "./supervisorPanel/SupervisorPanelHost";
 import { isStandaloneRemoteGroup, projectDisplayLabel, projectHostLabel } from "./sidebar/sidebarLabels";
 import { sidebarLiveState, type SidebarProjectNode, type SidebarRowLive, type SidebarWorktreeNode } from "./sidebar/sidebarModel";
 import { applyWorktreeOrder, emptyProjectGroupIds, groupWorktreesByProject, initialCollapsedProjects, seedCollapsedProjects } from "./sidebar/sidebarRows";
@@ -104,21 +100,11 @@ type SidebarProps = {
   onOpenResources?: () => void;
   onToggle?: () => void;
   onHide?: () => void;
-  /** Present when the sidebar offers the attention inbox as a sub view behind its header icon. */
-  attention?: SidebarAttention;
-};
-
-export type SidebarAttention = {
-  rows: readonly AttentionRow[];
-  onOpen: (row: AttentionRow) => void;
-  onDismiss: (row: AttentionRow) => void;
-  onDismissAll: () => void;
-  /** Lets a needs-you row answer its pane's prompt inline. */
-  prompts?: AttentionPrompts;
-  /** Working panes the Inbox lists only once the daemon reads a prompt on them. */
-  candidates?: readonly AttentionRow[];
-  inboxOpen: boolean;
-  onInboxOpenChange: (open: boolean) => void;
+  /**
+   * Focuses the terminal tab of a Supervisor panel row. The panel is the sidebar's default view
+   * whenever this is set (App always sets it); a host without a focus target has no panel.
+   */
+  onFocusSupervisorSession?: (sessionRef: string) => void;
 };
 
 /**
@@ -153,17 +139,17 @@ export function Sidebar({
   onOpenResources,
   onToggle,
   onHide,
-  attention,
+  onFocusSupervisorSession,
 }: SidebarProps) {
-  const inboxOpen = attention?.inboxOpen ?? false;
-  const [supervisorOpenState, setSupervisorOpen] = useState(false);
-  const advancedFeatures = useAdvancedFeatures();
-  const supervisorOpen = supervisorOpenState && !inboxOpen && advancedFeatures;
-  const supervisorTyping = useSupervisorTyping();
-  const sidebarView: SidebarViewId = supervisorOpen ? "supervisor" : inboxOpen ? "inbox" : "worktrees";
+  // The autonomy panel is the sidebar's Supervisor view: it opens by default and is not behind
+  // advanced features. The project tree is the other view; there is no Inbox view.
+  const panelMode = onFocusSupervisorSession !== undefined;
+  const widthRange = panelMode ? SUPERVISOR_SIDEBAR_RANGE : DEFAULT_SIDEBAR_RANGE;
+  const [chosenView, setChosenView] = useState<SidebarViewId>(panelMode ? "supervisor" : "worktrees");
+  const sidebarView: SidebarViewId = panelMode ? chosenView : "worktrees";
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [resizing, setResizing] = useState(false);
-  const [width, setWidth] = useState(loadSidebarWidth);
+  const [width, setWidth] = useState(() => loadSidebarWidth(widthRange));
   const widthRef = useRef(width);
   widthRef.current = width;
   const [worktreeOrder, setWorktreeOrder] = useState<WorktreeOrder>(loadWorktreeOrder);
@@ -178,7 +164,6 @@ export function Sidebar({
   );
 
   const projectGroups = useMemo(() => groupProjects(projects), [projects]);
-  const setupProjects = useMemo(() => setupProjectsFrom(projects), [projects]);
   const emptyGroupIds = useMemo(
     () => emptyProjectGroupIds(projectGroups, emptyWorkspaceIds),
     [emptyWorkspaceIds, projectGroups],
@@ -375,16 +360,16 @@ export function Sidebar({
   const endResize = useCallback(() => {
     if (!dragRef.current) return;
     dragRef.current = null;
-    persistSidebarWidth(widthRef.current);
+    persistSidebarWidth(widthRef.current, widthRange);
     document.body.style.cursor = "";
     setResizing(false);
-  }, []);
+  }, [widthRange]);
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
-      const nextWidth = clampSidebarWidth(drag.startWidth + event.clientX - drag.startX);
+      const nextWidth = clampSidebarWidth(drag.startWidth + event.clientX - drag.startX, widthRange);
       widthRef.current = nextWidth;
       setWidth(nextWidth);
     };
@@ -397,7 +382,7 @@ export function Sidebar({
       window.removeEventListener("pointercancel", endResize);
       document.body.style.cursor = "";
     };
-  }, [endResize]);
+  }, [endResize, widthRange]);
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -417,10 +402,10 @@ export function Sidebar({
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     const delta = event.key === "ArrowLeft" ? -SIDEBAR_KEYBOARD_STEP : SIDEBAR_KEYBOARD_STEP;
-    const nextWidth = clampSidebarWidth(widthRef.current + delta);
+    const nextWidth = clampSidebarWidth(widthRef.current + delta, widthRange);
     widthRef.current = nextWidth;
     setWidth(nextWidth);
-    persistSidebarWidth(nextWidth);
+    persistSidebarWidth(nextWidth, widthRange);
   };
 
   const handleDragStart = (event: DragStartEvent) => {
@@ -488,7 +473,7 @@ export function Sidebar({
     <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd} onDragCancel={() => setActiveDrag(null)}>
       <aside
         className="relative flex h-full shrink-0 flex-col overflow-hidden bg-worktree-sidebar text-worktree-sidebar-foreground"
-        style={{ width: `${width}px`, minWidth: `${MIN_SIDEBAR_WIDTH}px`, maxWidth: `${MAX_SIDEBAR_WIDTH}px` }}
+        style={{ width: `${width}px`, minWidth: `${widthRange.min}px`, maxWidth: `${widthRange.max}px` }}
       >
         <SidebarView
           model={model}
@@ -508,24 +493,17 @@ export function Sidebar({
             hideSidebar: hide ?? noop,
             openSettings: () => onOpenSettings?.(),
             openResources: onOpenResources ?? noop,
-            onViewChange: attention
-              ? (view) => {
-                  setSupervisorOpen(view === "supervisor");
-                  if ((view === "inbox") !== inboxOpen) attention.onInboxOpenChange(view === "inbox");
-                }
-              : undefined,
+            onViewChange: panelMode ? setChosenView : undefined,
           }}
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}
-          inbox={attention}
-          supervisor={attention ? { typing: supervisorTyping, content: <SupervisorPanel projects={setupProjects} /> } : undefined}
+          supervisor={onFocusSupervisorSession ? { content: <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} /> } : undefined}
           titlebarLeading={isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
           titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
           shortcuts={{
             hideSidebar: hide ? "sidebar.left.toggle" : undefined,
             addProject: "project.add",
             settings: onOpenSettings ? "settings.toggle" : undefined,
-            inbox: "notifications.toggle",
           }}
           projectChrome={projectChrome}
           renderRow={renderRow}
@@ -536,8 +514,8 @@ export function Sidebar({
           role="separator"
           aria-label="Resize sidebar"
           aria-orientation="vertical"
-          aria-valuemin={MIN_SIDEBAR_WIDTH}
-          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuemin={widthRange.min}
+          aria-valuemax={widthRange.max}
           aria-valuenow={width}
           tabIndex={0}
           onPointerDown={startResize}

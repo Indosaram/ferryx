@@ -922,6 +922,32 @@ pub(crate) async fn get_active_running_sessions(
     sessions
 }
 
+/// A published desktop flag must not mark a backend the registry still has running as exited.
+async fn published_session_is_registry_live(state: &RemoteGatewayState, session_id: &str) -> bool {
+    if let Ok(details) = state.session_backend.describe_session(session_id).await {
+        if details.running {
+            return true;
+        }
+    }
+    if let Some(session) = state.terminal_service.get_session(session_id) {
+        if matches!(
+            session.state(),
+            crate::terminal::PtySessionState::Running | crate::terminal::PtySessionState::Starting
+        ) {
+            return true;
+        }
+    }
+    if let Some(details) = state.terminal_service.remote().details(session_id) {
+        if matches!(
+            details.state,
+            crate::terminal::remote::RemoteConnectionState::Connected
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
 async fn list_legacy_sessions(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -1185,6 +1211,16 @@ async fn get_workspace_state(
 
     let worktrees = cache.worktrees_for(&active_ws, active_selection.as_ref());
     let ssh_rows: Vec<_> = ssh_projects.iter().map(|(project, _)| project.clone()).collect();
+    for tab in active_context.terminal_tabs.iter_mut() {
+        let Some(session_id) = tab.session_id.clone() else {
+            continue;
+        };
+        if tab.running == Some(false)
+            && published_session_is_registry_live(&state, &session_id).await
+        {
+            tab.running = None;
+        }
+    }
     let mut sessions = get_active_running_sessions(&state, &cache, &ssh_rows).await;
 
     if let Some(ref session_id) = active_context.session_id {
@@ -1204,12 +1240,22 @@ async fn get_workspace_state(
                 s.worktree_label = Some("default".to_string());
             }
         } else {
+            let published_running = active_context
+                .terminal_tabs
+                .iter()
+                .find(|tab| tab.session_id.as_deref() == Some(session_id.as_str()))
+                .and_then(|tab| tab.running);
+            let running = if published_session_is_registry_live(&state, session_id).await {
+                true
+            } else {
+                published_running.unwrap_or(true)
+            };
             sessions.push(RemoteTerminalSession {
                 session_id: session_id.clone(),
                 title: Some("Terminal".to_string()),
                 workspace_id: Some(active_ws.clone()),
                 worktree_label: Some("default".to_string()),
-                running: true,
+                running,
             });
             sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         }
@@ -1874,10 +1920,14 @@ async fn ws_events_handler(
             "MACHINE_SERVICE_UNAVAILABLE".into(),
         ))?;
         let receiver = services.workspaces.machine_events.subscribe();
+        // The owner's own devices (agent control admits them) also get prompt bodies on the
+        // `panel.session` frames; every other machine device gets state only. The socket asks the
+        // policy again for every frame, so a later change takes effect at once.
+        let device_id = device.id.clone();
         return Ok(ws.on_upgrade(move |socket| async move {
             let _ = while_device_authorized(
                 &mut revocation,
-                super::machine_events::serve(socket, state, receiver),
+                super::machine_events::serve(socket, state, receiver, device_id),
             )
             .await;
         }));
@@ -1887,6 +1937,7 @@ async fn ws_events_handler(
     // is then queued as a follow-up event, never missed by this client.
     let rx = state.event_tx.subscribe();
     let agent_rx = state.agent_events.subscribe();
+    let history_rx = state.agent_events.subscribe_history();
     let active_selection = state.active_selection();
     Ok(ws.on_upgrade(move |socket| async move {
         let _ = while_device_authorized(
@@ -1895,6 +1946,7 @@ async fn ws_events_handler(
                 socket,
                 rx,
                 agent_rx,
+                history_rx,
                 state.machine_services.clone(),
                 active_selection,
             ),
@@ -1917,10 +1969,53 @@ async fn while_device_authorized<T>(
     }
 }
 
+/// The mirror events socket hides machine-only sessions, the same rule as prompt pushes.
+///
+/// A frame that does not name a session is not exposed when machine services can answer
+/// ownership. With no machine services there is no machine-only session to hide.
+async fn reference_history_mirror_frame(
+    prompts: &mut crate::agent_control::events::PromptChangeFilter,
+    machine_services: &Option<Arc<crate::daemon::MachineServices>>,
+    frame: &str,
+) -> Option<String> {
+    let Some(services) = machine_services else {
+        return Some(frame.to_string());
+    };
+    let session_id = crate::agent_control::events::reference_history_frame_session(frame)?;
+    let exposed = match prompts.exposure(&session_id) {
+        Some(exposed) => exposed,
+        None => match mirror_session_exposed(&services.sessions, &session_id).await {
+            Ok(exposed) => {
+                prompts.remember_exposure(&session_id, exposed);
+                exposed
+            }
+            // Unknown ownership stays hidden for this reading only.
+            Err(()) => false,
+        },
+    };
+    exposed.then(|| frame.to_string())
+}
+
+/// Whether a Mirror caller may see this session.
+///
+/// `Ok(false)` is machine-only. `Err` is an ownership lookup that failed; the mirror events
+/// socket hides that reading and does not cache it. Callers with no machine services have
+/// nothing to hide and do not call this.
+async fn mirror_session_exposed(
+    services: &Arc<crate::daemon::session_service::DaemonSessionService>,
+    session_id: &str,
+) -> Result<bool, ()> {
+    match services.machine_only_async(session_id).await {
+        Ok(machine_only) => Ok(!machine_only),
+        Err(_) => Err(()),
+    }
+}
+
 async fn handle_events_socket(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<String>,
     mut agent_rx: broadcast::Receiver<crate::agent_control::events::AgentObservation>,
+    mut history_rx: broadcast::Receiver<String>,
     machine_services: Option<Arc<crate::daemon::MachineServices>>,
     active_selection: Option<RemoteActiveDesktopSelection>,
 ) {
@@ -1936,11 +2031,23 @@ async fn handle_events_socket(
     }
     let mut prompts = crate::agent_control::events::PromptChangeFilter::default();
     let mut agent_open = true;
+    let mut history_open = true;
     loop {
         let msg = tokio::select! {
             event = rx.recv() => match event {
                 Ok(msg) => msg,
                 Err(_) => break,
+            },
+            history = history_rx.recv(), if history_open => match history {
+                Ok(frame) => match reference_history_mirror_frame(&mut prompts, &machine_services, &frame).await {
+                    Some(frame) => frame,
+                    None => continue,
+                },
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
+                    history_open = false;
+                    continue;
+                }
             },
             observation = agent_rx.recv(), if agent_open => match observation {
                 Ok(observation) => {
@@ -1949,18 +2056,18 @@ async fn handle_events_socket(
                     if let Some(services) = &machine_services {
                         let exposed = match prompts.exposure(&observation.session_id) {
                             Some(exposed) => exposed,
-                            None => match services
-                                .sessions
-                                .machine_only_async(&observation.session_id)
-                                .await
+                            None => match mirror_session_exposed(
+                                &services.sessions,
+                                &observation.session_id,
+                            )
+                            .await
                             {
-                                Ok(machine_only) => {
-                                    prompts
-                                        .remember_exposure(&observation.session_id, !machine_only);
-                                    !machine_only
+                                Ok(exposed) => {
+                                    prompts.remember_exposure(&observation.session_id, exposed);
+                                    exposed
                                 }
                                 // Unknown ownership stays hidden for this reading only.
-                                Err(_) => false,
+                                Err(()) => false,
                             },
                         };
                         if !exposed {
@@ -4042,6 +4149,54 @@ async fn push_preferences(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMuteRequest {
+    session_ref: String,
+    muted: bool,
+}
+
+/// Mutes or unmutes phone push for one session (`<hostId>:<sessionId>`); the panel still lists
+/// it. Muting changes what every paired phone receives, so only a Control device may do it.
+async fn push_session_mute(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(payload): Json<SessionMuteRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let device = push_device(&state, &headers)?;
+    if device.permission != DevicePermission::Control {
+        return Err((StatusCode::FORBIDDEN, "Control permission required".into()));
+    }
+    state
+        .set_session_push_muted(&payload.session_ref, payload.muted)
+        .await
+        .map_err(|error| {
+            let status = match error.code {
+                crate::ipc::IpcErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, error.message)
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct PanelPresenceRequest {
+    visible: bool,
+}
+
+/// A paired client says whether it shows the panel (on show, on hide, and on a heartbeat while
+/// shown). While any client does, decision pushes are held back.
+async fn push_panel_presence(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(payload): Json<PanelPresenceRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let device = push_device(&state, &headers)?;
+    state.set_panel_visible(&device.id, payload.visible);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PushTestResponse {
@@ -4069,6 +4224,7 @@ async fn push_test(
         state: "test".into(),
         title: "Test alert".into(),
         body: "Phone alerts are working.".into(),
+        url: None,
     };
     let outcomes = futures_util::future::join_all(
         targets.iter().map(|sub| state.push.send(sub, &notification)),
@@ -4144,10 +4300,20 @@ pub(super) fn machine_error_with_details(
         .into_response()
 }
 
+pub(crate) fn machine_terminal_ready(state: &RemoteGatewayState) -> bool {
+    state.machine_services.as_ref().is_some_and(|services| {
+        services.workspaces.catalog().is_ok()
+            && services.workspaces.journal.session_revision().is_ok()
+    })
+}
+
 pub(super) fn authenticate_machine_request(
     state: &RemoteGatewayState,
     headers: &HeaderMap,
 ) -> Result<DeviceInfo, Box<Response>> {
+    if let Ok(device) = DESKTOP_REFERENCE_TRUST.try_with(DeviceInfo::clone) {
+        return Ok(device);
+    }
     let token = extract_token(headers)
         .ok_or_else(|| Box::new(machine_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED")))?;
     state
@@ -4215,6 +4381,134 @@ fn reference_chat_capability_identity(
     fields
 }
 
+/// Names advertised on `GET /api/v1/capabilities`.
+///
+/// Machine powers stay on a Machine-scope Control device. Reference-chat history and
+/// payload reads are served to any device, including View, so those two names are
+/// advertised whenever the terminal is ready. Composer control stays Control-only.
+/// `terminalContinueV1` stays machine-only: session create still requires Machine scope.
+fn gateway_capability_names(
+    machine_services: bool,
+    machine_scope: bool,
+    control: bool,
+    terminal_ready: bool,
+    catalog_ok: bool,
+    supervisor: bool,
+) -> Vec<&'static str> {
+    let mut capabilities = Vec::new();
+    if machine_services && machine_scope && control {
+        capabilities.extend([
+            "directoryBrowseV1",
+            "machineWorkspaceV1",
+            "managedWorktreesV1",
+            "pairedPasteUploadV1",
+            "pairedPasteUploadV2",
+            crate::paired_host::file_read::PAIRED_FILE_READ_CAPABILITY,
+            crate::paired_host::file_write::PAIRED_FILE_WRITE_CAPABILITY,
+        ]);
+        capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_LIST_CAPABILITY);
+        capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_MKDIR_CAPABILITY);
+        capabilities.push(super::repo_discovery::REPO_DISCOVERY_CAPABILITY);
+        capabilities.push(super::resources_api::RESOURCE_USAGE_CAPABILITY);
+        if terminal_ready {
+            capabilities.push("terminalCreateV1");
+            capabilities.push("terminalStreamV1");
+            capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY);
+            capabilities.extend(reference_chat_control_capabilities());
+        }
+        if catalog_ok {
+            capabilities.push(super::dag_api::DAG_STREAM_CAPABILITY);
+        }
+        capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
+        capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+        capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
+        capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
+        if supervisor {
+            capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
+            capabilities.push(supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
+        }
+    } else if control && terminal_ready {
+        capabilities.extend(reference_chat_control_capabilities());
+    } else if terminal_ready {
+        capabilities.extend(reference_chat_read_capabilities());
+    }
+    capabilities
+}
+
+fn reference_chat_read_capabilities() -> [&'static str; 2] {
+    [
+        reference_types::REFERENCE_HISTORY_DELTA_V1,
+        reference_types::REFERENCE_PAYLOAD_V1,
+    ]
+}
+
+fn reference_chat_control_capabilities() -> [&'static str; 3] {
+    let [history, payload] = reference_chat_read_capabilities();
+    [
+        history,
+        payload,
+        reference_control::REFERENCE_COMPOSER_CONTROL_CAPABILITY,
+    ]
+}
+
+#[cfg(test)]
+mod gateway_capability_name_tests {
+    use super::gateway_capability_names;
+    use crate::remote::reference_chat::control::REFERENCE_COMPOSER_CONTROL_CAPABILITY;
+    use crate::remote::reference_chat::types::{
+        REFERENCE_HISTORY_DELTA_V1, REFERENCE_PAYLOAD_V1,
+    };
+
+    #[test]
+    fn mirror_control_sees_reference_chat_and_not_machine_powers() {
+        let names = gateway_capability_names(true, false, true, true, true, true);
+        assert_eq!(
+            names,
+            vec![
+                REFERENCE_HISTORY_DELTA_V1,
+                REFERENCE_PAYLOAD_V1,
+                REFERENCE_COMPOSER_CONTROL_CAPABILITY,
+            ]
+        );
+    }
+
+    #[test]
+    fn mirror_without_a_ready_terminal_sees_nothing() {
+        assert!(gateway_capability_names(true, false, true, false, true, false).is_empty());
+    }
+
+    #[test]
+    fn a_view_device_sees_the_two_read_caps_when_the_terminal_is_ready() {
+        let expected = vec![REFERENCE_HISTORY_DELTA_V1, REFERENCE_PAYLOAD_V1];
+        assert_eq!(
+            gateway_capability_names(true, false, false, true, true, true),
+            expected,
+            "a mirror view device"
+        );
+        assert_eq!(
+            gateway_capability_names(true, true, false, true, true, true),
+            expected,
+            "a machine view device"
+        );
+        assert!(!expected.contains(&REFERENCE_COMPOSER_CONTROL_CAPABILITY));
+        assert!(gateway_capability_names(true, false, false, false, true, true).is_empty());
+        assert!(gateway_capability_names(true, true, false, false, true, false).is_empty());
+        assert!(gateway_capability_names(false, true, false, false, false, false).is_empty());
+    }
+
+    #[test]
+    fn machine_control_keeps_continuation_beside_reference_chat() {
+        let names = gateway_capability_names(true, true, true, true, false, false);
+        assert!(names.contains(&"directoryBrowseV1"));
+        assert!(names.contains(&"terminalContinueV1"));
+        assert!(names.contains(&REFERENCE_HISTORY_DELTA_V1));
+        assert_eq!(
+            names.iter().filter(|name| **name == REFERENCE_HISTORY_DELTA_V1).count(),
+            1
+        );
+    }
+}
+
 async fn get_capabilities(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -4228,35 +4522,24 @@ async fn get_capabilities(
     // The reference-chat host id this host publishes for itself. A mutation target names it;
     // `machineId` is a different value and never stands in for it.
     let reference_host_id = crate::remote::reference_chat::files::reference_host_id();
+    let capability_names = gateway_capability_names(
+        state.machine_services.is_some(),
+        device.access_scope == DeviceAccessScope::Machine,
+        device.permission == DevicePermission::Control,
+        machine_terminal_ready(&state),
+        state
+            .machine_services
+            .as_ref()
+            .is_some_and(|services| services.workspaces.catalog().is_ok()),
+        crate::hub_runtime::supervisor_available(),
+    );
     let mut document = serde_json::json!({
         "apiVersion": 1,
         "daemonEpoch": state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire).to_string(),
         "platform": std::env::consts::OS,
         "accessScope": device.access_scope,
         "permission": device.permission,
-        "capabilities": if state.machine_services.is_some() && device.access_scope == DeviceAccessScope::Machine && device.permission == DevicePermission::Control {
-            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", crate::paired_host::file_read::PAIRED_FILE_READ_CAPABILITY];
-            capabilities.push(super::repo_discovery::REPO_DISCOVERY_CAPABILITY);
-            capabilities.push(super::resources_api::RESOURCE_USAGE_CAPABILITY);
-            if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok()) {
-                capabilities.push("terminalCreateV1");
-                capabilities.push("terminalStreamV1");
-            }
-            // DAG frames are pushed from this machine's own journal watcher, so the
-            // capability is only real when the catalog that resolves roots is readable.
-            if state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok()) {
-                capabilities.push(super::dag_api::DAG_STREAM_CAPABILITY);
-            }
-            capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
-            capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
-            capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
-            capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
-            if crate::hub_runtime::supervisor_available() {
-                capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
-                capabilities.push(supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
-            }
-            capabilities
-        } else { vec![] },
+        "capabilities": capability_names,
         "browser": {
             "browserAvailable": browser_caps.browser_available,
             "supportedFormats": browser_caps.supported_formats,
@@ -4862,6 +5145,109 @@ async fn file_read_boundary(
     }
 }
 
+/// Writes one byte range of a regular host file for an authenticated machine peer.
+/// Admission matches paste-upload: the peer already holds control of this host.
+async fn file_write_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        true,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
+    let body = project_body(request, &admission).await?;
+    let req: super::machine_protocol::FileWriteRequest = super::machine_protocol::decode_json(
+        &body,
+        super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+    )
+    .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let outcome = crate::ipc::run_blocking(move || {
+        Ok(crate::paired_host::file_write::serve_host_write(&req, home.as_deref()))
+    })
+    .await
+    .map_err(|_| machine_error(StatusCode::INTERNAL_SERVER_ERROR, "MACHINE_SERVICE_UNAVAILABLE"))?;
+    match outcome {
+        Ok(result) => Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response()),
+        Err(error) => Err(machine_error(
+            StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            error.code(),
+        ).into()),
+    }
+}
+
+/// Lists one page of a host directory for an authenticated machine peer.
+async fn file_list_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        true,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
+    let body = project_body(request, &admission).await?;
+    let req: super::machine_protocol::FileListRequest = super::machine_protocol::decode_json(
+        &body,
+        super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+    )
+    .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let outcome = crate::ipc::run_blocking(move || {
+        Ok(crate::paired_host::file_tree::serve_host_list(&req, home.as_deref()))
+    })
+    .await
+    .map_err(|_| machine_error(StatusCode::INTERNAL_SERVER_ERROR, "MACHINE_SERVICE_UNAVAILABLE"))?;
+    match outcome {
+        Ok(result) => Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response()),
+        Err(error) => Err(machine_error(
+            StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            error.code(),
+        ).into()),
+    }
+}
+
+/// Creates one host directory for an authenticated machine peer.
+async fn file_mkdir_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    let admission = super::workspace_api::admit(
+        state.clone(),
+        headers.clone(),
+        true,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await?;
+    let body = project_body(request, &admission).await?;
+    let req: super::machine_protocol::FileMkdirRequest = super::machine_protocol::decode_json(
+        &body,
+        super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+    )
+    .map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let outcome = crate::ipc::run_blocking(move || {
+        Ok(crate::paired_host::file_tree::serve_host_mkdir(&req, home.as_deref()))
+    })
+    .await
+    .map_err(|_| machine_error(StatusCode::INTERNAL_SERVER_ERROR, "MACHINE_SERVICE_UNAVAILABLE"))?;
+    match outcome {
+        Ok(result) => Ok(([(header::CACHE_CONTROL, "no-store")], Json(result)).into_response()),
+        Err(error) => Err(machine_error(
+            StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST),
+            error.code(),
+        ).into()),
+    }
+}
+
 /// A session whose shell runs on an SSH remote or another paired host printed paths of
 /// THAT machine, not of this host: serving them would hand the paired desktop a
 /// different file under the same name. Session-less requests and host-local PTYs pass;
@@ -5061,6 +5447,7 @@ mod file_read_session_base_tests {
             path: path.into(),
             offset: 0,
             length: 16,
+            copy: false,
         }
     }
 
@@ -5828,6 +6215,7 @@ async fn remote_method_not_allowed() -> Response {
 // Route table (frozen contract section 3; the relay allowlist mirrors it in `relay_server.rs`):
 //
 //   GET    /api/v1/reference-chat/{sessionId}/history
+//   GET    /api/v1/reference-chat/{sessionId}/payload
 //   GET    /api/v1/reference-chat/{sessionId}/screen
 //   GET    /api/v1/reference-chat/{sessionId}/prompt
 //   POST   /api/v1/reference-chat/{sessionId}/submit
@@ -5849,12 +6237,15 @@ async fn remote_method_not_allowed() -> Response {
 // to. This gateway refuses such a read with a typed UNSUPPORTED rather than substituting a
 // local file for another host's conversation.
 
+use crate::remote::reference_chat::control as reference_control;
 use crate::remote::reference_chat::files as reference_files;
 use crate::remote::reference_chat::history as reference_history;
 use crate::remote::reference_chat::input::{self as reference_input, ReferenceInputClock};
+use crate::remote::reference_chat::payload as reference_payload;
 use crate::remote::reference_chat::prompts as reference_prompts;
 use crate::remote::reference_chat::screen as reference_screen;
 use crate::remote::reference_chat::types as reference_types;
+use crate::remote::reference_chat::watch as reference_watch;
 use crate::scoped_contracts::{
     AttachmentReceipt, ScopeError, ScopeErrorCode, ATTACHMENT_MAX_FILE_BYTES,
 };
@@ -5908,6 +6299,7 @@ pub(crate) struct ReferenceChatRuntime {
     #[cfg(test)]
     pub(crate) submit_staging_entered: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     preview_budget: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
+    composer: reference_control::ComposerHost,
 }
 
 impl ReferenceChatRuntime {
@@ -5960,6 +6352,12 @@ pub(crate) struct ReferenceChatReadQuery {
     cursor: Option<u64>,
     #[serde(default)]
     cursor_stream: Option<String>,
+    /// Rev3 replacement anchor, JSON object text. Absent keeps the rev2 page.
+    #[serde(default)]
+    after: Option<String>,
+    /// Opaque payload ref. Only the payload route reads it. A history read ignores it.
+    #[serde(default, rename = "ref")]
+    payload_ref: Option<String>,
 }
 
 /// The frozen mutation envelope plus the identity fields the contract adds where identified.
@@ -6266,6 +6664,9 @@ async fn reference_chat_identity(
         registry_id.unwrap_or("").to_string(),
     );
     if let Ok(details) = state.session_backend.describe_session(session_id).await {
+        // The history route already required this session id to be live. `running` is the
+        // same describe the handler just read: the agent process is still up. A miss stays false.
+        identity = identity.with_agent_running(details.running);
         if let Some(path) = details.worktree_path {
             identity = identity.with_cwd(path.to_string_lossy());
         }
@@ -6299,12 +6700,39 @@ async fn reference_chat_ensure_live(
         .iter()
         .any(|id| id == session_id)
     {
-        return Err(reference_chat_scope(
-            ScopeErrorCode::NotFound,
-            "no live session has that id on this host",
-        ));
+        return Err(reference_chat_unknown_session());
     }
     Ok(())
+}
+
+/// The refusal an unknown session gets. A machine-only session hidden from Mirror uses the same
+/// refusal, so the answer does not reveal that the session exists.
+fn reference_chat_unknown_session() -> ScopeError {
+    reference_chat_scope(
+        ScopeErrorCode::NotFound,
+        "no live session has that id on this host",
+    )
+}
+
+/// Hide a machine-only session from a Mirror device, the same predicate the mirror events socket uses.
+///
+/// A Machine-scope device is unaffected. With no machine services there is nothing to hide. An
+/// ownership lookup that fails is hidden, matching the events socket.
+async fn reference_chat_ensure_visible(
+    state: &RemoteGatewayState,
+    device: &DeviceInfo,
+    session_id: &str,
+) -> Result<(), ScopeError> {
+    if device.access_scope == DeviceAccessScope::Machine {
+        return Ok(());
+    }
+    let Some(services) = state.machine_services.as_ref() else {
+        return Ok(());
+    };
+    match mirror_session_exposed(&services.sessions, session_id).await {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(()) => Err(reference_chat_unknown_session()),
+    }
 }
 
 /// Authenticate, fence the target, and resolve the owning identity for one read.
@@ -6359,6 +6787,9 @@ async fn reference_chat_read_context_with(
             .load(std::sync::atomic::Ordering::Acquire),
     )
     .map_err(|error| reference_chat_refusal(&error))?;
+    reference_chat_ensure_visible(state, &device, session_id)
+        .await
+        .map_err(|error| reference_chat_refusal(&error))?;
     if require_live {
         reference_chat_ensure_live(state, session_id)
             .await
@@ -6420,6 +6851,9 @@ async fn reference_chat_mutation_context<P>(
             .load(std::sync::atomic::Ordering::Acquire),
     )
     .map_err(|error| reference_chat_refusal(&error))?;
+    reference_chat_ensure_visible(state, &device, session_id)
+        .await
+        .map_err(|error| reference_chat_refusal(&error))?;
     reference_chat_ensure_live(state, session_id)
         .await
         .map_err(|error| reference_chat_refusal(&error))?;
@@ -6462,7 +6896,12 @@ fn reference_chat_authorize(
     let auth = Arc::clone(&state.auth_manager);
     let state = Arc::clone(state);
     let target = target.clone();
+    // Captured now: the submit and answer transactions run on spawned tasks the scope does not reach.
+    let desktop_trusted = DESKTOP_REFERENCE_TRUST.try_with(|_| ()).is_ok();
     Box::new(move || {
+        if desktop_trusted {
+            return reference_chat_ensure_provider(&state, &target);
+        }
         let token = token.clone().ok_or_else(|| {
             reference_chat_scope(ScopeErrorCode::Unauthorized, "the caller's token is gone")
         })?;
@@ -6902,7 +7341,113 @@ async fn reference_chat_mutation_body<P: serde::de::DeserializeOwned>(
 // Reads
 // ---------------------------------------------------------------------------------------------
 
+/// A session whose live owner is a paired daemon. That owner emits its own history frame.
+fn reference_chat_session_has_paired_owner(state: &RemoteGatewayState, session_id: &str) -> bool {
+    state.machine_services.as_ref().is_some_and(|services| {
+        services
+            .sessions
+            .router()
+            .find_legacy_peer_for_session(session_id)
+            .is_some()
+    })
+}
+
+/// Register or refresh the owning-host watch for a resolved stream.
+///
+/// Called from the route after resolve, not from the history reader. A later delta read on this
+/// same function refreshes the TTL too. A sibling route that resolves its own stream should call
+/// this helper after that resolve; the reader does not need a hook.
+async fn reference_chat_note_history_watch(
+    state: &Arc<RemoteGatewayState>,
+    target: &reference_types::ReferenceTargetRef,
+    stream: &reference_history::ReferenceHistoryStream,
+) {
+    let paired = reference_chat_session_has_paired_owner(
+        state,
+        &target.target.backend_session_id,
+    );
+    let admit = reference_watch::admit_reference_history_watch(
+        target,
+        &reference_files::reference_host_id(),
+        &state.reference_owner_id,
+        paired,
+    );
+    let paths = if admit == reference_watch::HistoryWatchAdmit::Local {
+        reference_watch::reference_history_watch_paths(stream)
+    } else {
+        Vec::new()
+    };
+    state
+        .history_watch
+        .note_read(admit, target.clone(), paths)
+        .await;
+}
+
+#[cfg(test)]
+mod reference_history_watch_route_tests {
+    use super::{
+        reference_chat_note_history_watch, reference_files, reference_history, reference_types,
+        RemoteGatewayState,
+    };
+    use std::sync::Arc;
+
+    fn stream_for(
+        target: &reference_types::ReferenceTargetRef,
+        path: std::path::PathBuf,
+    ) -> reference_history::ReferenceHistoryStream {
+        reference_history::ReferenceHistoryStream {
+            source: reference_types::ReferenceHistorySource::ClaudeTranscript,
+            kind: reference_types::ReferenceNativeHistoryKind::Claude,
+            availability: reference_types::ReferenceHistoryAvailability::Native,
+            stream_id: "stream".into(),
+            location: reference_history::ReferenceHistoryLocation::File(path),
+            unavailable_reason: None,
+            owner: target.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resolved_local_stream_registers_and_a_foreign_target_does_not() {
+        let root = tempfile::tempdir().expect("root");
+        let path = root.path().join("session.jsonl");
+        std::fs::write(&path, b"turn\n").expect("transcript");
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::new(crate::terminal::TerminalService::default()),
+            crate::worktree::registry::WorkspaceRegistry::new(),
+        ));
+        state.history_watch.disarm_poller();
+        let local = reference_types::ReferenceTargetRef::without_provider_session(
+            crate::scoped_contracts::TargetRef {
+                host_id: reference_files::reference_host_id(),
+                owner_id: state.reference_owner_id.clone(),
+                epoch: crate::scoped_contracts::Epoch(0),
+                backend_session_id: "sess".into(),
+            },
+        );
+        reference_chat_note_history_watch(&state, &local, &stream_for(&local, path.clone())).await;
+        assert_eq!(state.history_watch.registration_count(), 1);
+
+        let foreign = reference_types::ReferenceTargetRef::without_provider_session(
+            crate::scoped_contracts::TargetRef {
+                host_id: "other-host".into(),
+                owner_id: state.reference_owner_id.clone(),
+                epoch: crate::scoped_contracts::Epoch(0),
+                backend_session_id: "other".into(),
+            },
+        );
+        reference_chat_note_history_watch(&state, &foreign, &stream_for(&foreign, path)).await;
+        assert_eq!(
+            state.history_watch.registration_count(),
+            1,
+            "a foreign host is not watched; its owner emits its own frame"
+        );
+    }
+}
+
 /// GET /api/v1/reference-chat/{sessionId}/history
+///
+/// A successful resolve also refreshes this host's metadata watch. A paired owner emits its own
+/// frame; this gateway does not synthesize one, and the relay is not taught to rewrite it.
 async fn reference_chat_history(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
@@ -6960,7 +7505,21 @@ where
         Ok(cursor) => cursor,
         Err(error) => return reference_chat_refusal(&error),
     };
+    let after = match reference_chat_after_anchor(query.after.as_deref()) {
+        Ok(after) => after,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    if cursor.is_some() && after.is_some() {
+        return reference_chat_refusal(&reference_chat_scope(
+            ScopeErrorCode::InvalidRequest,
+            format!(
+                "{}: cursor and after cannot be queried together",
+                reference_types::REFERENCE_HISTORY_CURSOR_AND_AFTER
+            ),
+        ));
+    }
     if reference_chat_session_is_remote(&state, &session_id).await {
+        state.history_watch.forget(&read.target);
         return reference_chat_error(
             ScopeErrorCode::Unsupported,
             "this session's transcript lives on its paired host; read it through that host's own \
@@ -6993,16 +7552,181 @@ where
             }})),
         ).into_response(),
     };
+    reference_chat_note_history_watch(&state, &read.target, &stream).await;
+    // An `after` query is answered from the newest page of this same window. The request
+    // cursor, not the page's older-page cursor, is what negotiation refuses alongside `after`.
+    let page_cursor = if after.is_some() { None } else { cursor.as_ref() };
     match reference_history::read_reference_history_page(
         &stream,
         &read.identity,
         limit,
-        cursor.as_ref(),
+        page_cursor,
     )
     .await
     {
-        Ok(page) => ([(header::CACHE_CONTROL, "no-store")], Json(page)).into_response(),
+        Ok(mut page) => {
+            reference_chat_attach_composer(&state, &read.identity, &mut page).await;
+            match crate::remote::reference_chat::history_delta::reference_history_negotiate(
+                &page,
+                &stream.stream_id,
+                cursor.as_ref(),
+                after.as_ref(),
+            ) {
+                Ok(crate::remote::reference_chat::history_delta::ReferenceHistoryRead::Page(_)) => {
+                    ([(header::CACHE_CONTROL, "no-store")], Json(&page)).into_response()
+                }
+                Ok(crate::remote::reference_chat::history_delta::ReferenceHistoryRead::Negotiated(body)) => {
+                    ([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
+                }
+                Err(error) => reference_chat_refusal(&error),
+            }
+        }
         Err(error) => reference_chat_refusal(&error),
+    }
+}
+
+/// Parse the optional rev3 `after` anchor. Missing is rev2. Present and unreadable is refused.
+fn reference_chat_after_anchor(
+    raw: Option<&str>,
+) -> Result<Option<reference_types::ReferenceHistoryAnchor>, ScopeError> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    serde_json::from_str(raw).map(Some).map_err(|error| {
+        reference_chat_scope(
+            ScopeErrorCode::InvalidRequest,
+            format!("the after anchor is not readable: {error}"),
+        )
+    })
+}
+
+/// Publish composer controls only when this provider's discovery succeeded.
+///
+/// A miss, a timeout, or a custom launch that does not map to the verified CLI omits the
+/// document. The history read itself still succeeds.
+async fn reference_chat_attach_composer(
+    state: &Arc<RemoteGatewayState>,
+    identity: &reference_history::ReferenceHistoryIdentity,
+    page: &mut reference_types::ReferenceHistoryPage,
+) {
+    if reference_control::probed_kind(&identity.registry_id).is_none() {
+        return;
+    }
+    let home = reference_chat_history_home(state).map(|path| path.to_string_lossy().into_owned());
+    reference_chat_runtime()
+        .composer
+        .attach_composer(
+            page,
+            &identity.registry_id,
+            identity.cwd.as_deref(),
+            home.as_deref(),
+            None,
+            &reference_control::ComposerDiscovery {
+                probe: reference_control::route_discovery_probe(),
+                clock: &reference_control::SystemDiscoveryClock,
+            },
+        )
+        .await;
+}
+
+/// A payload refusal whose message never carries a host path.
+fn reference_payload_refusal(error: &ScopeError) -> Response {
+    let message = if error.message.contains('/') || error.message.contains('\\') {
+        "the payload ref could not be resolved".to_string()
+    } else {
+        error.message.clone()
+    };
+    reference_chat_error(error.code, message)
+}
+
+/// GET /api/v1/reference-chat/{sessionId}/payload?ref=
+///
+/// Re-reads the native transcript on this host through `run_blocking`. A stale generation is
+/// `TARGET_EXPIRED`. A missing part is `NOT_FOUND`. The ref is opaque and the response names no path.
+async fn reference_chat_payload(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    query: Result<Query<ReferenceChatReadQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let query = match reference_chat_read_query(query) {
+        Ok(query) => query,
+        Err(response) => return *response,
+    };
+    let read = match reference_chat_read_context(&state, &headers, &session_id, &query, true).await {
+        Ok(read) => read,
+        Err(response) => return response.into(),
+    };
+    let Some(raw_ref) = query
+        .payload_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "the payload request names no ref",
+        );
+    };
+    if let (Some(named), Some(current)) = (
+        read.identity.provider_session_id(),
+        read.identity.agent_session_id.as_deref(),
+    ) {
+        if named != current {
+            return reference_chat_error(
+                ScopeErrorCode::TargetExpired,
+                "the pane's provider session changed; re-read its session rows",
+            );
+        }
+    }
+    if reference_chat_session_is_remote(&state, &session_id).await {
+        return reference_chat_error(
+            ScopeErrorCode::Unsupported,
+            "this session's transcript lives on its paired host; read it through that host's own \
+             reference-chat route",
+        );
+    }
+    let Some(home) = reference_chat_history_home(&state) else {
+        return reference_chat_error(
+            ScopeErrorCode::Unsupported,
+            "this host's transcript root is unknown",
+        );
+    };
+    let siblings = reference_chat_siblings(&state, &session_id).await;
+    let stream = match reference_chat_resolve_history(
+        home,
+        read.identity.clone(),
+        siblings,
+        reference_history::resolve_reference_history_stream,
+    )
+    .await
+    {
+        Ok(stream) => stream,
+        Err(error) => return reference_payload_refusal(&error),
+    };
+    if !stream.is_native() {
+        return reference_chat_error(
+            ScopeErrorCode::NotFound,
+            "this pane has no native transcript",
+        );
+    }
+    let identity = read.identity.clone();
+    let resolved = crate::ipc::run_blocking(move || {
+        Ok::<_, crate::ipc::error::IpcError>(reference_payload::read_and_resolve_reference_payload(
+            &stream,
+            &identity,
+            &raw_ref,
+        ))
+    })
+    .await;
+    match resolved {
+        Ok(Ok(body)) => ([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response(),
+        Ok(Err(error)) => reference_payload_refusal(&error),
+        Err(_) => reference_chat_error(
+            ScopeErrorCode::Timeout,
+            "the transcript read did not finish",
+        ),
     }
 }
 
@@ -7872,6 +8596,184 @@ async fn reference_chat_delete_file(
         .into_response()
 }
 
+// ---------------------------------------------------------------------------------------------
+// Desktop bridge
+// ---------------------------------------------------------------------------------------------
+
+tokio::task_local! {
+    /// Set only by [desktop_reference_chat], which the daemon reaches from its owner-only local
+    /// socket. No HTTP request runs inside this scope, so no header can supply it.
+    static DESKTOP_REFERENCE_TRUST: DeviceInfo;
+}
+
+fn desktop_reference_device() -> DeviceInfo {
+    DeviceInfo {
+        id: "desktop-local".to_string(),
+        name: "Ferryx desktop".to_string(),
+        permission: DevicePermission::Control,
+        access_scope: DeviceAccessScope::Machine,
+        created_at: 0,
+        last_seen_at: 0,
+        revoked: false,
+        installation_id: None,
+        attach_public_key: None,
+        account_machine_id: None,
+    }
+}
+
+pub(crate) fn desktop_reference_chat_identity(
+    state: &RemoteGatewayState,
+) -> crate::daemon::protocol::DesktopReferenceChatIdentity {
+    crate::daemon::protocol::DesktopReferenceChatIdentity {
+        host_id: reference_files::reference_host_id(),
+        owner_id: state.reference_owner_id.clone(),
+        epoch: state
+            .daemon_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+            .to_string(),
+    }
+}
+
+/// Serves one allowlisted desktop chat-lens request through the same reference-chat handlers,
+/// input queue and owner/epoch/provider fences the HTTP routes use.
+pub(crate) async fn desktop_reference_chat(
+    state: &Arc<RemoteGatewayState>,
+    request: crate::daemon::protocol::DesktopReferenceChatRequest,
+) -> crate::daemon::protocol::DesktopReferenceChatReply {
+    let response = DESKTOP_REFERENCE_TRUST
+        .scope(
+            desktop_reference_device(),
+            desktop_reference_chat_route(Arc::clone(state), request),
+        )
+        .await;
+    desktop_reference_chat_reply(response).await
+}
+
+async fn desktop_reference_chat_route(
+    state: Arc<RemoteGatewayState>,
+    request: crate::daemon::protocol::DesktopReferenceChatRequest,
+) -> Response {
+    use crate::daemon::protocol::DesktopReferenceChatKind as Kind;
+    let session_id = request.target.target.backend_session_id.clone();
+    if request.kind.is_read() {
+        let query = match desktop_reference_read_query(&request) {
+            Ok(query) => query,
+            Err(error) => return reference_chat_refusal(&error),
+        };
+        return match request.kind {
+            Kind::History => {
+                reference_chat_history(State(state), AxumPath(session_id), Ok(Query(query)), HeaderMap::new())
+                    .await
+            }
+            _ => {
+                reference_chat_prompt(State(state), AxumPath(session_id), Ok(Query(query)), HeaderMap::new())
+                    .await
+            }
+        };
+    }
+    let envelope = serde_json::json!({
+        "requestId": request.request_id,
+        "target": request.target.target,
+        "providerSessionId": request.target.provider_session_id,
+        "registryId": request.registry_id,
+        "params": request.params,
+    });
+    let body = match serde_json::to_vec(&envelope) {
+        Ok(body) => body,
+        Err(error) => {
+            return reference_chat_error(
+                ScopeErrorCode::InvalidRequest,
+                format!("the mutation envelope is not writable: {error}"),
+            )
+        }
+    };
+    let http = match axum::http::Request::builder()
+        .method(axum::http::Method::POST)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body))
+    {
+        Ok(http) => http,
+        Err(error) => {
+            return reference_chat_error(
+                ScopeErrorCode::InvalidRequest,
+                format!("the mutation request is not buildable: {error}"),
+            )
+        }
+    };
+    match request.kind {
+        Kind::Submit => reference_chat_submit(State(state), AxumPath(session_id), http).await,
+        Kind::Stop => reference_chat_stop(State(state), AxumPath(session_id), http).await,
+        _ => reference_chat_answer(State(state), AxumPath(session_id), http).await,
+    }
+}
+
+fn desktop_reference_read_query(
+    request: &crate::daemon::protocol::DesktopReferenceChatRequest,
+) -> Result<ReferenceChatReadQuery, ScopeError> {
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct ReadParams {
+        #[serde(default)]
+        cursor: Option<reference_types::ReferenceHistoryCursor>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        after: Option<serde_json::Value>,
+    }
+    let params = match &request.params {
+        serde_json::Value::Null => ReadParams::default(),
+        value => serde_json::from_value::<ReadParams>(value.clone()).map_err(|error| {
+            reference_chat_scope(
+                ScopeErrorCode::InvalidRequest,
+                format!("the read params are not readable: {error}"),
+            )
+        })?,
+    };
+    let after = match params.after {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => Some(text),
+        Some(value) => Some(value.to_string()),
+    };
+    let target = &request.target.target;
+    Ok(ReferenceChatReadQuery {
+        host_id: Some(target.host_id.clone()),
+        owner_id: Some(target.owner_id.clone()),
+        epoch: Some(target.epoch.0.to_string()),
+        backend_session_id: Some(target.backend_session_id.clone()),
+        provider_session_id: request.target.provider_session_id.clone(),
+        registry_id: request.registry_id.clone(),
+        limit: params.limit,
+        cursor: params.cursor.as_ref().map(|cursor| cursor.offset),
+        cursor_stream: params.cursor.map(|cursor| cursor.stream_id),
+        after,
+        payload_ref: None,
+    })
+}
+
+async fn desktop_reference_chat_reply(
+    response: Response,
+) -> crate::daemon::protocol::DesktopReferenceChatReply {
+    let status = response.status().as_u16();
+    let body = match axum::body::to_bytes(response.into_body(), REFERENCE_CHAT_MUTATION_MAX_BYTES).await {
+        Ok(bytes) if bytes.is_empty() => serde_json::Value::Null,
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+        }),
+        Err(error) => serde_json::json!({
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": format!("the reference-chat response could not be read: {error}"),
+                "retryable": false,
+            }
+        }),
+    };
+    crate::daemon::protocol::DesktopReferenceChatReply { status, body }
+}
+
+#[cfg(test)]
+#[path = "desktop_reference_chat_tests.rs"]
+mod desktop_reference_chat_tests;
+
 /// The web origin (`scheme://host[:port]`) of a URL; `ws`/`wss` map to `http`/`https`.
 fn web_origin(url: &str) -> Option<String> {
     let mut parsed = url::Url::parse(url.trim()).ok()?;
@@ -7911,6 +8813,8 @@ pub(crate) fn cors_origin_allowed(
                 | "/api/v1/push/subscribe"
                 | "/api/v1/push/unsubscribe"
                 | "/api/v1/push/preferences"
+                | "/api/v1/push/session-mute"
+                | "/api/v1/push/panel-presence"
         )
     {
         return false;
@@ -7939,6 +8843,148 @@ pub(crate) fn cors_origin_allowed(
             .iter()
             .filter_map(|saved| web_origin(saved))
             .any(|allowed| allowed == origin)
+}
+
+struct ReferenceControlPane {
+    state: Arc<RemoteGatewayState>,
+    target: reference_types::ReferenceTargetRef,
+    request_id: String,
+}
+
+impl reference_control::ControlPane for ReferenceControlPane {
+    fn write<'a>(&'a self, data: &'a [u8]) -> BoxFuture<'a, Result<(), String>> {
+        self.state.agent_events.note_input(
+            &self.target.target.backend_session_id,
+            Some(&self.request_id),
+        );
+        self.state
+            .session_backend
+            .write_input(&self.target.target.backend_session_id, data)
+    }
+
+    fn screen<'a>(&'a self) -> BoxFuture<'a, Option<String>> {
+        let state = Arc::clone(&self.state);
+        let target = self.target.clone();
+        Box::pin(async move {
+            reference_chat_snapshot_screen(&state, &target)
+                .await
+                .ok()
+                .map(|snapshot| snapshot.text)
+        })
+    }
+}
+
+/// POST /api/v1/reference-chat/{sessionId}/control
+///
+/// The body is `{ requestId, target, registryId, controlId, valueId }`. The host maps those
+/// ids to a provider command. A second in-flight apply for the same target is
+/// CONTROL_CONFLICT. The same request id replays the recorded outcome and does not type again.
+async fn reference_chat_control(
+    State(state): State<Arc<RemoteGatewayState>>,
+    AxumPath(session_id): AxumPath<String>,
+    request: axum::extract::Request,
+) -> Response {
+    let (headers, body) = match reference_chat_mutation_body::<reference_control::ControlRequest>(
+        request,
+        &state,
+    )
+    .await
+    {
+        Ok(parsed) => parsed,
+        Err(response) => return response.into(),
+    };
+    let device = match authenticate_machine_request(&state, &headers) {
+        Ok(device) => device,
+        Err(response) => return *response,
+    };
+    if device.permission != DevicePermission::Control {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "a view-only device cannot apply a composer control",
+        );
+    }
+    if body.request_id.trim().is_empty() {
+        return reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "a control apply names no request id",
+        );
+    }
+    let Some(named) = body.target.as_ref() else {
+        return reference_chat_error(
+            ScopeErrorCode::InvalidRequest,
+            "a control apply names no target",
+        );
+    };
+    if named.backend_session_id != session_id {
+        return reference_chat_error(
+            ScopeErrorCode::Forbidden,
+            "the control target names a different backend session than the route",
+        );
+    }
+    let epoch = named.epoch.0.to_string();
+    let target = match reference_chat_target(
+        &session_id,
+        Some(named.host_id.as_str()),
+        Some(named.owner_id.as_str()),
+        Some(epoch.as_str()),
+        body.provider_session_id.as_deref(),
+        state.reference_owner_id.as_str(),
+        state
+            .daemon_epoch
+            .load(std::sync::atomic::Ordering::Acquire),
+    ) {
+        Ok(target) => target,
+        Err(error) => return reference_chat_refusal(&error),
+    };
+    if let Err(error) = reference_chat_ensure_visible(&state, &device, &session_id).await {
+        return reference_chat_refusal(&error);
+    }
+    if let Err(error) = reference_chat_ensure_live(&state, &session_id).await {
+        return reference_chat_refusal(&error);
+    }
+    if let Err(error) = reference_chat_ensure_provider(&state, &target) {
+        return reference_chat_refusal(&error);
+    }
+    let identity = reference_chat_identity(&state, &target, Some(body.registry_id.as_str())).await;
+    let home = reference_chat_history_home(&state).map(|path| path.to_string_lossy().into_owned());
+    let authorize = reference_chat_authorize(&state, &headers, &target);
+    let pane = ReferenceControlPane {
+        state: Arc::clone(&state),
+        target: target.clone(),
+        request_id: body.request_id.clone(),
+    };
+    let runtime = reference_chat_runtime();
+    let composer = &runtime.composer;
+    let queue = &runtime.input;
+    let check = move || authorize().map_err(|error| error.message);
+    let outcome = composer
+        .apply(reference_control::ControlApply {
+            target: &target,
+            registry_id: &body.registry_id,
+            control_id: &body.control_id,
+            value_id: &body.value_id,
+            request_id: &body.request_id,
+            cwd: identity.cwd.as_deref(),
+            home: home.as_deref(),
+            queue,
+            pane: &pane,
+            clock: &reference_control::SystemDiscoveryClock,
+            authorize: &check,
+        })
+        .await;
+    match outcome {
+        reference_control::ControlRouteOutcome::Busy => reference_chat_result_failure(
+            &body.request_id,
+            &reference_chat_scope(
+                ScopeErrorCode::ControlConflict,
+                "another control apply is in flight for this pane",
+            ),
+        ),
+        reference_control::ControlRouteOutcome::Settled(disposition) => reference_chat_result_ok(
+            &body.request_id,
+            reference_control::outcome_data(&disposition),
+        ),
+    }
 }
 
 pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
@@ -7991,12 +9037,16 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             "/api/v1/agent-history/{sessionId}",
             get(get_agent_history),
         )
-        // Reference chat (plan task 13). The same authenticated gateway, the same listener and
-        // the same bearer/permission policy as every route above; no control router is mounted
-        // and nothing here resizes a pane or signals a process.
+        // Reference chat. The same authenticated gateway, listener, and bearer policy as the
+        // routes above. Composer control is POST .../control (T09). Nothing here resizes a pane
+        // or signals a process.
         .route(
             "/api/v1/reference-chat/{sessionId}/history",
             get(reference_chat_history),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/payload",
+            get(reference_chat_payload),
         )
         .route(
             "/api/v1/reference-chat/{sessionId}/screen",
@@ -8021,6 +9071,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/reference-chat/{sessionId}/answer",
             post(reference_chat_answer),
+        )
+        .route(
+            "/api/v1/reference-chat/{sessionId}/control",
+            post(reference_chat_control),
         )
         .route(
             "/api/v1/reference-chat/{sessionId}/files",
@@ -8065,6 +9119,8 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             )),
         )
         .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
+        .route("/api/v1/supervisor/panel", get(supervisor_api::http_panel))
+        .route("/api/v1/fleet/sessions", get(supervisor_api::http_fleet_sessions))
         .route("/api/v1/supervisor/start", post(supervisor_api::http_start))
         .route(
             "/api/v1/supervisor/move",
@@ -8111,6 +9167,16 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(supervisor_api::http_conversation),
         )
         .route(
+            "/api/v1/supervisor/converse",
+            post(supervisor_api::http_converse).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/supervisor/transcript",
+            get(supervisor_api::http_transcript),
+        )
+        .route(
             "/api/v1/supervisor/memory",
             get(supervisor_api::http_memory)
                 .post(supervisor_api::http_memory_post)
@@ -8123,6 +9189,30 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             post(supervisor_api::http_pause).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
+        )
+        // T9 direct controls. The stop shares the `{sessionId}` parameter name with
+        // `/api/v1/sessions/{sessionId}` (the router refuses two names at one position); the
+        // handler reads the segment as a `<hostId>:<backendSessionId>` handle. Neither route goes
+        // through the hub or the engine.
+        .route(
+            "/api/v1/sessions/{sessionId}/stop",
+            post(agent_control_service::http_session_ref_stop).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+                ),
+            ),
+        )
+        .route(
+            "/api/v1/supervisor/decisions/{sessionRef}/answer",
+            post(agent_control_service::http_decision_answer).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+                ),
+            ),
+        )
+        .route(
+            "/api/v1/supervisor/actions/{id}/undo",
+            post(supervisor_api::http_action_undo),
         )
         .route(
             "/api/v1/supervisor/observe",
@@ -8166,6 +9256,24 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
                 super::machine_protocol::MACHINE_JSON_MAX_BYTES,
             )),
         )
+        .route(
+            "/api/v1/workspace/file-write",
+            post(file_write_boundary).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/workspace/file-list",
+            post(file_list_boundary).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
+        .route(
+            "/api/v1/workspace/file-mkdir",
+            post(file_mkdir_boundary).layer(axum::extract::DefaultBodyLimit::max(
+                super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+            )),
+        )
         .route("/api/v1/workspace/select", post(select_workspace))
         .route("/api/v1/workspace/selection", post(select_workspace))
         .route(
@@ -8199,6 +9307,8 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(super::dag_api::ws_dag_handler),
         )
         .route("/api/v1/push/test", post(push_test))
+        .route("/api/v1/push/session-mute", post(push_session_mute))
+        .route("/api/v1/push/panel-presence", post(push_panel_presence))
         .route("/api/v1/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/v1/push/subscribe", post(push_subscribe))
         .route("/api/v1/push/unsubscribe", post(push_unsubscribe))
@@ -8228,11 +9338,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
 
     if cfg!(not(test)) {
         let auth = Arc::clone(&state.auth_manager);
+        // The gateway this router belongs to: the port its loopback listener binds
+        // (`config.port`, set before the router is built), so a QA daemon on its own port never
+        // forwards attaches to a production gateway on the same host.
+        let gateway_port = state.config.read().port;
         let deps = Arc::new(crate::remote::attach_router::AttachRouterDeps {
-            gateway_addr: format!(
-                "127.0.0.1:{}",
-                crate::remote::state::REMOTE_GATEWAY_PORT
-            ),
+            gateway_addr: format!("127.0.0.1:{gateway_port}"),
             authorize: Arc::new(move |key| auth.authorizes_attach_key_bytes(key)),
         });
         router = router.merge(crate::remote::attach_router::attach_router(deps));
@@ -10118,6 +11229,7 @@ mod tests {
                 worktree_slug: None,
                 worktree_label: None,
                 session_id: Some(session_id.clone()),
+                ..Default::default()
             }],
             ..Default::default()
         });
@@ -10140,6 +11252,7 @@ mod tests {
                 worktree_slug: None,
                 worktree_label: None,
                 session_id: Some("not-this-session".to_string()),
+                ..Default::default()
             }],
             ..Default::default()
         });
@@ -10366,6 +11479,68 @@ mod tests {
         server.abort();
     }
 
+    /// Mute and panel presence are owner controls: they need a paired token, mute needs
+    /// Control, a malformed ref is refused, and the mute lands in the push store.
+    #[tokio::test]
+    async fn session_mute_and_panel_presence_routes_are_authenticated_and_effective() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(RemoteGatewayState::new_with_paths(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+            Some(dir.path().join("remote-config.json")),
+            Some(dir.path().join("remote-auth.json")),
+        ));
+        let pair = |permission| {
+            let code = state.auth_manager.create_pairing_code(permission);
+            state.auth_manager.exchange_pairing_code(&code, "Phone").unwrap()
+        };
+        let (control, _) = pair(crate::remote::auth::DevicePermission::Control);
+        let (view, _) = pair(crate::remote::auth::DevicePermission::View);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn({
+            let router = create_remote_router(Arc::clone(&state));
+            async move { axum::serve(listener, router).await.unwrap() }
+        });
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let post = |path: &'static str, bearer: Option<&str>, body: serde_json::Value| {
+            let mut request = http.post(format!("http://{addr}/api/v1/push/{path}")).json(&body);
+            if let Some(bearer) = bearer {
+                request = request.bearer_auth(bearer);
+            }
+            async move { request.send().await.unwrap().status() }
+        };
+        let mute = serde_json::json!({"sessionRef": "mac:s1", "muted": true});
+
+        assert_eq!(post("session-mute", None, mute.clone()).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(post("session-mute", Some(view.as_str()), mute.clone()).await, StatusCode::FORBIDDEN);
+        assert!(!state.push.store.is_session_muted("mac:s1"), "a View device cannot mute");
+        assert_eq!(
+            post("session-mute", Some(control.as_str()), serde_json::json!({"sessionRef": "nocolon", "muted": true})).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(post("session-mute", Some(control.as_str()), mute).await, StatusCode::NO_CONTENT);
+        assert!(state.push.store.is_session_muted("mac:s1"));
+        assert_eq!(
+            post("session-mute", Some(control.as_str()), serde_json::json!({"sessionRef": "mac:s1", "muted": false})).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!state.push.store.is_session_muted("mac:s1"));
+
+        let shown = serde_json::json!({"visible": true});
+        assert_eq!(post("panel-presence", None, shown.clone()).await, StatusCode::UNAUTHORIZED);
+        assert!(!state.panel_shown(std::time::Instant::now()));
+        assert_eq!(post("panel-presence", Some(control.as_str()), shown).await, StatusCode::NO_CONTENT);
+        assert!(state.panel_shown(std::time::Instant::now()), "the report holds pushes back");
+        assert_eq!(
+            post("panel-presence", Some(control.as_str()), serde_json::json!({"visible": false})).await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(!state.panel_shown(std::time::Instant::now()));
+
+        server.abort();
+    }
+
     #[tokio::test]
     async fn test_headless_auto_spawns_default_shell() {
         let pty = Arc::new(crate::terminal::PtyManager::new());
@@ -10415,6 +11590,96 @@ mod tests {
         assert!(s.running);
 
         let _ = terminal_service.close_session(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn workspace_state_carries_exited_publication_and_live_registry_wins() {
+        let pty = Arc::new(crate::terminal::PtyManager::new());
+        let hub = Arc::new(TerminalOutputHub::default());
+        let terminal_service = Arc::new(TerminalService::new(Arc::clone(&pty), Arc::clone(&hub)));
+        let state = Arc::new(RemoteGatewayState::new(
+            Arc::clone(&terminal_service),
+            WorkspaceRegistry::new(),
+        ));
+        let code = state
+            .auth_manager
+            .create_pairing_code(crate::remote::auth::DevicePermission::Control);
+        let (token, _) = state
+            .auth_manager
+            .exchange_pairing_code(&code, "ExitedPublication")
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+
+        let (live_id, _rx) = terminal_service.spawn_shell(80, 24).expect("live shell");
+        let live_selection: RemoteActiveDesktopSelection = serde_json::from_value(serde_json::json!({
+            "workspaceId": "default",
+            "sessionId": live_id,
+            "terminalTabs": [{
+                "id": "tab-live",
+                "label": "claude",
+                "sessionId": live_id,
+                "agentType": "claude",
+                "running": false,
+                "providerSession": { "key": "session_id", "id": "prov-live" }
+            }]
+        }))
+        .expect("live publication decodes");
+        state.set_active_selection(live_selection);
+        let live = get_workspace_state(State(Arc::clone(&state)), headers.clone())
+            .await
+            .expect("live workspace state")
+            .0;
+        let live_row = live
+            .sessions
+            .iter()
+            .find(|row| row.session_id == live_id)
+            .expect("registry-live session is listed");
+        assert!(live_row.running, "a live registry session stays running");
+        let live_tab = live
+            .active_context
+            .terminal_tabs
+            .iter()
+            .find(|tab| tab.session_id.as_deref() == Some(live_id.as_str()))
+            .expect("live tab");
+        assert_eq!(live_tab.running, None, "desktop cannot publish a live backend as exited");
+        let _ = terminal_service.close_session(&live_id).await;
+
+        let gone = "pty-gone";
+        let exited_selection: RemoteActiveDesktopSelection = serde_json::from_value(serde_json::json!({
+            "workspaceId": "default",
+            "sessionId": gone,
+            "terminalTabs": [{
+                "id": "tab-gone",
+                "label": "claude",
+                "sessionId": gone,
+                "agentType": "claude",
+                "running": false,
+                "providerSession": { "key": "session_id", "id": "prov-exited" }
+            }]
+        }))
+        .expect("exited publication decodes");
+        assert_eq!(exited_selection.terminal_tabs[0].running, Some(false));
+        state.set_active_selection(exited_selection);
+        let exited = get_workspace_state(State(Arc::clone(&state)), headers)
+            .await
+            .expect("exited workspace state")
+            .0;
+        let row = exited
+            .sessions
+            .iter()
+            .find(|row| row.session_id == gone)
+            .expect("absent published session is synthesized");
+        assert!(!row.running, "an absent published session keeps running false");
+        let tab = &exited.active_context.terminal_tabs[0];
+        assert_eq!(tab.running, Some(false));
+        assert_eq!(
+            tab.provider_session.as_ref().map(|provider| provider.id.as_str()),
+            Some("prov-exited")
+        );
     }
 
     #[tokio::test]

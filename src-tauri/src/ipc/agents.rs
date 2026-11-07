@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::agent_detect::registry::{self, Discovery};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::ffi::OsString;
@@ -93,24 +94,9 @@ pub(crate) fn discover_agent_session(
     } else {
         requested.as_str()
     };
-    if !matches!(
-        normalized,
-        "claude"
-            | "codex"
-            | "copilot"
-            | "cursor"
-            | "kimi"
-            | "omo"
-            | "gjc"
-            | "antigravity"
-            | "opencode"
-            | "pi"
-            | "omp"
-            | "grok"
-            | "droid"
-            | "cline"
-            | "crush"
-    ) {
+    // Which agents Ferryx tracks, and how each one keeps its session, is one table
+    // (agent_detect::registry); this reader only applies it.
+    if !crate::agent_detect::registry::is_known(normalized) {
         return None;
     }
 
@@ -129,31 +115,32 @@ pub(crate) fn discover_agent_session(
         resume_id_from_args(normalized, args).map(|id| (id, DiscoverySource::LaunchArgv))
     };
     let live = |id: Option<String>| id.map(|id| (id, DiscoverySource::Live));
-    match agent_pid {
-        Some(pid) if normalized == "omo" => live(
+    let strategy = crate::agent_detect::registry::discovery(normalized);
+    match (strategy, agent_pid) {
+        (Some(Discovery::EnvironmentThenOpenFiles), Some(pid)) => live(
             omo_session_id_from_environment(pid, normalized)
                 .or_else(|| lsof_session_id(pid, normalized)),
         ),
-        Some(pid) if normalized == "antigravity" => live(antigravity_session_id(Some(pid), root_pid)),
-        None if normalized == "antigravity" => live(antigravity_session_id(None, root_pid)),
-        Some(pid) if normalized == "opencode" => live(opencode_session_id(Some(pid), root_pid)),
-        None if normalized == "opencode" => live(opencode_session_id(None, root_pid)),
-        Some(pid) if normalized == "pi" => live(pi_session_id(Some(pid), root_pid)),
-        None if normalized == "pi" => live(pi_session_id(None, root_pid)),
-        Some(pid)
-            if matches!(
-                normalized,
-                "claude" | "omp" | "grok" | "droid" | "cline" | "kimi" | "copilot" | "gjc"
-            ) =>
-        {
+        (Some(Discovery::AntigravityStore), pid) => live(antigravity_session_id(pid, root_pid)),
+        (Some(Discovery::OpencodeStore), pid) => live(opencode_session_id(pid, root_pid)),
+        (Some(Discovery::PiStore), pid) => live(pi_session_id(pid, root_pid)),
+        (Some(Discovery::OpenFilesThenResumeArgv), Some(pid)) => {
             live(lsof_session_id(pid, normalized)).or_else(|| resumed_id(pid))
         }
         // crush keeps every session of a project in one `.crush/crush.db`, so no open file names
         // the session; only the resume argv does.
-        Some(pid) if normalized == "crush" => resumed_id(pid),
-        None if normalized == "crush" => None,
-        Some(pid) => live(lsof_session_id(pid, normalized)),
-        None => live(lsof_session_id(root_pid, normalized)),
+        (Some(Discovery::ResumeArgvOnly), Some(pid)) => resumed_id(pid),
+        (Some(Discovery::ResumeArgvOnly), None) => None,
+        // No agent pid in the tree is not proof of no session: the pane's own root process can
+        // hold the store file, which is what this reader did before the table existed.
+        (
+            Some(Discovery::EnvironmentThenOpenFiles)
+            | Some(Discovery::OpenFiles)
+            | Some(Discovery::OpenFilesThenResumeArgv),
+            None,
+        ) => live(lsof_session_id(root_pid, normalized)),
+        (Some(Discovery::OpenFiles), Some(pid)) => live(lsof_session_id(pid, normalized)),
+        _ => None,
     }
 }
 
@@ -264,80 +251,69 @@ fn args_match_agent(agent_type: &str, args: &str) -> bool {
     } else {
         requested.as_str()
     };
-    if normalized_agent == "omo" {
-        let normalized_args = args.to_ascii_lowercase();
-        let executable = if let Some(quoted) = args.trim_start().strip_prefix('"') {
-            quoted.split('"').next().unwrap_or("")
-        } else {
-            args.split_whitespace().next().unwrap_or("")
-        };
-        let basename = executable.rsplit(['/', '\\']).next().unwrap_or(executable);
-        return basename.eq_ignore_ascii_case("mhc")
-            || basename.eq_ignore_ascii_case("mhc.exe")
-            || normalized_args.contains("/omo.js")
-            || normalized_args.contains("/senpi/dist/cli.js");
-    }
-
-    let Some(command) = args.split_whitespace().next() else {
+    // Every naming rule below comes from agent_detect::registry, so a new agent is one table entry
+    // rather than another arm here.
+    let Some(spec) = crate::agent_detect::registry::by_id(normalized_agent) else {
         return false;
     };
-    let basename = command
+    let normalized_args = args.to_ascii_lowercase();
+    let executable = if let Some(quoted) = args.trim_start().strip_prefix('"') {
+        quoted.split('"').next().unwrap_or("")
+    } else {
+        args.split_whitespace().next().unwrap_or("")
+    };
+    let basename = executable
         .rsplit(['/', '\\'])
         .next()
-        .unwrap_or(command)
+        .unwrap_or(executable)
         .to_ascii_lowercase();
+    // The detached `--cline-hub-daemon` serves sessions for other panes instead of running one.
+    if spec
+        .excluded_args
+        .iter()
+        .any(|excluded| normalized_args.contains(excluded))
+    {
+        return false;
+    }
+    let name_matches = spec
+        .command_names
+        .iter()
+        // An argv-only name is a binary the agent's CLI shares with an unrelated program, so it
+        // identifies the agent in a launch argv and nowhere else.
+        .chain(spec.argv_only_names.iter())
+        // A launcher variant is a binary that hosts this agent, so a pane still running the
+        // pre-split launcher (an omo session on the mhc binary) stays discoverable.
+        .chain(spec.launch_variants.iter().map(|(_, binary)| binary))
+        .any(|name| *name == basename || *name == basename.trim_end_matches(".exe"));
+    if name_matches {
+        return true;
+    }
+    // A bundled entry script (`…/omo.js`, `…/gjc.js`, `…/pi-coding-agent`) names the agent even
+    // when argv[0] is the interpreter or an npm shim.
+    if spec
+        .argv_markers
+        .iter()
+        .any(|marker| normalized_args.contains(marker))
+    {
+        return true;
+    }
     // kimi is a uv console script (`…/kimi-cli/bin/python ~/.local/bin/kimi`, local-2.md:212) and
     // gjc a bun-shebang symlink (`bun …/bin/gjc`, remote-gjc.md:18): argv[0] is the interpreter
     // and the agent is the entry script that follows it.
-    let interpreted_entry = || {
-        let interpreter = basename.trim_end_matches(".exe");
-        let is_interpreter = matches!(interpreter, "bun" | "node" | "python" | "python3")
-            || (interpreter.starts_with("python3.")
-                && interpreter[8..].bytes().all(|byte| byte.is_ascii_digit()));
-        is_interpreter
-            && args.split_whitespace().nth(1).is_some_and(|entry| {
-                entry
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(normalized_agent))
-            })
-    };
-    match normalized_agent {
-        "cursor" => matches!(basename.as_str(), "cursor-agent" | "cursor"),
-        "claude" | "codex" | "copilot" => basename == normalized_agent,
-        "kimi" => basename == "kimi" || interpreted_entry(),
-        "antigravity" => basename == "agy",
-        "gjc" => {
-            basename == "gjc"
-                || args.to_ascii_lowercase().contains("/gjc.js")
-                || interpreted_entry()
-        }
-        "opencode" => basename == "opencode",
-        "pi" => {
-            basename == "pi"
-                || basename == "pi.js"
-                || args.to_ascii_lowercase().contains("/pi-coding-agent")
-        }
-        // The bun install runs `bun ~/.bun/bin/omp`, so the entry script is argv[1]; omp's own
-        // worker helpers run `bun …/dist/cli.js __omp_worker_*` and must not match.
-        "omp" => {
-            basename == "omp"
-                || (basename == "bun"
-                    && args.split_whitespace().nth(1).is_some_and(|entry| {
-                        entry
-                            .rsplit(['/', '\\'])
-                            .next()
-                            .is_some_and(|name| name.eq_ignore_ascii_case("omp"))
-                    }))
-        }
-        // The npm install runs `node …/bin/crush` with the Go binary `…/@charmland/crush/bin/crush`
-        // as its child; a Go or Homebrew install is the bare binary.
-        "grok" | "droid" | "crush" => basename == normalized_agent,
-        // The npm shim runs `node ~/.bun/bin/cline` and the native `cline` binary is its child;
-        // the detached `--cline-hub-daemon` serves sessions for other panes too.
-        "cline" => basename == "cline" && !args.contains("--cline-hub-daemon"),
-        _ => false,
+    if !spec.interpreted_entry {
+        return false;
     }
+    let interpreter = basename.trim_end_matches(".exe");
+    let is_interpreter = matches!(interpreter, "bun" | "node" | "python" | "python3")
+        || (interpreter.starts_with("python3.")
+            && interpreter[8..].bytes().all(|byte| byte.is_ascii_digit()));
+    is_interpreter
+        && args.split_whitespace().nth(1).is_some_and(|entry| {
+            entry
+                .rsplit(['/', '\\'])
+                .next()
+                .is_some_and(|name| name.eq_ignore_ascii_case(normalized_agent))
+        })
 }
 
 /// The session a resumed agent was launched with, read from that agent's own argv: grok
@@ -346,25 +322,12 @@ fn args_match_agent(agent_type: &str, args: &str) -> bool {
 /// missing value is not an id.
 fn resume_id_from_args(agent_type: &str, args: &str) -> Option<String> {
     let tokens: Vec<&str> = args.split_whitespace().collect();
-    let flags: &[&str] = match agent_type {
-        "grok" => &["--resume", "-r"],
-        "droid" => &["--resume", "-r", "resume"],
-        "cline" => &["--id"],
-        "crush" => &["--session", "-s"],
-        // `claude --help`: `-r, --resume [value]` and `--session-id <uuid>`; Ferryx resumes claude
-        // with `--resume <uuid>` (terminal/shell.rs). claude keeps no transcript open, so argv is
-        // its only process-bound proof (re-explore-5 G1, measured on claude 2.1.308).
-        "claude" => &["--resume", "-r", "--session-id"],
-        // Ferryx resumes omp with `--resume <transcript-path>` or `--resume <id>`
-        // (terminal/shell.rs); a path value is read through omp's own store-path reader.
-        "omp" => &["--resume"],
-        // Measured flags: `kimi --help` (--session/-S), `copilot --help` (--resume [sessionId]),
-        // and the resume argv Ferryx itself spawns (terminal/shell.rs resolve_agent_resume_plan).
-        "kimi" => &["--session", "-S"],
-        "copilot" => &["--resume"],
-        "gjc" => &["--resume"],
-        _ => return None,
-    };
+    // Each agent's resume flags and id shape are its registry entry's; the validators below are
+    // shared by every agent that uses that shape.
+    let flags = crate::agent_detect::registry::resume_flags(agent_type);
+    if flags.is_empty() {
+        return None;
+    }
     let value = tokens
         .windows(2)
         .find(|pair| flags.contains(&pair[0]))
@@ -375,19 +338,21 @@ fn resume_id_from_args(agent_type: &str, args: &str) -> Option<String> {
                 flags.contains(&flag).then_some(value)
             })
         })?;
-    let valid = match agent_type {
-        "omp" => {
+    let valid = match crate::agent_detect::registry::session_id_shape(agent_type) {
+        Some(registry::SessionIdShape::OmpPathOrUuid) => {
             return if is_valid_uuid(value) {
                 Some(value.to_string())
             } else {
                 extract_session_id_from_path("omp", value)
             };
         }
-        "cline" => is_cline_session_id(value),
-        "crush" => is_valid_uuid(value) || is_crush_session_hash(value),
+        Some(registry::SessionIdShape::ClineSession) => is_cline_session_id(value),
+        Some(registry::SessionIdShape::CrushHashOrUuid) => {
+            is_valid_uuid(value) || is_crush_session_hash(value)
+        }
         // gjc ids are the 16-hex suffix of its store file (gjc_session_id_from_path).
-        "gjc" => is_crush_session_hash(value),
-        _ => is_valid_uuid(value),
+        Some(registry::SessionIdShape::Hex16) => is_crush_session_hash(value),
+        Some(registry::SessionIdShape::Uuid) | None => is_valid_uuid(value),
     };
     valid.then(|| value.to_string())
 }
@@ -759,16 +724,6 @@ pub(crate) fn extract_session_id_from_path(agent_type: &str, path: &str) -> Opti
         _ => {}
     }
     let markers: &[&str] = match agent_type {
-        "claude" => &["/.claude/projects/"],
-        "codex" => &["/.codex/sessions/"],
-        "copilot" => &["/.copilot/session-state/"],
-        "cursor" => &["/.cursor/chats/"],
-        "kimi" => &["/.kimi/sessions/"],
-        // omo writes its own store under `~/.omo/agent/sessions/` today and used the flat
-        // `~/.omo/sessions/` before that. Both are this reader's own store - the transcript
-        // reader and the resume-cwd search scan both - so both spellings identify an omo
-        // transcript, and neither is a guess at another program's file.
-        "omo" => &["/.omo/agent/sessions/", "/.omo/sessions/"],
         // The measured pi is senpi (facts/local.md:181): its store is
         // `<agentDir>/sessions/--<cwd slug>--/<ts>_<uuid>.jsonl` with agentDir
         // `$SENPI_CODING_AGENT_DIR`, else `~/.senpi/agent` (facts/local-1.md:341-344). Upstream pi
@@ -776,8 +731,12 @@ pub(crate) fn extract_session_id_from_path(agent_type: &str, path: &str) -> Opti
         "pi" => {
             return pi_session_id_from_path(&normalized, |key| env::var_os(key));
         }
-        "antigravity" => &["/.gemini/antigravity-cli/conversations/"],
-        _ => return None,
+        // Every other store root - omo's two spellings, maho's `~/.maho/agent/sessions/`, and the
+        // rest - is the agent's own registry entry, so a new agent needs no arm here.
+        other => match registry::store_markers(other) {
+            Some(markers) => markers,
+            None => return None,
+        },
     };
     // A provider may own more than one store spelling (omo does, above), so this is a set of
     // accepted roots rather than one string.

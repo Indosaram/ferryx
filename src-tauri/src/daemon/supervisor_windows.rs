@@ -607,6 +607,13 @@ pub fn registered_executables(env: Env<'_>) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether task `name` is registered with the Task Scheduler. Only a `/Query` that ran and failed
+/// counts as unregistered; a `schtasks` that cannot run counts as registered, so its runtime
+/// generation is never pruned.
+pub fn task_registered(scheduler: &mut dyn TaskScheduler, name: &str) -> bool {
+    !matches!(scheduler.run(&["/Query", "/TN", name]), Ok(false))
+}
+
 /// The daemon executable a watchdog spawns: its own staged runtime (`<root>/<key>/ferryx.exe`),
 /// never the GUI's executable. `current_exe` and `runtime_root` are already resolved.
 pub fn staged_daemon_executable(current_exe: &Path, runtime_root: &Path) -> Result<PathBuf> {
@@ -1029,6 +1036,12 @@ mod platform {
                 Ok(_) => {}
                 Err(error) => tracing::warn!(%error, "Daemon runtime garbage collection failed"),
             }
+            let probe = |key: &str| task_registered(&mut SystemScheduler, &generation_task_name(env, key));
+            let liveness = crate::daemon::supervisor::SystemGenerationLiveness::new(
+                &probe,
+                registered_executables(env),
+            );
+            crate::daemon::supervisor::prune_runtime_generations(&staged.key, &liveness);
         }
         Ok(changed)
     }

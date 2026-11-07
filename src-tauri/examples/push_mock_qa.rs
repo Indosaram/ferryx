@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         Some(dir.path().join("remote-config.json")),
         Some(dir.path().join("remote-auth.json")),
     ));
-    state.start_push_dispatch();
+    state.start_panel_push_dispatch();
 
     let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let gateway_addr = gateway.local_addr()?;

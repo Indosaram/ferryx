@@ -46,6 +46,8 @@ export interface KnownAgent {
 
 export const KNOWN_AGENT_MATCHERS: KnownAgent[] = [
   { pattern: /\b(?:agy|antigravity)\b/i, type: "antigravity", name: "Antigravity" },
+  // maho code's own titles (`maho code - …`) belong to maho, not to omo.
+  { pattern: /\bmaho\b/i, type: "maho", name: "Maho" },
   { pattern: /\bomo\b/i, type: "omo", name: "OMO" },
   { pattern: /\bgjc\b/i, type: "gjc", name: "Gajae Code" },
   { pattern: /\b(?:claude code|claude)\b/i, type: "claude", name: "Claude Code" },

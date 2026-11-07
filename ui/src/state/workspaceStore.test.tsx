@@ -335,6 +335,7 @@ describe("useWorkspaceStore terminal ownership", () => {
     await act(async () => {
       await result.current.openTab(worktree, "Claude", {
         sessionId: "agent-backend",
+        agentType: "claude",
         daemonEpoch: "epoch-9",
         incarnation: "life:agent-backend",
       });
@@ -343,8 +344,36 @@ describe("useWorkspaceStore terminal ownership", () => {
     const session = Object.values(result.current.state.sessions).find(
       (candidate) => candidate.backendSessionId === "agent-backend",
     );
-    expect(session).toMatchObject({ daemonEpoch: "epoch-9", incarnation: "life:agent-backend" });
+    expect(session).toMatchObject({ agentType: "claude", daemonEpoch: "epoch-9", incarnation: "life:agent-backend" });
     expect(services.spawnTerminal).not.toHaveBeenCalled();
+  });
+
+  it("opens a chat tab in the rendered store without replacing its backend on view changes", async () => {
+    const { services } = createServices();
+    const { result, unmount } = renderHook(() =>
+      useWorkspaceStore({ workspaceId: "ws-main", initialWorktrees: [worktree], services }),
+    );
+    let tabId = "";
+    await act(async () => {
+      tabId = openedTab(await result.current.openTab(worktree, "Chat", {
+        sessionId: "chat-backend", agentType: "claude", daemonEpoch: "epoch-chat", incarnation: "life:chat",
+      }, undefined, "chat"));
+    });
+    const pane = result.current.state.layout.layoutsByTabId[tabId];
+    expect(pane.root).toMatchObject({ type: "leaf", view: "chat" });
+    const leafId = pane.activeLeafId;
+    if (!leafId) throw new Error("expected active chat leaf");
+    const sessionId = pane.sessionIdsByLeafId[leafId];
+    const session = result.current.state.sessions[sessionId];
+    for (const view of ["terminal", "chat"] as const) {
+      act(() => result.current.setPaneView(tabId, leafId, view));
+      expect(result.current.state.layout.layoutsByTabId[tabId].root).toMatchObject({ view });
+      expect(result.current.state.sessions[sessionId]).toBe(session);
+      expect(session.backendSessionId).toBe("chat-backend");
+    }
+    expect(services.spawnTerminal).not.toHaveBeenCalled();
+    expect(services.closeTerminal).not.toHaveBeenCalled();
+    unmount();
   });
 
   it("forwards a per-tab shell override to the backend spawn", async () => {
@@ -425,6 +454,107 @@ describe("useWorkspaceStore terminal ownership", () => {
     const newSession = result.current.state.sessions[updatedLayout.sessionIdsByLeafId[updatedLayout.activeLeafId!]];
     expect(newSession.backendSessionId).toBe("backend-2");
     expect(newSession.cwd).toBe("/repo/main/packages/api");
+  });
+
+  it("forwards continuation startup into a new selected pane and leaves the source unchanged", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    await act(async () => {
+      await result.current.openTab(worktree);
+    });
+    (services.splitCreate as ReturnType<typeof vi.fn>).mockClear();
+    (services.closeTerminal as ReturnType<typeof vi.fn>).mockClear();
+
+    const tabId = result.current.state.layout.activeTabId!;
+    const tabLayout = result.current.state.layout.layoutsByTabId[tabId];
+    const sourceLeaf = tabLayout.activeLeafId!;
+    const sourceId = tabLayout.sessionIdsByLeafId[sourceLeaf];
+    const sourceBefore = { ...result.current.state.sessions[sourceId] };
+    const startup = {
+      kind: "agentContinue" as const,
+      agentType: "claude",
+      mode: "fork" as const,
+      providerSession: { key: "session_id" as const, id: "continue-ok-1" },
+    };
+
+    await act(async () => {
+      await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
+    });
+
+    expect(services.splitCreate).toHaveBeenCalledTimes(1);
+    expect(services.splitCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ startup }),
+      expect.anything(),
+    );
+    expect(services.closeTerminal).not.toHaveBeenCalledWith(sourceBefore.backendSessionId);
+    expect(result.current.state.sessions[sourceId]).toEqual(sourceBefore);
+    const updated = result.current.state.layout.layoutsByTabId[tabId];
+    expect(updated.sessionIdsByLeafId[sourceLeaf]).toBe(sourceId);
+    expect(updated.activeLeafId).not.toBe(sourceLeaf);
+    const selectedId = updated.sessionIdsByLeafId[updated.activeLeafId!];
+    expect(selectedId).not.toBe(sourceId);
+    expect(result.current.state.sessions[selectedId].workspaceId).toBe(sourceBefore.workspaceId);
+    expect(result.current.state.sessions[selectedId].worktree).toEqual(sourceBefore.worktree);
+    expect(result.current.state.sessions[selectedId].providerSession).toBeUndefined();
+  });
+
+  it("does not retry an unknown continuation create", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    await act(async () => {
+      await result.current.openTab(worktree);
+    });
+    let creates = 0;
+    (services.splitCreate as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      creates += 1;
+      throw { code: "UNKNOWN", message: "outcome unknown" };
+    });
+    const tabId = result.current.state.layout.activeTabId!;
+    const sourceLeaf = result.current.state.layout.layoutsByTabId[tabId].activeLeafId!;
+    const startup = {
+      kind: "agentContinue" as const,
+      agentType: "claude",
+      mode: "resume" as const,
+      providerSession: { key: "session_id" as const, id: "continue-unknown-local-1" },
+    };
+
+    await act(async () => {
+      await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
+      await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
+    });
+
+    expect(creates).toBe(1);
+  });
+
+  it("does not replay an unknown remote continuation spawn", async () => {
+    const { services } = createServices();
+    const { result } = renderHook(() => useWorkspaceStore({ initialWorktrees: [worktree], services }));
+    const restored = restoredSplitState();
+    restored.sessions["session-1"] = { ...restored.sessions["session-1"], workspaceId: "ssh:host-1" };
+    act(() => result.current.restoreWorkspace(restored));
+    let spawns = 0;
+    (services.spawnTerminal as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      spawns += 1;
+      throw { code: "OPERATION_OUTCOME_UNKNOWN", message: "outcome unknown" };
+    });
+    const startup = {
+      kind: "agentContinue" as const,
+      agentType: "codex",
+      mode: "resume" as const,
+      providerSession: { key: "session_id" as const, id: "continue-unknown-remote-1" },
+    };
+    let thrown: unknown;
+    await act(async () => {
+      try {
+        await result.current.splitPane("tab-primary", "leaf-1", "horizontal", { startup });
+      } catch (error) {
+        thrown = error;
+      }
+      await result.current.splitPane("tab-primary", "leaf-1", "horizontal", { startup });
+    });
+    expect(thrown).toMatchObject({ code: "OPERATION_OUTCOME_UNKNOWN" });
+    expect(spawns).toBe(1);
+    expect(services.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({ startup }));
   });
 
   it("dispatches split layout immediately while deferred spawn is unresolved, then rebinds when spawn resolves", async () => {

@@ -8,6 +8,7 @@
 //! backend integration owner, registers every authored lane below in the same change that
 //! wires them onto the existing remote routes.
 
+pub mod control;
 pub mod files;
 pub mod history;
 pub mod history_antigravity;
@@ -16,6 +17,7 @@ pub mod history_cline;
 pub mod history_copilot;
 pub mod history_crush;
 pub mod history_cursor;
+pub mod history_delta;
 pub mod history_gjc;
 pub mod history_grok;
 pub mod history_kimi;
@@ -25,6 +27,8 @@ pub mod history_opencode;
 pub mod history_parse;
 pub mod history_pi;
 pub mod input;
+pub mod model_discovery;
+pub mod payload;
 pub mod prompt_aider;
 pub mod prompt_claude;
 pub mod prompt_cline;
@@ -42,6 +46,7 @@ pub mod prompt_pi;
 pub mod prompts;
 pub mod screen;
 pub mod types;
+pub mod watch;
 
 pub use types::*;
 

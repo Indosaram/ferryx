@@ -553,8 +553,13 @@ fn is_executable(path: &Path) -> bool {
 }
 
 fn find_ghostty_binary_on_path() -> Option<PathBuf> {
-    let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
+    find_ghostty_binary_in(&env::var_os("PATH")?)
+}
+
+/// The PATH value is a parameter so tests never mutate the process environment, which every
+/// parallel test thread that spawns a child (git, shells) reads at the same time.
+fn find_ghostty_binary_in(path_var: &std::ffi::OsStr) -> Option<PathBuf> {
+    for dir in env::split_paths(path_var) {
         let candidate = dir.join(if cfg!(windows) {
             "ghostty.exe"
         } else {
@@ -565,6 +570,22 @@ fn find_ghostty_binary_on_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Theme directories shipped next to a Ghostty binary (bundle layout, then share layout).
+fn ghostty_bin_theme_candidates(ghostty_bin: &Path, name: &str) -> Vec<PathBuf> {
+    let Some(bin_dir) = ghostty_bin.parent() else {
+        return Vec::new();
+    };
+    vec![
+        bin_dir.join("..").join("ghostty").join("themes").join(name),
+        bin_dir
+            .join("..")
+            .join("share")
+            .join("ghostty")
+            .join("themes")
+            .join(name),
+    ]
 }
 
 /// Environment-derived directories where Ghostty may keep its configuration.
@@ -657,23 +678,7 @@ fn theme_config_candidates(name: &str, appearance: TerminalAppearance) -> Vec<Pa
 
     let mut candidates = theme_candidates_from_roots(&GhosttyEnvRoots::from_env(), &name);
     if let Some(ghostty_bin) = find_ghostty_binary_on_path() {
-        if let Some(bin_dir) = ghostty_bin.parent() {
-            candidates.push(
-                bin_dir
-                    .join("..")
-                    .join("ghostty")
-                    .join("themes")
-                    .join(&name),
-            );
-            candidates.push(
-                bin_dir
-                    .join("..")
-                    .join("share")
-                    .join("ghostty")
-                    .join("themes")
-                    .join(&name),
-            );
-        }
+        candidates.extend(ghostty_bin_theme_candidates(&ghostty_bin, &name));
     }
     if let Some(resources_dir) = env::var_os("GHOSTTY_RESOURCES_DIR") {
         candidates.push(PathBuf::from(resources_dir).join("themes").join(&name));
@@ -1206,31 +1211,13 @@ mod tests {
             fs::set_permissions(&ghostty_bin, perms).expect("set permissions");
         }
 
-        struct EnvGuard {
-            key: &'static str,
-            orig: Option<std::ffi::OsString>,
-        }
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                if let Some(orig) = &self.orig {
-                    env::set_var(self.key, orig);
-                } else {
-                    env::remove_var(self.key);
-                }
-            }
-        }
-
-        let _guard = EnvGuard {
-            key: "PATH",
-            orig: env::var_os("PATH"),
-        };
-
-        env::set_var("PATH", &bin_dir);
-
-        let found = find_ghostty_binary_on_path();
+        // PATH is passed in, never set: a process-wide PATH swap makes every parallel test that
+        // spawns git or a shell fail to find it.
+        let path_var = env::join_paths([bin_dir.as_path()]).expect("path value");
+        let found = find_ghostty_binary_in(&path_var);
         assert_eq!(found, Some(ghostty_bin.clone()));
 
-        let candidates = theme_config_candidates("tokyonight", TerminalAppearance::Dark);
+        let candidates = ghostty_bin_theme_candidates(&ghostty_bin, "tokyonight");
         let expected_bundle = bin_dir
             .join("..")
             .join("ghostty")
@@ -1258,7 +1245,7 @@ mod tests {
             let mut perms = fs::metadata(&ghostty_bin).expect("metadata").permissions();
             perms.set_mode(0o644);
             fs::set_permissions(&ghostty_bin, perms).expect("set permissions");
-            assert_eq!(find_ghostty_binary_on_path(), None);
+            assert_eq!(find_ghostty_binary_in(&path_var), None);
         }
     }
 

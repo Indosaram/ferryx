@@ -2,6 +2,8 @@ import { isDesktopShell } from "./clientRuntime";
 import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import type { DagRunSnapshot } from "./dagTypes";
 import type { DeliveryReceipt, RunTarget } from "./scopedContracts";
+import type { PanelEvent, PanelSnapshot } from "./supervisorPanel/contract";
+import { emptyPanelSnapshot } from "./supervisorPanel/emptySnapshot";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken, RemoteClient, type RemotePreferenceTarget } from "./remoteClient";
 import { invoke, isTauri as isTauriShell } from "@tauri-apps/api/core";
@@ -166,6 +168,17 @@ type DeleteWorktreeRequest = WorktreeStatusRequest & {
   deleteBranch?: boolean | null;
 };
 
+/** Host-built continuation. The client names a mode; it never names argv. */
+export type AgentContinueMode = "fork" | "resume";
+
+/** The only continuation startup DTO. Reference-chat aliases this type; it does not redefine it. */
+export type AgentContinueStartup = {
+  readonly kind: "agentContinue";
+  readonly agentType: string;
+  readonly providerSession: AgentProviderSession;
+  readonly mode: AgentContinueMode;
+};
+
 export type SpawnTerminalRequest = {
   workspaceId: string;
   worktree: WorktreeIdentity | null;
@@ -180,7 +193,7 @@ export type SpawnTerminalRequest = {
     kind: "agentResume";
     agentType: string;
     providerSession: AgentProviderSession;
-  } | {
+  } | AgentContinueStartup | {
     kind: "pairedDaemon";
     hostId: string;
     remoteWorkspaceId: string;
@@ -562,6 +575,84 @@ export async function getWorktreeDiskScanResult(workspaceId: string): Promise<Di
   });
 }
 
+/** The Supervisor panel snapshot; outside the desktop shell there is no hub, so setup is shown. */
+export async function getSupervisorPanel(): Promise<PanelSnapshot> {
+  if (!isTauri()) return emptyPanelSnapshot();
+  return invokeCommand<PanelSnapshot>("cmd_supervisor_panel");
+}
+
+/**
+ * Panel writes. Each names the Tauri command `docs/plans/SUPERVISOR_PANEL_CONTRACT.md` fixes for
+ * it; none of them is registered in `src-tauri` on every build, and a missing command rejects
+ * (never resolves), so the caller shows the failure instead of a success that did not happen.
+ */
+export async function converseSupervisor(request: { text: string; mentions: string[]; requestId: string }): Promise<unknown> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  return invokeCommand<unknown>("cmd_supervisor_converse", request);
+}
+
+export async function setSupervisorPanelPaused(paused: boolean): Promise<void> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  await invokeCommand<unknown>("cmd_supervisor_pause", { paused });
+}
+
+/** One page of the supervisor's app transcript after `cursor` (a message id; 0 is the start). */
+export async function readSupervisorTranscriptPage(cursor: number): Promise<unknown> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  return invokeCommand<unknown>("cmd_supervisor_read", { request: { view: "transcript", cursor } });
+}
+
+/** Saves the exported transcript into the Downloads folder; resolves to the saved path. */
+export async function saveSupervisorTranscriptFile(fileName: string, text: string): Promise<string> {
+  return invokeCommand<string>("cmd_supervisor_transcript_export", { fileName, text });
+}
+
+/**
+ * The native iPhone/iPad companion: stages the transcript as a file and opens the system share
+ * sheet (`share_text_file` in `mobile/src-tauri`). Resolves true when the user completed a share
+ * or save, false when the sheet was dismissed; rejects when the file could not be staged.
+ */
+export async function shareSupervisorTranscriptFile(fileName: string, text: string): Promise<boolean> {
+  return invokeCommand<boolean>("share_text_file", { fileName, text });
+}
+
+/** Stops one session straight through agent control, not via the engine. */
+export async function stopSupervisedSession(sessionRef: string): Promise<void> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  await invokeCommand<unknown>("cmd_session_stop", { sessionRef });
+}
+
+export async function undoSupervisorAction(actionId: number): Promise<void> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  await invokeCommand<unknown>("cmd_supervisor_action_undo", { id: actionId });
+}
+
+export async function supervisorAnswer(request: {
+  sessionRef: string;
+  promptId: string;
+  screenRevision: string;
+  optionIndex: number;
+}): Promise<Record<string, unknown> | null> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  return invokeCommand<Record<string, unknown> | null>("cmd_supervisor_answer", {
+    sessionRef: request.sessionRef,
+    promptId: request.promptId,
+    screenRevision: request.screenRevision,
+    optionIndex: request.optionIndex,
+  });
+}
+
+export async function startSupervisor(): Promise<boolean> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor hub starts only in the desktop app"));
+  return invokeCommand<boolean>("cmd_supervisor_start");
+}
+
+/** `panel.*` owner frames forwarded by the desktop shell as `supervisor_panel_event`. */
+export async function onSupervisorPanelEvent(handler: (event: PanelEvent) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<PanelEvent>("supervisor_panel_event", (event) => handler(event.payload));
+}
+
 export async function onWorktreeDiskScanProgress(
   handler: (payload: DiskScanSnapshot) => void,
 ): Promise<UnlistenFn> {
@@ -616,6 +707,27 @@ function sanitizeSpawnStartup(startup: SpawnTerminalRequest["startup"]): SpawnTe
       kind: "agentLaunch",
       command: String(startup.command ?? ""),
       args: Array.isArray(startup.args) ? startup.args.map(String) : [],
+    };
+  }
+  if (startup.kind === "agentContinue") {
+    if (startup.mode !== "fork" && startup.mode !== "resume") return null;
+    const providerSession = startup.providerSession as
+      | { key?: unknown; id?: unknown; transcriptPath?: unknown; launcher?: "mhc" }
+      | null
+      | undefined;
+    if (!providerSession || typeof providerSession.id !== "string") return null;
+    const key = providerSession.key === "conversation_id" ? "conversation_id" : "session_id";
+    const transcriptPath = typeof providerSession.transcriptPath === "string" ? providerSession.transcriptPath : undefined;
+    return {
+      kind: "agentContinue",
+      agentType: String(startup.agentType ?? ""),
+      mode: startup.mode,
+      providerSession: {
+        key,
+        id: providerSession.id,
+        ...(providerSession.launcher !== undefined ? { launcher: providerSession.launcher } : {}),
+        ...(transcriptPath !== undefined ? { transcriptPath } : {}),
+      },
     };
   }
   if (startup.kind !== "agentResume") return null;
@@ -1465,6 +1577,11 @@ export async function setAgentControlSettings(request: {
   return invokeCommand<AgentControlSettings>("cmd_agent_control_set", request);
 }
 
+export async function enableAgentControlOwner(): Promise<AgentControlSettings> {
+  if (!isTauri()) throw toIpcError(new Error("Agent control is configured only in the desktop app"));
+  return invokeCommand<AgentControlSettings>("cmd_agent_control_enable_owner");
+}
+
 export type DirectAutoTrustStatus = {
   /** Automatic account-attested direct trust is in effect. */
   enabled: boolean;
@@ -1765,6 +1882,15 @@ export type RemoteTerminalTabInfo = {
   worktreeSlug?: string;
   worktreeLabel?: string;
   sessionId?: string;
+  /** Absent for a live pane. False only when the desktop pane has exited and has no live backend. */
+  running?: boolean;
+  /** Normalized provider session, same shape as a sessions-list row. Only an exited agent pane publishes one. */
+  providerSession?: {
+    key: "session_id" | "conversation_id";
+    id: string;
+    transcriptPath?: string;
+    launcher?: "mhc";
+  };
 };
 
 export type FocusedTerminalPayload = {
@@ -1795,6 +1921,12 @@ export type FocusedTerminalPayload = {
 export async function reportDesktopWindowFocus(focused: boolean): Promise<void> {
   if (!isTauri()) return;
   return invokeCommand<void>("cmd_remote_set_window_focused", { focused });
+}
+
+/** Mutes or unmutes phone push for one session (`<hostId>:<sessionId>`); the panel still lists it. */
+export async function setSessionPushMuted(sessionRef: string, muted: boolean): Promise<void> {
+  if (!isTauri()) return;
+  return invokeCommand<void>("cmd_session_mute", { sessionRef, muted });
 }
 
 export async function publishFocusedTerminal(payload: FocusedTerminalPayload | null): Promise<void> {

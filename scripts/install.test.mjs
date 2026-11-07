@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,10 +13,30 @@ afterEach(() => {
   while (sandboxes.length) rmSync(sandboxes.pop(), { recursive: true, force: true });
 });
 
-// A file whose first 20 bytes pass the installer's linux/amd64 ELF header check and which the
-// shell runs as a script when execve rejects it (ENOEXEC), so the "--help" self-check exits 0.
-// The newline sits before the first NUL byte so the shell does not treat it as binary.
+// A payload the installer accepts on linux/amd64: its first 20 bytes must be a 64-bit
+// little-endian ELF with e_machine 0x3e, and the "--help" self-check must then exit 0. A real
+// x86_64 ELF is the only payload that satisfies both on Linux, because bash declines its
+// ENOEXEC script fallback for anything carrying ELF magic (exit 126, "cannot execute binary
+// file"). So copy the host's own /bin/true when it is one, and fall back to the synthetic
+// header-plus-script that only the shells with the ENOEXEC fallback (macOS) can run.
 function fakeLinuxAmd64Binary() {
+  for (const candidate of ["/bin/true", "/usr/bin/true"]) {
+    let bytes;
+    try {
+      bytes = readFileSync(candidate);
+    } catch {
+      continue;
+    }
+    if (
+      bytes.length >= 20 &&
+      bytes[0] === 0x7f && bytes.toString("latin1", 1, 4) === "ELF" &&
+      bytes[4] === 2 && bytes[5] === 1 &&
+      (bytes[16] | (bytes[17] << 8)) >>> 0 >= 2 && (bytes[16] | (bytes[17] << 8)) >>> 0 <= 3 &&
+      (bytes[18] | (bytes[19] << 8)) === 0x3e
+    ) {
+      return bytes;
+    }
+  }
   const header = Buffer.from([
     0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x0a, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23,
     0x02, 0x00, 0x3e, 0x00,

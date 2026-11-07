@@ -6,11 +6,13 @@ import {
   createLeafNode,
   equalizeRatios,
   findFirstLeafId,
+  findLeaf,
   findSiblingLeafId,
   MAX_PANE_RATIO,
   MIN_PANE_RATIO,
   removeLeaf,
   setRatioAtPath,
+  setLeafView,
   splitLeaf,
   swapLeaves,
   type PaneNode,
@@ -43,6 +45,25 @@ describe("createLeafNode", () => {
     expect(first.leafId).toMatch(/^pane:/);
     expect(second.leafId).toMatch(/^pane:/);
     expect(first.leafId).not.toBe(second.leafId);
+  });
+});
+
+describe("pane view", () => {
+  it("keeps a chat view with its leaf when split and swapped", () => {
+    const chat = setLeafView(leaf("a"), "a", "chat");
+    const root = splitLeaf(chat, "a", "b", "horizontal");
+    const moved = swapLeaves(root, "a", "b");
+    expect(findLeaf(moved, "a")).toEqual({ type: "leaf", leafId: "a", view: "chat" });
+    expect(findLeaf(moved, "b")).toEqual(leaf("b"));
+    expect(moved.type === "split" && moved.second).toBe(chat);
+  });
+
+  it("treats legacy leaves as terminal and ignores missing leaves", () => {
+    const root = nestedTree();
+    expect(setLeafView(root, "a", "terminal")).toBe(root);
+    expect(setLeafView(root, "missing", "chat")).toBe(root);
+    const chat = setLeafView(root, "a", "chat");
+    expect(findLeaf(setLeafView(chat, "a", "terminal"), "a")?.view).toBe("terminal");
   });
 });
 

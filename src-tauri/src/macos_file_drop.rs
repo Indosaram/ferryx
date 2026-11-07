@@ -34,6 +34,36 @@ pub struct FileDropIvars {
     on_drop: Box<dyn Fn(Vec<String>, f64, f64) + Send + Sync>,
 }
 
+const TRACE_FILE: &str = "ferryx-file-drop.log";
+const TRACE_MAX_BYTES: u64 = 256 * 1024;
+
+/// A Finder-launched app sends stderr to /dev/null, so the drag-destination lifecycle is also
+/// appended to a small file beside the switch-debug log. Without it a release build cannot tell
+/// "macOS never routed this drop to Ferryx" from "the frontend received it and ignored it".
+pub fn trace_note(note: &str) {
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(TRACE_FILE);
+    let oversized = match std::fs::metadata(&path) {
+        Ok(meta) => meta.len() > TRACE_MAX_BYTES,
+        Err(_) => false,
+    };
+    if oversized {
+        let _ = std::fs::write(&path, b"");
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{stamp} {note}");
+    }
+}
+
 define_class!(
     #[unsafe(super(NSView))]
     #[name = "FerryxFileDropView"]
@@ -60,6 +90,10 @@ define_class!(
     unsafe impl NSDraggingDestination for FerryxFileDropView {
         #[unsafe(method(draggingEntered:))]
         fn dragging_entered(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            let path_count = collect_paths(info).len();
+            // Reaching this proves AppKit resolved this view as the destination; a drop that
+            // produces no paste without a line here was never routed to Ferryx at all.
+            trace_note(&format!("draggingEntered: {path_count} path(s)"));
             self.operation_for(info)
         }
 
@@ -73,11 +107,18 @@ define_class!(
             let paths = collect_paths(info);
             tracing::info!("ferryx file drop: {} path(s)", paths.len());
             if paths.is_empty() {
+                trace_note("performDragOperation: no file paths on the pasteboard");
                 return Bool::NO;
             }
 
             let location = info.draggingLocation();
             let point = self.convertPoint_fromView(location, None);
+            trace_note(&format!(
+                "performDragOperation: {} path(s) at x={:.1} y={:.1}",
+                paths.len(),
+                point.x,
+                point.y
+            ));
             (self.ivars().on_drop)(paths, point.x, point.y);
             Bool::YES
         }
@@ -138,6 +179,7 @@ pub fn install<F>(raw_ns_window: *mut c_void, on_drop: F) -> Result<(), String>
 where
     F: Fn(Vec<String>, f64, f64) + Send + Sync + 'static,
 {
+    trace_note("install: begin");
     if raw_ns_window.is_null() {
         return Err("NSWindow pointer is null".into());
     }
@@ -173,5 +215,6 @@ where
     // The view must outlive this call; the window owns it as a subview from here on.
     let _leaked: *mut AnyObject = Retained::into_raw(view).cast();
 
+    trace_note("install: drag destination registered");
     Ok(())
 }

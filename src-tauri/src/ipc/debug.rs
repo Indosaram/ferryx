@@ -167,6 +167,9 @@ pub fn should_persist_entry(debug_enabled: bool, event: &str) -> bool {
         || event.starts_with("terminal.surface.attach.")
         || event.starts_with("terminal.surface.bounds.")
         || event.starts_with("terminal.surface.detach.")
+        // A drop the native destination received but that produced no paste is otherwise
+        // indistinguishable from one macOS never routed at all. Drops are rare, user-driven.
+        || event.starts_with("terminal.surface.drop.")
         || event == "terminal.surface.skipped"
         || event == "terminal.surface.cover"
         || is_release_persisted_navigation_event(event)

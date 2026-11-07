@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowUp,
@@ -6,6 +6,7 @@ import {
   FileText,
   Loader2,
   Pencil,
+  Mic,
   Plus,
   Square,
   Trash2,
@@ -14,7 +15,15 @@ import {
 import { cn } from "../../lib/cn";
 import type { ChatAttachment } from "./MobileChatComponents";
 import type { HeldMessage } from "./referenceQueue";
-import type { ReferenceFileReceipt } from "./referenceTypes";
+import type { FollowUpMessage } from "./referenceFollowUp";
+import type {
+  ReferenceComposerCapabilities,
+  ReferenceComposerModelApply,
+  ReferenceComposerOptionApply,
+  ReferenceFileReceipt,
+} from "./referenceTypes";
+import { insertAtCaret, probeDictation, type DictationSession } from "./referenceDictation";
+import { REFERENCE_CONTROL_EFFORT_ID, REFERENCE_CONTROL_MODEL_ID } from "./referenceControl";
 import { isImeConfirmingKey } from "./imeKeys";
 
 export type { ChatAttachment };
@@ -22,6 +31,18 @@ export type { ChatAttachment };
 export interface MobileChatComposerHandle {
   clearDraft: () => void;
   focus: () => void;
+}
+
+export interface ComposerControlChange {
+  readonly controlId: string;
+  readonly valueId: string;
+  readonly label: string;
+  readonly apply: ReferenceComposerModelApply | ReferenceComposerOptionApply;
+}
+
+export interface ComposerControlNotice {
+  readonly status: "applied" | "rejected" | "unknown" | "pending" | "picker";
+  readonly message: string;
 }
 
 /**
@@ -46,6 +67,7 @@ export interface MobileChatComposerProps {
   readonly attachments?: readonly ReferenceFileReceipt[];
   /** Stage files on the owning host; caret is where the mention is inserted. */
   readonly onAttachFiles?: (files: readonly File[], caret: number) => void;
+  readonly showAttachments?: boolean;
   readonly onRemoveAttachment?: (attachmentId: string) => void;
   readonly attaching?: boolean;
   readonly attachError?: string | null;
@@ -57,6 +79,16 @@ export interface MobileChatComposerProps {
   readonly onEditHeld?: (id: string, text: string) => void;
   readonly onSendHeld?: (id: string) => void;
   readonly onRemoveHeld?: (id: string) => void;
+  /**
+   * Follow-ups admitted while the agent is working. Shown whenever present.
+   * Cancel is only offered before delivery.
+   */
+  readonly queuedMessages?: readonly FollowUpMessage[];
+  readonly onCancelQueued?: (id: string) => void;
+  /** Admit the draft to the target queue. `false` keeps the text in the box. */
+  readonly onQueue?: (text: string) => boolean | void;
+  /** Deliver now on the advertised steer path. `false` keeps the text in the box. */
+  readonly onSteer?: (text: string) => boolean | void;
   /**
    * A prompt is waiting on the original pane. The card itself is drawn in the message stream by
    * the owner, never here, so the message box stays reachable with the keyboard open; this box
@@ -75,10 +107,44 @@ export interface MobileChatComposerProps {
   readonly disabled?: boolean;
   readonly placeholder?: string;
   readonly className?: string;
+  /**
+   * Controls for this target only. Absent, null, or an empty list hides that control.
+   * Nothing here is filled in from the agent name or a previous pane.
+   */
+  readonly composerCapabilities?: ReferenceComposerCapabilities | null;
+  readonly onApplyControl?: (change: ComposerControlChange) => void;
+  readonly controlNotice?: ComposerControlNotice | null;
+  /** A change discards dictation and drops a late result. Absent is one unnamed fence. */
+  readonly dictationFence?: string;
+  /** Terminal mode, or any other surface that must not keep the microphone open. */
+  readonly dictationSuspended?: boolean;
 }
 
 /** How long a first tap on Stop stays armed on a touch screen before it needs arming again. */
 const STOP_ARM_MS = 3000;
+
+interface SlashSpan {
+  readonly start: number;
+  readonly token: string;
+}
+
+function slashTokenAt(value: string, caret: number): SlashSpan | null {
+  const at = Number.isFinite(caret) ? Math.min(Math.max(0, Math.trunc(caret)), value.length) : value.length;
+  const match = /(?:^|\s)(\/[^\s]*)$/.exec(value.slice(0, at));
+  if (!match?.[1]) return null;
+  return { start: at - match[1].length, token: match[1] };
+}
+
+function slashCommandText(name: string): string {
+  const bare = name.replace(/^\/+/, "").trim();
+  return bare.length === 0 ? "/" : `/${bare} `;
+}
+
+function slashNameMatches(name: string, token: string): boolean {
+  const bare = name.replace(/^\/+/, "").toLowerCase();
+  const typed = token.replace(/^\/+/, "").toLowerCase();
+  return bare.startsWith(typed);
+}
 
 /** A held message named in a button's label: enough to tell rows apart, never a whole paragraph. */
 function heldName(text: string): string {
@@ -105,6 +171,7 @@ export const MobileChatComposer = React.forwardRef<
   draftUnsaved = false,
   attachments = [],
   onAttachFiles,
+  showAttachments = true,
   onRemoveAttachment,
   attaching = false,
   attachError = null,
@@ -114,6 +181,10 @@ export const MobileChatComposer = React.forwardRef<
   onEditHeld,
   onSendHeld,
   onRemoveHeld,
+  queuedMessages = [],
+  onCancelQueued,
+  onQueue,
+  onSteer,
   promptOpen = false,
   warning = null,
   warningAction = null,
@@ -124,6 +195,11 @@ export const MobileChatComposer = React.forwardRef<
   disabled = false,
   placeholder = "Ask the agent…",
   className,
+  composerCapabilities = null,
+  onApplyControl,
+  controlNotice = null,
+  dictationFence = "",
+  dictationSuspended = false,
 }, ref) => {
   const isControlled = value !== undefined;
   const [internalText, setInternalText] = useState("");
@@ -155,6 +231,56 @@ export const MobileChatComposer = React.forwardRef<
   }, [onStop, stopArmed]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textRef = useRef(text);
+  textRef.current = text;
+  const primaryFollowUpRef = useRef<"queue" | "steer" | null>(null);
+  const fenceRef = useRef(dictationFence);
+  fenceRef.current = dictationFence;
+  const dictationProbe = useMemo(
+    () => probeDictation(typeof window === "undefined" ? undefined : window),
+    [],
+  );
+  const dictationRef = useRef<DictationSession | null>(null);
+  const partialSpanRef = useRef<{ start: number; end: number } | null>(null);
+  const pendingCaretRef = useRef<number | null>(null);
+  const [dictating, setDictating] = useState(false);
+  const [caretPos, setCaretPos] = useState(0);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
+
+  const discardDictation = useCallback(() => {
+    dictationRef.current?.discard();
+    dictationRef.current = null;
+    partialSpanRef.current = null;
+    setDictating(false);
+  }, []);
+
+  useEffect(() => {
+    discardDictation();
+  }, [dictationFence, discardDictation]);
+
+  useEffect(() => {
+    if (dictationSuspended) discardDictation();
+  }, [dictationSuspended, discardDictation]);
+
+  useEffect(() => () => {
+    dictationRef.current?.discard();
+    dictationRef.current = null;
+  }, []);
+
+  useLayoutEffect(() => {
+    const next = pendingCaretRef.current;
+    if (next === null) return;
+    pendingCaretRef.current = null;
+    const el = textareaRef.current;
+    if (!el) return;
+    el.setSelectionRange(Math.min(Math.max(0, next), el.value.length), Math.min(Math.max(0, next), el.value.length));
+  }, [text]);
+
+  const rememberCaret = useCallback((node: HTMLTextAreaElement | null = textareaRef.current) => {
+    if (node === null || typeof node.selectionStart !== "number") return;
+    setCaretPos(node.selectionStart);
+  }, []);
 
   const setText = useCallback(
     (next: string) => {
@@ -163,6 +289,16 @@ export const MobileChatComposer = React.forwardRef<
     },
     [isControlled, onValueChange],
   );
+
+  const writeAt = useCallback((start: number, end: number, insertion: string) => {
+    if (isComposingRef.current) return;
+    const current = textRef.current;
+    const next = insertAtCaret(current, start, end, insertion);
+    pendingCaretRef.current = next.caret;
+    partialSpanRef.current = insertion.length === 0 ? null : { start: Math.min(start, end), end: next.caret };
+    setText(next.value);
+    setCaretPos(next.caret);
+  }, [setText]);
 
   const adjustHeight = useCallback(() => {
     const el = textareaRef.current;
@@ -216,17 +352,132 @@ export const MobileChatComposer = React.forwardRef<
     }
   }, [disabled, attaching, text, onSend, setText]);
 
+  const clearSentField = useCallback(() => {
+    setText("");
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "36px";
+    }
+  }, [setText]);
+
+  const handleQueue = useCallback(() => {
+    if (disabled || attaching) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const consumed = onQueue?.(trimmed);
+    if (consumed === false) return;
+    clearSentField();
+  }, [attaching, clearSentField, disabled, onQueue, text]);
+
+  const handleSteer = useCallback(() => {
+    if (disabled || attaching) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const consumed = onSteer?.(trimmed);
+    if (consumed === false) return;
+    clearSentField();
+  }, [attaching, clearSentField, disabled, onSteer, text]);
+
+  const slashSpan = composerCapabilities && composerCapabilities.slashCommands.length > 0
+    ? slashTokenAt(text, caretPos)
+    : null;
+  const slashOptions = slashSpan === null || composerCapabilities === null
+    ? []
+    : composerCapabilities.slashCommands.filter((command) => slashNameMatches(command.name, slashSpan.token));
+  const slashOpen = slashOptions.length > 0;
+  const slashVisible = slashOpen && !slashDismissed;
+
+  const insertSlash = useCallback((name: string) => {
+    const span = slashTokenAt(textRef.current, textareaRef.current?.selectionStart ?? caretPos);
+    if (span === null) return;
+    const insertion = slashCommandText(name);
+    partialSpanRef.current = null;
+    writeAt(span.start, span.start + span.token.length, insertion);
+    setSlashIndex(0);
+  }, [caretPos, writeAt]);
+
+  const slashKey = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (!slashVisible) return false;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSlashIndex((index) => (index + 1) % slashOptions.length);
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSlashIndex((index) => (index - 1 + slashOptions.length) % slashOptions.length);
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setSlashDismissed(true);
+      return true;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      if (isImeConfirmingKey(event, isComposingRef.current)) return false;
+      event.preventDefault();
+      const chosen = slashOptions[slashIndex] ?? slashOptions[0];
+      if (chosen) insertSlash(chosen.name);
+      return true;
+    }
+    return false;
+  }, [insertSlash, slashIndex, slashOptions, slashVisible]);
+
+  const applyDictation = useCallback((transcript: string, fence: string) => {
+    if (fenceRef.current !== fence || isComposingRef.current) return;
+    const current = textRef.current;
+    const el = textareaRef.current;
+    const span = partialSpanRef.current;
+    const start = span ? span.start : (el?.selectionStart ?? current.length);
+    const end = span ? span.end : (el?.selectionEnd ?? start);
+    writeAt(start, end, transcript);
+  }, [writeAt]);
+
+  const toggleDictation = useCallback(() => {
+    if (!dictationProbe.available || dictationSuspended) return;
+    if (dictationRef.current) {
+      dictationRef.current.stop();
+      dictationRef.current = null;
+      partialSpanRef.current = null;
+      setDictating(false);
+      return;
+    }
+    const fence = fenceRef.current;
+    const session = dictationProbe.create({
+      onPartial: (transcript) => applyDictation(transcript, fence),
+      onFinal: (transcript) => {
+        applyDictation(transcript, fence);
+        partialSpanRef.current = null;
+      },
+      onError: (error) => {
+        if (fenceRef.current !== fence) return;
+        if (error.code === "permission-denied" || error.code === "not-allowed") {
+          discardDictation();
+          return;
+        }
+        dictationRef.current?.stop();
+        dictationRef.current = null;
+        setDictating(false);
+      },
+    });
+    dictationRef.current = session;
+    setDictating(true);
+    session.start(fence);
+  }, [applyDictation, dictationProbe, dictationSuspended, discardDictation]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (slashKey(e)) return;
       if (e.key === "Enter" && !e.shiftKey) {
         if (isImeConfirmingKey(e, isComposingRef.current)) return;
         // a soft keyboard has no Shift+Enter: there Enter is a new line and the Send button sends
         if (coarsePointer()) return;
         e.preventDefault();
-        handleSend();
+        if (primaryFollowUpRef.current === "queue") handleQueue();
+        else if (primaryFollowUpRef.current === "steer") handleSteer();
+        else handleSend();
       }
     },
-    [handleSend]
+    [handleQueue, handleSend, handleSteer, slashKey]
   );
 
   const handleCompositionStart = useCallback(() => {
@@ -267,16 +518,32 @@ export const MobileChatComposer = React.forwardRef<
 
   const canSubmit = text.trim().length > 0 && !disabled && !attaching;
   // A prompt waiting on the original pane is a question this box answers, so the box keeps Send
-  // beside Stop while one is up. Without a prompt, a running pane shows Stop alone.
+  // beside Stop while one is up. Queue and steer appear only while the agent is working, the
+  // draft is nonempty, and that target currently advertises the action.
   const answersWaitingPrompt = promptOpen;
-  const showsSend = !isRunning || answersWaitingPrompt;
+  const followUp = !answersWaitingPrompt && isRunning && canSubmit ? composerCapabilities?.followUp : null;
+  const offersQueue = followUp?.queue === true;
+  const offersSteer = followUp?.steer === true;
+  const primaryFollowUp = offersQueue ? "queue" : offersSteer ? "steer" : null;
+  primaryFollowUpRef.current = primaryFollowUp;
+  const showsSend = primaryFollowUp === null && (!isRunning || answersWaitingPrompt);
   const textareaLabel = placeholder.replace(/…$/, "");
+  const modelChoices = composerCapabilities?.models?.choices ?? [];
+  const selectedModel = modelChoices.find((choice) => choice.id === composerCapabilities?.models?.current) ?? null;
+  const effortChoices = selectedModel?.efforts.filter((effort) => effort.length > 0) ?? [];
+  const optionControls = (composerCapabilities?.options ?? []).filter(
+    (option) => option.apply !== "start-only" && option.values.length > 0,
+  );
+  const showsModel = composerCapabilities?.models != null && modelChoices.length > 0;
+  const showsEffort = showsModel && effortChoices.length > 0;
+  const showsControls = showsModel || showsEffort || optionControls.length > 0;
   const hasExtras =
     draftUnsaved ||
     warning !== null ||
     attachError !== null ||
     attachments.length > 0 ||
-    heldMessages.length > 0;
+    heldMessages.length > 0 ||
+    queuedMessages.length > 0;
   const fileCountLabel = `${attachments.length} ${attachments.length === 1 ? "file" : "files"}`;
   const heldCountLabel = `${heldMessages.length} held`;
 
@@ -408,6 +675,31 @@ export const MobileChatComposer = React.forwardRef<
           })}
         </div>
       )}
+      {queuedMessages.length > 0 && (
+        <div data-testid="queued-follow-up-list" className="flex flex-col gap-1 px-3 pt-2 pb-1 border-b border-chat-border">
+          {queuedMessages.map((message) => {
+            const waiting = message.phase === "queued";
+            return (
+              <div key={message.id} data-testid={`queued-follow-up-${message.id}`} className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-xs text-chat-foreground">{message.text}</span>
+                <span className="shrink-0 text-xs text-chat-foreground-secondary">
+                  {message.phase === "unknown" ? "Not confirmed" : message.phase === "delivering" ? "Sending" : "Queued"}
+                </span>
+                <button
+                  type="button"
+                  data-testid={`queued-follow-up-cancel-${message.id}`}
+                  aria-label={"Cancel queued message " + heldName(message.text)}
+                  disabled={!waiting}
+                  onClick={() => onCancelQueued?.(message.id)}
+                  className="flex size-11 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:bg-chat-surface-hover hover:text-chat-danger disabled:opacity-40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <X aria-hidden="true" className="size-4" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {heldMessages.length > 0 && (
         <div
           id="chat-composer-held"
@@ -506,6 +798,126 @@ export const MobileChatComposer = React.forwardRef<
         />
 
         <div className="rounded-[20px] border border-chat-composer-border bg-chat-composer-surface transition-colors focus-within:border-chat-foreground-secondary/40">
+          {showsControls && (
+            <div data-testid="composer-controls" className="flex flex-wrap items-end gap-2 px-2 pt-2">
+              {showsModel && composerCapabilities?.models && (
+                <label className="flex min-w-0 flex-col gap-0.5 text-xs text-chat-foreground-secondary">
+                  <span id="composer-model-label">Model</span>
+                  <select
+                    data-testid="composer-model-control"
+                    aria-labelledby="composer-model-label"
+                    value={composerCapabilities.models.current ?? ""}
+                    onChange={(event) => {
+                      const choice = modelChoices.find((item) => item.id === event.currentTarget.value);
+                      if (!choice || !composerCapabilities.models) return;
+                      onApplyControl?.({
+                        controlId: REFERENCE_CONTROL_MODEL_ID,
+                        valueId: choice.id,
+                        label: choice.label,
+                        apply: composerCapabilities.models.apply,
+                      });
+                    }}
+                    className="min-h-11 max-w-full rounded-md border border-chat-border bg-chat-surface px-2 text-base text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    <option value="" disabled>Model</option>
+                    {modelChoices.map((choice) => (
+                      <option key={choice.id} value={choice.id}>{choice.label}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {showsEffort && composerCapabilities?.models && (
+                <label className="flex min-w-0 flex-col gap-0.5 text-xs text-chat-foreground-secondary">
+                  <span id="composer-effort-label">Effort</span>
+                  <select
+                    data-testid="composer-effort-control"
+                    aria-labelledby="composer-effort-label"
+                    value=""
+                    onChange={(event) => {
+                      const valueId = event.currentTarget.value;
+                      if (!valueId || !composerCapabilities.models) return;
+                      onApplyControl?.({
+                        controlId: REFERENCE_CONTROL_EFFORT_ID,
+                        valueId,
+                        label: valueId,
+                        apply: composerCapabilities.models.apply,
+                      });
+                    }}
+                    className="min-h-11 max-w-full rounded-md border border-chat-border bg-chat-surface px-2 text-base text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    <option value="" disabled>Effort</option>
+                    {effortChoices.map((effort) => (
+                      <option key={effort} value={effort}>{effort}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {optionControls.map((option) => (
+                <label key={option.id} className="flex min-w-0 flex-col gap-0.5 text-xs text-chat-foreground-secondary">
+                  <span id={`composer-option-label-${option.id}`}>{option.label}</span>
+                  <select
+                    data-testid={`composer-option-${option.id}`}
+                    aria-labelledby={`composer-option-label-${option.id}`}
+                    value={option.current ?? ""}
+                    onChange={(event) => {
+                      const valueId = event.currentTarget.value;
+                      if (!valueId) return;
+                      onApplyControl?.({
+                        controlId: option.id,
+                        valueId,
+                        label: valueId,
+                        apply: option.apply,
+                      });
+                    }}
+                    className="min-h-11 max-w-full rounded-md border border-chat-border bg-chat-surface px-2 text-base text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    <option value="" disabled>{option.label}</option>
+                    {option.values.map((value) => (
+                      <option key={value} value={value}>{value}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+          )}
+          {controlNotice !== null && (
+            <p
+              data-testid="composer-control-notice"
+              data-status={controlNotice.status}
+              role="status"
+              aria-live="polite"
+              className="px-3 pt-2 text-xs text-chat-foreground-secondary"
+            >
+              {controlNotice.message}
+            </p>
+          )}
+          {slashVisible && (
+            <div
+              id="composer-slash-list"
+              data-testid="composer-slash-list"
+              role="listbox"
+              aria-label="Slash commands"
+              className="flex flex-col gap-1 px-2 pt-2"
+            >
+              {slashOptions.map((command, index) => (
+                <button
+                  key={command.name}
+                  type="button"
+                  role="option"
+                  data-testid={`composer-slash-option-${command.name.replace(/^\/+/, "")}`}
+                  aria-selected={index === slashIndex}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => insertSlash(command.name)}
+                  className="flex min-h-11 items-center gap-2 rounded-md px-2 text-left text-sm text-chat-foreground hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <span className="font-medium">{slashCommandText(command.name).trim()}</span>
+                  {command.description ? (
+                    <span className="truncate text-chat-foreground-secondary">{command.description}</span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             data-testid="chat-composer-textarea"
@@ -514,10 +926,21 @@ export const MobileChatComposer = React.forwardRef<
             disabled={disabled}
             placeholder={placeholder}
             aria-label={textareaLabel}
+            aria-controls={slashVisible ? "composer-slash-list" : undefined}
+            aria-expanded={slashVisible || undefined}
+            aria-autocomplete={slashVisible ? "list" : undefined}
             enterKeyHint={coarsePointer() ? "enter" : "send"}
             autoComplete="off"
             inputMode="text"
-            onChange={(e) => setText(e.target.value)}
+            onChange={(event) => {
+              partialSpanRef.current = null;
+              setSlashDismissed(false);
+              setText(event.target.value);
+              rememberCaret(event.currentTarget);
+            }}
+            onSelect={(event) => rememberCaret(event.currentTarget)}
+            onKeyUp={(event) => rememberCaret(event.currentTarget)}
+            onClick={(event) => rememberCaret(event.currentTarget)}
             onKeyDown={handleKeyDown}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
@@ -527,7 +950,7 @@ export const MobileChatComposer = React.forwardRef<
           {/* Stop sits at the left edge, Send at the right: a slip never turns an answer into a stop */}
           <div className="flex items-center justify-between gap-3 px-1 pb-1">
             <div className="flex items-center gap-1">
-              <button
+              {showAttachments ? <button
                 type="button"
                 data-testid="attach-file-button"
                 aria-label="Attach file"
@@ -538,7 +961,21 @@ export const MobileChatComposer = React.forwardRef<
                 className="flex size-11 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 <Plus aria-hidden="true" className="size-5" />
-              </button>
+              </button> : null}
+              {dictationProbe.available && (
+                <button
+                  type="button"
+                  data-testid="dictation-mic-button"
+                  aria-label={dictating ? "Stop dictation" : "Start dictation"}
+                  aria-pressed={dictating}
+                  title={dictating ? "Stop dictation" : "Start dictation"}
+                  disabled={disabled || dictationSuspended}
+                  onClick={toggleDictation}
+                  className="flex size-11 shrink-0 items-center justify-center rounded-full text-chat-foreground-secondary hover:text-chat-foreground active:bg-chat-surface-raised transition-colors disabled:opacity-40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <Mic aria-hidden="true" className="size-5" />
+                </button>
+              )}
 
               {isRunning && (
                 <button
@@ -551,6 +988,19 @@ export const MobileChatComposer = React.forwardRef<
                 >
                   <Square aria-hidden="true" className="size-3.5 fill-current" />
                   <span aria-hidden="true">{stopArmed ? "Tap to confirm" : "Stop"}</span>
+                </button>
+              )}
+              {offersQueue && offersSteer && (
+                <button
+                  type="button"
+                  data-testid="steer-button"
+                  aria-label="Steer the running turn now"
+                  title="Steer the running turn now"
+                  disabled={!canSubmit}
+                  onClick={handleSteer}
+                  className="flex h-11 shrink-0 items-center rounded-full px-3 text-sm font-medium text-chat-foreground hover:bg-chat-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+                >
+                  Steer
                 </button>
               )}
             </div>
@@ -571,6 +1021,32 @@ export const MobileChatComposer = React.forwardRef<
                 )}
               >
                 <ArrowUp aria-hidden="true" className="size-5 stroke-[2.5]" />
+              </button>
+            )}
+            {primaryFollowUp === "queue" && (
+              <button
+                type="button"
+                data-testid="queue-follow-up-button"
+                aria-label="Queue message to send when the turn ends"
+                title="Queue message to send when the turn ends"
+                disabled={!canSubmit}
+                onClick={handleQueue}
+                className="flex h-11 shrink-0 items-center rounded-full bg-chat-primary px-4 text-sm font-medium text-chat-primary-foreground hover:bg-chat-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+              >
+                Queue
+              </button>
+            )}
+            {primaryFollowUp === "steer" && (
+              <button
+                type="button"
+                data-testid="steer-button"
+                aria-label="Steer the running turn now"
+                title="Steer the running turn now"
+                disabled={!canSubmit}
+                onClick={handleSteer}
+                className="flex h-11 shrink-0 items-center rounded-full bg-chat-primary px-4 text-sm font-medium text-chat-primary-foreground hover:bg-chat-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
+              >
+                Steer
               </button>
             )}
           </div>

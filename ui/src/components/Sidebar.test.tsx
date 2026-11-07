@@ -4,7 +4,6 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Worktree } from "../lib/types";
-import { notificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
 import { SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, SIDEBAR_WIDTH_STORAGE_KEY, Sidebar } from "./Sidebar";
 
 const nativeMenu = vi.hoisted(() => ({
@@ -66,7 +65,6 @@ function projectToggle(workspaceId: string) {
 
 beforeEach(() => {
   localStorage.clear();
-  notificationCenterStore.clearAll();
 });
 afterEach(cleanup);
 
@@ -896,42 +894,68 @@ describe("Sidebar navigation", () => {
     expect(onOpenHistory).toHaveBeenCalledWith(testProjects[0]);
   });
 
-  it("shows the worktree tree by default and swaps to the inbox only through the inbox tab", () => {
-    const attention = {
-      rows: [{
-        id: "row-1", revision: 1, workspaceId: "default", sessionId: "sess-1", state: "needs-you" as const,
-        who: "omo", location: "default / main", text: "Deploy — Ship it now?", at: Date.now(),
-      }],
-      onOpen: vi.fn(),
-      onDismiss: vi.fn(),
-      onDismissAll: vi.fn(),
-      inboxOpen: false,
-      onInboxOpenChange: vi.fn(),
-    };
-    const onSelectWorktree = vi.fn();
-    const view = renderSidebar({ attention, projects, activeProjectId: "maho-workspace", onSelectWorktree });
-    expect(screen.getByTestId("worktree-region")).toBeVisible();
-    expect(screen.queryByTestId("attention-row")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Mark all read" })).toBeNull();
-    const inboxButton = screen.getByRole("tab", { name: "Inbox (1)" });
-    expect(inboxButton).toHaveAttribute("aria-selected", "false");
-    expect(screen.getByTestId("sidebar-attention-badge")).toHaveTextContent("1");
-    const group = screen.getByRole("list", { name: "maho-workspace worktrees" });
-    fireEvent.click(within(group).getByRole("button", { name: /main/ }));
-    expect(onSelectWorktree).toHaveBeenCalledWith(worktree);
-    expect(attention.onInboxOpenChange).not.toHaveBeenCalled();
+  describe("with the Supervisor panel as the sidebar", () => {
+    const panelProps = (overrides: Record<string, unknown> = {}) => ({
+      onFocusSupervisorSession: vi.fn(),
+      projects,
+      activeProjectId: "maho-workspace",
+      ...overrides,
+    });
 
-    fireEvent.click(inboxButton);
-    expect(attention.onInboxOpenChange).toHaveBeenCalledWith(true);
+    it("opens on the one Supervisor panel, full height, with no lanes view or Inbox beside it", async () => {
+      renderSidebar(panelProps());
+      expect(await screen.findByTestId("supervisor-panel")).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: "Supervisor" })).toHaveAttribute("aria-selected", "true");
+      expect(screen.getAllByTestId("supervisor-panel")).toHaveLength(1);
+      expect(screen.getByTestId("supervisor-panel").className).not.toMatch(/max-h-/);
+      expect(screen.getByTestId("supervisor-panel").className).toContain("flex-1");
+      expect(screen.getByTestId("worktree-region")).not.toBeVisible();
+      // The only other view is the project tree: no Inbox tab, no badge, no mark-all-read.
+      expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Supervisor", "Worktrees"]);
+      expect(screen.queryByRole("tab", { name: /Inbox/ })).toBeNull();
+      expect(screen.queryByTestId("sidebar-attention-badge")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Mark all read" })).toBeNull();
+      expect(screen.queryByTestId("attention-inbox")).toBeNull();
+    });
 
-    view.rerender(<Sidebar {...baseProps({ attention: { ...attention, inboxOpen: true }, projects, activeProjectId: "maho-workspace", onSelectWorktree })} />);
-    expect(screen.getByTestId("worktree-region")).not.toBeVisible();
-    expect(screen.getByTestId("attention-row-text")).toHaveTextContent("Deploy — Ship it now?");
-    expect(screen.getByRole("tab", { name: "Inbox (1)" })).toHaveAttribute("aria-selected", "true");
-    fireEvent.click(screen.getByRole("button", { name: "Mark all read" }));
-    expect(attention.onDismissAll).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("tab", { name: "Worktrees" }));
-    expect(attention.onInboxOpenChange).toHaveBeenLastCalledWith(false);
+    it("keeps the project tree one tab away and returns to the panel", async () => {
+      const onSelectWorktree = vi.fn();
+      renderSidebar(panelProps({ onSelectWorktree }));
+      fireEvent.click(screen.getByRole("tab", { name: "Worktrees" }));
+      expect(screen.getByTestId("worktree-region")).toBeVisible();
+      const group = screen.getByRole("list", { name: "maho-workspace worktrees" });
+      fireEvent.click(within(group).getByRole("button", { name: /main/ }));
+      expect(onSelectWorktree).toHaveBeenCalledWith(worktree);
+      fireEvent.click(screen.getByRole("tab", { name: "Supervisor" }));
+      expect(await screen.findByTestId("supervisor-panel")).toBeInTheDocument();
+    });
+
+    it("is 380px wide by default and resizes within 320 to 480", () => {
+      renderSidebar(panelProps());
+      const sidebar = screen.getByRole("complementary");
+      const handle = screen.getByRole("separator", { name: "Resize sidebar" });
+      expect(sidebar).toHaveStyle({ width: "380px" });
+      expect(handle).toHaveAttribute("aria-valuemin", "320");
+      expect(handle).toHaveAttribute("aria-valuemax", "480");
+
+      fireEvent.pointerDown(handle, { clientX: 380, pointerId: 1 });
+      fireEvent.pointerMove(window, { clientX: 900, pointerId: 1 });
+      expect(sidebar).toHaveStyle({ width: "480px" });
+      fireEvent.pointerUp(window, { clientX: 900, pointerId: 1 });
+      expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe("480");
+
+      fireEvent.pointerDown(handle, { clientX: 480, pointerId: 2 });
+      fireEvent.pointerMove(window, { clientX: 10, pointerId: 2 });
+      expect(sidebar).toHaveStyle({ width: "320px" });
+      fireEvent.pointerUp(window, { clientX: 10, pointerId: 2 });
+      expect(localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe("320");
+    });
+
+    it("keeps the 236px project tree when a host offers no panel", () => {
+      renderSidebar({ projects, activeProjectId: "maho-workspace" });
+      expect(screen.getByRole("complementary")).toHaveStyle({ width: "236px" });
+      expect(screen.queryByRole("tablist")).toBeNull();
+    });
   });
 
   it("offers the resource panel from the sidebar footer", () => {

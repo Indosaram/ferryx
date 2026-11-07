@@ -247,6 +247,9 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
                 capabilities.push("pairedHostE2EV1");
             }
             capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY);
+            capabilities.push(crate::paired_host::file_write::PAIRED_FILE_WRITE_PROXY_CAPABILITY);
+            capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_LIST_PROXY_CAPABILITY);
+            capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_MKDIR_PROXY_CAPABILITY);
             // Mirrors the daemon's GetCapabilities surface: handover advertises ownership transfer.
             #[cfg(unix)]
             capabilities.push("sessionOwnershipTransferV1");
@@ -257,11 +260,16 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY);
+            capabilities.push(crate::hub_runtime::SUPERVISOR_CONVERSE_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_SETUP_CAPABILITY);
             capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY);
+            capabilities.push(crate::hub_runtime::SUPERVISOR_CONTROL_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY);
+            capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY);
+            capabilities.push(crate::remote::reference_chat::REFERENCE_HISTORY_DELTA_V1);
+            capabilities.push(crate::remote::reference_chat::REFERENCE_PAYLOAD_V1);
             #[cfg(feature = "remote-desktop")]
             capabilities.push(crate::daemon::protocol::REMOTE_DESKTOP_CAPABILITY);
             capabilities
@@ -311,10 +319,10 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
         ensure!(value["accessScope"] == serde_json::to_value(expected)?, "capability scope mismatch");
         let machine_terminal_ready = server.remote_state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok() && services.workspaces.journal.session_revision().is_ok());
         let expected_capabilities = if machine {
-            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", "pairedFileReadV1"];
+            let mut capabilities = vec!["directoryBrowseV1", "machineWorkspaceV1", "managedWorktreesV1", "pairedPasteUploadV1", "pairedPasteUploadV2", "pairedFileReadV1", "pairedFileWriteV1", "pairedFileListV1", "pairedFileMkdirV1"];
             capabilities.push(crate::remote::repo_discovery::REPO_DISCOVERY_CAPABILITY);
             capabilities.push(crate::remote::resources_api::RESOURCE_USAGE_CAPABILITY);
-            if machine_terminal_ready { capabilities.push("terminalCreateV1"); capabilities.push("terminalStreamV1"); }
+            if machine_terminal_ready { capabilities.push("terminalCreateV1"); capabilities.push("terminalStreamV1"); capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY); capabilities.push(crate::remote::reference_chat::REFERENCE_HISTORY_DELTA_V1); capabilities.push(crate::remote::reference_chat::REFERENCE_PAYLOAD_V1); capabilities.push(crate::remote::reference_chat::control::REFERENCE_COMPOSER_CONTROL_CAPABILITY); }
             // DAG streaming is advertised whenever the catalog that resolves remote
             // roots is readable, independent of terminal readiness.
             if server.remote_state.machine_services.as_ref().is_some_and(|services| services.workspaces.catalog().is_ok()) {
@@ -329,7 +337,15 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
             }
             serde_json::json!(capabilities)
-        } else { serde_json::json!([]) };
+        } else if machine_terminal_ready {
+            serde_json::json!([
+                crate::remote::reference_chat::REFERENCE_HISTORY_DELTA_V1,
+                crate::remote::reference_chat::REFERENCE_PAYLOAD_V1,
+                crate::remote::reference_chat::control::REFERENCE_COMPOSER_CONTROL_CAPABILITY,
+            ])
+        } else {
+            serde_json::json!([])
+        };
         ensure!(value["capabilities"] == expected_capabilities, "machine capability contract mismatch: expected {expected_capabilities}, got {}", value["capabilities"]);
         ensure!(!value.to_string().contains(&root.to_string_lossy().to_string()), "capability leaks private path");
         ensure!(client.get(&capability_url).bearer_auth("invalid-credential").send().await?.status() == 401,

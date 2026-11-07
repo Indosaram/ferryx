@@ -1,0 +1,14 @@
+{
+  "id": "{{tabId}}",
+  "label": "{{label}}",
+  "agentType": "{{agentType}}",
+  "worktreeLabel": "{{worktreeLabel}}",
+  "sessionId": "{{sessionId}}",
+  "running": false,
+  "providerSession": {
+    "key": "{{providerKey}}",
+    "id": "{{providerSessionId}}",
+    "transcriptPath": "{{transcriptPath}}",
+    "launcher": "{{launcher}}"
+  }
+}

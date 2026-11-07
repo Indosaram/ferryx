@@ -21,13 +21,13 @@ import { isAbsoluteTerminalCwd } from "../lib/terminalCwd";
 import { switchDebug } from "../lib/switchDebug";
 import { withTimeout } from "../lib/withTimeout";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, resolvePairedStartup } from "../lib/remoteProject";
-import { createStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON } from "../lib/sessionLifecycle";
+import { createStandbyBackendSessionId, isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON } from "../lib/sessionLifecycle";
 import { findGroupForWorkspace, groupProjects } from "../lib/projectGrouping";
 import { hasValidProjectTarget } from "../lib/projectIdentity";
 import { getCachedSshHosts } from "../lib/sshHosts";
 import { getMigratedItem, PROJECTS_STORAGE_KEY } from "../lib/storageKeys";
 import { startSshRecovery } from "../lib/sshRecovery";
-import { canCaptureAuthoritativeProviderSession } from "../lib/agentResume";
+import { canCaptureAuthoritativeProviderSession, continuationOutcomeUnknown, continuationUnknownHeld, holdContinuationUnknown } from "../lib/agentResume";
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
@@ -68,11 +68,9 @@ import type {
   WorktreeIdentity,
 } from "../lib/types";
 import { createLayoutState, getFocusedGroupId, getGroupForTab, getTabsForGroup, layoutReducer } from "./layout";
-import { collectLeafIds, type PaneDirection, type ResolvedSeam } from "./paneTree";
+import { collectLeafIds, type PaneDirection, type PaneView, type ResolvedSeam } from "./paneTree";
 import { moveTabIntoPaneSplit } from "./tabPaneDrop";
-import { notificationCenterStore, type NotificationCenterStore } from "../lib/notificationCenter/notificationCenterStore";
-import { hasRecentObservationInteraction } from "../lib/notificationCenter/activityRecording";
-import { countAttentionEntries, liveActivityLookup } from "../features/ferryx/attention/attentionModel";
+import { hasRecentObservationInteraction } from "../lib/observationInteraction";
 import { formatRecoveryKey, RecoveryScheduler, type AuthorityCorrectionReceipt, type RecoveryClock } from "../lib/sessionRecovery";
 
 const LAST_TAB_EXIT_TIMEOUT_MS = 5_000;
@@ -594,7 +592,7 @@ const PROVIDER_SESSION_PROBE_INTERVAL_MS = 2_000;
 /** Manifest ids whose provider session the daemon can discover from the pane's process tree. */
 export const PROVIDER_SESSION_PROBE_AGENTS: readonly string[] = [
   "claude", "codex", "copilot", "cursor", "cursor-agent", "kimi", "omo", "gjc", "antigravity",
-  "opencode", "omp", "grok", "droid", "cline", "crush",
+  "opencode", "omp", "grok", "droid", "cline", "crush", "maho",
 ];
 
 /**
@@ -684,7 +682,11 @@ export type WorkspaceServices = {
 
 export type SplitPaneOptions = {
   position?: "first" | "second";
+  view?: PaneView;
+  agentType?: string;
   content?: PaneContent;
+  /** Host-validated startup for the new pane. A continuation does not mutate the source pane. */
+  startup?: SpawnTerminalRequest["startup"];
 };
 
 export type TabSplitEdge = "left" | "right" | "top" | "bottom";
@@ -694,6 +696,7 @@ export type TabSplitEdge = "left" | "right" | "top" | "bottom";
  *  identity reported by the detailed spawn rather than a bare session id. */
 export type PreSpawnedBackend = {
   sessionId: string;
+  agentType?: string;
   daemonEpoch: string | null;
   incarnation: string | null;
   /** Attach generation the session last had in another window. The new pane attaches with a
@@ -717,7 +720,7 @@ export type WorkspaceAction =
   | { type: "SET_WORKTREES"; worktrees: Worktree[] }
   | { type: "RESTORE_WORKSPACE"; state: WorkspaceState }
   | { type: "SELECT_WORKTREE"; path: string }
-  | { type: "ADD_TAB_WITH_SESSION"; tab: WorkspaceTab; session?: TerminalSession; targetWorktreePath?: string; activate?: boolean }
+  | { type: "ADD_TAB_WITH_SESSION"; tab: WorkspaceTab; session?: TerminalSession; targetWorktreePath?: string; activate?: boolean; view?: PaneView }
   | {
       type: "CLOSE_TAB";
       tabId: string;
@@ -737,6 +740,7 @@ export type WorkspaceAction =
       position?: "first" | "second";
       newLeafId: string;
       content?: PaneContent;
+      view?: PaneView;
       session: TerminalSession;
     }
   | { type: "MOVE_TAB_TO_GROUP"; sourceTabId: string; targetGroupId: string; targetIndex?: number }
@@ -769,6 +773,7 @@ export type WorkspaceAction =
       leafId: string;
     }
   | { type: "FOCUS_PANE"; tabId: string; leafId: string }
+  | { type: "SET_PANE_VIEW"; tabId: string; leafId: string; view: PaneView }
   | {
       type: "SET_PANE_RATIO";
       tabId: string;
@@ -987,8 +992,7 @@ export function useWorkspaceStore({
   const dispatch = useCallback(
     (action: WorkspaceAction) => {
       const previous = stateRef.current;
-      // Same observation rule the inbox recorder applies: a frontmost window with nobody at it
-      // is not watching, so the pane must keep its frame exactly when the inbox keeps the row.
+      // A frontmost window with nobody at it is not watching, so the pane keeps its frame.
       const contextualAction = action.type === "SESSION_TITLE_ACTIVITY" || action.type === "SESSION_SCREEN_ACTIVITY" || action.type === "MARK_TAB_UNREAD"
         ? { ...action, observed: (getNativeWindowFocused() ?? isWindowForegroundFocused()) && hasRecentObservationInteraction() }
         : action;
@@ -1351,6 +1355,7 @@ export function useWorkspaceStore({
         workspaceId,
         worktree: worktreeIdentity(worktree),
         backendSessionId,
+        ...(backendOverride?.agentType ? { agentType: backendOverride.agentType } : {}),
         ...(daemonEpoch !== null ? { daemonEpoch } : {}),
         ...(incarnation !== null ? { incarnation } : {}),
         ...(backendOverride?.attemptGeneration !== undefined
@@ -1385,7 +1390,7 @@ export function useWorkspaceStore({
   );
 
   const openTab = useCallback(
-    async (worktree: Worktree, label?: string, backendOverride?: PreSpawnedBackend, shell?: string) => {
+    async (worktree: Worktree, label?: string, backendOverride?: PreSpawnedBackend, shell?: string, view?: PaneView) => {
       const capturedWorktreePath = worktree.path;
       switchDebug("terminal.open.start", {
         workspaceId,
@@ -1405,7 +1410,7 @@ export function useWorkspaceStore({
             if (!originSnapshot.worktrees.some((candidate) => candidate.path === capturedWorktreePath)) {
               dispatchToOwner({ type: "SET_WORKTREES", worktrees: [...originSnapshot.worktrees, worktree] }, workspaceId);
             }
-            dispatchToOwner({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath }, workspaceId);
+            dispatchToOwner({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath, view }, workspaceId);
             dispatchToOwner({ type: "SELECT_WORKTREE", path: capturedWorktreePath }, workspaceId);
             return binding.tab.id;
           }
@@ -1424,7 +1429,7 @@ export function useWorkspaceStore({
       if (!stateRef.current.worktrees.some((candidate) => candidate.path === capturedWorktreePath)) {
         dispatch({ type: "SET_WORKTREES", worktrees: [...stateRef.current.worktrees, worktree] });
       }
-      dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath });
+      dispatch({ type: "ADD_TAB_WITH_SESSION", ...binding, targetWorktreePath: capturedWorktreePath, view });
       dispatch({ type: "SELECT_WORKTREE", path: capturedWorktreePath });
       switchDebug("terminal.open.complete", {
         workspaceId,
@@ -1881,6 +1886,13 @@ export function useWorkspaceStore({
         });
         return;
       }
+      const continueStartup = options.startup?.kind === "agentContinue" ? options.startup : null;
+      if (continueStartup && continuationUnknownHeld(continueStartup)) {
+        switchDebug("split.pane.refused.continuation-unknown", {
+          reason: `sourceLocalSessionId=${sourceLocalSessionId} mode=${continueStartup.mode}`,
+        });
+        return;
+      }
 
       const localSessionId = createId("session");
       const newLeafId = createId("leaf");
@@ -1889,6 +1901,7 @@ export function useWorkspaceStore({
         !isPairedWorkspaceId(sourceSession.workspaceId || workspaceId);
       const session: LocalSplitSession = {
         id: localSessionId,
+        ...(options.agentType ? { agentType: options.agentType } : {}),
         cwd: sourceSession.cwd,
         worktreePath: sessionWorktreePath(sourceSession),
         workspaceId: sourceSession.workspaceId || workspaceId,
@@ -1918,6 +1931,7 @@ export function useWorkspaceStore({
           position: options.position,
           newLeafId,
           content: options.content,
+          view: options.view,
           session,
         });
       });
@@ -1937,8 +1951,13 @@ export function useWorkspaceStore({
           workspaceId: session.workspaceId,
           worktree: session.worktree,
           inheritFromSessionId: sourceSession.backendSessionId,
+          ...(options.startup ? { startup: options.startup } : {}),
           ...initialGridFields(grid),
         });
+        const created = stateRef.current.sessions[localSessionId];
+        if (continueStartup && created?.reconnectError && continuationOutcomeUnknown(created.reconnectError)) {
+          holdContinuationUnknown(continueStartup);
+        }
         return;
       }
 
@@ -1961,6 +1980,7 @@ export function useWorkspaceStore({
             worktree: sourceSession.worktree,
             cwd: isPaired ? sourceSession.cwd : null,
             inheritFromSessionId: sourceSession.backendSessionId,
+            ...(options.startup ? { startup: options.startup } : {}),
             ...initialGridFields(grid),
           });
           backendSessionId = result.sessionId;
@@ -1982,6 +2002,7 @@ export function useWorkspaceStore({
             workspaceId: sourceSession.workspaceId || workspaceId,
             worktree: sourceSession.worktree,
             cwd: liveCwd,
+            ...(options.startup ? { startup: options.startup } : {}),
             ...initialGridFields(grid),
           });
         }
@@ -2004,6 +2025,7 @@ export function useWorkspaceStore({
           await services.closeTerminal(backendSessionId).catch(() => undefined);
         }
       } catch (error) {
+        if (continueStartup && continuationOutcomeUnknown(error)) holdContinuationUnknown(continueStartup);
         if (backendSessionId) {
           terminalEventBus.clearSession(backendSessionId);
           await services.closeTerminal(backendSessionId).catch(() => undefined);
@@ -2278,6 +2300,10 @@ export function useWorkspaceStore({
     [dispatch],
   );
   const focusPane = useCallback((tabId: string, leafId: string) => dispatch({ type: "FOCUS_PANE", tabId, leafId }), [dispatch]);
+  const setPaneView = useCallback(
+    (tabId: string, leafId: string, view: PaneView) => dispatch({ type: "SET_PANE_VIEW", tabId, leafId, view }),
+    [dispatch],
+  );
   const setPaneRatio = useCallback(
     (
       tabId: string,
@@ -2705,17 +2731,11 @@ export function useWorkspaceStore({
     () => selectActivityNotificationTargets(renderedState),
     [renderedState.layout, renderedState.worktreeLayouts, renderedState.worktrees, renderedState.activityBySessionId, renderedState.sessions],
   );
-  const [notificationVersion, setNotificationVersion] = useState(0);
-  useEffect(() => {
-    return notificationCenterStore.subscribe(() => {
-      setNotificationVersion((v) => v + 1);
-    });
-  }, []);
   const unreadBadgeCount = useMemo(
     () => selectGlobalUnreadBadgeCount(renderedState, workspaceId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion and notificationVersion
-    // are external change signals that useMemo cannot observe directly from renderedState.
-    [renderedState, workspaceId, parkedActivityVersion, notificationVersion],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is an external
+    // change signal that useMemo cannot observe directly from renderedState.
+    [renderedState, workspaceId, parkedActivityVersion],
   );
 
   return {
@@ -2755,6 +2775,7 @@ export function useWorkspaceStore({
     renameTab,
     setTabPinned,
     focusPane,
+    setPaneView,
     setPaneRatio,
     equalizePaneRun,
     setTabGroupRatio,
@@ -3106,16 +3127,7 @@ export function selectWorktreeActivitySummariesAcrossWorkspaces(
 export function selectGlobalUnreadBadgeCount(
   currentState?: WorkspaceState,
   currentWorkspaceId?: string,
-  store: NotificationCenterStore = notificationCenterStore,
 ): number {
-  const storeEntries = store.getSnapshot().entries;
-  if (store !== notificationCenterStore || storeEntries.length > 0) {
-    const mounted = currentState
-      ? { workspaceId: currentState.workspaceId ?? currentWorkspaceId, activityBySessionId: currentState.activityBySessionId }
-      : null;
-    return countAttentionEntries(storeEntries, liveActivityLookup(mounted, listWorkspaceSnapshots()));
-  }
-
   if (!currentState) return 0;
 
   const countAttention = (state: WorkspaceState): number =>
@@ -3526,7 +3538,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
 
       if (targetWorktreePath && state.activeWorktreePath && targetWorktreePath !== state.activeWorktreePath) {
         const targetLayout = state.worktreeLayouts?.[targetWorktreePath] ?? createLayoutState();
-        const updatedLayout = layoutReducer(targetLayout, { type: "ADD_TAB", tab: action.tab, sessionId, activate: action.activate });
+        const updatedLayout = layoutReducer(targetLayout, { type: "ADD_TAB", tab: action.tab, sessionId, activate: action.activate, view: action.view });
         return {
           ...state,
           sessions,
@@ -3540,7 +3552,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       return {
         ...state,
         sessions,
-        layout: layoutReducer(state.layout, { type: "ADD_TAB", tab: action.tab, sessionId, activate: action.activate }),
+        layout: layoutReducer(state.layout, { type: "ADD_TAB", tab: action.tab, sessionId, activate: action.activate, view: action.view }),
       };
     }
     case "REORDER_TAB":
@@ -3563,6 +3575,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         position: action.position,
         newLeafId: action.newLeafId,
         content: action.content,
+        view: action.view,
         sessionId: action.session.id,
       });
       if (layout === state.layout) {
@@ -3756,6 +3769,10 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       }
       return state;
     }
+    case "SET_PANE_VIEW": {
+      const layout = layoutReducer(state.layout, action);
+      return layout === state.layout ? state : { ...state, layout };
+    }
     case "FOCUS_PANE": {
       const layout = layoutReducer(state.layout, { type: "FOCUS_PANE", tabId: action.tabId, leafId: action.leafId });
       const focused = acknowledgeTabCompletions({ ...state, layout }, action.tabId);
@@ -3926,6 +3943,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
             ...session,
             lifecycle: "exited",
             backendSessionId: null,
+            ...retainedLastBackendSessionId(session),
             remoteConnectionState: undefined,
             reconnectLifecycle: "idle",
             exitCode: liveInfo.recoveryAuthority.exitCode ?? null,
@@ -3978,6 +3996,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
               lifecycle: action.lifecycle,
               exitCode: action.lifecycle === "exited" ? action.exitCode ?? null : null,
               backendSessionId: dead ? null : session.backendSessionId,
+              ...(dead ? retainedLastBackendSessionId(session) : {}),
               reconnectLifecycle: dead ? "idle" : session.reconnectLifecycle,
               ...(dead ? clearedTransportState(session) : {}),
             },
@@ -4021,6 +4040,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         lifecycle: "exited",
         exitCode: action.exitCode ?? null,
         backendSessionId: null,
+        ...retainedLastBackendSessionId(session),
         reconnectLifecycle: "idle",
         ...clearedTransportState(session),
         backendUnavailableReason: action.reason ?? null,
@@ -4046,6 +4066,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         ...session,
         lifecycle: "exited",
         backendSessionId: null,
+        ...retainedLastBackendSessionId(session),
         reconnectLifecycle: "idle",
         ...clearedTransportState(session),
         backendUnavailableReason: "absent",
@@ -4265,57 +4286,59 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         (action.clearAgent === undefined && (isSshBackendReplaced || isPairedBackendReplaced));
       const activityBySessionId = { ...state.activityBySessionId };
       if (shouldClearAgent) delete activityBySessionId[action.sessionId];
+      const nextRebind: TerminalSession = {
+        ...session,
+        backendSessionId: action.backendSessionId,
+        processState: "running",
+        exitCode: null,
+        cwd: action.cwd && isAbsoluteTerminalCwd(action.cwd) ? action.cwd : session.cwd,
+        daemonEpoch: action.daemonEpoch ?? null,
+        ...(action.incarnation != null ? { incarnation: action.incarnation } : {}),
+        recoveryKey: action.recoveryKey ?? session.recoveryKey ?? formatRecoveryKey({
+          kind: isRemoteWorkspaceId(session.workspaceId) ? "ssh" : "local",
+          frontendSessionId: action.sessionId,
+          backendSessionId: action.backendSessionId,
+          expectedIncarnation: action.incarnation ?? session.incarnation ?? null,
+        }),
+        ...(action.recoveryToken != null
+          ? { recoveryToken: action.recoveryToken }
+          : session.recoveryToken != null
+            ? { recoveryToken: session.recoveryToken + 1 }
+            : {}),
+        lastOutputSequence: null,
+        lifecycle: action.pendingAttachment ? session.lifecycle : "running",
+        reconnectLifecycle: action.pendingAttachment ? "binding" : "idle",
+        reconnectError: null,
+        backendUnavailableReason: null,
+        recoveryState: null,
+        reconnectRequestId: action.pendingAttachment ? session.reconnectRequestId : null,
+        ...(shouldClearAgent
+          ? {
+              agentType: null,
+              agentSessionId: null,
+              providerSession: null,
+            }
+          : {}),
+        ...(isSshBackendReplaced || isPairedBackendReplaced
+          ? {
+              remoteConnectionState: "connected",
+              remoteGeneration: 1,
+              remoteFailure: null,
+              remoteReplayGap: null,
+            }
+          : {
+              ...(session.remoteConnectionState !== undefined ? { remoteConnectionState: undefined } : {}),
+              ...(session.remoteFailure != null ? { remoteFailure: null } : {}),
+              ...(session.remoteReplayGap != null ? { remoteReplayGap: null } : {}),
+            }),
+      };
+      if (!isStandbyBackendSessionId(action.backendSessionId)) delete nextRebind.lastBackendSessionId;
       return {
         ...state,
         ...(shouldClearAgent ? { activityBySessionId } : {}),
         sessions: {
           ...state.sessions,
-          [action.sessionId]: {
-            ...session,
-            backendSessionId: action.backendSessionId,
-            processState: "running",
-            exitCode: null,
-            cwd: action.cwd && isAbsoluteTerminalCwd(action.cwd) ? action.cwd : session.cwd,
-            daemonEpoch: action.daemonEpoch ?? null,
-            ...(action.incarnation != null ? { incarnation: action.incarnation } : {}),
-            recoveryKey: action.recoveryKey ?? session.recoveryKey ?? formatRecoveryKey({
-              kind: isRemoteWorkspaceId(session.workspaceId) ? "ssh" : "local",
-              frontendSessionId: action.sessionId,
-              backendSessionId: action.backendSessionId,
-              expectedIncarnation: action.incarnation ?? session.incarnation ?? null,
-            }),
-            ...(action.recoveryToken != null
-              ? { recoveryToken: action.recoveryToken }
-              : session.recoveryToken != null
-                ? { recoveryToken: session.recoveryToken + 1 }
-                : {}),
-            lastOutputSequence: null,
-            lifecycle: action.pendingAttachment ? session.lifecycle : "running",
-            reconnectLifecycle: action.pendingAttachment ? "binding" : "idle",
-            reconnectError: null,
-            backendUnavailableReason: null,
-            recoveryState: null,
-            reconnectRequestId: action.pendingAttachment ? session.reconnectRequestId : null,
-            ...(shouldClearAgent
-              ? {
-                  agentType: null,
-                  agentSessionId: null,
-                  providerSession: null,
-                }
-              : {}),
-            ...(isSshBackendReplaced || isPairedBackendReplaced
-              ? {
-                  remoteConnectionState: "connected",
-                  remoteGeneration: 1,
-                  remoteFailure: null,
-                  remoteReplayGap: null,
-                }
-              : {
-                  ...(session.remoteConnectionState !== undefined ? { remoteConnectionState: undefined } : {}),
-                  ...(session.remoteFailure != null ? { remoteFailure: null } : {}),
-                  ...(session.remoteReplayGap != null ? { remoteReplayGap: null } : {}),
-                }),
-          },
+          [action.sessionId]: nextRebind,
         },
       };
     }
@@ -4657,6 +4680,17 @@ function clearedTransportState(session: TerminalSession): Partial<TerminalSessio
     remoteReplayGap: null,
     ...(session.processState === "running" ? { processState: "standby" as const } : {}),
   };
+}
+
+/** Real backend id to publish after the pane exits. A standby id is never retained. */
+function retainedLastBackendSessionId(session: TerminalSession): { lastBackendSessionId: string } | Record<string, never> {
+  const prior = session.backendSessionId;
+  const retained = prior && !isStandbyBackendSessionId(prior)
+    ? prior
+    : session.lastBackendSessionId && !isStandbyBackendSessionId(session.lastBackendSessionId)
+      ? session.lastBackendSessionId
+      : undefined;
+  return retained ? { lastBackendSessionId: retained } : {};
 }
 
 /**
@@ -5003,7 +5037,18 @@ type LogicalSpawnRequest = {
   inheritFromSessionId?: string | null;
   cols?: number;
   rows?: number;
+  startup?: SpawnTerminalRequest["startup"];
 };
+
+function logicalStartup(request: LogicalSpawnRequest): SpawnTerminalRequest["startup"] {
+  if (request.startup) return request.startup;
+  return resolvePairedStartup(request.workspaceId);
+}
+
+function replayLogicalSpawn(startup: SpawnTerminalRequest["startup"], error: unknown): boolean {
+  if (startup?.kind === "agentContinue") return false;
+  return isAmbiguousRendererTransportError(error);
+}
 
 /** Geometry measurement must never block a spawn: any failure means "unavailable". */
 async function measureFor(services: WorkspaceServices, target: InitialGeometryTarget): Promise<InitialPtyGrid | null> {
@@ -5020,12 +5065,12 @@ async function spawnTerminalForLogicalAction(
   request: LogicalSpawnRequest,
 ): Promise<string> {
   const clientRequestId = createClientRequestId();
-  const startup = resolvePairedStartup(request.workspaceId);
+  const startup = logicalStartup(request);
   const stableRequest = { ...request, clientRequestId, ...(startup ? { startup } : {}) };
   try {
     return await services.spawnTerminal(stableRequest);
   } catch (error) {
-    if (!isAmbiguousRendererTransportError(error)) throw error;
+    if (!replayLogicalSpawn(startup, error)) throw error;
     return services.spawnTerminal(stableRequest);
   }
 }
@@ -5035,13 +5080,13 @@ async function spawnDetailedForLogicalAction(
   request: LogicalSpawnRequest,
 ): Promise<Awaited<ReturnType<NonNullable<WorkspaceServices["spawnTerminalDetailed"]>>>> {
   const clientRequestId = createClientRequestId();
-  const startup = resolvePairedStartup(request.workspaceId);
+  const startup = logicalStartup(request);
   const stableRequest = { ...request, clientRequestId, ...(startup ? { startup } : {}) };
   const spawnDetailed = services.spawnTerminalDetailed!;
   try {
     return await spawnDetailed(stableRequest);
   } catch (error) {
-    if (!isAmbiguousRendererTransportError(error)) throw error;
+    if (!replayLogicalSpawn(startup, error)) throw error;
     return spawnDetailed(stableRequest);
   }
 }

@@ -1,0 +1,27 @@
+{
+  "schema": "herdr-reference-chat/qa14-follow-up/1",
+  "duplicatePosts": [
+    {
+      "requestId": "req-dup",
+      "text": "HERDR_QA14_DUP"
+    }
+  ],
+  "queuedRows": [
+    {
+      "id": "row-1",
+      "delivered": true,
+      "deliveries": 1,
+      "requestId": "req-queue"
+    }
+  ],
+  "steerHidden": {
+    "advertised": false,
+    "visible": false
+  },
+  "dictationHidden": {
+    "probeOk": false,
+    "micVisible": false,
+    "autoSent": false
+  }
+}
+

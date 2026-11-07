@@ -285,7 +285,7 @@ fn reference_chat_mutation(method: &Method, path: &str) -> bool {
                 .strip_prefix("/api/v1/")
                 .map(|route| route.split('/').collect::<Vec<_>>())
                 .as_deref(),
-            Some(["reference-chat", _, "submit" | "stop" | "answer"])
+            Some(["reference-chat", _, "submit" | "stop" | "answer" | "control"])
         )
 }
 
@@ -300,6 +300,8 @@ fn agent_control_mutation(method: &Method, path: &str) -> bool {
                 .map(|route| route.split('/').collect::<Vec<_>>())
                 .as_deref(),
             Some(["agent-control", "sessions", _, "send" | "answer" | "stop"])
+                | Some(["sessions", _, "stop"])
+                | Some(["supervisor", "decisions", _, "answer"])
         )
 }
 
@@ -2078,9 +2080,10 @@ impl RelayState {
         &self,
         machine: &str,
         generation: u64,
-        registration: RegisterPairingPin,
+        mut registration: RegisterPairingPin,
     ) -> Result<(), &'static str> {
         let channels = self.inner.control_channels.lock();
+        let now = current_time_secs();
         if channels
             .get(machine)
             .is_none_or(|c| c.generation != generation)
@@ -2092,11 +2095,14 @@ impl RelayState {
                 .pairing_token
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            || registration.expires_at <= current_time_secs()
-            || registration.expires_at > current_time_secs() + MAX_PAIRING_LEASE
+            || registration.expires_at <= now
+            || registration.expires_at > now + MAX_PAIRING_LEASE + PAIRING_CLOCK_SKEW_TOLERANCE
         {
             return Err("Invalid pairing registration");
         }
+        // The daemon computes the expiry on its own clock; the relay's clock is the one
+        // that enforces the lease.
+        registration.expires_at = registration.expires_at.min(now + MAX_PAIRING_LEASE);
         let mut pairings = self.inner.pairings.lock();
         pairings.retain(|_, p| p.registration.expires_at > current_time_secs());
         // A daemon that retries after a lost ACK re-sends the identical registration.
@@ -2370,6 +2376,9 @@ const MAX_ACTIVE_PAIRING_PINS_PER_MACHINE: usize = 5;
 /// A short numeric code is only safe as a brief lease, so the relay caps the lifetime
 /// rather than trusting the client-supplied `expires_at`.
 const MAX_PAIRING_LEASE: u64 = 600;
+/// How far a registering daemon's clock may run ahead of the relay's. A full-lease
+/// request from a slightly fast daemon is clamped to the cap instead of refused.
+const PAIRING_CLOCK_SKEW_TOLERANCE: u64 = 30;
 
 /// The bearer a device presents, trimmed. Every device-token route parses it the same way,
 /// so a token that works over HTTP also works for a socket ticket.
@@ -3213,7 +3222,15 @@ async fn host_http_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     request: Request<Body>,
 ) -> Result<Response, StatusCode> {
-    if !allowed_http_route(request.method(), &path) {
+    // The route is validated as the raw, undecoded request path (the bytes that are forwarded):
+    // axum's wildcard is already percent-decoded, so an encoded `<hostUrl>:<id>` session ref
+    // would arrive as extra and empty segments.
+    let raw_route = request
+        .uri()
+        .path()
+        .strip_prefix(&format!("/host/{machine}/api/v1/"))
+        .unwrap_or_default();
+    if !allowed_http_route(request.method(), raw_route) {
         return Err(StatusCode::FORBIDDEN);
     }
     // A refused query answers with the frozen machine envelope every other refusal on this
@@ -3504,12 +3521,30 @@ async fn browser_identify_http_handler(
 
 pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
     let parts: Vec<_> = path.split('/').collect();
-    if parts.iter().any(|part| {
+    // Only the session ref of a direct stop or a decision tap may carry %XX escapes: a paired
+    // computer's host id is a URL, so its ref travels as one percent-encoded segment.
+    let ref_position = match (method.as_str(), parts.as_slice()) {
+        ("POST", ["sessions", _, "stop"]) => Some(1),
+        ("POST", ["supervisor", "decisions", _, "answer"]) => Some(2),
+        _ => None,
+    };
+    if parts.iter().enumerate().any(|(index, part)| {
         part.is_empty()
             || matches!(*part, "." | "..")
-            || !part
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.' | b'~'))
+            || if Some(index) == ref_position {
+                !encoded_session_ref_is_admissible(part)
+            } else {
+                // The route is split raw, then each segment is decoded and held to the old
+                // character rule, so `daemon-session%3Aabc` is `daemon-session:abc` as it was
+                // when the wildcard arrived decoded, while `%2F`, `%20`, controls, malformed
+                // escapes and encoded dot segments stay refused.
+                !decoded_segment(part).is_some_and(|decoded| {
+                    !matches!(decoded.as_slice(), b"." | b"..")
+                        && decoded.iter().all(|b| {
+                            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.' | b'~')
+                        })
+                })
+            }
     }) {
         return false;
     }
@@ -3530,21 +3565,22 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["terminal", "preferences"])
             | ("GET", ["browser", "sessions" | "identify"])
             | ("POST", ["workspace", "select" | "selection"])
-            // Paired desktop machine reads/uploads; each paste-upload chunk is 32 KiB raw,
-            // which stays under the 64 KiB forwarded-body bound once base64 + JSON wrapped.
-            | ("POST", ["workspace", "file-read" | "paste-upload"])
+            // Paired desktop machine reads/uploads. Paste-upload and file-write chunks are
+            // 32 KiB raw, which stays under the 64 KiB forwarded-body bound once base64 + JSON wrapped.
+            | ("POST", ["workspace", "file-read" | "paste-upload" | "file-write" | "file-list" | "file-mkdir"])
             | ("POST", ["pair", "exchange"])
             | ("POST", ["direct", "offer"])
             | ("GET", ["push", "vapid-public-key"])
             | ("POST", ["push", "subscribe" | "unsubscribe" | "preferences"])
-            | ("POST", ["push", "test"])
+            | ("POST", ["push", "test" | "session-mute" | "panel-presence"])
             | ("GET", ["session", _])
             | ("GET", ["agent-history", _])
             // Reference chat (plan task 13). The relay only admits the frozen route table;
             // the machine's own gateway authenticates, fences the target and enforces the
             // read-only policy, exactly as it does for a direct caller.
             | ("GET", ["reference-chat", _, "history" | "screen" | "prompt" | "files"])
-            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files" | "acknowledge-outcome"])
+            | ("GET", ["reference-chat", _, "payload"])
+            | ("POST", ["reference-chat", _, "submit" | "stop" | "answer" | "files" | "acknowledge-outcome" | "control"])
             | ("GET" | "DELETE", ["reference-chat", _, "files", _])
             // Agent control. Reads and mutations are separate paths so a dropped mutation
             // reply is outcome-unknown and a dropped wait stays a timeout.
@@ -3552,6 +3588,11 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["agent-control", "sessions", _])
             | ("GET", ["agent-control", "sessions", _, "wait"])
             | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
+            // Direct session stop by `<hostId>:<backendSessionId>` and an owner's decision tap;
+            // the machine authorizes the device and fences the stale screen revision.
+            | ("POST", ["sessions", _, "stop"])
+            | ("POST", ["supervisor", "decisions", _, "answer"])
+            | ("POST", ["supervisor", "actions", _, "undo"])
             // Supervisor view. The lane key rides in the pause body, never in the path.
             | ("GET", ["supervisor"])
             | ("POST", ["supervisor", "pause" | "start"])
@@ -3566,6 +3607,55 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["supervisor", "observe" | "move" | "release-to" | "fence"])
             | ("GET", ["attach"])
     )
+}
+
+/// One raw path segment with its `%XX` escapes decoded. `None` for a malformed escape.
+fn decoded_segment(segment: &str) -> Option<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(segment.len());
+    let mut bytes = segment.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let digit = |b: Option<u8>| b.and_then(|b| (b as char).to_digit(16));
+            let (Some(hi), Some(lo)) = (digit(bytes.next()), digit(bytes.next())) else {
+                return None;
+            };
+            decoded.push((hi * 16 + lo) as u8);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    Some(decoded)
+}
+
+/// One raw path segment holding a session ref: plain route characters or valid `%XX` escapes,
+/// decoding to non-empty UTF-8 without control characters, and never to a dot segment. An
+/// escaped `/` stays inside the segment; it is never a separator.
+fn encoded_session_ref_is_admissible(segment: &str) -> bool {
+    let mut decoded = Vec::with_capacity(segment.len());
+    let mut bytes = segment.bytes();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'%' => {
+                let digit = |b: Option<u8>| b.and_then(|b| (b as char).to_digit(16));
+                let (Some(hi), Some(lo)) = (digit(bytes.next()), digit(bytes.next())) else {
+                    return false;
+                };
+                decoded.push((hi * 16 + lo) as u8);
+            }
+            b if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.' | b'~') => {
+                decoded.push(b)
+            }
+            _ => return false,
+        }
+    }
+    match String::from_utf8(decoded) {
+        Ok(decoded) => {
+            !decoded.is_empty()
+                && !matches!(decoded.as_str(), "." | "..")
+                && !decoded.chars().any(char::is_control)
+        }
+        Err(_) => false,
+    }
 }
 
 /// How large a forwarded body one reference-chat route may carry.
@@ -3637,6 +3727,7 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         "limit",
         "cursor",
         "cursorStream",
+        "after",
     ];
     let allowed: &[&str] = match path.split('/').collect::<Vec<_>>().as_slice() {
         ["fs", "directories"] => &["path", "includeHidden"],
@@ -3657,6 +3748,16 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         // `ReferenceChatReadQuery`, so they admit exactly its fields. A mutation's target
         // travels in its own envelope body, so its query must stay empty.
         ["reference-chat", _, "history" | "screen" | "prompt" | "acknowledge-outcome"] => reference_chat_read_fields,
+        // The payload handler reads the target fence and `ref`. Paging fields are history-only.
+        ["reference-chat", _, "payload"] => &[
+            "hostId",
+            "ownerId",
+            "epoch",
+            "backendSessionId",
+            "providerSessionId",
+            "registryId",
+            "ref",
+        ],
         ["reference-chat", _, "files"] => reference_chat_read_fields,
         ["reference-chat", _, "files", _] => reference_chat_read_fields,
         ["agent-control", "events"] => &["after"],
@@ -5954,7 +6055,14 @@ mod tests {
     #[test]
     fn test_allowed_http_route_admits_push_registration() {
         assert!(allowed_http_route(&Method::GET, "push/vapid-public-key"));
-        for route in ["push/subscribe", "push/unsubscribe", "push/preferences", "push/test"] {
+        for route in [
+            "push/subscribe",
+            "push/unsubscribe",
+            "push/preferences",
+            "push/test",
+            "push/session-mute",
+            "push/panel-presence",
+        ] {
             assert!(allowed_http_route(&Method::POST, route), "{route}");
             assert!(!allowed_http_route(&Method::GET, route), "{route} is POST only");
         }
@@ -5974,7 +6082,13 @@ mod tests {
         // direct adapter is up; a refusal here surfaces as a bodyless 403.
         assert!(allowed_http_route(&Method::POST, "workspace/file-read"));
         assert!(allowed_http_route(&Method::POST, "workspace/paste-upload"));
+        assert!(allowed_http_route(&Method::POST, "workspace/file-write"));
+        assert!(allowed_http_route(&Method::POST, "workspace/file-list"));
+        assert!(allowed_http_route(&Method::POST, "workspace/file-mkdir"));
         assert!(!allowed_http_route(&Method::GET, "workspace/file-read"));
+        assert!(!allowed_http_route(&Method::GET, "workspace/file-write"));
+        assert!(!allowed_http_route(&Method::GET, "workspace/file-list"));
+        assert!(!allowed_http_route(&Method::DELETE, "workspace/file-mkdir"));
         assert!(!allowed_http_route(&Method::DELETE, "workspace/paste-upload"));
         assert!(!allowed_http_route(&Method::POST, "workspace/file-read/extra"));
         assert!(!allowed_http_route(&Method::POST, "workspace/../file-read"));
@@ -6234,6 +6348,120 @@ mod tests {
     }
 
     #[test]
+    fn an_encoded_colon_in_an_id_segment_is_admitted_and_other_escapes_are_not() {
+        assert!(allowed_http_route(&Method::GET, "agent-history/daemon-session%3Aabc"));
+        assert!(allowed_http_route(
+            &Method::POST,
+            "reference-chat/daemon-session%3Aabc/acknowledge-outcome"
+        ));
+        for route in [
+            "agent-history/a%2Fb",
+            "agent-history/%2e%2e",
+            "agent-history/%2E",
+            "agent-history/a%20b",
+            "agent-history/a%0Ab",
+            "agent-history/a%zz",
+            "agent-history/a%",
+        ] {
+            assert!(!allowed_http_route(&Method::GET, route), "{route}");
+        }
+    }
+
+    #[test]
+    fn an_encoded_paired_session_ref_is_admitted_only_on_the_stop_and_answer_routes() {
+        let encoded = "https%3A%2F%2Frelay.example%2Fhost%2Fm%3As1";
+        let stop = format!("sessions/{encoded}/stop");
+        let tap = format!("supervisor/decisions/{encoded}/answer");
+        for route in [&stop, &tap] {
+            assert!(allowed_http_route(&Method::POST, route), "POST {route}");
+            assert!(!allowed_http_route(&Method::GET, route), "GET {route} stays refused");
+            assert!(!allowed_http_route(&Method::DELETE, route), "DELETE {route} stays refused");
+        }
+        // The escaped slashes stay inside one segment, so the route is still a mutation.
+        assert!(agent_control_mutation(&Method::POST, &format!("/api/v1/{stop}")));
+        assert!(agent_control_mutation(&Method::POST, &format!("/api/v1/{tap}")));
+        assert!(!agent_control_mutation(&Method::GET, &format!("/api/v1/{stop}")));
+        // Escapes are admitted nowhere else, and a bad escape or an encoded dot segment never is.
+        for route in [
+            format!("agent-control/sessions/{encoded}/stop"),
+            format!("sessions/{encoded}"),
+            format!("sessions/{encoded}/stop/extra"),
+            format!("workspace/{encoded}"),
+            "sessions/%2e%2e/stop".to_owned(),
+            "sessions/%2E/stop".to_owned(),
+            "sessions/%2e%2E/stop".to_owned(),
+            "sessions/%/stop".to_owned(),
+            "sessions/%zz/stop".to_owned(),
+            "sessions/%0a/stop".to_owned(),
+            "sessions/%ff/stop".to_owned(),
+            "sessions//stop".to_owned(),
+            "supervisor/decisions/%2e%2e/answer".to_owned(),
+        ] {
+            assert!(!allowed_http_route(&Method::POST, &route), "{route}");
+        }
+        // An unescaped slash in the ref is the old decoded shape: more segments, refused.
+        assert!(!allowed_http_route(
+            &Method::POST,
+            "sessions/https://relay.example/host/m:s1/stop"
+        ));
+    }
+
+    /// Production-shaped: the request goes through the real relay router, so the encoded ref is
+    /// validated from the raw URI path and forwarded to the host byte for byte.
+    #[tokio::test]
+    async fn a_paired_session_ref_stop_traverses_the_relay_as_one_encoded_segment() {
+        let state = test_state(vec![]);
+        let (base, server) = spawn_test_relay_with_state(state.clone()).await;
+        let (generation, mut notices, _grants) = state.register_control_channel("m".into());
+        state.register_device_token("m", "paired-device-token");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let base = base.replace("ws://", "http://");
+        let tunnel = base.replace("http://", "ws://");
+        let encoded = "https%3A%2F%2Frelay.example%2Fhost%2Fm%3As1";
+        let url = format!("{base}/host/m/api/v1/sessions/{encoded}/stop");
+
+        // Refused before anything is forwarded: wrong method, and an encoded `..`.
+        let get = client.get(&url).send().await.unwrap();
+        assert_eq!(get.status(), StatusCode::FORBIDDEN);
+        let dots = client
+            .post(format!("{base}/host/m/api/v1/sessions/%2e%2e/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(dots.status(), StatusCode::FORBIDDEN);
+
+        let post = client
+            .post(&url)
+            .bearer_auth("paired-device-token")
+            .header("content-type", "application/json")
+            .body("{}")
+            .send();
+        let peer = async {
+            let notice = notices.recv().await.unwrap();
+            let (mut data, _) = tokio_tungstenite::connect_async(format!(
+                "{tunnel}/tunnel/data/{}",
+                notice.session_id
+            ))
+            .await
+            .unwrap();
+            let request = data.next().await.unwrap().unwrap().into_data();
+            let head = String::from_utf8_lossy(&request).into_owned();
+            assert!(
+                head.starts_with(&format!("POST /api/v1/sessions/{encoded}/stop HTTP/1.1")),
+                "forwarded raw, not decoded: {head}"
+            );
+            data.close(None).await.unwrap();
+        };
+        let (response, ()) = timeout(Duration::from_secs(10), async { tokio::join!(post, peer) })
+            .await
+            .unwrap();
+        // The host's reply was lost after delivery: outcome-unknown, so it was a mutation.
+        assert_eq!(response.unwrap().status(), StatusCode::CONFLICT);
+        state.unregister_control_channel("m", generation);
+        server.abort();
+    }
+
+    #[test]
     fn agent_control_and_supervisor_routes_join_the_allowlist_without_loosening_it() {
         assert!(allowed_http_route(&Method::GET, "agent-control/sessions"));
         assert!(allowed_http_route(&Method::GET, "agent-control/events"));
@@ -6259,6 +6487,21 @@ mod tests {
         ));
         assert!(allowed_http_route(&Method::GET, "supervisor"));
         assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
+        // T9: direct stop, decision tap and undo are admitted, and only as POST.
+        for route in [
+            "sessions/host:pane-1/stop",
+            "supervisor/decisions/host:pane-1/answer",
+            "supervisor/actions/7/undo",
+        ] {
+            assert!(allowed_http_route(&Method::POST, route), "POST {route}");
+            assert!(!allowed_http_route(&Method::GET, route), "GET {route} stays refused");
+            assert!(!allowed_http_route(&Method::DELETE, route), "DELETE {route} stays refused");
+        }
+        // The typed-into-a-pane routes are outcome-unknown mutations; undo is not a keystroke.
+        assert!(agent_control_mutation(&Method::POST, "/api/v1/sessions/host:pane-1/stop"));
+        assert!(agent_control_mutation(&Method::POST, "/api/v1/supervisor/decisions/host:pane-1/answer"));
+        assert!(!agent_control_mutation(&Method::POST, "/api/v1/supervisor/actions/7/undo"));
+        assert!(!agent_control_mutation(&Method::GET, "/api/v1/sessions/host:pane-1/stop"));
         assert!(allowed_http_route(&Method::POST, "supervisor/start"));
         assert!(allowed_http_route(&Method::POST, "supervisor/request"));
         assert!(allowed_http_route(&Method::GET, "supervisor/conversation"));
@@ -6376,7 +6619,7 @@ mod tests {
 
     #[tokio::test]
     async fn r23_truncated_reference_chat_mutations_report_outcome_unknown() {
-        for suffix in ["submit", "stop", "answer"] {
+        for suffix in ["submit", "stop", "answer", "control"] {
             for partial in [
                 b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n".as_slice(),
                 b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"ok\":true".as_slice(),
@@ -7963,12 +8206,14 @@ mod tests {
         assert!(state
             .register_pairing(machine, 1, registration(current_time_secs() + 86_400))
             .is_err());
-        // Exceeding the cap by one second is still rejected: the bound is the contract.
+        // Exceeding the cap by more than the clock-skew allowance is still rejected.
         assert!(state
             .register_pairing(
                 machine,
                 1,
-                registration(current_time_secs() + MAX_PAIRING_LEASE + 1)
+                registration(
+                    current_time_secs() + MAX_PAIRING_LEASE + PAIRING_CLOCK_SKEW_TOLERANCE + 1
+                )
             )
             .is_err());
         // A lease inside the cap is accepted, so the guard is not simply refusing everything.
@@ -7979,6 +8224,36 @@ mod tests {
                 registration(current_time_secs() + MAX_PAIRING_LEASE - 5)
             )
             .is_ok());
+    }
+
+    #[test]
+    fn a_full_lease_from_a_daemon_whose_clock_runs_ahead_is_accepted_and_capped() {
+        // A daemon asks for the full lease on its own clock. When that clock is a couple
+        // of seconds ahead of the relay, the expiry lands just past the relay's cap; the
+        // relay must still register the code, holding it to the cap on its own clock.
+        let state = test_state(vec![]);
+        let machine = "skewed-machine";
+        let (tx, _rx) = mpsc::channel(1);
+        state
+            .inner
+            .control_channels
+            .lock()
+            .insert(machine.to_owned(), ControlChannel { generation: 1, tx });
+        let daemon_clock_lead = 2;
+        let registration = RegisterPairingPin {
+            generation: Some(1),
+            machine_id: machine.into(),
+            pin: "246810".into(),
+            pairing_token: "skewed-pairing-token".into(),
+            expires_at: current_time_secs() + daemon_clock_lead + MAX_PAIRING_LEASE,
+        };
+        state
+            .register_pairing(machine, 1, registration)
+            .expect("a full lease from a slightly fast daemon clock must register");
+        let stored = state.inner.pairings.lock()["246810"]
+            .registration
+            .expires_at;
+        assert!(stored <= current_time_secs() + MAX_PAIRING_LEASE);
     }
 
     #[tokio::test]
@@ -9362,6 +9637,23 @@ mod tests {
             assert!(
                 validate_http_query(&path, Some("repoPath=/etc/passwd")).is_err(),
                 "{path} must still refuse a field the contract does not define"
+            );
+        }
+    }
+
+    #[test]
+    fn the_payload_allowlist_admits_only_the_fields_the_handler_reads() {
+        let path = "reference-chat/session-1/payload";
+        let identity = "hostId=local&ownerId=owner&epoch=1&backendSessionId=s&providerSessionId=p&registryId=codex&ref=payload-ref";
+        assert!(
+            validate_http_query(path, Some(identity)).is_ok(),
+            "the payload handler reads the target fence and ref"
+        );
+        for extra in ["limit=50", "cursor=3", "cursorStream=codex-transcript:abc", "after=%7B%7D"] {
+            let query = format!("{identity}&{extra}");
+            assert!(
+                validate_http_query(path, Some(&query)).is_err(),
+                "{extra} is not read by the payload handler"
             );
         }
     }

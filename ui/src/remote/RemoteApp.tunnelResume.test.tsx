@@ -43,7 +43,7 @@ function makeTunnel(): FakeTunnel {
     isClosed: false,
     fetchLike: vi.fn(),
     openWebSocket: vi.fn(),
-    close: vi.fn(() => {
+    close: vi.fn<() => void>(() => {
       tunnel.isClosed = true;
     }),
   };
@@ -103,7 +103,7 @@ describe("RemoteApp account tunnel resume", () => {
     vi.spyOn(attachTunnelModule, "openAccountTunnel").mockImplementation(async () => {
       const tunnel = makeTunnel();
       tunnels.push(tunnel);
-      return { transport: tunnel as never, close: () => tunnel.close() };
+      return { transport: tunnel as never, close: () => { tunnel.close(); } };
     });
     vi.spyOn(accountAttachModule, "getOrCreateAttachKey").mockResolvedValue({
       publicKey: "phone-initiator-pub-key-base64",

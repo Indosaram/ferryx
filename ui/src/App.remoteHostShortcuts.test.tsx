@@ -348,6 +348,11 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
       expect(screen.getByTestId("mock-remote-host-connection")).toBeInTheDocument();
     });
 
+    // The sidebar opens on the Supervisor panel; the project tree is one tab away.
+    act(() => {
+      screen.getByRole("tab", { name: "Worktrees" }).click();
+    });
+
     // Clicking "Add worktree to local" in sidebar should NOT open AddWorktreeDialog
     const addWorktreeBtn = screen.getByRole("button", { name: "Add worktree to local" });
     act(() => {

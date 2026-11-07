@@ -13,6 +13,8 @@ import {
   SurvivalGateError,
   assertSurvivalGate,
   evaluateSurvivalGate,
+  formatBytes,
+  renderFootprintTable,
   survivalScenariosFor,
 } from "./lib/release-survival.mjs";
 import { publishRelease } from "./release-local.mjs";
@@ -85,6 +87,48 @@ test("a summary without a commit field is refused as stale", () => withTmp((runD
 test("missing footprint.json is refused with SURVIVAL_FOOTPRINT_MISSING", () => withTmp((runDir) => {
   writeSurvivalFixture(runDir, COMMIT, { footprint: false });
   refused(runDir, "SURVIVAL_FOOTPRINT_MISSING");
+}));
+
+const MIB = 1024 * 1024;
+const footprintDoc = {
+  schema: "ferryx-footprint/v1", commit: COMMIT, platform: "linux", mode: "isolated-daemon",
+  timestamp: "2026-10-25T01:02:03.000Z", payloadBytes: 50 * MIB, fdLimit: 4096,
+  samples: [
+    { sessions: 30, guiRssBytes: 300 * MIB, daemonRssBytes: 96.25 * MIB, fdCount: 211, daemonRuntimeBytes: 41 * MIB },
+    { sessions: 1, guiRssBytes: 180 * MIB, daemonRssBytes: 20 * MIB, fdCount: 31, daemonRuntimeBytes: 41 * MIB },
+    { sessions: 10, guiRssBytes: 210.5 * MIB, daemonRssBytes: 44 * MIB, fdCount: 81, daemonRuntimeBytes: 41 * MIB },
+  ],
+};
+
+test("survival-report.md carries the footprint table from footprint.json", () => withTmp((runDir) => {
+  writeSurvivalFixture(runDir, COMMIT);
+  writeFileSync(join(runDir, "survival", "footprint.json"), JSON.stringify(footprintDoc));
+  const { report, reportPath } = assertSurvivalGate({ releaseDir: runDir, commitSha: COMMIT });
+  assert.equal(readFileSync(reportPath, "utf8"), report);
+  const table = [
+    "| Sessions | Daemon RSS | GUI RSS | FD count | Runtime dir size |",
+    "| --- | --- | --- | --- | --- |",
+    "| 1 | 20.0 MiB | 180.0 MiB | 31 | 41.0 MiB |",
+    "| 10 | 44.0 MiB | 210.5 MiB | 81 | 41.0 MiB |",
+    "| 30 | 96.3 MiB | 300.0 MiB | 211 | 41.0 MiB |",
+  ].join("\n");
+  assert.ok(report.includes(`Footprint measured on linux, commit \`${COMMIT}\`, 2026-10-25T01:02:03.000Z.\n\n${table}\n`), report);
+}));
+
+test("renderFootprintTable shows a dash for a missing value and nothing without samples", () => {
+  assert.deepEqual(renderFootprintTable({ samples: [{ sessions: 1, guiRssBytes: null, daemonRssBytes: 1024 * 1024, fdCount: 9, daemonRuntimeBytes: 0 }] }).slice(2), [
+    "| 1 | 1.0 MiB | - | 9 | 0.0 MiB |",
+  ]);
+  assert.deepEqual(renderFootprintTable({ schema: "fixture" }), []);
+  assert.deepEqual(renderFootprintTable(null), []);
+  assert.equal(formatBytes(-1), "-");
+});
+
+test("a footprint.json without samples is reported, not tabulated", () => withTmp((runDir) => {
+  writeSurvivalFixture(runDir, COMMIT);
+  const { report } = assertSurvivalGate({ releaseDir: runDir, commitSha: COMMIT });
+  assert.match(report, /Footprint \(footprint\.json\): present\.\n\nfootprint\.json has no samples to tabulate\./);
+  assert.doesNotMatch(report, /\| Sessions \|/);
 }));
 
 test("an owner waiver is accepted for missing evidence and recorded in the report", () => withTmp((runDir) => {
@@ -191,12 +235,28 @@ const publishArgs = (runDir, gh, extra = {}) => ({
   lsRemoteFn: () => `${COMMIT}\trefs/tags/v2026.1024.1\n`, ...extra,
 });
 
+/**
+ * publishRelease refuses to run when CI or GITHUB_ACTIONS is set, so a suite that exercises it must
+ * clear the markers first; hosted runners always set them and a developer machine usually does not.
+ */
+async function withoutCIMarkers(fn) {
+  const saved = { CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  try {
+    return await fn();
+  } finally {
+    if (saved.CI !== undefined) process.env.CI = saved.CI;
+    if (saved.GITHUB_ACTIONS !== undefined) process.env.GITHUB_ACTIONS = saved.GITHUB_ACTIONS;
+  }
+}
+
 test("drafting refuses a FAIL fixture before any gh call", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "ferryx-survival-publish-"));
   try {
     const { runDir, gh, callLog } = assembledRun(tmp);
     writeSurvivalFixture(runDir, COMMIT, { mutate: (s, p) => { if (p === "windows") s.scenarios.find((x) => x.id === "Q01").status = "FAIL"; } });
-    await assert.rejects(() => publishRelease(publishArgs(runDir, gh)), (error) => error.code === "SURVIVAL_FAIL");
+    await assert.rejects(() => withoutCIMarkers(() => publishRelease(publishArgs(runDir, gh))), (error) => error.code === "SURVIVAL_FAIL");
     assert.equal(existsSync(callLog), false);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -208,7 +268,7 @@ test("drafting with a waiver puts the report and the waiver in the release body"
   try {
     const { runDir, gh, notesCopy } = assembledRun(tmp);
     writeSurvivalFixture(runDir, COMMIT, { footprint: false });
-    const result = await publishRelease(publishArgs(runDir, gh, { survivalWaiver: "footprint pending todo 17" }));
+    const result = await withoutCIMarkers(() => publishRelease(publishArgs(runDir, gh, { survivalWaiver: "footprint pending todo 17" })));
     assert.equal(result.published, true);
     assert.equal(result.survivalWaiver, "footprint pending todo 17");
     const body = readFileSync(notesCopy, "utf8");

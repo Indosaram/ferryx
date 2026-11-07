@@ -83,9 +83,37 @@ export function sessionPersistenceKey(sessions: Record<string, TerminalSession>)
   return Object.entries(sessions)
     .map(
       ([id, session]) =>
-        `${id}:${session.backendSessionId ?? ""}:${session.daemonEpoch ?? ""}:${session.incarnation ?? ""}:${getSessionProcessState(session)}:${session.lifecycle}:${session.agentType ?? ""}:${session.providerSession?.key ?? ""}:${session.providerSession?.id ?? ""}:${JSON.stringify(localSplitIntent(session) ?? null)}:${JSON.stringify(session.attachTuple ?? null)}`,
+        `${id}:${session.backendSessionId ?? ""}:${session.lastBackendSessionId ?? ""}:${session.daemonEpoch ?? ""}:${session.incarnation ?? ""}:${getSessionProcessState(session)}:${session.lifecycle}:${session.agentType ?? ""}:${session.providerSession?.key ?? ""}:${session.providerSession?.id ?? ""}:${JSON.stringify(localSplitIntent(session) ?? null)}:${JSON.stringify(session.attachTuple ?? null)}`,
     )
     .join(",");
+}
+
+function realPublicationBackendId(id: string | null | undefined): string | undefined {
+  if (!id || isStandbyBackendSessionId(id)) return undefined;
+  return id;
+}
+
+/** Persist the retained id only while the pane has no live backend, and never a standby id. */
+function persistedLastBackendSessionId(session: TerminalSession): { lastBackendSessionId: string } | Record<string, never> {
+  const last = realPublicationBackendId(session.lastBackendSessionId);
+  const backendMissing = !session.backendSessionId || isStandbyBackendSessionId(session.backendSessionId);
+  return last && backendMissing ? { lastBackendSessionId: last } : {};
+}
+
+/**
+ * After restart, an exited pane keeps a real id for publication. A live backend stays the only id.
+ * If the saved backend id itself was real and restore has just dropped it, that id is the last one.
+ */
+function restoredLastBackendSessionId(
+  persistedLast: string | null | undefined,
+  persistedBackend: string | null,
+  restoredBackend: string | null,
+  lifecycle: TerminalLifecycle,
+): { lastBackendSessionId: string } | Record<string, never> {
+  const exited = lifecycle === "exited" || lifecycle === "failed";
+  if (!exited || realPublicationBackendId(restoredBackend)) return {};
+  const retained = realPublicationBackendId(persistedLast) ?? realPublicationBackendId(persistedBackend);
+  return retained ? { lastBackendSessionId: retained } : {};
 }
 
 export function serializeWorkspaceState(
@@ -345,6 +373,7 @@ export function serializeWorkspaceState(
     persistedTerminalSessions[id] = {
       localSessionId: sess.id,
       backendSessionId: sess.backendSessionId,
+      ...persistedLastBackendSessionId(sess),
       processState: getSessionProcessState(sess),
       worktreePath: sess.worktreePath ?? sess.cwd,
       cwd: sess.cwd,
@@ -759,6 +788,7 @@ export function deserializeWorkspaceState(
       workspaceId,
       worktree: matchingWorktree ? worktreeIdentity(matchingWorktree) : null,
       backendSessionId,
+      ...restoredLastBackendSessionId(sess.lastBackendSessionId, persistedBackendSessionId, backendSessionId, lifecycle),
       processState,
       lifecycle,
       daemonEpoch,

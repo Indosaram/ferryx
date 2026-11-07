@@ -36,6 +36,10 @@ pub struct MachineSession {
     pub creator_device: String,
     pub session: super::machine_protocol::Session,
     pub exit: Option<super::machine_protocol::ExitMetadata>,
+    /// The state and screen times the agent observer last measured, kept so a restarted daemon
+    /// does not restart them. Absent in journals written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_stamps: Option<crate::agent_control::events::SessionStamps>,
 }
 #[cfg(test)]
 type JournalProbe = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
@@ -359,6 +363,45 @@ impl MachineOperationJournal {
             .get(id)
             .cloned())
     }
+    /// The persisted agent stamps of every session that has them, by session id.
+    pub(crate) fn agent_stamps(
+        &self,
+    ) -> Result<BTreeMap<String, crate::agent_control::events::SessionStamps>, String> {
+        Ok(self
+            .state
+            .lock()
+            .as_ref()
+            .map_err(Clone::clone)?
+            .sessions
+            .iter()
+            .filter_map(|(id, session)| Some((id.clone(), session.agent_stamps.clone()?)))
+            .collect())
+    }
+    /// Stores the newest stamps of each named session in one write. A session this journal does
+    /// not own (a desktop pane, or one that ended) is skipped; it changes nothing else, so no
+    /// session revision moves and no machine event is owed.
+    pub(crate) fn record_agent_stamps(
+        &self,
+        stamps: &BTreeMap<String, crate::agent_control::events::SessionStamps>,
+    ) -> Result<(), String> {
+        let mut state = self.state.lock();
+        let _file_lock = self.refresh_locked(&mut state)?;
+        let mut candidate = state.as_ref().map_err(Clone::clone)?.clone();
+        let mut changed = false;
+        for (id, stamps) in stamps {
+            let Some(session) = candidate.sessions.get_mut(id) else {
+                continue;
+            };
+            if session.agent_stamps.as_ref() != Some(stamps) {
+                session.agent_stamps = Some(stamps.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+        self.persist(&mut state, candidate)
+    }
     pub(crate) fn save_session(&self, session: MachineSession) -> Result<(), String> {
         let mut state = self.state.lock();
         let _file_lock = self.refresh_locked(&mut state)?;
@@ -368,6 +411,8 @@ impl MachineOperationJournal {
             if current.session.target != merged.session.target {
                 return Err("STALE_EPOCH".into());
             }
+            // Stamps are the observer's, never the caller's snapshot of the session.
+            merged.agent_stamps = current.agent_stamps.clone();
             merged.session.title = current.session.title.clone();
             merged.session.cwd = current.session.cwd.clone();
             merged.session.agent_type = current.session.agent_type.clone();
@@ -493,3 +538,144 @@ impl MachineOperationJournal {
 #[cfg(test)]
 #[path = "journal_contention_tests.rs"]
 mod contention_tests;
+
+#[cfg(test)]
+mod agent_stamp_tests {
+    use super::*;
+    use crate::agent_control::{events::SessionStamps, AgentControlState};
+    use crate::scoped_contracts::Epoch;
+
+    fn stamps(revision: &str, since: i64, changed: i64) -> SessionStamps {
+        SessionStamps {
+            state: AgentControlState::Working,
+            screen_revision: Some(revision.into()),
+            state_since_ms: Some(since),
+            screen_changed_at_ms: Some(changed),
+        }
+    }
+
+    fn machine_session(id: &str) -> MachineSession {
+        MachineSession {
+            creator_device: "device".into(),
+            session: super::super::machine_protocol::Session {
+                title: None,
+                agent_type: None,
+                target: super::super::machine_protocol::RemoteTerminalTarget {
+                    machine_id: "machine".into(),
+                    daemon_epoch: Epoch(1),
+                    session_id: id.into(),
+                },
+                workspace_id: "ws".into(),
+                worktree: None,
+                cwd: "/work".into(),
+                cols: 80,
+                rows: 24,
+                running: true,
+                provider_session: None,
+                start_sequence: Epoch(0),
+                end_sequence: Epoch(0),
+                pid: None,
+            },
+            exit: None,
+            agent_stamps: None,
+        }
+    }
+
+    fn journal_with(dir: &tempfile::TempDir, ids: &[&str]) -> MachineOperationJournal {
+        let journal = MachineOperationJournal::open(dir.path().join("machine-operations.v1.json"));
+        for id in ids {
+            journal.save_session(machine_session(id)).unwrap();
+        }
+        journal
+    }
+
+    #[test]
+    fn stamps_round_trip_through_the_file_and_a_reopened_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = journal_with(&dir, &["s1", "s2"]);
+        assert!(journal.agent_stamps().unwrap().is_empty(), "nothing is persisted before a reading");
+        let batch = BTreeMap::from([("s1".to_string(), stamps("r1", 100, 200))]);
+        journal.record_agent_stamps(&batch).unwrap();
+
+        let reopened = MachineOperationJournal::open(dir.path().join("machine-operations.v1.json"));
+        let loaded = reopened.agent_stamps().unwrap();
+        assert_eq!(loaded.len(), 1, "only a session with stamps appears: {loaded:?}");
+        assert_eq!(loaded["s1"], stamps("r1", 100, 200));
+    }
+
+    #[test]
+    fn recording_stamps_for_a_session_the_journal_does_not_own_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = journal_with(&dir, &["s1"]);
+        let revision = journal.session_revision().unwrap();
+        let batch = BTreeMap::from([("desktop-pane".to_string(), stamps("r", 1, 2))]);
+        journal.record_agent_stamps(&batch).unwrap();
+        assert!(journal.agent_stamps().unwrap().is_empty());
+        assert_eq!(journal.session_revision().unwrap(), revision, "stamps never move the session revision");
+    }
+
+    #[test]
+    fn saving_a_session_snapshot_keeps_the_observers_stamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = journal_with(&dir, &["s1"]);
+        journal
+            .record_agent_stamps(&BTreeMap::from([("s1".to_string(), stamps("r1", 100, 200))]))
+            .unwrap();
+        // A later save carries the caller's snapshot of the session, which has no stamps.
+        journal.save_session(machine_session("s1")).unwrap();
+        assert_eq!(journal.agent_stamps().unwrap()["s1"], stamps("r1", 100, 200));
+    }
+
+    #[test]
+    fn a_journal_written_before_stamps_existed_loads_with_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("machine-operations.v1.json");
+        let journal = journal_with(&dir, &["s1"]);
+        drop(journal);
+        // The file as an older build wrote it: the same session record without the field.
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(value["sessions"]["s1"].get("agentStamps").is_none(), "no stamps are written until there are some");
+        value["sessions"]["s1"].as_object_mut().unwrap().remove("agentStamps");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let legacy = MachineOperationJournal::open(path);
+        assert!(legacy.session("s1").unwrap().is_some(), "the legacy journal loads");
+        assert!(legacy.agent_stamps().unwrap().is_empty());
+        legacy
+            .record_agent_stamps(&BTreeMap::from([("s1".to_string(), stamps("r1", 5, 6))]))
+            .unwrap();
+        assert_eq!(legacy.agent_stamps().unwrap()["s1"], stamps("r1", 5, 6));
+    }
+
+    #[test]
+    fn a_persisted_restart_keeps_the_old_times_on_an_unchanged_reading() {
+        use crate::agent_control::{events::AgentEventBus, events::ObservationDraft, AgentStateSource, AgentTier};
+        let dir = tempfile::tempdir().unwrap();
+        let journal = journal_with(&dir, &["s1"]);
+        journal
+            .record_agent_stamps(&BTreeMap::from([("s1".to_string(), stamps("rev", 100, 200))]))
+            .unwrap();
+        drop(journal);
+
+        // A new daemon run: a fresh bus seeded from the reopened journal, a clock far later.
+        let reopened = MachineOperationJournal::open(dir.path().join("machine-operations.v1.json"));
+        let bus = AgentEventBus::new(8);
+        bus.seed_stamps(reopened.agent_stamps().unwrap());
+        let reading = |revision: &str| ObservationDraft {
+            session_id: "s1".into(),
+            state: AgentControlState::Working,
+            state_source: AgentStateSource::Provider,
+            tier: AgentTier::Screen,
+            prompt_id: None,
+            kind: None,
+            screen_revision: Some(revision.into()),
+            workspace_id: None,
+        };
+        let unchanged = bus.publish(reading("rev"));
+        assert_eq!(unchanged.state_since_ms, Some(100));
+        assert_eq!(unchanged.screen_changed_at_ms, Some(200));
+        let moved = bus.publish(reading("rev-2"));
+        assert_eq!(moved.state_since_ms, Some(100));
+        assert!(moved.screen_changed_at_ms.is_some_and(|at| at > 200), "{moved:?}");
+    }
+}

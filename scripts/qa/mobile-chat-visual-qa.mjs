@@ -118,15 +118,11 @@ const PHONE_HOME_PROBE = (state) => {
     .filter(visible)
     .filter((el) => nameOf(el).length === 0)
     .map((el) => el.getAttribute("data-testid") ?? el.outerHTML.slice(0, 80));
-  const needsTabs = state.startsWith("home-") || state === "account-delete";
-  const tabs = document.querySelector('[data-testid="mobile-home-tabs"]');
-  const tabRect = tabs?.getBoundingClientRect() ?? null;
-  const tabsInViewport = tabRect
-    ? tabRect.height > 0 && tabRect.left >= -0.5 && tabRect.right <= window.innerWidth + 0.5 && tabRect.bottom <= window.innerHeight + 0.5
-    : false;
+  // The tab bar and the lanes list are gone: the panel is the home. Any of them present is a failure.
+  const oldSurface = Array.from(
+    document.querySelectorAll('[data-testid="mobile-home-tabs"], [data-testid^="mobile-home-tab-"], [data-testid="inbox-home"], [data-testid="supervisor-home"], [data-testid="supervisor-lane-card"]'),
+  ).map((el) => el.getAttribute("data-testid"));
   const targetSelectors = [
-    '[data-testid^="mobile-home-tab-"]',
-    '[data-testid="supervisor-lane-pause"]',
     '[data-testid="supervisor-take-over"]',
     '[data-testid="supervisor-resume"]',
   ];
@@ -141,9 +137,7 @@ const PHONE_HOME_PROBE = (state) => {
     state,
     overflow,
     unnamed,
-    needsTabs,
-    tabsPresent: Boolean(tabs),
-    tabsInViewport,
+    oldSurface,
     smallTargets,
     stripExpected,
     stripState: strip?.getAttribute("data-state") ?? null,
@@ -353,11 +347,7 @@ const TOP_BAR_PROBE = (expectedWidth) => {
 async function run() {
   const PHONE_HOME_STATES = [
     "home-supervisor",
-    "home-supervisor-acting",
-    "home-supervisor-off",
-    "home-supervisor-unsupported",
-    "home-supervisor-long",
-    "home-inbox",
+    "home-supervisor-setup",
     "home-worktrees",
     "account-delete",
     "session-strip-acting",
@@ -618,7 +608,7 @@ async function run() {
     if (key.startsWith("phonehome-")) {
       if (value?.overflow) fail(`${key}: the document scrolls horizontally`);
       if (value?.unnamed?.length > 0) fail(`${key}: unnamed buttons ${JSON.stringify(value.unnamed)}`);
-      if (value?.needsTabs && !(value.tabsPresent && value.tabsInViewport)) fail(`${key}: the home tab bar is missing or outside the viewport`);
+      if (value?.oldSurface?.length > 0) fail(`${key}: a retired surface is still rendered ${JSON.stringify(value.oldSurface)}`);
       if (value?.smallTargets?.length > 0) fail(`${key}: touch targets under 44px ${JSON.stringify(value.smallTargets)}`);
       if (value?.stripExpected && !value.stripState) fail(`${key}: the supervisor session strip is not rendered`);
     }

@@ -12,8 +12,6 @@ import { WelcomeWizard } from "../components/onboarding/WelcomeWizard";
 import { SupervisorSetupBanner } from "../components/supervisor/SupervisorSetupBanner";
 import type { ResolvedAgent } from "../lib/agentsSettings";
 import { SETUP_NEXT_ACTIONS, type SetupActions, type SetupNextAction, type SetupStatus } from "../lib/supervisorSetupModel";
-import { fixtureLane, fixtureMachine, fixtureSnapshot } from "../remote/home/phoneHomeFixtures";
-import { SupervisorHome } from "../remote/home/SupervisorHome";
 
 const params = new URLSearchParams(window.location.search);
 const view = params.get("view") ?? "step";
@@ -102,23 +100,9 @@ function QaApp() {
     );
   }
   if (view === "phone") {
-    const machines = [
-      fixtureMachine({
-        machineId: "studio",
-        label: "Studio Mac",
-        snapshot: { ...fixtureSnapshot({ lanes: [fixtureLane({ key: "a" })] }), setup: status },
-      }),
-    ];
     return (
-      <div className="flex h-screen w-full flex-col">
-        <SupervisorHome
-          machines={machines}
-          now={Date.now()}
-          needsYou={new Set()}
-          onSetPaused={async (_m, laneKey, paused) => ({ kind: "ok", laneKey, paused, changed: true })}
-          onOpenLane={() => undefined}
-          setupActions={() => (viewOnly ? null : qaActions)}
-        />
+      <div className="flex h-screen w-full flex-col gap-2 bg-chat-screen p-4">
+        <SupervisorSetupBanner surface="phone" runLabel="Finish setup" status={status} actions={viewOnly ? null : qaActions} />
       </div>
     );
   }

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
+use async_trait::async_trait;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -32,6 +33,40 @@ pub const OBSERVER_UNAVAILABLE: &str = "OBSERVER_UNAVAILABLE";
 pub const DIVERGENCE_STOP_AFTER: u32 = 2;
 
 const OWNERSHIP_PREAMBLE: &str = "<ferryx-review-ownership>Ferryx's supervisor checks this turn against the lane goal. Do not declare goal requirements met; report what you changed and how to verify it.</ferryx-review-ownership>";
+
+/// Takes a quota fault of the supervisor's own model off the goal loop: the recovery scheduler
+/// schedules the retry, so the lane is neither stopped nor blocked.
+#[async_trait]
+pub trait QuotaRecovery: Send + Sync {
+    /// Reports a quota fault met while grading `lane_key` (whose pane is `session_id`).
+    /// `true` means recovery took the fault over; `false` leaves the loop to stop the lane.
+    async fn quota_fault(&self, lane_key: &str, session_id: &str, detail: &str) -> bool;
+}
+
+/// True when `fault` is a quota fault that `quota` took over.
+async fn quota_taken(
+    quota: Option<&dyn QuotaRecovery>,
+    lane_key: &str,
+    session_id: &str,
+    fault: &crate::meta::mhc_fault::SupervisorFault,
+) -> bool {
+    match (quota, fault) {
+        (Some(quota), crate::meta::mhc_fault::SupervisorFault::Quota { detail }) => {
+            quota.quota_fault(lane_key, session_id, detail).await
+        }
+        _ => false,
+    }
+}
+
+/// Blocks the lane as degraded: recovery's bounded retries ran out, so the loop's own stop
+/// path holds it for the owner instead of leaving it Working unwatched.
+pub async fn stop_degraded(
+    pool: &SqlitePool,
+    lane_key: &str,
+    detail: &str,
+) -> Result<LoopOutcome, GoalError> {
+    stop(pool, lane_key, StopReason::SupervisorDegraded, Some(detail)).await
+}
 
 /// What one loop pass changed, for the `supervisor_changed` payload `{laneKey, stopReason}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -354,6 +389,7 @@ async fn decide<C: AgentControl + ?Sized>(
     contract: &Contract,
     session_id: &str,
     bundle: &EvidenceBundle,
+    quota: Option<&dyn QuotaRecovery>,
 ) -> Result<LoopOutcome, GoalError> {
     let lane_key = contract.lane_key.as_str();
     let recent_turns = turns::turns_of(pool, lane_key).await?;
@@ -363,6 +399,9 @@ async fn decide<C: AgentControl + ?Sized>(
             return stop(pool, lane_key, StopReason::JudgeUnavailable, None).await;
         }
         Err(GoalError::SupervisorFault(fault)) => {
+            if quota_taken(quota, lane_key, session_id, &fault).await {
+                return Ok(LoopOutcome::new(lane_key));
+            }
             let detail = fault.to_string();
             return stop(pool, lane_key, StopReason::SupervisorDegraded, Some(&detail)).await;
         }
@@ -398,6 +437,9 @@ async fn decide<C: AgentControl + ?Sized>(
                 stop(pool, lane_key, StopReason::JudgeUnavailable, None).await
             }
             Err(GoalError::SupervisorFault(fault)) => {
+                if quota_taken(quota, lane_key, session_id, &fault).await {
+                    return Ok(LoopOutcome::new(lane_key));
+                }
                 let detail = fault.to_string();
                 stop(pool, lane_key, StopReason::SupervisorDegraded, Some(&detail)).await
             }
@@ -444,6 +486,19 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
     control: &C,
     lane_key: &str,
     worked: bool,
+) -> Result<Option<LoopOutcome>, GoalError> {
+    on_turn_settled_with(pool, judge, control, lane_key, worked, None).await
+}
+
+/// [`on_turn_settled`] with a recovery for the supervisor model's quota fault: when `quota`
+/// takes the fault over, the pass ends without a stop and the recovery scheduler re-runs it.
+pub async fn on_turn_settled_with<C: AgentControl + ?Sized>(
+    pool: &SqlitePool,
+    judge: &Judge,
+    control: &C,
+    lane_key: &str,
+    worked: bool,
+    quota: Option<&dyn QuotaRecovery>,
 ) -> Result<Option<LoopOutcome>, GoalError> {
     // The legacy goal loop settles and judges only on the lease holder.
     if !crate::holder::is_holder_now() {
@@ -514,7 +569,7 @@ pub async fn on_turn_settled<C: AgentControl + ?Sized>(
     });
     let outcome = crate::usage::with_cause(
         cause,
-        decide(pool, judge, control, &contract, &session_id, &bundle),
+        decide(pool, judge, control, &contract, &session_id, &bundle, quota),
     )
     .await;
     if superseded {
@@ -1190,7 +1245,17 @@ mod tests {
     }
 
     /// A backend that names its failure, as the retained mhc supervisor does.
-    struct FaultingModel;
+    struct FaultingModel {
+        fault: SupervisorFault,
+    }
+
+    impl FaultingModel {
+        fn quota() -> Self {
+            Self {
+                fault: SupervisorFault::quota("429 usage limit reached"),
+            }
+        }
+    }
 
     #[async_trait]
     impl ModelTurn for FaultingModel {
@@ -1204,9 +1269,28 @@ mod tests {
             _context: crate::meta::mhc_fault::TurnContext,
         ) -> std::result::Result<String, crate::meta::mhc_fault::TurnFault> {
             Err(crate::meta::mhc_fault::TurnFault::Supervisor(
-                crate::meta::mhc_fault::SupervisorFault::quota("429 usage limit reached"),
+                self.fault.clone(),
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn recovery_giving_up_blocks_the_lane_as_degraded_with_its_detail() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let outcome = stop_degraded(&pool, LANE, "recovery gave up after 5 retries")
+            .await
+            .unwrap();
+        assert_eq!(outcome.stop_reason, Some(StopReason::SupervisorDegraded));
+        let contract = goal(&pool).await;
+        assert_eq!(contract.stop_reason, Some(StopReason::SupervisorDegraded));
+        assert_eq!(
+            contract.stop_detail.as_deref(),
+            Some("recovery gave up after 5 retries")
+        );
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
     }
 
     #[tokio::test]
@@ -1215,7 +1299,7 @@ mod tests {
         let control = FakeControl::default();
         let judge = Judge::bare()
             .with_pool(pool.clone())
-            .with_fallback(Arc::new(FaultingModel));
+            .with_fallback(Arc::new(FaultingModel::quota()));
         let outcome = on_turn_settled(&pool, &judge, &control, LANE, true)
             .await
             .unwrap()
@@ -1230,6 +1314,107 @@ mod tests {
             Some(LaneStatus::Blocked)
         );
         assert!(control.sends().is_empty());
+    }
+
+    /// Records quota reports and answers with a fixed verdict.
+    struct QuotaSink {
+        takes: bool,
+        reports: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl QuotaSink {
+        fn new(takes: bool) -> Self {
+            Self {
+                takes,
+                reports: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn reports(&self) -> Vec<(String, String, String)> {
+            self.reports.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl QuotaRecovery for QuotaSink {
+        async fn quota_fault(&self, lane_key: &str, session_id: &str, detail: &str) -> bool {
+            self.reports.lock().unwrap().push((
+                lane_key.to_owned(),
+                session_id.to_owned(),
+                detail.to_owned(),
+            ));
+            self.takes
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quota_fault_taken_by_recovery_does_not_stop_or_block_the_lane() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let control = FakeControl::default();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(Arc::new(FaultingModel::quota()));
+        let sink = QuotaSink::new(true);
+        let outcome = on_turn_settled_with(&pool, &judge, &control, LANE, true, Some(&sink))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, None);
+        assert!(!outcome.sent && !outcome.awaiting_approval);
+        assert_eq!(goal(&pool).await.stop_reason, None);
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Working)
+        );
+        let reports = sink.reports();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].0, LANE);
+        assert_eq!(reports[0].1, "pane-1");
+        assert!(reports[0].2.contains("usage limit"), "{}", reports[0].2);
+        assert!(control.sends().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_quota_fault_recovery_declines_still_stops_the_lane_as_degraded() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let control = FakeControl::default();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(Arc::new(FaultingModel::quota()));
+        let sink = QuotaSink::new(false);
+        let outcome = on_turn_settled_with(&pool, &judge, &control, LANE, true, Some(&sink))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, Some(StopReason::SupervisorDegraded));
+        assert_eq!(sink.reports().len(), 1);
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
+        assert!(control.sends().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_non_quota_fault_is_never_offered_to_recovery() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let control = FakeControl::default();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(Arc::new(FaultingModel {
+                fault: SupervisorFault::provider("upstream exploded"),
+            }));
+        let sink = QuotaSink::new(true);
+        let outcome = on_turn_settled_with(&pool, &judge, &control, LANE, true, Some(&sink))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, Some(StopReason::SupervisorDegraded));
+        assert!(sink.reports().is_empty());
+        assert_eq!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
     }
 
     /// The retained mhc supervisor that completes the assessment (a retained context) and
@@ -1285,6 +1470,59 @@ mod tests {
             Some(LaneStatus::Blocked)
         );
         assert!(control.sends().is_empty());
+    }
+
+    /// Like [`ConvergeFaultingModel`], but the convergence check hits a usage limit.
+    struct ConvergeQuotaModel;
+
+    #[async_trait]
+    impl ModelTurn for ConvergeQuotaModel {
+        async fn complete(&self, _prompt: &str) -> Result<String> {
+            Err(HubError::message("untyped path must not be used"))
+        }
+
+        async fn complete_typed(
+            &self,
+            _prompt: &str,
+            context: TurnContext,
+        ) -> std::result::Result<String, TurnFault> {
+            match context {
+                TurnContext::Retained => Ok(COMPLETE.to_owned()),
+                TurnContext::Fresh => Err(TurnFault::Supervisor(SupervisorFault::quota(
+                    "429 usage limit reached",
+                ))),
+            }
+        }
+
+        fn owns_deadline(&self) -> bool {
+            true
+        }
+
+        fn is_supervisor_engine(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quota_fault_at_the_convergence_check_routes_to_recovery_not_a_stop() {
+        let pool = lane_pool(Some(GoalMode::Full)).await;
+        let control = FakeControl::default();
+        let judge = Judge::bare()
+            .with_pool(pool.clone())
+            .with_fallback(Arc::new(ConvergeQuotaModel));
+        let sink = QuotaSink::new(true);
+        let outcome = on_turn_settled_with(&pool, &judge, &control, LANE, true, Some(&sink))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.stop_reason, None);
+        assert_eq!(goal(&pool).await.stop_reason, None);
+        assert_eq!(sink.reports().len(), 1);
+        assert!(sink.reports()[0].2.contains("usage limit"));
+        assert_ne!(
+            status_of(&pool, LANE).await.unwrap(),
+            Some(LaneStatus::Blocked)
+        );
     }
 
     /// Scripted answers served as the retained mhc supervisor engine.

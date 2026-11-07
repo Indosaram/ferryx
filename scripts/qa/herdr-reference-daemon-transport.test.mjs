@@ -12,6 +12,7 @@
  * the Windows branch is exercised on every host rather than only where the defect was found.
  */
 
+import { gitEnv as fixtureGitEnv } from './unified-supervisor/git-env.mjs';
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import { spawn, spawnSync } from 'node:child_process';
@@ -1718,7 +1719,7 @@ test('the provenance identity does not move with the host git configuration or u
     writeFileSync(clean, '');
     writeFileSync(hostA, '[diff]\n\tmnemonicprefix = true\n\talgorithm = histogram\n\tindentHeuristic = false\n\tcontext = 8\n\trenames = false\n');
     writeFileSync(hostB, '[diff]\n\tnoprefix = true\n\talgorithm = minimal\n\tsuppressBlankEmpty = true\n[core]\n\tautocrlf = true\n\tquotePath = true\n');
-    const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: clean };
+    const gitEnv = fixtureGitEnv({ GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: clean });
     const git = (...args) => {
       const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: gitEnv });
       assert.equal(result.status, 0, 'git ' + args.join(' ') + ' failed: ' + result.stderr);

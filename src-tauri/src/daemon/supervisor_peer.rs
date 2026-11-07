@@ -36,11 +36,10 @@
 //!
 //! Windows: the daemon listens on loopback TCP, which carries no peer pid, and the transport
 //! token only proves the peer can read a file a pane process of the same user can read too.
-//! The desktop app reaches the daemon over the same TCP and token, so neither it nor the CLI
-//! or `ferryx-cli mcp` can be told apart from a worker pane. A `TokenAuthenticated`
-//! connection is therefore refused every gated request with `FORBIDDEN`, like an `Unknown`
-//! peer: on Windows the supervisor cannot be mutated over the daemon socket (not from the
-//! desktop app either) until the transport can prove the owner's origin. Reads stay served.
+//! So the accept path resolves the connection's owning process from the kernel's TCP table and
+//! classifies it by the same rule plus pane Job Object membership (`supervisor_peer_win`). A
+//! connection whose owner cannot be resolved stays `TokenAuthenticated` and is refused every
+//! gated request with `FORBIDDEN`, like an `Unknown` peer. Reads stay served.
 use std::collections::HashSet;
 
 /// How deep a parent chain is followed before the walk gives up (and refuses).
@@ -65,8 +64,8 @@ pub enum PeerOrigin {
     /// The transport carries no peer pid (in-process pairs in tests, a platform without peer
     /// credentials, or a peer that exited before accept finished). Gated requests are refused.
     Unknown,
-    /// The peer presented the transport token but its process is unknown (Windows loopback
-    /// TCP, documented above). Gated requests are refused.
+    /// The peer presented the transport token but its process could not be resolved (Windows
+    /// loopback TCP, documented above). Gated requests are refused.
     TokenAuthenticated,
 }
 

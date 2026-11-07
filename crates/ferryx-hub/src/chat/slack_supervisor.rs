@@ -30,16 +30,14 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 use super::slack_turn::{Admitted, SlackTurnConfig};
-use crate::goals::contract::RequirementSpec;
 use crate::meta::mhc_profile::ConversationScope;
 use crate::meta::mhc_supervisor::{
-    MhcSupervisor, WorkToolCall, WorkToolHandler, WorkToolRejection, WorkToolRequest,
-    WorkerPreference,
+    MhcSupervisor, SessionTools, WorkToolCall, WorkToolHandler, WorkToolRejection,
+    WorkToolRequest,
 };
-use crate::supervisor::admission::{
-    self, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
-};
-use crate::supervisor::{goal_of, ChannelProvider, ExecutionKind};
+use crate::supervisor::admission::{self, ActorContext, OwnerChoices, SubmitOutcome};
+use crate::supervisor::app_work::submit_from_call;
+use crate::supervisor::{goal_of, ChannelProvider};
 
 /// Added to a reply that claims work was accepted, or that follows a tried submit, when
 /// nothing was persisted.
@@ -253,46 +251,21 @@ fn update_record(
 /// Slack turn in flight is rejected: there is no authenticated actor to act for.
 pub struct SlackWorkTools {
     pool: SqlitePool,
+    sessions: Option<Arc<SessionTools>>,
 }
 
 impl SlackWorkTools {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            sessions: None,
+        }
     }
-}
 
-/// The model's `submit` call as an untrusted [`SubmitWork`] proposal. It declares only the
-/// baseline operations a natural-language execution request carries; anything wider needs the
-/// owner's explicit choice.
-fn submit_from_call(
-    title: &str,
-    requirements: &[String],
-    worker: WorkerPreference,
-    source_body: &str,
-) -> SubmitWork {
-    let requirements: Vec<RequirementSpec> = requirements
-        .iter()
-        .enumerate()
-        .map(|(index, text)| RequirementSpec {
-            id: format!("r{}", index + 1),
-            text: text.trim().to_owned(),
-            verifier: format!("independent verification that: {}", text.trim()),
-        })
-        .collect();
-    SubmitWork {
-        project_id: None,
-        host_id: None,
-        kind: match worker {
-            WorkerPreference::Mhc => Some(ExecutionKind::Mhc),
-            WorkerPreference::Pty => Some(ExecutionKind::Pty),
-            WorkerPreference::Any => None,
-        },
-        title: title.trim().to_owned(),
-        instruction: format!("{}\n\n{}", title.trim(), source_body.trim()),
-        requirements,
-        cwd: None,
-        operations: OperationClass::BASELINE.to_vec(),
-        turn_limit: None,
+    /// Serves the session tools (list, read, answer, send, stop) too.
+    pub fn with_sessions(mut self, sessions: Arc<SessionTools>) -> Self {
+        self.sessions = Some(sessions);
+        self
     }
 }
 
@@ -360,6 +333,13 @@ impl WorkToolHandler for SlackWorkTools {
                     )),
                 }
             }
+            call => match &self.sessions {
+                Some(sessions) => sessions.execute(call).await,
+                None => Err(WorkToolRejection::new(
+                    "SUPERVISOR_SESSIONS_UNAVAILABLE",
+                    "the session tools are not installed",
+                )),
+            },
         }
     }
 }
@@ -1246,6 +1226,7 @@ mod tests {
     use crate::chat::slack::with_test_api;
     use crate::chat::slack_turn::{admit, handle, AllowBots};
     use crate::chat::slack_web::mock::{serve_scripted, Calls};
+    use crate::meta::mhc_supervisor::WorkerPreference;
     use crate::meta::omo_client::OmoClientConfig;
     use crate::supervisor::{
         bind_channel, bind_project_host, create_project, ensure_identity, ChannelAddress,

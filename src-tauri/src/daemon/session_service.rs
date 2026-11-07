@@ -165,12 +165,17 @@ pub(super) struct ProviderSessionClaimKey {
 
 impl ProviderSessionClaimKey {
     pub(super) fn from_startup(startup: Option<&TerminalStartup>) -> Option<Self> {
-        let TerminalStartup::AgentResume {
-            agent_type,
-            provider_session,
-        } = startup?
-        else {
-            return None;
+        let (agent_type, provider_session) = match startup? {
+            TerminalStartup::AgentResume {
+                agent_type,
+                provider_session,
+            }
+            | TerminalStartup::AgentContinue {
+                agent_type,
+                provider_session,
+                mode: crate::daemon::protocol::ContinueMode::Resume,
+            } => (agent_type, provider_session),
+            _ => return None,
         };
         let agent_type = agent_type.trim().to_ascii_lowercase();
         let transcript_path = if matches!(agent_type.as_str(), "pi" | "prime-agent") {
@@ -191,6 +196,38 @@ impl ProviderSessionClaimKey {
     }
 }
 
+/// Provider session published on a newly created pane. Resume is the same conversation, so the
+/// request's id stays. A fork is a new native session and must stay unset until its own hook
+/// reports one; stamping the source id binds chat to the parent until then.
+pub(super) fn published_create_provider_session(
+    mode: Option<crate::daemon::protocol::ContinueMode>,
+    provider_session: &crate::daemon::protocol::AgentProviderSession,
+) -> Option<crate::daemon::protocol::AgentProviderSession> {
+    if matches!(mode, Some(crate::daemon::protocol::ContinueMode::Fork)) {
+        None
+    } else {
+        Some(provider_session.clone())
+    }
+}
+
+/// `provider_session` written onto the machine createSession journal row.
+pub(super) fn published_create_provider_session_for_startup(
+    startup: &crate::remote::machine_protocol::Startup,
+) -> Option<crate::daemon::protocol::AgentProviderSession> {
+    match startup {
+        crate::remote::machine_protocol::Startup::Shell => None,
+        crate::remote::machine_protocol::Startup::AgentResume {
+            provider_session,
+            ..
+        } => published_create_provider_session(None, provider_session),
+        crate::remote::machine_protocol::Startup::AgentContinue {
+            provider_session,
+            mode,
+            ..
+        } => published_create_provider_session(Some(*mode), provider_session),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SpawnError {
     #[error(
@@ -204,6 +241,10 @@ pub(super) enum SpawnError {
     },
     #[error("{0}")]
     InvalidAgentResume(String),
+    #[error("AGENT_CONTINUE_UNSUPPORTED")]
+    ContinueUnsupported,
+    #[error("AGENT_CONTINUE_CONFLICT")]
+    ContinueConflict { existing_session_id: String },
     #[error("{0}")]
     Structured(crate::ipc::IpcError),
     #[error("{0}")]
@@ -728,6 +769,65 @@ impl DaemonSessionService {
     pub fn desktop_geometry(&self, session_id: &str) -> Option<(u16, u16)> {
         self.desktop_geometries.lock().get(session_id).copied()
     }
+
+    fn refuse_unsafe_continue(&self, startup: Option<&TerminalStartup>) -> Result<(), SpawnError> {
+        let Some(TerminalStartup::AgentContinue {
+            agent_type,
+            provider_session,
+            mode,
+        }) = startup
+        else {
+            return Ok(());
+        };
+        let surface = if MACHINE_SPAWN.try_with(|_| ()).is_ok() {
+            crate::terminal::continue_startup::ContinueSurface::Machine
+        } else {
+            crate::terminal::continue_startup::ContinueSurface::Local
+        };
+        crate::terminal::continue_startup::continue_supported(
+            &[crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY],
+            agent_type,
+            *mode,
+            surface,
+        )
+        .map_err(|_| SpawnError::ContinueUnsupported)?;
+        let agent = agent_type.trim().to_ascii_lowercase();
+        let id = provider_session.id.trim();
+        let mut sources = Vec::new();
+        for (key, session_id) in self.provider_session_claims.lock().iter() {
+            if key.agent_type == agent && key.provider_id == id {
+                sources.push(crate::terminal::continue_startup::ContinueSource {
+                    session_id: session_id.clone(),
+                    running: self.session_is_live(session_id),
+                    working: self.session_activity_state(session_id).as_deref() == Some("working"),
+                });
+            }
+        }
+        for state in self.agent_states.retained() {
+            let same_id = state
+                .provider_session
+                .as_ref()
+                .is_some_and(|provider| provider.id.trim() == id);
+            let same_agent = state
+                .agent
+                .as_deref()
+                .is_none_or(|name| name.trim().eq_ignore_ascii_case(&agent));
+            if same_id
+                && same_agent
+                && sources.iter().all(|source| source.session_id != state.session_id)
+            {
+                sources.push(crate::terminal::continue_startup::ContinueSource {
+                    session_id: state.session_id.clone(),
+                    running: self.session_is_live(&state.session_id),
+                    working: state.state.trim().eq_ignore_ascii_case("working"),
+                });
+            }
+        }
+        crate::terminal::continue_startup::admit_continue(*mode, &sources).map_err(
+            |existing_session_id| SpawnError::ContinueConflict { existing_session_id },
+        )
+    }
+
     pub fn session_activity_state(&self, session_id: &str) -> Option<String> {
         let current = self.agent_states.current(session_id)?;
         match current.state.trim().to_ascii_lowercase().as_str() {
@@ -736,6 +836,15 @@ impl DaemonSessionService {
             "done" => Some("done".to_string()),
             _ => None,
         }
+    }
+
+    /// Whether telemetry says the agent died mid-turn: the daemon released the pane after the
+    /// agent's own last report still said `working`. Cleared when a new agent owns the pane.
+    pub fn agent_control_failed(&self, session_id: &str) -> bool {
+        self.agent_states.current(session_id).is_some_and(|state| {
+            state.origin == crate::daemon::protocol::AgentStateOrigin::ProcessReleased
+                && state.outcome == Some(crate::daemon::protocol::AgentOutcome::Error)
+        })
     }
 
     /// The agent extension's last report for this PTY, for the agent-control surface.
@@ -1129,6 +1238,28 @@ impl DaemonSessionService {
                     provider_session: provider_session.clone(),
                 })
             }
+            Startup::AgentContinue {
+                agent_type,
+                provider_session,
+                mode,
+            } => {
+                if provider_session.transcript_path.is_some()
+                    || crate::terminal::continue_startup::continue_supported(
+                        &[crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY],
+                        agent_type,
+                        *mode,
+                        crate::terminal::continue_startup::ContinueSurface::Machine,
+                    )
+                    .is_err()
+                {
+                    return Err(crate::terminal::continue_startup::AGENT_CONTINUE_UNSUPPORTED.into());
+                }
+                Some(TerminalStartup::AgentContinue {
+                    agent_type: agent_type.clone(),
+                    provider_session: provider_session.clone(),
+                    mode: *mode,
+                })
+            }
         };
         let worktree = request.worktree.as_ref().map(|w| WorktreeIdentity {
             ws_id: w.ws_id.clone(),
@@ -1188,6 +1319,12 @@ impl DaemonSessionService {
         }
         result.map_err(|e| match e {
             SpawnError::AgentSessionConflict { .. } => "AGENT_SESSION_CONFLICT".into(),
+            SpawnError::ContinueUnsupported => {
+                crate::terminal::continue_startup::AGENT_CONTINUE_UNSUPPORTED.into()
+            }
+            SpawnError::ContinueConflict { .. } => {
+                crate::terminal::continue_startup::AGENT_CONTINUE_CONFLICT.into()
+            }
             SpawnError::InvalidAgentResume(_) => "AGENT_RESUME_INVALID".into(),
             SpawnError::Structured(error) => error.code.to_string(),
             SpawnError::Other(code) => match code.as_str() {
@@ -1995,20 +2132,40 @@ impl DaemonSessionService {
         let RemoteSpawnTarget { project, host } = target;
         let SpawnOptions { worktree, cwd, cols, rows, .. } = options;
         let provider_claim = fingerprint.provider_claim.clone();
+        self.refuse_unsafe_continue(fingerprint.startup.as_ref())?;
         if let Some(claim) = &provider_claim {
             if let Some(existing_session_id) = self.provider_session_claims.lock().get(claim).cloned() {
-                return Err(SpawnError::AgentSessionConflict {
-                    agent_type: claim.agent_type.clone(),
-                    provider_key: claim.provider_key,
-                    provider_id: claim.provider_id.clone(),
-                    existing_session_id,
-                });
+                if matches!(fingerprint.startup, Some(TerminalStartup::AgentContinue { .. })) {
+                    if self.session_is_live(&existing_session_id) {
+                        return Err(SpawnError::ContinueConflict { existing_session_id });
+                    }
+                } else {
+                    return Err(SpawnError::AgentSessionConflict {
+                        agent_type: claim.agent_type.clone(),
+                        provider_key: claim.provider_key,
+                        provider_id: claim.provider_id.clone(),
+                        existing_session_id,
+                    });
+                }
             }
         }
         let resume = match &fingerprint.startup {
             Some(TerminalStartup::AgentResume { agent_type, provider_session }) => Some(
                 crate::terminal::shell::resolve_agent_resume_plan(agent_type, provider_session)
                     .map_err(|error| SpawnError::InvalidAgentResume(error.to_string()))?,
+            ),
+            Some(TerminalStartup::AgentContinue {
+                agent_type,
+                provider_session,
+                mode,
+            }) => Some(
+                crate::terminal::shell::resolve_agent_continue_plan(agent_type, provider_session, *mode)
+                    .map_err(|error| match error {
+                        crate::terminal::shell::AgentResumeError::ContinueUnsupported(_) => {
+                            SpawnError::ContinueUnsupported
+                        }
+                        other => SpawnError::InvalidAgentResume(other.to_string()),
+                    })?,
             ),
             _ => None,
         };
@@ -2056,9 +2213,24 @@ impl DaemonSessionService {
                 Some(relative)
             },
             agent_identity: match &fingerprint.startup {
-                Some(TerminalStartup::AgentResume { agent_type, provider_session }) => Some(
-                    serde_json::json!({"agentType": agent_type, "providerSession": provider_session}),
-                ),
+                Some(TerminalStartup::AgentResume {
+                    agent_type,
+                    provider_session,
+                }) => Some(serde_json::json!({
+                    "agentType": agent_type,
+                    "providerSession": provider_session,
+                })),
+                Some(TerminalStartup::AgentContinue {
+                    agent_type,
+                    provider_session,
+                    mode,
+                }) => match published_create_provider_session(Some(*mode), provider_session) {
+                    Some(provider_session) => Some(serde_json::json!({
+                        "agentType": agent_type,
+                        "providerSession": provider_session,
+                    })),
+                    None => Some(serde_json::json!({ "agentType": agent_type })),
+                },
                 _ => None,
             },
         };
@@ -2248,12 +2420,13 @@ impl DaemonSessionService {
         if client_request_id.trim().is_empty() {
             return Err(SpawnError::Other("clientRequestId cannot be empty".into()));
         }
+        self.refuse_unsafe_continue(startup.as_ref())?;
 
         let remote = match (
             crate::ssh::projects::is_remote(workspace_id),
             startup.as_ref(),
         ) {
-            (true, Some(TerminalStartup::RemoteSsh { .. } | TerminalStartup::AgentResume { .. })) => {
+            (true, Some(TerminalStartup::RemoteSsh { .. } | TerminalStartup::AgentResume { .. } | TerminalStartup::AgentContinue { .. })) => {
                 if shell.is_some() {
                     return Err(SpawnError::Other(
                         "Local shell overrides are unsupported for SSH sessions".into(),
@@ -2611,23 +2784,48 @@ impl DaemonSessionService {
                     cwd
                 };
                 let resume_cwd = if machine.is_some() {
-                    if let Some(TerminalStartup::AgentResume {
-                        agent_type,
-                        provider_session,
-                    }) = &spawn_startup
-                    {
-                        let plan = crate::terminal::shell::resolve_agent_resume_plan(
+                    if let Some((agent_type, provider_session, continue_mode)) = match &spawn_startup {
+                        Some(TerminalStartup::AgentResume {
                             agent_type,
                             provider_session,
-                        )
-                        .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
+                        }) => Some((agent_type, provider_session, None)),
+                        Some(TerminalStartup::AgentContinue {
+                            agent_type,
+                            provider_session,
+                            mode,
+                        }) => Some((agent_type, provider_session, Some(*mode))),
+                        _ => None,
+                    } {
+                        let plan = if let Some(mode) = continue_mode {
+                            crate::terminal::shell::resolve_agent_continue_plan(
+                                agent_type,
+                                provider_session,
+                                mode,
+                            )
+                            .map_err(|error| match error {
+                                crate::terminal::shell::AgentResumeError::ContinueUnsupported(_) => {
+                                    SpawnError::ContinueUnsupported
+                                }
+                                other => SpawnError::InvalidAgentResume(other.to_string()),
+                            })?
+                        } else {
+                            crate::terminal::shell::resolve_agent_resume_plan(
+                                agent_type,
+                                provider_session,
+                            )
+                            .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?
+                        };
                         if crate::ipc::agents::resolve_binary(
                             &plan.program,
                             &crate::ipc::agents::search_paths(),
                         )
                         .is_none()
                         {
-                            return Err("AGENT_RESUME_UNSUPPORTED".to_string().into());
+                            return Err(if continue_mode.is_some() {
+                                SpawnError::ContinueUnsupported
+                            } else {
+                                SpawnError::Other("AGENT_RESUME_UNSUPPORTED".to_string())
+                            });
                         }
                         // Already on a blocking worker: the store lookup reads the user's files.
                         let requested = cwd
@@ -2682,11 +2880,69 @@ impl DaemonSessionService {
                     default_cwd.clone()
                 };
 
+                if let Some(TerminalStartup::AgentContinue {
+                    agent_type,
+                    provider_session,
+                    mode,
+                }) = &spawn_startup
+                {
+                    let agent = agent_type.trim().to_ascii_lowercase();
+                    let id = provider_session.id.trim();
+                    let live = |session_id: &str| {
+                        terminal_service.get_session(session_id).is_some_and(|session| {
+                            matches!(
+                                session.state(),
+                                PtySessionState::Starting | PtySessionState::Running
+                            )
+                        }) || terminal_service.remote().details(session_id).is_some()
+                    };
+                    let mut sources = Vec::new();
+                    for (key, session_id) in claims.lock().iter() {
+                        if key.agent_type == agent && key.provider_id == id {
+                            let working = agent_states
+                                .current(session_id)
+                                .is_some_and(|state| state.state.trim().eq_ignore_ascii_case("working"));
+                            sources.push(crate::terminal::continue_startup::ContinueSource {
+                                session_id: session_id.clone(),
+                                running: live(session_id),
+                                working,
+                            });
+                        }
+                    }
+                    for state in agent_states.retained() {
+                        let same_id = state
+                            .provider_session
+                            .as_ref()
+                            .is_some_and(|provider| provider.id.trim() == id);
+                        let same_agent = state
+                            .agent
+                            .as_deref()
+                            .is_none_or(|name| name.trim().eq_ignore_ascii_case(&agent));
+                        if same_id
+                            && same_agent
+                            && sources.iter().all(|source| source.session_id != state.session_id)
+                        {
+                            sources.push(crate::terminal::continue_startup::ContinueSource {
+                                session_id: state.session_id.clone(),
+                                running: live(&state.session_id),
+                                working: state.state.trim().eq_ignore_ascii_case("working"),
+                            });
+                        }
+                    }
+                    if let Err(existing_session_id) =
+                        crate::terminal::continue_startup::admit_continue(*mode, &sources)
+                    {
+                        return Err(SpawnError::ContinueConflict { existing_session_id });
+                    }
+                }
                 let mut cmd = match crate::terminal::shell::resolve_startup_command(
                     shell.as_deref(),
                     spawn_startup.as_ref(),
                 ) {
                     Ok(cmd) => cmd,
+                    Err(crate::terminal::shell::AgentResumeError::ContinueUnsupported(_)) => {
+                        return Err(SpawnError::ContinueUnsupported);
+                    }
                     Err(err) => return Err(SpawnError::InvalidAgentResume(err.to_string())),
                 };
                 #[cfg(test)]
@@ -2716,12 +2972,21 @@ impl DaemonSessionService {
                         crate::ipc::agents::omo_conversation_owner(&claim.provider_id, &live)
                     });
                     if let Some(existing_session_id) = existing {
-                        return Err(SpawnError::AgentSessionConflict {
-                            agent_type: claim.agent_type.clone(),
-                            provider_key: claim.provider_key,
-                            provider_id: claim.provider_id.clone(),
-                            existing_session_id,
-                        });
+                        if matches!(spawn_startup, Some(TerminalStartup::AgentContinue { .. })) {
+                            if terminal_service.get_session(&existing_session_id).is_some_and(|session| {
+                                matches!(session.state(), PtySessionState::Starting | PtySessionState::Running)
+                            }) || terminal_service.remote().details(&existing_session_id).is_some()
+                            {
+                                return Err(SpawnError::ContinueConflict { existing_session_id });
+                            }
+                        } else {
+                            return Err(SpawnError::AgentSessionConflict {
+                                agent_type: claim.agent_type.clone(),
+                                provider_key: claim.provider_key,
+                                provider_id: claim.provider_id.clone(),
+                                existing_session_id,
+                            });
+                        }
                     }
                 }
                 cmd.env("PROMPT_EOL_MARK", "");
@@ -2794,15 +3059,15 @@ impl DaemonSessionService {
                                 crate::remote::machine_protocol::Startup::AgentResume {
                                     agent_type,
                                     ..
+                                }
+                                | crate::remote::machine_protocol::Startup::AgentContinue {
+                                    agent_type,
+                                    ..
                                 } => Some(agent_type.clone()),
                             },
-                            provider_session: match &machine.request.startup {
-                                crate::remote::machine_protocol::Startup::Shell => None,
-                                crate::remote::machine_protocol::Startup::AgentResume {
-                                    provider_session,
-                                    ..
-                                } => Some(provider_session.clone()),
-                            },
+                            provider_session: published_create_provider_session_for_startup(
+                                &machine.request.startup,
+                            ),
                             start_sequence: crate::scoped_contracts::Epoch(
                                 start_sequence.unwrap_or(0),
                             ),
@@ -2810,6 +3075,7 @@ impl DaemonSessionService {
                             pid: None,
                         },
                         exit: None,
+                        agent_stamps: None,
                     }
                 });
                 // Store idempotency entry and session metadata before releasing the request lock.

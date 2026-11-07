@@ -1,0 +1,47 @@
+{
+  "$comment": "All-local F3 run on maho-win: it is the control host, the session host and the Windows desktop. Every host has sshDestination \"local\" (helpers run as direct children), MahoRD (this worktree's crates/ferryx-rd `ferryx-rd-client`, the absorbed maho-client, built with --features cli next to its FFmpeg DLLs) drives this machine's own maho-host on 127.0.0.1, and the run-owned relay listens on plain HTTP loopback. The iPhone and macOS lanes are not in this run and are recorded blocked (LANE_NOT_IN_RUN). The Windows lane types the launcher's 8.3 short path into the Run dialog and MahoRD drops '-' and '_', so no worktree path component may have '-' or '_' in its first 6 characters (the config check refuses it): name the worktree e.g. f3winlocal-<yyyymmdd>. binary/cli/relay must be inside the worktree: build into the shared target, then copy ferryx.exe, ferryx-cli.exe, ferryx-relay.exe and the FFmpeg DLLs into <wt>\\.qa\\f3-bin\\gui. The GUI is built with tauri/custom-protocol so it renders the embedded ui/dist with no dev server; the session daemon is the same ferryx.exe --daemon.",
+  "lanes": ["windows"],
+  "ownerEmail": "owner@example.invalid",
+  "mahordExecutable": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\.qa\\f3-bin\\mahord\\ferryx-rd-client.exe",
+  "tesseract": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+  "sshExecutable": "ssh",
+  "relayOrigin": "http://127.0.0.1:47960",
+  "sessionHost": {
+    "hostId": "maho-win-session",
+    "platform": "win32",
+    "sshDestination": "local",
+    "bun": "C:\\Users\\<user>\\AppData\\Local\\Microsoft\\WinGet\\Links\\bun.exe",
+    "worktreeRoot": "C:\\Users\\<user>\\ferryx-wt",
+    "worktree": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>",
+    "hostHelper": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\scripts\\qa\\supervisor-f3\\host-helper.mjs",
+    "remoteAgent": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\scripts\\qa\\fixtures\\native-remote-agent.mjs",
+    "binary": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\.qa\\f3-bin\\gui\\ferryx.exe",
+    "cli": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\.qa\\f3-bin\\gui\\ferryx-cli.exe",
+    "relay": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\.qa\\f3-bin\\gui\\ferryx-relay.exe",
+    "uiDist": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\ui\\dist",
+    "buildManifest": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\.qa\\f3-bin\\gui\\candidate-manifest.json",
+    "relayFront": { "kind": "loopback" }
+  },
+  "hosts": {
+    "windows": {
+      "hostId": "maho-win",
+      "platform": "win32",
+      "sshDestination": "local",
+      "mahordAddress": "127.0.0.1",
+      "pairingId": "<this machine's local MahoRD pairing id>",
+      "mahordNudgeMs": 500,
+      "bun": "C:\\Users\\<user>\\AppData\\Local\\Microsoft\\WinGet\\Links\\bun.exe",
+      "worktreeRoot": "C:\\Users\\<user>\\ferryx-wt",
+      "worktree": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>",
+      "hostHelper": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\scripts\\qa\\supervisor-f3\\host-helper.mjs",
+      "remoteAgent": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\scripts\\qa\\fixtures\\native-remote-agent.mjs",
+      "binary": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\.qa\\f3-bin\\gui\\ferryx.exe",
+      "cli": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\.qa\\f3-bin\\gui\\ferryx-cli.exe",
+      "uiDist": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\ui\\dist",
+      "buildManifest": "C:\\Users\\<user>\\ferryx-wt\\f3winlocal-<yyyymmdd>\\.qa\\f3-bin\\gui\\candidate-manifest.json",
+      "exportLabel": "Export transcript",
+      "viewerLabel": "Open in Viewer",
+      "viewerMarker": "Supervisor report"
+    }
+  }
+}

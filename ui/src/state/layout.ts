@@ -24,7 +24,10 @@ import {
   equalizeRatios,
   findAlignedSplitRatio,
   findFirstLeafId,
+  findLeaf,
   findSiblingLeafId,
+  setLeafView,
+  type PaneView,
   type PaneDirection,
   removeLeaf,
   setCollinearRatioAtPath,
@@ -37,7 +40,7 @@ import {
 import { equalizeSplitRun } from "./splitEqualization";
 
 export type LayoutAction =
-  | { type: "ADD_TAB"; tab: WorkspaceTab; sessionId?: string; activate?: boolean }
+  | { type: "ADD_TAB"; tab: WorkspaceTab; sessionId?: string; activate?: boolean; view?: PaneView }
   | { type: "CLOSE_TAB"; tabId: string; replacementTab?: WorkspaceTab }
   | { type: "ACTIVATE_TAB"; tabId: string }
   | { type: "UPDATE_FILE_TAB"; tabId: string; line: number | null; col: number | null; path?: string; remote?: import("../lib/filePreviewTypes").RemotePreviewOrigin }
@@ -50,6 +53,7 @@ export type LayoutAction =
       targetLeafId?: string;
       direction: PaneDirection;
       newLeafId?: string;
+      view?: PaneView;
       sessionId?: string;
       content?: PaneContent;
       position?: "first" | "second";
@@ -81,6 +85,7 @@ export type LayoutAction =
   | { type: "EQUALIZE_TAB_GROUP_RUN"; path: string }
   | { type: "CLOSE_PANE"; tabId: string; leafId: string; replacementSessionId?: string }
   | { type: "FOCUS_PANE"; tabId: string; leafId: string }
+  | { type: "SET_PANE_VIEW"; tabId: string; leafId: string; view: PaneView }
   | {
       type: "SET_PANE_RATIO";
       tabId: string;
@@ -156,7 +161,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
         const content = defaultContentForTab(action.tab, action.sessionId);
         const sessionId = content.kind === "terminal" ? content.sessionId : "";
         layoutsByTabId[action.tab.id] = {
-          root: createLeafNode(leafId),
+          root: { ...createLeafNode(leafId), ...(action.view ? { view: action.view } : {}) },
           activeLeafId: leafId,
           expandedLeafId: null,
           sessionIdsByLeafId: { [leafId]: sessionId },
@@ -358,7 +363,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
             ...state.layoutsByTabId,
             [action.tabId]: {
               ...tabLayout,
-              root: newRoot,
+              root: action.view && newContent.kind === "terminal" ? setLeafView(newRoot, newLeafId, action.view) : newRoot,
               activeLeafId: newLeafId,
               expandedLeafId: null,
               sessionIdsByLeafId: { ...tabLayout.sessionIdsByLeafId, [newLeafId]: newSessionId },
@@ -549,7 +554,7 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
               contentsByLeafId: nextContentsByLeafId,
             },
             [newTab.id]: {
-              root: createLeafNode(action.leafId),
+              root: findLeaf(sourceLayout.root, action.leafId) ?? createLeafNode(action.leafId),
               activeLeafId: action.leafId,
               expandedLeafId: null,
               sessionIdsByLeafId: { [action.leafId]: movedSessionId },
@@ -604,6 +609,21 @@ export function layoutReducer(inputState: LayoutState, action: LayoutAction): La
         },
         true,
       );
+    }
+    case "SET_PANE_VIEW": {
+      const tabLayout = state.layoutsByTabId[action.tabId];
+      if (!tabLayout) return state;
+      const content = tabLayout.contentsByLeafId?.[action.leafId];
+      if (content && content.kind !== "terminal") return state;
+      const root = setLeafView(tabLayout.root, action.leafId, action.view);
+      if (root === tabLayout.root) return state;
+      return {
+        ...state,
+        layoutsByTabId: {
+          ...state.layoutsByTabId,
+          [action.tabId]: { ...tabLayout, root },
+        },
+      };
     }
     case "FOCUS_PANE": {
       const tabLayout = state.layoutsByTabId[action.tabId];

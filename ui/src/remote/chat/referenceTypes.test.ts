@@ -140,6 +140,7 @@ describe("reference part union", () => {
     "compact",
     "notice",
     "taskResult",
+    "diff",
   ];
 
   const parts: readonly ReferencePart[] = [
@@ -156,6 +157,10 @@ describe("reference part union", () => {
     {
       kind: "taskResult",
       tasks: [{ id: "t1", title: "task one", status: "completed", result: "ok" }],
+    },
+    {
+      kind: "diff",
+      patch: { ref: "patch-1", byteLength: 12, digest: "def", truncated: false },
     },
   ];
 

@@ -23,6 +23,8 @@ pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
 pub const AGENT_PROMPT_CAPABILITY: &str = "agentPromptV1";
 /// Advertised in `GetCapabilities` by a daemon that spawns `TerminalStartup::AgentLaunch`.
 pub const AGENT_LAUNCH_CAPABILITY: &str = "agentLaunchV1";
+/// Advertised by a host that accepts `agentContinue` and builds the continuation argv itself.
+pub const TERMINAL_CONTINUE_CAPABILITY: &str = "terminalContinueV1";
 /// Advertised in `GetCapabilities` by a daemon built with the `remote-desktop` feature, which
 /// serves `RemoteDesktopHost{Get,Set,Respond}`. Consent prompts reach the GUI as the remote event
 /// `rd-host-consent` `{requestId, clientName}`.
@@ -317,6 +319,13 @@ where
     Ok(deserialize_lenient_option(deserializer)?.unwrap_or_default())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContinueMode {
+    Fork,
+    Resume,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TerminalStartup {
@@ -333,6 +342,14 @@ pub enum TerminalStartup {
     AgentResume {
         agent_type: String,
         provider_session: AgentProviderSession,
+    },
+    /// Host-validated continuation. The client names the source session and mode; the host
+    /// builds argv and never accepts a client argv array.
+    #[serde(rename_all = "camelCase")]
+    AgentContinue {
+        agent_type: String,
+        provider_session: AgentProviderSession,
+        mode: ContinueMode,
     },
     /// A fresh agent launch: the command and args the desktop agent settings resolved.
     #[serde(rename_all = "camelCase")]
@@ -665,6 +682,15 @@ pub enum SupervisorReadAction {
         after: Option<i64>,
     },
     Memory,
+    /// The app transcript after a message-id cursor.
+    Transcript {
+        #[serde(default)]
+        cursor: Option<i64>,
+    },
+    /// The panel snapshot (`PanelSnapshot`): sessions, handling, log, rules, decisions.
+    Panel,
+    /// This computer's sessions as the fleet read maps them (`FleetSession[]`).
+    Fleet,
     /// Whether this daemon serves the supervisor or stands by for a holder:
     /// `{standby, holderMachineId, holderLabel}`. Read by `ferryx-cli mcp` before it opens
     /// the hub database.
@@ -974,6 +1000,15 @@ pub enum DaemonRequest {
     SupervisorReadV1 {
         request: SupervisorReadAction,
     },
+    /// One owner message from the panel composer, answered by the supervisor on the `app`
+    /// channel; both are stored in the app transcript. Gated by `supervisorConverseV1`.
+    #[serde(rename = "supervisorConverseV1", rename_all = "camelCase")]
+    SupervisorConverseV1 {
+        text: String,
+        #[serde(default)]
+        mentions: Vec<String>,
+        request_id: String,
+    },
     /// Automatic supervisor setup. Gated by `supervisorSetupV1`.
     #[serde(rename_all = "camelCase")]
     SupervisorSetup {
@@ -1141,6 +1176,12 @@ pub enum DaemonRequest {
     RemoteSetWindowFocused {
         focused: bool,
     },
+    /// Mutes or unmutes phone push for one session; the panel still lists it.
+    #[serde(rename_all = "camelCase")]
+    SessionMute {
+        session_ref: String,
+        muted: bool,
+    },
     /// Turns this connection into a one-way stream of desktop-directed remote
     /// events. Without it the gateway (which lives in the daemon) has no way to
     /// reach the GUI, so remote-issued selections are silently dropped.
@@ -1210,6 +1251,32 @@ pub enum DaemonRequest {
         #[serde(default)]
         excluded_device_ids: Vec<String>,
     },
+    /// One-step owner enablement: agent control on, only the owner's own paired machine Control
+    /// devices admitted. Gated by `supervisorControlV1`.
+    AgentControlEnableOwner,
+    /// The owner pauses or resumes every supervisor action (the hub-wide flag, not one lane).
+    /// Never goes through the engine. Gated by `supervisorControlV1`.
+    #[serde(rename_all = "camelCase")]
+    SupervisorGlobalPause {
+        paused: bool,
+    },
+    /// Read the persisted supervisor settings, or with `enabled` set the owner turns the
+    /// supervisor on or off first. Gated by `supervisorControlV1`.
+    #[serde(rename_all = "camelCase")]
+    SupervisorSettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+    },
+    /// Undo one action-log entry through its undo handle. Gated by `supervisorControlV1`.
+    #[serde(rename_all = "camelCase")]
+    SupervisorActionUndo {
+        id: i64,
+    },
+    /// Start the stopped hub in this daemon, as `ferryx hub start` does on the unix control
+    /// socket: the desktop's Turn on where there is no control socket (Windows). Starting clears
+    /// the owner's Stop, so it is owner-gated: a process inside a pane is refused. Answered `SupervisorControlOk {result: {started}}`. An older daemon
+    /// answers an untyped "Malformed request" and the desktop keeps its control-socket path.
+    SupervisorHubStart,
     /// The remote desktop host's settings and live state. Gated by `remoteDesktopV1`.
     RemoteDesktopHostGet,
     /// Turns the remote desktop host on or off and sets its input/clipboard policy.
@@ -1225,6 +1292,85 @@ pub enum DaemonRequest {
         request_id: String,
         approve: bool,
     },
+    ReferenceChatIdentity,
+    #[serde(rename_all = "camelCase")]
+    ReferenceChat {
+        request: DesktopReferenceChatRequest,
+    },
+}
+
+/// The allowlist: files, control, screen and payload kinds do not deserialize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DesktopReferenceChatKind {
+    History,
+    Prompt,
+    Submit,
+    Stop,
+    Answer,
+}
+
+impl DesktopReferenceChatKind {
+    pub fn is_read(self) -> bool {
+        matches!(self, Self::History | Self::Prompt)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopReferenceChatRequest {
+    pub kind: DesktopReferenceChatKind,
+    pub request_id: String,
+    #[serde(deserialize_with = "deserialize_desktop_reference_target")]
+    pub target: crate::remote::reference_chat::types::ReferenceTargetRef,
+    #[serde(default)]
+    pub registry_id: Option<String>,
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// Accepts the frontend's nested `{target, providerSessionId}` and the flattened Rust wire.
+fn deserialize_desktop_reference_target<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::remote::reference_chat::types::ReferenceTargetRef, D::Error> {
+    use crate::remote::reference_chat::types::ReferenceTargetRef;
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Nested {
+        target: crate::scoped_contracts::TargetRef,
+        #[serde(default)]
+        provider_session_id: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Nested(Nested),
+        Flat(ReferenceTargetRef),
+    }
+    Ok(match Wire::deserialize(deserializer)? {
+        Wire::Nested(Nested { target, provider_session_id: Some(provider) })
+            if !provider.trim().is_empty() =>
+        {
+            ReferenceTargetRef::with_provider_session(target, provider)
+        }
+        Wire::Nested(Nested { target, .. }) => ReferenceTargetRef::without_provider_session(target),
+        Wire::Flat(target) => target,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopReferenceChatReply {
+    pub status: u16,
+    pub body: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopReferenceChatIdentity {
+    pub host_id: String,
+    pub owner_id: String,
+    pub epoch: String,
 }
 
 /// One connected remote desktop viewer.
@@ -1306,6 +1452,22 @@ pub struct PairedDagBinding {
     pub host_id: String,
     pub generation: crate::scoped_contracts::Epoch,
     pub remote_workspace_id: String,
+}
+
+impl DaemonRequest {
+    /// A request that changes what the supervisor may do or undoes what it did. The daemon
+    /// refuses it from a process running inside a Ferryx pane: a worker agent must not turn the
+    /// supervisor on, start its stopped hub, resume it, widen agent control or undo its log.
+    pub fn is_owner_supervisor_control(&self) -> bool {
+        match self {
+            Self::SupervisorGlobalPause { .. }
+            | Self::SupervisorActionUndo { .. }
+            | Self::SupervisorHubStart
+            | Self::AgentControlEnableOwner => true,
+            Self::SupervisorSettings { enabled } => enabled.is_some(),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1586,6 +1748,12 @@ pub enum DaemonResponse {
     AgentIntegrationOk {
         enabled: bool,
     },
+    /// The result of a direct supervisor control (`SupervisorGlobalPause`, `SupervisorSettings`,
+    /// `SupervisorActionUndo`).
+    #[serde(rename_all = "camelCase")]
+    SupervisorControlOk {
+        result: serde_json::Value,
+    },
     /// The admission outcome (`submit`) or the dispatch status (`status`).
     #[serde(rename_all = "camelCase")]
     SupervisorDispatchOk {
@@ -1621,6 +1789,11 @@ pub enum DaemonResponse {
     /// The view a `SupervisorReadV1` asked for.
     #[serde(rename = "supervisorReadV1Ok", rename_all = "camelCase")]
     SupervisorReadV1Ok {
+        value: serde_json::Value,
+    },
+    /// The stored owner message and supervisor reply of a `SupervisorConverseV1`.
+    #[serde(rename = "supervisorConverseV1Ok", rename_all = "camelCase")]
+    SupervisorConverseV1Ok {
         value: serde_json::Value,
     },
     /// The SetupStatus (status, run) or the adoption report (adoptAll).
@@ -1682,6 +1855,7 @@ pub enum DaemonResponse {
     },
     RemoteSetActiveSelectionOk,
     RemoteSetWindowFocusedOk,
+    SessionMuteOk,
     #[serde(rename_all = "camelCase")]
     RemoteGetActiveSelectionOk {
         selection: Option<RemoteActiveDesktopSelection>,
@@ -1707,6 +1881,14 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     RemoteDesktopHostState {
         state: RdHostState,
+    },
+    #[serde(rename_all = "camelCase")]
+    ReferenceChatIdentityOk {
+        identity: DesktopReferenceChatIdentity,
+    },
+    #[serde(rename_all = "camelCase")]
+    ReferenceChatOk {
+        reply: DesktopReferenceChatReply,
     },
     #[serde(rename_all = "camelCase")]
     Error {
@@ -2382,6 +2564,48 @@ mod tests {
     }
 
     #[test]
+    fn direct_supervisor_controls_round_trip_and_only_changes_are_owner_gated() {
+        let pause = serde_json::json!({"type":"supervisorGlobalPause","paused":true});
+        let request: DaemonRequest = serde_json::from_value(pause.clone()).unwrap();
+        assert!(matches!(request, DaemonRequest::SupervisorGlobalPause { paused: true }));
+        assert_eq!(serde_json::to_value(&request).unwrap(), pause);
+        assert!(request.is_owner_supervisor_control());
+
+        let undo: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"supervisorActionUndo","id":7})).unwrap();
+        assert!(matches!(undo, DaemonRequest::SupervisorActionUndo { id: 7 }));
+        assert!(undo.is_owner_supervisor_control());
+
+        let enable: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"agentControlEnableOwner"})).unwrap();
+        assert!(enable.is_owner_supervisor_control());
+
+        let read: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"supervisorSettings"})).unwrap();
+        assert!(matches!(read, DaemonRequest::SupervisorSettings { enabled: None }));
+        assert!(!read.is_owner_supervisor_control(), "reading the settings changes nothing");
+        let turn_on: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"supervisorSettings","enabled":true})).unwrap();
+        assert!(turn_on.is_owner_supervisor_control(), "turning it on is an owner decision");
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            serde_json::json!({"type":"supervisorSettings"}),
+            "an absent switch is omitted on the wire"
+        );
+        assert!(!DaemonRequest::SupervisorSnapshot.is_owner_supervisor_control());
+
+        let start: DaemonRequest =
+            serde_json::from_value(serde_json::json!({"type":"supervisorHubStart"})).unwrap();
+        assert!(matches!(start, DaemonRequest::SupervisorHubStart));
+        assert_eq!(serde_json::to_value(&start).unwrap(), serde_json::json!({"type":"supervisorHubStart"}));
+        assert!(start.is_owner_supervisor_control(), "starting the hub undoes the owner's Stop");
+
+        let ok = DaemonResponse::SupervisorControlOk { result: serde_json::json!({"paused": true}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorControlOk""#), "{text}");
+    }
+
+    #[test]
     fn supervisor_dispatch_actions_round_trip_on_the_daemon_wire() {
         let status = DaemonRequest::SupervisorDispatch {
             request: SupervisorDispatchAction::Status { goal_id: "g-1".into() },
@@ -2562,6 +2786,30 @@ mod tests {
         let ok = DaemonResponse::SupervisorReadV1Ok { value: serde_json::json!({"next": 4}) };
         let text = serde_json::to_string(&ok).unwrap();
         assert!(text.contains(r#""type":"supervisorReadV1Ok""#), "{text}");
+    }
+
+    #[test]
+    fn the_supervisor_converse_round_trips_on_the_daemon_wire() {
+        let request: DaemonRequest = serde_json::from_value(serde_json::json!(
+            {"type": "supervisorConverseV1", "text": "hi", "requestId": "r1"}
+        ))
+        .unwrap();
+        assert!(matches!(
+            request,
+            DaemonRequest::SupervisorConverseV1 { ref text, ref mentions, ref request_id }
+                if text == "hi" && mentions.is_empty() && request_id == "r1"
+        ));
+        let transcript: DaemonRequest = serde_json::from_value(serde_json::json!(
+            {"type": "supervisorReadV1", "request": {"view": "transcript", "cursor": 4}}
+        ))
+        .unwrap();
+        assert!(matches!(
+            transcript,
+            DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Transcript { cursor: Some(4) } }
+        ));
+        let ok = DaemonResponse::SupervisorConverseV1Ok { value: serde_json::json!({"replayed": false}) };
+        let text = serde_json::to_string(&ok).unwrap();
+        assert!(text.contains(r#""type":"supervisorConverseV1Ok""#), "{text}");
     }
 
     #[test]

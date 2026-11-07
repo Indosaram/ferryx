@@ -1,12 +1,18 @@
 //! WGPU device, queue, and GPU context management for terminal rendering.
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, ReentrantMutex};
 use std::sync::{Arc, OnceLock};
 
 use crate::native_terminal::error::NativeTerminalError;
 
-// Serialize independent instance initialization and final release, not GPU work.
-static INSTANCE_LIFECYCLE: Mutex<()> = Mutex::new(());
+// Serialize wgpu instance create/destroy and adapter/device acquisition.
+// The Vulkan loader is not thread-safe until its first call returns. Parallel
+// `vkEnumerateInstanceExtensionProperties` (shared_surface_instance racing
+// GpuContext::new, which libtest does) jumps through a null ICD dispatch
+// and SIGSEGVs at address 0. Frame submission stays outside this lock.
+// Reentrant because a failed acquire drops `OwnedInstance` on the thread that
+// already holds the lock.
+static INSTANCE_LIFECYCLE: ReentrantMutex<()> = ReentrantMutex::new(());
 
 #[cfg(test)]
 thread_local! {
@@ -204,6 +210,12 @@ impl GpuContext {
     // Independent contexts use separate instances so they do not share one EGL context.
     pub(crate) fn shared_surface_instance() -> wgpu::Instance {
         static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
+        if let Some(instance) = INSTANCE.get() {
+            return instance.clone();
+        }
+        // Lock before OnceLock init so a waiter never holds the OnceLock while
+        // blocked on the lifecycle lock (that deadlocks against the inverse order).
+        let _guard = INSTANCE_LIFECYCLE.lock();
         INSTANCE.get_or_init(|| {
             wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::all(),
@@ -217,22 +229,25 @@ impl GpuContext {
             return Err(forced_adapter_error());
         }
         static CONTEXT: OnceLock<Result<GpuContext, NativeTerminalError>> = OnceLock::new();
-        CONTEXT.get_or_init(|| Self::with_instance(Self::shared_surface_instance())).clone()
+        if let Some(context) = CONTEXT.get() {
+            return context.clone();
+        }
+        let _guard = INSTANCE_LIFECYCLE.lock();
+        CONTEXT
+            .get_or_init(|| Self::with_instance(Self::shared_surface_instance()))
+            .clone()
     }
 
     /// Initializes a real wgpu device and queue, selecting the primary native backend.
     pub fn new() -> Result<Self, NativeTerminalError> {
-        let (instance, owner) = {
-            let _guard = INSTANCE_LIFECYCLE.lock();
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::all(),
-                flags: wgpu::InstanceFlags::default(),
-                backend_options: wgpu::BackendOptions::default(),
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
-            });
-            let owner = Arc::new(OwnedInstance(Some(instance.clone())));
-            (instance, owner)
-        };
+        let _guard = INSTANCE_LIFECYCLE.lock();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let owner = Arc::new(OwnedInstance(Some(instance.clone())));
         Self::with_owned_instance(Some(owner), instance)
     }
 
@@ -245,6 +260,8 @@ impl GpuContext {
         owned_instance: Option<Arc<OwnedInstance>>,
         instance: wgpu::Instance,
     ) -> Result<Self, NativeTerminalError> {
+        // request_adapter / request_device are still loader init, not frame work.
+        let _guard = INSTANCE_LIFECYCLE.lock();
         if adapter_forced_unavailable() {
             return Err(forced_adapter_error());
         }

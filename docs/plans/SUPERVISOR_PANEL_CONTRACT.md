@@ -7,13 +7,13 @@ Code: hub `crates/ferryx-hub/src/supervisor/panel_contract.rs` (serde camelCase)
 
 | Type | Shape |
 |---|---|
-| `SessionRef` | string `<hostId>:<backendSessionId>`; Rust newtype with `new`, `parse`, `as_str`, `Display` |
+| `SessionRef` | string `<hostId>:<backendSessionId>`; Rust newtype with `new`, `parse`, `as_str`, `Display`. A paired computer's host id is its URL (`https://relay/host/<machine>`), so the ref splits at the first `:` after `/host/`. In a request path the whole ref is ONE percent-encoded segment (`sessions/https%3A%2F%2Frelay%2Fhost%2Fm%3As1/stop`); the relay validates and forwards the raw path, and `%2F` is never a separator. |
 | `HealthKind` | `{type:"healthy"}` / `upstreamError{status?}` / `quota{resetAtMs?}` / `stalled{sinceMs}` / `failed{reason}` |
 | `SessionHealth` | `{sessionRef, kind, observedAtMs}` |
 | `PendingPrompt` | `{promptId, kind: question\|permission\|approval, question, command?, options[], screenRevision?}` |
 | `FleetSession` | `{sessionRef, hostId, hostLabel, title, cwd, agent, state: working\|blocked\|idle\|unknown, stateSource, stateSinceMs?, screenChangedAtMs?, pendingPrompt?, lastAssistantLine?, updatedAtMs, stale}` |
 | `ActionKind` | answered, retried, resumed, cancelled, stopped, ruleChanged, finished, escalated |
-| `EvidenceRef` / `UndoHandle` | `{kind, id}` / `{kind, payload}` |
+| `EvidenceRef` / `UndoHandle` | `{kind, id}` / `{kind, payload}`; only `receipt`, `delivery`, `stateTransition` and `commit` are delivery events (D9); `prompt`, `session`, `goal` and `answerHistory` name a subject or a reason and leave a claim Unverified |
 | `ActionEntry` | `{id, incidentKey, sessionRef?, kind, summary, basis, evidence[], undo?, live, createdAtMs, updatedAtMs}`; one row per `incidentKey`, updated in place |
 | `Escalation` | `{sessionRef, prompt, recommendedIndex, reason, createdAtMs}`; recommendation mandatory |
 | `AnswerDecision` | `{type:"answer", optionIndex, basis}` / `{type:"escalate", recommendedIndex, reason}` |
@@ -26,7 +26,7 @@ Default rules (`default_rules()`, seconds): `upstreamRetry {backoffSecs:[60,120,
 
 `resume_text(agent)`: `claude` / `claude-code` / `codex` -> `"continue"`; others `None` (escalate).
 
-Hub traits (all in `panel_contract.rs`, `async_trait`): `ActionLog` (`upsert_incident`, `list_today`, `mark_undone`), `RuleStore` (`list`, `upsert`), `HealthClassifier` (`classify(&FleetSession, tail, rules, now_ms) -> HealthKind`, sync), `SessionControl` (`stop`, `send`, `answer`, `read_tail`). Errors: `crate::error::HubError`.
+Hub traits (all in `panel_contract.rs`, `async_trait`): `ActionLog` (`upsert_incident`, `list_today`, `mark_undone`), `RuleStore` (`list`, `upsert`), `HealthClassifier` (`classify(&FleetSession, tail, rules, now_ms) -> HealthKind`, sync), `SessionControl` (`stop`, `send`, `answer`, `read_tail`; `answer` returns `Option<String>`, the `requestId` of the delivery receipt the host accepted it under, which an `answered` row stores as its only `receipt` evidence; no receipt, no evidence). Errors: `crate::error::HubError`.
 
 ## Daemon fields (no code in this task)
 
@@ -63,3 +63,20 @@ Non-owner subscribers never receive prompt bodies.
 `cmd_supervisor_panel`, `cmd_supervisor_converse`, `cmd_session_stop`, `cmd_supervisor_pause`, `cmd_supervisor_answer`, `cmd_supervisor_action_undo`, `cmd_supervisor_dispatch`.
 
 Note: `PanelSnapshot.sessions` lists every session; the UI reducer places each session in exactly one section (decisions, handling, sessions) per plan D5.
+
+## T9 direct controls (implemented)
+
+All of these skip the hub engine. Auth is the existing agent-control gate: machine scope, Control permission, agent control on, device admitted; a mirror, view-only or excluded device gets 403 before any body is read.
+
+| Route | Body -> response |
+|---|---|
+| `POST /api/v1/sessions/{sessionRef}/stop` | optional `{requestId}`; the provider interrupt key via agent control. A ref for a paired computer is forwarded once through the daemon's agent-control path to that computer (same device authorization, per-device audit; a lost answer is 409 `OPERATION_OUTCOME_UNKNOWN` and is not resent; an unknown paired host is 404); a malformed ref 400. |
+| `POST /api/v1/supervisor/decisions/{sessionRef}/answer` | `{promptId, screenRevision, optionIndex[, requestId]}`; an owner tap, no answer gate; stale revision is 409 `REQUEST_CONFLICT` and nothing is typed. A ref for a paired computer is forwarded exactly like the stop route, and the tap joins this computer's answer history under that computer's session refs only. |
+| `POST /api/v1/supervisor/pause` | `{paused}` pauses every supervisor action (hub flag `supervisor_paused`); `{laneKey, paused}` keeps pausing one lane. Same path, one handler. |
+| `POST /api/v1/supervisor/actions/{id}/undo` | runs the entry's undo handle; `restoreRule` (rule store) and `restoreDecision` (the autonomy service takes its answer back and reopens the decision card) are supported. Any other kind is 422 `UNSUPPORTED`; a spent or missing handle 404; a `restoreDecision` whose screen moved on 409 `STALE`; a `restoreDecision` while autonomy is not installed 503 `SUPERVISOR_UNAVAILABLE`. |
+
+Tauri: `cmd_session_stop`, `cmd_supervisor_answer`, `cmd_supervisor_pause`, `cmd_supervisor_action_undo`, `cmd_supervisor_settings`, `cmd_supervisor_dispatch` (explicit `projectId`; no guessing), `cmd_agent_control_enable_owner` (agent control on, only the owner's own paired machine Control devices admitted), `cmd_supervisor_start` (setup card, after `cmd_agent_control_enable_owner`: sends `start` on the local hub control socket like `ferryx hub start`, never restarting the daemon; returns `started`, false when the hub already ran; `UNSUPPORTED` where there is no unix control socket).
+
+Daemon wire (capability `supervisorControlV1`): `supervisorGlobalPause`, `supervisorSettings`, `supervisorActionUndo`, `agentControlEnableOwner`. Each that changes state is refused from a process inside a Ferryx pane.
+
+Supervisor settings live in hub_meta key `supervisor_settings`: `{enabled, removeAll, ownerHome}`. `enabled` is effective only while the daemon resolves the same owner home (`OMO_HOME`, else `<home>/.omo`) that turned it on. `removeAll` is off by default.

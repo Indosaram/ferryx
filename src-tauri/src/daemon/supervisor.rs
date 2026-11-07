@@ -333,6 +333,143 @@ pub fn uninstall() -> Result<()> {
     backend::uninstall(&process_env)
 }
 
+/// What keeps an older runtime generation directory from being pruned.
+pub(crate) trait GenerationLiveness {
+    /// Whether the OS job of generation `key` (staged at `dir`) is loaded or still referenced by a
+    /// registered job definition. A job whose state cannot be read counts as loaded.
+    fn job_loaded(&self, key: &str, dir: &Path) -> bool;
+    /// Whether a live process runs from `dir`. An unreadable process table counts as live.
+    fn has_live_process(&self, dir: &Path) -> bool;
+}
+
+/// [`GenerationLiveness`] backed by the OS process table, a backend job probe, and the executables
+/// every registered job definition names.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux", windows)), allow(dead_code))]
+pub(crate) struct SystemGenerationLiveness<'a> {
+    job_probe: &'a dyn Fn(&str) -> bool,
+    registered_job_executables: Vec<PathBuf>,
+    /// `None` when the process table could not be read.
+    running: Option<Vec<PathBuf>>,
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux", windows)), allow(dead_code))]
+impl<'a> SystemGenerationLiveness<'a> {
+    pub(crate) fn new(job_probe: &'a dyn Fn(&str) -> bool, registered_job_executables: Vec<PathBuf>) -> Self {
+        use crate::daemon::runtime_stage::RuntimeUsage as _;
+        let usage = crate::daemon::runtime_stage::SystemRuntimeUsage {
+            registered_job_executables: Vec::new(),
+        };
+        let running = match usage.running_executables() {
+            Ok(paths) => Some(paths.iter().map(|path| canonical(path)).collect()),
+            Err(error) => {
+                tracing::warn!(%error, "Cannot list running processes; no daemon runtime generation is pruned");
+                None
+            }
+        };
+        Self {
+            job_probe,
+            registered_job_executables: registered_job_executables.iter().map(|path| canonical(path)).collect(),
+            running,
+        }
+    }
+}
+
+impl GenerationLiveness for SystemGenerationLiveness<'_> {
+    fn job_loaded(&self, key: &str, dir: &Path) -> bool {
+        let dir = canonical(dir);
+        self.registered_job_executables.iter().any(|exe| exe.starts_with(&dir)) || (self.job_probe)(key)
+    }
+
+    fn has_live_process(&self, dir: &Path) -> bool {
+        let dir = canonical(dir);
+        match &self.running {
+            Some(running) => running.iter().any(|exe| exe.starts_with(&dir)),
+            None => true,
+        }
+    }
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux", windows)), allow(dead_code))]
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Prunes stale generation directories under the `daemon-runtime` root `root`.
+///
+/// Kept unconditionally: the current generation `current_key`, every generation staged at or
+/// after it (a successor may be mid-registration), and the newest generation staged before it
+/// (one previous generation, for rollback). Any older generation is removed only when it has no
+/// loaded OS job and no live process; in-flight staging dirs (`.tmp-`) are never touched. When
+/// `current_key` is not staged under `root` nothing is removed. Returns the removed keys.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux", windows)), allow(dead_code))]
+pub(crate) fn prune_stale_runtime_generations(
+    root: &Path,
+    current_key: &str,
+    liveness: &dyn GenerationLiveness,
+) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut generations: Vec<(u128, String, PathBuf)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            (!name.contains(".tmp-")).then(|| (staged_at(&entry.path()), name, entry.path()))
+        })
+        .collect();
+    let Some(current_staged_at) = generations
+        .iter()
+        .find(|(_, key, _)| key == current_key)
+        .map(|(staged_at, _, _)| *staged_at)
+    else {
+        return Vec::new();
+    };
+    generations.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+
+    let mut previous_kept = false;
+    let mut removed = Vec::new();
+    for (staged_at, key, dir) in generations {
+        if key == current_key || staged_at >= current_staged_at {
+            continue;
+        }
+        if !previous_kept {
+            previous_kept = true;
+            continue;
+        }
+        if liveness.job_loaded(&key, &dir) || liveness.has_live_process(&dir) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => removed.push(key),
+            Err(error) => {
+                tracing::warn!(%error, generation = %key, "Could not remove a stale daemon runtime generation")
+            }
+        }
+    }
+    removed
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux", windows)), allow(dead_code))]
+fn staged_at(dir: &Path) -> u128 {
+    std::fs::read_to_string(dir.join(crate::daemon::runtime_stage::STAGED_AT_FILE))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// [`prune_stale_runtime_generations`] under the real runtime root, logging what it removed.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux", windows)), allow(dead_code))]
+pub(crate) fn prune_runtime_generations(current_key: &str, liveness: &dyn GenerationLiveness) {
+    let Some(root) = crate::daemon::server::daemon_runtime_root() else {
+        return;
+    };
+    let removed = prune_stale_runtime_generations(&root, current_key, liveness);
+    if !removed.is_empty() {
+        tracing::info!(?removed, "Pruned stale daemon runtime generations");
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod backend {
     use super::{non_empty, Env, Result, SUPERVISOR_NAME_ENV};
@@ -470,7 +607,25 @@ mod backend {
     fn register_job_for_login(env: Env<'_>, job: &generation::GenerationJob) -> Result<bool> {
         let (changed, dir, base) = login_registration_with(&generation::SystemLaunchctl, uid(), env, job)?;
         collect_unused_runtimes(env, &dir, &base);
+        prune_stale_generations(env, &dir, &base, job);
         Ok(changed)
+    }
+
+    /// Keeps `job`'s generation and one previous; older generation dirs go only when launchd has
+    /// no job for their label, no plist names them, and no process runs from them.
+    fn prune_stale_generations(env: Env<'_>, dir: &Path, base: &str, job: &generation::GenerationJob) {
+        let Some(current_key) = job.label.strip_prefix(&format!("{base}.")) else {
+            return;
+        };
+        let Some(registered) = registered_executables(env, dir, base) else {
+            return;
+        };
+        let uid = uid();
+        let probe = |key: &str| {
+            generation::job_loaded(&generation::SystemLaunchctl, uid, &generation::generation_label(base, key))
+        };
+        let liveness = super::SystemGenerationLiveness::new(&probe, registered);
+        super::prune_runtime_generations(current_key, &liveness);
     }
 
     /// The plist half of login registration: `job` gets `RunAtLoad` true, every other generation
@@ -494,23 +649,9 @@ mod backend {
         let Some(root) = crate::daemon::server::daemon_runtime_root() else {
             return;
         };
-        let mut registered = match generation::job_executables(dir, base) {
-            Ok(executables) => executables,
-            Err(error) => {
-                tracing::warn!(%error, "Cannot read the daemon job plists; keeping every runtime generation");
-                return;
-            }
+        let Some(registered) = registered_executables(env, dir, base) else {
+            return;
         };
-        if let Some(legacy) = legacy_plist_path(env) {
-            match std::fs::read_to_string(&legacy) {
-                Ok(content) => registered.extend(generation::plist_program(&content).map(PathBuf::from)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    tracing::warn!(%error, "Cannot read the legacy daemon plist; keeping every runtime generation");
-                    return;
-                }
-            }
-        }
         let usage = runtime_stage::SystemRuntimeUsage {
             registered_job_executables: registered,
         };
@@ -521,6 +662,28 @@ mod backend {
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "Daemon runtime garbage collection failed"),
         }
+    }
+
+    /// Executables of every generation plist and the legacy plist; `None` when any cannot be read.
+    fn registered_executables(env: Env<'_>, dir: &Path, base: &str) -> Option<Vec<PathBuf>> {
+        let mut registered = match generation::job_executables(dir, base) {
+            Ok(executables) => executables,
+            Err(error) => {
+                tracing::warn!(%error, "Cannot read the daemon job plists; keeping every runtime generation");
+                return None;
+            }
+        };
+        if let Some(legacy) = legacy_plist_path(env) {
+            match std::fs::read_to_string(&legacy) {
+                Ok(content) => registered.extend(generation::plist_program(&content).map(PathBuf::from)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(%error, "Cannot read the legacy daemon plist; keeping every runtime generation");
+                    return None;
+                }
+            }
+        }
+        Some(registered)
     }
 
     /// The legacy single-job plist (`com.ferryx.daemon.plist`, or the QA `<base>.plist`).
@@ -765,8 +928,27 @@ mod backend {
         let rewritten = supervisor_linux::register_for_login(base, name, path, staged)?;
         if let Some(unit_dir) = path.parent() {
             collect_runtime_garbage(unit_dir);
+            prune_stale_generations(base, name, unit_dir);
         }
         Ok(rewritten)
+    }
+
+    /// Keeps unit `name`'s generation and one previous; older generation dirs go only when systemd
+    /// has no loaded unit for them, no unit file names them, and no process runs from them.
+    fn prune_stale_generations(base: &str, name: &str, unit_dir: &Path) {
+        let Some(current_key) = name.strip_prefix(&format!("{base}-")) else {
+            return;
+        };
+        let probe = |key: &str| {
+            supervisor_linux::generation_unit_name(base, key)
+                .map(|unit| supervisor_linux::unit_loaded(&supervisor_linux::UserSystemctl, &unit))
+                .unwrap_or(true)
+        };
+        let liveness = super::SystemGenerationLiveness::new(
+            &probe,
+            supervisor_linux::registered_job_executables(unit_dir),
+        );
+        super::prune_runtime_generations(current_key, &liveness);
     }
 
     /// The legacy single unit `<base>.service`: disabled without `--now` for an Alive/Unknown
@@ -1102,5 +1284,61 @@ mod tests {
         );
         let (again, _, _) = backend::login_registration_with(&launchctl, 501, &env, &new).unwrap();
         assert!(!again, "a second registration changes nothing");
+    }
+
+    /// Scripted liveness: loaded jobs by key, live processes by generation dir.
+    struct FakeLiveness {
+        loaded: Vec<String>,
+        live_dirs: Vec<PathBuf>,
+    }
+
+    impl GenerationLiveness for FakeLiveness {
+        fn job_loaded(&self, key: &str, _dir: &Path) -> bool {
+            self.loaded.iter().any(|loaded| loaded == key)
+        }
+        fn has_live_process(&self, dir: &Path) -> bool {
+            self.live_dirs.iter().any(|live| live == dir)
+        }
+    }
+
+    #[test]
+    fn retire_keeps_live_generations_and_one_previous() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = |key: &str, staged_at: u128| {
+            let dir = root.path().join(key);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(crate::daemon::runtime_stage::STAGED_AT_FILE), staged_at.to_string()).unwrap();
+            std::fs::write(dir.join("ferryx"), "exe").unwrap();
+            dir
+        };
+        let newer = stage("2026.1021.1-55555555", 500);
+        let current = stage("2026.1020.1-44444444", 400);
+        let previous = stage("2026.1015.1-33333333", 300);
+        let older_loaded = stage("2026.1010.1-22222222", 200);
+        let older_live_pid = stage("2026.1008.1-21212121", 150);
+        let older_dead = stage("2026.1005.1-11111111", 100);
+        let staging = root.path().join("2026.1022.1-66666666.tmp-1-2");
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let liveness = FakeLiveness {
+            loaded: vec!["2026.1010.1-22222222".to_string()],
+            live_dirs: vec![older_live_pid.clone()],
+        };
+        let removed = prune_stale_runtime_generations(root.path(), "2026.1020.1-44444444", &liveness);
+        assert_eq!(removed, vec!["2026.1005.1-11111111".to_string()]);
+        assert!(!older_dead.exists(), "an older generation with no job and no process is pruned");
+        for kept in [&newer, &current, &previous, &older_loaded, &older_live_pid, &staging] {
+            assert!(kept.exists(), "{} must be kept", kept.display());
+        }
+
+        assert!(
+            prune_stale_runtime_generations(root.path(), "2026.1020.1-44444444", &liveness).is_empty(),
+            "a second run removes nothing"
+        );
+        assert!(
+            prune_stale_runtime_generations(root.path(), "2026.0101.1-00000000", &liveness).is_empty(),
+            "an unknown current generation prunes nothing"
+        );
+        assert!(previous.exists() && older_loaded.exists() && older_live_pid.exists());
     }
 }

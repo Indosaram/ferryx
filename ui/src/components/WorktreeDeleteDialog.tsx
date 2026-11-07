@@ -207,7 +207,7 @@ export function WorktreeDeleteDialog({
         role="dialog"
         aria-label="Delete worktree"
         aria-modal="true"
-        className="w-full max-w-lg animate-enter overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+        className="w-full max-w-lg animate-enter overflow-hidden rounded-xl border border-border bg-popover shadow-elevation-4"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-center justify-between border-b border-border px-4 py-3">
