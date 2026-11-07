@@ -57,13 +57,16 @@ pub fn install<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Re
         let Some(paths) = uri_list_paths(selection) else {
             return;
         };
-        let Some((browser_id, engine, point, origin)) = tab_at(&drop_handle, x, y) else {
+        let Some((browser_id, engine, point)) = tab_at(&drop_handle, x, y) else {
             tracing::debug!("file drop over no browser tab was left unconsumed");
             return;
         };
         if engine == crate::browser::BrowserEngine::System {
-            let viewport = (origin.0 + point.0, origin.1 + point.1);
-            deliver_to_system_tab(&drop_handle, &browser_id, &paths, viewport);
+            // The system webview is a child widget placed at (origin) and `point` is already
+            // relative to it, so the page's elementFromPoint takes the tab-local point. Adding
+            // the origin would land the drop in the wrong element (and off the pane on a tab
+            // that does not start at the window origin).
+            deliver_to_system_tab(&drop_handle, &browser_id, &paths, point);
             return;
         }
         tauri::async_runtime::spawn(async move {
@@ -115,7 +118,7 @@ fn parse_uri_list(raw: &[u8]) -> Option<Vec<String>> {
 }
 
 /// Finds the visible tab under a GTK widget point, returning it with tab-relative CSS-pixel
-/// coordinates and the pane origin those coordinates are relative to.
+/// coordinates.
 ///
 /// `BrowserManager::set_bounds` stores each tab's logical rect in window coordinates, the same
 /// space GTK reports drag coordinates in, so this is a plain hit test; the engine applies its own
@@ -124,7 +127,7 @@ fn tab_at<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     x: i32,
     y: i32,
-) -> Option<(String, crate::browser::BrowserEngine, (f64, f64), (f64, f64))> {
+) -> Option<(String, crate::browser::BrowserEngine, (f64, f64))> {
     let manager = app_handle.try_state::<std::sync::Arc<crate::browser::BrowserManager>>()?;
     let point_x = f64::from(x);
     let point_y = f64::from(y);
@@ -138,14 +141,13 @@ fn tab_at<R: tauri::Runtime>(
                 && point_x < bounds.x + bounds.width
                 && point_y >= bounds.y
                 && point_y < bounds.y + bounds.height;
-            // Tab-relative, which is what the Chromium drop protocol expects; the system path
-            // adds the pane origin back for elementFromPoint.
+            // Tab-relative, which is what both the Chromium drop protocol and the system
+            // webview's elementFromPoint expect.
             inside.then(|| {
                 (
                     session.browser_id,
                     session.engine,
                     (point_x - bounds.x, point_y - bounds.y),
-                    (bounds.x, bounds.y),
                 )
             })
         })
