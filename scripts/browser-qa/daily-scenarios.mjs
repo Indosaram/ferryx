@@ -641,10 +641,20 @@ function toolbarIcons(ctx) {
     const median = small[Math.floor(small.length / 2)] ?? 11;
     at = runs.findLastIndex((run) => width(run) >= median * 1.6 && width(run) <= median * 4);
   }
-  if (at < 0 && anchor !== label) return { icons: [], label: null, via: "zoom readout run not found", runs: runs.length, y };
+  if (at < 0 && anchor !== label) {
+    // No wider run: OCR missed the "100%" readout and the row holds only icons. macOS run
+    // 42352352939 measured this exactly (screenshot 14): five 10-14px runs at 862/902/931/962/993
+    // and no readout, so every earlier attempt returned "zoom readout run not found" with 0
+    // icons and g2 history/folder never opened. Every icon is right of the URL, and the readout
+    // renders at 100% too (BrowserToolbar.tsx:879), so its absence is an OCR miss, not a control
+    // that is not there: the icons are every run after the URL.
+    if (!runs.length) return { icons: [], label: null, via: "no runs right of the url", runs: runs.length, y };
+    via = "no readout run (icons after the url)";
+    at = -1;
+  }
   // Icons are 14px glyphs; a separator line is 1px, a wider run is not an icon.
   const icons = runs.slice(at + 1).filter((run) => width(run) >= 6 && width(run) <= 30).map(([a, b]) => ({ x: Math.round((a + b) / 2), y }));
-  return { icons, label: { x: at >= 0 ? runs[at][0] : label.left, y }, via };
+  return { icons, label: { x: at >= 0 ? runs[at][0] : anchor.left, y }, via };
 }
 
 /** The toolbar Back button: the third control left of the address box (Back, Forward, Reload). */
@@ -759,15 +769,37 @@ async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0, wh
 }
 
 /**
- * Items of the "Duplicate browser tab" submenu, given the clicked parent item's centre: the
- * submenu's first item shares the parent's row, the rest follow below it (about 22px a row), and
- * it opens beside the parent, right of it or (near the screen edge) left of it. Macos run
- * 41949155327: parent at [484,182] -> Private [674,204]; parent at [859,182] -> work [721,226].
- * "Private" or "work" elsewhere on screen (a tab title, the Settings profile row) never counts.
+ * Rows of the "Duplicate browser tab" submenu when the parent item itself cannot be read. The
+ * parent row is white on blue while the pointer sits on it (the context menu opens under the
+ * cursor, so its first item is always under the pointer), and macOS run 42352352939 probe-166
+ * read the submenu's "Default (current)" and "Private" but never "Duplicate browser tab". A
+ * readable "(current)" row therefore proves the submenu is open; its rows all share the column of
+ * the row's first word, about 22px apart. Returns that column and the row's line, or the clicked
+ * parent when it was read.
  */
+async function duplicateSubmenuAnchor(ctx, duplicate) {
+  if (duplicate) return duplicate;
+  return await until(() => {
+    const words = screenWords(ctx);
+    const current = words.filter((word) => /current/i.test(word.text)).sort((a, b) => a.top - b.top)[0];
+    if (!current) return null;
+    // Rows start at the first word of the same line, left of "(current)".
+    const line = words.filter((word) => Math.abs(word.top - current.top) <= 8 && word.left <= current.left)
+      .sort((a, b) => a.left - b.left)[0];
+    return [line?.left ?? current.left, current.top];
+  }, 3000, 500);
+}
+
+/** Submenu rows beside a clicked parent item (see `inDuplicateSubmenu`). */
 function inDuplicateSubmenu(parent) {
   const [x, y] = parent;
   return (word) => word.top + word.height / 2 >= y - 12 && word.top <= y + 160 && Math.abs(word.left - x) <= 420 && Math.abs(word.left - x) >= 60;
+}
+
+/** Submenu rows in the column of a "Default (current)" anchor (see `duplicateSubmenuAnchor`). */
+function inSubmenuColumn(anchor) {
+  const [x, y] = anchor;
+  return (word) => word.top + word.height / 2 >= y - 12 && word.top <= y + 170 && Math.abs(word.left - x) <= 60;
 }
 
 /**
@@ -1881,8 +1913,18 @@ export async function dailyWebviewAfter(ctx) {
     const privateTrail = [];
     const duplicate = await clickWord(ctx, (text) => /^duplicate/i.test(text), { timeout: 5000, trail: privateTrail });
     await sleep(1000);
-    const privateItem = duplicate ? await clickWord(ctx, (text) => /^Private$/.test(text), { timeout: 5000, where: inDuplicateSubmenu(duplicate), trail: privateTrail }) : null;
-    g11.private_menu = { duplicate, private: privateItem, trail: privateTrail };
+    // The context menu opens under the cursor, so its first item sits under the pointer and its
+    // submenu is already open; when that blue parent row is unreadable the submenu's own rows are
+    // still there to click (macOS run 42352352939 probe-166).
+    const privateAnchor = await duplicateSubmenuAnchor(ctx, duplicate);
+    const privateItem = privateAnchor
+      ? await clickWord(ctx, (text) => /^Private$/.test(text), {
+        timeout: 5000,
+        where: duplicate ? inDuplicateSubmenu(duplicate) : inSubmenuColumn(privateAnchor),
+        trail: privateTrail,
+      })
+      : null;
+    g11.private_menu = { duplicate, anchor: privateAnchor, private: privateItem, trail: privateTrail };
     // No menu item was clicked: no tab can appear, so the wait is skipped.
     const privateTab = privateItem
       ? await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.profileId === "private"), 15000)
@@ -2016,37 +2058,87 @@ export async function dailyChromium(ctx) {
     // The input's placeholder is "Profile name" and the "Add Profile" button sits right of it, so
     // the rightmost "Profile" was the button (an empty draft: a no-op) and "work" was typed
     // nowhere. Click the "Profile" that has "name" right after it on its line.
-    const placeholder = await until(() => {
-      const words = screenWords(ctx);
-      return words.filter((word) => /^Profile$/.test(word.text)).find((word) => words.some((next) => /^name$/i.test(next.text)
-        && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40)) ?? null;
-    }, 6000, 800);
     let input = null;
     let inputVia = "placeholder 'Profile name'";
-    if (placeholder) {
-      input = [placeholder.left + Math.round(placeholder.width / 2), placeholder.top + Math.round(placeholder.height / 2)];
-    } else {
+    const readInput = async () => {
+      const words = await until(() => screenWords(ctx), 4000, 400) ?? [];
+      const placeholderWord = words.filter((word) => /^Profile$/.test(word.text)).find((word) => words.some((next) => /^name$/i.test(next.text)
+        && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40));
+      if (placeholderWord) {
+        return { at: [placeholderWord.left + Math.round(placeholderWord.width / 2), placeholderWord.top + Math.round(placeholderWord.height / 2)], via: "placeholder 'Profile name'" };
+      }
       // The muted placeholder is easy for OCR to miss; the input (w-36, 144px) ends 6px left of
       // the "Add Profile" button, so its middle is about 100px left of the word "Add".
-      const words = screenWords(ctx);
       const addWord = words.filter((word) => /^Add$/.test(word.text)).find((word) => words.some((next) => /^Profile$/.test(next.text)
         && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40));
       if (addWord) {
-        input = [addWord.left - 100 * (ctx.host.scale?.() ?? 1), addWord.top + Math.round(addWord.height / 2)];
-        inputVia = "left of 'Add Profile'";
+        return { at: [addWord.left - 100 * (ctx.host.scale?.() ?? 1), addWord.top + Math.round(addWord.height / 2)], via: "left of 'Add Profile'" };
       }
+      return null;
+    };
+    // The settings pane keeps settling after the scroll lands: macOS run 42352352939 read the
+    // placeholder at y=255 in probe-255/256 and at y=317 in probe-257/258, while the step clicked
+    // the older y=260, so "work" was typed nowhere and no profile was added. Read the input twice
+    // and only act once the two reads agree; a miss re-reads, clears the input and types again.
+    const typedInInput = (target) => {
+      const words = screenWords(ctx);
+      return words.some((word) => /^work$/i.test(word.text)
+        && Math.abs(word.top + Math.round(word.height / 2) - target[1]) < 24
+        && Math.abs(word.left + Math.round(word.width / 2) - target[0]) < 160);
+    };
+    const stableInput = async () => {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const first = await readInput();
+        if (!first) return null;
+        await sleep(700);
+        const second = await readInput();
+        if (second && Math.abs(second.at[0] - first.at[0]) <= 4 && Math.abs(second.at[1] - first.at[1]) <= 4) return second;
+      }
+      return null;
+    };
+    const attempts = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const target = await stableInput();
+      if (!target) break;
+      input = target.at;
+      inputVia = target.via;
+      ctx.host.click(...input);
+      await sleep(300);
+      // retry: the first click may have landed before the caret did; clear and retype in place.
+      if (attempt > 0) {
+        ctx.host.key({ key: "a", mods: ["mod"] });
+        await sleep(150);
+        ctx.host.key({ key: "BackSpace" });
+        await sleep(150);
+      }
+      ctx.host.type("work");
+      await sleep(400);
+      const landed = await until(() => typedInInput(input), 2500, 400);
+      attempts.push({ input, via: inputVia, landed });
+      if (landed) break;
     }
-    if (input) ctx.host.click(...input);
-    await sleep(300);
-    ctx.host.type("work");
-    await sleep(300);
+    g11.input_attempts = attempts;
     // Enter in the input adds the profile (BrowserSection's onKeyDown). Add is clicked as well:
     // after a successful Enter the draft is empty and addProfile returns without adding a second.
     ctx.host.key({ key: "Enter" });
     await sleep(800);
     const add = await clickWord(ctx, (text) => /^Add$/.test(text), { timeout: 5000, pick: "rightmost" });
     await sleep(1500);
-    g11.settings = { opened: opened.ok, scrolled: scrolled.ok, input, input_via: input ? inputVia : null, add, work_row: await waitWords(ctx, ["work"], 3000) };
+    // The profile row sits in the list under the input, left of the per-row buttons. A bare
+    // "work" anywhere on screen matched the "Worktrees" nav tab (macOS run 42352352939, work at
+    // x=345 in the left nav while the content column starts at x=394), so the row must sit in the
+    // content column below the "Session & Cookies" heading.
+    const workRow = await until(() => {
+      const words = screenWords(ctx);
+      const heading = words.filter((word) => /^Session$/i.test(word.text)).sort((a, b) => a.top - b.top)[0];
+      const addButton = words.filter((word) => /^Add$/.test(word.text)).sort((a, b) => a.top - b.top)[0];
+      const base = heading?.top ?? addButton?.top ?? 0;
+      const left = heading?.left ?? 0;
+      const row = words.filter((word) => /^work$/i.test(word.text) && word.top > base + 20 && word.left >= left
+        && (!addButton || word.left < addButton.left));
+      return row.length ? row[0].text : null;
+    }, 3000, 500);
+    g11.settings = { opened: opened.ok, scrolled: scrolled.ok, input, input_via: input ? inputVia : null, add, work_row: workRow };
     ctx.host.key({ key: "Escape" });
     await sleep(1500);
     // Duplicate the Chromium tab into the "work" profile from its tab context menu.
@@ -2067,7 +2159,19 @@ export async function dailyChromium(ctx) {
       const duplicate = await clickWord(ctx, (text) => /^duplicate/i.test(text), { timeout: 5000 });
       await sleep(1000);
       const workTrail = [];
-      g11.work_menu = { duplicate, work: duplicate ? await clickWord(ctx, (text) => /^work$/i.test(text), { timeout: 5000, where: inDuplicateSubmenu(duplicate), trail: workTrail }) : null, trail: workTrail };
+      const workAnchor = await duplicateSubmenuAnchor(ctx, duplicate);
+      g11.work_menu = {
+        duplicate,
+        anchor: workAnchor,
+        work: workAnchor
+          ? await clickWord(ctx, (text) => /^work$/i.test(text), {
+            timeout: 5000,
+            where: duplicate ? inDuplicateSubmenu(duplicate) : inSubmenuColumn(workAnchor),
+            trail: workTrail,
+          })
+          : null,
+        trail: workTrail,
+      };
       // Windows run 41824966041 screenshot 60: the Duplicate submenu listed only "Default
       // (current)" and "Private" (the profile was never added), so no "work" item existed.
       if (!g11.work_menu.work) ctx.host.key({ key: "Escape" });

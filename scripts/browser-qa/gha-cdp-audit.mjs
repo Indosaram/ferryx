@@ -2367,8 +2367,12 @@ await section("import", async (record) => {
     await sleep(800);
     // macOS OCR misses the "File format" label but reads its default value (run 41786025622), and
     // on run 42319828844 it missed both on the first look and read them a moment later, so the
-    // anchor is retried instead of sampled once.
-    const anchor = await until(() => {
+    // anchor is retried instead of sampled once. Run 42352352939 measured the race exactly: the
+    // 12 s window expired and the very next probe (probe-100) read both "File format" and the
+    // "1Password (.1pux)" default, so the budget is longer and a stray open dropdown is closed
+    // before one more wait. The dialog itself is left as it is: the format is picked below and
+    // Import stays blocked until it is.
+    const findAnchor = () => {
       const words = ocr(probeShot()) ?? [];
       const label = findPhrase(words, "File format")[0] ?? null;
       if (label) {
@@ -2377,7 +2381,23 @@ await section("import", async (record) => {
       }
       const fallback = words.find((word) => word.text === "1Password");
       return fallback ? { chooser: label, value: fallback } : null;
-    }, 12000, 600);
+    };
+    let anchor = await until(findAnchor, 25000, 600);
+    if (!anchor) {
+      // The password-manager section had not replaced the previous Chrome results panel yet: run
+      // 42352352939's probes 095-099 still read that panel (Bookmarks/History/Cookies rows) and
+      // probe-100, one tick after the 12 s window closed, read this one. Re-pick the source when
+      // its row was found, rather than waiting on a panel that is not there; nothing here presses
+      // Import.
+      if (select) {
+        host.click(select.x, select.y);
+        await sleep(800);
+        host.key({ key: "End" });
+        host.key({ key: "Enter" });
+        await sleep(1200);
+      }
+      anchor = await until(findAnchor, 15000, 600);
+    }
     const chooser = anchor?.chooser ?? null;
     const value = anchor?.value ?? null;
     let formatPicked = false;
