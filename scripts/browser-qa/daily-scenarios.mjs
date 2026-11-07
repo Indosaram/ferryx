@@ -2100,15 +2100,23 @@ export async function dailyChromium(ctx) {
       }, 4000, 400) ?? [];
       const placeholderWord = words.filter((word) => /^Profile$/.test(word.text)).find((word) => words.some((next) => /^name$/i.test(next.text)
         && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40));
-      if (placeholderWord) {
-        return { at: [placeholderWord.left + Math.round(placeholderWord.width / 2), placeholderWord.top + Math.round(placeholderWord.height / 2)], via: "placeholder 'Profile name'" };
-      }
       // The muted placeholder is easy for OCR to miss; the input (w-36, 144px) ends 6px left of
       // the "Add Profile" button, so its middle is about 100px left of the word "Add".
       const addWord = words.filter((word) => /^Add$/.test(word.text)).find((word) => words.some((next) => /^Profile$/.test(next.text)
         && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40));
+      // Input and Add are siblings of one `flex items-center` row (BrowserSection's
+      // Session & Cookies action), so their vertical centres differ by a couple of pixels. Linux
+      // run 42352352939 matched a "Profile name" 63px above the Add button, i.e. some other
+      // element, and typing there added no profile. When the two anchors disagree on the row, Add
+      // wins: it is bold 11px text that OCR reads reliably, while the placeholder is muted.
+      const rowGap = placeholderWord && addWord
+        ? Math.abs((placeholderWord.top + placeholderWord.height / 2) - (addWord.top + addWord.height / 2))
+        : null;
+      if (placeholderWord && (rowGap === null || rowGap <= 16)) {
+        return { at: [placeholderWord.left + Math.round(placeholderWord.width / 2), placeholderWord.top + Math.round(placeholderWord.height / 2)], via: "placeholder 'Profile name'", rowGap };
+      }
       if (addWord) {
-        return { at: [addWord.left - 100 * (ctx.host.scale?.() ?? 1), addWord.top + Math.round(addWord.height / 2)], via: "left of 'Add Profile'" };
+        return { at: [addWord.left - 100 * (ctx.host.scale?.() ?? 1), addWord.top + Math.round(addWord.height / 2)], via: "left of 'Add Profile'", rowGap };
       }
       return null;
     };
