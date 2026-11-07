@@ -1589,13 +1589,19 @@ export async function dailyWebviewBefore(ctx) {
       try {
         await visit(ctx, `${fixtureBase}/notify.html`, "NOTIFYME");
         await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 8000 });
+        // Windows run 42352352939 read the title of a remembered tab id and got "upload-idle"
+        // while /notify.html had landed in another tab, so the permission was reported as never
+        // granted and the prompt stayed open into the print step (screenshots 20 and 21 both show
+        // it). Read the tab that actually shows the page, as `tabAt` exists for.
+        const notifyTab = () => tabAt(ctx, "/notify.html")?.browserId ?? daily.tabB;
+        const permTitle = () => tab(ctx, notifyTab())?.title ?? "";
         // The page sets "perm:asking" on the click. Linux run 41824966041 stayed on "perm:idle":
         // the click never reached the page, so it is repeated once before waiting for the prompt.
-        g6.asked = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(tab(ctx, daily.tabB)?.title ?? ""), 4000, 500));
+        g6.asked = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(permTitle()), 4000, 500));
         if (!g6.asked) {
           ctx.host.focus();
           await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 5000 });
-          g6.asked_retry = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(tab(ctx, daily.tabB)?.title ?? ""), 4000, 500));
+          g6.asked_retry = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(permTitle()), 4000, 500));
         }
         await waitWords(ctx, ["wants"], 10000);
         // OCR reads the small "Allow" as "atow" or misses it (linux run 41767162699), so fuzzy
@@ -1978,10 +1984,32 @@ export async function dailyChromium(ctx) {
   };
   const newChromiumTab = async () => {
     const before = new Set(ctx.sessions().list.map((entry) => entry.browserId));
+    const reuse = () => ctx.sessions().list.find((entry) => entry.engine === "chromium") ?? null;
     await shortcut(ctx, { key: "b", mods: ["mod", "shift"] });
-    const created = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.engine === "chromium"), 30000);
+    let created = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.engine === "chromium"), 30000);
+    // Windows run 42352352939: Mod+Shift+B added no tab at all, so both daily Chromium steps
+    // reported "no chromium tab" (screenshots 58 and 59 are byte-identical) while the engine group
+    // above had already proven a Chromium tab works. The step needs a Chromium tab, not a fresh
+    // one, so an existing one is reused before the CLI opens another.
+    if (created) {
+      g11.chromium_tab_via = "Mod+Shift+B";
+    } else if ((created = reuse())) {
+      // A reused tab is not necessarily the active one, and `chromiumNavigate` types into the
+      // active tab's address bar, so it is activated first.
+      g11.chromium_tab_activate = await activateTab(ctx, created.browserId, null);
+      g11.chromium_tab_via = "reused the open chromium tab";
+    } else {
+      g11.chromium_tab_via = "ferryx browser tab new";
+      const opened = await ctx.cliAsync("tab", "new");
+      created = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.engine === "chromium") ?? reuse(), 30000);
+      if (!created) {
+        const added = ctx.sessions().list.filter((entry) => !before.has(entry.browserId));
+        g11.chromium_tab_new = { cli: opened.ok ? "ok" : opened.stderr, added: added.map((entry) => `${entry.browserId}:${entry.engine}`) };
+        return null;
+      }
+    }
     await sleep(3000);
-    return created ?? null;
+    return created;
   };
 
   await run(ctx, "daily-g8-chromium", "Chromium tab /upload.html: native file chooser and an OS file drag onto DROPZONE", async () => {
@@ -2061,7 +2089,10 @@ export async function dailyChromium(ctx) {
     let input = null;
     let inputVia = "placeholder 'Profile name'";
     const readInput = async () => {
-      const words = await until(() => screenWords(ctx), 4000, 400) ?? [];
+      const words = await until(() => {
+        const read = screenWords(ctx);
+        return read.length ? read : null;
+      }, 4000, 400) ?? [];
       const placeholderWord = words.filter((word) => /^Profile$/.test(word.text)).find((word) => words.some((next) => /^name$/i.test(next.text)
         && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40));
       if (placeholderWord) {
