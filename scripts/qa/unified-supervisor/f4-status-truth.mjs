@@ -288,8 +288,13 @@ const logLineChunk = (html, summary) => html.split('data-testid="action-log-line
 // A zombie (exited, not yet reaped by its new parent) is not alive, and neither is a process
 // mid-exit: the kernel empties /proc/<pid>/cmdline once its address space is released, so it
 // can never run user code again.
-const procState = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '')[0] ?? null; } catch { return null; } };
-const exiting = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`).length === 0; } catch { return false; } };
+// Linux reads /proc; macOS has none, so ask ps for the one state letter ("Z" = zombie).
+const procState = (pid) => {
+  try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '')[0] ?? null; } catch { /* not Linux */ }
+  const state = spawnSync('ps', ['-o', 'state=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
+  return state ? state[0] : null;
+};
+const exiting = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`).length === 0; } catch { return procState(pid) === 'Z'; } };
 const alive = (pid) => { try { process.kill(pid, 0); return procState(pid) !== 'Z' && !exiting(pid); } catch (error) { return error?.code === 'EPERM'; } };
 const argvOf = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch { return spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim() || null; } };
 async function teardown(daemon) {
