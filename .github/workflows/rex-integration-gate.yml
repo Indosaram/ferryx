@@ -153,6 +153,12 @@ jobs:
       - name: Daemon write latency benchmark
         run: |
           set -o pipefail
+          # The example links the default `remote-desktop` feature, so at startup it loads the
+          # LGPL FFmpeg shared objects from the pinned SDK that fetch-ffmpeg installed. Without
+          # this the runner aborts with
+          #   "error while loading shared libraries: libavcodec.so.63" (exit 127).
+          FFMPEG_SDK="$PWD/src-tauri/resources/ffmpeg/sdk"
+          export LD_LIBRARY_PATH="$FFMPEG_SDK/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           cargo run --manifest-path src-tauri/Cargo.toml --release --example daemon_write_bench 2>&1 | tail -5
       - name: iroh-direct feature check and graph
         run: |
