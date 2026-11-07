@@ -642,14 +642,18 @@ function toolbarIcons(ctx) {
     at = runs.findLastIndex((run) => width(run) >= median * 1.6 && width(run) <= median * 4);
   }
   if (at < 0 && anchor !== label) {
-    // No wider run: OCR missed the "100%" readout and the row holds only icons. macOS run
-    // 42352352939 measured this exactly (screenshot 14): five 10-14px runs at 862/902/931/962/993
-    // and no readout, so every earlier attempt returned "zoom readout run not found" with 0
-    // icons and g2 history/folder never opened. Every icon is right of the URL, and the readout
-    // renders at 100% too (BrowserToolbar.tsx:879), so its absence is an OCR miss, not a control
-    // that is not there: the icons are every run after the URL.
-    if (!runs.length) return { icons: [], label: null, via: "no runs right of the url", runs: runs.length, y };
-    via = "no readout run (icons after the url)";
+    // The browser pane here is ~640px wide, under BROWSER_TOOLBAR_COMPACT_WIDTH (720), so the
+    // toolbar renders no zoom group at all (BrowserToolbar.tsx:971 `compact ? null`) and the
+    // readout this scan keys on genuinely is not on screen: screenshot 14 of run 42352352939
+    // shows five runs at 867/903/931/962/993 -- bookmark star, History, Extensions, external,
+    // overflow. Every earlier attempt returned "zoom readout run not found" with 0 icons, so the
+    // History menu (`clickToolbarIcon(ctx, 1, ...)`) and the bookmark folder never opened.
+    // History is index 1 in both layouts: uncompact counts [zoom in, History, ...] because the
+    // slice below starts after the readout; compact counts [star, History, ...]. Steps that need
+    // a control only the wide toolbar has (index 7, Save as PDF) find no icon at that index and
+    // fail without clicking something else.
+    if (!runs.length) return { icons: [], label: null, via: "no runs right of the url", runs: runs.length, y, compact: true };
+    via = "no zoom group (compact toolbar)";
     at = -1;
   }
   // Icons are 14px glyphs; a separator line is 1px, a wider run is not an icon.
