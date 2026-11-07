@@ -34,6 +34,7 @@ import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
 import { BROWSER_SHORTCUT_EVENT, browserTabIdForBrowserId, getBrowserState, navigateBrowser, onBrowserLinkClicked, onBrowserOpenRequested, onBrowserPopupCloseRequested, onBrowserSessionCreated, onBrowserShortcutRequested, onBrowserTabSwitch, openExternalUrl, popupOpenerLink, reportBrowserAdoption, setBrowserZoom, browserTabSelectIndex, browserWorkspaceSelectIndex, type BrowserReloadOptions, type BrowserShortcutAction, type BrowserShortcutDomEvent } from "./lib/browserTauri";
+import { printBrowser } from "./lib/browserSystem";
 import { listen } from "@tauri-apps/api/event";
 import { CLI_OPEN_FILE_EVENT, parseCliOpenFilePayload } from "./lib/cliOpenFile";
 import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./lib/linkRouting";
@@ -3063,6 +3064,13 @@ function WorkspaceApp({
     }).catch(reportRuntimeError);
   }, [createBrowserTab, openFilePreviewTab, reportRuntimeError]);
 
+  const handleBrowserPrint = useCallback(
+    (browserId: string) => {
+      void printBrowser(browserId).catch(reportRuntimeError);
+    },
+    [reportRuntimeError],
+  );
+
   const handleBrowserZoom = useCallback(
     async (browserId: string, direction: "in" | "out" | "reset") => {
       try {
@@ -4320,6 +4328,7 @@ function WorkspaceApp({
     handleSelectWorktreeByIndex,
     handleReopenClosedBrowserTab,
     handleBrowserZoom,
+    handleBrowserPrint,
     createBrowserTab,
     shortcutBrowserId,
     reportRuntimeError,
@@ -4347,6 +4356,10 @@ function WorkspaceApp({
         "browser.forward": browserShortcutsActive ? () => dispatchBrowserShortcut("forward") : undefined,
         "browser.find": browserShortcutsActive ? () => dispatchBrowserShortcut("find") : undefined,
         "browser.bookmarkPage": browserShortcutsActive ? () => dispatchBrowserShortcut("bookmark-page") : undefined,
+        "browser.print": browserShortcutsActive && shortcutBrowserId ? () => handleBrowserPrint(shortcutBrowserId) : undefined,
+        "browser.zoomIn": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "in") : undefined,
+        "browser.zoomOut": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "out") : undefined,
+        "browser.zoomReset": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "reset") : undefined,
         "tab.next": () => handleCycleTab(1),
         "tab.previous": () => handleCycleTab(-1),
         "tab.select1": () => handleSelectTerminalTabByIndex(0),
