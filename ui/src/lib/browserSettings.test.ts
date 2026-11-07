@@ -1,7 +1,9 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  BROWSER_SETTINGS_EVENT,
   BROWSER_ZOOM_LEVELS,
+  browserNamedProfilesSupported,
   DEFAULT_BROWSER_SETTINGS,
   formatBrowserTabLabel,
   loadBrowserSettings,
@@ -10,13 +12,62 @@ import {
   normalizeBrowserAddress,
   normalizeBrowserSettings,
   normalizeHomePageInput,
+  resolveSupportedBrowserProfileId,
   saveBrowserSettings,
   searchUrlFor,
+  setChromiumEngineAvailable,
+  supportedBrowserProfiles,
 } from "./browserSettings";
 import { BROWSER_SETTINGS_STORAGE_KEY } from "./storageKeys";
 
 beforeEach(() => {
   localStorage.clear();
+});
+
+describe("named browser profiles on macOS", () => {
+  let platformDescriptor: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    platformDescriptor = Object.getOwnPropertyDescriptor(navigator, "platform");
+    Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+  });
+
+  afterEach(() => {
+    setChromiumEngineAvailable(false);
+    if (platformDescriptor) Object.defineProperty(navigator, "platform", platformDescriptor);
+    else delete (navigator as unknown as Record<string, unknown>).platform;
+  });
+
+  it("hides named profiles until the Chromium engine is installed", () => {
+    const settings = normalizeBrowserSettings({
+      ...DEFAULT_BROWSER_SETTINGS,
+      profiles: [...DEFAULT_BROWSER_SETTINGS.profiles, { id: "work", name: "Work" }],
+      defaultProfileId: "work",
+    });
+    expect(browserNamedProfilesSupported()).toBe(false);
+    expect(supportedBrowserProfiles(settings).map((profile) => profile.id)).toEqual(["default", "private"]);
+    expect(resolveSupportedBrowserProfileId("work", settings)).toBe("default");
+
+    setChromiumEngineAvailable(true);
+
+    expect(browserNamedProfilesSupported()).toBe(true);
+    expect(supportedBrowserProfiles(settings).map((profile) => profile.id)).toEqual(["default", "private", "work"]);
+    expect(resolveSupportedBrowserProfileId("work", settings)).toBe("work");
+  });
+
+  it("notifies settings listeners only when engine availability changes", () => {
+    const listener = vi.fn();
+    window.addEventListener(BROWSER_SETTINGS_EVENT, listener);
+    try {
+      setChromiumEngineAvailable(true);
+      setChromiumEngineAvailable(true);
+      expect(listener).toHaveBeenCalledTimes(1);
+      setChromiumEngineAvailable(false);
+      expect(listener).toHaveBeenCalledTimes(2);
+    } finally {
+      window.removeEventListener(BROWSER_SETTINGS_EVENT, listener);
+    }
+  });
 });
 
 describe("browser settings", () => {
@@ -97,6 +148,12 @@ describe("browser settings", () => {
     expect(formatBrowserTabLabel("Docs", "https://example.com", "feature/login", enabled)).toBe("Docs");
     expect(formatBrowserTabLabel("localhost:3000", "http://localhost:3000", "feature/login", disabled))
       .toBe("localhost:3000");
+  });
+
+  it("keeps ask-where-to-save off unless a boolean turns it on", () => {
+    expect(normalizeBrowserSettings({}).askWhereToSave).toBe(false);
+    expect(normalizeBrowserSettings({ askWhereToSave: true }).askWhereToSave).toBe(true);
+    expect(normalizeBrowserSettings({ askWhereToSave: "yes" }).askWhereToSave).toBe(false);
   });
 
   it("keeps the built-in default profile and falls back deterministically when the selected default is missing", () => {

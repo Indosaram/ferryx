@@ -1,0 +1,4 @@
+Title,URL,Username,Password,Notes,OTPAuth
+Apple Passwords Login,https://apple-passwords.example/login,apple-user@example.test,SYNTH-APPLE-PASSWORD-001,Synthetic note,otpauth://totp/Apple:apple-user?secret=SYNTHOTP
+Apple Passwords Duplicate,https://apple-passwords.example/login,apple-user@example.test,SYNTH-APPLE-PASSWORD-002,Synthetic duplicate,
+Apple Passwords Blank,https://blank.apple-passwords.example,blank-apple@example.test,,Synthetic blank,

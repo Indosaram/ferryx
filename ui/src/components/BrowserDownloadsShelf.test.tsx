@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -35,6 +35,7 @@ const browserTauriMocks = vi.hoisted(() => ({
       }
     };
   }),
+  revealDownloadedFile: vi.fn(async (_path: string) => undefined),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriCoreMocks.invoke }));
@@ -78,7 +79,7 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
   });
 
   it("renders an in-progress row with a working Cancel button from an updated event", async () => {
-    render(<BrowserDownloadsShelf />);
+    render(<BrowserDownloadsShelf browserId="b-1" />);
 
     await waitFor(() => {
       expect(browserTauriMocks.onBrowserDownloadUpdated).toHaveBeenCalled();
@@ -94,6 +95,7 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
       receivedBytes: 450,
       createdAtMs: Date.now(),
       updatedAtMs: Date.now(),
+      browserId: "b-1",
     };
 
     await act(async () => {
@@ -124,7 +126,7 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
   });
 
   it("surfaces structured error code when cancel rejects without message fallback", async () => {
-    render(<BrowserDownloadsShelf />);
+    render(<BrowserDownloadsShelf browserId="b-1" />);
 
     await waitFor(() => {
       expect(updateListener).not.toBeNull();
@@ -138,6 +140,7 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
       receivedBytes: 1024,
       createdAtMs: Date.now(),
       updatedAtMs: Date.now(),
+      browserId: "b-1",
     };
 
     await act(async () => {
@@ -170,12 +173,105 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
       message: "Tauri event listen rejected",
     });
 
-    render(<BrowserDownloadsShelf />);
+    render(<BrowserDownloadsShelf browserId="b-1" />);
 
     await waitFor(() => {
       expect(screen.getByTestId("downloads-load-error")).toBeDefined();
       expect(screen.getByText("EVENT_LISTEN_FAILED")).toBeDefined();
     });
+  });
+
+  const engineRecord = (overrides: Partial<DownloadRecord>): DownloadRecord => ({
+    id: "wv-1",
+    url: "https://example.com/setup.exe",
+    filePath: "/Users/test/Downloads/setup.exe",
+    status: "inProgress",
+    totalBytes: 100,
+    receivedBytes: 40,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    browserId: "b-1",
+    ...overrides,
+  });
+
+  const showRecord = async (record: DownloadRecord) => {
+    render(<BrowserDownloadsShelf browserId="b-1" />);
+    await waitFor(() => expect(updateListener).not.toBeNull());
+    await act(async () => updateListener?.(record));
+    return screen.findByTestId(`download-row-${record.id}`);
+  };
+
+  it("lists only the downloads its own tab started", async () => {
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) =>
+      cmd === "cmd_browser_download_list"
+        ? [
+            engineRecord({ id: "mine", browserId: "b-1" }),
+            engineRecord({ id: "other-tab", browserId: "b-2" }),
+            engineRecord({ id: "unowned", browserId: null }),
+          ]
+        : undefined,
+    );
+    render(<BrowserDownloadsShelf browserId="b-1" />);
+
+    expect(await screen.findByTestId("download-row-mine")).toBeDefined();
+    expect(screen.queryByTestId("download-row-other-tab")).toBeNull();
+    expect(screen.queryByTestId("download-row-unowned")).toBeNull();
+  });
+
+  it("renders no shelf for a tab that started no download", async () => {
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) =>
+      cmd === "cmd_browser_download_list" ? [engineRecord({ id: "other-tab", browserId: "b-2" })] : undefined,
+    );
+    render(<BrowserDownloadsShelf browserId="b-1" />);
+    await waitFor(() => expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_browser_download_list"));
+    await waitFor(() => expect(updateListener).not.toBeNull());
+
+    await act(async () => updateListener?.(engineRecord({ id: "other-live", browserId: "b-2" })));
+    expect(screen.queryByTestId("browser-downloads-shelf")).toBeNull();
+  });
+
+  it.each([
+    { label: "pausable running", record: { status: "inProgress", canPause: true, canCancel: true }, pause: "Pause download", cancel: true },
+    { label: "paused", record: { status: "paused", canPause: true, canCancel: true }, pause: "Resume download", cancel: true },
+    { label: "cancel-only", record: { status: "inProgress", canPause: false, canCancel: true }, pause: null, cancel: true },
+    { label: "uncontrolled", record: { status: "inProgress", canPause: false, canCancel: false }, pause: null, cancel: false },
+    { label: "legacy without flags", record: { status: "inProgress" }, pause: null, cancel: true },
+    { label: "completed", record: { status: "completed", canPause: true, canCancel: true }, pause: null, cancel: false },
+  ] as const)("renders only the controls a $label download supports", async ({ record, pause, cancel }) => {
+    const row = await showRecord(engineRecord(record));
+    const pauseButtons = within(row).queryAllByRole("button", { name: /^(Pause|Resume) download$/ });
+    expect(pauseButtons.map((button) => button.getAttribute("aria-label"))).toEqual(pause ? [pause] : []);
+    expect(within(row).queryByRole("button", { name: "Cancel" }) !== null).toBe(cancel);
+  });
+
+  it("pauses, resumes and cancels through the download commands", async () => {
+    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => (cmd === "cmd_browser_download_list" ? [] : true));
+    const row = await showRecord(engineRecord({ canPause: true, canCancel: true }));
+
+    fireEvent.click(within(row).getByRole("button", { name: "Pause download" }));
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_browser_download_pause", { downloadId: "wv-1", pause: true });
+
+    await act(async () => updateListener?.(engineRecord({ status: "paused", canPause: true, canCancel: true, updatedAtMs: 2 })));
+    fireEvent.click(within(row).getByRole("button", { name: "Resume download" }));
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_browser_download_pause", { downloadId: "wv-1", pause: false });
+
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+    expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_browser_download_cancel", { downloadId: "wv-1" });
+  });
+
+  it("reveals the downloaded file itself, so a drive-root file keeps its full path", async () => {
+    const row = await showRecord(engineRecord({ status: "completed", filePath: "C:\\file.bin" }));
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole("button", { name: "Reveal in folder" }));
+    });
+    expect(browserTauriMocks.revealDownloadedFile).toHaveBeenCalledWith("C:\\file.bin");
+
+    browserTauriMocks.revealDownloadedFile.mockRejectedValueOnce({ code: "PATH_NOT_FOUND", message: "gone" });
+    await act(async () => {
+      fireEvent.click(within(row).getByRole("button", { name: "Reveal in folder" }));
+    });
+    expect(await within(row).findByText("PATH_NOT_FOUND")).toBeDefined();
   });
 
   it("keeps a newer download event over an older list response and drops out-of-order list reads", async () => {
@@ -188,6 +284,7 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
       receivedBytes,
       createdAtMs: 1,
       updatedAtMs,
+      browserId: "b-1",
     });
     const pending: Array<(records: DownloadRecord[]) => void> = [];
     tauriCoreMocks.invoke.mockImplementation((cmd: string) => {
@@ -197,7 +294,7 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
       return Promise.resolve(undefined);
     });
 
-    const { rerender } = render(<BrowserDownloadsShelf refreshToken={0} />);
+    const { rerender } = render(<BrowserDownloadsShelf browserId="b-1" refreshToken={0} />);
     await waitFor(() => expect(updateListener).not.toBeNull());
     await act(async () => pending[0]([record(10, 10)]));
     expect(await screen.findByText("10%")).toBeDefined();
@@ -206,8 +303,8 @@ describe("BrowserDownloadsShelf lifecycle and events", () => {
     await act(async () => updateListener?.(record(90, 90)));
     expect(screen.getByText("90%")).toBeDefined();
 
-    rerender(<BrowserDownloadsShelf refreshToken={1} />);
-    rerender(<BrowserDownloadsShelf refreshToken={2} />);
+    rerender(<BrowserDownloadsShelf browserId="b-1" refreshToken={1} />);
+    rerender(<BrowserDownloadsShelf browserId="b-1" refreshToken={2} />);
     await waitFor(() => expect(pending).toHaveLength(3));
 
     // The superseded read settles first; it is no longer current, so nothing in it may apply.

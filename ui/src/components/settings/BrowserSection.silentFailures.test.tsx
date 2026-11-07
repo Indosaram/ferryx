@@ -10,10 +10,26 @@ const browserMocks = vi.hoisted(() => ({
   getBrowserEngineStatus: vi.fn(async () => ({ state: "unsupported" as const })),
 }));
 
+vi.mock("./SiteSettingsGroup", () => ({ SiteSettingsGroup: () => null }));
+// The agent access group has its own tests and talks to the backend on mount.
+vi.mock("./BrowserAgentAccessGroup", () => ({ BrowserAgentAccessGroup: () => null }));
+// The default-browser group has its own tests and queries the OS on mount.
+vi.mock("./DefaultBrowserGroup", () => ({ DefaultBrowserGroup: () => null }));
+
 vi.mock("../../lib/browserTauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/browserTauri")>();
   return { ...actual, ...browserMocks };
 });
+
+vi.mock("../../lib/browserExtensions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/browserExtensions")>()),
+  listBrowserExtensions: vi.fn(async () => ({ profile: "default", engineInstalled: false, supported: false, extensions: [] })),
+}));
+vi.mock("../../lib/browserVault", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/browserVault")>()),
+  getVaultStatus: vi.fn(async () => ({ available: true, backend: "keychain" as const })),
+  listVaultItems: vi.fn(async () => []),
+}));
 
 const activeBrowser = {
   browserId: "browser-1",

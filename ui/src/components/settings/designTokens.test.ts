@@ -7,6 +7,8 @@ import * as primitives from "./primitives";
 const SECTION_FILES = [
   "AppearanceSection.tsx",
   "BrowserSection.tsx",
+  "BrowserEngineGroup.tsx",
+  "BrowserExtensionsGroup.tsx",
   "GeneralSection.tsx",
   "NotificationsSection.tsx",
   "RemoteAccessSection.tsx",

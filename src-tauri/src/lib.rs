@@ -28,6 +28,10 @@ pub mod host_boot;
 pub mod ipc;
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 pub mod macos_file_drop;
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+pub mod linux_file_drop;
+#[cfg(feature = "desktop")]
+pub mod system_file_drop;
 pub mod native_terminal;
 pub mod notification;
 pub mod paired_host;
@@ -1035,7 +1039,14 @@ pub(crate) fn configure_app_window<R: tauri::Runtime>(
         release_macos_window_drag_destination(window)?;
         install_macos_file_drop_destination(window)?;
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window.set_focus();
+        if let Err(error) = crate::linux_file_drop::install(window) {
+            tracing::warn!("failed to install the Linux file drop destination: {error}");
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = window.set_focus();
     }
@@ -1428,7 +1439,7 @@ fn configure_qa_primary_window<R: tauri::Runtime>(
         .app
         .windows
         .iter_mut()
-        .find(|window| window.label == "main")
+        .find(|window| window.label == window_registry::PRIMARY_WINDOW_LABEL)
         .ok_or_else(|| "QA config has no main window".to_string())?;
     window.create = false;
     QA_PRIMARY_WINDOW_PROFILE.with(|slot| *slot.borrow_mut() = Some(profile.to_path_buf()));
@@ -1438,6 +1449,50 @@ fn configure_qa_primary_window<R: tauri::Runtime>(
 #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
 thread_local! {
     static QA_PRIMARY_WINDOW_PROFILE: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Stops Tauri from creating the main window from config, so setup can build it with an
+/// isolated data folder (see [`build_isolated_main_window`]).
+#[cfg(feature = "desktop")]
+fn defer_main_window<R: tauri::Runtime>(context: &mut tauri::Context<R>) {
+    if let Some(window) = context
+        .config_mut()
+        .app
+        .windows
+        .iter_mut()
+        .find(|window| window.label == window_registry::PRIMARY_WINDOW_LABEL)
+    {
+        window.create = false;
+    }
+}
+
+/// Builds the main window from config with its webview data under `FERRYX_DATA_DIR`: the
+/// WebView2 user data folder (otherwise `%LOCALAPPDATA%\<identifier>`), the WebKitGTK data
+/// dir, or on macOS a website data store of its own.
+#[cfg(feature = "desktop")]
+fn build_isolated_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+    let Some(data_dir) =
+        crate::browser::data_paths::shared_webview_dir(std::env::var_os("FERRYX_DATA_DIR").as_deref())
+    else {
+        return Ok(());
+    };
+    let Some(config) = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == window_registry::PRIMARY_WINDOW_LABEL)
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let builder = tauri::WebviewWindowBuilder::from_config(app, &config)?;
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.data_directory(data_dir);
+    #[cfg(target_os = "macos")]
+    let builder = builder.data_store_identifier(crate::browser::data_paths::data_store_identifier(&data_dir));
+    builder.build()?;
+    Ok(())
 }
 
 #[cfg(feature = "desktop")]
@@ -1522,6 +1577,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                     {
                         registry.note_focused(window.label());
                     }
+                    #[cfg(target_os = "windows")]
+                    crate::ipc::browser::forward_frame_focus(window);
                 }
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
                     crate::ipc::window::note_window_geometry_changed(window);
@@ -1531,9 +1588,9 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 }
                 _ => {}
             }
-            // Chromium panes on macOS are separate windows that must follow the main one.
+            // Chromium panes on macOS are separate windows that must follow their app window.
             #[cfg(all(feature = "desktop", target_os = "macos"))]
-            if window.label() == "main"
+            if window_registry::is_app_window_label(window.label())
                 && matches!(
                     event,
                     tauri::WindowEvent::Moved(_)
@@ -1544,7 +1601,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                 if let Some(manager) =
                     window.try_state::<std::sync::Arc<crate::browser::BrowserManager>>()
                 {
-                    crate::ipc::browser::follow_main_window(window, manager.inner());
+                    crate::ipc::browser::follow_app_window(window, manager.inner());
                 }
             }
             #[cfg(target_os = "macos")]
@@ -1600,11 +1657,24 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             let _ = event;
         })
         .setup(move |app| {
+            // First, so everything below sees the main window exactly as in a normal run.
+            // The QA primary window builds its own main window below.
+            #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+            let qa_window = QA_PRIMARY_WINDOW_PROFILE.with(|slot| slot.borrow().is_some());
+            #[cfg(not(all(feature = "local-split-qa", feature = "native-terminal")))]
+            let qa_window = false;
+            if !qa_window && app.get_webview_window(window_registry::PRIMARY_WINDOW_LABEL).is_none() {
+                build_isolated_main_window(app)?;
+            }
             // Bridge-kind changes happen outside any webview callback (Windows upgrades from
             // the async CDP leak probe), so the manager publishes them as browser_state_changed.
             crate::ipc::browser::install_browser_state_emitter(
                 app.handle(),
                 app.state::<Arc<browser::BrowserManager>>().inner(),
+            );
+            crate::browser::site_permissions::init(
+                app.handle(),
+                Arc::clone(app.state::<Arc<browser::BrowserManager>>().inner()),
             );
             #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
             if let Some(profile) = QA_PRIMARY_WINDOW_PROFILE.with(|slot| slot.borrow_mut().take()) {
@@ -1613,7 +1683,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                     .app
                     .windows
                     .iter()
-                    .find(|window| window.label == "main")
+                    .find(|window| window.label == window_registry::PRIMARY_WINDOW_LABEL)
                     .ok_or_else(|| std::io::Error::other("QA config has no main window"))?;
                 tauri::WebviewWindowBuilder::from_config(app, window_config)?
                     .data_directory(profile)
@@ -1731,15 +1801,22 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         // Restore the main window's size, position, and maximized state from the last run.
-        .plugin(
-            tauri_plugin_window_state::Builder::default()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
-                )
-                .build(),
-        )
+        .plugin({
+            let window_state = tauri_plugin_window_state::Builder::default().with_state_flags(
+                tauri_plugin_window_state::StateFlags::SIZE
+                    | tauri_plugin_window_state::StateFlags::POSITION
+                    | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+            );
+            // The plugin joins the name onto the app config dir; an absolute path replaces it,
+            // which keeps an isolated run's window state under FERRYX_DATA_DIR.
+            let window_state = match crate::browser::data_paths::window_state_file(
+                std::env::var_os("FERRYX_DATA_DIR").as_deref(),
+            ) {
+                Some(file) => window_state.with_filename(file.to_string_lossy().into_owned()),
+                None => window_state,
+            };
+            window_state.build()
+        })
         .manage(
             Arc::new(crate::ipc::browser::ProductionDaemonReclaimTransport::new(
                 Arc::clone(&remote_manager),
@@ -2022,6 +2099,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_set_visible,
         cmd_browser_set_zoom,
         cmd_browser_focus,
+        cmd_browser_focus_app,
         cmd_browser_get_state,
         cmd_browser_find,
         cmd_browser_clear_find,
@@ -2041,9 +2119,47 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_browser_engine_status,
         cmd_browser_engine_install,
         cmd_browser_engine_remove,
+        crate::ipc::browser_engine::cmd_browser_engine_rollback,
+        crate::ipc::browser_engine::cmd_browser_engine_take_fallback,
+        crate::ipc::browser_extensions::cmd_browser_extensions_list,
+        crate::ipc::browser_extensions::cmd_browser_extensions_open_page,
+        crate::ipc::browser_extensions::cmd_browser_extensions_set_enabled,
+        crate::ipc::browser_extensions::cmd_browser_extensions_remove,
+        crate::ipc::browser_extensions::cmd_browser_extensions_set_pinned,
+        crate::ipc::browser_extensions::cmd_browser_engine_paths,
+        crate::ipc::default_browser::cmd_default_browser_status,
+        crate::ipc::default_browser::cmd_default_browser_make_default,
+        crate::ipc::default_browser::cmd_default_browser_take_inbound_urls,
+        crate::ipc::default_browser::cmd_browser_detect_sign_in_block,
+        crate::ipc::default_browser::cmd_browser_sign_in_handoff_plan,
+        crate::ipc::default_browser::cmd_browser_sign_in_auth_session,
+        crate::ipc::default_browser::cmd_browser_sign_in_track,
+        crate::ipc::browser_vault::cmd_browser_vault_status,
+        crate::ipc::browser_vault::cmd_browser_vault_list,
+        crate::ipc::browser_vault::cmd_browser_vault_reveal,
+        crate::ipc::browser_vault::cmd_browser_vault_update,
+        crate::ipc::browser_vault::cmd_browser_vault_delete,
+        crate::ipc::browser_vault::cmd_browser_vault_generate,
+        crate::ipc::browser_vault::cmd_browser_vault_matches,
+        crate::ipc::browser_vault::cmd_browser_vault_fill,
+        crate::ipc::browser_vault::cmd_browser_vault_save_pending,
+        crate::ipc::browser_vault::cmd_browser_vault_dismiss_pending,
         cmd_browser_open_external,
         cmd_browser_remote_reclaim,
         cmd_browser_remote_revoke,
+        crate::browser::site_permissions::cmd_browser_permission_decide,
+        crate::browser::site_permissions::cmd_browser_permission_pending,
+        crate::browser::site_permissions::cmd_browser_media_capture,
+        crate::browser::site_permissions::cmd_browser_site_permissions_list,
+        crate::browser::site_permissions::cmd_browser_site_permission_revoke,
+        ipc::browser_system::cmd_browser_zoom_step,
+        ipc::browser_system::cmd_browser_apply_site_zoom,
+        ipc::browser_system::cmd_browser_print,
+        ipc::browser_system::cmd_browser_save_pdf,
+        ipc::browser_system::cmd_browser_drop_paths,
+        ipc::browser_system::cmd_browser_set_download_preferences,
+        ipc::browser_system::cmd_browser_download_pause,
+        ipc::browser_system::cmd_browser_download_to_folder,
         cmd_open_file_path,
         dag_list_runs,
         dag_get_run,
@@ -2053,6 +2169,31 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         dag_watch_ssh_project,
         dag_unwatch_project,
         dag_discover_watch_roots,
+        ipc::browser_library::cmd_browser_bookmarks_get,
+        ipc::browser_library::cmd_browser_bookmark_add,
+        ipc::browser_library::cmd_browser_bookmark_folder_create,
+        ipc::browser_library::cmd_browser_bookmark_update,
+        ipc::browser_library::cmd_browser_bookmark_move,
+        ipc::browser_library::cmd_browser_bookmark_delete,
+        ipc::browser_library::cmd_browser_bookmarks_import,
+        ipc::browser_library::cmd_browser_history_list,
+        ipc::browser_library::cmd_browser_history_suggest,
+        ipc::browser_library::cmd_browser_history_delete,
+        ipc::browser_library::cmd_browser_history_clear,
+        ipc::browser_library::cmd_browser_history_import,
+        ipc::browser_library::cmd_browser_history_migrate_legacy,
+        ipc::browser_library::cmd_browser_history_set_enabled,
+        ipc::browser_library::cmd_browser_search_suggest,
+        // Browser agent consent (app chrome only; guest pages are refused).
+        crate::browser::agent::service::cmd_browser_agent_overview,
+        crate::browser::agent::service::cmd_browser_agent_resolve,
+        crate::browser::agent::service::cmd_browser_agent_revoke,
+        crate::browser::agent::service::cmd_browser_agent_reclaim,
+        crate::browser::agent::service::cmd_browser_agent_set_settings,
+        cmd_browser_import_sources,
+        cmd_browser_import_run,
+        cmd_browser_import_cancel,
+        cmd_browser_import_password_file,
     ]);
     builder.invoke_handler(move |invoke: tauri::ipc::Invoke<R>| {
         if invoke.message.command() == "cmd_retry_paired_session" {
@@ -3099,6 +3240,14 @@ mod window_lifecycle_tests {
 /// App run-loop hook. Quitting the GUI stops only the GUI's own watchdog; it never stops,
 /// unloads or signals the daemon, which owns every PTY (pinned by `quit_path_tests`).
 fn handle_run_event<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>, event: &tauri::RunEvent) {
+    // macOS hands http(s) links to the running app (Ferryx as the default browser) as an
+    // Apple Event instead of argv, both on a cold launch and while it runs.
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Opened { urls } = event {
+        for url in urls {
+            crate::ipc::default_browser::deliver_inbound_url(app_handle, url.as_str());
+        }
+    }
     if let tauri::RunEvent::Exit = event {
         if let Some(watchdog) = app_handle.try_state::<crate::watchdog::WatchdogHandle>() {
             watchdog.stop();
@@ -3118,6 +3267,15 @@ pub fn run() {
     // OUT_DIR cache files during macro expansion, after the compile start time Cargo records,
     // so the next build of the crate always saw them as changed and rebuilt ferryx_lib.
     let context = tauri::tauri_build_context!();
+    // An isolated run (FERRYX_DATA_DIR) builds the main window itself in setup, with its webview
+    // data under that dir; a normal run keeps the config-created window and its data folder.
+    let context = {
+        let mut context = context;
+        if crate::browser::data_paths::shared_webview_dir(std::env::var_os("FERRYX_DATA_DIR").as_deref()).is_some() {
+            defer_main_window(&mut context);
+        }
+        context
+    };
     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
     let qa_profile = match (
         std::env::var("FERRYX_QA_BARRIER_DIR"),

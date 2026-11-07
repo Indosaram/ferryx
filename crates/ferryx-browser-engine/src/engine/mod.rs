@@ -5,6 +5,7 @@
 //! buttons, menus) in a frameless window the platform module keeps over the tab's pane. Windows
 //! the browser opens on its own (a new tab, a sign-in popup) are reported to Ferryx, which makes
 //! a tab for them and adopts them.
+//! A hidden `chrome://extensions` browser, never a tab, manages extensions (`extensions.rs`).
 
 use cef::*;
 use ferryx_browser_engine_protocol::{Command, Event, Rect as PaneRect};
@@ -13,6 +14,14 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 mod platform;
+mod permissions;
+mod system;
+mod extensions;
+mod import_cookies;
+mod vault;
+
+#[cfg(target_os = "linux")]
+mod linux_sandbox;
 
 #[cfg(target_os = "macos")]
 pub mod mac_app;
@@ -62,8 +71,14 @@ pub fn run(main_args: &MainArgs, cmd_line: &CommandLine, sandbox_info: *mut u8) 
         }
     }
     let cache = cache_dir.map(|dir| CefString::from(dir.as_str())).unwrap_or_default();
+    // Linux installs live in the user's data dir, where the setuid sandbox cannot exist: the
+    // namespace sandbox is used, and only a kernel without user namespaces runs unsandboxed.
+    #[cfg(target_os = "linux")]
+    let sandboxed = cfg!(feature = "sandbox") && linux_sandbox::sandbox_usable();
+    #[cfg(not(target_os = "linux"))]
+    let sandboxed = cfg!(feature = "sandbox");
     let settings = Settings {
-        no_sandbox: (!cfg!(feature = "sandbox")) as _,
+        no_sandbox: (!sandboxed) as _,
         persist_session_cookies: 1,
         root_cache_path: cache.clone(),
         cache_path: cache,
@@ -84,6 +99,8 @@ enum Key {
     Popup(u32),
     /// DevTools: an ordinary window of its own.
     Free,
+    /// The hidden extensions page (`extensions.rs`): never a tab, never shown to Ferryx.
+    Manager,
 }
 
 struct Pane {
@@ -94,11 +111,22 @@ struct Pane {
     url: String,
     title: String,
     loading: Option<(bool, bool, bool)>,
+    /// Keeps the tab's DevTools message observer registered (dropping it unregisters).
+    devtools: Option<Registration>,
 }
 
 impl Pane {
     fn new(view: BrowserView, rect: PaneRect, visible: bool) -> Self {
-        Self { view, window: None, rect, visible, url: String::new(), title: String::new(), loading: None }
+        Self {
+            view,
+            window: None,
+            rect,
+            visible,
+            url: String::new(),
+            title: String::new(),
+            loading: None,
+            devtools: None,
+        }
     }
 }
 
@@ -112,6 +140,10 @@ thread_local! {
     static NEXT_POPUP: Cell<u32> = const { Cell::new(1) };
     static LIVE_BROWSERS: Cell<usize> = const { Cell::new(0) };
     static QUITTING: Cell<bool> = const { Cell::new(false) };
+    /// DevTools calls in flight: message id to the Ferryx tab that asked.
+    static DEVTOOLS_CALLS: RefCell<HashMap<u32, String>> = RefCell::new(HashMap::new());
+    /// Tabs whose `focus` command waits for their window to become active (see `focus_tab`).
+    static PENDING_FOCUS: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
 }
 
 fn emit(event: Event) {
@@ -136,6 +168,9 @@ fn key_of(browser: &mut Browser) -> Option<Key> {
     });
     if let Some(tab) = tab {
         return Some(Key::Tab(tab));
+    }
+    if extensions::is_manager(browser) {
+        return Some(Key::Manager);
     }
     POPUPS.with_borrow(|popups| {
         popups.iter().find(|(_, pane)| same(&pane.view, browser)).map(|(id, _)| Key::Popup(*id))
@@ -179,7 +214,7 @@ fn with_pane<T>(key: &Key, f: impl FnOnce(&mut Pane) -> T) -> Option<T> {
     match key {
         Key::Tab(tab) => TABS.with_borrow_mut(|tabs| tabs.get_mut(tab).map(f)),
         Key::Popup(id) => POPUPS.with_borrow_mut(|popups| popups.get_mut(id).map(f)),
-        Key::Free => None,
+        Key::Free | Key::Manager => None,
     }
 }
 
@@ -235,11 +270,51 @@ fn adopt(tab: String, popup: u32) {
 }
 
 fn close(tab: &str) {
+    // Ferryx closed the tab: requests it held are denied (dropped) and their prompts go.
+    permissions::forget_tab(tab);
+    PENDING_FOCUS.with_borrow_mut(|pending| pending.remove(tab));
     if let Some(pane) = TABS.with_borrow_mut(|tabs| tabs.remove(tab))
         && let Some(browser) = pane.view.browser()
         && let Some(host) = browser.host()
     {
         host.close_browser(1);
+    }
+}
+
+/// A CDP method name: `Domain.method`, ASCII letters only around one or more dots.
+fn is_cdp_method(method: &str) -> bool {
+    !method.is_empty()
+        && method.contains('.')
+        && method.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+fn devtools_failure(tab: String, id: u32, message: &str) {
+    let escaped: String = message.chars().filter(|c| !matches!(c, '"' | '\\') && !c.is_control()).collect();
+    emit(Event::Devtools { tab, id, ok: false, result: format!("{{\"message\":\"{escaped}\"}}") });
+}
+
+/// Runs one CDP call on the tab's browser through CEF's in-process DevTools message API; the
+/// answer arrives in [`EngineDevtoolsObserver`]. No DevTools port is opened.
+fn devtools(tab: String, id: u32, method: &str, params: &str) {
+    if !is_cdp_method(method) || !params.trim_start().starts_with('{') || i32::try_from(id).is_err() {
+        devtools_failure(tab, id, "malformed devtools call");
+        return;
+    }
+    let Some(host) = browser_of(&tab).and_then(|browser| browser.host()) else {
+        devtools_failure(tab, id, "the tab has no browser");
+        return;
+    };
+    with_pane(&Key::Tab(tab.clone()), |pane| {
+        if pane.devtools.is_none() {
+            let mut observer = EngineDevtoolsObserver::new();
+            pane.devtools = host.add_dev_tools_message_observer(Some(&mut observer));
+        }
+    });
+    DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.insert(id, tab.clone()));
+    let message = format!("{{\"id\":{id},\"method\":\"{method}\",\"params\":{params}}}");
+    if host.send_dev_tools_message(Some(message.as_bytes())) == 0 {
+        DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&id));
+        devtools_failure(tab, id, "the browser refused the devtools call");
     }
 }
 
@@ -297,6 +372,214 @@ fn execute(command: Command) {
                 }
             }
         }
+        Command::Permission { request, allow } => permissions::answer(request, allow),
+        Command::Find { tab, query, forward, match_case, find_next } => {
+            system::find(&tab, &query, forward, match_case, find_next)
+        }
+        Command::StopFind { tab, clear_selection } => system::stop_find(&tab, clear_selection),
+        Command::Zoom { tab, percent } => system::zoom(&tab, percent),
+        Command::Print { tab } => system::print(&tab),
+        Command::PrintPdf { tab, path } => system::print_pdf(&tab, &path),
+        Command::DownloadPath { download, path } => system::download_path(download, &path),
+        Command::DownloadControl { download, action } => system::download_control(download, action),
+        Command::FileChosen { request, paths } => system::file_chosen(request, &paths),
+        Command::NotificationPermission { tab, state } => system::notification_permission(&tab, state),
+        Command::Devtools { tab, id, method, params } => devtools(tab, id, &method, &params),
+        Command::ImportCookies { path } => {
+            import_cookies::apply(std::path::Path::new(&path));
+        }
+        Command::Fill { tab, script } => {
+            if let Some(browser) = browser_of(&tab) {
+                vault::fill(&browser, &script);
+            }
+        }
+        Command::Focus { tab, address } => {
+            let window = TABS.with_borrow(|tabs| tabs.get(&tab).and_then(|pane| pane.window.clone()));
+            let Some(window) = window else {
+                eprintln!("ferryx-engine: focus {tab}: the tab has no window yet");
+                return;
+            };
+            // Linux: Chrome's location bar takes no programmatic focus inside the embedded
+            // window (IDC_FOCUS_LOCATION and Ctrl+L leave the page focused), only a click. The
+            // engine clicks it through the X server and selects its text.
+            #[cfg(target_os = "linux")]
+            if address && let Some((x, y)) = omnibox_point(&tab) {
+                let clicked = platform::click_and_select_all(&window, x, y);
+                eprintln!("ferryx-engine: focus {tab} address: clicked the location bar at ({x}, {y}): {clicked}");
+                if clicked {
+                    return;
+                }
+            }
+            // Windows: the same holds for the embedded child window (maho-win G16: after
+            // IDC_FOCUS_LOCATION and Ctrl+L the page's BrowserView stays focused and typed text
+            // is lost). The window takes Win32 focus, then a click is posted to its location bar;
+            // a first click into the omnibox selects its text.
+            #[cfg(target_os = "windows")]
+            if address && let Some((x, y)) = omnibox_point(&tab) {
+                platform::focus(&window);
+                let clicked = platform::post_click(&window, x, y);
+                eprintln!("ferryx-engine: focus {tab} address: posted a click on the location bar at ({x}, {y}): {clicked}");
+                if clicked {
+                    return;
+                }
+            }
+            // Moving X focus into the window activates its widget only once Chromium handles the
+            // FocusIn, and activation restores the widget's last focused view: a view focused
+            // before that (Chrome's address bar) loses focus again. An inactive window gets its
+            // view focused from `on_window_activation_changed` instead.
+            let active = window.is_active() != 0;
+            let native_focus = platform::native_focus(&window);
+            eprintln!("ferryx-engine: focus {tab} address={address}: window active {active}, native focus {native_focus:?}");
+            match focus_step(active, native_focus) {
+                FocusStep::Now => focus_tab(&tab, address),
+                FocusStep::AfterActivation => {
+                    PENDING_FOCUS.with_borrow_mut(|pending| pending.insert(tab.clone(), address));
+                    platform::focus(&window);
+                }
+                FocusStep::AfterNativeFocus => {
+                    // Windows: the window is active but another window (Ferryx's webview) has
+                    // the keyboard focus. Win32 focus first; the focus change restores the
+                    // widget's stored focused view, so the view is focused from a task after it.
+                    platform::focus(&window);
+                    let mut task = FocusTab::new(tab.clone(), address);
+                    post_task(ThreadId::UI, Some(&mut task));
+                }
+            }
+        }
+        Command::Extensions { id, call } => extensions::call(id, call),
+    }
+}
+
+/// How a `focus` command reaches its tab's view.
+#[derive(Debug, PartialEq, Eq)]
+enum FocusStep {
+    /// The window is active and holds the keyboard focus: focus the view right away.
+    Now,
+    /// The window is inactive: give it OS focus, then focus the view once it is activated.
+    AfterActivation,
+    /// The window is active but another window holds the keyboard focus (a Windows child
+    /// window stays active while Ferryx's own webview has the focus): give it the focus, then
+    /// focus the view.
+    AfterNativeFocus,
+}
+
+/// `native_focus` is whether the window holds the OS keyboard focus, where that is separate
+/// from activation (Windows); `None` where activation carries the focus.
+fn focus_step(active: bool, native_focus: Option<bool>) -> FocusStep {
+    match (active, native_focus) {
+        (false, _) => FocusStep::AfterActivation,
+        (true, Some(false)) => FocusStep::AfterNativeFocus,
+        (true, _) => FocusStep::Now,
+    }
+}
+
+/// Focuses Chrome's address bar (`address`) or the page of a tab whose window is active.
+fn focus_tab(tab: &str, address: bool) {
+    let Some(host) = browser_of(tab).and_then(|browser| browser.host()) else { return };
+    let window = TABS.with_borrow(|tabs| tabs.get(tab).and_then(|pane| pane.window.clone()));
+    let focused_view = || {
+        window
+            .as_ref()
+            .and_then(|window| window.focused_view())
+            .map(|view| CefString::from(&view.type_string()).to_string())
+    };
+    if !address {
+        host.set_focus(1);
+        eprintln!("ferryx-engine: focus {tab}: focused view now {:?}", focused_view());
+        return;
+    }
+    let can = host.can_execute_chrome_command(sys::IDC_FOCUS_LOCATION);
+    host.execute_chrome_command(sys::IDC_FOCUS_LOCATION, WindowOpenDisposition::CURRENT_TAB);
+    let after_command = focused_view();
+    eprintln!("ferryx-engine: focus {tab} address: IDC_FOCUS_LOCATION enabled {can}, focused view now {after_command:?}");
+    // The page's BrowserView still focused means the command did not reach the omnibox: press
+    // Chrome's own Ctrl+L in the (active) window instead.
+    if after_command.as_deref() == Some("BrowserView")
+        && let Some(window) = window.as_ref()
+    {
+        // VKEY_L = 0x4C; EVENTFLAG_CONTROL_DOWN = 1 << 2.
+        window.send_key_press(0x4C, 1 << 2);
+        eprintln!("ferryx-engine: focus {tab} address: sent Ctrl+L, focused view now {:?}", focused_view());
+    }
+}
+
+/// Where Chrome's location bar is in the tab's window, in pixels: the middle of the toolbar
+/// row, past the back, forward and reload buttons (three 36 DIP buttons from an 8 DIP inset)
+/// and the site-info chip at the field's start.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn omnibox_point(tab: &str) -> Option<(i32, i32)> {
+    let (toolbar, scale) = TABS.with_borrow(|tabs| {
+        let pane = tabs.get(tab)?;
+        let scale = pane
+            .window
+            .as_ref()
+            .and_then(|window| window.display())
+            .map_or(1.0, |display| display.device_scale_factor());
+        Some((pane.view.chrome_toolbar()?, scale))
+    })?;
+    let bounds = toolbar.bounds();
+    if bounds.height <= 0 {
+        return None;
+    }
+    let x = bounds.x + omnibox_offset(bounds.width)?;
+    let y = bounds.y + bounds.height / 2;
+    Some(((x as f32 * scale).round() as i32, (y as f32 * scale).round() as i32))
+}
+
+/// How far into a toolbar of `width` DIP the location field is clicked: 140 DIP past the
+/// back, forward and reload buttons (three 36 DIP buttons from an 8 DIP inset), but never past
+/// the toolbar's middle, where extension icons start. None when that point would not land
+/// clearly inside the field (a narrow pane): a click there would hit a button or the site-info
+/// chip, so the caller falls back to the focus command instead.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn omnibox_offset(width: i32) -> Option<i32> {
+    const BUTTONS_END: i32 = 8 + 3 * 36;
+    const INTO_FIELD: i32 = 140;
+    // Past the site-info chip at the field's start, with room to spare.
+    const MIN_INTO_FIELD: i32 = 60;
+    let x = (BUTTONS_END + INTO_FIELD).min(width / 2);
+    (x >= BUTTONS_END + MIN_INTO_FIELD).then_some(x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{browser_switches, focus_step, omnibox_offset, FocusStep};
+
+    #[test]
+    fn focus_waits_for_the_keyboard_focus_an_active_window_lacks() {
+        // An active Windows child window without the keyboard focus (CI-UI and maho-win G16:
+        // Mod+L left the focus on Ferryx) takes it before its view is focused.
+        assert_eq!(focus_step(true, Some(false)), FocusStep::AfterNativeFocus);
+        assert_eq!(focus_step(true, Some(true)), FocusStep::Now);
+        assert_eq!(focus_step(true, None), FocusStep::Now);
+        assert_eq!(focus_step(false, Some(false)), FocusStep::AfterActivation);
+        assert_eq!(focus_step(false, None), FocusStep::AfterActivation);
+    }
+
+    #[test]
+    fn omnibox_click_lands_in_the_field_or_not_at_all() {
+        // A wide toolbar: 140 DIP into the field.
+        assert_eq!(omnibox_offset(1200), Some(116 + 140));
+        // Narrower: capped at the middle while that is still well inside the field.
+        assert_eq!(omnibox_offset(400), Some(200));
+        // Too narrow: the point would fall on Reload/Forward/Back or the site-info chip.
+        for width in [0, 80, 120, 231, 300, 351] {
+            assert_eq!(omnibox_offset(width), None, "width {width}");
+        }
+        assert_eq!(omnibox_offset(352), Some(176));
+    }
+
+    #[test]
+    fn remote_debugging_drops_the_switch_that_keeps_the_engine_alive() {
+        // With remote debugging, no-startup-window makes Chrome keep the engine running after its
+        // last tab closed (CI run 41786025622: every quit hung until Ferryx killed the engine).
+        assert!(!browser_switches(true).contains(&"no-startup-window"));
+        assert!(browser_switches(false).contains(&"no-startup-window"));
+        for remote_debugging in [false, true] {
+            let switches = browser_switches(remote_debugging);
+            assert!(switches.contains(&"disable-session-crashed-bubble"));
+            assert!(switches.contains(&"hide-crash-restore-bubble"));
+        }
     }
 }
 
@@ -307,6 +590,7 @@ fn quit() {
         .with_borrow_mut(|tabs| tabs.drain().map(|(_, pane)| pane.view).collect::<Vec<_>>())
         .into_iter()
         .chain(POPUPS.with_borrow_mut(|popups| popups.drain().map(|(_, pane)| pane.view).collect::<Vec<_>>()))
+        .chain(extensions::take_view())
         .collect();
     for view in views {
         if let Some(host) = view.browser().and_then(|browser| browser.host()) {
@@ -328,6 +612,19 @@ fn read_commands() {
     }
     let mut task = Quit::new();
     post_task(ThreadId::UI, Some(&mut task));
+}
+
+wrap_task! {
+    struct FocusTab {
+        tab: String,
+        address: bool,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            focus_tab(&self.tab, self.address);
+        }
+    }
 }
 
 wrap_task! {
@@ -354,6 +651,19 @@ wrap_task! {
     }
 }
 
+/// Switches the browser process gets. `no-startup-window` is left out when remote debugging is
+/// on (a debug build's FERRYX_ENGINE_EXTRA_ARGS): together they make Chrome hold a keep-alive
+/// that only a DevTools `Browser.close` releases, and CEF's quit waits for every keep-alive, so
+/// the engine outlived its last tab. CEF never runs Chrome's startup browser creator, so no
+/// startup window opens either way.
+fn browser_switches(remote_debugging: bool) -> &'static [&'static str] {
+    if remote_debugging {
+        &["disable-session-crashed-bubble", "hide-crash-restore-bubble"]
+    } else {
+        &["no-startup-window", "disable-session-crashed-bubble", "hide-crash-restore-bubble"]
+    }
+}
+
 wrap_app! {
     struct EngineApp;
 
@@ -367,8 +677,20 @@ wrap_app! {
             // (after a crash or kill) would add stray windows on top of Ferryx's tabs.
             let browser_process = process_type.is_none_or(|kind| kind.to_string().is_empty());
             if let (true, Some(command_line)) = (browser_process, command_line) {
-                for switch in ["no-startup-window", "disable-session-crashed-bubble", "hide-crash-restore-bubble"] {
-                    command_line.append_switch(Some(&CefString::from(switch)));
+                let remote_debugging = ["remote-debugging-port", "remote-debugging-pipe"]
+                    .iter()
+                    .any(|name| command_line.has_switch(Some(&CefString::from(*name))) == 1);
+                for switch in browser_switches(remote_debugging) {
+                    command_line.append_switch(Some(&CefString::from(*switch)));
+                }
+                // Linux: the pane windows are reparented into Ferryx's X window, so Chromium
+                // must use X11 (XWayland in a Wayland session), never its Wayland backend.
+                #[cfg(target_os = "linux")]
+                if command_line.has_switch(Some(&CefString::from("ferryx-parent-xid"))) == 1 {
+                    command_line.append_switch_with_value(
+                        Some(&CefString::from("ozone-platform")),
+                        Some(&CefString::from("x11")),
+                    );
                 }
             }
         }
@@ -384,6 +706,9 @@ wrap_browser_process_handler! {
 
     impl BrowserProcessHandler {
         fn on_context_initialized(&self) {
+            if let Ok(dir) = std::env::var("FERRYX_CEF_CACHE") {
+                import_cookies::apply_pending(std::path::Path::new(&dir));
+            }
             std::thread::spawn(read_commands);
         }
 
@@ -430,6 +755,8 @@ wrap_window_delegate! {
 
             match &self.key {
                 Key::Free => window.show(),
+                // Hidden: it is shown only while Chrome's remove dialog is open.
+                Key::Manager => extensions::window_created(window),
                 key => {
                     platform::embed(window);
                     let handle = platform::handle(window);
@@ -458,8 +785,22 @@ wrap_window_delegate! {
             self.view.borrow_mut().take();
         }
 
+        fn on_window_activation_changed(&self, _window: Option<&mut Window>, active: ::std::os::raw::c_int) {
+            let Key::Tab(tab) = &self.key else { return };
+            if active == 0 {
+                return;
+            }
+            if let Some(address) = PENDING_FOCUS.with_borrow_mut(|pending| pending.remove(tab)) {
+                eprintln!("ferryx-engine: focus {tab} address={address}: window activated");
+                // Activation restores the widget's stored focused view after this callback
+                // returns, so the view is focused from a task that runs once that is done.
+                let mut task = FocusTab::new(tab.clone(), address);
+                post_task(ThreadId::UI, Some(&mut task));
+            }
+        }
+
         fn is_frameless(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
-            (self.key != Key::Free) as _
+            !matches!(self.key, Key::Free | Key::Manager) as _
         }
 
         fn can_close(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
@@ -527,6 +868,22 @@ wrap_client! {
         fn load_handler(&self) -> Option<LoadHandler> {
             Some(EngineLoadHandler::new())
         }
+
+        fn permission_handler(&self) -> Option<PermissionHandler> {
+            Some(permissions::EnginePermissionHandler::new())
+        }
+
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(system::EngineDownloadHandler::new())
+        }
+
+        fn find_handler(&self) -> Option<FindHandler> {
+            Some(system::EngineFindHandler::new())
+        }
+
+        fn dialog_handler(&self) -> Option<DialogHandler> {
+            Some(system::EngineDialogHandler::new())
+        }
     }
 }
 
@@ -568,6 +925,30 @@ wrap_display_handler! {
                 emit(Event::Title { tab, title });
             }
         }
+
+        fn on_media_access_change(
+            &self,
+            browser: Option<&mut Browser>,
+            has_video_access: ::std::os::raw::c_int,
+            has_audio_access: ::std::os::raw::c_int,
+        ) {
+            let Some(browser) = browser else { return };
+            if let Some(Key::Tab(tab)) = key_of(browser) {
+                emit(Event::MediaAccess { tab, video: has_video_access != 0, audio: has_audio_access != 0 });
+            }
+        }
+
+        fn on_console_message(
+            &self,
+            browser: Option<&mut Browser>,
+            _level: LogSeverity,
+            message: Option<&CefString>,
+            _source: Option<&CefString>,
+            _line: ::std::os::raw::c_int,
+        ) -> ::std::os::raw::c_int {
+            // The Notification shim's messages are protocol traffic, not page console output.
+            system::on_console_message(browser, message) as _
+        }
     }
 }
 
@@ -575,6 +956,15 @@ wrap_load_handler! {
     struct EngineLoadHandler;
 
     impl LoadHandler {
+        fn on_load_start(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            _transition_type: TransitionType,
+        ) {
+            system::on_load_start(browser, frame);
+        }
+
         fn on_loading_state_change(
             &self,
             browser: Option<&mut Browser>,
@@ -585,6 +975,10 @@ wrap_load_handler! {
             let Some(browser) = browser else { return };
             let state = (is_loading != 0, can_go_back != 0, can_go_forward != 0);
             let Some(key) = key_of(browser) else { return };
+            if key == Key::Manager {
+                extensions::on_loading_state_change(browser, state.0);
+                return;
+            }
             with_pane(&key, |pane| pane.loading = Some(state));
             if let Key::Tab(tab) = key {
                 emit(Event::Loading { tab, loading: state.0, can_go_back: state.1, can_go_forward: state.2 });
@@ -600,6 +994,11 @@ wrap_life_span_handler! {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             LIVE_BROWSERS.set(LIVE_BROWSERS.get() + 1);
             let Some(browser) = browser else { return };
+            // The hidden extensions page is no site: no password hooks, never a stray.
+            if extensions::is_manager(browser) {
+                return;
+            }
+            vault::attach(browser);
             if key_of(browser).is_some() {
                 return;
             }
@@ -611,22 +1010,46 @@ wrap_life_span_handler! {
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             LIVE_BROWSERS.set(LIVE_BROWSERS.get().saturating_sub(1));
             if let Some(browser) = browser {
+                vault::detach(browser);
                 STRAYS.with_borrow_mut(|strays| strays.retain(|candidate| candidate.is_same(Some(browser)) == 0));
                 DEVTOOLS.with_borrow_mut(|views| views.retain(|view| !same(view, browser)));
                 match key_of(browser) {
                     Some(Key::Tab(tab)) => {
                         TABS.with_borrow_mut(|tabs| tabs.remove(&tab));
+                        permissions::forget_tab(&tab);
+                        system::forget_tab(&tab);
                         emit(Event::Closed { tab });
                     }
                     Some(Key::Popup(id)) => {
                         POPUPS.with_borrow_mut(|popups| popups.remove(&id));
                     }
+                    Some(Key::Manager) => extensions::on_closed(),
                     _ => {}
                 }
             }
             if QUITTING.get() && LIVE_BROWSERS.get() == 0 {
                 quit_message_loop();
             }
+        }
+    }
+}
+
+wrap_dev_tools_message_observer! {
+    struct EngineDevtoolsObserver;
+
+    impl DevToolsMessageObserver {
+        fn on_dev_tools_method_result(
+            &self,
+            _browser: Option<&mut Browser>,
+            message_id: ::std::os::raw::c_int,
+            success: ::std::os::raw::c_int,
+            result: Option<&[u8]>,
+        ) {
+            let Ok(id) = u32::try_from(message_id) else { return };
+            // Only answers to calls Ferryx made are reported; DevTools windows use their own ids.
+            let Some(tab) = DEVTOOLS_CALLS.with_borrow_mut(|calls| calls.remove(&id)) else { return };
+            let result = result.map(|bytes| String::from_utf8_lossy(bytes).into_owned()).unwrap_or_else(|| "{}".into());
+            emit(Event::Devtools { tab, id, ok: success != 0, result });
         }
     }
 }

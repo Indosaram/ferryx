@@ -76,7 +76,14 @@ fn main() {
         }
     }
     if group == Some("browser") {
-        match parse_browser_cli(&args).and_then(run_browser_cli) {
+        let outcome = if let Some(parsed) = ferryx_lib::cli::parse_browser_controllers_cli(&args) {
+            parsed.and_then(ferryx_lib::cli::run_browser_controllers_cli)
+        } else if let Some(parsed) = ferryx_lib::cli::parse_browser_adapter_cli(&args) {
+            parsed.and_then(ferryx_lib::cli::run_browser_adapter_cli)
+        } else {
+            parse_browser_cli(&args).and_then(run_browser_cli)
+        };
+        match outcome {
             Ok(()) => return,
             Err(error) => {
                 print_browser_cli_error("BROWSER_CLI_INVALID_OR_UNAVAILABLE", error);

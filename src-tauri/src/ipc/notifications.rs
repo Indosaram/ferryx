@@ -13,6 +13,7 @@ use crate::notification::{
     picked_audio_file, DispatchNotificationRequest, DispatchNotificationResult,
     NativeNotificationBackend, NotificationActivations, NotificationAudioPlayer,
     NotificationContent, NotificationPermissionRequestDto, NotificationPermissionStatusDto,
+    NotificationPlatform,
     NotificationProbeResult, NotificationService, NotificationSound, NotificationTarget,
     OpenSystemSettingsResult, PickedAudioFile, PlaySoundResult, SetBadgeCountResult,
     SUPPORTED_AUDIO_EXTENSIONS,
@@ -59,10 +60,18 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
         // Windows/Linux: route clicks through notify-rust when the notification
         // carries a destination. notify-rust's `wait_for_response` gives us the
         // real activation the tauri plugin drops. Test / id-less notifications
-        // (no target) still show through the plugin.
+        // (no target) still show through the plugin on Windows.
+        //
+        // Linux shows every notification through notify-rust on the calling thread
+        // (callers run in `run_blocking`). The plugin's desktop `show()` spawns
+        // notify-rust onto a Tokio worker, and on Linux notify-rust calls
+        // `zbus::block_on`, which (zbus's `tokio` feature is on through ashpd) starts
+        // its own runtime there and panics with "Cannot start a runtime from within a
+        // runtime": the page notification never reached D-Bus (linux UI audit run
+        // 41846200603, daily G6).
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
-            if content.target.is_some() {
+            if shows_through_notify_rust(NotificationPlatform::current(), content.target.is_some()) {
                 let app_id = self.app.config().identifier.clone();
                 return crate::notification::notify_rust_adapter::submit_with_click_routing(
                     content,
@@ -100,6 +109,14 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
                 .map_err(|error| error.to_string())
         }
     }
+}
+
+/// Whether a Windows/Linux notification is shown through `notify-rust` on the calling thread
+/// rather than the plugin's `show()`: always on Linux (the plugin's Tokio-spawned `show()`
+/// panics there, see `submit`), and on Windows only when a click target has to be routed.
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+fn shows_through_notify_rust(platform: NotificationPlatform, has_target: bool) -> bool {
+    platform == NotificationPlatform::Linux || has_target
 }
 
 /// Build a service bound to the running app.
@@ -539,6 +556,17 @@ mod tests {
         let decoded: NotificationProbeResult = serde_json::from_str(&encoded).expect("decode");
 
         assert_eq!(decoded, probe);
+    }
+
+    /// Linux never goes through the plugin's `show()`: it spawns notify-rust onto a Tokio
+    /// worker, where zbus's `block_on` panics (linux UI audit run 41846200603, daily G6).
+    #[test]
+    fn linux_shows_every_notification_through_notify_rust() {
+        assert!(shows_through_notify_rust(NotificationPlatform::Linux, false));
+        assert!(shows_through_notify_rust(NotificationPlatform::Linux, true));
+        // Windows keeps the plugin for target-less notifications.
+        assert!(!shows_through_notify_rust(NotificationPlatform::Windows, false));
+        assert!(shows_through_notify_rust(NotificationPlatform::Windows, true));
     }
 
     #[test]

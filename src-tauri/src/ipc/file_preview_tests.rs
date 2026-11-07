@@ -1807,8 +1807,15 @@ fn dev_server_origins_are_trusted_only_by_debug_builds() {
 
 #[test]
 fn not_a_directory_is_a_missing_file_not_a_permission_problem() {
-    let error = std::io::Error::from_raw_os_error(libc::ENOTDIR);
-    assert_eq!(reason_of(&io_failure(&error, Path::new("/tmp/a.txt/x"))), "MissingFile");
+    // The error the host OS really reports for a path that runs through a regular file
+    // (`ENOTDIR` on Unix, `ERROR_PATH_NOT_FOUND` on Windows); a raw errno number means something
+    // else on Windows, where 20 is `ERROR_BAD_UNIT`.
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let through_file = file.join("x");
+    let error = std::fs::File::open(&through_file).expect_err("a file is not a directory");
+    assert_eq!(reason_of(&io_failure(&error, &through_file)), "MissingFile");
 }
 
 #[test]

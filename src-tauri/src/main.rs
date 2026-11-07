@@ -75,7 +75,14 @@ fn main() {
         }
     }
     if args.get(1).is_some_and(|arg| arg == "browser") {
-        match parse_browser_cli(&args).and_then(run_browser_cli) {
+        let outcome = if let Some(parsed) = ferryx_lib::cli::parse_browser_controllers_cli(&args) {
+            parsed.and_then(ferryx_lib::cli::run_browser_controllers_cli)
+        } else if let Some(parsed) = ferryx_lib::cli::parse_browser_adapter_cli(&args) {
+            parsed.and_then(ferryx_lib::cli::run_browser_adapter_cli)
+        } else {
+            parse_browser_cli(&args).and_then(run_browser_cli)
+        };
+        match outcome {
             Ok(()) => return,
             Err(error) => {
                 print_browser_cli_error("BROWSER_CLI_INVALID_OR_UNAVAILABLE", error);
@@ -133,6 +140,19 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
+            // The OS opens http(s) links with Ferryx once it is the default browser: a running
+            // app takes the URL over the browser CLI endpoint (the app's single-instance
+            // channel); otherwise this process starts the app with the URL queued for its UI.
+            if let Some(url) = ferryx_lib::browser::default_browser::inbound_url_from_args(&args) {
+                match forward_inbound_url(url.clone()) {
+                    Ok(()) => return,
+                    Err(error) => eprintln!("no running Ferryx took the link, starting one: {error}"),
+                }
+                ferryx_lib::browser::default_browser::queue_inbound_url(url);
+                let _ = raised_limit;
+                ferryx_lib::run();
+                return;
+            }
             // The app binary only opens a window when launched bare. Anything else is a command
             // typed into a terminal: starting the whole app runtime there spawns SSH supervisors and
             // shells under that terminal and never returns it.

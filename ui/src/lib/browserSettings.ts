@@ -22,8 +22,13 @@ export type BrowserSettingsState = {
   shiftOpensSystemBrowser: boolean;
   showTerminalLinkActions: boolean;
   localhostWorktreeLabels: boolean;
+  /** Ask where to save each download instead of saving it to the download folder. */
+  askWhereToSave: boolean;
   profiles: BrowserProfile[];
   defaultProfileId: string;
+  /** Opt-in: ask the search engine for suggestions as the user types (sends typed text). */
+  searchSuggestions: boolean;
+  showBookmarkBar: boolean;
 };
 
 export const DEFAULT_BROWSER_PROFILE: BrowserProfile = { id: "default", name: "Default" };
@@ -34,7 +39,7 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
   homePage: "",
   searchEngine: "duckduckgo",
   defaultZoom: 100,
-  restoreTabsOnLaunch: false,
+  restoreTabsOnLaunch: true,
   rememberBrowsingHistory: true,
   openLinksInBuiltInBrowser: true,
   linkClickTarget: "builtin",
@@ -42,8 +47,11 @@ export const DEFAULT_BROWSER_SETTINGS: BrowserSettingsState = {
   shiftOpensSystemBrowser: true,
   showTerminalLinkActions: true,
   localhostWorktreeLabels: true,
+  askWhereToSave: false,
   profiles: [DEFAULT_BROWSER_PROFILE, PRIVATE_BROWSER_PROFILE],
   defaultProfileId: DEFAULT_BROWSER_PROFILE.id,
+  searchSuggestions: false,
+  showBookmarkBar: true,
 };
 
 export const BROWSER_SETTINGS_EVENT = "ferryx:browser-settings";
@@ -89,9 +97,21 @@ export function isBuiltInBrowserProfileId(profileId: string): boolean {
   return BUILT_IN_BROWSER_PROFILE_IDS.has(profileId);
 }
 
+// macOS WebKit has no persistent named data stores; named profiles there need the Chromium engine.
+let chromiumEngineAvailable = false;
+
+/** Records whether the Chromium engine is installed; re-renders settings consumers on change. */
+export function setChromiumEngineAvailable(available: boolean): void {
+  if (chromiumEngineAvailable === available) return;
+  chromiumEngineAvailable = available;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent<BrowserSettingsState>(BROWSER_SETTINGS_EVENT, { detail: loadBrowserSettings() }));
+  }
+}
+
 export function browserNamedProfilesSupported(): boolean {
   if (typeof navigator === "undefined") return true;
-  return classifyNavigatorPlatform(navigator) !== "macos";
+  return classifyNavigatorPlatform(navigator) !== "macos" || chromiumEngineAvailable;
 }
 
 export function supportedBrowserProfiles(
@@ -187,8 +207,17 @@ export function normalizeBrowserSettings(value: unknown): BrowserSettingsState {
     localhostWorktreeLabels: typeof source.localhostWorktreeLabels === "boolean"
       ? source.localhostWorktreeLabels
       : DEFAULT_BROWSER_SETTINGS.localhostWorktreeLabels,
+    askWhereToSave: typeof source.askWhereToSave === "boolean"
+      ? source.askWhereToSave
+      : DEFAULT_BROWSER_SETTINGS.askWhereToSave,
     profiles,
     defaultProfileId: profileIds.has(requestedDefault) ? requestedDefault : DEFAULT_BROWSER_PROFILE.id,
+    searchSuggestions: typeof source.searchSuggestions === "boolean"
+      ? source.searchSuggestions
+      : DEFAULT_BROWSER_SETTINGS.searchSuggestions,
+    showBookmarkBar: typeof source.showBookmarkBar === "boolean"
+      ? source.showBookmarkBar
+      : DEFAULT_BROWSER_SETTINGS.showBookmarkBar,
   };
 }
 
@@ -205,7 +234,10 @@ function settingsForPersistence(settings: BrowserSettingsState): Partial<Browser
     "shiftOpensSystemBrowser",
     "showTerminalLinkActions",
     "localhostWorktreeLabels",
+    "askWhereToSave",
     "defaultProfileId",
+    "searchSuggestions",
+    "showBookmarkBar",
   ];
   for (const key of scalarKeys) {
     if (settings[key] !== DEFAULT_BROWSER_SETTINGS[key]) {
@@ -360,6 +392,12 @@ export function isHttpUrl(url: string): boolean {
 
 export function isFileUrl(url: string): boolean {
   return /^file:\/\//i.test(url.trim());
+}
+
+/** Profiles whose tabs never reach disk: no restore, no saved back/forward stack. */
+export function isPrivateBrowserProfileId(profileId: string | null | undefined): boolean {
+  const trimmed = profileId?.trim();
+  return trimmed === PRIVATE_BROWSER_PROFILE.id || trimmed === "private" || trimmed === "remote";
 }
 
 export function isNavigableBrowserUrl(url: string): boolean {

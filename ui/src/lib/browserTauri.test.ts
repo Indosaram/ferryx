@@ -4,9 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   browserAutomationAct,
   browserAutomationSnapshot,
+  browserDownloadErrorRegistered,
   browserTabSelectIndex,
   browserWorkspaceSelectIndex,
   closeBrowser,
+  downloadBrowserUrlToFolder,
   extractBrowserCookieImportReason,
   formatBrowserCookieImportError,
   getBrowserCookieImportActionableMessage,
@@ -16,6 +18,7 @@ import {
   importInstalledBrowserCookies,
   isBrowserTabShortcutAction,
   reloadBrowser,
+  revealDownloadedFile,
   setBrowserBounds,
   setBrowserVisible,
 } from "./browserTauri";
@@ -309,6 +312,48 @@ describe("browser automation ipc", () => {
       },
     });
     expect(result).toEqual({ importedCount: 42, skippedCount: 5 });
+  });
+
+  it("invokes cmd_browser_download_to_folder with the tab and url", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ id: "d1", status: "completed" });
+
+    await downloadBrowserUrlToFolder("browser-1", "https://e.test/a.zip");
+
+    expect(invoke).toHaveBeenCalledWith("cmd_browser_download_to_folder", {
+      browserId: "browser-1",
+      url: "https://e.test/a.zip",
+    });
+  });
+
+  it("reveals a saved download through cmd_path_reveal", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    await revealDownloadedFile("/home/me/Downloads/a.zip");
+
+    expect(invoke).toHaveBeenCalledWith("cmd_path_reveal", { path: "/home/me/Downloads/a.zip" });
+  });
+});
+
+describe("browserDownloadErrorRegistered", () => {
+  it("is true only when the host says the registry took the download", () => {
+    expect(browserDownloadErrorRegistered({
+      code: "BROWSER_DOWNLOAD_FAILED",
+      message: "Browser download failed: server returned HTTP 404",
+      details: { downloadRegistered: true, downloadId: "dl-1" },
+    })).toBe(true);
+  });
+
+  it("is false for a refusal before registration and for errors without the signal", () => {
+    expect(browserDownloadErrorRegistered({
+      code: "BROWSER_DOWNLOAD_FAILED",
+      message: "refused",
+      details: { downloadRegistered: false },
+    })).toBe(false);
+    expect(browserDownloadErrorRegistered({ code: "BROWSER_DOWNLOAD_FAILED", message: "refused" })).toBe(false);
+    expect(browserDownloadErrorRegistered({ details: { downloadRegistered: "true" } })).toBe(false);
+    expect(browserDownloadErrorRegistered({ details: null })).toBe(false);
+    expect(browserDownloadErrorRegistered("BROWSER_DOWNLOAD_FAILED")).toBe(false);
+    expect(browserDownloadErrorRegistered(null)).toBe(false);
   });
 });
 

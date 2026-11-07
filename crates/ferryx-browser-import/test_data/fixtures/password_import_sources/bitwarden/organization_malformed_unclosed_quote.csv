@@ -1,0 +1,2 @@
+collections,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp
+Engineering,login,Malformed Bitwarden Org,"unterminated synthetic org note,org_unsupported:synthetic,0,https://malformed.bitwarden-org.example,malformed-org@example.test,SYNTH-BITWARDEN-ORG-MALFORMED-PASSWORD,otpauth://totp/MalformedOrg?secret=SYNTHOTP

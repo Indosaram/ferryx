@@ -1,0 +1,52 @@
+[package]
+name = "ferryx-browser-import"
+version = "0.1.0"
+edition = "2021"
+description = "Reads bookmarks, history, cookies and passwords from other browsers for the Ferryx browser"
+license = "MPL-2.0"
+publish = false
+
+# Ported from Maho's maho-import crate (same owner). Not part of a parent workspace, like
+# browser-engine-protocol: src-tauri uses it as a path dependency.
+[workspace]
+
+[lib]
+name = "ferryx_browser_import"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+plist = "1"
+url = "2"
+# Same major as src-tauri: both link libsqlite3-sys, which allows a single version per build.
+rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "6"
+lz4_flex = "0.11"
+tempfile = "3"
+base64 = "0.22"
+aes = "0.8"
+aes-gcm = "0.10"
+cbc = { version = "0.1", features = ["block-padding"] }
+des = "0.8"
+pbkdf2 = "0.12"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# zbus 5 on async-io, the stack notify-rust already pulls into Ferryx's Linux build.
+secret-service = { version = "5", default-features = false, features = ["rt-async-io-crypto-rust"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", default-features = false, features = ["std", "Win32_System_Com", "Win32_Security_Cryptography", "Win32_Foundation"] }
+
+[dev-dependencies]
+tempfile = "3"

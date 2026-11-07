@@ -10,9 +10,11 @@ import { isMacShortcutPlatform } from "./shortcuts";
 import { setNativeTerminalDomOverlayInput } from "./tauri";
 
 const NativeTerminalVisibilityContext = createContext({ visible: true, occluded: false });
-// Match modal dialogs and search overlays that own input. Non-modal notifications
-// like toasts do NOT own input and must never block terminal interactivity.
-const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="search"]';
+// Match modal dialogs (including alert dialogs such as the window-level agent approval
+// card) and search overlays that own input. Non-modal notifications like toasts do NOT
+// own input and must never block terminal interactivity. An in-flow alertdialog inside a
+// pane opts out with data-native-terminal-yield="off".
+const YIELDING_SURFACE_SELECTOR = '[role="dialog"], [role="alertdialog"], [role="search"]';
 const OPT_OUT_SELECTOR = '[data-native-terminal-yield="off"]';
 
 // Docked search sits outside native bounds: retain rendering, not terminal input.

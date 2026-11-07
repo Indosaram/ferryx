@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ferryx/scripts/qa/browser-agent/config.schema.json",
+  "title": "Ferryx browser-agent QA host config",
+  "description": "One QA host for scripts/qa/browser-agent/run.mjs (plan maho-browser-merge, Concrete QA contract). Validated before anything is launched. Never put production credentials or the real user data directory here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "os",
+    "binaries",
+    "isolation",
+    "mahord",
+    "remoteGateway"
+  ],
+  "properties": {
+    "os": {
+      "description": "OS label used as the evidence directory name: <evidence>/<os>/<Q>/.",
+      "type": "string",
+      "enum": [
+        "macos",
+        "windows",
+        "linux"
+      ]
+    },
+    "hostLabel": {
+      "description": "Free-form host name recorded in receipts (e.g. omarchy, maho-win).",
+      "type": "string",
+      "minLength": 1
+    },
+    "binaries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gui",
+        "cli"
+      ],
+      "properties": {
+        "gui": {
+          "description": "Candidate GUI executable paths, in preference order; the first existing one is used.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/absolutePath"
+          }
+        },
+        "cli": {
+          "description": "Candidate `ferryx` CLI executable paths, in preference order.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/absolutePath"
+          }
+        }
+      }
+    },
+    "isolation": {
+      "description": "Isolated roots owned by this run; must be absolute and pairwise distinct. The harness never touches the real profile or HOME.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtimeRoot",
+        "dataRoot",
+        "profileRoot"
+      ],
+      "properties": {
+        "runtimeRoot": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "dataRoot": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "profileRoot": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "tmpRoot": {
+          "$ref": "#/$defs/absolutePath"
+        }
+      }
+    },
+    "mahord": {
+      "description": "MahoRD endpoint driving the native GUI (scripts/qa/daemon-lifetime/lib/mahord.mjs).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "pairingId"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pairingId": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+        },
+        "binary": {
+          "description": "maho-client executable; defaults to `maho-client` on PATH.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "remoteGateway": {
+      "description": "Existing remote gateway bootstrap for the QA (non-production) device used by Q2/Q4/Q8/Q9.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "bootstrapFile"
+      ],
+      "properties": {
+        "url": {
+          "description": "Gateway base URL of the isolated QA instance.",
+          "type": "string",
+          "pattern": "^(https?|wss?)://[^\\s]+$"
+        },
+        "bootstrapFile": {
+          "description": "Path to the QA device bootstrap/pairing material produced for this run (not production auth).",
+          "$ref": "#/$defs/absolutePath"
+        },
+        "deviceLabel": {
+          "type": "string",
+          "minLength": 1
+        },
+        "remoteControlPageUrl": {
+          "description": "Remote control page used for the Q9 390x844 consent checks.",
+          "type": "string",
+          "pattern": "^https?://[^\\s]+$"
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "readyMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 600000
+        },
+        "requestMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 600000
+        },
+        "approvalMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 600000
+        }
+      }
+    },
+    "engine": {
+      "description": "Browser engine under test. 'webview' = the system webview (FERRYX_CEF_ENGINE_DIR unset); 'chromium' = the CEF engine from engineDir (passed to the app as FERRYX_CEF_ENGINE_DIR). Evidence goes to <evidence>/<os>-<engine>/<Q>/.",
+      "type": "string",
+      "enum": [
+        "webview",
+        "chromium"
+      ]
+    },
+    "engineDir": {
+      "description": "Chromium engine directory (contains ferryx_engine); required when engine is chromium.",
+      "$ref": "#/$defs/absolutePath"
+    },
+    "consentCard": {
+      "description": "Screen position of the consent card's Allow/Approve button on this host.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approve"],
+      "properties": {
+        "approve": { "$ref": "#/$defs/screenPoint" },
+        "revokeGrant": {
+          "description": "The first grant's Revoke access button, with Settings > Browser already open on Agent access.",
+          "$ref": "#/$defs/screenPoint"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "screenPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y"],
+      "properties": { "x": { "type": "integer", "minimum": 0 }, "y": { "type": "integer", "minimum": 0 } }
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 2,
+      "pattern": "^(/|[A-Za-z]:[\\\\/]|\\\\\\\\)"
+    }
+  }
+}

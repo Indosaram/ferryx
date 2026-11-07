@@ -373,6 +373,25 @@ pub struct RemoteTranscriptTarget {
     pub dir: String,
 }
 
+/// Whether the paired-host store holds a session with this id at all.
+///
+/// This is the "does the session run on another host" question, and it must not depend on whether
+/// a transcript location can be derived from the record: a record whose project path is not a
+/// POSIX path (a Windows host) still names a session on another machine.
+pub fn store_holds_remote_session(store_json: &str, session_id: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(store_json)
+        .ok()
+        .and_then(|parsed| {
+            parsed.get("remoteSessions")?.as_array().map(|rows| {
+                rows.iter().any(|row| {
+                    row.pointer("/descriptor/backendSessionId").and_then(|v| v.as_str())
+                        == Some(session_id)
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Finds the stored descriptor for `session_id` and derives the remote transcript directory.
 ///
 /// The store is keyed by `descriptor.backendSessionId`, which is the id the session service and the

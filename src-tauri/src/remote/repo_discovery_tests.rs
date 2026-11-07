@@ -12,13 +12,21 @@ fn git_dir(repo: &Path, head: &str) {
     std::fs::write(repo.join(".git").join("HEAD"), head).unwrap();
 }
 
+/// The canonical path in the form discovery reports it: `std::fs::canonicalize` adds the Windows
+/// verbatim prefix (`\\?\C:\...`), which discovery strips from every path it returns.
+fn canonical(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap();
+    PathBuf::from(crate::worktree::strip_verbatim_prefix(canonical.to_str().unwrap()))
+}
+
 fn names(walk: &Walk, root: &Path) -> Vec<String> {
-    let root = root.to_str().unwrap();
+    // Discovery reports paths without the Windows verbatim prefix, so the root is compared the same way.
+    let root = crate::worktree::strip_verbatim_prefix(root.to_str().unwrap());
     walk.repos
         .iter()
         .map(|repo| {
             repo.repo_root
-                .strip_prefix(root)
+                .strip_prefix(root.as_str())
                 .unwrap()
                 .trim_start_matches(['/', '\\'])
                 .replace('\\', "/")
@@ -141,7 +149,7 @@ fn head_parsing_accepts_only_branch_refs() {
 #[test]
 fn root_that_is_a_repository_returns_only_itself() {
     let fixture = fixture();
-    let root = std::fs::canonicalize(fixture.path()).unwrap().join("alpha");
+    let root = canonical(fixture.path()).join("alpha");
     let result = run(&root, MAX_DEPTH, true, CAPS);
     assert_eq!(result.repos.len(), 1);
     assert_eq!(Path::new(&result.repos[0].repo_root), root);
@@ -173,7 +181,7 @@ fn caps_truncate_without_failing() {
 #[test]
 fn registrations_join_by_canonical_root() {
     let fixture = fixture();
-    let root = std::fs::canonicalize(fixture.path()).unwrap();
+    let root = canonical(fixture.path());
     let mut repos = run(&root, 2, false, CAPS).repos;
     let alpha = root.join("alpha");
     let elsewhere = root.join("elsewhere");
@@ -305,7 +313,7 @@ async fn http_route_lists_repositories_and_capability_needs_machine_control() {
         assert_eq!(response.headers()["cache-control"], "no-store");
         let listing: machine_protocol::Repositories =
             serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
-        let home = std::fs::canonicalize(fixture.path()).unwrap();
+        let home = canonical(fixture.path());
         assert_eq!(Path::new(&listing.path), home);
         assert!(!listing.truncated);
         let mut roots: Vec<PathBuf> = listing

@@ -282,6 +282,15 @@ impl BrowserManager {
             .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))
     }
 
+    /// The tab's recorded addresses, oldest first (newest last); empty for an unknown tab.
+    pub fn history_snapshot(&self, browser_id: &str) -> Vec<String> {
+        self.sessions
+            .read()
+            .get(browser_id)
+            .map(|session| session.history.clone())
+            .unwrap_or_default()
+    }
+
     pub fn webview_labels_for_profile(&self, profile_id: &BrowserProfileId) -> Vec<String> {
         self.sessions
             .read()
@@ -324,6 +333,25 @@ impl BrowserManager {
         s.loading = true;
         s.load_error = None;
         Ok(valid_url)
+    }
+
+    /// Rolls back a navigation that turned into a download: the engine never committed it, so the
+    /// page (and its URL) is still the previous one, and no load event will ever clear `loading`.
+    /// Only a session whose current URL is `url` is touched. Returns the restored state, if any.
+    pub fn abandon_navigation_to(&self, browser_id: &str, url: &str) -> Option<BrowserState> {
+        let mut guard = self.sessions.write();
+        let s = guard.get_mut(browser_id)?;
+        if s.url != url {
+            return None;
+        }
+        if s.history_index > 0 && s.history.get(s.history_index).is_some_and(|entry| entry == url) {
+            s.history.remove(s.history_index);
+            s.history_index -= 1;
+            s.url = s.history[s.history_index].clone();
+        }
+        s.loading = false;
+        sync_history_flags(s);
+        Some(browser_state(s))
     }
 
     pub fn begin_reload(&self, browser_id: &str) -> Result<BrowserState, BrowserError> {
@@ -474,6 +502,34 @@ impl BrowserManager {
         Ok(browser_state(s))
     }
 
+    /// An engine tab started loading a main-frame document: a reload, a history move, a form
+    /// post or a navigation the engine began on its own, possibly to the same URL. Unless a
+    /// load is already pending (`begin_reload`, `update_url` or a history dispatch already
+    /// invalidated the document), refs observed on the previous document become stale.
+    pub fn begin_engine_load(
+        &self,
+        browser_id: &str,
+        can_go_back: bool,
+        can_go_forward: bool,
+    ) -> Result<BrowserState, BrowserError> {
+        let mut guard = self.sessions.write();
+        let s = guard
+            .get_mut(browser_id)
+            .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+        if !s.loading {
+            s.generation += 1;
+            s.automation_targets.clear();
+            s.remote_targets.clear();
+            s.remote_snapshot_id = None;
+            s.loading = true;
+            s.load_error = None;
+        }
+        s.can_go_back = can_go_back;
+        s.can_go_forward = can_go_forward;
+        s.native_history_flags = true;
+        Ok(browser_state(s))
+    }
+
     pub fn set_bounds(&self, browser_id: &str, bounds: LogicalRect) -> Result<(), BrowserError> {
         if !bounds.is_valid() {
             return Err(BrowserError::InvalidBounds);
@@ -525,6 +581,28 @@ impl BrowserManager {
             .get(reference)
             .cloned()
             .ok_or_else(|| BrowserError::AutomationTargetNotFound(reference.to_string()))
+    }
+
+    /// Records what an agent observe issued: each ref with the fingerprint (tag, role, name)
+    /// its node had. Shares the per-generation automation map, so navigation clears it.
+    pub fn record_observed_refs(
+        &self,
+        browser_id: &str,
+        generation: u64,
+        refs: Vec<(String, String)>,
+    ) -> Result<(), BrowserError> {
+        self.record_automation_targets(
+            browser_id,
+            generation,
+            refs.into_iter()
+                .map(|(reference, fingerprint)| BrowserAutomationTarget { reference, selector: fingerprint })
+                .collect(),
+        )
+    }
+
+    /// The fingerprint the current generation's observe recorded for `reference`.
+    pub fn observed_ref(&self, browser_id: &str, generation: u64, reference: &str) -> Result<String, BrowserError> {
+        self.automation_target(browser_id, generation, reference)
     }
 
     pub fn assert_automation_generation(
@@ -869,6 +947,8 @@ impl BrowserManager {
                             url: s.url.clone(),
                             title: s.title.clone(),
                             visible: s.visible,
+                            engine: s.engine,
+                            zoom_factor: s.zoom_factor,
                         },
                     )
                 })
@@ -895,6 +975,30 @@ pub fn order_sessions_by_creation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_navigation_that_became_a_download_restores_the_page_url() {
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("download-a")).unwrap();
+        manager.update_url("download-a", "https://example.com/file.zip").unwrap();
+        let state = manager.abandon_navigation_to("download-a", "https://example.com/file.zip").unwrap();
+        assert_eq!(state.url, "https://example.com/");
+        assert!(!state.loading);
+        assert_eq!(manager.history_snapshot("download-a"), vec!["https://example.com/".to_string()]);
+        assert!(manager.abandon_navigation_to("download-a", "https://example.com/other.zip").is_none());
+    }
+
+    #[test]
+    fn history_snapshot_lists_a_tab_addresses_oldest_first() {
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("history-a")).unwrap();
+        manager.update_url("history-a", "https://accounts.google.com/").unwrap();
+        assert_eq!(
+            manager.history_snapshot("history-a"),
+            vec!["https://example.com/".to_string(), "https://accounts.google.com/".to_string()]
+        );
+        assert!(manager.history_snapshot("history-missing").is_empty());
+    }
 
     #[test]
     fn identity_snapshot_reads_the_live_session_and_fails_after_close() {
@@ -1020,6 +1124,46 @@ mod tests {
         assert!(!manager.has_guest_views());
     }
 
+    #[test]
+    fn list_sessions_reports_each_tab_engine() {
+        // Given a webview tab and a tab the Chromium engine draws, when the sessions are
+        // listed, then each summary carries its own engine (what `ferryx browser list` prints).
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("engine-system")).unwrap();
+        manager.register_session(create_request("engine-chromium")).unwrap();
+        manager.set_engine("engine-chromium", BrowserEngine::Chromium).unwrap();
+        let engines: Vec<(String, BrowserEngine)> = manager
+            .list_sessions()
+            .into_iter()
+            .map(|s| (s.browser_id, s.engine))
+            .collect();
+        assert_eq!(
+            engines,
+            vec![
+                ("engine-system".to_string(), BrowserEngine::System),
+                ("engine-chromium".to_string(), BrowserEngine::Chromium),
+            ]
+        );
+        let json = serde_json::to_value(manager.list_sessions()).unwrap();
+        assert_eq!(json[0]["engine"], "system");
+        assert_eq!(json[1]["engine"], "chromium");
+    }
+
+    #[test]
+    fn list_sessions_reports_each_tab_zoom() {
+        // Given a tab zoomed to 125%, when the sessions are listed, then the summary carries
+        // the zoom and serializes it as `zoomFactor` (what `ferryx browser list` prints).
+        let manager = BrowserManager::new();
+        manager.register_session(create_request("zoom-default")).unwrap();
+        manager.register_session(create_request("zoom-set")).unwrap();
+        manager.set_zoom("zoom-set", 1.25).unwrap();
+        let sessions = manager.list_sessions();
+        assert_eq!(sessions[0].zoom_factor, 1.0);
+        assert_eq!(sessions[1].zoom_factor, 1.25);
+        let json = serde_json::to_value(&sessions).unwrap();
+        assert_eq!(json[1]["zoomFactor"], 1.25);
+    }
+
     fn create_request(browser_id: &str) -> CreateBrowserRequest {
         CreateBrowserRequest {
             browser_id: Some(browser_id.to_string()),
@@ -1042,6 +1186,8 @@ mod tests {
             url: "https://example.com/".to_string(),
             title: None,
             visible: true,
+            engine: BrowserEngine::System,
+            zoom_factor: 1.0,
         }
     }
 
@@ -1211,5 +1357,64 @@ mod tests {
         assert_eq!(sequences.len(), 2);
         assert!(sequences[0] < sequences[1]);
         assert_ne!(first.browser_id, second.browser_id);
+    }
+
+    #[test]
+    fn engine_load_start_invalidates_refs_of_the_previous_document() {
+        // A same-URL reload the engine starts on its own (toolbar, location.reload(), a form
+        // post) sends no new address, only a load start; refs from the old page must go stale.
+        let manager = BrowserManager::new();
+        let state = manager
+            .register_session(create_request("engine-load"))
+            .expect("register");
+        manager
+            .record_observed_refs(
+                "engine-load",
+                state.generation,
+                vec![("e1".to_string(), "button|Submit".to_string())],
+            )
+            .expect("record refs");
+        assert!(manager.observed_ref("engine-load", state.generation, "e1").is_ok());
+
+        let loading = manager
+            .begin_engine_load("engine-load", true, false)
+            .expect("engine load start");
+        assert!(loading.loading);
+        assert_eq!(loading.url, state.url);
+        assert_eq!(loading.generation, state.generation + 1);
+        assert!(loading.can_go_back && !loading.can_go_forward);
+        assert!(matches!(
+            manager.observed_ref("engine-load", state.generation, "e1"),
+            Err(BrowserError::AutomationSnapshotStale)
+        ));
+        assert!(matches!(
+            manager.automation_target("engine-load", loading.generation, "e1"),
+            Err(BrowserError::AutomationTargetNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn reload_followed_by_engine_load_start_bumps_generation_once() {
+        let manager = BrowserManager::new();
+        let state = manager
+            .register_session(create_request("engine-reload"))
+            .expect("register");
+        let reloading = manager.begin_reload("engine-reload").expect("begin reload");
+        assert_eq!(reloading.generation, state.generation + 1);
+
+        let loading = manager
+            .begin_engine_load("engine-reload", false, false)
+            .expect("engine load start");
+        assert_eq!(loading.generation, reloading.generation);
+        assert!(loading.loading);
+
+        // Once that load finished, the next load start is a new document again.
+        manager
+            .update_navigation_state("engine-reload", None, None, Some(false), Some(false), Some(false), None)
+            .expect("load finished");
+        let next = manager
+            .begin_engine_load("engine-reload", false, false)
+            .expect("next engine load start");
+        assert_eq!(next.generation, reloading.generation + 1);
     }
 }

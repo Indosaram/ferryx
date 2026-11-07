@@ -28,10 +28,13 @@ const browserMocks = vi.hoisted(() => ({
   findBrowser: vi.fn(),
   clearBrowserFind: vi.fn(),
   downloadBrowserUrlWithSession: vi.fn(),
+  focusBrowser: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: eventMocks.listen }));
+vi.mock("./BrowserPermissionPrompt", () => ({ BrowserPermissionPrompts: () => null, BrowserMediaCaptureIndicator: () => null }));
+vi.mock("./BrowserVaultBar", () => ({ BrowserVaultBar: () => null }));
 vi.mock("../lib/browserTauri", () => browserMocks);
 vi.mock("./BrowserToolbar", () => ({
   BrowserToolbar: ({ tab }: { tab: BrowserTab }) => (

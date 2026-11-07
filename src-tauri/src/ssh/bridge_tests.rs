@@ -212,6 +212,17 @@ impl Drop for TestFixture {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.daemon_child.lock() {
             if let Some(mut child) = guard.take() {
+                // The daemon's PTY shells and their ConPTY hosts outlive a plain kill on Windows and
+                // keep burning CPU for the rest of the suite. End the whole tree while the daemon is
+                // still alive to anchor it.
+                #[cfg(windows)]
+                {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/T", "/F", "/PID", &child.id().to_string()])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
                 let _ = child.kill();
                 let _ = child.wait();
             }

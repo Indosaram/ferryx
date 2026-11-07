@@ -1,15 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { dragDropPositionToLogical } from "./NativeTerminalPane";
+import { isMacHost } from "../lib/platform";
+import { isMacShortcutPlatform } from "../lib/shortcuts";
 import { save } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, RefreshCw, X } from "lucide-react";
 
 import {
   BROWSER_SHORTCUT_EVENT,
+  browserDownloadErrorRegistered,
   clearBrowserFind,
+  downloadBrowserUrlToFolder,
   downloadBrowserUrlWithSession,
   extractBrowserErrorCode,
   findBrowser,
+  focusBrowser,
+  focusAppWebview,
+  listBrowsers,
   onBrowserDownloadRequested,
+  onBrowserDownloadUpdated,
   onBrowserShortcutRequested,
   openExternalUrl,
   setBrowserBounds,
@@ -21,11 +31,24 @@ import {
   type BrowserReloadOptions,
   type DesignFeedbackTarget,
 } from "../lib/browserTauri";
-import { recordBrowserHistory } from "../lib/browserHistory";
-import { PRIVATE_BROWSER_PROFILE } from "../lib/browserSettings";
+import {
+  BROWSER_LIBRARY_OPEN_EVENT,
+  useBookmarks,
+  type BrowserLibraryOpenDetail,
+} from "../lib/browserLibrary";
+import { PRIVATE_BROWSER_PROFILE, useBrowserSettings } from "../lib/browserSettings";
+import { goBackInBrowserTab, goForwardInBrowserTab, useBrowserTabNavigation } from "../lib/browserTabNavigation";
 import { useNativeTerminalVisibility } from "../lib/nativeTerminalVisibility";
 import { BrowserToolbar } from "./BrowserToolbar";
+import { BrowserBookmarkBar } from "./BrowserBookmarkBar";
+import { BrowserLibraryPanel, type BrowserLibraryOpenRequest, type BrowserLibraryView } from "./BrowserLibraryPanel";
+import { BrowserSignInHandoffBar } from "./BrowserSignInHandoffBar";
 import { BrowserDownloadsShelf } from "./BrowserDownloadsShelf";
+import { BrowserEngineFallbackNotice } from "./BrowserEngineFallbackNotice";
+import { BrowserMediaCaptureIndicator, BrowserPermissionPrompts } from "./BrowserPermissionPrompt";
+import { onBrowserFindResult } from "../lib/browserSystem";
+import { browserErrorText } from "../lib/browserErrorText";
+import { BrowserVaultBar } from "./BrowserVaultBar";
 import type { BrowserTab } from "../lib/types";
 
 interface BrowserPaneProps {
@@ -48,6 +71,11 @@ type BrowserStateChangedPayload = {
   loadError?: string | null;
   engine?: BrowserTab["engine"];
 };
+
+/** The pane's download row exists only while a download needs the user: an offer to answer, or a
+ * save that failed before the registry took it (so the shelf has no row for it). Every started
+ * download lives on the shelf. */
+type DownloadPhase = "offer" | "failed";
 
 function suggestedDownloadName(url: string): string {
   try {
@@ -89,6 +117,10 @@ export function BrowserPane({
   const toolbarRef = useRef<HTMLDivElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const [liveTab, setLiveTab] = useState<BrowserTab>(tab);
+  // Mod+L reaches Ferryx while Ferryx has keyboard focus; a Chromium tab draws its own address
+  // bar, so the engine focuses that one.
+  const isChromiumRef = useRef(liveTab.engine === "chromium");
+  isChromiumRef.current = liveTab.engine === "chromium";
   // Parents rebuild `tab` from store state that never sees `browser_state_changed`, so a new
   // object with unchanged values must not roll the live url/title/navigation state back.
   const previousTabRef = useRef<BrowserTab>(tab);
@@ -102,6 +134,7 @@ export function BrowserPane({
   const [paneAlert, setPaneAlert] = useState<{ action: string; code: string } | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
+  const [downloadPhase, setDownloadPhase] = useState<DownloadPhase>("offer");
   // A request the host could not attribute to the user (no trusted bridge): nothing is fetched
   // until the user confirms with Save.
   const [downloadNeedsConfirmation, setDownloadNeedsConfirmation] = useState(false);
@@ -110,6 +143,19 @@ export function BrowserPane({
   // The download registry emits no lifecycle event of its own, so every shelf refresh is driven
   // by an explicit signal: the page's `browser_download_requested` event, or a finished save.
   const [downloadsRefreshToken, setDownloadsRefreshToken] = useState(0);
+  // Downloads of this tab already seen on `browser_download_updated`; a new one re-reveals the
+  // shelf (engine downloads emit no `browser_download_requested`). Older records do not.
+  const seenDownloadIdsRef = useRef<Set<string>>(new Set());
+  const mountedAtMsRef = useRef(Date.now());
+  // The Library (bookmarks manager / history page) replaces the page view while open; the
+  // native page view is hidden then, because DOM cannot be drawn over it.
+  const [libraryView, setLibraryView] = useState<BrowserLibraryView | null>(null);
+  const [openTabs, setOpenTabs] = useState<Array<{ browserId: string; url: string; title: string | null }>>([]);
+  const { settings: browserSettings } = useBrowserSettings();
+  // The download listener subscribes once per browser; it reads the latest settings from here.
+  const askWhereToSaveRef = useRef(browserSettings.askWhereToSave);
+  askWhereToSaveRef.current = browserSettings.askWhereToSave;
+  const { tree: bookmarkTree } = useBookmarks();
   const updateBoundsRef = useRef<() => void>(() => undefined);
   // Latest find request wins: async find/clear responses can resolve out of order, so a stale
   // response for a superseded or cleared query must not overwrite the current result.
@@ -118,7 +164,21 @@ export function BrowserPane({
   // The browser surface must yield (hide) whenever a global modal/search surface is mounted, then
   // be restored only if this owner is itself visible. Mirrors NativeTerminalPane's occlusion fix.
   const surfaceVisible = useNativeTerminalVisibility();
-  const maskAwareVisible = visible && surfaceVisible;
+  const maskAwareVisible = visible && surfaceVisible && libraryView === null;
+  // A Chromium tab draws its own toolbar, whose back/forward only knows the engine's history.
+  // After a restart that history is empty, so the tab's saved stack is offered here and the
+  // back/forward shortcuts (which the hidden Ferryx toolbar would handle) are served by the pane.
+  const chromiumEngine = liveTab.engine === "chromium";
+  const chromiumEngineRef = useRef(chromiumEngine);
+  chromiumEngineRef.current = chromiumEngine;
+  const navigation = useBrowserTabNavigation(tab.browserId, Boolean(liveTab.canGoBack), Boolean(liveTab.canGoForward));
+  const runHistoryStep = (forward: boolean) => {
+    void (forward ? goForwardInBrowserTab(tab.browserId) : goBackInBrowserTab(tab.browserId)).catch((error: unknown) => {
+      setPaneAlert({ action: forward ? "Forward" : "Back", code: parseErrorCode(error) });
+    });
+  };
+  const runHistoryStepRef = useRef(runHistoryStep);
+  runHistoryStepRef.current = runHistoryStep;
 
   useEffect(() => {
     const previous = previousTabRef.current;
@@ -139,7 +199,22 @@ export function BrowserPane({
   }, [tab]);
 
   useEffect(() => {
-    if (findOpen) findInputRef.current?.focus();
+    if (!findOpen) return;
+    // The page view (a native child webview or the Chromium engine window) keeps OS keyboard
+    // focus after Ctrl+F, so focusing the DOM input alone sends typed keys to the page. The app
+    // webview is asked to take the keyboard back first, then the input is focused, and focused
+    // again once the native focus moved (also when that call fails).
+    let cancelled = false;
+    const nativeFocus = focusAppWebview();
+    findInputRef.current?.focus();
+    void nativeFocus
+      .catch(() => undefined)
+      .then(() => {
+        if (!cancelled) findInputRef.current?.focus();
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [findOpen]);
 
   useEffect(() => {
@@ -148,6 +223,27 @@ export function BrowserPane({
     setDisplayError(null);
     return () => {
       findRequestSeqRef.current += 1;
+    };
+  }, [tab.browserId]);
+
+  useEffect(() => {
+    // A Chromium tab finds natively and reports the count afterwards, as events.
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void onBrowserFindResult((payload) => {
+      if (payload.browserId !== tab.browserId) return;
+      setFindResult({ matchCount: payload.matchCount, found: payload.matchCount > 0 });
+    })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else cleanup = unlisten;
+      })
+      .catch((error: unknown) => {
+        if (!disposed) setPaneAlert({ action: "Find listener", code: parseErrorCode(error) });
+      });
+    return () => {
+      disposed = true;
+      cleanup?.();
     };
   }, [tab.browserId]);
 
@@ -168,20 +264,8 @@ export function BrowserPane({
         engine: payload.engine ?? current.engine,
         loadError: payload.loadError ?? null,
       }));
-      // Private-profile tabs are incognito: never persist their URLs or titles,
-      // even when the global "remember browsing history" setting is on.
-      if (
-        tab.profileId !== PRIVATE_BROWSER_PROFILE.id &&
-        !payload.loading &&
-        !payload.loadError &&
-        payload.url
-      ) {
-        recordBrowserHistory({
-          browserId: payload.browserId,
-          url: payload.url,
-          title: payload.title ?? null,
-        });
-      }
+      // History is recorded host-side from the same state change (both engines), and never for
+      // private-profile tabs; see src-tauri/src/browser/library/recorder.rs.
     };
 
     void listen<BrowserStateChangedPayload>("browser_state_changed", (event) => {
@@ -203,21 +287,38 @@ export function BrowserPane({
 
   useEffect(() => {
     const openFind = (action: BrowserShortcutAction) => {
+      if ((action === "back" || action === "forward") && chromiumEngineRef.current) {
+        runHistoryStepRef.current(action === "forward");
+        return;
+      }
       if (action !== "find") return;
       setFindOpen(true);
       setFindError(null);
     };
+    const focusChromiumAddress = (action: BrowserShortcutAction) => {
+      if (action !== "focus-address" || !isChromiumRef.current) return;
+      void focusBrowser(tab.browserId, { address: true }).catch((error: unknown) => {
+        setPaneAlert({ action: "Focus address bar", code: parseErrorCode(error) });
+      });
+    };
     const handleDomShortcut = (event: Event) => {
       const detail = (event as BrowserShortcutDomEvent).detail;
-      if (detail?.browserId === tab.browserId) openFind(detail.action);
+      if (detail?.browserId === tab.browserId) {
+        openFind(detail.action);
+        focusChromiumAddress(detail.action);
+      }
     };
     window.addEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
 
     let disposed = false;
     let shortcutCleanup: (() => void) | undefined;
     let downloadCleanup: (() => void) | undefined;
+    let downloadUpdateCleanup: (() => void) | undefined;
     void onBrowserShortcutRequested((payload) => {
-      if (payload.browserId === tab.browserId) openFind(payload.action);
+      if (payload.browserId === tab.browserId) {
+        openFind(payload.action);
+        focusChromiumAddress(payload.action);
+      }
     }).then((cleanup) => {
       if (disposed) cleanup();
       else shortcutCleanup = cleanup;
@@ -226,15 +327,35 @@ export function BrowserPane({
     });
     void onBrowserDownloadRequested((payload) => {
       if (payload.browserId !== tab.browserId) return;
-      setDownloadUrl(payload.targetUrl);
-      setDownloadStatus(null);
-      setDownloadNeedsConfirmation(payload.requiresConfirmation === true);
+      const needsConfirmation = payload.requiresConfirmation === true;
       // A new download re-reveals the shelf the user dismissed earlier, and refreshes it.
       setDownloadsShelfOpen(true);
       setDownloadsRefreshToken((current) => current + 1);
+      // A download the user clicked is saved to the download folder right away, as any browser
+      // does, and shows only on the shelf; an unattributed one waits for Save, and "ask where to
+      // save" waits for Save as, in the pane's download row.
+      if (!needsConfirmation && !askWhereToSaveRef.current) {
+        void runDownloadRef.current(payload.targetUrl, null);
+        return;
+      }
+      setDownloadUrl(payload.targetUrl);
+      setDownloadStatus(null);
+      setDownloadPhase("offer");
+      setDownloadNeedsConfirmation(needsConfirmation);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else downloadCleanup = cleanup;
+    }).catch((error: unknown) => {
+      if (!disposed) setPaneAlert({ action: "Download listener", code: parseErrorCode(error) });
+    });
+    void onBrowserDownloadUpdated((record) => {
+      if (record.browserId !== tab.browserId || record.createdAtMs < mountedAtMsRef.current) return;
+      if (seenDownloadIdsRef.current.has(record.id)) return;
+      seenDownloadIdsRef.current.add(record.id);
+      setDownloadsShelfOpen(true);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else downloadUpdateCleanup = cleanup;
     }).catch((error: unknown) => {
       if (!disposed) setPaneAlert({ action: "Download listener", code: parseErrorCode(error) });
     });
@@ -243,9 +364,90 @@ export function BrowserPane({
       disposed = true;
       shortcutCleanup?.();
       downloadCleanup?.();
+      downloadUpdateCleanup?.();
       window.removeEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
     };
   }, [tab.browserId]);
+
+  useEffect(() => {
+    const openLibrary = (event: Event) => {
+      // The toolbar also opens the Downloads view, which the shared detail type predates.
+      const detail = (event as CustomEvent<BrowserLibraryOpenDetail | BrowserLibraryOpenRequest>).detail;
+      if (detail?.browserId === tab.browserId) setLibraryView(detail.view);
+    };
+    window.addEventListener(BROWSER_LIBRARY_OPEN_EVENT, openLibrary);
+    return () => window.removeEventListener(BROWSER_LIBRARY_OPEN_EVENT, openLibrary);
+  }, [tab.browserId]);
+
+  // Open tabs for the omnibox "switch to tab" rows; private tabs are never offered elsewhere.
+  const isPrivatePane = tab.profileId === PRIVATE_BROWSER_PROFILE.id;
+  useEffect(() => {
+    if (!visible) return;
+    let disposed = false;
+    void Promise.resolve()
+      .then(() => listBrowsers())
+      .then((sessions) => {
+        if (disposed || !Array.isArray(sessions)) return;
+        setOpenTabs(sessions
+          .filter((session) => isPrivatePane || session.profileId !== PRIVATE_BROWSER_PROFILE.id)
+          .map((session) => ({ browserId: session.browserId, url: session.url, title: session.title ?? null })));
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, [isPrivatePane, liveTab.url, visible]);
+
+  // A file dropped from the OS lands on the window, not on this page: Windows and Linux
+  // consume the drop at app level, so the browser tab never hears about it and the files are
+  // discarded. Take the app-level drop when it is inside this pane and let the backend hand it
+  // to the tab (Chromium through DevTools, the platform webview through a replayed DragEvent).
+  useEffect(() => {
+    // macOS hands the drop to the child webview natively (lib.rs unregisters the window as a
+    // dragged type so the WKWebView is the destination), so replaying it there would deliver the
+    // same files twice. Only Windows and Linux discard it at app level.
+    if (!isTauri() || !visible || isMacHost()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ paths?: string[]; position: { x: number; y: number } }>(
+      "tauri://drag-drop",
+      (event) => {
+        if (disposed) return;
+        const el = containerRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        // The event carries a physical position; the pane rect and the tab bounds are logical.
+        const scale =
+          typeof window !== "undefined" && typeof window.devicePixelRatio === "number"
+            ? window.devicePixelRatio
+            : 1;
+        const logical = dragDropPositionToLogical(
+          event.payload.position,
+          scale,
+          isMacShortcutPlatform(),
+        );
+        const x = logical.x;
+        const y = logical.y;
+        const inside = x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+        if (!inside) return;
+        const paths = event.payload.paths ?? [];
+        if (paths.length === 0) return;
+        void invoke("cmd_browser_drop_paths", { paths, x, y }).catch(
+          () => false,
+        );
+      },
+    )
+      .then((off) => {
+        if (disposed) off();
+        else unlisten = off;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [visible]);
+
 
   useEffect(() => {
     const el = containerRef.current;
@@ -367,30 +569,84 @@ export function BrowserPane({
     setFindQuery("");
     setFindResult({ matchCount: 0, found: false });
     setFindError(null);
-    void clearBrowserFind(tab.browserId)
-      .then(() => setPaneAlert((current) => (current?.action === "Clear find" ? null : current)))
-      .catch((error: unknown) => setPaneAlert({ action: "Clear find", code: parseErrorCode(error) }));
+    // Closing find is a no-op when there is nothing to clear; a stale highlight is not worth an
+    // alert after the user dismissed the bar.
+    void clearBrowserFind(tab.browserId).catch(() => undefined);
   };
 
-  const saveDownload = async () => {
+  /** Puts a save that never reached the registry back in the row. A cancel the user asked for
+   * is not a failure: it reads Cancelled and offers Save again instead of Retry. */
+  const showUnrecordedDownloadError = (url: string, error: unknown) => {
+    const code = extractBrowserErrorCode(error);
+    setDownloadUrl(url);
+    if (code === "BROWSER_DOWNLOAD_CANCELLED") {
+      setDownloadPhase("offer");
+      setDownloadStatus("Cancelled");
+    } else {
+      setDownloadPhase("failed");
+      setDownloadStatus(browserErrorText(code));
+    }
+  };
+
+  /** Saves `url` to `filePath`, or to a free name in the download folder when it is null. The
+   * started save lives on the shelf, so the row goes away. */
+  const runDownload = async (url: string, filePath: string | null) => {
+    setDownloadUrl(null);
+    setDownloadStatus(null);
+    setDownloadPhase("offer");
+    setDownloadNeedsConfirmation(false);
+    setDownloadsShelfOpen(true);
+    try {
+      if (filePath) await downloadBrowserUrlWithSession(tab.browserId, url, filePath);
+      else await downloadBrowserUrlToFolder(tab.browserId, url);
+    } catch (error) {
+      // The host says whether the registry took the download: if so the failure shows on its
+      // shelf row; if not (a refused URL, destination or cookie read) the row keeps it with Retry.
+      if (!browserDownloadErrorRegistered(error)) {
+        showUnrecordedDownloadError(url, error);
+      }
+    } finally {
+      // The registry only gains a record (completed or failed) once this call settles.
+      setDownloadsRefreshToken((current) => current + 1);
+    }
+  };
+  const runDownloadRef = useRef(runDownload);
+  runDownloadRef.current = runDownload;
+
+  const saveDownloadAs = async () => {
     if (!downloadUrl) return;
-    let saveAttempted = false;
     try {
       const filePath = await save({ defaultPath: suggestedDownloadName(downloadUrl) });
       if (!filePath) return;
-      saveAttempted = true;
-      setDownloadStatus("Saving…");
-      await downloadBrowserUrlWithSession(tab.browserId, downloadUrl, filePath);
-      setDownloadStatus("Saved");
-      setDownloadNeedsConfirmation(false);
+      await runDownload(downloadUrl, filePath);
     } catch (error) {
-      const code = extractBrowserErrorCode(error);
-      setDownloadStatus(code === "BROWSER_DOWNLOAD_CANCELLED" ? "Cancelled" : code);
-    } finally {
-      // The registry only gains a record (completed or failed) once this call settles.
-      if (saveAttempted) setDownloadsRefreshToken((current) => current + 1);
+      showUnrecordedDownloadError(downloadUrl, error);
     }
   };
+
+  const dismissDownload = () => {
+    setDownloadUrl(null);
+    setDownloadStatus(null);
+    setDownloadNeedsConfirmation(false);
+    setDownloadPhase("offer");
+  };
+
+  // An offer belongs to the page that made it: navigating away drops an unanswered one, while a
+  // failed save stays until dismissed or retried.
+  const downloadOfferPageRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (downloadUrl && downloadPhase === "offer") {
+      if (downloadOfferPageRef.current === null) downloadOfferPageRef.current = liveTab.url;
+      else if (downloadOfferPageRef.current !== liveTab.url) {
+        downloadOfferPageRef.current = null;
+        setDownloadUrl(null);
+        setDownloadStatus(null);
+        setDownloadNeedsConfirmation(false);
+      }
+    } else {
+      downloadOfferPageRef.current = null;
+    }
+  }, [downloadPhase, downloadUrl, liveTab.url]);
 
   const openDownloadExternally = (url: string) => {
     void Promise.resolve(openExternalUrl(url))
@@ -399,12 +655,59 @@ export function BrowserPane({
   };
 
   return (
-    <div className="flex flex-col w-full h-full bg-[#4b4b4b] overflow-hidden">
-      <div ref={toolbarRef}>
+    <div className="flex flex-col w-full h-full bg-background overflow-hidden">
+      <div ref={toolbarRef} className="relative">
+        {liveTab.loading && liveTab.engine !== "chromium" ? (
+          <div
+            role="progressbar"
+            aria-label="Loading page"
+            aria-busy="true"
+            data-testid="browser-loading-bar"
+            className="pointer-events-none absolute inset-x-0 top-0 z-20 h-0.5 overflow-hidden bg-primary/15"
+          >
+            <div className="h-full w-1/3 animate-pulse rounded-full bg-primary" />
+          </div>
+        ) : null}
         {/* A Chromium tab draws its own toolbar (address bar, extensions, menu) inside the pane. */}
         {liveTab.engine === "chromium" ? null : (
-          <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} />
+          <BrowserToolbar tab={liveTab} onNavigate={onNavigate} onReload={onReload} designFeedbackTargets={designFeedbackTargets} openTabs={openTabs} />
         )}
+        {liveTab.engine === "chromium" || !browserSettings.showBookmarkBar ? null : (
+          <BrowserBookmarkBar tree={bookmarkTree} onOpen={onNavigate} />
+        )}
+        {chromiumEngine && (navigation.restoredBack || navigation.restoredForward) ? (
+          <div className="flex items-center gap-1 border-b border-border bg-card px-3 py-1 text-xs" data-testid="browser-restored-history">
+            <span className="text-muted-foreground">Earlier pages in this tab</span>
+            {navigation.restoredBack ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-muted"
+                aria-label="Back"
+                onClick={() => runHistoryStep(false)}
+              >
+                <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                Back
+              </button>
+            ) : null}
+            {navigation.restoredForward ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-muted"
+                aria-label="Forward"
+                onClick={() => runHistoryStep(true)}
+              >
+                Forward
+                <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {/* Shown for both engines: the Chromium tab hides the Ferryx toolbar. */}
+        <div className="flex justify-end px-3 empty:hidden">
+          <BrowserMediaCaptureIndicator browserId={tab.browserId} />
+        </div>
+        <BrowserPermissionPrompts browserId={tab.browserId} />
+        <BrowserSignInHandoffBar tab={liveTab} />
         {findOpen ? (
           <div className="flex items-center gap-1.5 border-b border-border bg-popover px-3 py-1.5" data-testid="browser-find-bar">
             <input
@@ -430,7 +733,7 @@ export function BrowserPane({
             <button type="button" aria-label="Previous match" onClick={() => void runFind(findQuery, true)} className="rounded p-1 hover:bg-accent"><ChevronUp className="size-3.5" /></button>
             <button type="button" aria-label="Next match" onClick={() => void runFind(findQuery, false)} className="rounded p-1 hover:bg-accent"><ChevronDown className="size-3.5" /></button>
             <button type="button" aria-label="Close find" onClick={closeFind} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
-            {findError ? <span className="text-[10px] text-destructive">{findError}</span> : null}
+            {findError ? <span className="text-[10px] text-destructive" data-error-code={findError}>{browserErrorText(findError)}</span> : null}
           </div>
         ) : null}
         {downloadUrl ? (
@@ -446,12 +749,32 @@ export function BrowserPane({
                 Needs confirmation: the page started this without a click
               </span>
             ) : null}
-            {downloadStatus ? <span className="text-muted-foreground">{downloadStatus}</span> : null}
-            <button type="button" onClick={() => openDownloadExternally(downloadUrl)} className="flex items-center gap-1 rounded border border-border px-2 py-1 hover:bg-accent"><ExternalLink className="size-3" /> Open in system browser</button>
-            <button type="button" onClick={() => void saveDownload()} className="rounded border border-border px-2 py-1 hover:bg-accent">{downloadNeedsConfirmation ? "Save" : "Save as…"}</button>
-            <button type="button" aria-label="Dismiss download" onClick={() => { setDownloadUrl(null); setDownloadStatus(null); setDownloadNeedsConfirmation(false); }} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
+            {downloadStatus ? (
+              <span
+                data-testid="browser-download-status"
+                data-phase={downloadPhase}
+                className={downloadPhase === "failed" ? "text-destructive" : "text-muted-foreground"}
+              >
+                {downloadStatus}
+              </span>
+            ) : null}
+            <button type="button" onClick={() => void runDownload(downloadUrl, null)} className="rounded bg-primary px-2 py-1 font-medium text-primary-foreground hover:bg-primary/90">{downloadPhase === "failed" ? "Retry" : "Save"}</button>
+            <button type="button" onClick={() => void saveDownloadAs()} className="rounded border border-border px-2 py-1 hover:bg-accent">Save as…</button>
+            {/* Inline, not a portaled menu: the native page view paints over any popover below this row. */}
+            <button
+              type="button"
+              aria-label="Open in system browser"
+              title="Open in system browser"
+              onClick={() => openDownloadExternally(downloadUrl)}
+              className="rounded p-1 hover:bg-accent"
+            >
+              <ExternalLink className="size-3.5" />
+            </button>
+            <button type="button" aria-label="Dismiss download" onClick={dismissDownload} className="rounded p-1 hover:bg-accent"><X className="size-3.5" /></button>
           </div>
         ) : null}
+        <BrowserEngineFallbackNotice browserId={tab.browserId} />
+        <BrowserVaultBar browserId={liveTab.browserId} url={liveTab.url} loading={Boolean(liveTab.loading)} />
         {paneAlert ? (
           <div
             role="alert"
@@ -460,7 +783,7 @@ export function BrowserPane({
           >
             <CircleAlert className="size-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate">
-              {paneAlert.action} failed: {paneAlert.code}
+              {paneAlert.action} failed: {browserErrorText(paneAlert.code)}
             </span>
           </div>
         ) : null}
@@ -471,7 +794,7 @@ export function BrowserPane({
           >
             <CircleAlert className="size-3.5 shrink-0" />
             <span className="min-w-0 flex-1 truncate">
-              표시 실패: {displayError.code} ({displayError.operation})
+              Couldn't show the page: {displayError.code} ({displayError.operation})
             </span>
             <button
               type="button"
@@ -485,6 +808,7 @@ export function BrowserPane({
         ) : null}
         {downloadsShelfOpen ? (
           <BrowserDownloadsShelf
+            browserId={tab.browserId}
             onClose={() => setDownloadsShelfOpen(false)}
             refreshToken={downloadsRefreshToken}
           />
@@ -506,15 +830,39 @@ export function BrowserPane({
           onNavigate(url);
         }}
       >
+        {libraryView ? (
+          <BrowserLibraryPanel
+            view={libraryView}
+            onViewChange={setLibraryView}
+            onOpen={(url) => {
+              setLibraryView(null);
+              onNavigate(url);
+            }}
+            onClose={() => setLibraryView(null)}
+          />
+        ) : null}
         {liveTab.loadError ? (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-8" data-testid="browser-load-error">
-            <div className="max-w-lg rounded-lg border border-border bg-card p-5 shadow-lg">
-              <div className="text-sm font-semibold">This page could not be loaded</div>
-              <div className="mt-2 break-all font-mono text-[11px] text-muted-foreground">{liveTab.url}</div>
-              <div className="mt-2 text-xs text-destructive">{liveTab.loadError}</div>
-              <button type="button" onClick={() => onReload()} className="mt-4 flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs hover:bg-accent">
-                <RefreshCw className="size-3.5" /> Retry
-              </button>
+            <div className="w-full max-w-lg rounded-lg border border-border bg-card p-5 text-card-foreground shadow-lg">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <CircleAlert className="size-4 shrink-0 text-destructive" />
+                This page could not be loaded
+              </div>
+              <div className="mt-2 truncate font-mono text-[11px] text-muted-foreground" title={liveTab.url}>{liveTab.url}</div>
+              <div className="mt-2 break-words text-xs text-destructive">{liveTab.loadError}</div>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <button type="button" onClick={() => onReload()} className="flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  <RefreshCw className="size-3.5" /> Retry
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openDownloadExternally(liveTab.url)}
+                  data-testid="browser-load-error-open-external"
+                  className="flex items-center gap-1.5 rounded border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <ExternalLink className="size-3.5" /> Open in system browser
+                </button>
+              </div>
             </div>
           </div>
         ) : null}

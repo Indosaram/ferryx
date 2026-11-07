@@ -38,6 +38,11 @@ export type ShortcutActionId =
   | "browser.back"
   | "browser.forward"
   | "browser.find"
+  | "browser.bookmarkPage"
+  | "browser.print"
+  | "browser.zoomIn"
+  | "browser.zoomOut"
+  | "browser.zoomReset"
   | "terminal.splitRight"
   | "terminal.splitDown"
   | "terminal.unsplit"
@@ -155,6 +160,45 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     title: "Find in browser page",
     group: "Tabs",
     binding: { key: "f", mod: true },
+    source: "ferryx",
+  },
+  {
+    id: "browser.bookmarkPage",
+    title: "Bookmark this page",
+    group: "Tabs",
+    binding: { key: "d", mod: true },
+    source: "ferryx",
+  },
+  {
+    // Listed before commandPalette.open, whose Mod+P alias it takes over in a browser tab.
+    id: "browser.print",
+    title: "Print browser page",
+    group: "Tabs",
+    binding: { key: "p", mod: true },
+    source: "ferryx",
+  },
+  {
+    // The browser.zoom* actions are listed before the terminal font zoom (zoom.*) whose chords
+    // they take over while a browser tab owns shortcuts.
+    id: "browser.zoomIn",
+    title: "Zoom in browser page",
+    group: "View",
+    binding: { key: "=", mod: true },
+    aliases: [{ key: "+", mod: true, shift: true }],
+    source: "ferryx",
+  },
+  {
+    id: "browser.zoomOut",
+    title: "Zoom out browser page",
+    group: "View",
+    binding: { key: "-", mod: true },
+    source: "ferryx",
+  },
+  {
+    id: "browser.zoomReset",
+    title: "Reset browser page zoom",
+    group: "View",
+    binding: { key: "0", mod: true },
     source: "ferryx",
   },
   {
@@ -577,7 +621,15 @@ export type ShortcutConflict =
   | { readonly kind: "reserved"; readonly chord: ReservedChord };
 
 /** Terminal actions App disables while a browser surface owns shortcuts, so they may share browser chords. */
-const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>(["terminal.focusNext", "terminal.focusPrevious", "terminal.search"]);
+const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>([
+  "terminal.focusNext",
+  "terminal.focusPrevious",
+  "terminal.search",
+  "terminal.splitRight",
+  "zoom.in",
+  "zoom.out",
+  "zoom.reset",
+]);
 
 function surfacesAreExclusive(a: ShortcutActionId, b: ShortcutActionId): boolean {
   return (a.startsWith("browser.") && BROWSER_EXCLUSIVE_TERMINAL_ACTIONS.has(b))
@@ -614,6 +666,10 @@ export function findConflict(
   if (reserved) return { kind: "reserved", chord: reserved };
   for (const shortcut of resolvedShortcuts(overrides, preset, isMac)) {
     if (shortcut.id === actionId || surfacesAreExclusive(actionId, shortcut.id)) continue;
+    // Browser actions fire only while a browser tab owns shortcuts and there deliberately
+    // pre-empt app/terminal chords (browser.print over the palette's Mod+P, bookmarkPage over
+    // Mod+D), so they shadow a non-browser action in that tab instead of taking its chord.
+    if (shortcut.id.startsWith("browser.") && !actionId.startsWith("browser.")) continue;
     if ([shortcut.binding, ...(shortcut.aliases ?? [])].some((candidate) => effectiveChord(candidate, isMac) === chord)) {
       return { kind: "action", actionId: shortcut.id, title: shortcut.title };
     }
