@@ -191,6 +191,7 @@ pub mod implementation {
         child
             .with_webview(move |platform_webview| {
                 let widget = platform_webview.inner().clone();
+                widget.drag_dest_unset();
                 if let Some(parent) = widget.parent() {
                     if let Ok(container) = parent.downcast::<gtk::Container>() {
                         container.remove(&widget);
