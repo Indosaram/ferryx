@@ -2293,9 +2293,16 @@ await section("import", async (record) => {
     if (found) return { ...host.click(found.x, found.y), at: [found.x, found.y], via: "pixels" };
     return { ...(await clickWord(word, { timeout: 4000, pick: "last" })), via: "ocr" };
   };
-  const results = async () => until(() => {
+  // `exclude` is the results panel as it stood before this import. The panel keeps the previous
+  // import's lines until the new one lands, so without it a click that never imported anything
+  // (run 42319828844: the JSON pass missed the format dropdown and read the Chrome import again)
+  // still looks like a finished import.
+  const results = async (exclude = []) => until(() => {
     const words = ocr(probeShot()) ?? [];
-    return words.some((word) => word.text === "imported" || word.text === "imported,") ? words : null;
+    const used = words.some((word) => word.text === "imported" || word.text === "imported,");
+    if (!used) return null;
+    const key = exclude.join("|");
+    return key && lines(words).join("|") === key ? null : words;
   }, 120000, 1500);
   const lines = (words) => {
     const rows = new Map();
@@ -2365,13 +2372,23 @@ await section("import", async (record) => {
     host.key({ key: "End" });
     host.key({ key: "Enter" });
     await sleep(800);
-    const chooser = await until(() => findPhrase(ocr(probeShot()) ?? [], "File format")[0] ?? null, 6000);
+    // macOS OCR misses the "File format" label but reads its default value (run 41786025622), and
+    // on run 42319828844 it missed both on the first look and read them a moment later, so the
+    // anchor is retried instead of sampled once.
+    const anchor = await until(() => {
+      const words = ocr(probeShot()) ?? [];
+      const label = findPhrase(words, "File format")[0] ?? null;
+      if (label) {
+        const beside = words.find((word) => word.top > label.top + 8 && word.top < label.top + 50 && Math.abs(word.left - label.left) < 40);
+        if (beside) return { chooser: label, value: beside };
+      }
+      const fallback = words.find((word) => word.text === "1Password");
+      return fallback ? { chooser: label, value: fallback } : null;
+    }, 12000, 600);
+    const chooser = anchor?.chooser ?? null;
+    const value = anchor?.value ?? null;
     let formatPicked = false;
     let formatVia = null;
-    // macOS OCR misses the "File format" label but reads its default value (run 41786025622).
-    const value = chooser
-      ? (ocr(probeShot()) ?? []).find((word) => word.top > chooser.top + 8 && word.top < chooser.top + 50 && Math.abs(word.left - chooser.left) < 40)
-      : (ocr(probeShot()) ?? []).find((word) => word.text === "1Password");
     if (value) {
       const openValue = async () => {
         host.click(value.left + 20, value.top + Math.round(value.height / 2));
@@ -2419,9 +2436,21 @@ await section("import", async (record) => {
     }
     // The picked path shows next to "Choose file…"; Import stays disabled until it does.
     const chosen = Boolean(await until(() => findWord(ocr(probeShot()) ?? [], "", { match: (word) => word.text.includes(basename(path)) }), 10000));
-    const imported = await clickDialogButton("primary", "Import");
-    const done = await results();
-    const outcome = { dialog: opened.ok, format_picked: formatPicked, format_via: formatVia, format_anchor: chooser ? "label" : value ? "value" : null, choose: choose.ok, file_shown: chosen, import_clicked: imported.ok, lines: lines(done) };
+    // Only import once the format and the file are both really chosen: pressing Import without
+    // them re-runs whatever format the dialog still held, and the panel then shows that import's
+    // lines, which read as success. The step fails here instead, naming the stage it stopped at.
+    const blocked = !formatPicked ? "FORMAT_NOT_PICKED" : !choose.ok ? "CHOOSE_NOT_CLICKED" : !chosen ? "FILE_NOT_SHOWN" : null;
+    const before = lines(ocr(probeShot()) ?? []);
+    const imported = blocked ? { ok: false } : await clickDialogButton("primary", "Import");
+    const done = blocked ? null : await results(before);
+    const outcome = { dialog: opened.ok, format_picked: formatPicked, format_via: formatVia, format_anchor: chooser ? "label" : value ? "value" : null, choose: choose.ok, file_shown: chosen, import_clicked: imported.ok, blocked, before, lines: lines(done) };
+    if (blocked) {
+      await step(`import-${label}`, `Import a ${format} file through the dialog's file picker`, [["import", () => ({ ok: false, stderr: `${blocked}: the dialog never showed the ${format} file selected`, ...outcome })]], { any: ["imported"] });
+      await clickDialogButton("secondary", "Done");
+      host.key({ key: "Escape" });
+      await sleep(1000);
+      return outcome;
+    }
     await step(`import-${label}`, `Import a ${format} file through the dialog's file picker`, [["import", () => ({ ok: Boolean(done), ...outcome })]], { any: ["imported"] });
     await clickDialogButton("secondary", "Done");
     host.key({ key: "Escape" });
