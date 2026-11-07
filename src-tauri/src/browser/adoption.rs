@@ -229,6 +229,8 @@ mod tests {
                 url: "https://example.com/".into(),
                 title: None,
                 visible: true,
+                engine: crate::browser::model::BrowserEngine::System,
+                zoom_factor: 1.0,
             },
             adoption: BrowserAdoption {
                 adopted: Some(false),

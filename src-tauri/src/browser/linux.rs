@@ -71,6 +71,50 @@ pub mod implementation {
         containers.remove(window_label)
     }
 
+    /// The visibility calls the overlay makes on a child webview widget, kept behind a trait so
+    /// the reveal/hide rules below can be checked without a display.
+    trait OverlayChildWidget {
+        fn show_all(&self);
+        fn show(&self);
+        fn hide(&self);
+        fn set_no_show_all(&self, no_show_all: bool);
+    }
+
+    impl OverlayChildWidget for webkit2gtk::WebView {
+        fn show_all(&self) {
+            WidgetExt::show_all(self);
+        }
+        fn show(&self) {
+            WidgetExt::show(self);
+        }
+        fn hide(&self) {
+            WidgetExt::hide(self);
+        }
+        fn set_no_show_all(&self, no_show_all: bool) {
+            WidgetExt::set_no_show_all(self, no_show_all);
+        }
+    }
+
+    /// First reveal of a webview put into the overlay. Showing the toplevel window (tao maps
+    /// `Window::show` to `gtk_widget_show_all`) walks every descendant, so a browser webview that
+    /// was hidden because another tab, Settings or the library took its place would be painted
+    /// over the app again on every CLI focus, tab switch or notification click. Opting the
+    /// webview out of `show_all` leaves its visibility to `set_child_visible` alone. Its own
+    /// internals are shown once here, before the opt-out, so later reveals only need `show`.
+    fn reveal_attached_child<W: OverlayChildWidget>(widget: &W) {
+        widget.show_all();
+        widget.set_no_show_all(true);
+    }
+
+    /// Plain `show` on purpose: `show_all` is a no-op for a widget opted out of it.
+    fn set_child_widget_visible<W: OverlayChildWidget>(widget: &W, visible: bool) {
+        if visible {
+            widget.show();
+        } else {
+            widget.hide();
+        }
+    }
+
     /// The counterpart every registration needs: the store is keyed by window
     /// label, so without this call a destroyed window's overlay (and every
     /// webview it holds) is retained for the process lifetime, and a window that
@@ -168,7 +212,7 @@ pub mod implementation {
 
                     widget.set_size_request(w, h);
                     container.fixed.put(&widget, x, y);
-                    widget.show_all();
+                    reveal_attached_child(&widget);
                     container.webviews.insert(browser_id_owned, widget);
                 }
             })
@@ -206,11 +250,7 @@ pub mod implementation {
         prune_dead_overlays(&mut containers);
         for container in containers.values_mut() {
             if let Some(widget) = container.webviews.get(browser_id) {
-                if visible {
-                    widget.show();
-                } else {
-                    widget.hide();
-                }
+                set_child_widget_visible(widget, visible);
                 return Ok(true);
             }
         }
@@ -232,6 +272,67 @@ pub mod implementation {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::cell::Cell;
+
+        /// Models the GTK3 rules the overlay depends on: `show_all` marks a widget visible
+        /// unless it opted out with `no_show_all`; `show`/`hide` always apply.
+        #[derive(Default)]
+        struct FakeWidget {
+            visible: Cell<bool>,
+            no_show_all: Cell<bool>,
+        }
+
+        impl OverlayChildWidget for FakeWidget {
+            fn show_all(&self) {
+                if !self.no_show_all.get() {
+                    self.visible.set(true);
+                }
+            }
+            fn show(&self) {
+                self.visible.set(true);
+            }
+            fn hide(&self) {
+                self.visible.set(false);
+            }
+            fn set_no_show_all(&self, no_show_all: bool) {
+                self.no_show_all.set(no_show_all);
+            }
+        }
+
+        /// What showing the toplevel window does to every descendant (tao's `Window::show`).
+        fn window_show_all(children: &[&FakeWidget]) {
+            for child in children {
+                child.show_all();
+            }
+        }
+
+        #[test]
+        fn showing_the_window_does_not_reveal_a_hidden_browser_webview() {
+            let tab_a = FakeWidget::default();
+            let tab_b = FakeWidget::default();
+            reveal_attached_child(&tab_a);
+            reveal_attached_child(&tab_b);
+            assert!(tab_a.visible.get() && tab_b.visible.get());
+
+            // Tab B became the active tab, so tab A's webview is hidden.
+            set_child_widget_visible(&tab_a, false);
+            // A CLI `tab switch` or `focus` presents the window, which runs show_all on it.
+            window_show_all(&[&tab_a, &tab_b]);
+
+            assert!(!tab_a.visible.get(), "a hidden tab must stay hidden after the window is shown");
+            assert!(tab_b.visible.get());
+        }
+
+        #[test]
+        fn an_opted_out_webview_is_still_revealed_by_set_child_visible() {
+            let tab = FakeWidget::default();
+            reveal_attached_child(&tab);
+            set_child_widget_visible(&tab, false);
+            assert!(!tab.visible.get());
+
+            set_child_widget_visible(&tab, true);
+            assert!(tab.visible.get());
+        }
 
         #[test]
         fn overlay_store_is_keyed_by_window_label() {

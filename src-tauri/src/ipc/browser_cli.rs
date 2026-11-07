@@ -40,6 +40,12 @@ pub enum BrowserCliRequest {
         #[serde(default)]
         col: Option<u32>,
     },
+    /// A URL the OS asked a second Ferryx process to open (Ferryx as the default browser).
+    /// The running app opens it in a new browser tab.
+    #[serde(rename_all = "camelCase")]
+    OpenInboundUrl {
+        url: String,
+    },
     #[serde(rename_all = "camelCase")]
     Open {
         url: String,
@@ -208,10 +214,30 @@ pub enum BrowserCliRequest {
         #[serde(default, alias = "duration_ms")]
         duration_ms: Option<u64>,
     },
+    /// QA probe: drops the file at `path` on the page at viewport point (`x`, `y`), CSS
+    /// pixels, through CDP. `serde_json::Number` keeps the enum `Eq`.
+    #[serde(rename_all = "camelCase")]
+    DropFiles {
+        #[serde(alias = "browser_id")]
+        browser_id: String,
+        path: String,
+        x: serde_json::Number,
+        y: serde_json::Number,
+    },
     #[serde(rename_all = "camelCase")]
     RemoteAttach {
         #[serde(default)]
         protocol_version: Option<u32>,
+    },
+    /// Settings > Browser > Extensions from the CLI: `list`, or `remove` of `extension_id`
+    /// (Chrome confirms the removal in its own dialog, as from the Settings row).
+    #[serde(rename_all = "camelCase")]
+    Extensions {
+        action: String,
+        #[serde(default, alias = "extension_id")]
+        extension_id: Option<String>,
+        #[serde(default)]
+        profile: Option<String>,
     },
 }
 
@@ -721,6 +747,14 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
                 .map_err(|e| IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string()))
         }
         RemoteBrowserOperation::Reload { browser_id } => {
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+            if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+                let state = manager.begin_reload(&browser_id)?;
+                crate::browser::cef_engine::reload(&browser_id, false)?;
+                return serde_json::to_value(&state).map_err(|e| {
+                    IpcError::new(IpcErrorCode::BrowserAutomationFailed, e.to_string())
+                });
+            }
             let state = manager.begin_reload(&browser_id)?;
             let webview = app
                 .get_webview(&state.webview_label)
@@ -1370,11 +1404,11 @@ pub async fn execute_remote_operation<R: tauri::Runtime>(
         }
         RemoteBrowserOperation::Snapshot { browser_id } => {
             let state = manager.get_state(&browser_id)?;
-            let webview = app
-                .get_webview(&state.webview_label)
-                .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-            let result = crate::ipc::browser::eval_webview(
-                webview,
+            // Both engines: the Chromium engine over its DevTools API, the webview directly.
+            let result = crate::browser::agent::page::eval(
+                app,
+                manager,
+                &browser_id,
                 crate::ipc::browser::AUTOMATION_SNAPSHOT_SCRIPT.to_string(),
             )
             .await?;
@@ -1440,6 +1474,32 @@ pub struct BrowserCliEnvelope {
     pub token: String,
     #[serde(flatten)]
     pub request: BrowserCliRequest,
+}
+
+/// A paired controller's credential, sent beside the transport token
+/// (`ferryx browser controllers pair`). Never logged or echoed.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerAuth {
+    pub id: String,
+    pub secret: String,
+}
+
+impl std::fmt::Debug for ControllerAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControllerAuth").field("id", &self.id).field("secret", &"[redacted]").finish()
+    }
+}
+
+/// Optional fields of a CLI envelope read beside the request: the controller credential and
+/// the controller management sub-protocol (pairing, grants), which is not a browser request.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCliEnvelopeExtras {
+    #[serde(default)]
+    pub controller_auth: Option<ControllerAuth>,
+    #[serde(default)]
+    pub agent: Option<crate::browser::agent::wire::AgentRequest>,
 }
 
 pub const BROWSER_CLI_UNAUTHORIZED: &str = "BROWSER_CLI_UNAUTHORIZED";
@@ -1536,7 +1596,12 @@ pub enum BrowserCliResponse {
     Snapshot {
         snapshot: BrowserAutomationSnapshot,
     },
-    Acted,
+    /// `dispatched`/`applied` are flattened into the response; an old client that reads only
+    /// `type` still sees `acted`.
+    Acted {
+        #[serde(flatten)]
+        outcome: crate::browser::model::BrowserActOutcome,
+    },
     Opened {
         browser: BrowserSessionSummary,
         adoption: crate::browser::adoption::BrowserAdoption,
@@ -1599,10 +1664,17 @@ pub enum BrowserCliResponse {
     Highlighted {
         highlight: crate::browser::picker::BrowserHighlightResult,
     },
+    FilesDropped {
+        calls: serde_json::Value,
+    },
+    Extensions {
+        listing: serde_json::Value,
+    },
     #[serde(rename_all = "camelCase")]
     FileOpened {
         path: String,
     },
+    InboundUrlOpened,
     Error {
         code: String,
         message: String,
@@ -1852,6 +1924,16 @@ pub fn start_browser_cli_server<R: tauri::Runtime>(
     manager: Arc<BrowserManager>,
 ) -> Result<BrowserCliServerStart, BrowserError> {
     start_browser_cli_server_at_path(app, manager, &browser_cli_socket_path())
+}
+
+/// Test seam: serves the browser CLI endpoint at `path` (a socket on Unix, a port file elsewhere).
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) fn start_browser_cli_server_for_test<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    manager: Arc<BrowserManager>,
+    path: &Path,
+) -> Result<BrowserCliServerStart, BrowserError> {
+    start_browser_cli_server_at_path(app, manager, path)
 }
 
 #[cfg(not(unix))]
@@ -2109,12 +2191,45 @@ where
             // Authorization is decided before the command is interpreted, so an
             // unauthorized peer learns nothing about which commands exist or
             // whether its arguments named a real browser session.
+            let extras = serde_json::from_str::<serde_json::Value>(line.trim())
+                .ok()
+                .filter(|value| {
+                    value
+                        .get("token")
+                        .and_then(|token| token.as_str())
+                        .is_some_and(|token| tokens_match(expected_token.as_str(), token))
+                })
+                .map(|value| serde_json::from_value::<BrowserCliEnvelopeExtras>(value).unwrap_or_default());
+            if let Some(agent) = extras.as_ref().and_then(|extras| extras.agent.clone()) {
+                let auth = extras.as_ref().and_then(|extras| extras.controller_auth.clone());
+                let response = crate::browser::agent::wire::execute(&app, auth.as_ref(), agent).await;
+                let mut text = serde_json::to_string(&response)
+                    .map_err(|error| BrowserError::Internal(error.to_string()))?;
+                text.push('\n');
+                writer.write_all(text.as_bytes()).await.map_err(|error| BrowserError::Internal(error.to_string()))?;
+                writer.flush().await.map_err(|error| BrowserError::Internal(error.to_string()))?;
+                return Ok(());
+            }
             match serde_json::from_str::<BrowserCliEnvelope>(line.trim()) {
                 Ok(envelope) if tokens_match(expected_token.as_str(), &envelope.token) => {
-                    if matches!(envelope.request, BrowserCliRequest::RemoteAttach { .. }) {
-                        is_remote_attach = true;
+                    let auth = extras.and_then(|extras| extras.controller_auth);
+                    match crate::browser::agent::service::admit_cli(&manager, auth.as_ref(), &envelope.request).await {
+                        crate::browser::agent::service::Admission::Refused(error) => error_response(error),
+                        crate::browser::agent::service::Admission::Allowed(admitted) => {
+                            use crate::browser::agent::service as agent;
+                            if matches!(envelope.request, BrowserCliRequest::RemoteAttach { .. }) {
+                                is_remote_attach = true;
+                            }
+                            let request = agent::with_resolved_tab(envelope.request, admitted.resolved_tab);
+                            let response = match admitted.fence {
+                                Some(fence) => {
+                                    agent::ACT_FENCE.scope(fence, execute_request(&app, &manager, request)).await
+                                }
+                                None => execute_request(&app, &manager, request).await,
+                            };
+                            agent::filter_response(admitted.listing, &manager, response)
+                        }
                     }
-                    execute_request(&app, &manager, envelope.request).await
                 }
                 Ok(_) => unauthorized(),
                 Err(error) => {
@@ -2325,7 +2440,7 @@ where
 /// CLI reload, matching `cmd_browser_reload` without a hard reload: the GUI toolbar is told
 /// about the loading state, and a failed reload clears `loading` and records the error
 /// instead of leaving the session stuck. The webview is resolved first, so a missing one
-/// leaves the session untouched.
+/// leaves the session untouched. An engine (CEF) tab has no webview and reloads in the engine.
 #[cfg(feature = "desktop")]
 fn reload_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -2338,14 +2453,7 @@ fn reload_browser_session<R: tauri::Runtime>(
             crate::browser::BrowserStateChangedPayload::from(state),
         );
     };
-    let label = manager.get_webview_label(browser_id)?;
-    let webview = app
-        .get_webview(&label)
-        .ok_or_else(|| BrowserError::WebviewNotFound(label.clone()))?;
-    let state = manager.begin_reload(browser_id)?;
-    emit_state(&state);
-    if let Err(error) = webview.reload() {
-        let message = error.to_string();
+    let reload_failed = |message: String| -> IpcError {
         if let Ok(error_state) = manager.update_navigation_state(
             browser_id,
             None,
@@ -2357,9 +2465,24 @@ fn reload_browser_session<R: tauri::Runtime>(
         ) {
             emit_state(&error_state);
         }
-        return Err(BrowserError::NavigationFailed(message).into());
+        BrowserError::NavigationFailed(message).into()
+    };
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::cef_engine::is_cef_tab(browser_id) {
+        let state = manager.begin_reload(browser_id)?;
+        emit_state(&state);
+        return crate::browser::cef_engine::reload(browser_id, false)
+            .map_err(|error| reload_failed(error.to_string()));
     }
-    Ok(())
+    let label = manager.get_webview_label(browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| BrowserError::WebviewNotFound(label.clone()))?;
+    let state = manager.begin_reload(browser_id)?;
+    emit_state(&state);
+    webview
+        .reload()
+        .map_err(|error| reload_failed(error.to_string()))
 }
 
 #[cfg(feature = "desktop")]
@@ -2378,9 +2501,11 @@ async fn execute_request<R: tauri::Runtime>(
                 Err(error) => error_response(error),
             }
         }
-        BrowserCliRequest::Act { request } => {
+        BrowserCliRequest::Act { mut request } => {
+            // A postcondition wait is bounded like `wait`, inside the CLI's response timeout.
+            request.postcondition = request.postcondition.map(clamp_cli_wait_condition);
             match browser_automation_act(app.clone(), manager, request).await {
-                Ok(()) => BrowserCliResponse::Acted,
+                Ok(outcome) => BrowserCliResponse::Acted { outcome },
                 Err(error) => error_response(error),
             }
         }
@@ -2520,7 +2645,7 @@ async fn execute_request<R: tauri::Runtime>(
             }
         }
         BrowserCliRequest::Focus { browser_id } => {
-            match focus_browser_session(app, manager, &browser_id) {
+            match focus_browser_session(app, manager, &browser_id, false) {
                 Ok(()) => BrowserCliResponse::Focused,
                 Err(error) => error_response(error),
             }
@@ -2695,7 +2820,7 @@ async fn execute_request<R: tauri::Runtime>(
                 }
             };
 
-            if let Err(error) = focus_browser_session(app, manager, &session.browser_id) {
+            if let Err(error) = focus_browser_session(app, manager, &session.browser_id, false) {
                 return error_response(error);
             }
 
@@ -2909,10 +3034,80 @@ async fn execute_request<R: tauri::Runtime>(
                 Err(error) => error_response(error),
             }
         }
+        BrowserCliRequest::DropFiles {
+            browser_id,
+            path,
+            x,
+            y,
+        } => {
+            if !(cfg!(debug_assertions) || std::env::var_os("FERRYX_DATA_DIR").is_some()) {
+                return error_response(IpcError::new(
+                    IpcErrorCode::Unsupported,
+                    "drop-files is a QA probe: debug builds or isolated runs (FERRYX_DATA_DIR) only",
+                ));
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+            {
+                let _ = (browser_id, path, x, y);
+                error_response(IpcError::new(
+                    IpcErrorCode::Unsupported,
+                    "drop-files needs the Chromium engine",
+                ))
+            }
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+            {
+                let (Some(x), Some(y)) = (x.as_f64(), y.as_f64()) else {
+                    return error_response(IpcError::new(
+                        IpcErrorCode::InvalidArgument,
+                        "drop-files needs numeric --x and --y",
+                    ));
+                };
+                let calls = crate::browser::cef_engine::drop_files(&browser_id, &[path], x, y)
+                    .await
+                    .into_iter()
+                    .map(|(event, result)| match result {
+                        Ok(result) => {
+                            serde_json::json!({"event": event, "ok": true, "result": result})
+                        }
+                        Err(error) => {
+                            serde_json::json!({"event": event, "ok": false, "error": error})
+                        }
+                    })
+                    .collect();
+                BrowserCliResponse::FilesDropped {
+                    calls: serde_json::Value::Array(calls),
+                }
+            }
+        }
         BrowserCliRequest::RemoteAttach { protocol_version } => {
             BrowserCliResponse::RemoteAttached {
                 service_epoch: "1".into(),
                 protocol_version: protocol_version.unwrap_or(1),
+            }
+        }
+        BrowserCliRequest::Extensions { action, extension_id, profile } => {
+            use crate::ipc::browser_extensions::{list_extensions, remove_extension};
+            let result = match (action.as_str(), extension_id) {
+                ("list", _) => list_extensions(app.clone(), profile).await,
+                ("remove", Some(extension_id)) => remove_extension(app.clone(), manager, profile, extension_id).await,
+                ("remove", None) => Err(IpcError::new(IpcErrorCode::InvalidArgument, "extensions remove needs an extension id")),
+                (other, _) => Err(IpcError::new(IpcErrorCode::InvalidArgument, format!("unknown extensions action: {other}"))),
+            };
+            match result.and_then(|listing| {
+                serde_json::to_value(listing).map_err(|error| IpcError::new(IpcErrorCode::InternalError, error.to_string()))
+            }) {
+                Ok(listing) => BrowserCliResponse::Extensions { listing },
+                Err(error) => error_response(error),
+            }
+        }
+        BrowserCliRequest::OpenInboundUrl { url } => {
+            if crate::ipc::default_browser::deliver_inbound_url(app, &url) {
+                BrowserCliResponse::InboundUrlOpened
+            } else {
+                error_response(IpcError::new(
+                    IpcErrorCode::InvalidArgument,
+                    "an inbound URL must be http or https",
+                ))
             }
         }
         BrowserCliRequest::OpenFile { path, line, col } => {
@@ -2966,6 +3161,7 @@ async fn execute_request<R: tauri::Runtime>(
     }
 }
 
+#[cfg(test)]
 async fn send_over_stream<S>(
     stream: S,
     request: BrowserCliRequest,
@@ -2974,10 +3170,57 @@ async fn send_over_stream<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    send_over_stream_as(stream, request, token, None).await
+}
+
+/// Sends a request with the paired controller credential beside the token (never in the
+/// request itself).
+async fn send_over_stream_as<S>(
+    stream: S,
+    request: BrowserCliRequest,
+    token: String,
+    auth: Option<ControllerAuth>,
+) -> Result<BrowserCliResponse, BrowserError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut envelope = serde_json::to_value(&BrowserCliEnvelope { token, request })
+        .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+    if let Some(auth) = auth {
+        envelope["controllerAuth"] = serde_json::to_value(auth)
+            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
+    }
+    let response = send_envelope_over_stream(stream, envelope).await?;
+    serde_json::from_str(response.trim())
+        .map_err(|error| BrowserError::AutomationFailed(error.to_string()))
+}
+
+/// The controller the CLI acts as: `--controller`/`FERRYX_BROWSER_CONTROLLER`, else the
+/// default selection; none until the user pairs one.
+async fn cli_controller_auth() -> Result<Option<ControllerAuth>, BrowserError> {
+    let explicit = CLI_CONTROLLER.lock().clone();
+    crate::ipc::run_blocking(move || {
+        let Some(dir) = crate::browser::agent::client::store_dir() else { return Ok(Ok(None)) };
+        Ok(crate::browser::agent::client::load_auth(&dir, explicit.as_deref()))
+    })
+    .await
+    .map_err(|error| BrowserError::Internal(error.to_string()))?
+    .map_err(BrowserError::CliUnavailable)
+}
+
+/// `--controller <uuid>` of the running CLI invocation.
+pub static CLI_CONTROLLER: std::sync::LazyLock<parking_lot::Mutex<Option<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Writes one JSON envelope line and reads one response line.
+async fn send_envelope_over_stream<S>(stream: S, envelope: serde_json::Value) -> Result<String, BrowserError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use tokio::io::AsyncWriteExt;
 
     let (reader, mut writer) = tokio::io::split(stream);
-    let mut request_json = serde_json::to_string(&BrowserCliEnvelope { token, request })
+    let mut request_json = serde_json::to_string(&envelope)
         .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
     request_json.push('\n');
     writer
@@ -3009,21 +3252,93 @@ where
         Ok(Ok(RequestLine::Eof)) => String::new(),
         Ok(Ok(RequestLine::Line(line))) => line,
     };
-    serde_json::from_str(response.trim())
-        .map_err(|error| BrowserError::AutomationFailed(error.to_string()))
+    Ok(response)
+}
+
+/// Sends one controller management request (`browser controllers ...`) to the running app.
+pub async fn send_agent_request(
+    auth: Option<ControllerAuth>,
+    request: crate::browser::agent::wire::AgentRequest,
+) -> Result<crate::browser::agent::wire::AgentResponse, String> {
+    let (stream, token) = connect_browser_endpoint().await.map_err(|error| error.to_string())?;
+    let mut envelope = serde_json::json!({ "token": token, "agent": request });
+    if let Some(auth) = auth {
+        envelope["controllerAuth"] = serde_json::to_value(auth).map_err(|error| error.to_string())?;
+    }
+    let response = send_envelope_over_stream(stream, envelope).await.map_err(|error| error.to_string())?;
+    serde_json::from_str(response.trim()).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+async fn connect_browser_endpoint() -> Result<(tokio::net::UnixStream, String), BrowserError> {
+    let socket_path = browser_cli_socket_path();
+    let token_path = token_path_for(&socket_path);
+    let token = crate::ipc::run_blocking(move || Ok::<_, IpcError>(read_token_file(&token_path)))
+        .await
+        .map_err(|e| BrowserError::Internal(e.to_string()))??;
+    let stream = tokio::net::UnixStream::connect(&socket_path).await.map_err(|error| {
+        BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
+    })?;
+    Ok((stream, token))
+}
+
+#[cfg(not(unix))]
+async fn connect_browser_endpoint() -> Result<(tokio::net::TcpStream, String), BrowserError> {
+    let port_path = browser_cli_socket_path();
+    let token_path = token_path_for(&port_path);
+    let port = crate::ipc::run_blocking(move || Ok::<_, IpcError>(read_port_from_file(&port_path)))
+        .await
+        .map_err(|e| BrowserError::Internal(e.to_string()))??;
+    let token = crate::ipc::run_blocking(move || Ok::<_, IpcError>(read_token_file(&token_path)))
+        .await
+        .map_err(|e| BrowserError::Internal(e.to_string()))??;
+    let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.map_err(|error| {
+        BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
+    })?;
+    Ok((stream, token))
 }
 
 #[cfg(unix)]
 pub async fn send_browser_cli_request(
     request: BrowserCliRequest,
 ) -> Result<BrowserCliResponse, BrowserError> {
-    send_browser_cli_request_at_path(request, &browser_cli_socket_path()).await
+    let auth = cli_controller_auth().await?;
+    send_browser_cli_request_at_path_as(request, &browser_cli_socket_path(), auth).await
 }
 
+/// Sends one request as the given controller (the pipe and MCP adapters pick their
+/// credential once per request).
+pub async fn send_browser_cli_request_as(
+    request: BrowserCliRequest,
+    auth: Option<ControllerAuth>,
+) -> Result<BrowserCliResponse, BrowserError> {
+    send_browser_cli_request_at_path_as(request, &browser_cli_socket_path(), auth).await
+}
+
+/// Test seam: sends one request as `auth` to the endpoint at `path`.
+#[cfg(test)]
+pub(crate) async fn send_browser_cli_request_for_test(
+    request: BrowserCliRequest,
+    path: &Path,
+    auth: Option<ControllerAuth>,
+) -> Result<BrowserCliResponse, BrowserError> {
+    send_browser_cli_request_at_path_as(request, path, auth).await
+}
+
+#[cfg(test)]
 #[cfg(unix)]
 async fn send_browser_cli_request_at_path(
     request: BrowserCliRequest,
     socket_path: &Path,
+) -> Result<BrowserCliResponse, BrowserError> {
+    send_browser_cli_request_at_path_as(request, socket_path, None).await
+}
+
+#[cfg(unix)]
+async fn send_browser_cli_request_at_path_as(
+    request: BrowserCliRequest,
+    socket_path: &Path,
+    auth: Option<ControllerAuth>,
 ) -> Result<BrowserCliResponse, BrowserError> {
     use tokio::net::UnixStream;
 
@@ -3036,20 +3351,31 @@ async fn send_browser_cli_request_at_path(
     let stream = UnixStream::connect(socket_path).await.map_err(|error| {
         BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
     })?;
-    send_over_stream(stream, request, token).await
+    send_over_stream_as(stream, request, token, auth).await
 }
 
 #[cfg(not(unix))]
 pub async fn send_browser_cli_request(
     request: BrowserCliRequest,
 ) -> Result<BrowserCliResponse, BrowserError> {
-    send_browser_cli_request_at_path(request, &browser_cli_socket_path()).await
+    let auth = cli_controller_auth().await?;
+    send_browser_cli_request_at_path_as(request, &browser_cli_socket_path(), auth).await
 }
 
+#[cfg(test)]
 #[cfg(not(unix))]
 async fn send_browser_cli_request_at_path(
     request: BrowserCliRequest,
     port_path: &Path,
+) -> Result<BrowserCliResponse, BrowserError> {
+    send_browser_cli_request_at_path_as(request, port_path, None).await
+}
+
+#[cfg(not(unix))]
+async fn send_browser_cli_request_at_path_as(
+    request: BrowserCliRequest,
+    port_path: &Path,
+    auth: Option<ControllerAuth>,
 ) -> Result<BrowserCliResponse, BrowserError> {
     use tokio::net::TcpStream;
 
@@ -3070,7 +3396,7 @@ async fn send_browser_cli_request_at_path(
         .map_err(|error| {
             BrowserError::CliUnavailable(format!("Ferryx desktop app is not running: {error}"))
         })?;
-    send_over_stream(stream, request, token).await
+    send_over_stream_as(stream, request, token, auth).await
 }
 
 /// Maps a decoded click failure onto the IPC surface by variant only.
@@ -3233,9 +3559,12 @@ mod tests {
                 url: "https://example.com/".to_string(),
                 title: Some("Example".to_string()),
                 visible: true,
+                engine: crate::browser::BrowserEngine::Chromium,
+                zoom_factor: 1.0,
             }],
         };
         let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains(r#""engine":"chromium""#), "{json}");
         let parsed: BrowserCliResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, resp);
     }
@@ -3477,6 +3806,8 @@ mod tests {
             url: registered_session.url,
             title: None,
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
+            zoom_factor: 1.0,
         };
 
         assert_eq!(
@@ -3652,6 +3983,8 @@ mod tests {
             url: registered_session.url,
             title: None,
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
+            zoom_factor: 1.0,
         };
 
         assert_eq!(
@@ -4053,6 +4386,8 @@ mod tests {
             url: registered_session.url,
             title: None,
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
+            zoom_factor: 1.0,
         };
 
         assert_eq!(
@@ -4472,6 +4807,20 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains(r#""command":"eval""#));
         assert!(json.contains(r#""browserId":"b1""#));
+        let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, req);
+
+        // DropFiles
+        let req = BrowserCliRequest::DropFiles {
+            browser_id: "b1".into(),
+            path: "/tmp/a.txt".into(),
+            x: serde_json::Number::from_f64(10.5).unwrap(),
+            y: serde_json::Number::from_f64(20.0).unwrap(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""command":"dropFiles""#));
+        assert!(json.contains(r#""browserId":"b1""#));
+        assert!(json.contains(r#""x":10.5"#));
         let parsed: BrowserCliRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, req);
 
@@ -4921,6 +5270,8 @@ mod tests {
             url: "https://example.com".into(),
             title: Some("Title".into()),
             visible: true,
+            engine: crate::browser::BrowserEngine::System,
+            zoom_factor: 1.0,
         };
         let summary_json = serde_json::to_string(&summary).unwrap();
         assert!(!summary_json.contains(token));

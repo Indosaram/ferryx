@@ -166,6 +166,16 @@ pub struct BrowserSessionSummary {
     pub url: String,
     pub title: Option<String>,
     pub visible: bool,
+    /// Which engine draws the tab (`system` or `chromium`); `ferryx browser list` prints it.
+    #[serde(default)]
+    pub engine: BrowserEngine,
+    /// The tab's page zoom (1.0 = 100%); `ferryx browser list` prints it.
+    #[serde(default = "default_zoom_factor")]
+    pub zoom_factor: f64,
+}
+
+fn default_zoom_factor() -> f64 {
+    1.0
 }
 
 impl From<&BrowserState> for BrowserSessionSummary {
@@ -178,6 +188,8 @@ impl From<&BrowserState> for BrowserSessionSummary {
             url: state.url.clone(),
             title: state.title.clone(),
             visible: state.visible,
+            engine: state.engine,
+            zoom_factor: state.zoom_factor,
         }
     }
 }
@@ -307,6 +319,11 @@ pub struct BrowserAutomationElement {
     pub role: String,
     pub name: String,
     pub tag_name: String,
+    #[serde(default)]
+    pub disabled: bool,
+    /// Checkbox, radio and ARIA checked state; absent for other elements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -317,6 +334,38 @@ pub struct BrowserAutomationSnapshot {
     pub url: String,
     pub title: String,
     pub elements: Vec<BrowserAutomationElement>,
+    /// More elements exist than the observe cap returned.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Embedded frames the observe did not enter (their content is never read).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<BrowserAutomationFrame>,
+    /// The page script ran in an isolated world the page's own scripts cannot reach
+    /// (Chromium engine tabs); false means it shared the page's world.
+    #[serde(default)]
+    pub isolated: bool,
+}
+
+/// An embedded frame boundary in an observe: an iframe, frame, object or embed element.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAutomationFrame {
+    pub kind: String,
+    pub title: String,
+    pub src: String,
+}
+
+/// What an act did. `dispatched` means the input reached the element; `applied` is set only
+/// when the request carried a postcondition the page did not already show: true once the page
+/// matched it, false if it did not before the timeout. Without one (or when the page matched
+/// before the act) nothing claims the action took effect.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserActOutcome {
+    #[serde(default)]
+    pub dispatched: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,6 +466,10 @@ pub struct BrowserAutomationRequest {
     pub browser_id: String,
     pub generation: u64,
     pub action: BrowserAutomationAction,
+    /// Page state that shows the action took effect (text, selector, URL or load state,
+    /// optionally wrapped with a timeout). Script conditions are refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postcondition: Option<BrowserWaitCondition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,6 +1,6 @@
 [package]
 name = "ferryx"
-version = "2026.1101.1"
+version = "2026.1107.2"
 description = "Ultra-lightweight workspace & AI agent launcher (Tauri v2 + Rust)"
 authors = ["Ferryx Contributors"]
 license-file = "../LICENSE"
@@ -84,6 +84,7 @@ local-split-qa = []
 # against a normal build, so the update-pending path is exercised against a real process.
 qa-protocol-bump = ["local-split-qa"]
 # Native GPU presentation is optional; real libghostty-vt parsing is always built.
+apple-web-browser-entitlement = []
 native-terminal = [
     "dep:wgpu",
     "dep:raw-window-handle",
@@ -116,6 +117,7 @@ ferryx-rd-net = { path = "../crates/ferryx-rd/ferryx-rd-net", optional = true, d
 ferryx-rd-host = { path = "../crates/ferryx-rd/ferryx-rd-host", optional = true, default-features = false }
 ferryx-rd-decode = { path = "../crates/ferryx-rd/ferryx-rd-decode", optional = true, features = ["ffmpeg"] }
 ferryx-rd-app = { path = "../crates/ferryx-rd/ferryx-rd-app", optional = true, features = ["ffmpeg"] }
+ferryx-browser-import = { path = "../crates/ferryx-browser-import" }
 ferryx-browser-engine-protocol = { path = "../crates/browser-engine-protocol" }
 async-trait = "0.1"
 tauri = { version = "2", features = ["macos-private-api", "test", "unstable", "image-png", "devtools"], optional = true }
@@ -127,7 +129,7 @@ tokio = { version = "1.53", features = ["full"] }
 tokio-util = "0.7"
 portable-pty = { version = "0.9", path = "vendor/portable-pty" }
 base64 = "0.23"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 bytes = "1.12"
 libc = "0.2"
 # kimi keys its session folders by md5(cwd); the history reader re-derives it to recover the cwd.
@@ -186,6 +188,8 @@ cbc = { version = "0.1.2", features = ["block-padding"] }
 aes = "0.8.4"
 sha1 = "0.10.7"
 dirs = "6"
+aes-gcm = "0.10.3"
+zeroize = { version = "1.9", features = ["zeroize_derive"] }
 tempfile = "3.17"
 quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
@@ -249,6 +253,15 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSData",
     "NSEnumerator",
     "NSJSONSerialization",
+    "NSProcessInfo",
+    "NSURLRequest",
+] }
+objc2-authentication-services = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "ASFoundation",
+    "ASWebAuthenticationSession",
+    "ASWebAuthenticationSessionCallback",
 ] }
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",
@@ -262,6 +275,10 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKFrameInfo",
     "WKSecurityOrigin",
     "WKWebViewConfiguration",
+    "objc2-app-kit",
+    "WKUIDelegate",
+    "WKDownload",
+    "WKDownloadDelegate",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
@@ -302,22 +319,28 @@ windows-sys = { version = "0.59", default-features = false, features = [
     "Win32_System_Threading",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Security_Cryptography",
 ] }
 # Trusted browser bridge (src/browser/bridge/windows.rs). Same versions wry 0.55 already
 # pulls in (Cargo.lock: webview2-com 0.38.2, windows 0.61.3), so no second copy is built.
 webview2-com = "0.38"
-windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.61", default-features = false, features = ["Win32_UI_Input_KeyboardAndMouse", "Security_Credentials_UI", "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", default-features = false, optional = true }
 webkit2gtk = { version = "2.0.2", default-features = false, optional = true }
 # Reads the trusted bridge's JavaScriptCore values (browser/bridge/linux.rs); same pin as wry.
 javascriptcore = { package = "javascriptcore-rs", version = "=1.1.2", default-features = false, optional = true }
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 
 [dev-dependencies]
 tempfile = "3.17"
 tokio-test = "0.4"
 tokio = { version = "1.53", features = ["test-util"] }
+
+# tests/wry_delegate_classes_macos.rs builds a wry webview directly; the same wry tauri runs on.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+wry = { version = "0.55", default-features = false }
 
 [profile.release]
 lto = "thin"

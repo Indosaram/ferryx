@@ -25,7 +25,7 @@
  * Prints the final notarized bundle path on success.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -177,6 +177,22 @@ if (fetchMhc.exit !== 0) {
   process.exit(1);
 }
 
+// 1c. LGPL FFmpeg dylibs for the default `remote-desktop` feature. Without this the links against
+// @rpath/libav*.dylib resolve to nothing, the bundle is not self-contained, and the daemon cannot
+// start. Stage from the pinned SDK (scripts/fetch-ffmpeg.mjs) exactly as the release pipeline does.
+const ffmpegTarget = "aarch64-apple-darwin";
+const stageFfmpeg = run("bun", [
+  path.join(worktree, "scripts/stage-ffmpeg.mjs"),
+  "--target",
+  ffmpegTarget,
+  "--prefix",
+  path.join(worktree, "src-tauri/resources/ffmpeg/sdk"),
+]);
+if (stageFfmpeg.exit !== 0) {
+  console.error(`stage-ffmpeg failed: FFmpeg dylibs for ${ffmpegTarget} are required\n${stageFfmpeg.out.slice(-2000)}`);
+  process.exit(1);
+}
+
 // 2. Signed build with the updater key from the repo-local .env (never committed).
 const { key: updaterKey, password: updaterPassword } = updaterKeyFromEnv(
   readFileSync(path.join(mainRepo, ".env"), "utf8"),
@@ -221,8 +237,48 @@ try {
   process.exit(1);
 }
 
+// 3b. Copy the staged FFmpeg runtime into the bundle's Frameworks dir (the binary carries
+// @executable_path/../Frameworks). Tauri does not do this for a plain `--bundles app` build.
+const ffmpegPayload = path.join(worktree, "src-tauri/resources/ffmpeg/payload", ffmpegTarget);
+const ffmpegRuntime = path.join(ffmpegPayload, "runtime");
+const ffmpegLegal = path.join(ffmpegPayload, "legal");
+const frameworksDir = path.join(appPath, "Contents/Frameworks");
+const legalDir = path.join(appPath, "Contents/Resources/ffmpeg-legal");
+if (!existsSync(ffmpegRuntime)) {
+  console.error(`FFmpeg runtime payload missing at ${ffmpegRuntime}`);
+  process.exit(1);
+}
+mkdirSync(frameworksDir, { recursive: true });
+for (const name of readdirSync(ffmpegRuntime)) {
+  if (!name.endsWith(".dylib")) continue;
+  copyFileSync(path.join(ffmpegRuntime, name), path.join(frameworksDir, name));
+}
+if (existsSync(ffmpegLegal)) {
+  mkdirSync(legalDir, { recursive: true });
+  for (const name of readdirSync(ffmpegLegal)) {
+    copyFileSync(path.join(ffmpegLegal, name), path.join(legalDir, name));
+  }
+}
+
+// 3c. The dylibs are signed inside-out before the app, or codesign refuses the bundle.
+for (const name of readdirSync(frameworksDir)) {
+  if (!name.endsWith(".dylib")) continue;
+  const sign = run("codesign", [
+    "--force", "--options", "runtime", "--timestamp",
+    "--sign", signingIdentity, path.join(frameworksDir, name),
+  ], {}, { capture: true });
+  if (sign.exit !== 0) {
+    console.error(`codesign failed for ${name}:\n${sign.out.slice(-1500)}`);
+    process.exit(1);
+  }
+}
+
 // 4. Finalize: re-sign, seal, notarize, staple, validate via the release pipeline.
-const { finalizeMacosBundle } = await import(path.join(mainRepo, "scripts/lib/release-platforms.mjs"));
+const { finalizeMacosBundle, verifyMacosFfmpegBundle } = await import(
+  path.join(mainRepo, "scripts/lib/release-platforms.mjs")
+);
+const ffmpegDylibs = verifyMacosFfmpegBundle({ appPath, payloadDir: ffmpegPayload });
+console.log(`ffmpeg: verified ${ffmpegDylibs.length} dylibs in Contents/Frameworks`);
 let outcome;
 try {
   outcome = finalizeMacosBundle({

@@ -82,6 +82,70 @@ struct Inner {
     size: PtySize,
 }
 
+/// The answer to the cursor-position query the console host sends at startup.
+const STARTUP_CURSOR_REPORT: &[u8] = b"\x1b[1;1R";
+/// The cursor-position query (DSR 6) the console host sends at startup.
+const STARTUP_CURSOR_QUERY: &[u8] = b"\x1b[6n";
+
+/// Whether the console host's startup cursor-position query is still waiting for its answer, as
+/// far as this master's output shows.
+///
+/// The host sends the query and then blocks until a report arrives, producing no further output.
+/// So output seen AFTER a complete query proves the host got its answer (or, on a host that bounds
+/// the wait, gave up on it) and is running: from then on nothing is owed. Until then the query is
+/// treated as pending, which includes the case where no output was read at all.
+#[derive(Default)]
+struct StartupQuery {
+    /// Bytes of `STARTUP_CURSOR_QUERY` matched so far in the output stream.
+    matched: usize,
+    /// True once any output byte followed a complete query.
+    answered: bool,
+}
+
+impl StartupQuery {
+    fn observe(&mut self, output: &[u8]) {
+        for &byte in output {
+            if self.answered {
+                return;
+            }
+            if self.matched == STARTUP_CURSOR_QUERY.len() {
+                self.answered = true;
+            } else if byte == STARTUP_CURSOR_QUERY[self.matched] {
+                self.matched += 1;
+            } else {
+                self.matched = usize::from(byte == STARTUP_CURSOR_QUERY[0]);
+            }
+        }
+    }
+}
+
+impl Drop for Inner {
+    /// `PsuedoCon::new` passes `PSUEDOCONSOLE_INHERIT_CURSOR`, so the console host starts by asking
+    /// for the cursor position and, holding the console lock, reads input until the report
+    /// arrives. The inbox host on Windows Server 2022 / Windows 10 never gives up on that wait, and
+    /// a broken input pipe does not end it either. `ClosePseudoConsole`, which runs when `con` drops
+    /// below, then waits for that host to exit, so a pseudoconsole closed before a terminal answered
+    /// the query never finishes closing, and the thread that dropped it is lost.
+    ///
+    /// The report is sent here, through the master's own input handle (still open, since fields
+    /// drop after this), ONLY while the query is still pending by `StartupQuery`: the host is then
+    /// blocked inside its startup read and consumes the report itself, so no client process can
+    /// see it. Once output has followed the query the host is past that read and the report is
+    /// not sent: a process still attached to the console (on the natural-exit or reader-error
+    /// paths) would otherwise read it as a keypress. The one remaining window is a terminal that
+    /// answered the query moments before this drop, with the host's next output not yet read; the
+    /// host then sees one extra report as input. The pipe is non-blocking, so this write can never
+    /// wait.
+    fn drop(&mut self) {
+        if !self.cancel.startup_query_pending() {
+            return;
+        }
+        if let Err(error) = std::io::Write::write_all(&mut self.input_handle, STARTUP_CURSOR_REPORT) {
+            log::debug!("startup cursor report before ClosePseudoConsole was not delivered: {error}");
+        }
+    }
+}
+
 impl Inner {
     pub fn resize(
         &mut self,
@@ -178,6 +242,8 @@ struct ReaderCancel {
     // this same lock, so a rise can never slip between reading the gauge and waiting for it.
     outstanding_reads: Mutex<u64>,
     outstanding_changed: Condvar,
+    /// The console host's startup cursor query, as seen by every reader of this master.
+    startup_query: Mutex<StartupQuery>,
 }
 
 impl ReaderCancel {
@@ -191,7 +257,25 @@ impl ReaderCancel {
             event: unsafe { FileDescriptor::from_raw_handle(handle.cast()) },
             outstanding_reads: Mutex::new(0),
             outstanding_changed: Condvar::new(),
+            startup_query: Mutex::new(StartupQuery::default()),
         }))
+    }
+
+    fn lock_startup_query(&self) -> std::sync::MutexGuard<'_, StartupQuery> {
+        self.startup_query
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn observe_output(&self, output: &[u8]) {
+        let mut query = self.lock_startup_query();
+        if !query.answered {
+            query.observe(output);
+        }
+    }
+
+    fn startup_query_pending(&self) -> bool {
+        !self.lock_startup_query().answered
     }
 
     fn request(&self) {
@@ -431,6 +515,16 @@ impl Drop for OverlappedOutputReader {
 
 impl Read for OverlappedOutputReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let result = self.read_output(buf);
+        if let Ok(transferred) = result {
+            self.cancel.observe_output(&buf[..transferred]);
+        }
+        result
+    }
+}
+
+impl OverlappedOutputReader {
+    fn read_output(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }

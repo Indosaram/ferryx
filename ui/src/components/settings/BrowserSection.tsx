@@ -14,7 +14,7 @@ import {
   type BrowserProfile,
   type BrowserSettingsState,
 } from "../../lib/browserSettings";
-import { clearBrowserHistory } from "../../lib/browserHistory";
+import { clearAllBrowserHistory } from "../../lib/browserLibrary";
 import {
   extractBrowserErrorCode,
   focusBrowser,
@@ -44,7 +44,13 @@ import {
 } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { BrowserEngineGroup } from "./BrowserEngineGroup";
+import { SiteSettingsGroup } from "./SiteSettingsGroup";
+import { BrowserExtensionsGroup } from "./BrowserExtensionsGroup";
+import { BrowserAgentAccessGroup } from "./BrowserAgentAccessGroup";
+import { DefaultBrowserGroup } from "./DefaultBrowserGroup";
+import { BrowserPasswordsGroup } from "./BrowserPasswordsGroup";
 import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
+import { ImportBrowserDataDialog } from "./ImportBrowserDataDialog";
 
 export function BrowserSection() {
   const { settings, updateSettings, resetSettings } = useBrowserSettings();
@@ -327,21 +333,49 @@ export function BrowserSection() {
               onCheckedChange={(checked) => void update({ restoreTabsOnLaunch: checked })}
             />
           </SettingRow>
-          <SettingRow label="Remember browsing history" description="Keep up to 100 recently visited built-in browser pages across Ferryx restarts.">
+          <SettingRow label="Remember browsing history" description="Keep the pages you visit in the built-in browser (never private tabs). Turning this off clears it.">
             <Switch
               id="browser-remember-history"
               aria-label="Remember browsing history"
               checked={settings.rememberBrowsingHistory}
               onCheckedChange={(checked) => {
-                if (!checked) clearBrowserHistory();
+                if (!checked) {
+                  void clearAllBrowserHistory().catch((error: unknown) => {
+                    setActionError(`Clear browsing history failed: ${extractBrowserErrorCode(error)}`);
+                  });
+                }
                 void update({ rememberBrowsingHistory: checked });
               }}
+            />
+          </SettingRow>
+          <SettingRow label="Show bookmarks bar" description="Show your bookmarks below the address bar.">
+            <Switch
+              id="browser-show-bookmark-bar"
+              aria-label="Show bookmarks bar"
+              checked={settings.showBookmarkBar}
+              onCheckedChange={(checked) => void update({ showBookmarkBar: checked })}
+            />
+          </SettingRow>
+          <SettingRow label="Search suggestions" description="Send what you type in the address bar to your search engine for suggestions. Off: only bookmarks, history and open tabs.">
+            <Switch
+              id="browser-search-suggestions"
+              aria-label="Search suggestions"
+              checked={settings.searchSuggestions}
+              onCheckedChange={(checked) => void update({ searchSuggestions: checked })}
             />
           </SettingRow>
         </div>
       </SettingsGroup>
 
+      <DefaultBrowserGroup />
+
       <BrowserEngineGroup />
+      <BrowserExtensionsGroup />
+
+      <SiteSettingsGroup />
+
+      <BrowserAgentAccessGroup />
+      <BrowserPasswordsGroup />
 
       <SettingsGroup title="Link Routing">
         <div className="border-b border-border">
@@ -401,6 +435,14 @@ export function BrowserSection() {
               aria-label="Localhost Worktree Labels"
               checked={settings.localhostWorktreeLabels}
               onCheckedChange={(checked) => void update({ localhostWorktreeLabels: checked })}
+            />
+          </SettingRow>
+          <SettingRow label="Ask where to save downloads" description="Choose a folder for each download instead of saving it to the Downloads folder.">
+            <Switch
+              id="browser-ask-where-to-save"
+              aria-label="Ask where to save downloads"
+              checked={settings.askWhereToSave}
+              onCheckedChange={(checked) => void update({ askWhereToSave: checked })}
             />
           </SettingRow>
         </div>
@@ -486,7 +528,7 @@ export function BrowserSection() {
         description={`Default uses the normal browser store. Private is ephemeral. ${
           namedProfilesSupported
             ? "Named profiles use separate persistent data directories."
-            : "macOS WebKit does not expose persistent named data stores, so only Default and Private are available."
+            : "macOS WebKit does not expose persistent named data stores, so only Default and Private are available. Install the Chromium engine to use named profiles."
         }`}
         action={
           namedProfilesSupported ? (
@@ -520,9 +562,11 @@ export function BrowserSection() {
           const isDefault = profile.id === settings.defaultProfileId;
           const isBuiltIn = isBuiltInBrowserProfileId(profile.id);
           return (
-            <div key={profile.id} className="flex items-center gap-3 py-3">
+            <div key={profile.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 py-3" data-testid={`browser-profile-row-${profile.id}`}>
               <Cookie className="size-4 shrink-0 text-muted-foreground" />
-              <div className="min-w-0 flex-1">
+              {/* The name column keeps a readable minimum; the actions wrap below it instead of
+                  squeezing it, so the pill and buttons never overlap the name or id. */}
+              <div className="min-w-[10rem] flex-1 basis-40">
                 <input
                   key={`${profile.id}:${profile.name}`}
                   defaultValue={profile.name}
@@ -541,18 +585,26 @@ export function BrowserSection() {
                   }}
                   className="h-7 w-full max-w-56 rounded border border-transparent bg-transparent px-1 text-[11px] font-medium outline-none hover:border-border focus:border-ring disabled:opacity-80"
                 />
-                <div className="px-1 font-mono text-[11px] text-muted-foreground">{profile.id}</div>
+                <div className="truncate px-1 font-mono text-[11px] text-muted-foreground" title={profile.id}>{profile.id}</div>
                 {importStatus[profile.id] ? <div className="mt-0.5 px-1 text-[11px] text-muted-foreground">{importStatus[profile.id]}</div> : null}
+                {!installedImportSupported ? (
+                  <div className="mt-0.5 px-1 text-[11px] text-muted-foreground" data-testid="browser-profile-import-hint">
+                    To bring cookies from Chrome or Edge, use Import browser data… under Import below.
+                  </div>
+                ) : isMac ? (
+                  <div className="mt-0.5 px-1 text-[11px] text-muted-foreground">macOS will ask for Keychain access</div>
+                ) : null}
               </div>
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
               {isDefault ? (
-                <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-[11px] font-medium">Default</Badge>
+                <Badge variant="secondary" className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium">Default</Badge>
               ) : (
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   onClick={() => void update({ defaultProfileId: profile.id })}
-                  className="h-7 px-2 text-[11px]"
+                  className="h-7 shrink-0 px-2 text-[11px]"
                 >
                   Make Default
                 </Button>
@@ -563,20 +615,19 @@ export function BrowserSection() {
                 size="sm"
                 disabled={importingProfiles.has(profile.id)}
                 onClick={() => void importCookies(profile.id)}
-                className="h-7 gap-1 px-2 text-[11px]"
+                className="h-7 shrink-0 gap-1 px-2 text-[11px]"
               >
                 <FolderOpen className="size-3" /> Import Cookies
               </Button>
               {installedImportSupported ? (
-                <div className="flex flex-col items-end gap-1">
-                  <div className="flex items-center gap-1.5">
+                <>
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       disabled={importingProfiles.has(profile.id)}
                       onClick={() => void importInstalledCookies(profile.id, "chrome")}
-                      className="h-7 px-2 text-[11px]"
+                      className="h-7 shrink-0 px-2 text-[11px]"
                     >
                       Import from Chrome
                     </Button>
@@ -586,22 +637,12 @@ export function BrowserSection() {
                       size="sm"
                       disabled={importingProfiles.has(profile.id)}
                       onClick={() => void importInstalledCookies(profile.id, "edge")}
-                      className="h-7 px-2 text-[11px]"
+                      className="h-7 shrink-0 px-2 text-[11px]"
                     >
                       Import from Edge
                     </Button>
-                  </div>
-                  {isMac ? (
-                    <span className="text-[11px] text-muted-foreground">
-                      macOS will ask for Keychain access
-                    </span>
-                  ) : null}
-                </div>
-              ) : (
-                <span className="text-[11px] text-muted-foreground">
-                  Installed browser cookie import is unavailable on Windows (Chromium app-bound encryption)
-                </span>
-              )}
+                </>
+              ) : null}
               {pendingDeleteProfileId === profile.id ? (
                 <div role="group" aria-label={`Confirm delete profile ${profile.name}`} className="flex items-center gap-1.5">
                   <Button
@@ -638,6 +679,7 @@ export function BrowserSection() {
                   <Trash2 className="size-3.5" />
                 </Button>
               )}
+              </div>
             </div>
           );
         })}
@@ -694,7 +736,36 @@ export function BrowserSection() {
           </div>
         ) : null}
       </SettingsGroup>
+      <ImportBrowserDataGroup
+        profiles={visibleProfiles.filter((profile) => profile.id !== "private")}
+        defaultProfileId={settings.defaultProfileId === "private" ? "default" : settings.defaultProfileId}
+      />
     </section>
+  );
+}
+
+function ImportBrowserDataGroup({
+  profiles,
+  defaultProfileId,
+}: {
+  profiles: { id: string; name: string }[];
+  defaultProfileId: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <SettingsGroup
+      title="Import"
+      description="Bring bookmarks, history, cookies and passwords from another browser or a password manager export."
+      action={
+        <Button type="button" variant="outline" size="sm" onClick={() => setOpen(true)} className="h-8 px-2 text-[11px]">
+          Import browser data…
+        </Button>
+      }
+    >
+      {open ? (
+        <ImportBrowserDataDialog open={open} onOpenChange={setOpen} profiles={profiles} defaultProfileId={defaultProfileId} />
+      ) : null}
+    </SettingsGroup>
   );
 }
 

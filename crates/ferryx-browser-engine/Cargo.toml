@@ -38,7 +38,12 @@ resources_path = "resources"
 [dependencies]
 cef = { version = "=156.2.0", default-features = false, features = ["build-util"] }
 ferryx-browser-engine-protocol = { path = "../browser-engine-protocol" }
+# The per-load nonce of the Notification shim's console lines (engine/system.rs).
+getrandom = "0.3"
 semver = "1"
+# Parses the DevTools events the password-vault hooks observe (engine/vault.rs); cef already
+# depends on it.
+serde_json = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
@@ -58,3 +63,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+[target.'cfg(target_os = "linux")'.dependencies]
+# The namespace-sandbox probe (engine/linux_sandbox.rs).
+libc = "0.2"
+# Writes engine-linux-<arch>.zip (src/bin/bundle.rs); same version the Ferryx installer reads.
+zip = { version = "4.6", default-features = false, features = ["deflate"] }

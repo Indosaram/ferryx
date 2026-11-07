@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "helperVersion": "2026.1101.1",
   "protocolVersion": 1,
-  "sourceFingerprint": "3abee5f47f6a90c6db3778605d496ab87bd6250ad8cf38fc566dd01101eff413",
+  "sourceFingerprint": "97c718a41a023bb89296a41671b6f3dcc11fe565cf2c3a912108fbd3de62a604",
   "requiredCapabilities": [
     "sshHelperV1",
     "dagSubscribeV1",

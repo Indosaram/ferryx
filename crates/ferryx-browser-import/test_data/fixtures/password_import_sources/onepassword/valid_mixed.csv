@@ -1,0 +1,4 @@
+Title,Website,Username,Password,One-time password,Favorite status,Archived status,Tags,Notes
+1Password Login,https://onepassword.example/login,onepassword-user@example.test,SYNTH-1PASSWORD-CSV-PASSWORD-001,otpauth://totp/OnePassword:onepassword-user?secret=SYNTHOTP,false,false,"migration,synthetic",Synthetic note
+1Password Duplicate,https://onepassword.example/login,onepassword-user@example.test,SYNTH-1PASSWORD-CSV-PASSWORD-002,,false,false,duplicate,Synthetic duplicate row
+1Password Blank,https://blank.onepassword.example,blank-onepassword@example.test,,,false,false,blank,Synthetic blank password row

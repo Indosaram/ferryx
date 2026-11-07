@@ -21,7 +21,9 @@ export function classifyNavigatorPlatform(nav: NavigatorPlatformSource | undefin
   if (!nav) return "unknown";
   const combined = `${nav.userAgentData?.platform ?? ""} ${nav.platform ?? ""} ${nav.userAgent ?? ""}`;
 
-  if (/Win/i.test(combined)) return "windows";
+  // "Darwin" contains "win", so match Windows tokens exactly instead of a bare /Win/i.
+  // "Darwin" contains "win", so match Windows tokens exactly instead of a bare /Win/i.
+  if (/Windows|Win32|Win64|WinNT/i.test(combined)) return "windows";
   if (/Mac|iPhone|iPad|iPod/i.test(combined)) return "macos";
   if (/Linux|X11|CrOS/i.test(combined)) return "linux";
   return "unknown";

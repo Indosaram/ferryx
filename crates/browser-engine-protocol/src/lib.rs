@@ -11,6 +11,109 @@
 /// Marks an engine stdout line as a protocol event.
 pub const EVENT_PREFIX: &str = "@ferryx ";
 
+pub mod cookies;
+
+/// What a site asks to use. On the wire a comma-separated list of the names below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PermissionKind {
+    Camera,
+    Microphone,
+    /// Screen, window or tab capture (getDisplayMedia).
+    Screen,
+    Notifications,
+    Geolocation,
+    /// Reading the clipboard.
+    Clipboard,
+    /// Anything else the engine asked about in the same request.
+    Other,
+}
+
+impl PermissionKind {
+    pub const ALL: [Self; 7] = [
+        Self::Camera,
+        Self::Microphone,
+        Self::Screen,
+        Self::Notifications,
+        Self::Geolocation,
+        Self::Clipboard,
+        Self::Other,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Camera => "camera",
+            Self::Microphone => "microphone",
+            Self::Screen => "screen",
+            Self::Notifications => "notifications",
+            Self::Geolocation => "geolocation",
+            Self::Clipboard => "clipboard",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
+fn kinds_field(kinds: &[PermissionKind]) -> String {
+    kinds.iter().map(|kind| kind.as_str()).collect::<Vec<_>>().join(",")
+}
+
+fn parse_kinds(field: &str) -> Option<Vec<PermissionKind>> {
+    field.split(',').map(PermissionKind::parse).collect()
+}
+
+/// Chromium extension ids are 32 letters from `a` to `p`.
+pub fn is_extension_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
+/// What [`Command::Extensions`] asks the engine's extension manager to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtensionCall {
+    /// Every installed extension, as a JSON array.
+    List,
+    SetEnabled { extension: String, enabled: bool },
+    Remove { extension: String },
+    /// Pins or unpins the extension's toolbar button.
+    Pin { extension: String, pinned: bool },
+}
+
+/// Exactly `count` fields, the first a valid extension id.
+fn extension_fields(rest: &str, count: usize) -> Option<Vec<&str>> {
+    let (parts, tail) = fields(rest, count)?;
+    (tail.is_empty() && is_extension_id(parts[0])).then_some(parts)
+}
+
+impl ExtensionCall {
+    fn fields(&self) -> String {
+        match self {
+            Self::List => "list".to_string(),
+            Self::SetEnabled { extension, enabled } => format!("enable {extension} {}", flag(*enabled)),
+            Self::Remove { extension } => format!("remove {extension}"),
+            Self::Pin { extension, pinned } => format!("pin {extension} {}", flag(*pinned)),
+        }
+    }
+
+    fn parse(line: &str) -> Option<Self> {
+        let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
+        match verb {
+            "list" if rest.is_empty() => Some(Self::List),
+            "enable" => {
+                let parts = extension_fields(rest, 2)?;
+                Some(Self::SetEnabled { extension: parts[0].to_string(), enabled: parse_flag(parts[1])? })
+            }
+            "remove" => Some(Self::Remove { extension: extension_fields(rest, 1)?[0].to_string() }),
+            "pin" => {
+                let parts = extension_fields(rest, 2)?;
+                Some(Self::Pin { extension: parts[0].to_string(), pinned: parse_flag(parts[1])? })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// A pane rectangle: pixels inside the Ferryx window on Windows, screen points from the
 /// top-left on macOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,6 +141,39 @@ pub enum Command {
     Back { tab: String },
     Forward { tab: String },
     Reload { tab: String, ignore_cache: bool },
+    /// Answers [`Event::PermissionRequest`] `request`: allow or deny everything it asked for.
+    Permission { request: u64, allow: bool },
+    // --- downloads, print, find, zoom, file chooser, page notifications ---
+    /// Searches the page; the engine answers with [`Event::FindResult`].
+    Find { tab: String, query: String, forward: bool, match_case: bool, find_next: bool },
+    StopFind { tab: String, clear_selection: bool },
+    /// Page zoom in percent of the default size.
+    Zoom { tab: String, percent: u32 },
+    /// Opens the engine's print dialog for the tab.
+    Print { tab: String },
+    /// Saves the page as a PDF file; the engine answers with [`Event::PdfDone`].
+    PrintPdf { tab: String, path: String },
+    /// Answers [`Event::DownloadBegin`]: where to save it, or an empty path to cancel it.
+    DownloadPath { download: u32, path: String },
+    DownloadControl { download: u32, action: DownloadAction },
+    /// Answers [`Event::FileDialog`]; no paths cancels the dialog.
+    FileChosen { request: u32, paths: Vec<String> },
+    /// Tells the page's Notification shim what Ferryx decided for its origin.
+    NotificationPermission { tab: String, state: PagePermission },
+    /// Sends one Chrome DevTools Protocol call to the tab's browser through CEF's in-process
+    /// DevTools message API (no TCP port). `params` is a JSON object on one line; the answer
+    /// is [`Event::Devtools`] with the same `id`.
+    Devtools { tab: String, id: u32, method: String, params: String },
+    /// Applies (then deletes) a staged cookie file, see [`cookies`]. Not tab scoped.
+    ImportCookies { path: String },
+    /// Password autofill: runs `script` in the tab's [`VAULT_WORLD_NAME`] isolated world of its
+    /// top frame. The script fills only when the frame's origin is the one it expects.
+    Fill { tab: String, script: String },
+    /// Gives the tab's window keyboard focus: Chrome's address bar when `address`, else the page.
+    Focus { tab: String, address: bool },
+    /// Manages the profile's extensions through the engine's hidden `chrome://extensions`
+    /// page; the answer is [`Event::Extensions`] with the same `id`. Not tab scoped.
+    Extensions { id: u32, call: ExtensionCall },
 }
 
 /// Engine to Ferryx.
@@ -53,6 +189,285 @@ pub enum Event {
     Loading { tab: String, loading: bool, can_go_back: bool, can_go_forward: bool },
     /// The tab's browser closed inside the engine (the page, a shortcut, a crash).
     Closed { tab: String },
+    /// A page in `tab` asks to use `kinds`; the engine holds the request until Ferryx answers
+    /// with [`Command::Permission`]. Nothing is granted without that answer.
+    PermissionRequest { tab: String, request: u64, kinds: Vec<PermissionKind>, origin: String },
+    /// The engine dropped an unanswered request (navigation, the tab closed): the prompt goes.
+    PermissionDismissed { tab: String, request: u64 },
+    /// The page in `tab` started or stopped capturing the camera (`video`) or microphone (`audio`).
+    MediaAccess { tab: String, video: bool, audio: bool },
+    // --- downloads, print, find, file chooser, page notifications ---
+    FindResult { tab: String, count: u32, active: u32, final_update: bool },
+    PdfDone { tab: String, ok: bool, path: String },
+    /// The page started a download; Ferryx answers with [`Command::DownloadPath`]. `tab` is
+    /// empty when the download came from a window Ferryx has no tab for.
+    DownloadBegin { download: u32, tab: String, total: Option<u64>, url: String, name: String },
+    DownloadUpdate { download: u32, received: u64, total: Option<u64>, state: DownloadState, path: String },
+    /// The page asked for a file chooser; Ferryx answers with [`Command::FileChosen`].
+    FileDialog { request: u32, tab: String, mode: FileDialogMode, accept: Vec<String>, default_path: String },
+    /// A message from the page's Notification shim (JSON), with the page URL it came from.
+    PageMessage { tab: String, url: String, message: String },
+    /// The answer to [`Command::Devtools`]: `result` is the CDP result object on success, the
+    /// CDP error object (or `{"message":...}` when the call could not be sent) otherwise.
+    Devtools { tab: String, id: u32, ok: bool, result: String },
+    /// A login form was submitted in the tab's top frame: `payload` is the JSON that
+    /// [`VAULT_CAPTURE_SCRIPT`] posted from its isolated world (`v`, `kind`, `origin`,
+    /// `username`, `password`). Page script cannot reach that world's binding.
+    FormSubmitted { tab: String, payload: String },
+    /// The answer to [`Command::Extensions`]: `result` is one line of JSON (the extension list
+    /// for [`ExtensionCall::List`]), or `{"message":...}` when `ok` is false.
+    Extensions { id: u32, ok: bool, result: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadAction {
+    Cancel,
+    Pause,
+    Resume,
+}
+
+/// Why a download stopped without completing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadFailure {
+    DiskFull,
+    AccessDenied,
+    Network,
+    Server,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadState {
+    InProgress,
+    Paused,
+    Complete,
+    Cancelled,
+    Failed(DownloadFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDialogMode {
+    Open,
+    OpenMultiple,
+    OpenFolder,
+    Save,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PagePermission {
+    Granted,
+    Denied,
+    Default,
+}
+
+/// Prefix of the console line the engine's Notification shim writes; the engine turns these
+/// lines into [`Event::PageMessage`] and keeps them out of the console.
+pub const PAGE_MESSAGE_CONSOLE_PREFIX: &str = "@ferryx-notify ";
+
+const NOTIFICATION_POST_PLACEHOLDER: &str = "__FERRYX_NOTIFY_POST__";
+const NOTIFICATION_SHIM_TEMPLATE: &str = include_str!("notification_shim.js");
+
+/// The page `Notification` replacement both engines install. `post` is a JS expression for a
+/// function taking the JSON message string; the host answers through
+/// `window.__ferryxNotificationPermission(state)`.
+pub fn notification_shim(post: &str) -> String {
+    NOTIFICATION_SHIM_TEMPLATE.replace(NOTIFICATION_POST_PLACEHOLDER, post)
+}
+
+/// The script that hands a permission state to the page's Notification shim.
+pub fn notification_permission_script(state: PagePermission) -> String {
+    format!(
+        "window.__ferryxNotificationPermission && window.__ferryxNotificationPermission('{}')",
+        state.token()
+    )
+}
+
+impl DownloadAction {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancel",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        match token {
+            "cancel" => Some(Self::Cancel),
+            "pause" => Some(Self::Pause),
+            "resume" => Some(Self::Resume),
+            _ => None,
+        }
+    }
+}
+
+impl DownloadState {
+    fn token(self) -> &'static str {
+        match self {
+            Self::InProgress => "progress",
+            Self::Paused => "paused",
+            Self::Complete => "complete",
+            Self::Cancelled => "cancelled",
+            Self::Failed(DownloadFailure::DiskFull) => "failed-nospace",
+            Self::Failed(DownloadFailure::AccessDenied) => "failed-access",
+            Self::Failed(DownloadFailure::Network) => "failed-network",
+            Self::Failed(DownloadFailure::Server) => "failed-server",
+            Self::Failed(DownloadFailure::Other) => "failed",
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        Some(match token {
+            "progress" => Self::InProgress,
+            "paused" => Self::Paused,
+            "complete" => Self::Complete,
+            "cancelled" => Self::Cancelled,
+            "failed-nospace" => Self::Failed(DownloadFailure::DiskFull),
+            "failed-access" => Self::Failed(DownloadFailure::AccessDenied),
+            "failed-network" => Self::Failed(DownloadFailure::Network),
+            "failed-server" => Self::Failed(DownloadFailure::Server),
+            "failed" => Self::Failed(DownloadFailure::Other),
+            _ => return None,
+        })
+    }
+}
+
+impl FileDialogMode {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::OpenMultiple => "multiple",
+            Self::OpenFolder => "folder",
+            Self::Save => "save",
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        match token {
+            "open" => Some(Self::Open),
+            "multiple" => Some(Self::OpenMultiple),
+            "folder" => Some(Self::OpenFolder),
+            "save" => Some(Self::Save),
+            _ => None,
+        }
+    }
+}
+
+impl PagePermission {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Granted => "granted",
+            Self::Denied => "denied",
+            Self::Default => "default",
+        }
+    }
+
+    fn parse(token: &str) -> Option<Self> {
+        match token {
+            "granted" => Some(Self::Granted),
+            "denied" => Some(Self::Denied),
+            "default" => Some(Self::Default),
+            _ => None,
+        }
+    }
+}
+
+/// One space-free field: spaces in a URL are percent-encoded, an empty value becomes `-`.
+fn token_field(value: &str) -> String {
+    let value = one_line(value).replace(' ', "%20");
+    if value.is_empty() {
+        "-".to_string()
+    } else {
+        value
+    }
+}
+
+fn parse_token_field(value: &str) -> String {
+    if value == "-" {
+        String::new()
+    } else {
+        value.to_string()
+    }
+}
+
+fn total_field(total: Option<u64>) -> String {
+    total.map_or_else(|| "-1".to_string(), |total| total.to_string())
+}
+
+fn parse_total(value: &str) -> Option<Option<u64>> {
+    if value == "-1" {
+        Some(None)
+    } else {
+        value.parse().ok().map(Some)
+    }
+}
+
+/// Accept filters (`.png`, `image/*`) as one comma-separated field; a filter that holds a
+/// comma or whitespace cannot be carried and is dropped.
+fn accept_field(accept: &[String]) -> String {
+    let kept: Vec<&str> = accept
+        .iter()
+        .map(String::as_str)
+        .filter(|filter| !filter.is_empty() && !filter.contains([',', ' ', '\t', '\r', '\n']))
+        .collect();
+    if kept.is_empty() {
+        "-".to_string()
+    } else {
+        kept.join(",")
+    }
+}
+
+fn parse_accept(value: &str) -> Vec<String> {
+    if value == "-" {
+        Vec::new()
+    } else {
+        value.split(',').map(str::to_string).collect()
+    }
+}
+
+/// Paths are separated by tabs; a path holding a tab or line break cannot be carried.
+fn paths_field(paths: &[String]) -> String {
+    paths
+        .iter()
+        .filter(|path| !path.is_empty() && !path.contains(['\t', '\r', '\n']))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
+fn parse_paths(value: &str) -> Vec<String> {
+    value.split('\t').filter(|path| !path.is_empty()).map(str::to_string).collect()
+}
+
+/// Isolated-world name the engine runs [`VAULT_CAPTURE_SCRIPT`] and fill scripts in.
+pub const VAULT_WORLD_NAME: &str = "ferryx-vault";
+/// CDP binding the capture script posts through in the Chromium engine; it is added for
+/// [`VAULT_WORLD_NAME`] only.
+pub const VAULT_BINDING_NAME: &str = "__ferryxVault";
+
+/// Login-form capture, shared by both engines: Ferryx appends it to the system webview's
+/// trusted broker, and the Chromium engine injects it into [`VAULT_WORLD_NAME`].
+pub const VAULT_CAPTURE_SCRIPT: &str = include_str!("vault_capture.js");
+
+/// `value` as a JSON string literal, for the CDP messages the engine writes by hand.
+pub fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 || ch == '\u{2028}' || ch == '\u{2029}' => {
+                out.push_str(&format!("\\u{:04x}", ch as u32));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn one_line(text: &str) -> String {
@@ -122,6 +537,29 @@ impl Command {
             Self::Back { tab } => format!("back {tab}"),
             Self::Forward { tab } => format!("forward {tab}"),
             Self::Reload { tab, ignore_cache } => format!("reload {tab} {}", flag(*ignore_cache)),
+            Self::Permission { request, allow } => format!("permission {request} {}", flag(*allow)),
+            Self::Find { tab, query, forward, match_case, find_next } => format!(
+                "find {tab} {} {} {} {}",
+                flag(*forward),
+                flag(*match_case),
+                flag(*find_next),
+                one_line(query)
+            ),
+            Self::StopFind { tab, clear_selection } => format!("stopfind {tab} {}", flag(*clear_selection)),
+            Self::Zoom { tab, percent } => format!("zoom {tab} {percent}"),
+            Self::Print { tab } => format!("print {tab}"),
+            Self::PrintPdf { tab, path } => format!("printpdf {tab} {}", one_line(path)),
+            Self::DownloadPath { download, path } => format!("dlpath {download} {}", one_line(path)),
+            Self::DownloadControl { download, action } => format!("dlctl {download} {}", action.token()),
+            Self::FileChosen { request, paths } => format!("filechosen {request} {}", paths_field(paths)),
+            Self::NotificationPermission { tab, state } => format!("notifyperm {tab} {}", state.token()),
+            Self::Devtools { tab, id, method, params } => {
+                format!("devtools {tab} {id} {method} {}", one_line(params))
+            }
+            Self::ImportCookies { path } => format!("import-cookies {}", one_line(path)),
+            Self::Fill { tab, script } => format!("fill {tab} {}", one_line(script)),
+            Self::Focus { tab, address } => format!("focus {tab} {}", flag(*address)),
+            Self::Extensions { id, call } => format!("extensions {id} {}", call.fields()),
         }
     }
 
@@ -160,6 +598,80 @@ impl Command {
                 let (parts, _) = fields(rest, 2)?;
                 Some(Self::Reload { tab: parts[0].to_string(), ignore_cache: parse_flag(parts[1])? })
             }
+            "permission" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::Permission { request: parts[0].parse().ok()?, allow: parse_flag(parts[1])? })
+            }
+            "find" => {
+                let (parts, query) = fields(rest, 4)?;
+                Some(Self::Find {
+                    tab: parts[0].to_string(),
+                    forward: parse_flag(parts[1])?,
+                    match_case: parse_flag(parts[2])?,
+                    find_next: parse_flag(parts[3])?,
+                    query: query.to_string(),
+                })
+            }
+            "stopfind" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::StopFind { tab: parts[0].to_string(), clear_selection: parse_flag(parts[1])? })
+            }
+            "zoom" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::Zoom { tab: parts[0].to_string(), percent: parts[1].parse().ok()? })
+            }
+            "print" => Some(Self::Print { tab: tab_only(rest)? }),
+            "printpdf" => {
+                let (parts, path) = fields(rest, 1)?;
+                if path.is_empty() {
+                    return None;
+                }
+                Some(Self::PrintPdf { tab: parts[0].to_string(), path: path.to_string() })
+            }
+            "dlpath" => {
+                let (parts, path) = fields(rest, 1)?;
+                Some(Self::DownloadPath { download: parts[0].parse().ok()?, path: path.to_string() })
+            }
+            "dlctl" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::DownloadControl {
+                    download: parts[0].parse().ok()?,
+                    action: DownloadAction::parse(parts[1])?,
+                })
+            }
+            "filechosen" => {
+                let (parts, paths) = fields(rest, 1)?;
+                Some(Self::FileChosen { request: parts[0].parse().ok()?, paths: parse_paths(paths) })
+            }
+            "notifyperm" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::NotificationPermission {
+                    tab: parts[0].to_string(),
+                    state: PagePermission::parse(parts[1])?,
+                })
+            }
+            "devtools" => {
+                let (parts, params) = fields(rest, 3)?;
+                Some(Self::Devtools {
+                    tab: parts[0].to_string(),
+                    id: parts[1].parse().ok()?,
+                    method: parts[2].to_string(),
+                    params: if params.is_empty() { "{}".to_string() } else { params.to_string() },
+                })
+            }
+            "import-cookies" if !rest.is_empty() => Some(Self::ImportCookies { path: rest.to_string() }),
+            "fill" => {
+                let (parts, script) = fields(rest, 1)?;
+                Some(Self::Fill { tab: parts[0].to_string(), script: script.to_string() })
+            }
+            "focus" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::Focus { tab: parts[0].to_string(), address: parse_flag(parts[1])? })
+            }
+            "extensions" => {
+                let (parts, call) = fields(rest, 1)?;
+                Some(Self::Extensions { id: parts[0].parse().ok()?, call: ExtensionCall::parse(call)? })
+            }
             _ => None,
         }
     }
@@ -179,6 +691,45 @@ impl Event {
                 flag(*can_go_forward)
             ),
             Self::Closed { tab } => format!("closed {tab}"),
+            Self::PermissionRequest { tab, request, kinds, origin } => {
+                format!("permission-request {tab} {request} {} {}", kinds_field(kinds), one_line(origin))
+            }
+            Self::PermissionDismissed { tab, request } => format!("permission-dismissed {tab} {request}"),
+            Self::MediaAccess { tab, video, audio } => {
+                format!("media-access {tab} {} {}", flag(*video), flag(*audio))
+            }
+            Self::FindResult { tab, count, active, final_update } => {
+                format!("findresult {tab} {count} {active} {}", flag(*final_update))
+            }
+            Self::PdfDone { tab, ok, path } => format!("pdf {tab} {} {}", flag(*ok), one_line(path)),
+            Self::DownloadBegin { download, tab, total, url, name } => format!(
+                "dlbegin {download} {} {} {} {}",
+                token_field(tab),
+                total_field(*total),
+                token_field(url),
+                one_line(name)
+            ),
+            Self::DownloadUpdate { download, received, total, state, path } => format!(
+                "dlupdate {download} {received} {} {} {}",
+                total_field(*total),
+                state.token(),
+                one_line(path)
+            ),
+            Self::FileDialog { request, tab, mode, accept, default_path } => format!(
+                "filedialog {request} {} {} {} {}",
+                token_field(tab),
+                mode.token(),
+                accept_field(accept),
+                one_line(default_path)
+            ),
+            Self::PageMessage { tab, url, message } => {
+                format!("pagemsg {tab} {} {}", token_field(url), one_line(message))
+            }
+            Self::Devtools { tab, id, ok, result } => {
+                format!("devtools {tab} {id} {} {}", flag(*ok), one_line(result))
+            }
+            Self::FormSubmitted { tab, payload } => format!("form {tab} {}", one_line(payload)),
+            Self::Extensions { id, ok, result } => format!("extensions {id} {} {}", flag(*ok), one_line(result)),
         };
         format!("{EVENT_PREFIX}{body}")
     }
@@ -218,6 +769,99 @@ impl Event {
                 })
             }
             "closed" => Some(Self::Closed { tab: fields(rest, 1)?.0[0].to_string() }),
+            "permission-request" => {
+                let (parts, origin) = fields(rest, 3)?;
+                Some(Self::PermissionRequest {
+                    tab: parts[0].to_string(),
+                    request: parts[1].parse().ok()?,
+                    kinds: parse_kinds(parts[2])?,
+                    origin: origin.to_string(),
+                })
+            }
+            "permission-dismissed" => {
+                let (parts, _) = fields(rest, 2)?;
+                Some(Self::PermissionDismissed { tab: parts[0].to_string(), request: parts[1].parse().ok()? })
+            }
+            "media-access" => {
+                let (parts, _) = fields(rest, 3)?;
+                Some(Self::MediaAccess {
+                    tab: parts[0].to_string(),
+                    video: parse_flag(parts[1])?,
+                    audio: parse_flag(parts[2])?,
+                })
+            }
+            "findresult" => {
+                let (parts, _) = fields(rest, 4)?;
+                Some(Self::FindResult {
+                    tab: parts[0].to_string(),
+                    count: parts[1].parse().ok()?,
+                    active: parts[2].parse().ok()?,
+                    final_update: parse_flag(parts[3])?,
+                })
+            }
+            "pdf" => {
+                let (parts, path) = fields(rest, 2)?;
+                Some(Self::PdfDone { tab: parts[0].to_string(), ok: parse_flag(parts[1])?, path: path.to_string() })
+            }
+            "dlbegin" => {
+                let (parts, name) = fields(rest, 4)?;
+                Some(Self::DownloadBegin {
+                    download: parts[0].parse().ok()?,
+                    tab: parse_token_field(parts[1]),
+                    total: parse_total(parts[2])?,
+                    url: parse_token_field(parts[3]),
+                    name: name.to_string(),
+                })
+            }
+            "dlupdate" => {
+                let (parts, path) = fields(rest, 4)?;
+                Some(Self::DownloadUpdate {
+                    download: parts[0].parse().ok()?,
+                    received: parts[1].parse().ok()?,
+                    total: parse_total(parts[2])?,
+                    state: DownloadState::parse(parts[3])?,
+                    path: path.to_string(),
+                })
+            }
+            "filedialog" => {
+                let (parts, default_path) = fields(rest, 4)?;
+                Some(Self::FileDialog {
+                    request: parts[0].parse().ok()?,
+                    tab: parse_token_field(parts[1]),
+                    mode: FileDialogMode::parse(parts[2])?,
+                    accept: parse_accept(parts[3]),
+                    default_path: default_path.to_string(),
+                })
+            }
+            "pagemsg" => {
+                let (parts, message) = fields(rest, 2)?;
+                Some(Self::PageMessage {
+                    tab: parts[0].to_string(),
+                    url: parse_token_field(parts[1]),
+                    message: message.to_string(),
+                })
+            }
+            "devtools" => {
+                let (parts, result) = fields(rest, 3)?;
+                Some(Self::Devtools {
+                    tab: parts[0].to_string(),
+                    id: parts[1].parse().ok()?,
+                    ok: parse_flag(parts[2])?,
+                    result: result.to_string(),
+                })
+            }
+            "form" => {
+                let (parts, payload) = fields(rest, 1)?;
+                Some(Self::FormSubmitted { tab: parts[0].to_string(), payload: payload.to_string() })
+            }
+            "extensions" => {
+                let (parts, result) = fields(rest, 2)?;
+                Some(Self::Extensions {
+                    id: parts[0].parse().ok()?,
+                    ok: parse_flag(parts[1])?,
+                    result: result.to_string(),
+                })
+            }
             _ => None,
         }
     }
@@ -252,6 +896,17 @@ mod tests {
             Command::Forward { tab: tab.clone() },
             Command::Reload { tab: tab.clone(), ignore_cache: true },
             Command::Raise,
+            Command::Permission { request: u64::MAX, allow: true },
+            Command::Permission { request: 0, allow: false },
+            Command::Devtools {
+                tab: tab.clone(),
+                id: 42,
+                method: "Runtime.evaluate".into(),
+                params: r#"{"expression":"document.title + ' x'","returnByValue":true}"#.into(),
+            },
+            Command::ImportCookies { path: "/data/browser-cef/default/ferryx import.tsv".into() },
+            Command::Focus { tab: tab.clone(), address: true },
+            Command::Focus { tab: tab.clone(), address: false },
         ];
         for command in commands {
             assert_eq!(Command::parse(&command.to_line()), Some(command));
@@ -267,6 +922,27 @@ mod tests {
             Event::Address { tab: tab.clone(), url: "https://a.test/".into() },
             Event::Title { tab: tab.clone(), title: "Inbox (3) - mail".into() },
             Event::Loading { tab: tab.clone(), loading: false, can_go_back: true, can_go_forward: false },
+            Event::PermissionRequest {
+                tab: tab.clone(),
+                request: 42,
+                kinds: vec![PermissionKind::Camera, PermissionKind::Microphone],
+                origin: "https://meet.example.com:8443".into(),
+            },
+            Event::PermissionRequest {
+                tab: tab.clone(),
+                request: 43,
+                kinds: PermissionKind::ALL.to_vec(),
+                origin: "https://a.test".into(),
+            },
+            Event::PermissionDismissed { tab: tab.clone(), request: 42 },
+            Event::MediaAccess { tab: tab.clone(), video: true, audio: false },
+            Event::Devtools {
+                tab: tab.clone(),
+                id: 9,
+                ok: true,
+                result: r#"{"result":{"type":"string","value":"a b"}}"#.into(),
+            },
+            Event::Devtools { tab: tab.clone(), id: 10, ok: false, result: r#"{"message":"no browser"}"#.into() },
             Event::Closed { tab },
         ];
         for event in events {
@@ -295,6 +971,10 @@ mod tests {
         assert_eq!(Command::parse("open b1 0 0 800"), None);
         assert_eq!(Command::parse("show"), None);
         assert_eq!(Command::parse("dance b1"), None);
+        assert_eq!(Command::parse("permission 7 yes"), None);
+        assert_eq!(Command::parse("permission x 1"), None);
+        assert_eq!(Event::parse("@ferryx permission-request b1 7 camera,teleport https://a.test"), None);
+        assert_eq!(Event::parse("@ferryx media-access b1 1"), None);
     }
 
     #[test]
@@ -304,5 +984,202 @@ mod tests {
             Some(Event::Closed { tab: "b1".into() })
         );
         assert_eq!(Command::parse("hide b1\r"), Some(Command::Hide { tab: "b1".into() }));
+    }
+
+    #[test]
+    fn every_system_command_survives_a_round_trip() {
+        let tab = "b1".to_string();
+        let commands = [
+            Command::Find {
+                tab: tab.clone(),
+                query: "two  words ".trim_end().into(),
+                forward: false,
+                match_case: true,
+                find_next: true,
+            },
+            Command::StopFind { tab: tab.clone(), clear_selection: true },
+            Command::Zoom { tab: tab.clone(), percent: 125 },
+            Command::Print { tab: tab.clone() },
+            Command::PrintPdf { tab: tab.clone(), path: "/Users/me/My Docs/page.pdf".into() },
+            Command::DownloadPath { download: 4, path: "C:\\Users\\me\\Downloads\\a b.zip".into() },
+            Command::DownloadPath { download: 4, path: String::new() },
+            Command::DownloadControl { download: 4, action: DownloadAction::Pause },
+            Command::DownloadControl { download: 4, action: DownloadAction::Resume },
+            Command::DownloadControl { download: 4, action: DownloadAction::Cancel },
+            Command::FileChosen { request: 9, paths: vec!["/tmp/a b.png".into(), "/tmp/c.txt".into()] },
+            Command::FileChosen { request: 9, paths: Vec::new() },
+            Command::NotificationPermission { tab, state: PagePermission::Granted },
+        ];
+        for command in commands {
+            assert_eq!(Command::parse(&command.to_line()), Some(command));
+        }
+    }
+
+    #[test]
+    fn every_system_event_survives_a_round_trip() {
+        let tab = "b1".to_string();
+        let events = [
+            Event::FindResult { tab: tab.clone(), count: 12, active: 3, final_update: true },
+            Event::PdfDone { tab: tab.clone(), ok: true, path: "/tmp/My Page.pdf".into() },
+            Event::PdfDone { tab: tab.clone(), ok: false, path: String::new() },
+            Event::DownloadBegin {
+                download: 7,
+                tab: tab.clone(),
+                total: Some(1 << 33),
+                url: "https://a.test/f?x=1".into(),
+                name: "My File (1).zip".into(),
+            },
+            Event::DownloadBegin { download: 8, tab: String::new(), total: None, url: String::new(), name: "x".into() },
+            Event::DownloadUpdate {
+                download: 7,
+                received: 1024,
+                total: None,
+                state: DownloadState::Paused,
+                path: "/tmp/My File (1).zip".into(),
+            },
+            Event::DownloadUpdate {
+                download: 7,
+                received: 0,
+                total: Some(10),
+                state: DownloadState::Failed(DownloadFailure::DiskFull),
+                path: String::new(),
+            },
+            Event::FileDialog {
+                request: 2,
+                tab: tab.clone(),
+                mode: FileDialogMode::OpenMultiple,
+                accept: vec![".png".into(), "image/*".into()],
+                default_path: "/tmp/a b".into(),
+            },
+            Event::FileDialog {
+                request: 3,
+                tab: tab.clone(),
+                mode: FileDialogMode::Save,
+                accept: Vec::new(),
+                default_path: String::new(),
+            },
+            Event::PageMessage {
+                tab,
+                url: "https://mail.test/inbox".into(),
+                message: r#"{"op":"show","title":"New mail","body":"Hi there"}"#.into(),
+            },
+        ];
+        for event in events {
+            assert_eq!(Event::parse(&event.to_line()), Some(event));
+        }
+    }
+
+    #[test]
+    fn a_url_with_spaces_stays_one_field_and_bad_system_lines_are_ignored() {
+        let event = Event::DownloadBegin {
+            download: 1,
+            tab: "b1".into(),
+            total: None,
+            url: "https://a.test/a b".into(),
+            name: "a b".into(),
+        };
+        assert_eq!(
+            Event::parse(&event.to_line()),
+            Some(Event::DownloadBegin {
+                download: 1,
+                tab: "b1".into(),
+                total: None,
+                url: "https://a.test/a%20b".into(),
+                name: "a b".into(),
+            })
+        );
+        assert_eq!(Event::parse("@ferryx dlupdate 1 5 -1 exploded /tmp/x"), None);
+        assert_eq!(Event::parse("@ferryx filedialog 1 b1 sideways - "), None);
+        assert_eq!(Command::parse("dlctl 1 rewind"), None);
+        assert_eq!(Command::parse("printpdf b1"), None);
+        assert_eq!(Command::parse("zoom b1 big"), None);
+    }
+
+    #[test]
+    fn the_notification_shim_carries_the_post_function() {
+        let shim = notification_shim("window.__post");
+        assert!(!shim.contains(NOTIFICATION_POST_PLACEHOLDER));
+        assert!(shim.contains("window.__post"));
+        assert_eq!(
+            notification_permission_script(PagePermission::Denied),
+            "window.__ferryxNotificationPermission && window.__ferryxNotificationPermission('denied')"
+        );
+    }
+
+    #[test]
+    fn a_devtools_call_without_params_gets_an_empty_object_and_a_bad_id_is_refused() {
+        assert_eq!(
+            Command::parse("devtools b1 3 Page.captureScreenshot"),
+            Some(Command::Devtools {
+                tab: "b1".into(),
+                id: 3,
+                method: "Page.captureScreenshot".into(),
+                params: "{}".into(),
+            })
+        );
+        assert_eq!(Command::parse("devtools b1 x Page.enable {}"), None);
+        assert_eq!(Event::parse("@ferryx devtools b1 3 2 {}"), None);
+    }
+
+    #[test]
+    fn vault_fill_and_form_lines_round_trip_on_one_line() {
+        let fill = Command::Fill { tab: "b1".into(), script: "(() => { return 'a b'; })()".into() };
+        assert_eq!(Command::parse(&fill.to_line()), Some(fill));
+        let form = Event::FormSubmitted {
+            tab: "b1".into(),
+            payload: r#"{"v":1,"kind":"formSubmitted","origin":"https://a.test","username":"u v","password":"p\nq"}"#.into(),
+        };
+        assert!(!form.to_line().contains('\n'));
+        assert_eq!(Event::parse(&form.to_line()), Some(form));
+        assert_eq!(Command::parse("fill"), None);
+    }
+
+    #[test]
+    fn json_string_escapes_quotes_controls_and_line_separators() {
+        assert_eq!(json_string("a\"b\\c\nd\u{1}\u{2028}"), r#""a\"b\\c\nd\u0001\u2028""#);
+        assert!(VAULT_CAPTURE_SCRIPT.contains("formSubmitted"));
+    }
+
+    const EXTENSION: &str = "cjpalhdlnbpafiamejdnhcphjbkeiagm";
+
+    #[test]
+    fn every_extension_call_and_answer_survives_a_round_trip() {
+        let calls = [
+            ExtensionCall::List,
+            ExtensionCall::SetEnabled { extension: EXTENSION.into(), enabled: false },
+            ExtensionCall::SetEnabled { extension: EXTENSION.into(), enabled: true },
+            ExtensionCall::Remove { extension: EXTENSION.into() },
+            ExtensionCall::Pin { extension: EXTENSION.into(), pinned: true },
+        ];
+        for (id, call) in (1u32..).zip(calls) {
+            let command = Command::Extensions { id, call };
+            assert_eq!(Command::parse(&command.to_line()), Some(command));
+        }
+        let answers = [
+            Event::Extensions { id: 1, ok: true, result: r#"[{"id":"a","name":"A b"}]"#.into() },
+            Event::Extensions { id: 2, ok: false, result: r#"{"message":"cancelled"}"#.into() },
+        ];
+        for answer in answers {
+            assert!(!answer.to_line().contains('\n'));
+            assert_eq!(Event::parse(&answer.to_line()), Some(answer));
+        }
+    }
+
+    #[test]
+    fn extension_lines_with_bad_ids_or_fields_are_refused() {
+        assert!(is_extension_id(EXTENSION));
+        assert!(!is_extension_id("qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"));
+        assert!(!is_extension_id(&EXTENSION[..31]));
+        assert_eq!(Command::parse("extensions 1 remove ../../etc"), None);
+        assert_eq!(Command::parse(&format!("extensions 1 remove {}", EXTENSION.to_uppercase())), None);
+        assert_eq!(Command::parse(&format!("extensions 1 enable {EXTENSION} yes")), None);
+        assert_eq!(Command::parse(&format!("extensions 1 pin {EXTENSION}")), None);
+        assert_eq!(Command::parse(&format!("extensions 1 remove {EXTENSION} extra")), None);
+        assert_eq!(Command::parse("extensions x list"), None);
+        assert_eq!(Command::parse("extensions 1 list extra"), None);
+        assert_eq!(Command::parse("extensions 1 dance"), None);
+        assert_eq!(Command::parse("extensions 1"), None);
+        assert_eq!(Event::parse("@ferryx extensions 1 2 []"), None);
+        assert_eq!(Event::parse("@ferryx extensions x 1 []"), None);
     }
 }

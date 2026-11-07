@@ -502,6 +502,8 @@ export type BrowserSessionSummary = {
   url: string;
   title?: string | null;
   visible: boolean;
+  engine?: BrowserEngine;
+  zoomFactor?: number;
 };
 
 export type BrowserAutomationElement = {
@@ -509,7 +511,12 @@ export type BrowserAutomationElement = {
   role: string;
   name: string;
   tagName: string;
+  disabled?: boolean;
+  checked?: boolean | null;
 };
+
+/** An embedded frame the observe did not enter. */
+export type BrowserAutomationFrame = { kind: string; title: string; src: string };
 
 export type BrowserAutomationSnapshot = {
   browserId: string;
@@ -517,7 +524,13 @@ export type BrowserAutomationSnapshot = {
   url: string;
   title: string;
   elements: BrowserAutomationElement[];
+  truncated?: boolean;
+  frames?: BrowserAutomationFrame[];
+  isolated?: boolean;
 };
+
+/** `applied` is present only when the request carried a postcondition. */
+export type BrowserActOutcome = { dispatched: boolean; applied?: boolean };
 
 export type BrowserAutomationClickAction = {
   type: "click";
@@ -544,6 +557,8 @@ export type BrowserAutomationRequest = {
   browserId: string;
   generation: number;
   action: BrowserAutomationAction;
+  /** Same shape as a wait condition: text, selector, url or load state (scripts are refused). */
+  postcondition?: Record<string, unknown>;
 };
 
 export type Pane = {

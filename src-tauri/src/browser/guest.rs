@@ -16,6 +16,9 @@ const POPUP_CLOSE_HOST: &str = "popupclose.ferryx.invalid";
 /// `window.opener.postMessage(...)` from a popup tab: param `msg` = JSON
 /// `{ data, targetOrigin }`.
 const OPENER_HOST: &str = "opener.ferryx.invalid";
+/// A message from the page's Notification shim: param `msg` = JSON. Class (b): the page can
+/// only ask; the host decides per origin (`crate::browser::site_permissions`).
+const NOTIFY_HOST: &str = "notify.ferryx.invalid";
 
 /// Shortcuts the page route may still carry: they only affect the sending tab's own
 /// document, which the page can already do itself (design 2.1 "b-self"). App-chrome
@@ -37,6 +40,8 @@ pub enum BrowserGuestAction {
     PopupCloseHandle { handle: String },
     /// `handle.postMessage(...)` from the opener tab to a specific popup handle.
     PopupMessage { handle: String, message: String },
+    /// A message from the page's Notification shim (JSON).
+    PageNotification { message: String },
 }
 
 /// Parses a class (b) control navigation from the page-world bridge.
@@ -79,6 +84,9 @@ pub fn parse_browser_guest_action(url: &Url, expected_nonce: &str) -> Option<Bro
         OPENER_HOST => {
             query_value(url, "msg").map(|message| BrowserGuestAction::OpenerMessage { message })
         }
+        NOTIFY_HOST => {
+            query_value(url, "msg").map(|message| BrowserGuestAction::PageNotification { message })
+        }
         _ => None,
     }
 }
@@ -94,6 +102,14 @@ const BRIDGE_HARD_RELOAD_PLACEHOLDER: &str = "__FERRYX_BROWSER_BRIDGE_HARD_RELOA
 const BRIDGE_NATIVE_OPEN_PLACEHOLDER: &str = "__FERRYX_BROWSER_BRIDGE_NATIVE_OPEN__";
 const POPUP_SURFACE_PLACEHOLDER: &str = "__FERRYX_IS_POPUP_SURFACE__";
 const WINDOW_CLOSE_BODY_PLACEHOLDER: &str = "__FERRYX_WINDOW_CLOSE_BODY__";
+const NOTIFICATION_SHIM_PLACEHOLDER: &str = "__FERRYX_NOTIFICATION_SHIM__";
+
+/// The page Notification shim, posting through this script's class (b) route.
+fn notification_shim_source() -> String {
+    ferryx_browser_engine_protocol::notification_shim(
+        "(message) => route('notify.ferryx.invalid', 'msg', message)",
+    )
+}
 
 /// Body of the `window.close` replacement in a popup tab, substituted for
 /// [`WINDOW_CLOSE_BODY_PLACEHOLDER`]. Closing asks the host, and the host is the only
@@ -202,6 +218,7 @@ pub fn browser_guest_bridge_script(nonce: &str, is_popup: bool) -> String {
             BRIDGE_NATIVE_OPEN_PLACEHOLDER,
             if cfg!(windows) { "true" } else { "false" },
         )
+        .replace(NOTIFICATION_SHIM_PLACEHOLDER, &notification_shim_source())
 }
 
 const BRIDGE_SCRIPT_TEMPLATE: &str = r#"
@@ -629,6 +646,9 @@ __FERRYX_WINDOW_CLOSE_BODY__
     event.preventDefault();
     assign(target);
   }, true);
+
+  // Web Notification API, gated by the host per origin.
+  __FERRYX_NOTIFICATION_SHIM__
 })();
 "#;
 
@@ -937,6 +957,22 @@ mod tests {
 
     #[test]
     fn parses_popup_navigate_and_opener_message_actions() {
+        // (popup cases follow; the page notification route is checked first)
+        let notify = Url::parse(&format!(
+            "https://notify.ferryx.invalid/?msg=%7B%22op%22%3A%22request%22%7D&nonce={TEST_NONCE}"
+        ))
+        .unwrap();
+        assert_eq!(
+            parse_browser_guest_action(&notify, TEST_NONCE),
+            Some(BrowserGuestAction::PageNotification { message: r#"{"op":"request"}"#.into() })
+        );
+        let wrong_nonce =
+            Url::parse("https://notify.ferryx.invalid/?msg=%7B%7D&nonce=other").unwrap();
+        assert_eq!(parse_browser_guest_action(&wrong_nonce, TEST_NONCE), None);
+        let script = browser_guest_bridge_script(TEST_NONCE, false);
+        assert!(!script.contains(NOTIFICATION_SHIM_PLACEHOLDER));
+        assert!(script.contains("route('notify.ferryx.invalid', 'msg', message)"));
+
         // `window.open(url)` no longer creates a tab through the page route: op=open moved
         // to the trusted bridge, with or without an explicit op.
         let open = Url::parse(&format!(

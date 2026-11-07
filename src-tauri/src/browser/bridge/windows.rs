@@ -168,27 +168,31 @@ pub fn leak_probe_passed(raw: &str) -> bool {
     leak_probe_outcome(Some(raw)) == ProbeOutcome::Passed
 }
 
-/// Runtime.bindingCalled params -> payload, only when the call came from the tracked
-/// main-frame ferryx-bridge context under our binding name.
-pub fn accept_binding_call(params: &str, main_context: Option<i64>) -> Option<String> {
-    let main_context = main_context?;
+/// Runtime.bindingCalled params -> payload, only when the call came from one of the tracked
+/// main-frame ferryx-bridge contexts under our binding name.
+pub fn accept_binding_call(params: &str, main_contexts: &[i64]) -> Option<String> {
     let value: Value = serde_json::from_str(params).ok()?;
     if value["name"].as_str() != Some(BINDING_NAME) {
         return None;
     }
-    if value["executionContextId"].as_i64() != Some(main_context) {
+    if !value["executionContextId"].as_i64().is_some_and(|id| main_contexts.contains(&id)) {
         return None;
     }
     value["payload"].as_str().map(str::to_string)
 }
 
-/// Tracks the ferryx-bridge execution context of the main frame from CDP events.
+/// Tracks the ferryx-bridge execution contexts of the main frame from CDP events.
+///
+/// One document can get several contexts named ferryx-bridge (WebView2 reports a new one
+/// for every isolated world created under that name). The broker registered with
+/// Page.addScriptToEvaluateOnNewDocument runs in the first one, so that one is the main
+/// context, and a binding call from any of them is the bridge's own.
 #[derive(Debug, Default, Clone)]
 pub struct ContextTracker {
     main_frame_id: Option<String>,
-    /// frameId -> ferryx-bridge context id, for every frame (subframes are kept only so a
-    /// later main-frame id can be resolved without waiting for another event).
-    contexts: HashMap<String, i64>,
+    /// frameId -> ferryx-bridge context ids in creation order, for every frame (subframes are
+    /// kept only so a later main-frame id can be resolved without waiting for another event).
+    contexts: HashMap<String, Vec<i64>>,
 }
 
 impl ContextTracker {
@@ -210,7 +214,7 @@ impl ContextTracker {
     }
 
     /// Runtime.executionContextCreated. Returns true when the new context is the main
-    /// frame's ferryx-bridge world.
+    /// frame's first ferryx-bridge world of its document.
     pub fn on_context_created(&mut self, params: &str) -> bool {
         let Ok(value) = serde_json::from_str::<Value>(params) else {
             return false;
@@ -226,13 +230,17 @@ impl ContextTracker {
         let (Some(id), Some(frame)) = (context["id"].as_i64(), aux["frameId"].as_str()) else {
             return false;
         };
-        self.contexts.insert(frame.to_string(), id);
-        self.main_frame_id.as_deref() == Some(frame)
+        let ids = self.contexts.entry(frame.to_string()).or_default();
+        ids.push(id);
+        ids.len() == 1 && self.main_frame_id.as_deref() == Some(frame)
     }
 
     /// Records a world this module created itself with Page.createIsolatedWorld.
     pub fn on_world_created(&mut self, frame_id: &str, context_id: i64) {
-        self.contexts.insert(frame_id.to_string(), context_id);
+        let ids = self.contexts.entry(frame_id.to_string()).or_default();
+        if !ids.contains(&context_id) {
+            ids.push(context_id);
+        }
     }
 
     /// Runtime.executionContextDestroyed.
@@ -241,7 +249,10 @@ impl ContextTracker {
             return;
         };
         if let Some(id) = value["executionContextId"].as_i64() {
-            self.contexts.retain(|_, existing| *existing != id);
+            for ids in self.contexts.values_mut() {
+                ids.retain(|existing| *existing != id);
+            }
+            self.contexts.retain(|_, ids| !ids.is_empty());
         }
     }
 
@@ -255,9 +266,15 @@ impl ContextTracker {
     }
 
     pub fn main_context(&self) -> Option<i64> {
+        self.main_contexts().first().copied()
+    }
+
+    /// Every live ferryx-bridge context of the main frame, oldest first.
+    pub fn main_contexts(&self) -> &[i64] {
         self.main_frame_id
             .as_deref()
-            .and_then(|frame| self.contexts.get(frame).copied())
+            .and_then(|frame| self.contexts.get(frame))
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -627,15 +644,15 @@ fn register_cdp_events(core: &ICoreWebView2, installed: &Installed) -> windows::
     subscribe(core, "Runtime.bindingCalled", move |_, params| {
         let main = with_world(&this.label, |world| {
             if world.life.is_isolated() {
-                world.tracker.main_context()
+                world.tracker.main_contexts().to_vec()
             } else {
-                None
+                Vec::new()
             }
         })
-        .flatten();
-        match accept_binding_call(params, main) {
+        .unwrap_or_default();
+        match accept_binding_call(params, &main) {
             Some(payload) => (this.ctx.sink)(&this.ctx.browser_id, &payload, Attestation::IsolatedWorld),
-            None => tracing::debug!(browser_id = %this.ctx.browser_id, "dropped a binding call outside the main-frame ferryx-bridge world"),
+            None => tracing::warn!(browser_id = %this.ctx.browser_id, "dropped a binding call outside the main-frame ferryx-bridge world"),
         }
     })?;
 
@@ -1079,23 +1096,49 @@ mod tests {
     }
 
     #[test]
+    fn a_document_with_several_bridge_worlds_keeps_the_first_as_main_and_accepts_all() {
+        let mut tracker = ContextTracker::default();
+        tracker.set_main_frame("MAIN".into());
+        // Only the first world of a document asks for a leak re-probe.
+        assert!(tracker.on_context_created(&created(45, WORLD_NAME, "MAIN", false)));
+        assert!(!tracker.on_context_created(&created(46, WORLD_NAME, "MAIN", false)));
+        assert!(!tracker.on_context_created(&created(51, WORLD_NAME, "MAIN", false)));
+        assert!(!tracker.on_context_created(&created(60, WORLD_NAME, "SUB", false)));
+        assert_eq!(tracker.main_context(), Some(45));
+        assert_eq!(tracker.main_contexts(), &[45, 46, 51]);
+        let envelope = r#"{"v":1,"kind":"download","url":"http://127.0.0.1/download/ferryx-qa.txt"}"#;
+        let call = |ctx: i64| json!({ "name": BINDING_NAME, "payload": envelope, "executionContextId": ctx }).to_string();
+        // The broker that saw the click runs in the first world: its call is the bridge's.
+        assert_eq!(accept_binding_call(&call(45), tracker.main_contexts()).as_deref(), Some(envelope));
+        assert_eq!(accept_binding_call(&call(51), tracker.main_contexts()).as_deref(), Some(envelope));
+        // A subframe world is still refused.
+        assert_eq!(accept_binding_call(&call(60), tracker.main_contexts()), None);
+        tracker.on_context_destroyed(r#"{"executionContextId":45}"#);
+        assert_eq!(tracker.main_context(), Some(46));
+        // A new document starts over and asks for one re-probe.
+        tracker.on_contexts_cleared();
+        assert!(tracker.main_contexts().is_empty());
+        assert!(tracker.on_context_created(&created(70, WORLD_NAME, "MAIN", false)));
+    }
+
+    #[test]
     fn binding_calls_are_accepted_only_from_the_main_frame_world() {
         let call = |name: &str, ctx: i64, payload: Value| {
             json!({ "name": name, "payload": payload, "executionContextId": ctx }).to_string()
         };
         let envelope = r#"{"v":1,"kind":"download","url":"https://e.com/a"}"#;
         assert_eq!(
-            accept_binding_call(&call(BINDING_NAME, 9, json!(envelope)), Some(9)).as_deref(),
+            accept_binding_call(&call(BINDING_NAME, 9, json!(envelope)), &[9]).as_deref(),
             Some(envelope)
         );
         // Page world or subframe world context ids are dropped.
-        assert_eq!(accept_binding_call(&call(BINDING_NAME, 1, json!(envelope)), Some(9)), None);
+        assert_eq!(accept_binding_call(&call(BINDING_NAME, 1, json!(envelope)), &[9]), None);
         // No tracked context means nothing is trusted.
-        assert_eq!(accept_binding_call(&call(BINDING_NAME, 9, json!(envelope)), None), None);
+        assert_eq!(accept_binding_call(&call(BINDING_NAME, 9, json!(envelope)), &[]), None);
         // Another binding name, a non-string payload, or garbage are dropped.
-        assert_eq!(accept_binding_call(&call("other", 9, json!(envelope)), Some(9)), None);
-        assert_eq!(accept_binding_call(&call(BINDING_NAME, 9, json!({"v":1})), Some(9)), None);
-        assert_eq!(accept_binding_call("not json", Some(9)), None);
+        assert_eq!(accept_binding_call(&call("other", 9, json!(envelope)), &[9]), None);
+        assert_eq!(accept_binding_call(&call(BINDING_NAME, 9, json!({"v":1})), &[9]), None);
+        assert_eq!(accept_binding_call("not json", &[9]), None);
     }
 
     #[test]

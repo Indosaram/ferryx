@@ -1,7 +1,7 @@
 use crate::browser::{
     browser_find_script, browser_guest_bridge_script, cookie_from_imported, download_url_to_path,
     parse_browser_find_callback, parse_browser_guest_action, parse_cookie_file,
-    BrowserAutomationAction, BrowserAutomationElement, BrowserAutomationRequest,
+    BrowserAutomationAction, BrowserAutomationRequest,
     BrowserAutomationSnapshot, BrowserAutomationTarget, BrowserDialogEntry,
     BrowserDialogHandleRequest, BrowserDialogPolicyRequest, BrowserDownloadRequest,
     BrowserDownloadRequestedPayload, BrowserElementPickedPayload, BrowserError, BrowserFindResult,
@@ -24,8 +24,6 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AutomationSnapshotResult {
-    pub(crate) url: String,
-    pub(crate) title: String,
     pub(crate) elements: Vec<AutomationSnapshotElement>,
 }
 
@@ -60,8 +58,13 @@ pub(crate) const AUTOMATION_SNAPSHOT_SCRIPT: &str = r#"(() => {
     return segments.join(' > ');
   };
   const roleFor = (element) => element.getAttribute('role') || element.tagName.toLowerCase();
-  const nameFor = (element) => element.getAttribute('aria-label') || element.getAttribute('title') ||
-    element.getAttribute('placeholder') || element.textContent.trim().replace(/\s+/g, ' ').slice(0, 160);
+  // A password field is named by its label only: never its value or a value attribute a
+  // framework mirrored into the DOM.
+  const isSecret = (element) => element instanceof HTMLInputElement && element.type === 'password';
+  const nameFor = (element) => isSecret(element)
+    ? (element.getAttribute('aria-label') || element.getAttribute('placeholder') || 'password')
+    : (element.getAttribute('aria-label') || element.getAttribute('title') ||
+      element.getAttribute('placeholder') || element.textContent.trim().replace(/\s+/g, ' ').slice(0, 160));
   return JSON.stringify({
     url: location.href,
     title: document.title,
@@ -69,7 +72,7 @@ pub(crate) const AUTOMATION_SNAPSHOT_SCRIPT: &str = r#"(() => {
       reference: `e${index + 1}`,
       selector: selectorFor(element),
       role: roleFor(element),
-      name: nameFor(element),
+      name: nameFor(element).slice(0, 160),
       tagName: element.tagName.toLowerCase(),
     })),
   });
@@ -319,31 +322,10 @@ async fn dispatch_macos_keypress<R: tauri::Runtime>(
     Ok(true)
 }
 
-fn automation_script(
-    action: &BrowserAutomationAction,
-    selector: Option<&str>,
-) -> Result<String, BrowserError> {
+/// The page script for an action that addresses no element (keypress, window scroll, typing
+/// into the focused element). Element actions go through `observe.js` by ref instead.
+fn automation_script(action: &BrowserAutomationAction) -> Result<String, BrowserError> {
     match action {
-        BrowserAutomationAction::Click { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.click(); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Fill { value, .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            let value = serde_json::to_string(value)
-                .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); element.value = {value}; element.dispatchEvent(new Event('input', {{ bubbles: true }})); element.dispatchEvent(new Event('change', {{ bubbles: true }})); return 'ok'; }})()"
-            ))
-        }
         BrowserAutomationAction::Keypress { key } => {
             let parsed = parse_keypress(key)?;
             let key = serde_json::to_string(&parsed.key)
@@ -356,101 +338,21 @@ fn automation_script(
                 "(() => {{ const target = document.activeElement || document.body || document.documentElement; const init = {{ bubbles: true, cancelable: true, key: {key}, metaKey: {meta_key}, ctrlKey: {ctrl_key}, altKey: {alt_key}, shiftKey: {shift_key} }}; const keydown = new KeyboardEvent('keydown', init); const notPrevented = target ? target.dispatchEvent(keydown) : true; const keyup = new KeyboardEvent('keyup', init); if (target) {{ target.dispatchEvent(keyup); }} if (!notPrevented) {{ throw new Error('keydown prevented'); }} return 'ok'; }})()"
             ))
         }
-        BrowserAutomationAction::Dblclick { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.dispatchEvent(new MouseEvent('dblclick', {{ bubbles: true, cancelable: true, view: window }})); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Hover { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.dispatchEvent(new MouseEvent('mouseover', {{ bubbles: true, cancelable: true, view: window }})); element.dispatchEvent(new MouseEvent('mouseenter', {{ bubbles: false, cancelable: false, view: window }})); element.dispatchEvent(new MouseEvent('mousemove', {{ bubbles: true, cancelable: true, view: window }})); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Focus { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Check { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); if (!element.checked) {{ element.checked = true; element.dispatchEvent(new Event('input', {{ bubbles: true }})); element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} if (element.getAttribute('aria-checked') === 'false') {{ element.setAttribute('aria-checked', 'true'); }} return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Uncheck { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); if (element.checked) {{ element.checked = false; element.dispatchEvent(new Event('input', {{ bubbles: true }})); element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} if (element.getAttribute('aria-checked') === 'true') {{ element.setAttribute('aria-checked', 'false'); }} return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::ScrollIntoView { .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.scrollIntoView({{ behavior: 'instant', block: 'center', inline: 'center' }}); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Select { value, .. } => {
-            let selector = serde_json::to_string(selector.ok_or_else(|| {
-                BrowserError::AutomationFailed("missing snapshot selector".into())
-            })?)
-            .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            let value_json = serde_json::to_string(value)
-                .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            Ok(format!(
-                "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); let matched = false; if (element.tagName === 'SELECT') {{ for (const opt of element.options) {{ if (opt.value === {value_json} || opt.text === {value_json}) {{ opt.selected = true; matched = true; break; }} }} }} if (!matched && element.value !== undefined) {{ element.value = {value_json}; }} element.dispatchEvent(new Event('input', {{ bubbles: true }})); element.dispatchEvent(new Event('change', {{ bubbles: true }})); return 'ok'; }})()"
-            ))
-        }
-        BrowserAutomationAction::Scroll { x, y, .. } => {
+        BrowserAutomationAction::Scroll { reference: None, x, y } => {
             let dx = x.unwrap_or(0);
             let dy = y.unwrap_or(0);
-            if let Some(sel) = selector {
-                let selector = serde_json::to_string(sel)
-                    .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-                Ok(format!(
-                    "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.scrollBy({{ left: {dx}, top: {dy}, behavior: 'instant' }}); return 'ok'; }})()"
-                ))
-            } else {
-                Ok(format!(
-                    "(() => {{ window.scrollBy({{ left: {dx}, top: {dy}, behavior: 'instant' }}); return 'ok'; }})()"
-                ))
-            }
+            Ok(format!(
+                "(() => {{ window.scrollBy({{ left: {dx}, top: {dy}, behavior: 'instant' }}); return 'ok'; }})()"
+            ))
         }
-        BrowserAutomationAction::Type { text, .. } => {
+        BrowserAutomationAction::Type { reference: None, text } => {
             let text_json = serde_json::to_string(text)
                 .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-            if let Some(sel) = selector {
-                let selector = serde_json::to_string(sel)
-                    .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
-                Ok(format!(
-                    "(() => {{ const element = document.querySelector({selector}); if (!element) throw new Error('element disappeared'); element.focus(); const str = {text_json}; for (const ch of str) {{ const init = {{ bubbles: true, cancelable: true, key: ch }}; element.dispatchEvent(new KeyboardEvent('keydown', init)); element.dispatchEvent(new KeyboardEvent('keypress', init)); if (element.value !== undefined) {{ element.value = (element.value || '') + ch; element.dispatchEvent(new Event('input', {{ bubbles: true }})); }} else if (element.isContentEditable) {{ document.execCommand('insertText', false, ch); }} element.dispatchEvent(new KeyboardEvent('keyup', init)); }} if (element.value !== undefined) {{ element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} return 'ok'; }})()"
-                ))
-            } else {
-                Ok(format!(
-                    "(() => {{ const element = document.activeElement || document.body; if (!element) throw new Error('element disappeared'); element.focus(); const str = {text_json}; for (const ch of str) {{ const init = {{ bubbles: true, cancelable: true, key: ch }}; element.dispatchEvent(new KeyboardEvent('keydown', init)); element.dispatchEvent(new KeyboardEvent('keypress', init)); if (element.value !== undefined) {{ element.value = (element.value || '') + ch; element.dispatchEvent(new Event('input', {{ bubbles: true }})); }} else if (element.isContentEditable) {{ document.execCommand('insertText', false, ch); }} element.dispatchEvent(new KeyboardEvent('keyup', init)); }} if (element.value !== undefined) {{ element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} return 'ok'; }})()"
-                ))
-            }
+            Ok(format!(
+                "(() => {{ const element = document.activeElement || document.body; if (!element) throw new Error('element disappeared'); element.focus(); const str = {text_json}; for (const ch of str) {{ const init = {{ bubbles: true, cancelable: true, key: ch }}; element.dispatchEvent(new KeyboardEvent('keydown', init)); element.dispatchEvent(new KeyboardEvent('keypress', init)); if (element.value !== undefined) {{ element.value = (element.value || '') + ch; element.dispatchEvent(new Event('input', {{ bubbles: true }})); }} else if (element.isContentEditable) {{ document.execCommand('insertText', false, ch); }} element.dispatchEvent(new KeyboardEvent('keyup', init)); }} if (element.value !== undefined) {{ element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} return 'ok'; }})()"
+            ))
         }
+        _ => Err(BrowserError::AutomationFailed("element actions are addressed by ref".into())),
     }
 }
 
@@ -459,34 +361,25 @@ mod automation_tests {
     use super::*;
 
     #[test]
-    fn fill_script_encodes_untrusted_values_as_json_strings() {
-        let script = automation_script(
-            &BrowserAutomationAction::Fill {
-                reference: "e1".into(),
-                value: "hello'); window.bad = true; //".into(),
-            },
-            Some("#email"),
-        )
-        .expect("build fill script");
-
-        assert!(script.contains("element.value = \"hello'); window.bad = true; //\""));
-        assert!(!script.contains("element.value = hello');"));
+    fn automation_snapshot_never_reads_field_values_and_names_password_fields_by_label() {
+        assert!(AUTOMATION_SNAPSHOT_SCRIPT.contains("element.type === 'password'"));
+        assert!(!AUTOMATION_SNAPSHOT_SCRIPT.contains(".value"));
     }
 
     #[test]
-    fn click_requires_snapshot_selector() {
-        let error = automation_script(
-            &BrowserAutomationAction::Click {
-                reference: "e1".into(),
-            },
-            None,
-        )
-        .expect_err("click requires resolved snapshot target");
-
-        assert_eq!(
-            error,
-            BrowserError::AutomationFailed("missing snapshot selector".into())
-        );
+    fn untargeted_actions_encode_text_as_json_and_element_actions_need_a_ref() {
+        let typed = automation_script(&BrowserAutomationAction::Type {
+            reference: None,
+            text: "hello'); window.bad = true; //".into(),
+        })
+        .expect("type into the focused element");
+        assert!(typed.contains("const str = \"hello'); window.bad = true; //\""));
+        let scroll = automation_script(&BrowserAutomationAction::Scroll { reference: None, x: Some(0), y: Some(200) })
+            .expect("window scroll");
+        assert!(scroll.contains("window.scrollBy({ left: 0, top: 200"));
+        let error = automation_script(&BrowserAutomationAction::Click { reference: "d1.1".into() })
+            .expect_err("element actions go through observe.js");
+        assert_eq!(error, BrowserError::AutomationFailed("element actions are addressed by ref".into()));
     }
 
     #[test]
@@ -779,12 +672,9 @@ mod automation_tests {
         for (input, expected_key, expected_meta, expected_ctrl, expected_alt, expected_shift) in
             cases
         {
-            let script = automation_script(
-                &BrowserAutomationAction::Keypress {
-                    key: input.to_string(),
-                },
-                None,
-            )
+            let script = automation_script(&BrowserAutomationAction::Keypress {
+                key: input.to_string(),
+            })
             .unwrap_or_else(|err| panic!("failed to build script for '{input}': {err:?}"));
 
             assert!(
@@ -856,173 +746,13 @@ mod automation_tests {
         ];
 
         for input in invalid_cases {
-            let res = automation_script(
-                &BrowserAutomationAction::Keypress {
-                    key: input.to_string(),
-                },
-                None,
-            );
+            let res = automation_script(&BrowserAutomationAction::Keypress {
+                key: input.to_string(),
+            });
             assert!(
                 res.is_err(),
                 "keypress input '{input}' should fail validation, but succeeded with: {:?}",
                 res.ok()
-            );
-        }
-    }
-
-    #[test]
-    fn extended_automation_actions_script_generation() {
-        // dblclick
-        let dblclick = automation_script(
-            &BrowserAutomationAction::Dblclick {
-                reference: "row1".into(),
-            },
-            Some("#row1"),
-        )
-        .expect("dblclick script");
-        assert!(dblclick.contains("querySelector(\"#row1\")"));
-        assert!(dblclick.contains("new MouseEvent('dblclick'"));
-
-        // hover
-        let hover = automation_script(
-            &BrowserAutomationAction::Hover {
-                reference: "menu".into(),
-            },
-            Some(".menu-trigger"),
-        )
-        .expect("hover script");
-        assert!(hover.contains("querySelector(\".menu-trigger\")"));
-        assert!(hover.contains("mouseover"));
-        assert!(hover.contains("mouseenter"));
-        assert!(hover.contains("mousemove"));
-
-        // focus
-        let focus = automation_script(
-            &BrowserAutomationAction::Focus {
-                reference: "input".into(),
-            },
-            Some("#email"),
-        )
-        .expect("focus script");
-        assert!(focus.contains("querySelector(\"#email\")"));
-        assert!(focus.contains("element.focus()"));
-
-        // check
-        let check = automation_script(
-            &BrowserAutomationAction::Check {
-                reference: "chk".into(),
-            },
-            Some("#accept-terms"),
-        )
-        .expect("check script");
-        assert!(check.contains("querySelector(\"#accept-terms\")"));
-        assert!(check.contains("element.checked = true"));
-        assert!(check.contains("new Event('change'"));
-
-        // uncheck
-        let uncheck = automation_script(
-            &BrowserAutomationAction::Uncheck {
-                reference: "chk".into(),
-            },
-            Some("#accept-terms"),
-        )
-        .expect("uncheck script");
-        assert!(uncheck.contains("querySelector(\"#accept-terms\")"));
-        assert!(uncheck.contains("element.checked = false"));
-        assert!(uncheck.contains("new Event('change'"));
-
-        // scroll-into-view
-        let scroll_into_view = automation_script(
-            &BrowserAutomationAction::ScrollIntoView {
-                reference: "footer".into(),
-            },
-            Some("#site-footer"),
-        )
-        .expect("scrollIntoView script");
-        assert!(scroll_into_view.contains("querySelector(\"#site-footer\")"));
-        assert!(scroll_into_view.contains("element.scrollIntoView"));
-
-        // select
-        let select = automation_script(
-            &BrowserAutomationAction::Select {
-                reference: "country".into(),
-                value: "US".into(),
-            },
-            Some("#country-select"),
-        )
-        .expect("select script");
-        assert!(select.contains("querySelector(\"#country-select\")"));
-        assert!(select.contains("opt.value === \"US\""));
-        assert!(select.contains("new Event('change'"));
-
-        // scroll (with and without element selector)
-        let scroll_elem = automation_script(
-            &BrowserAutomationAction::Scroll {
-                reference: Some("pane".into()),
-                x: Some(10),
-                y: Some(50),
-            },
-            Some("#scroll-pane"),
-        )
-        .expect("scroll elem script");
-        assert!(scroll_elem.contains("querySelector(\"#scroll-pane\")"));
-        assert!(scroll_elem.contains("element.scrollBy({ left: 10, top: 50"));
-
-        let scroll_win = automation_script(
-            &BrowserAutomationAction::Scroll {
-                reference: None,
-                x: Some(0),
-                y: Some(200),
-            },
-            None,
-        )
-        .expect("scroll window script");
-        assert!(scroll_win.contains("window.scrollBy({ left: 0, top: 200"));
-
-        // type (with and without element selector)
-        let type_elem = automation_script(
-            &BrowserAutomationAction::Type {
-                reference: Some("txt".into()),
-                text: "hello".into(),
-            },
-            Some("#name-input"),
-        )
-        .expect("type elem script");
-        assert!(type_elem.contains("querySelector(\"#name-input\")"));
-        assert!(type_elem.contains("element.focus()"));
-        assert!(type_elem.contains("new KeyboardEvent('keydown'"));
-        assert!(type_elem.contains("element.value = (element.value || '') + ch"));
-
-        let type_active = automation_script(
-            &BrowserAutomationAction::Type {
-                reference: None,
-                text: "world".into(),
-            },
-            None,
-        )
-        .expect("type active script");
-        assert!(type_active.contains("document.activeElement || document.body"));
-        assert!(type_active.contains("element.focus()"));
-    }
-
-    #[test]
-    fn extended_automation_actions_require_snapshot_selector() {
-        let require_selector = vec![
-            BrowserAutomationAction::Dblclick { reference: "e1".into() },
-            BrowserAutomationAction::Hover { reference: "e1".into() },
-            BrowserAutomationAction::Focus { reference: "e1".into() },
-            BrowserAutomationAction::Check { reference: "e1".into() },
-            BrowserAutomationAction::Uncheck { reference: "e1".into() },
-            BrowserAutomationAction::ScrollIntoView { reference: "e1".into() },
-            BrowserAutomationAction::Select { reference: "e1".into(), value: "v".into() },
-        ];
-
-        for action in require_selector {
-            let error = automation_script(&action, None)
-                .expect_err("action requiring element must fail without selector");
-            assert_eq!(
-                error,
-                BrowserError::AutomationFailed("missing snapshot selector".into())
             );
         }
     }
@@ -1050,6 +780,7 @@ pub(crate) async fn eval_webview<R: tauri::Runtime>(
 pub const BROWSER_STATE_CHANGED_EVENT: &str = "browser_state_changed";
 
 fn emit_browser_state<R: tauri::Runtime>(webview: &tauri::Webview<R>, state: &BrowserState) {
+    crate::ipc::browser_library::observe_browser_state(webview.app_handle(), state);
     let _ = webview.app_handle().emit(
         BROWSER_STATE_CHANGED_EVENT,
         BrowserStateChangedPayload::from(state),
@@ -1065,6 +796,7 @@ pub fn install_browser_state_emitter<R: tauri::Runtime>(
 ) {
     let app = app.clone();
     manager.set_state_listener(Arc::new(move |state: &BrowserState| {
+        crate::ipc::browser_library::observe_browser_state(&app, state);
         let _ = app.emit(
             BROWSER_STATE_CHANGED_EVENT,
             BrowserStateChangedPayload::from(state),
@@ -1092,12 +824,19 @@ fn update_webview_state<R: tauri::Runtime>(
         let manager = Arc::clone(&manager);
         let browser_id = browser_id.clone();
         let webview_for_emit = webview.clone();
+        // A finished load also re-reads the document title: the title observer can miss the
+        // change on a same-tab navigation, which left the previous page's title on the tab.
+        let load_finished = loading == Some(false);
         let _ = webview.with_webview(move |platform_webview| unsafe {
             let native: &objc2_web_kit::WKWebView = &*platform_webview.inner().cast();
+            let title = load_finished
+                .then(|| native.title().map(|title| title.to_string()))
+                .flatten()
+                .filter(|title| !title.trim().is_empty());
             if let Ok(state) = manager.update_navigation_state(
                 &browser_id,
                 None,
-                None,
+                title,
                 None,
                 Some(native.canGoBack()),
                 Some(native.canGoForward()),
@@ -1353,7 +1092,13 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
         }
     }
 
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    // UI commands mount the tab in their calling window; background callers (CLI, remote) in
+    // the focused app window.
+    let host_window = host_window
+        .filter(|window| crate::window_registry::is_app_window_label(window.label()))
+        .or_else(|| crate::window_registry::focused_window(app));
+
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let cef_engine_dir = if opener.is_none() {
         engine_data_dir(app)
             .ok()
@@ -1361,6 +1106,17 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
     } else {
         None
     };
+    // A native Wayland window has no X window to host the engine's: those tabs stay on the
+    // system webview. Settings > Browser says why, and so does the pane once it is registered.
+    #[cfg(target_os = "linux")]
+    let has_x_parent = host_window
+        .as_ref()
+        .and_then(crate::browser::cef_engine::parent_xid)
+        .is_some();
+    #[cfg(target_os = "linux")]
+    let wayland_notice = wayland_engine_notice(cef_engine_dir.is_some(), has_x_parent);
+    #[cfg(target_os = "linux")]
+    let cef_engine_dir = cef_engine_dir.filter(|_| has_x_parent);
     // The Chromium engine keeps a named profile in its own directory; WebKit cannot.
     #[cfg(target_os = "macos")]
     if cef_engine_dir.is_none()
@@ -1376,6 +1132,13 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
     }
     let state = manager.register_session(request.clone())?;
     record_session_created(&state.browser_id);
+    // Without this the tab would quietly open on the system webview, leaving the user to guess
+    // why the Chromium engine they installed is not used.
+    #[cfg(target_os = "linux")]
+    if let Some(message) = wayland_notice {
+        let notice = crate::browser::engine_install::record_fallback(&state.browser_id, message);
+        let _ = app.emit(crate::ipc::browser_engine::BROWSER_ENGINE_FALLBACK_EVENT, notice);
+    }
 
     #[cfg(not(target_os = "macos"))]
     let profile_data_dir = match request.profile.as_ref() {
@@ -1383,11 +1146,9 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
             let root = discard_session_on_error(
                 manager,
                 &state.browser_id,
-                app.path()
-                    .app_data_dir()
-                    .map_err(|error| BrowserError::CreateFailed(error.to_string())),
+                crate::browser::data_paths::app_data_root(app).map_err(BrowserError::CreateFailed),
             )?;
-            let data_dir = root.join("browser-profiles").join(profile_id);
+            let data_dir = crate::browser::data_paths::named_profile_dir(&root, profile_id);
             discard_session_on_error(
                 manager,
                 &state.browser_id,
@@ -1397,17 +1158,31 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
             )?;
             Some(data_dir)
         }
-        _ => None,
+        // The default and private profiles share the app webview's folder, which an isolated
+        // run moves under FERRYX_DATA_DIR (WebView2 would otherwise use %LOCALAPPDATA%).
+        _ => crate::browser::data_paths::shared_webview_dir(std::env::var_os("FERRYX_DATA_DIR").as_deref()),
+    };
+    // WebKit has no data folder; an isolated run gets its own website data store instead.
+    #[cfg(target_os = "macos")]
+    let isolated_store = crate::browser::data_paths::shared_webview_dir(std::env::var_os("FERRYX_DATA_DIR").as_deref())
+        .map(|dir| crate::browser::data_paths::data_store_identifier(&dir));
+
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    let state = match cef_engine_dir {
+        Some(engine_dir) => {
+            let browser_id = state.browser_id.clone();
+            match create_cef_browser_session(app, manager, state, engine_dir, None, host_window.clone()).await {
+                Ok(state) => return Ok(state),
+                // The engine could not open the tab: it opens on the system webview instead,
+                // and its pane says why.
+                Err(error) => crate::ipc::browser_engine::fall_back_to_system_webview(
+                    app, manager, &request, &browser_id, error,
+                )?,
+            }
+        }
+        None => state,
     };
 
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    if let Some(engine_dir) = cef_engine_dir {
-        return create_cef_browser_session(app, manager, state, engine_dir).await;
-    }
-
-    let host_window = host_window
-        .filter(|window| crate::window_registry::is_app_window_label(window.label()))
-        .or_else(|| crate::window_registry::focused_window(app));
     if let Some(host_window) = host_window {
         let label = state.webview_label.clone();
         let target_url = state.url.clone();
@@ -1427,6 +1202,7 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
         let new_window_browser_id = browser_id.clone();
         let page_browser_id = browser_id.clone();
         let title_browser_id = browser_id.clone();
+        let download_browser_id = browser_id.clone();
 
         let guest_bridge_nonce = uuid::Uuid::new_v4().to_string();
         let nonce = guest_bridge_nonce.clone();
@@ -1481,10 +1257,14 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
             };
 
             let builder = tauri::WebviewBuilder::new(label, parsed_url)
+                // OS file drops go to the page (drop zones, <input type=file>), not to Tauri's DragDrop event.
+                .disable_drag_drop_handler()
                 .user_agent(crate::browser::default_desktop_user_agent())
                 .incognito(incognito)
                 .devtools(true)
                 .initialization_script(browser_guest_bridge_script(&guest_bridge_nonce, is_popup))
+                // Native downloads (WKDownload / WebView2 / WebKitDownload) feed the shelf.
+                .on_download(crate::ipc::browser_system::webview_download_handler(download_browser_id))
                 // Native new windows never open. In an Isolated tab the broker owns
                 // window.open; in an Unavailable tab nothing can attest the request, so it is
                 // denied visibly instead of vanishing (design 3.5, "as implemented").
@@ -1587,6 +1367,20 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
                             });
                             false
                         }
+                        Some(BrowserGuestAction::PageNotification { message }) => {
+                            let page_url = bridge_manager
+                                .get_state(&bridge_browser_id)
+                                .map(|state| state.url)
+                                .unwrap_or_default();
+                            crate::ipc::browser_system::handle_page_notification(
+                                &bridge_app,
+                                &bridge_manager,
+                                &bridge_browser_id,
+                                &page_url,
+                                &message,
+                            );
+                            false
+                        }
                         None => true,
                     },
                 )
@@ -1616,6 +1410,7 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
                         )
                     });
                     let navigation_url = (!fallback_to_blank).then_some(page_url);
+                    let loaded_url = navigation_url.clone().filter(|_| !loading);
                     update_webview_state(
                         &webview,
                         Arc::clone(&page_manager),
@@ -1625,6 +1420,14 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
                         Some(loading),
                         error,
                     );
+                    if let Some(url) = loaded_url {
+                        crate::ipc::browser_system::on_webview_page_loaded(
+                            webview.app_handle(),
+                            &page_manager,
+                            &page_browser_id,
+                            &url,
+                        );
+                    }
                 })
                 .on_document_title_changed(move |webview, title| {
                     update_webview_state(
@@ -1643,6 +1446,11 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
                 builder.data_directory(data_dir)
             } else {
                 builder
+            };
+            #[cfg(target_os = "macos")]
+            let builder = match isolated_store {
+                Some(identifier) if !incognito => builder.data_store_identifier(identifier),
+                _ => builder,
             };
 
             let pos = if let Some(ref b) = bounds {
@@ -1678,6 +1486,11 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
                         Ok(()) => 'kept: {
                             let _ = child.eval(&eval_bridge_script);
                             let _ = child.set_zoom(zoom_factor);
+                            // Camera, microphone and other site permissions ask the user
+                            // instead of the engine's default (wry grants media on macOS).
+                            crate::browser::site_permissions::install_webview(&child, &browser_id);
+                            // Cancel, Pause and Resume for the downloads this tab's engine runs.
+                            crate::browser::webview_download::install(&child);
                             let bridge_kind =
                                 crate::browser::bridge::install(&child, &install_ctx);
                             if let Err(error) =
@@ -1837,8 +1650,9 @@ pub async fn create_browser_session_in_window<R: tauri::Runtime>(
 }
 
 /// Publishes a session state change without a webview in scope (CEF tabs have none).
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn emit_session_state<R: tauri::Runtime>(app: &AppHandle<R>, state: &BrowserState) {
+    crate::ipc::browser_library::observe_browser_state(app, state);
     let _ = app.emit(
         BROWSER_STATE_CHANGED_EVENT,
         BrowserStateChangedPayload::from(state),
@@ -1846,13 +1660,17 @@ fn emit_session_state<R: tauri::Runtime>(app: &AppHandle<R>, state: &BrowserStat
 }
 
 /// Opens the tab in its profile's Chromium engine, whose browser window sits over the pane.
-/// The engine reports the page's address, title and loading state as events.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-async fn create_cef_browser_session<R: tauri::Runtime>(
+/// The engine reports the page's address, title and loading state as events. The tab belongs
+/// to `host_window` (the focused app window without one), which the registry records as its
+/// owner.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub(crate) async fn create_cef_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &Arc<BrowserManager>,
     state: BrowserState,
     engine_dir: std::path::PathBuf,
+    engine_url: Option<String>,
+    host_window: Option<tauri::Window<R>>,
 ) -> Result<BrowserState, IpcError> {
     use crate::browser::cef_engine;
     let browser_id = state.browser_id.clone();
@@ -1865,17 +1683,24 @@ async fn create_cef_browser_session<R: tauri::Runtime>(
         Ok(state) => state,
         Err(error) => return Err(fail(error.to_string())),
     };
-    let Some(main_window) = app.get_window("main") else {
-        return Err(fail("main window unavailable".into()));
+    let Some(host_window) = host_window
+        .filter(|window| crate::window_registry::is_app_window_label(window.label()))
+        .or_else(|| crate::window_registry::focused_window(app))
+    else {
+        return Err(fail("no app window available".into()));
     };
     #[cfg(target_os = "windows")]
-    let parent = match main_window.hwnd() {
+    let parent = match host_window.hwnd() {
         Ok(hwnd) => hwnd.0 as isize,
-        Err(error) => return Err(fail(format!("main window handle: {error}"))),
+        Err(error) => return Err(fail(format!("app window handle: {error}"))),
     };
     #[cfg(target_os = "macos")]
-    let Some(parent) = cef_engine::window_number(&main_window) else {
-        return Err(fail("main window number unavailable".into()));
+    let Some(parent) = cef_engine::window_number(&host_window) else {
+        return Err(fail("app window number unavailable".into()));
+    };
+    #[cfg(target_os = "linux")]
+    let Some(parent) = cef_engine::parent_xid(&host_window) else {
+        return Err(fail("app window has no X11 window (Wayland session)".into()));
     };
     let bounds = manager
         .get_bounds(&browser_id)
@@ -1887,7 +1712,7 @@ async fn create_cef_browser_session<R: tauri::Runtime>(
             width: 800.0,
             height: 600.0,
         });
-    let rect = cef_pane_rect(&main_window, &bounds);
+    let rect = cef_pane_rect(&host_window, &bounds);
     // One engine per profile shares cookies, logins and extensions across that profile's tabs;
     // a private tab's engine keeps its data in memory.
     let profile = state.profile_id.as_str().to_string();
@@ -1895,13 +1720,13 @@ async fn create_cef_browser_session<R: tauri::Runtime>(
         None
     } else {
         match engine_data_dir(app) {
-            Ok(root) => Some(root.join("browser-cef").join(&profile)),
+            Ok(root) => Some(crate::browser::data_paths::cef_profile_dir(&root, &profile)),
             Err(error) => return Err(fail(error.message)),
         }
     };
     let sink = cef_event_sink(app.clone(), Arc::clone(manager));
     let open_id = browser_id.clone();
-    let url = state.url.clone();
+    let url = engine_url.unwrap_or_else(|| state.url.clone());
     let visible = state.visible;
     if let Err(error) = crate::ipc::run_blocking(move || {
         let launch = cef_engine::EngineLaunch {
@@ -1916,25 +1741,72 @@ async fn create_cef_browser_session<R: tauri::Runtime>(
         discard_failed_session(manager, &browser_id);
         return Err(error);
     }
+    crate::window_registry::record_owner(app, &browser_id, host_window.label());
     emit_session_state(app, &state);
     Ok(state)
 }
 
+/// Starts the profile's Chromium engine without opening a tab (Settings > Extensions talks to
+/// it) in the focused app window, with the same data dir and event sink as the profile's tabs.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub(crate) async fn ensure_cef_engine<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    profile: &BrowserProfileId,
+    engine_dir: std::path::PathBuf,
+) -> Result<(), IpcError> {
+    use crate::browser::cef_engine;
+    let host_window = crate::window_registry::focused_window(app)
+        .ok_or_else(|| BrowserError::CreateFailed("no app window available".into()))?;
+    #[cfg(target_os = "windows")]
+    let parent = host_window
+        .hwnd()
+        .map(|hwnd| hwnd.0 as isize)
+        .map_err(|error| BrowserError::CreateFailed(format!("app window handle: {error}")))?;
+    #[cfg(target_os = "macos")]
+    let parent = cef_engine::window_number(&host_window)
+        .ok_or_else(|| BrowserError::CreateFailed("app window number unavailable".into()))?;
+    #[cfg(target_os = "linux")]
+    let parent = cef_engine::parent_xid(&host_window)
+        .ok_or_else(|| BrowserError::CreateFailed("app window has no X11 window (Wayland session)".into()))?;
+    let profile_id = profile.as_str().to_string();
+    let cache_dir = if profile.is_private() {
+        None
+    } else {
+        Some(engine_data_dir(app)?.join("browser-cef").join(&profile_id))
+    };
+    let sink = cef_event_sink(app.clone(), Arc::clone(manager));
+    crate::ipc::run_blocking(move || {
+        let launch = cef_engine::EngineLaunch {
+            engine_dir: &engine_dir,
+            cache_dir: cache_dir.as_deref(),
+            parent,
+        };
+        cef_engine::ensure_running(&launch, &profile_id, sink).map_err(IpcError::from)
+    })
+    .await
+}
+
 /// Applies a Chromium engine's events: page state to the tab, a closed browser to a closed tab,
 /// and a window the engine opened on its own (a new tab, a sign-in popup) to a new tab.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn cef_event_sink<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: Arc<BrowserManager>,
 ) -> crate::browser::cef_engine::EventSink {
     use crate::browser::cef_engine::{self, Event};
     Arc::new(move |profile: &str, event: Event| {
+        // Downloads, find, PDF, file chooser and page notifications.
+        let Some(event) = crate::ipc::browser_system::handle_cef_event(&app, &manager, profile, event) else {
+            return;
+        };
         let (browser_id, update) = match event {
             Event::Created { tab, .. } => {
                 cef_engine::repaint(&tab);
                 return;
             }
             Event::Address { tab, url } => {
+                crate::ipc::default_browser::on_cef_address(&app, &manager, &tab, &url);
                 let update = manager.update_navigation_state(&tab, Some(url), None, None, None, None, None);
                 (tab, update)
             }
@@ -1943,15 +1815,21 @@ fn cef_event_sink<R: tauri::Runtime>(
                 (tab, update)
             }
             Event::Loading { tab, loading, can_go_back, can_go_forward } => {
-                let update = manager.update_navigation_state(
-                    &tab,
-                    None,
-                    None,
-                    Some(loading),
-                    Some(can_go_back),
-                    Some(can_go_forward),
-                    None,
-                );
+                // A main-frame load start is a new document even at the same URL (an engine
+                // reload, a form post), so refs observed on the previous one must go stale.
+                let update = if loading {
+                    manager.begin_engine_load(&tab, can_go_back, can_go_forward)
+                } else {
+                    manager.update_navigation_state(
+                        &tab,
+                        None,
+                        None,
+                        Some(false),
+                        Some(can_go_back),
+                        Some(can_go_forward),
+                        None,
+                    )
+                };
                 (tab, update)
             }
             Event::Closed { tab } => {
@@ -1965,6 +1843,25 @@ fn cef_event_sink<R: tauri::Runtime>(
                 adopt_cef_popup(&app, &manager, profile, popup, url);
                 return;
             }
+            // DevTools answers go to their caller in `cef_engine`, never to the sink.
+            Event::Devtools { .. } => return,
+            Event::PermissionRequest { tab, request, kinds, origin } => {
+                crate::browser::site_permissions::cef_request(profile, tab, request, kinds, origin);
+                return;
+            }
+            Event::PermissionDismissed { request, .. } => {
+                crate::browser::site_permissions::cef_dismissed(profile, request);
+                return;
+            }
+            Event::MediaAccess { tab, video, audio } => {
+                crate::browser::site_permissions::cef_media_access(&tab, video, audio);
+                return;
+            }
+            Event::FormSubmitted { tab, payload } => {
+                crate::ipc::browser_vault::handle_form_submitted(&app, &manager, &tab, &payload);
+                return;
+            }
+            _ => return,
         };
         if let Ok(state) = update {
             emit_session_state(&app, &state);
@@ -1975,7 +1872,7 @@ fn cef_event_sink<R: tauri::Runtime>(
 }
 
 /// Gives a window the engine opened on its own a Ferryx tab of the same profile.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn adopt_cef_popup<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &BrowserManager,
@@ -2014,6 +1911,10 @@ fn adopt_cef_popup<R: tauri::Runtime>(
         discard_failed_session(manager, &state.browser_id);
         return;
     }
+    // The engine opened it from the page the user works in.
+    if let Some(window) = crate::window_registry::focused_window(app) {
+        crate::window_registry::record_owner(app, &state.browser_id, window.label());
+    }
     let _ = app.emit(
         crate::browser::guest::BROWSER_SESSION_CREATED_EVENT,
         crate::browser::model::BrowserSessionCreatedPayload {
@@ -2030,6 +1931,13 @@ pub(crate) fn trusted_bridge_sink<R: tauri::Runtime>(
     manager: Arc<BrowserManager>,
 ) -> crate::browser::bridge::BridgeSink {
     Arc::new(move |browser_id: &str, raw: &str, attestation| {
+        // A login submission from the vault capture script in the same isolated world.
+        if attestation == crate::browser::bridge::Attestation::IsolatedWorld
+            && crate::browser::vault::is_capture_envelope(raw)
+        {
+            crate::ipc::browser_vault::handle_form_submitted(&app, &manager, browser_id, raw);
+            return;
+        }
         let action = match crate::browser::bridge::parse_envelope(raw) {
             Ok(action) => action,
             Err(error) => {
@@ -2474,7 +2382,7 @@ pub async fn navigate_browser_session_with_context<R: tauri::Runtime>(
     // and the session must not be left with a bumped generation and `loading = true`.
     // The URL policy is checked first so a refused URL reports its policy error.
     crate::browser::security::validate_url_with_context(url, context)?;
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(browser_id) {
         let valid_url = manager.update_url_with_context(browser_id, url, context)?;
         emit_session_state(app, &manager.get_state(browser_id)?);
@@ -2518,11 +2426,13 @@ pub async fn cmd_browser_navigate<R: tauri::Runtime>(
     url: String,
 ) -> Result<(), IpcError> {
     let state = manager.get_state(&browser_id)?;
+    // The desktop user navigating a tab takes it back from any agent holding it.
+    crate::browser::agent::service::desktop_touched(&browser_id);
     // A Chromium-engine tab has no Tauri webview; its engine process takes the navigation.
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     let has_view = crate::browser::cef_engine::is_cef_tab(&browser_id)
         || app.get_webview(&state.webview_label).is_some();
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     let has_view = app.get_webview(&state.webview_label).is_some();
     if !has_view {
         return Err(BrowserError::WebviewNotFound(state.webview_label).into());
@@ -2536,6 +2446,25 @@ pub(crate) fn history_navigation<R: tauri::Runtime>(
     browser_id: &str,
     forward: bool,
 ) -> Result<(), IpcError> {
+    // An engine tab has no webview: the engine moves its own history. The dispatch
+    // invalidates refs first, since the move loads another document.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::cef_engine::is_cef_tab(browser_id) {
+        let (state, dispatch) = manager.begin_history_dispatch(browser_id, forward)?;
+        emit_session_state(app, &state);
+        if !dispatch {
+            return Ok(());
+        }
+        if let Err(error) = crate::browser::cef_engine::history(browser_id, forward) {
+            if state.loading {
+                if let Ok(restored) = manager.cancel_history_navigation(browser_id, forward) {
+                    emit_session_state(app, &restored);
+                }
+            }
+            return Err(error.into());
+        }
+        return Ok(());
+    }
     // Resolve the webview before the dispatch records anything, so a missing webview
     // leaves the session's loading state and generation untouched.
     let label = manager.get_webview_label(browser_id)?;
@@ -2618,7 +2547,8 @@ pub async fn cmd_browser_go_back<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    crate::browser::agent::service::desktop_touched(&browser_id);
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
         return Ok(crate::browser::cef_engine::history(&browser_id, false)?);
     }
@@ -2631,7 +2561,8 @@ pub async fn cmd_browser_go_forward<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    crate::browser::agent::service::desktop_touched(&browser_id);
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
         return Ok(crate::browser::cef_engine::history(&browser_id, true)?);
     }
@@ -2736,22 +2667,19 @@ pub async fn cmd_browser_import_installed_cookies<R: tauri::Runtime>(
     let kind = request.source;
     let source_profile = request.source_profile;
 
-    let read_result: crate::browser::chromium_cookies::ChromiumCookieReadResult =
-        crate::ipc::run_blocking(move || {
-            crate::browser::chromium_cookie_source::import_installed_browser_cookies_sync(
-                kind,
-                source_profile.as_deref(),
-                Some(&home_dir),
-            )
-            .map_err(|import_err| {
-                IpcError::new(
-                    IpcErrorCode::BrowserCookieImportFailed,
-                    import_err.to_string(),
-                )
+    // The ported importer reads the profile (snapshot copy, Keychain / keyring / DPAPI).
+    let read_result = crate::ipc::run_blocking(move || {
+        crate::browser::import::installed_cookies::read_installed_browser_cookies(
+            kind,
+            source_profile.as_deref(),
+            Some(&home_dir),
+        )
+        .map_err(|import_err| {
+            IpcError::new(IpcErrorCode::BrowserCookieImportFailed, import_err.to_string())
                 .with_details(serde_json::json!({ "reason": import_err.reason.as_str() }))
-            })
         })
-        .await?;
+    })
+    .await?;
 
     let cookies = read_result
         .cookies
@@ -2779,9 +2707,7 @@ pub async fn cmd_browser_import_installed_cookies<R: tauri::Runtime>(
         }
     }
 
-    let skipped_count = read_result.unsupported_v11_count
-        + read_result.decrypt_failed_count
-        + read_result.invalid_count;
+    let skipped_count = read_result.skipped;
 
     Ok(ImportInstalledBrowserCookiesResult {
         imported_count: cookies.len(),
@@ -2796,7 +2722,8 @@ pub async fn cmd_browser_reload<R: tauri::Runtime>(
     browser_id: String,
     ignore_cache: Option<bool>,
 ) -> Result<(), IpcError> {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    crate::browser::agent::service::desktop_touched(&browser_id);
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
         let state = manager.begin_reload(&browser_id)?;
         emit_session_state(&app, &state);
@@ -2843,10 +2770,10 @@ pub async fn cmd_browser_set_bounds<R: tauri::Runtime>(
     bounds: LogicalRect,
 ) -> Result<(), IpcError> {
     manager.set_bounds(&browser_id, bounds.clone())?;
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::is_cef_tab(&browser_id) {
-        if let Some(main_window) = app.get_window("main") {
-            crate::browser::cef_engine::set_bounds(&browser_id, cef_pane_rect(&main_window, &bounds));
+        if let Some(window) = crate::window_registry::window_for_session(&app, &browser_id) {
+            crate::browser::cef_engine::set_bounds(&browser_id, cef_pane_rect(&window, &bounds));
         }
         return Ok(());
     }
@@ -2894,7 +2821,7 @@ pub fn set_browser_session_visible<R: tauri::Runtime>(
     visible: bool,
 ) -> Result<(), IpcError> {
     manager.set_visible(browser_id, visible)?;
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::set_visible(browser_id, visible) {
         return Ok(());
     }
@@ -2951,6 +2878,12 @@ pub async fn cmd_browser_set_zoom<R: tauri::Runtime>(
     browser_id: String,
     zoom_factor: f64,
 ) -> Result<f64, IpcError> {
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        let clamped = manager.set_zoom(&browser_id, zoom_factor)?;
+        crate::browser::cef_engine::system::set_zoom(&browser_id, clamped)?;
+        return Ok(clamped);
+    }
     let clamped = manager.set_zoom(&browser_id, zoom_factor)?;
     let state = manager.get_state(&browser_id)?;
     let webview = app
@@ -2966,9 +2899,22 @@ pub fn focus_browser_session<R: tauri::Runtime>(
     app: &AppHandle<R>,
     manager: &BrowserManager,
     browser_id: &str,
+    address: bool,
 ) -> Result<(), IpcError> {
     set_browser_session_visible(app, manager, browser_id, true)?;
     record_session_created(browser_id);
+    tracing::info!(%browser_id, address, "browser focus request");
+    // A Chromium-engine tab has no Tauri webview: its engine focuses the page or Chrome's own
+    // address bar. Refocusing an already focused Ferryx window would only race that request.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::cef_engine::is_cef_tab(browser_id) {
+        // The window that owns the tab (the primary window when no owner is known).
+        if let Some(window) = crate::window_registry::window_for_session(app, browser_id) {
+            present_window(&window, false)?;
+        }
+        crate::browser::cef_engine::focus(browser_id, address)?;
+        return Ok(());
+    }
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -2976,20 +2922,34 @@ pub fn focus_browser_session<R: tauri::Runtime>(
     // Raise the window that hosts this browser's webview, not a fixed window.
     let host_window = webview.window();
     if crate::window_registry::is_app_window_label(host_window.label()) {
-        let window = host_window;
-        window.show().map_err(|error| {
-            BrowserError::Internal(format!("failed to show the browser's window: {error}"))
-        })?;
-        window.unminimize().map_err(|error| {
-            BrowserError::Internal(format!("failed to unminimize the browser's window: {error}"))
-        })?;
-        window.set_focus().map_err(|error| {
-            BrowserError::Internal(format!("failed to focus the browser's window: {error}"))
-        })?;
+        present_window(&host_window, true)?;
     }
     webview.set_focus().map_err(|error| {
         BrowserError::Internal(format!("failed to focus browser webview: {error}"))
     })?;
+    Ok(())
+}
+
+/// Shows and unminimizes a browser's window, and focuses it (`always_focus`, else only when it
+/// is not focused yet).
+fn present_window<R: tauri::Runtime>(
+    window: &tauri::Window<R>,
+    always_focus: bool,
+) -> Result<(), IpcError> {
+    window.show().map_err(|error| {
+        BrowserError::Internal(format!("failed to show the browser's window: {error}"))
+    })?;
+    window.unminimize().map_err(|error| {
+        BrowserError::Internal(format!("failed to unminimize the browser's window: {error}"))
+    })?;
+    let focused = window.is_focused().map_err(|error| {
+        BrowserError::Internal(format!("failed to read the browser's window focus: {error}"))
+    })?;
+    if always_focus || !focused {
+        window.set_focus().map_err(|error| {
+            BrowserError::Internal(format!("failed to focus the browser's window: {error}"))
+        })?;
+    }
     Ok(())
 }
 
@@ -2998,8 +2958,141 @@ pub async fn cmd_browser_focus<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
+    address: Option<bool>,
 ) -> Result<(), IpcError> {
-    focus_browser_session(&app, &manager, &browser_id)
+    focus_browser_session(&app, &manager, &browser_id, address.unwrap_or(false))
+}
+
+/// Gives OS keyboard focus back to the app's own webview, so a Ferryx input (find bar, address
+/// bar) receives typed keys while a page view holds focus: a WebView2/WebKitGTK child webview,
+/// a WKWebView, or a Chromium engine window (a child window on Windows and X11, a window of
+/// another app on macOS). Focusing a DOM input alone leaves the keys with the page view.
+/// `window` is the calling app window; anything else falls back to the focused app window.
+pub fn focus_app_webview<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    window: tauri::Window<R>,
+) -> Result<(), IpcError> {
+    let window = Some(window)
+        .filter(|window| crate::window_registry::is_app_window_label(window.label()))
+        .or_else(|| crate::window_registry::focused_window(app))
+        .ok_or_else(|| BrowserError::Internal("no app window to focus".into()))?;
+    // An app window's webview carries the window's label.
+    let webview = app
+        .get_webview(window.label())
+        .ok_or_else(|| BrowserError::WebviewNotFound(window.label().to_string()))?;
+    // macOS: activates Ferryx again when the engine app took the keyboard.
+    window.set_focus().map_err(|error| {
+        BrowserError::Internal(format!("failed to focus the app window: {error}"))
+    })?;
+    // X11: the engine's child window keeps X input focus even while the toplevel is
+    // active, so the toplevel takes it back before GTK focuses the webview widget.
+    #[cfg(target_os = "linux")]
+    if let Some(xid) = crate::browser::cef_engine::parent_xid(&window) {
+        window
+            .run_on_main_thread(move || crate::browser::cef_engine::take_x_focus(xid))
+            .map_err(|error| BrowserError::Internal(format!("failed to schedule X focus: {error}")))?;
+    }
+    webview.set_focus().map_err(|error| {
+        BrowserError::Internal(format!("failed to focus the app webview: {error}"))
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_browser_focus_app<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    window: tauri::Window<R>,
+) -> Result<(), IpcError> {
+    focus_app_webview(&app, window)
+}
+
+/// Windows: activating an app window (Alt+Tab, a title-bar click, a Chromium engine window
+/// handing activation back) leaves Win32 keyboard focus on the window frame itself. The app
+/// webview is a child window, so typed keys and shortcuts such as Mod+L never reach the UI
+/// (maho-win G16 and CI-UI `input_failed`: focus stayed on the Ferryx frame). The focus is
+/// forwarded to the app webview; a focused child (the webview, an engine pane) is left alone.
+/// tao reports `Focused(true)` only when its own active-and-focused state flips, which most
+/// re-activations do not do, so the frame is subclassed for WM_SETFOCUS (the way wry handles
+/// its `WRY_WEBVIEW` container). Installing is idempotent; it runs on every app window focus.
+#[cfg(target_os = "windows")]
+pub fn forward_frame_focus<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    let Ok(frame) = window.hwnd() else { return };
+    let frame = frame.0;
+    // `Window::hwnd` and window events are only served on the UI thread that owns the frame.
+    // SAFETY: the subclass procedure is a plain function with no reference data.
+    if unsafe { frame_focus::SetWindowSubclass(frame, Some(frame_focus::on_frame_message), frame_focus::ID, 0) } == 0 {
+        tracing::warn!("could not subclass the app window frame for keyboard focus");
+    }
+    frame_focus::forward_if_frame_focused(frame);
+}
+
+#[cfg(target_os = "windows")]
+mod frame_focus {
+    use std::ffi::c_void;
+
+    type Hwnd = *mut c_void;
+    const WM_SETFOCUS: u32 = 0x0007;
+    /// Subclass id: "fxfo".
+    pub const ID: usize = 0x6678_666f;
+
+    #[link(name = "comctl32")]
+    unsafe extern "system" {
+        pub fn SetWindowSubclass(
+            hwnd: Hwnd,
+            callback: Option<unsafe extern "system" fn(Hwnd, u32, usize, isize, usize, usize) -> isize>,
+            id: usize,
+            data: usize,
+        ) -> i32;
+        fn DefSubclassProc(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetFocus() -> Hwnd;
+        fn SetFocus(hwnd: Hwnd) -> Hwnd;
+        fn FindWindowExW(parent: Hwnd, after: Hwnd, class: *const u16, title: *const u16) -> Hwnd;
+    }
+
+    pub unsafe extern "system" fn on_frame_message(
+        hwnd: Hwnd,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        _id: usize,
+        _data: usize,
+    ) -> isize {
+        // tao handles WM_SETFOCUS first (its Focused bookkeeping); then the focus moves on.
+        let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        if message == WM_SETFOCUS {
+            forward_if_frame_focused(hwnd);
+        }
+        result
+    }
+
+    /// Moves a keyboard focus resting on the frame to the app webview's container, which
+    /// (wry's own WM_SETFOCUS handler) hands it on to the WebView2 document.
+    pub fn forward_if_frame_focused(frame: Hwnd) {
+        // SAFETY: Win32 calls on windows owned by this (UI) thread.
+        unsafe {
+            if !super::frame_holds_focus(GetFocus() as isize, frame as isize) {
+                return;
+            }
+            let class: Vec<u16> = "WRY_WEBVIEW\0".encode_utf16().collect();
+            let container = FindWindowExW(frame, std::ptr::null_mut(), class.as_ptr(), std::ptr::null());
+            if container.is_null() {
+                tracing::warn!("the app window has no WRY_WEBVIEW child; its frame keeps the keyboard focus");
+                return;
+            }
+            SetFocus(container);
+        }
+        tracing::debug!("app window frame took the keyboard focus; moved it to the app webview");
+    }
+}
+
+/// Whether the keyboard focus sits on the app window frame itself rather than on a child.
+#[cfg(any(target_os = "windows", test))]
+fn frame_holds_focus(focused: isize, frame: isize) -> bool {
+    focused != 0 && focused == frame
 }
 
 #[tauri::command]
@@ -3019,6 +3112,11 @@ pub async fn cmd_browser_find<R: tauri::Runtime>(
     query: String,
     backwards: bool,
 ) -> Result<BrowserFindResult, IpcError> {
+    // Chromium tabs search natively; the count follows as `browser_find_result` events.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        return crate::ipc::browser_system::cef_find(&browser_id, &query, backwards);
+    }
     let state = manager.get_state(&browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -3042,13 +3140,19 @@ pub async fn cmd_browser_clear_find<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::cef_engine::is_cef_tab(&browser_id) {
+        return crate::ipc::browser_system::cef_clear_find(&browser_id);
+    }
     let state = manager.get_state(&browser_id)?;
-    let webview = app
-        .get_webview(&state.webview_label)
-        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    let _ = eval_webview(webview, BROWSER_CLEAR_FIND_SCRIPT.to_string())
-        .await
-        .map_err(|error| BrowserError::FindFailed(error.to_string()))?;
+    // Clearing is best-effort: a page that cannot run scripts (about:blank, a page mid-navigation)
+    // has no find highlight to clear, so closing the find bar must not report a failure.
+    let Some(webview) = app.get_webview(&state.webview_label) else {
+        return Ok(());
+    };
+    if let Err(error) = eval_webview(webview, BROWSER_CLEAR_FIND_SCRIPT.to_string()).await {
+        tracing::debug!(browser_id = %browser_id, %error, "find highlight was not cleared");
+    }
     Ok(())
 }
 
@@ -3138,23 +3242,51 @@ pub async fn browser_download_with_session<R: tauri::Runtime>(
     manager: &BrowserManager,
     request: BrowserDownloadRequest,
 ) -> Result<crate::browser::download::DownloadRecord, IpcError> {
-    let cookie_header = download_cookie_header(app, manager, &request).await?;
+    // The id is chosen here so a failure can be checked against the registry afterwards.
+    let download_id = uuid::Uuid::new_v4().to_string();
+    let cookie_header = download_cookie_header(app, manager, &request)
+        .await
+        .map_err(|error| with_download_registration(error, &download_id))?;
+    download_with_registration_signal(&request, cookie_header.as_deref(), &download_id).await
+}
 
-    let download_id = crate::browser::download::download_url_with_cookies(
+/// Runs one registry download under `download_id`; every error says whether a record exists.
+async fn download_with_registration_signal(
+    request: &BrowserDownloadRequest,
+    cookie_header: Option<&str>,
+    download_id: &str,
+) -> Result<crate::browser::download::DownloadRecord, IpcError> {
+    crate::browser::download::download_url_with_cookies(
         &request.url,
         std::path::Path::new(&request.file_path),
-        cookie_header.as_deref(),
-        None,
+        cookie_header,
+        Some(download_id),
+        request.browser_id.as_deref(),
     )
-    .await?;
+    .await
+    .map_err(|error| with_download_registration(error.into(), download_id))?;
 
-    let record = crate::browser::download::get_download(&download_id).ok_or_else(|| {
-        IpcError::new(
-            IpcErrorCode::BrowserDownloadFailed,
-            "Download registered but missing from registry",
+    crate::browser::download::get_download(download_id).ok_or_else(|| {
+        with_download_registration(
+            IpcError::new(
+                IpcErrorCode::BrowserDownloadFailed,
+                "Download registered but missing from registry",
+            ),
+            download_id,
         )
-    })?;
-    Ok(record)
+    })
+}
+
+/// Tells the UI whether the failed download left a registry record (shown on the downloads
+/// shelf) or failed before one existed (so the offer row must keep it with Retry). Read from
+/// the registry itself, so the answer stays true whichever step failed.
+fn with_download_registration(error: IpcError, download_id: &str) -> IpcError {
+    let details = if crate::browser::download::get_download(download_id).is_some() {
+        serde_json::json!({ "downloadRegistered": true, "downloadId": download_id })
+    } else {
+        serde_json::json!({ "downloadRegistered": false })
+    };
+    error.with_details(details)
 }
 
 #[tauri::command]
@@ -3173,6 +3305,7 @@ pub async fn cmd_browser_handle_dialog<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     request: BrowserDialogHandleRequest,
 ) -> Result<BrowserDialogEntry, IpcError> {
+    crate::browser::agent::service::desktop_touched(&request.browser_id);
     browser_handle_dialog(&app, manager.inner(), request).await
 }
 
@@ -3280,6 +3413,7 @@ pub async fn cmd_browser_set_dialog_policy<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     request: BrowserDialogPolicyRequest,
 ) -> Result<(), IpcError> {
+    crate::browser::agent::service::desktop_touched(&request.browser_id);
     browser_set_dialog_policy(&app, manager.inner(), &request.browser_id, &request.policy).await
 }
 #[tauri::command]
@@ -3296,43 +3430,51 @@ pub async fn browser_automation_snapshot<R: tauri::Runtime>(
     manager: &Arc<BrowserManager>,
     browser_id: String,
 ) -> Result<BrowserAutomationSnapshot, IpcError> {
+    use crate::browser::agent::{observe, page, redact};
     let state = manager.get_state(&browser_id)?;
-    let webview = app
-        .get_webview(&state.webview_label)
-        .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    let result = eval_webview(webview, AUTOMATION_SNAPSHOT_SCRIPT.to_string()).await?;
-    let snapshot_json: String = serde_json::from_str(&result).map_err(|error| {
-        BrowserError::AutomationFailed(format!("invalid snapshot callback result: {error}"))
-    })?;
-    let snapshot: AutomationSnapshotResult =
-        serde_json::from_str(&snapshot_json).map_err(|error| {
-            BrowserError::AutomationFailed(format!("invalid snapshot response: {error}"))
-        })?;
-    let targets = snapshot
-        .elements
-        .iter()
-        .map(|element| BrowserAutomationTarget {
-            reference: element.reference.clone(),
-            selector: element.selector.clone(),
-        })
-        .collect();
-    manager.record_automation_targets(&browser_id, state.generation, targets)?;
+    // Both engines run observe.js: a Chromium engine tab in an isolated world over its
+    // DevTools API, a system webview tab directly.
+    let isolated = page::agent_world_isolated(&browser_id);
+    let raw = page::eval_agent(&app, manager, &browser_id, observe::observe_script(isolated)).await?;
+    let observation = observe::parse_observation(&raw)?;
+    // The record is bound to the generation read before the observe: a navigation in between
+    // makes it stale instead of pairing refs with the next document.
+    manager.record_observed_refs(
+        &browser_id,
+        state.generation,
+        observation
+            .elements
+            .iter()
+            .map(|element| (element.reference.clone(), element.fingerprint()))
+            .collect(),
+    )?;
 
     Ok(BrowserAutomationSnapshot {
         browser_id,
         generation: state.generation,
-        url: snapshot.url,
-        title: snapshot.title,
-        elements: snapshot
+        // What an agent observes never carries credentials the page shows or the URL holds.
+        url: redact::redact_url(&observation.url),
+        title: redact::redact_text(&observation.title).into_owned(),
+        elements: observation
             .elements
             .into_iter()
-            .map(|element| BrowserAutomationElement {
-                reference: element.reference,
-                role: element.role,
-                name: element.name,
-                tag_name: element.tag_name,
+            .map(|element| {
+                let mut element = element.into_element();
+                element.name = redact::redact_text(&element.name).into_owned();
+                element
             })
             .collect(),
+        truncated: observation.truncated,
+        frames: observation
+            .frames
+            .into_iter()
+            .map(|mut frame| {
+                frame.title = redact::redact_text(&frame.title).into_owned();
+                frame.src = redact::redact_url(&frame.src);
+                frame
+            })
+            .collect(),
+        isolated,
     })
 }
 
@@ -3341,7 +3483,8 @@ pub async fn cmd_browser_automation_act<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: State<'_, Arc<BrowserManager>>,
     request: BrowserAutomationRequest,
-) -> Result<(), IpcError> {
+) -> Result<crate::browser::model::BrowserActOutcome, IpcError> {
+    crate::browser::agent::service::desktop_touched(&request.browser_id);
     browser_automation_act(app, manager.inner(), request).await
 }
 
@@ -3371,44 +3514,76 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
     app: AppHandle<R>,
     manager: &Arc<BrowserManager>,
     request: BrowserAutomationRequest,
-) -> Result<(), IpcError> {
-    let selector = match &request.action {
-        BrowserAutomationAction::Click { reference }
-        | BrowserAutomationAction::Fill { reference, .. }
-        | BrowserAutomationAction::Dblclick { reference }
-        | BrowserAutomationAction::Hover { reference }
-        | BrowserAutomationAction::Focus { reference }
-        | BrowserAutomationAction::Check { reference }
-        | BrowserAutomationAction::Uncheck { reference }
-        | BrowserAutomationAction::ScrollIntoView { reference }
-        | BrowserAutomationAction::Select { reference, .. } => {
-            Some(manager.automation_target(&request.browser_id, request.generation, reference)?)
+) -> Result<crate::browser::model::BrowserActOutcome, IpcError> {
+    use crate::browser::agent::{observe, page};
+    let isolated = page::agent_world_isolated(&request.browser_id);
+    // A postcondition is checked for shape before anything is dispatched.
+    let postcondition = request
+        .postcondition
+        .as_ref()
+        .map(|condition| observe::postcondition_script(condition, isolated))
+        .transpose()?;
+    // The ref must come from this generation's observe (checked before the page is touched);
+    // the page then checks the node is the one it named, still attached and unchanged.
+    let expect = observe::action_reference(&request.action)
+        .map(|reference| manager.observed_ref(&request.browser_id, request.generation, reference))
+        .transpose()?;
+    // A postcondition the page already shows says nothing about this act: it is sampled
+    // first, and such an act reports no `applied` at all instead of a false success.
+    let already = match &postcondition {
+        Some((script, _)) => {
+            let raw = page::eval_agent(&app, manager, &request.browser_id, script.clone()).await?;
+            observe::parse_check(&raw)?
         }
-        BrowserAutomationAction::Scroll {
-            reference: Some(reference),
-            ..
-        }
-        | BrowserAutomationAction::Type {
-            reference: Some(reference),
-            ..
-        } => {
-            Some(manager.automation_target(&request.browser_id, request.generation, reference)?)
-        }
-        BrowserAutomationAction::Scroll { reference: None, .. }
-        | BrowserAutomationAction::Type { reference: None, .. }
-        | BrowserAutomationAction::Keypress { .. } => {
-            manager.assert_automation_generation(&request.browser_id, request.generation)?;
-            #[cfg(target_os = "windows")]
-            if matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
-                windows_keypress_capability()?;
-            }
-            #[cfg(target_os = "linux")]
-            if matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
-                linux_keypress_capability()?;
-            }
-            None
-        }
+        None => false,
     };
+    match expect {
+        Some(expect) => page::act_element(&app, manager, &request.browser_id, &request.action, &expect).await?,
+        None => dispatch_untargeted_act(&app, manager, &request).await?,
+    }
+    let applied = match postcondition {
+        Some(_) if already => None,
+        Some((script, timeout_ms)) => Some(
+            await_postcondition(
+                &app,
+                manager,
+                &request.browser_id,
+                script,
+                timeout_ms.map(std::time::Duration::from_millis),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    Ok(crate::browser::model::BrowserActOutcome { dispatched: true, applied })
+}
+
+/// Actions that address no element: a keypress, a window scroll, typing into whatever has
+/// focus. They are fenced by the document generation only.
+async fn dispatch_untargeted_act<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &Arc<BrowserManager>,
+    request: &BrowserAutomationRequest,
+) -> Result<(), IpcError> {
+    manager.assert_automation_generation(&request.browser_id, request.generation)?;
+    // A Chromium engine tab has trusted key input on every platform.
+    let engine_tab = crate::browser::agent::page::is_engine_tab(&request.browser_id);
+    #[cfg(target_os = "windows")]
+    if !engine_tab && matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
+        windows_keypress_capability()?;
+    }
+    #[cfg(target_os = "linux")]
+    if !engine_tab && matches!(request.action, BrowserAutomationAction::Keypress { .. }) {
+        linux_keypress_capability()?;
+    }
+    if engine_tab {
+        if !crate::browser::agent::page::trusted_act(&request.browser_id, &request.action).await? {
+            let script = automation_script(&request.action)?;
+            crate::browser::agent::service::recheck_act(&request.browser_id)?;
+            crate::browser::agent::page::eval(app, manager, &request.browser_id, script).await?;
+        }
+        return Ok(());
+    }
     let state = manager.get_state(&request.browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -3417,14 +3592,49 @@ pub async fn browser_automation_act<R: tauri::Runtime>(
     #[cfg(target_os = "macos")]
     if let BrowserAutomationAction::Keypress { key } = &request.action {
         let keypress = parse_keypress(key)?;
+        crate::browser::agent::service::recheck_act(&request.browser_id)?;
         if dispatch_macos_keypress(&webview, &keypress).await? {
             return Ok(());
         }
     }
 
-    let script = automation_script(&request.action, selector.as_deref())?;
+    let script = automation_script(&request.action)?;
+    crate::browser::agent::service::recheck_act(&request.browser_id)?;
     let _ = eval_webview(webview, script).await?;
     Ok(())
+}
+
+/// Whether the page reaches an act's postcondition before the timeout: `false` on timeout,
+/// never an error for a page that simply did not change. Navigations are expected here (a
+/// submit loads the next page), so a failed evaluation is retried until the deadline, as
+/// `wait` does; only a closed tab ends it early. A page condition has no event to subscribe
+/// to, so it is re-checked on a short interval.
+async fn await_postcondition<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    script: String,
+    timeout: Option<std::time::Duration>,
+) -> Result<bool, IpcError> {
+    let deadline = wait_deadline(tokio::time::Instant::now(), timeout);
+    let interval = std::time::Duration::from_millis(250);
+    loop {
+        match crate::browser::agent::page::eval_agent(app, manager, browser_id, script.clone()).await {
+            Ok(raw) => match crate::browser::agent::observe::parse_check(&raw) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                // An invalid selector never matches; say so instead of waiting it out.
+                Err(error) => return Err(error.into()),
+            },
+            Err(BrowserError::NotFound(id)) => return Err(BrowserError::NotFound(id).into()),
+            Err(_) => {}
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        tokio::time::sleep(interval.min(remaining)).await;
+    }
 }
 
 /// Navigates the popup tab an opener created for one of its handles.
@@ -3698,9 +3908,16 @@ pub async fn close_browser_session<R: tauri::Runtime>(
     let session = manager
         .remove_session(browser_id)
         .ok_or_else(|| BrowserError::NotFound(browser_id.to_string()))?;
+    crate::browser::agent::service::tab_closed(browser_id);
+    crate::window_registry::release_owner(app, browser_id);
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    crate::browser::agent::cef_backend::forget(browser_id);
     crate::browser::bridge::forget_webview(app, &session.webview_label);
     CREATED_SESSION_IDS.lock().retain(|id| id != browser_id);
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    crate::browser::site_permissions::forget_browser(browser_id);
+    crate::browser::sign_in_handoff::untrack(browser_id);
+    crate::ipc::browser_library::forget_tab(browser_id);
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     if crate::browser::cef_engine::close(browser_id) {
         crate::browser::popup::forget_opener(browser_id);
         return Ok(());
@@ -3745,6 +3962,7 @@ pub async fn cmd_browser_close<R: tauri::Runtime>(
     manager: State<'_, Arc<BrowserManager>>,
     browser_id: String,
 ) -> Result<(), IpcError> {
+    crate::ipc::browser_vault::forget_browser(&browser_id);
     match close_browser_session(&app, manager.inner(), &browser_id).await {
         Ok(()) => Ok(()),
         Err(IpcError {
@@ -3764,24 +3982,12 @@ pub async fn cmd_browser_list(
 
 /// Where the engine and its per-tab caches live: the app data dir, or `FERRYX_DATA_DIR` when an
 /// isolated (QA or test) instance set it, so such a run never touches the real install.
-fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
-    if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR").filter(|dir| !dir.is_empty()) {
-        return Ok(std::path::PathBuf::from(dir));
-    }
-    app.path()
-        .app_data_dir()
-        .map_err(|error| IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string()))
+pub(crate) fn engine_data_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<std::path::PathBuf, IpcError> {
+    crate::browser::data_paths::app_data_root(app)
+        .map_err(|error| IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error))
 }
 
-fn engine_install_error(error: crate::browser::engine_install::InstallError) -> IpcError {
-    use crate::browser::engine_install::InstallError;
-    let code = match error {
-        InstallError::Unsupported(_) => crate::ipc::error::IpcErrorCode::UnsupportedCapability,
-        InstallError::Io(_) => crate::ipc::error::IpcErrorCode::IoError,
-        _ => crate::ipc::error::IpcErrorCode::InternalError,
-    };
-    IpcError::new(code, error.to_string())
-}
+use crate::ipc::browser_engine::install_error as engine_install_error;
 
 /// Whether the Chromium engine is installed. New tabs use it once it is.
 #[tauri::command]
@@ -3789,37 +3995,85 @@ pub async fn cmd_browser_engine_status<R: tauri::Runtime>(
     app: AppHandle<R>,
 ) -> Result<crate::browser::engine_install::EngineStatus, IpcError> {
     let data_dir = engine_data_dir(&app)?;
+    let inactive = engine_inactive_reason(&app);
     crate::ipc::run_blocking(move || {
-        Ok(crate::browser::engine_install::status(&data_dir, ENGINE_EXECUTABLE))
+        Ok(crate::browser::engine_install::mark_inactive(
+            crate::browser::engine_install::status(&data_dir, ENGINE_EXECUTABLE),
+            inactive,
+        ))
     })
     .await
 }
 
-/// Downloads, verifies and installs the Chromium engine for this platform.
+/// Downloads, verifies (signed manifest, size, SHA-256) and installs the Chromium engine for
+/// this platform, keeping the engine it replaces for rollback. Failures carry the typed reason
+/// in `details` (see `engine_install::InstallError`).
 #[tauri::command]
 pub async fn cmd_browser_engine_install<R: tauri::Runtime>(
     app: AppHandle<R>,
 ) -> Result<crate::browser::engine_install::EngineStatus, IpcError> {
     use crate::browser::engine_install;
     let data_dir = engine_data_dir(&app)?;
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("Ferryx/", env!("CARGO_PKG_VERSION")))
-        .build()
+    let guard = engine_install::InstallGuard::acquire().map_err(engine_install_error)?;
+    let client = engine_install::http_client(engine_install::CONNECT_TIMEOUT, engine_install::READ_TIMEOUT)
         .map_err(|error| IpcError::internal(error.to_string()))?;
-    let bytes = engine_install::fetch(&client).await.map_err(engine_install_error)?;
+    let cleanup_dir = data_dir.clone();
+    let inactive = engine_inactive_reason(&app);
     crate::ipc::run_blocking(move || {
-        let dir = engine_install::unpack(&bytes, &data_dir, ENGINE_EXECUTABLE)
-            .map_err(engine_install_error)?;
+        engine_install::clean_leftovers(&cleanup_dir);
+        Ok(())
+    })
+    .await?;
+    let progress_app = app.clone();
+    let mut last_percent: Option<u64> = None;
+    // Emits when the download has moved by at least 1% since the last event, and when done.
+    let mut on_progress = move |received: u64, total: u64| {
+        let percent = received.saturating_mul(100).checked_div(total).unwrap_or(100);
+        if last_percent.is_some_and(|last| percent <= last) && received < total {
+            return;
+        }
+        last_percent = Some(percent);
+        let _ = progress_app.emit(
+            BROWSER_ENGINE_INSTALL_PROGRESS_EVENT,
+            EngineInstallProgress { received_bytes: received, total_bytes: Some(total) },
+        );
+    };
+    let downloaded = engine_install::download(&client, &data_dir, &mut on_progress)
+        .await
+        .map_err(engine_install_error)?;
+    crate::ipc::run_blocking(move || {
+        let _guard = guard;
+        let installed = engine_install::install_archive(
+            &downloaded.path,
+            &data_dir,
+            &downloaded.version,
+            &downloaded.sha256,
+            ENGINE_EXECUTABLE,
+        );
+        if let Err(error) = std::fs::remove_file(&downloaded.path) {
+            tracing::warn!(path = %downloaded.path.display(), "could not remove the engine download: {error}");
+        }
+        let dir = installed.map_err(engine_install_error)?;
         #[cfg(target_os = "windows")]
         crate::browser::cef_engine::grant_sandbox_read(&dir).map_err(IpcError::from)?;
         #[cfg(not(target_os = "windows"))]
         let _ = dir;
-        Ok(engine_install::status(&data_dir, ENGINE_EXECUTABLE))
+        Ok(engine_install::mark_inactive(engine_install::status(&data_dir, ENGINE_EXECUTABLE), inactive))
     })
     .await
 }
 
-/// Removes the installed engine; open Chromium tabs keep running until closed.
+/// Emitted with an [`EngineInstallProgress`] while the engine archive downloads.
+pub const BROWSER_ENGINE_INSTALL_PROGRESS_EVENT: &str = "browser_engine_install_progress";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineInstallProgress {
+    pub received_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
+/// Removes every installed engine; open Chromium tabs keep running until closed.
 #[tauri::command]
 pub async fn cmd_browser_engine_remove<R: tauri::Runtime>(
     app: AppHandle<R>,
@@ -3827,33 +4081,54 @@ pub async fn cmd_browser_engine_remove<R: tauri::Runtime>(
     use crate::browser::engine_install;
     let data_dir = engine_data_dir(&app)?;
     crate::ipc::run_blocking(move || {
-        let dir = engine_install::install_dir(&data_dir);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).map_err(|error| {
-                IpcError::new(crate::ipc::error::IpcErrorCode::IoError, error.to_string())
-            })?;
-        }
+        let _guard = engine_install::InstallGuard::acquire().map_err(engine_install_error)?;
+        engine_install::remove_all(&data_dir).map_err(engine_install_error)?;
         Ok(engine_install::status(&data_dir, ENGINE_EXECUTABLE))
     })
     .await
 }
 
 /// The engine's executable name, also on platforms without a Chromium backend yet.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-const ENGINE_EXECUTABLE: &str = crate::browser::cef_engine::ENGINE_EXE;
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const ENGINE_EXECUTABLE: &str = "ferryx_engine";
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub(crate) const ENGINE_EXECUTABLE: &str = crate::browser::cef_engine::ENGINE_EXE;
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub(crate) const ENGINE_EXECUTABLE: &str = "ferryx_engine";
+
+/// Why an installed engine cannot run in this session, if it cannot.
+pub(crate) fn engine_inactive_reason<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    if linux_engine_parent(app).is_none() {
+        return Some(crate::browser::cef_engine::WAYLAND_REASON);
+    }
+    let _ = app;
+    None
+}
+
+/// The primary app window's X window, which a native Wayland session does not have. X11 or
+/// Wayland is a property of the whole session, so every app window answers the same.
+#[cfg(target_os = "linux")]
+fn linux_engine_parent<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<isize> {
+    crate::window_registry::primary_window(app)
+        .and_then(|window| crate::browser::cef_engine::parent_xid(&window))
+}
+
+/// The pane notice for a tab that would have used the installed engine but cannot, because the
+/// session has no X window to put it in. Nothing to say when the engine is not installed.
+#[cfg(target_os = "linux")]
+fn wayland_engine_notice(engine_installed: bool, has_x_parent: bool) -> Option<&'static str> {
+    (engine_installed && !has_x_parent).then_some(crate::browser::cef_engine::WAYLAND_FALLBACK_MESSAGE)
+}
 
 /// Where a pane's engine window goes, in the units the platform module places it in: pixels
-/// inside the main window on Windows, screen points (top-left origin) on macOS, where the
-/// engine window is a separate window over the main one.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+/// inside the main window on Windows and Linux, screen points (top-left origin) on macOS,
+/// where the engine window is a separate window over the main one.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn cef_pane_rect<R: tauri::Runtime>(
     main_window: &tauri::Window<R>,
     bounds: &LogicalRect,
 ) -> crate::browser::cef_engine::PhysicalRect {
     let scale = main_window.scale_factor().unwrap_or(1.0);
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         crate::browser::cef_engine::to_physical(bounds, scale)
     }
@@ -3875,15 +4150,20 @@ fn cef_pane_rect<R: tauri::Runtime>(
     }
 }
 
-/// Moves every engine window back over its pane after the main window moved, resized or came
-/// to the front. Only macOS needs it: there the engine windows are separate windows, while on
-/// Windows they are children that move with the main window.
+/// Moves the engine windows of `window`'s tabs back over their panes after that app window
+/// moved, resized or came to the front. Only macOS needs it: there the engine windows are
+/// separate windows, while on Windows they are children that move with their window.
 #[cfg(target_os = "macos")]
-pub(crate) fn follow_main_window<R: tauri::Runtime>(
+pub(crate) fn follow_app_window<R: tauri::Runtime>(
     window: &tauri::Window<R>,
     manager: &BrowserManager,
 ) {
     for browser_id in crate::browser::cef_engine::tab_ids() {
+        let owned = crate::window_registry::window_for_session(window.app_handle(), &browser_id)
+            .is_some_and(|owner| owner.label() == window.label());
+        if !owned {
+            continue;
+        }
         if let Ok(Some(bounds)) = manager.get_bounds(&browser_id) {
             crate::browser::cef_engine::set_bounds(&browser_id, cef_pane_rect(window, &bounds));
         }
@@ -4181,6 +4461,28 @@ async fn resolve_session_cwd(
 mod tests {
     use super::*;
     use super::{windows_open_request, WindowsOpenRequest};
+
+    /// Only focus on the frame itself is forwarded to the app webview: a focused child (the
+    /// webview, a Chromium pane) and no focus at all are left alone.
+    #[test]
+    fn only_frame_focus_is_forwarded() {
+        assert!(frame_holds_focus(100, 100));
+        assert!(!frame_holds_focus(200, 100));
+        assert!(!frame_holds_focus(0, 100));
+        assert!(!frame_holds_focus(0, 0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_notice_only_when_installed_engine_has_no_x_parent() {
+        assert_eq!(
+            wayland_engine_notice(true, false),
+            Some(crate::browser::cef_engine::WAYLAND_FALLBACK_MESSAGE)
+        );
+        assert_eq!(wayland_engine_notice(true, true), None);
+        assert_eq!(wayland_engine_notice(false, false), None);
+        assert_eq!(wayland_engine_notice(false, true), None);
+    }
 
     #[test]
     fn failed_creation_forgets_the_installed_bridge_world() {
@@ -4785,6 +5087,68 @@ mod tests {
         assert!(!BROWSER_DUMP_STATE_SCRIPT.contains("document.cookie"));
     }
 
+    #[tokio::test]
+    async fn download_refused_before_registration_reports_no_record() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let request = BrowserDownloadRequest {
+            url: "http://127.0.0.1:9/file.bin".into(),
+            // No file name: the target is refused before the registry takes the download.
+            file_path: String::new(),
+            browser_id: None,
+            cookies: Some("a=b".into()),
+        };
+        let error = download_with_registration_signal(&request, request.cookies.as_deref(), &id)
+            .await
+            .expect_err("a destination without a file name must fail");
+        assert_eq!(error.code, IpcErrorCode::BrowserDownloadFailed);
+        assert_eq!(
+            error.message,
+            "Browser download failed: download destination must name a file"
+        );
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({ "downloadRegistered": false }))
+        );
+        assert!(crate::browser::download::get_download(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn download_failing_after_registration_reports_its_record() {
+        // A local server that answers HTTP 500: the failure comes after the registry took the
+        // download, and is the same on every machine (no freed-port race).
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+        let port = listener.local_addr().expect("stub addr").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            socket
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write 500");
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let id = uuid::Uuid::new_v4().to_string();
+        let request = BrowserDownloadRequest {
+            url: format!("http://127.0.0.1:{port}/file.bin"),
+            file_path: dir.path().join("file.bin").to_string_lossy().into_owned(),
+            browser_id: None,
+            cookies: Some("a=b".into()),
+        };
+        let error = download_with_registration_signal(&request, request.cookies.as_deref(), &id)
+            .await
+            .expect_err("an HTTP 500 must fail");
+        server.await.expect("stub server");
+        assert_eq!(error.code, IpcErrorCode::BrowserDownloadFailed);
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({ "downloadRegistered": true, "downloadId": id }))
+        );
+        let record = crate::browser::download::get_download(&id).expect("failed record kept");
+        assert_eq!(record.status, crate::browser::download::DownloadStatus::Failed);
+    }
+
     #[test]
     fn test_save_browser_state_fails_on_unwritable_parent() {
         // A regular file cannot be a parent directory on any OS, unlike a root-level path,
@@ -5180,6 +5544,11 @@ pub async fn eval_browser_session<R: tauri::Runtime>(
     browser_id: &str,
     script: &str,
 ) -> Result<(Option<String>, bool), IpcError> {
+    if crate::browser::agent::page::is_engine_tab(browser_id) {
+        let raw = crate::browser::agent::page::eval(app, manager, browser_id, script.to_string()).await?;
+        let (truncated_str, truncated) = truncate_eval_result(raw);
+        return Ok(((truncated_str != "undefined").then_some(truncated_str), truncated));
+    }
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -5228,6 +5597,9 @@ pub async fn wait_browser_session_with_timeout<R: tauri::Runtime>(
     condition: crate::browser::model::BrowserWaitCondition,
     timeout: Option<std::time::Duration>,
 ) -> Result<(), IpcError> {
+    if crate::browser::agent::page::is_engine_tab(browser_id) {
+        return wait_engine_tab(app, manager, browser_id, &condition, timeout).await;
+    }
     let state = manager.get_state(browser_id)?;
     let webview = app
         .get_webview(&state.webview_label)
@@ -5300,8 +5672,44 @@ pub async fn screenshot_browser_session<R: tauri::Runtime>(
     browser_id: &str,
     out_path: &str,
 ) -> Result<String, IpcError> {
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    if crate::browser::agent::page::is_engine_tab(browser_id) {
+        let target = crate::browser::screenshot::resolve_screenshot_path(out_path)?;
+        let source = crate::browser::agent::cef_backend::EngineSnapshotSource { browser_id };
+        return crate::browser::screenshot::take_browser_screenshot_with_source(&source, browser_id, target)
+            .await;
+    }
     let state = manager.get_state(browser_id)?;
     crate::browser::screenshot::take_browser_screenshot(app, &state.webview_label, out_path).await
+}
+
+/// `wait` for a Chromium engine tab: the same condition scripts, evaluated over the engine's
+/// DevTools API until true or the deadline. Like the webview path it re-evaluates on a short
+/// interval, because a page condition has no event to subscribe to.
+async fn wait_engine_tab<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    manager: &BrowserManager,
+    browser_id: &str,
+    condition: &crate::browser::model::BrowserWaitCondition,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), IpcError> {
+    let script = build_wait_condition_script(condition);
+    let deadline = wait_deadline(tokio::time::Instant::now(), timeout);
+    let interval = std::time::Duration::from_millis(250);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(IpcError::new(IpcErrorCode::BrowserWaitTimeout, "browser wait condition timed out"));
+        }
+        match crate::browser::agent::page::eval(app, manager, browser_id, script.clone()).await {
+            Ok(raw) if parse_eval_boolean(&raw) => return Ok(()),
+            Ok(_) => {}
+            // A closed tab ends the wait at once; a navigating page is retried.
+            Err(BrowserError::NotFound(id)) => return Err(BrowserError::NotFound(id).into()),
+            Err(_) => {}
+        }
+        tokio::time::sleep(interval.min(deadline.saturating_duration_since(tokio::time::Instant::now()))).await;
+    }
 }
 
 pub async fn highlight_browser_session<R: tauri::Runtime>(
@@ -5342,6 +5750,7 @@ pub async fn cmd_browser_highlight<R: tauri::Runtime>(
     browser_id: String,
     selector: String,
 ) -> Result<crate::browser::picker::BrowserHighlightResult, IpcError> {
+    crate::browser::agent::service::desktop_touched(&browser_id);
     highlight_browser_session(&app, manager.inner(), &browser_id, &selector).await
 }
 
@@ -7409,4 +7818,96 @@ mod popup_handle_tests {
         crate::browser::popup::clear_all();
     }
 
+}
+
+#[cfg(test)]
+mod desktop_reclaim_tests {
+    use super::*;
+    use crate::browser::agent::service::{lease_tab_for_test, tab_lease_epoch_for_test};
+
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        app.manage(Arc::new(BrowserManager::new()));
+        app
+    }
+
+    /// Leases `browser_id` to an agent, so a later refusal proves the desktop reclaimed it.
+    fn leased(browser_id: &str) -> String {
+        assert!(
+            lease_tab_for_test(browser_id).expect("agent takes the lease").is_some(),
+            "the agent holds the tab before the desktop command"
+        );
+        browser_id.to_string()
+    }
+
+    fn assert_reclaimed(browser_id: &str) {
+        assert_eq!(
+            tab_lease_epoch_for_test(browser_id),
+            None,
+            "{browser_id}: the desktop command must end the agent lease"
+        );
+        assert!(
+            lease_tab_for_test(browser_id).is_err(),
+            "{browser_id}: the reclaimed tab stays off-limits to agents until resumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_history_and_reload_commands_reclaim_an_agent_leased_tab() {
+        let app = mock_app();
+        let handle = app.handle();
+
+        let back = leased("desktop-reclaim-back");
+        let _ = cmd_browser_go_back(handle.clone(), app.state(), back.clone()).await;
+        assert_reclaimed(&back);
+
+        let forward = leased("desktop-reclaim-forward");
+        let _ = cmd_browser_go_forward(handle.clone(), app.state(), forward.clone()).await;
+        assert_reclaimed(&forward);
+
+        let reload = leased("desktop-reclaim-reload");
+        let _ = cmd_browser_reload(handle.clone(), app.state(), reload.clone(), None).await;
+        assert_reclaimed(&reload);
+    }
+
+    #[tokio::test]
+    async fn desktop_page_commands_reclaim_an_agent_leased_tab() {
+        let app = mock_app();
+        let handle = app.handle();
+
+        let highlight = leased("desktop-reclaim-highlight");
+        let selector = String::from("#x");
+        let _ =
+            cmd_browser_highlight(handle.clone(), app.state(), highlight.clone(), selector).await;
+        assert_reclaimed(&highlight);
+
+        let dialog = leased("desktop-reclaim-dialog");
+        let request = BrowserDialogHandleRequest {
+            browser_id: dialog.clone(),
+            action: "accept".into(),
+            prompt_text: None,
+        };
+        let _ = cmd_browser_handle_dialog(handle.clone(), app.state(), request).await;
+        assert_reclaimed(&dialog);
+
+        let policy = leased("desktop-reclaim-dialog-policy");
+        let request = BrowserDialogPolicyRequest {
+            browser_id: policy.clone(),
+            policy: "accept".into(),
+        };
+        let _ = cmd_browser_set_dialog_policy(handle.clone(), app.state(), request).await;
+        assert_reclaimed(&policy);
+
+        let act = leased("desktop-reclaim-act");
+        let request = BrowserAutomationRequest {
+            browser_id: act.clone(),
+            generation: 0,
+            action: BrowserAutomationAction::Click { reference: "e1".into() },
+            postcondition: None,
+        };
+        let _ = cmd_browser_automation_act(handle.clone(), app.state(), request).await;
+        assert_reclaimed(&act);
+    }
 }

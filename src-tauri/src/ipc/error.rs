@@ -143,6 +143,10 @@ pub enum IpcErrorCode {
     AuthExpired,
     NotFound,
     MethodNotAllowed,
+    /// Installing, rolling back or removing the Chromium engine failed.
+    /// details: the engine_install::InstallError, tagged by `reason`.
+    BrowserEngineInstallFailed,
+    BrowserImportFailed,
     #[serde(untagged)]
     Custom(String),
 }
@@ -214,6 +218,7 @@ impl IpcErrorCode {
             "AUTH_EXPIRED" => Self::AuthExpired,
             "NOT_FOUND" => Self::NotFound,
             "METHOD_NOT_ALLOWED" => Self::MethodNotAllowed,
+            "BROWSER_IMPORT_FAILED" => Self::BrowserImportFailed,
             "INTERNAL_ERROR" => Self::InternalError,
             "UNSUPPORTED" => Self::Unsupported,
             "SESSION_ID_CONFLICT" => Self::SessionIdConflict,
@@ -548,6 +553,8 @@ impl From<crate::browser::BrowserError> for IpcError {
             crate::browser::BrowserError::CliUnavailable(_) => IpcErrorCode::BrowserCliUnavailable,
             crate::browser::BrowserError::PlatformUnsupported(_) => IpcErrorCode::Unsupported,
             crate::browser::BrowserError::Internal(_) => IpcErrorCode::InternalError,
+            // Keeps the authority code and details (pairing command, epochs, tool).
+            crate::browser::BrowserError::Authority(error) => return Self::from(error),
         };
         Self::new(code, message)
     }
@@ -724,5 +731,17 @@ mod tests {
         assert_eq!(err.code, IpcErrorCode::InvalidArgument);
         assert_eq!(serde_json::to_string(&err.code).unwrap(), "\"INVALID_ARGUMENT\"");
         assert!(err.message.contains("profile-x"));
+    }
+
+    #[test]
+    fn test_browser_authority_error_keeps_its_code_and_details() {
+        use crate::browser::agent::{AuthorityError, ControllerId, BROWSER_CONTROLLER_REVOKED};
+        use crate::browser::BrowserError;
+
+        let controller = ControllerId::generate();
+        let err = IpcError::from(BrowserError::Authority(AuthorityError::Revoked { controller }));
+        let value = serde_json::to_value(&err).unwrap();
+        assert_eq!(value["code"], BROWSER_CONTROLLER_REVOKED);
+        assert_eq!(value["details"]["controllerId"], controller.to_string());
     }
 }

@@ -34,7 +34,10 @@ fn older_message_search_and_exact_identity() {
     assert_eq!(p.items.len(), 1, "older parsed message must be searchable");
     assert_eq!(p.items[0].provider_session.id, "019ec598-c800-7000-8000-000000000001");
     assert_eq!(h.read(&p.items[0].entry_key, None, 100).unwrap().items[0].text, "older-message-sentinel");
-    assert_eq!(h.source_path(&p.items[0].entry_key), Some(Path::new(&cwd).join("logs").join("older.jsonl").as_path()));
+    // History scans canonicalized roots, so the source path is the canonical file path (macOS
+    // temp dirs sit behind /var -> /private/var; Windows adds the \\?\ prefix).
+    let older = fs::canonicalize(Path::new(&cwd).join("logs").join("older.jsonl")).unwrap();
+    assert_eq!(h.source_path(&p.items[0].entry_key), Some(older.as_path()));
     assert_eq!(h.source_path("missing-entry-key"), None);
 }
 struct NativeBoundary(Mutex<Vec<(ConversationClaimKey, TerminalStartup)>>);
@@ -63,6 +66,12 @@ fn selected_session_exact_typed_resume_and_duplicate_fence() {
 fn write(path: &Path, body: &str) {
     fs::create_dir_all(path.parent().expect("fixture path has a parent")).unwrap();
     fs::write(path, body).unwrap();
+}
+/// `cwd` as the inside of a JSON string, for a fixture's `__CWD__`: a Windows path's `\` must be
+/// escaped or the fixture is not JSON.
+fn json_cwd(cwd: &str) -> String {
+    let quoted = serde_json::to_string(cwd).unwrap();
+    quoted[1..quoted.len() - 1].to_owned()
 }
 fn boundary() -> (NativeBoundary, ConversationOwner) {
     (NativeBoundary(Mutex::new(vec![])), ConversationOwner::Provisional { request_id: "test".into() })
@@ -96,7 +105,7 @@ fn senpi_family_lists_reads_and_targets_resume_for_omo_pi_omp_gjc() {
     ] {
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().to_string_lossy().into_owned();
-        write(&root.path().join("--slug--").join("2026-10-22T07-26-30-758Z_session.jsonl"), &body.replace("__CWD__", &cwd));
+        write(&root.path().join("--slug--").join("2026-10-22T07-26-30-758Z_session.jsonl"), &body.replace("__CWD__", &json_cwd(&cwd)));
         let mut h = History::new(vec![(provider, root.path().into())]);
         let page = h.search(wire, Some(&cwd), sentinel, None, 100).unwrap();
         assert_eq!(page.items.len(), 1, "{wire} session must be searchable by its message text");
@@ -137,7 +146,7 @@ fn droid_lists_sessions_with_turns_and_reports_read_as_unsettled() {
     let root = tempfile::tempdir().unwrap();
     let cwd = root.path().to_string_lossy().into_owned();
     let slug = root.path().join("-tmp-work");
-    write(&slug.join("d08d895d-058f-4f86-aa21-48d7dbdcaa9f.jsonl"), &include_str!("fixtures/droid/session.jsonl").replace("__CWD__", &cwd));
+    write(&slug.join("d08d895d-058f-4f86-aa21-48d7dbdcaa9f.jsonl"), &include_str!("fixtures/droid/session.jsonl").replace("__CWD__", &json_cwd(&cwd)));
     write(&slug.join("d08d895d-058f-4f86-aa21-48d7dbdcaa90.jsonl"), &format!("{}\n", json!({"type":"session_start","id":"d08d895d-058f-4f86-aa21-48d7dbdcaa90","title":"redacted-title","owner":"indo","version":2,"cwd":cwd,"hostId":"6f1d0c1a-0000-4000-8000-000000000001"})));
     let mut h = History::new(vec![(CanonicalProvider::Droid, root.path().into())]);
     let page = h.search("droid", Some(&cwd), "", None, 100).unwrap();
@@ -207,7 +216,7 @@ fn grok_rejoins_message_chunks_from_the_update_stream() {
     let root = tempfile::tempdir().unwrap();
     let cwd = root.path().to_string_lossy().into_owned();
     let session = root.path().join("%2Ftmp%2Fproj").join("01a16274-a688-7e73-b6fc-434bc7781be4");
-    write(&session.join("summary.json"), &include_str!("fixtures/grok/summary.json").replace("__CWD__", &cwd));
+    write(&session.join("summary.json"), &include_str!("fixtures/grok/summary.json").replace("__CWD__", &json_cwd(&cwd)));
     write(&session.join("updates.jsonl"), include_str!("fixtures/grok/updates.jsonl"));
     let mut h = History::new(vec![(CanonicalProvider::Grok, root.path().into())]);
     let page = h.search("grok", Some(&cwd), "grok-assistant-sentinel", None, 100).unwrap();
@@ -224,7 +233,7 @@ fn cline_reads_the_sibling_messages_document_and_unwraps_user_input() {
     let root = tempfile::tempdir().unwrap();
     let cwd = root.path().to_string_lossy().into_owned();
     let session = root.path().join("1792653340197_ys4yu");
-    write(&session.join("1792653340197_ys4yu.json"), &include_str!("fixtures/cline/session.json").replace("__CWD__", &cwd));
+    write(&session.join("1792653340197_ys4yu.json"), &include_str!("fixtures/cline/session.json").replace("__CWD__", &json_cwd(&cwd)));
     write(&session.join("1792653340197_ys4yu.messages.json"), include_str!("fixtures/cline/messages.json"));
     let mut h = History::new(vec![(CanonicalProvider::Cline, root.path().into())]);
     let page = h.search("cline", Some(&cwd), "cline-user-sentinel", None, 100).unwrap();
@@ -245,7 +254,7 @@ fn antigravity_lists_from_the_summary_index_and_reads_the_transcript() {
     let id = "1908f6de-ef1d-424b-8f89-d66be0db44b5";
     let connection = rusqlite::Connection::open(root.path().join("conversation_summaries.db")).unwrap();
     connection.execute_batch("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT, step_count INTEGER, last_modified_time TEXT, workspace_uris TEXT, parent_conversation_id TEXT);").unwrap();
-    connection.execute("INSERT INTO conversation_summaries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", rusqlite::params![id, "redacted-title", "redacted-title", 6, "2026-10-22 07:06:46.019683+00:00", format!("[\"file://{cwd}\"]"), Option::<String>::None]).unwrap();
+    connection.execute("INSERT INTO conversation_summaries VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", rusqlite::params![id, "redacted-title", "redacted-title", 6, "2026-10-22 07:06:46.019683+00:00", json!([format!("file://{cwd}")]).to_string(), Option::<String>::None]).unwrap();
     drop(connection);
     write(&root.path().join("brain").join(id).join(".system_generated").join("logs").join("transcript_full.jsonl"), include_str!("fixtures/antigravity/transcript_full.jsonl"));
     let mut h = History::new(vec![(CanonicalProvider::Antigravity, root.path().into())]);
@@ -319,7 +328,7 @@ fn antigravity_reads_planner_responses_as_assistant_and_tool_records() {
     let id = "06468bac-2c00-4674-9598-71f9e59b9af6";
     let connection = rusqlite::Connection::open(root.path().join("conversation_summaries.db")).unwrap();
     connection.execute_batch("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT, preview TEXT, step_count INTEGER, last_modified_time TEXT, workspace_uris TEXT, parent_conversation_id TEXT);").unwrap();
-    connection.execute("INSERT INTO conversation_summaries VALUES (?1, 'redacted-title', 'redacted-title', 5, '2026-10-08 00:10:07+00:00', ?2, NULL)", rusqlite::params![id, format!("[\"file://{cwd}\"]")]).unwrap();
+    connection.execute("INSERT INTO conversation_summaries VALUES (?1, 'redacted-title', 'redacted-title', 5, '2026-10-08 00:10:07+00:00', ?2, NULL)", rusqlite::params![id, json!([format!("file://{cwd}")]).to_string()]).unwrap();
     drop(connection);
     write(&root.path().join("brain").join(id).join(".system_generated").join("logs").join("transcript_full.jsonl"), include_str!("fixtures/antigravity/replied_transcript_full.jsonl"));
     let mut h = History::new(vec![(CanonicalProvider::Antigravity, root.path().into())]);

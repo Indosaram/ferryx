@@ -595,13 +595,27 @@ mod tests {
         );
     }
 
+    /// An absolute directory on the host OS: `resolve_host_path` resolves host-native paths, and
+    /// a POSIX "/repo" has no drive, so it is not absolute on Windows.
+    fn host_abs(parts: &[&str]) -> PathBuf {
+        let mut path = if cfg!(windows) { PathBuf::from(r"C:\") } else { PathBuf::from("/") };
+        for part in parts {
+            path.push(part);
+        }
+        path
+    }
+
+    fn text(path: &Path) -> &str {
+        path.to_str().expect("UTF-8 fixture path")
+    }
+
     #[test]
     fn resolve_host_path_expands_home() {
-        let home = Path::new("/home/u");
-        assert_eq!(resolve_host_path("~", None, Some(home), None).unwrap(), PathBuf::from("/home/u"));
+        let home = host_abs(&["home", "u"]);
+        assert_eq!(resolve_host_path("~", None, Some(&home), None).unwrap(), home);
         assert_eq!(
-            resolve_host_path("~/shots/a.png", None, Some(home), None).unwrap(),
-            PathBuf::from("/home/u/shots/a.png")
+            resolve_host_path("~/shots/a.png", None, Some(&home), None).unwrap(),
+            home.join("shots").join("a.png")
         );
         assert_eq!(
             resolve_host_path("~/x", None, None, None).unwrap_err(),
@@ -611,13 +625,16 @@ mod tests {
 
     #[test]
     fn resolve_host_path_joins_relative_onto_cwd_then_session() {
+        let repo = host_abs(&["repo"]);
+        let other = host_abs(&["other"]);
+        let wt = host_abs(&["wt"]);
         assert_eq!(
-            resolve_host_path("shot.png", Some("/repo"), None, Some(Path::new("/other"))).unwrap(),
-            PathBuf::from("/repo/shot.png")
+            resolve_host_path("shot.png", Some(text(&repo)), None, Some(&other)).unwrap(),
+            repo.join("shot.png")
         );
         assert_eq!(
-            resolve_host_path("shot.png", None, None, Some(Path::new("/wt"))).unwrap(),
-            PathBuf::from("/wt/shot.png")
+            resolve_host_path("shot.png", None, None, Some(&wt)).unwrap(),
+            wt.join("shot.png")
         );
         assert_eq!(resolve_host_path("shot.png", None, None, None).unwrap_err(), HostReadError::InvalidPath);
         assert_eq!(
@@ -628,13 +645,16 @@ mod tests {
 
     #[test]
     fn resolve_host_path_keeps_absolute_and_normalizes_dot_dot() {
-        assert_eq!(resolve_host_path("/etc/hosts", Some("/repo"), None, None).unwrap(), PathBuf::from("/etc/hosts"));
+        let repo = host_abs(&["repo"]);
+        let hosts = host_abs(&["etc", "hosts"]);
+        assert_eq!(resolve_host_path(text(&hosts), Some(text(&repo)), None, None).unwrap(), hosts);
         assert_eq!(
-            resolve_host_path("src/../docs/./a.md", Some("/repo"), None, None).unwrap(),
-            PathBuf::from("/repo/docs/a.md")
+            resolve_host_path("src/../docs/./a.md", Some(text(&repo)), None, None).unwrap(),
+            repo.join("docs").join("a.md")
         );
-        assert_eq!(resolve_host_path("/../etc", None, None, None).unwrap_err(), HostReadError::InvalidPath);
-        assert_eq!(resolve_host_path("a\nb", Some("/r"), None, None).unwrap_err(), HostReadError::InvalidPath);
+        let climb = format!("{}..{}etc", text(&host_abs(&[])), std::path::MAIN_SEPARATOR);
+        assert_eq!(resolve_host_path(&climb, None, None, None).unwrap_err(), HostReadError::InvalidPath);
+        assert_eq!(resolve_host_path("a\nb", Some(text(&repo)), None, None).unwrap_err(), HostReadError::InvalidPath);
     }
 
     #[test]

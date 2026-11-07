@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
@@ -12,15 +12,26 @@ import {
   History as HistoryIcon,
   Bug,
   MousePointer2,
+  Star,
+  Search as SearchIcon,
+  AppWindow,
+  Bookmark as BookmarkIcon,
+  Library as LibraryIcon,
+  Download as DownloadIcon,
+  Printer,
+  FileDown,
+  MoreHorizontal,
+  Puzzle,
+  type LucideIcon,
 } from "lucide-react";
 import {
   BROWSER_SHORTCUT_EVENT,
   extractBrowserErrorCode,
   focusBrowser,
+  focusAppWebview,
+  getBrowserEngineStatus,
   getBrowserState,
   getBrowserSnapshotCapability,
-  goBackBrowser,
-  goForwardBrowser,
   deliverDesignFeedback,
   finishBrowserElementPick,
   injectBrowserElementPicker,
@@ -29,7 +40,7 @@ import {
   openBrowserDevtools,
   removeBrowserElementPicker,
   openExternalUrl,
-  setBrowserZoom,
+  type BrowserEngineStatus,
   type BrowserDesignSnapshot,
   type BrowserReloadOptions,
   type BrowserShortcutAction,
@@ -38,21 +49,110 @@ import {
   type DesignFeedbackTarget,
 } from "../lib/browserTauri";
 import { BrowserDesignFeedbackPopover } from "./BrowserDesignFeedbackPopover";
+import { openBrowserLibraryView } from "./BrowserLibraryPanel";
 import {
-  BROWSER_HISTORY_EVENT,
-  clearBrowserHistory,
-  loadBrowserHistory,
-  searchBrowserHistory,
-  type BrowserHistoryEntry,
-} from "../lib/browserHistory";
-import { BROWSER_ZOOM_LEVELS, normalizeBrowserAddress, useBrowserSettings } from "../lib/browserSettings";
+  applyBrowserSiteZoom,
+  printBrowser,
+  saveBrowserPdf,
+  stepBrowserZoom,
+  type BrowserZoomDirection,
+} from "../lib/browserSystem";
+import {
+  addBookmark,
+  clearAllBrowserHistory,
+  deleteBookmark,
+  fetchSearchSuggestions,
+  findBookmarkByUrl,
+  listHostHistory,
+  onBrowserLibraryChanged,
+  openBrowserLibrary,
+  rankOmniboxSuggestions,
+  useBookmarks,
+  type HostHistoryEntry,
+  type OmniboxSuggestion,
+} from "../lib/browserLibrary";
+import { requestSwitchToBrowserTab } from "../lib/browserLibrarySync";
+import { goBackInBrowserTab, goForwardInBrowserTab, useBrowserTabNavigation } from "../lib/browserTabNavigation";
+import { isPrivateBrowserProfileId, normalizeBrowserAddress, searchUrlFor, useBrowserSettings } from "../lib/browserSettings";
+import { openSettingsSection } from "../lib/browserExtensions";
+import { isMacHost } from "../lib/platform";
 import { isHardReloadSupportedPlatform } from "../lib/shortcuts";
 import type { BrowserTab } from "../lib/types";
 
-// Keep the toolbar's zoom clamps in lockstep with the Settings-exposed zoom levels
-// (BROWSER_ZOOM_LEVELS percentages), so a zoom restored by the backend stays reachable.
-const BROWSER_ZOOM_MIN = Math.min(...BROWSER_ZOOM_LEVELS) / 100;
-const BROWSER_ZOOM_MAX = Math.max(...BROWSER_ZOOM_LEVELS) / 100;
+// Mirrors ZOOM_STEPS in src-tauri/src/browser/system.rs. Only the optimistic readout uses it;
+// the host does the real stepping and its answer replaces this guess.
+const HOST_ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 3.0, 5.0];
+
+function guessZoomStep(current: number, direction: BrowserZoomDirection): number {
+  if (direction === "reset") return 1.0;
+  const from = Number.isFinite(current) ? current : 1.0;
+  if (direction === "in") return HOST_ZOOM_STEPS.find((step) => step > from + 1e-6) ?? HOST_ZOOM_STEPS[HOST_ZOOM_STEPS.length - 1];
+  return [...HOST_ZOOM_STEPS].reverse().find((step) => step < from - 1e-6) ?? HOST_ZOOM_STEPS[0];
+}
+
+/** Below this toolbar width the secondary actions move into the "More" row. */
+export const BROWSER_TOOLBAR_COMPACT_WIDTH = 720;
+
+const TOOLBAR_BUTTON_BASE =
+  "inline-flex shrink-0 items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground";
+/** The one class set every icon-only toolbar button shares. */
+export const TOOLBAR_ICON_BUTTON = `${TOOLBAR_BUTTON_BASE} size-7 justify-center`;
+const TOOLBAR_ROW_BUTTON = `${TOOLBAR_BUTTON_BASE} h-7 gap-1.5 px-2 text-[11px]`;
+
+type ToolbarButtonProps = {
+  icon: LucideIcon;
+  label: string;
+  title: string;
+  onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  variant?: "icon" | "row";
+  disabled?: boolean;
+  pressed?: boolean;
+  expanded?: boolean;
+  hasPopup?: boolean;
+  controls?: string;
+  testId?: string;
+  shortcut?: string;
+  iconClassName?: string;
+};
+
+/** Icon button (toolbar) or icon + text button (inline rows): same label, tooltip and focus ring. */
+function ToolbarButton({
+  icon: Icon,
+  label,
+  title,
+  onClick,
+  variant = "icon",
+  disabled,
+  pressed,
+  expanded,
+  hasPopup,
+  controls,
+  testId,
+  shortcut,
+  iconClassName = "",
+}: ToolbarButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      aria-label={label}
+      aria-pressed={pressed}
+      aria-expanded={expanded}
+      aria-haspopup={hasPopup ? "true" : undefined}
+      aria-controls={controls}
+      data-testid={testId}
+      data-shortcut={shortcut}
+      className={`${variant === "row" ? TOOLBAR_ROW_BUTTON : TOOLBAR_ICON_BUTTON} ${pressed ? "bg-muted text-foreground" : ""}`}
+    >
+      <Icon className={`size-3.5 ${iconClassName}`} />
+      {variant === "row" ? <span>{label}</span> : null}
+    </button>
+  );
+}
+
+type ExtensionsStatus = "loading" | "error" | BrowserEngineStatus;
 
 /** Every toolbar failure names the action the user took plus the backend's structured code, so a
  * failed action can never read as a successful one. The code comes from the IPC error contract,
@@ -74,6 +174,8 @@ interface BrowserToolbarProps {
   onToggleElementPick?: () => void;
   elementPicking?: boolean;
   designFeedbackTargets?: DesignFeedbackTarget[];
+  /** Other open browser tabs, offered by the omnibox as "switch to tab". */
+  openTabs?: Array<{ browserId: string; url: string; title: string | null }>;
 }
 
 export function BrowserToolbar({
@@ -85,20 +187,45 @@ export function BrowserToolbar({
   onToggleElementPick,
   elementPicking: elementPickingProp,
   designFeedbackTargets = [],
+  openTabs = [],
 }: BrowserToolbarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const omniboxId = useId();
   const omniboxListId = `${omniboxId}-history`;
+  const moreRowId = `${omniboxId}-more`;
+  const extensionsRowId = `${omniboxId}-extensions`;
+  // 0 means "not measured yet" (first paint, jsdom): treated as wide so nothing is hidden blindly.
+  const [toolbarWidth, setToolbarWidth] = useState(0);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [extensionsOpen, setExtensionsOpen] = useState(false);
+  const [extensionsStatus, setExtensionsStatus] = useState<ExtensionsStatus>("loading");
+  const [extensionsErrorCode, setExtensionsErrorCode] = useState<string | null>(null);
   const [inputUrl, setInputUrl] = useState(tab.url);
   // Set while the user has typed into the omnibox and not yet submitted, blurred or escaped, so
   // a live URL update from the page cannot overwrite half-typed text.
   const inputDirtyRef = useRef(false);
   const [historyQuery, setHistoryQuery] = useState("");
   const [zoomFactor, setZoomFactor] = useState(tab.zoomFactor ?? 1.0);
+  // The shown zoom, readable at shortcut time: two quick presses step from the first guess,
+  // not twice from the same render's value.
+  const zoomFactorRef = useRef(zoomFactor);
+  // Only the newest zoom request (step or site zoom) may set the readout; an older answer that
+  // arrives late would show a zoom the page no longer has.
+  const zoomRequestRef = useRef(0);
+  const showZoom = useCallback((zoom: number) => {
+    zoomFactorRef.current = zoom;
+    setZoomFactor(zoom);
+  }, []);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [omniboxOpen, setOmniboxOpen] = useState(false);
   const [selectedHistoryIndex, setSelectedHistoryIndex] = useState(-1);
-  const [historyEntries, setHistoryEntries] = useState<BrowserHistoryEntry[]>(loadBrowserHistory);
+  // Recent pages (host store) for the History menu and for the omnibox before typing.
+  const [historyEntries, setHistoryEntries] = useState<HostHistoryEntry[]>([]);
+  // Host matches for the typed text, ranked by frecency.
+  const [historyMatches, setHistoryMatches] = useState<HostHistoryEntry[]>([]);
+  const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
+  const { tree: bookmarkTree } = useBookmarks();
   const [snapshotCapability, setSnapshotCapability] = useState<BrowserSnapshotCapability | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [designSnapshot, setDesignSnapshot] = useState<BrowserDesignSnapshot | null>(null);
@@ -108,16 +235,61 @@ export function BrowserToolbar({
   // without a parent; a parent that passes `elementPicking` still drives it.
   const [elementPicking, setElementPicking] = useState(elementPickingProp ?? false);
   const { settings, updateSettings } = useBrowserSettings();
+  const navigation = useBrowserTabNavigation(tab.browserId, Boolean(tab.canGoBack), Boolean(tab.canGoForward));
+
+  // The toolbar measures its own width (not the window's): panes can be split narrower than the
+  // viewport, and the right cluster must yield to the address bar at the pane's width.
+  useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const measure = () => setToolbarWidth(el.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const compact = toolbarWidth > 0 && toolbarWidth < BROWSER_TOOLBAR_COMPACT_WIDTH;
+  const moreRowOpen = compact && moreOpen;
+
+  // Engine status is only needed once the user opens the row, so it is fetched lazily then.
+  useEffect(() => {
+    if (!extensionsOpen) return;
+    let disposed = false;
+    setExtensionsStatus("loading");
+    setExtensionsErrorCode(null);
+    void Promise.resolve()
+      .then(() => getBrowserEngineStatus())
+      .then((status) => {
+        if (!disposed) setExtensionsStatus(status);
+      })
+      .catch((error: unknown) => {
+        if (disposed) return;
+        setExtensionsErrorCode(extractBrowserErrorCode(error));
+        setExtensionsStatus("error");
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [extensionsOpen]);
 
   // Picking needs native snapshot capture AND this tab's isolated-world bridge, which the
   // backend reports as `pick`. An unknown capability (an older backend without the command)
   // keeps the control as-is; a reported capability enables picking only when `pick` is true.
   const elementPickSupported = snapshotCapability === null || snapshotCapability.pick === true;
 
-  const omniboxEntries = useMemo(() => {
-    if (!settings.rememberBrowsingHistory) return [];
-    return searchBrowserHistory(historyEntries, historyQuery, 8);
-  }, [historyEntries, historyQuery, settings.rememberBrowsingHistory]);
+  const omniboxEntries: OmniboxSuggestion[] = useMemo(() => {
+    const typed = historyQuery.trim();
+    const history = settings.rememberBrowsingHistory ? (typed ? historyMatches : historyEntries) : [];
+    if (!typed && history.length === 0) return [];
+    return rankOmniboxSuggestions(historyQuery, {
+      history,
+      bookmarks: bookmarkTree.bookmarks,
+      tabs: openTabs,
+      searchSuggestions: typed && settings.searchSuggestions ? searchSuggestions : [],
+      currentBrowserId: tab.browserId,
+    }, 8);
+  }, [bookmarkTree.bookmarks, historyEntries, historyMatches, historyQuery, openTabs, searchSuggestions, settings.rememberBrowsingHistory, settings.searchSuggestions, tab.browserId]);
+  const currentBookmark = useMemo(() => findBookmarkByUrl(bookmarkTree, tab.url), [bookmarkTree, tab.url]);
 
   useEffect(() => {
     if (elementPickingProp !== undefined) setElementPicking(elementPickingProp);
@@ -137,21 +309,127 @@ export function BrowserToolbar({
     if (inputDirtyRef.current) return;
     setInputUrl(tab.url);
     setHistoryQuery("");
+    // A committed navigation ends the omnibox session: its suggestions describe the old page.
+    setOmniboxOpen(false);
+    setSelectedHistoryIndex(-1);
   }, [tab.url]);
 
   useEffect(() => {
-    setZoomFactor(tab.zoomFactor ?? 1.0);
-  }, [tab.browserId, tab.zoomFactor]);
+    if (tab.loading && !inputDirtyRef.current) {
+      setOmniboxOpen(false);
+      setSelectedHistoryIndex(-1);
+    }
+  }, [tab.loading]);
+
+  // Clicking into the page moves focus to the native page view, which the toolbar sees only as
+  // the app window losing focus; the suggestion list must not stay drawn over the page then.
+  useEffect(() => {
+    const closeOnWindowBlur = () => {
+      setOmniboxOpen(false);
+      setSelectedHistoryIndex(-1);
+    };
+    window.addEventListener("blur", closeOnWindowBlur);
+    return () => window.removeEventListener("blur", closeOnWindowBlur);
+  }, []);
 
   useEffect(() => {
-    const syncHistory = () => setHistoryEntries(loadBrowserHistory());
-    window.addEventListener(BROWSER_HISTORY_EVENT, syncHistory);
-    window.addEventListener("storage", syncHistory);
+    showZoom(tab.zoomFactor ?? 1.0);
+  }, [showZoom, tab.browserId, tab.zoomFactor]);
+
+  // The host applies the site's remembered zoom when a page loads, but that change does not
+  // reach the tab's state event, so after a navigation the readout would keep the previous
+  // site's zoom. Asking the host to apply the site zoom answers the zoom the page now has.
+  const siteZoomTargetRef = useRef({ browserId: tab.browserId, url: tab.url });
+  useEffect(() => {
+    const previous = siteZoomTargetRef.current;
+    siteZoomTargetRef.current = { browserId: tab.browserId, url: tab.url };
+    // The first render and a toolbar reused for another tab take the zoom from tab state.
+    if (previous.browserId !== tab.browserId || previous.url === tab.url) return;
+    const request = ++zoomRequestRef.current;
+    const isPrivate = isPrivateBrowserProfileId(tab.profileId);
+    void applyBrowserSiteZoom(tab.browserId)
+      .then((applied) => {
+        if (request !== zoomRequestRef.current) return;
+        // No answer means the host left the zoom alone: a private tab keeps its zoom, any other
+        // tab is at 100% (no remembered zoom and nothing to change).
+        if (applied !== null) showZoom(applied);
+        else if (!isPrivate) showZoom(1.0);
+      })
+      .catch((error: unknown) => {
+        if (request === zoomRequestRef.current) setActionError(actionFailureMessage("Site zoom", error));
+      });
+  }, [showZoom, tab.browserId, tab.url, tab.profileId]);
+
+  // History lives in the host store; any window's visit refreshes the recent list.
+  const refreshRecentHistory = useRef(() => undefined as void);
+  refreshRecentHistory.current = () => {
+    if (!settings.rememberBrowsingHistory) {
+      setHistoryEntries([]);
+      return;
+    }
+    void Promise.resolve()
+      .then(() => listHostHistory("", undefined, 50))
+      .then((entries) => setHistoryEntries(entries ?? []))
+      .catch(() => setHistoryEntries([]));
+  };
+  useEffect(() => {
+    refreshRecentHistory.current();
+  }, [settings.rememberBrowsingHistory]);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    void Promise.resolve()
+      .then(() => onBrowserLibraryChanged((kind) => {
+        if (kind === "history") refreshRecentHistory.current();
+      }))
+      .then((cleanup) => {
+        if (disposed) cleanup?.();
+        else unlisten = cleanup;
+      })
+      .catch(() => undefined);
     return () => {
-      window.removeEventListener(BROWSER_HISTORY_EVENT, syncHistory);
-      window.removeEventListener("storage", syncHistory);
+      disposed = true;
+      unlisten?.();
     };
   }, []);
+
+  // Typed text: host history matches, and (opt-in) search-engine suggestions. The latest query
+  // wins; a failed or offline suggest call leaves local suggestions only.
+  useEffect(() => {
+    const query = historyQuery.trim();
+    if (!query) {
+      setHistoryMatches([]);
+      setSearchSuggestions([]);
+      return;
+    }
+    let stale = false;
+    if (settings.rememberBrowsingHistory) {
+      void Promise.resolve()
+        .then(() => listHostHistory(query, undefined, 50))
+        .then((entries) => { if (!stale) setHistoryMatches(entries ?? []); })
+        .catch(() => { if (!stale) setHistoryMatches([]); });
+    }
+    if (settings.searchSuggestions) {
+      void Promise.resolve()
+        .then(() => fetchSearchSuggestions(settings.searchEngine, query))
+        .then((items) => { if (!stale) setSearchSuggestions(items ?? []); })
+        .catch(() => { if (!stale) setSearchSuggestions([]); });
+    }
+    return () => {
+      stale = true;
+    };
+  }, [historyQuery, settings.rememberBrowsingHistory, settings.searchEngine, settings.searchSuggestions]);
+
+  const toggleBookmark = async () => {
+    if (!/^(https?|file):/i.test(tab.url)) return;
+    try {
+      if (currentBookmark) await deleteBookmark(currentBookmark.id);
+      else await addBookmark(tab.title?.trim() || tab.url, tab.url);
+      setActionError(null);
+    } catch (error) {
+      setActionError(actionFailureMessage("Bookmark", error));
+    }
+  };
 
   useEffect(() => {
     let disposed = false;
@@ -200,7 +478,8 @@ export function BrowserToolbar({
 
   const handleGoBack = async () => {
     try {
-      await goBackBrowser(tab.browserId);
+      // After a restart the engine's own history is empty; the tab's saved stack takes over.
+      await goBackInBrowserTab(tab.browserId);
       setActionError(null);
       onGoBack?.();
     } catch (error) {
@@ -211,7 +490,7 @@ export function BrowserToolbar({
 
   const handleGoForward = async () => {
     try {
-      await goForwardBrowser(tab.browserId);
+      await goForwardInBrowserTab(tab.browserId);
       setActionError(null);
       onGoForward?.();
     } catch (error) {
@@ -221,20 +500,43 @@ export function BrowserToolbar({
 
   // The shortcut listener must not re-subscribe on every render (parents pass inline callbacks),
   // so it reads the latest handlers through a ref instead of depending on them.
-  const shortcutHandlersRef = useRef({ onReload, goBack: handleGoBack, goForward: handleGoForward });
-  shortcutHandlersRef.current = { onReload, goBack: handleGoBack, goForward: handleGoForward };
+  // The zoom handlers are function declarations hoisted from below, read at shortcut time.
+  const shortcutHandlersRef = useRef({ onReload, goBack: handleGoBack, goForward: handleGoForward, toggleBookmark, zoomIn: handleZoomIn, zoomOut: handleZoomOut, zoomReset: handleZoomReset });
+  shortcutHandlersRef.current = { onReload, goBack: handleGoBack, goForward: handleGoForward, toggleBookmark, zoomIn: handleZoomIn, zoomOut: handleZoomOut, zoomReset: handleZoomReset };
 
   useEffect(() => {
-    const runShortcut = (action: BrowserShortcutAction) => {
+    /** Returns true when this toolbar handled the action itself. */
+    const runShortcut = (action: BrowserShortcutAction): boolean => {
       const handlers = shortcutHandlersRef.current;
+      // Every shortcut but focus-address acts on the page (find, reload, history), so the
+      // suggestion list from an earlier omnibox session closes first.
+      if (action !== "focus-address") {
+        setOmniboxOpen(false);
+        setSelectedHistoryIndex(-1);
+      }
       switch (action) {
         case "focus-address":
-          inputRef.current?.focus();
-          inputRef.current?.select();
           setHistoryQuery("");
           setHistoryOpen(false);
           setSelectedHistoryIndex(-1);
-          if (settings.rememberBrowsingHistory) setOmniboxOpen(true);
+          setOmniboxOpen(true);
+          {
+            // Ctrl+L from the page: the page view holds OS keyboard focus until the app webview
+            // takes it back, so that is requested before the address bar is focused, and the
+            // bar is focused again once the native focus moved.
+            const nativeFocus = focusAppWebview();
+            inputRef.current?.focus();
+            inputRef.current?.select();
+            void nativeFocus
+              .catch(() => undefined)
+              .then(() => {
+                inputRef.current?.focus();
+                inputRef.current?.select();
+              });
+          }
+          break;
+        case "bookmark-page":
+          void handlers.toggleBookmark();
           break;
         case "reload":
           handlers.onReload();
@@ -251,15 +553,26 @@ export function BrowserToolbar({
         case "find":
           // BrowserPane owns the find overlay and receives the same event.
           break;
+        case "zoom-in":
+          void handlers.zoomIn();
+          return true;
+        case "zoom-out":
+          void handlers.zoomOut();
+          return true;
+        case "zoom-reset":
+          void handlers.zoomReset();
+          return true;
         default:
           // Tab navigation actions are routed at the App level; ignore here.
           break;
       }
+      return false;
     };
 
     const handleDomShortcut = (event: Event) => {
       const detail = (event as BrowserShortcutDomEvent).detail;
-      if (detail?.browserId === tab.browserId) runShortcut(detail.action);
+      // Claiming the event tells App this tab applied the zoom, so App does not step it again.
+      if (detail?.browserId === tab.browserId && runShortcut(detail.action)) event.preventDefault();
     };
     window.addEventListener(BROWSER_SHORTCUT_EVENT, handleDomShortcut);
 
@@ -326,10 +639,27 @@ export function BrowserToolbar({
     onNavigate(url);
   };
 
+  const acceptSuggestion = (suggestion: OmniboxSuggestion) => {
+    if (suggestion.kind === "tab" && suggestion.browserId) {
+      inputDirtyRef.current = false;
+      setInputUrl(tab.url);
+      setHistoryQuery("");
+      setOmniboxOpen(false);
+      setSelectedHistoryIndex(-1);
+      requestSwitchToBrowserTab(suggestion.browserId);
+      return;
+    }
+    if (suggestion.kind === "search" && suggestion.query) {
+      navigateFromAddress(searchUrlFor(settings.searchEngine, suggestion.query));
+      return;
+    }
+    navigateFromAddress(suggestion.url);
+  };
+
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     if (selectedHistoryIndex >= 0 && selectedHistoryIndex < omniboxEntries.length) {
-      navigateFromAddress(omniboxEntries[selectedHistoryIndex].url);
+      acceptSuggestion(omniboxEntries[selectedHistoryIndex]);
       return;
     }
     if (!inputUrl.trim()) return;
@@ -339,12 +669,16 @@ export function BrowserToolbar({
   const handleAddressKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
+      // Like other browsers: Escape drops the edit and shows the current page's address again.
       inputDirtyRef.current = false;
+      setInputUrl(tab.url);
+      setHistoryQuery("");
       setOmniboxOpen(false);
       setSelectedHistoryIndex(-1);
+      event.currentTarget.select();
       return;
     }
-    if (!settings.rememberBrowsingHistory || omniboxEntries.length === 0) return;
+    if (omniboxEntries.length === 0) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       setOmniboxOpen(true);
@@ -363,29 +697,38 @@ export function BrowserToolbar({
       .catch((error: unknown) => setActionError(actionFailureMessage("Open in system browser", error)));
   };
 
-  const applyZoom = async (nextZoom: number) => {
+  const applyZoom = async (direction: BrowserZoomDirection) => {
     // The optimistic value must not outlive a rejected IPC: showing 110% while the page stays at
     // 100% is exactly the lie the zoom readout must never tell.
-    const previousZoom = zoomFactor;
-    setZoomFactor(nextZoom);
+    const previousZoom = zoomFactorRef.current;
+    const request = ++zoomRequestRef.current;
+    setOmniboxOpen(false);
+    showZoom(guessZoomStep(previousZoom, direction));
     try {
-      const applied = await setBrowserZoom(tab.browserId, nextZoom);
-      // The backend answers the zoom it actually applied; show that rather than the request.
-      if (typeof applied === "number" && Number.isFinite(applied)) setZoomFactor(applied);
+      // The host steps from the zoom it holds for the tab, applies it on either engine and
+      // remembers it for the page's site; its answer is the zoom the page really has.
+      const applied = await stepBrowserZoom(tab.browserId, direction);
+      if (request !== zoomRequestRef.current) return;
+      if (typeof applied === "number" && Number.isFinite(applied)) showZoom(applied);
       setActionError(null);
     } catch (error) {
-      setZoomFactor(previousZoom);
+      if (request !== zoomRequestRef.current) return;
+      showZoom(previousZoom);
       setActionError(actionFailureMessage("Zoom", error));
     }
   };
 
-  const handleZoomIn = async () => {
-    await applyZoom(Math.min(BROWSER_ZOOM_MAX, Math.round((zoomFactor + 0.1) * 10) / 10));
-  };
+  async function handleZoomIn() {
+    await applyZoom("in");
+  }
 
-  const handleZoomOut = async () => {
-    await applyZoom(Math.max(BROWSER_ZOOM_MIN, Math.round((zoomFactor - 0.1) * 10) / 10));
-  };
+  async function handleZoomOut() {
+    await applyZoom("out");
+  }
+
+  async function handleZoomReset() {
+    await applyZoom("reset");
+  }
 
   const handleFocus = async () => {
     try {
@@ -404,7 +747,7 @@ export function BrowserToolbar({
         setInputUrl(state.url);
         setHistoryQuery("");
       }
-      setZoomFactor(state.zoomFactor);
+      showZoom(state.zoomFactor);
       setActionError(null);
     } catch (error) {
       setActionError(actionFailureMessage("Sync state", error));
@@ -412,7 +755,7 @@ export function BrowserToolbar({
   };
 
   const toggleHistory = () => {
-    setHistoryEntries(loadBrowserHistory());
+    refreshRecentHistory.current();
     setOmniboxOpen(false);
     setHistoryOpen((open) => !open);
   };
@@ -424,7 +767,7 @@ export function BrowserToolbar({
 
   const setRememberHistory = (remember: boolean) => {
     if (!remember) {
-      clearBrowserHistory();
+      void clearAllBrowserHistory().catch((error: unknown) => setActionError(actionFailureMessage("Clear history", error)));
       setHistoryQuery("");
       setOmniboxOpen(false);
     }
@@ -432,7 +775,9 @@ export function BrowserToolbar({
   };
 
   const hardReloadSupported = isHardReloadSupportedPlatform();
-  const omniboxListOpen = settings.rememberBrowsingHistory && omniboxOpen && omniboxEntries.length > 0;
+  const modKey = isMacHost() ? "Cmd" : "Ctrl";
+  const hasOpenableUrl = Boolean(tab.url) && tab.url !== "about:blank";
+  const omniboxListOpen = omniboxOpen && omniboxEntries.length > 0;
   const omniboxOptionId = (index: number) => `${omniboxId}-option-${index}`;
 
   const handleReload = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -443,43 +788,132 @@ export function BrowserToolbar({
     onReload();
   };
 
+  const handleDevtools = () => {
+    // A rejected devtools open is otherwise an unhandled rejection: the user clicks and
+    // nothing happens, with no reason shown anywhere.
+    void openBrowserDevtools(tab.browserId)
+      .then(() => setActionError(null))
+      .catch((error: unknown) => setActionError(actionFailureMessage("DevTools", error)));
+  };
+
+  const handleTogglePicker = () => {
+    // Arming the picker is the user's action; a rejection here would otherwise leave the
+    // button pressed with nothing listening for a pick.
+    const nextPicking = !elementPicking;
+    const togglePicker = elementPicking
+      ? removeBrowserElementPicker(tab.browserId)
+      : injectBrowserElementPicker(tab.browserId);
+    setElementPicking(nextPicking);
+    void togglePicker
+      .then(() => setActionError(null))
+      .catch((error: unknown) => {
+        // The page kept its previous picker state, so the button does too.
+        setElementPicking(!nextPicking);
+        setActionError(actionFailureMessage("Element picker", error));
+      });
+    onToggleElementPick?.();
+  };
+
+  const openChromiumTab = () => {
+    window.dispatchEvent(
+      new CustomEvent("ferryx:open-browser-url", { detail: { url: tab.url, profileId: tab.profileId } }),
+    );
+  };
+
+  // The same four actions render as icon buttons (wide) or icon + text buttons (More row).
+  const secondaryActionButtons = (variant: "icon" | "row") => (
+    <>
+      <ToolbarButton
+        icon={Target}
+        label="Focus webview"
+        title="Focus webview: send keyboard input to the page"
+        variant={variant}
+        onClick={() => void handleFocus()}
+      />
+      <ToolbarButton
+        icon={RefreshCw}
+        label="Sync browser state"
+        title="Sync browser state: re-read the page URL and zoom"
+        variant={variant}
+        onClick={() => void handleSyncState()}
+      />
+      <ToolbarButton icon={Bug} label="DevTools" title="Open DevTools for this page" variant={variant} onClick={handleDevtools} />
+      <ToolbarButton
+        icon={MousePointer2}
+        label="Select element"
+        title={elementPickSupported ? "Select element on the page" : "Element picking is unavailable for this tab"}
+        variant={variant}
+        disabled={!elementPickSupported}
+        pressed={elementPicking}
+        onClick={handleTogglePicker}
+      />
+      {/* Print and Save as PDF (the shortcut is Cmd/Ctrl+P). */}
+      <ToolbarButton
+        icon={Printer}
+        label="Print page"
+        title={`Print (${modKey}+P)`}
+        variant={variant}
+        onClick={() => {
+          void printBrowser(tab.browserId)
+            .then(() => setActionError(null))
+            .catch((error: unknown) => setActionError(actionFailureMessage("Print", error)));
+        }}
+      />
+      <ToolbarButton
+        icon={FileDown}
+        label="Save page as PDF"
+        title="Save as PDF"
+        variant={variant}
+        onClick={() => {
+          void saveBrowserPdf(tab.browserId)
+            .then(() => setActionError(null))
+            .catch((error: unknown) => setActionError(actionFailureMessage("Save as PDF", error)));
+        }}
+      />
+    </>
+  );
+
+  const zoomControls = (variant: "icon" | "row") => (
+    <>
+      <ToolbarButton icon={ZoomOut} label="Zoom out" title="Zoom out" variant={variant} onClick={() => void handleZoomOut()} />
+      <span className="w-9 text-center font-mono text-[10px] text-muted-foreground" data-testid="browser-zoom-readout">
+        {Math.round(zoomFactor * 100)}%
+      </span>
+      <ToolbarButton icon={ZoomIn} label="Zoom in" title="Zoom in" variant={variant} onClick={() => void handleZoomIn()} />
+    </>
+  );
+
   return (
-    <div className="relative z-10 shrink-0 bg-background border-b border-border text-xs text-foreground select-none">
+    <div ref={rootRef} data-testid="browser-toolbar-root" data-compact={compact ? "true" : "false"} className="relative z-10 shrink-0 border-b border-border bg-card text-xs text-foreground select-none">
       <div className="flex items-center gap-2 px-3 py-1.5">
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            disabled={!tab.canGoBack}
+        <div className="flex shrink-0 items-center gap-0.5">
+          <ToolbarButton
+            icon={ArrowLeft}
+            label="Back"
+            title={navigation.canGoBack ? `Back (${modKey}+[)` : "No previous page"}
+            disabled={!navigation.canGoBack}
             onClick={() => void handleGoBack()}
-            aria-label="Back"
-            data-shortcut="browser.back"
-            className="p-1 rounded hover:bg-muted disabled:opacity-30 transition-colors"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            disabled={!tab.canGoForward}
+            shortcut="browser.back"
+          />
+          <ToolbarButton
+            icon={ArrowRight}
+            label="Forward"
+            title={navigation.canGoForward ? `Forward (${modKey}+])` : "No next page"}
+            disabled={!navigation.canGoForward}
             onClick={() => void handleGoForward()}
-            aria-label="Forward"
-            data-shortcut="browser.forward"
-            className="p-1 rounded hover:bg-muted disabled:opacity-30 transition-colors"
-          >
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
+            shortcut="browser.forward"
+          />
+          <ToolbarButton
+            icon={RotateCw}
+            label="Reload"
+            title={`Reload (${modKey}+R${hardReloadSupported ? ", Shift+Click bypasses the cache" : ""})`}
             onClick={handleReload}
-            aria-label="Reload"
-            title={hardReloadSupported ? "Reload (Shift+Click bypasses the cache)" : "Reload"}
-            data-shortcut="browser.reload"
-            className="p-1 rounded hover:bg-muted transition-colors"
-          >
-            <RotateCw className={`w-3.5 h-3.5 ${tab.loading ? "animate-spin" : ""}`} />
-          </button>
+            shortcut="browser.reload"
+            iconClassName={tab.loading ? "animate-spin" : ""}
+          />
         </div>
 
-        <form onSubmit={handleSubmit} className="flex-1 flex items-center">
+        <form onSubmit={handleSubmit} className="flex min-w-0 flex-1 items-center">
           <input
             ref={inputRef}
             type="text"
@@ -488,21 +922,26 @@ export function BrowserToolbar({
               setHistoryQuery("");
               setHistoryOpen(false);
               setSelectedHistoryIndex(-1);
-              if (settings.rememberBrowsingHistory) setOmniboxOpen(true);
+              setOmniboxOpen(true);
             }}
             onChange={(event) => {
               inputDirtyRef.current = true;
               setInputUrl(event.target.value);
               setHistoryQuery(event.target.value);
               setSelectedHistoryIndex(-1);
-              if (settings.rememberBrowsingHistory) setOmniboxOpen(true);
+              setOmniboxOpen(true);
             }}
             onBlur={() => {
               inputDirtyRef.current = false;
+              // Suggestion rows keep focus on mousedown, so a real blur means focus left the
+              // omnibox (the page, the find bar, another control).
+              setOmniboxOpen(false);
+              setSelectedHistoryIndex(-1);
             }}
             onKeyDown={handleAddressKeyDown}
             placeholder="Search or enter URL"
             aria-label="URL address bar"
+            title={`Address bar (${modKey}+L)`}
             data-shortcut="browser.focusAddress"
             role="combobox"
             aria-autocomplete="list"
@@ -513,77 +952,98 @@ export function BrowserToolbar({
                 ? omniboxOptionId(selectedHistoryIndex)
                 : undefined
             }
-            className="w-full bg-background border border-border rounded px-2.5 py-1 text-xs text-foreground focus:outline-none focus:border-primary font-mono"
+            className="h-7 w-full min-w-0 rounded border border-border bg-background px-2.5 font-mono text-xs text-foreground focus:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
+          <button
+            type="button"
+            onClick={() => void toggleBookmark()}
+            disabled={!/^(https?|file):/i.test(tab.url)}
+            title={currentBookmark ? "Remove bookmark" : "Bookmark this page"}
+            aria-label={currentBookmark ? "Remove bookmark" : "Bookmark this page"}
+            aria-pressed={Boolean(currentBookmark)}
+            data-shortcut="browser.bookmarkPage"
+            className="ml-1 p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors"
+          >
+            <Star className={`w-3.5 h-3.5 ${currentBookmark ? "fill-current text-amber-400" : ""}`} />
+          </button>
         </form>
 
-        <div className="flex items-center gap-0.5 border-l border-border/70 pl-1.5">
-          <button type="button" onClick={handleZoomOut} title="Zoom out" aria-label="Zoom out" className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <ZoomOut className="w-3.5 h-3.5" />
-          </button>
-          <span className="font-mono text-[10px] text-muted-foreground w-8 text-center">{Math.round(zoomFactor * 100)}%</span>
-          <button type="button" onClick={handleZoomIn} title="Zoom in" aria-label="Zoom in" className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <ZoomIn className="w-3.5 h-3.5" />
-          </button>
-        </div>
+        {compact ? null : (
+          <div className="flex shrink-0 items-center gap-0.5 border-l border-border/70 pl-1.5" data-testid="browser-toolbar-zoom">
+            {zoomControls("icon")}
+          </div>
+        )}
 
-        <div className="flex items-center gap-0.5 border-l border-border/70 pl-1.5">
-          <button type="button" onClick={toggleHistory} title="History" aria-label="History" aria-expanded={historyOpen} className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <HistoryIcon className="w-3.5 h-3.5" />
-          </button>
-          <button type="button" onClick={handleFocus} title="Focus webview" aria-label="Focus webview" className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <Target className="w-3.5 h-3.5" />
-          </button>
-          <button type="button" onClick={handleSyncState} title="Sync browser state" aria-label="Sync browser state" className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
-            <RefreshCw className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              // A rejected devtools open is otherwise an unhandled rejection: the user clicks and
-              // nothing happens, with no reason shown anywhere.
-              void openBrowserDevtools(tab.browserId)
-                .then(() => setActionError(null))
-                .catch((error: unknown) => setActionError(actionFailureMessage("DevTools", error)));
-            }}
-            title="DevTools"
-            aria-label="DevTools"
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <Bug className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            disabled={!elementPickSupported}
-            onClick={() => {
-              // Arming the picker is the user's action; a rejection here would otherwise leave the
-              // button pressed with nothing listening for a pick.
-              const nextPicking = !elementPicking;
-              const togglePicker = elementPicking
-                ? removeBrowserElementPicker(tab.browserId)
-                : injectBrowserElementPicker(tab.browserId);
-              setElementPicking(nextPicking);
-              void togglePicker
-                .then(() => setActionError(null))
-                .catch((error: unknown) => {
-                  // The page kept its previous picker state, so the button does too.
-                  setElementPicking(!nextPicking);
-                  setActionError(actionFailureMessage("Element picker", error));
-                });
-              onToggleElementPick?.();
-            }}
-            title={elementPickSupported ? "Select element" : "Select element (unavailable on this platform)"}
-            aria-label="Select element"
-            aria-pressed={elementPicking}
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30"
-          >
-            <MousePointer2 className="w-3.5 h-3.5" />
-          </button>
-          <button type="button" onClick={handleExternalOpen} title="Open in default browser" aria-label="Open in external browser" className="p-1 rounded hover:bg-muted transition-colors">
-            <ExternalLink className="w-3.5 h-3.5 text-muted-foreground" />
-          </button>
+        <div className="flex shrink-0 items-center gap-0.5 border-l border-border/70 pl-1.5">
+          <ToolbarButton
+            icon={HistoryIcon}
+            label="History"
+            title="Browsing history"
+            expanded={historyOpen}
+            onClick={toggleHistory}
+          />
+          {compact ? null : secondaryActionButtons("icon")}
+          <ToolbarButton
+            icon={Puzzle}
+            label="Extensions"
+            title="Extensions"
+            expanded={extensionsOpen}
+            controls={extensionsOpen ? extensionsRowId : undefined}
+            testId="browser-toolbar-extensions"
+            onClick={() => setExtensionsOpen((open) => !open)}
+          />
+          <ToolbarButton
+            icon={ExternalLink}
+            label="Open in external browser"
+            title={hasOpenableUrl ? "Open in default browser" : "Nothing to open yet: this tab has no page"}
+            disabled={!hasOpenableUrl}
+            onClick={handleExternalOpen}
+          />
+          {compact ? (
+            <ToolbarButton
+              icon={MoreHorizontal}
+              label="More"
+              title="More actions: zoom, focus, sync, DevTools, select element, print, save as PDF"
+              hasPopup
+              expanded={moreRowOpen}
+              controls={moreRowOpen ? moreRowId : undefined}
+              testId="browser-toolbar-more"
+              onClick={() => setMoreOpen((open) => !open)}
+            />
+          ) : null}
         </div>
       </div>
+
+      {moreRowOpen ? (
+        <div id={moreRowId} data-testid="browser-toolbar-more-row" className="flex flex-wrap items-center gap-1 border-t border-border/70 px-3 py-1.5">
+          {zoomControls("row")}
+          <span aria-hidden="true" className="mx-1 h-4 w-px bg-border/70" />
+          {secondaryActionButtons("row")}
+        </div>
+      ) : null}
+
+      {extensionsOpen ? (
+        <div id={extensionsRowId} data-testid="browser-extensions-row" className="flex flex-wrap items-center gap-2 border-t border-border/70 px-3 py-1.5 text-[11px] text-muted-foreground">
+          <Puzzle className="size-3.5 shrink-0" />
+          {extensionsStatus === "loading" ? (
+            <span role="status">Checking the browser engine…</span>
+          ) : extensionsStatus === "error" ? (
+            <span role="alert" className="text-destructive">Couldn't check the browser engine: {extensionsErrorCode}</span>
+          ) : extensionsStatus.state === "installed" ? (
+            <>
+              <span>This tab uses the system webview. New tabs open in Chromium with extensions.</span>
+              <button type="button" onClick={openChromiumTab} className={TOOLBAR_ROW_BUTTON}>Open new Chromium tab</button>
+            </>
+          ) : extensionsStatus.state === "unsupported" ? (
+            <span>Extensions need the Chromium engine, which is not available on this platform yet.</span>
+          ) : (
+            <>
+              <span>Extensions need the full browser engine.</span>
+              <button type="button" onClick={() => openSettingsSection("browser", "browser-engine")} className={TOOLBAR_ROW_BUTTON}>Install engine</button>
+            </>
+          )}
+        </div>
+      ) : null}
 
       {actionError ? (
         <div role="alert" data-testid="browser-toolbar-error" className="border-t border-border/70 px-3 py-1 text-[10px] text-destructive">
@@ -613,7 +1073,7 @@ export function BrowserToolbar({
       ) : null}
 
       {omniboxListOpen ? (
-        <div id={omniboxListId} role="listbox" aria-label="Address bar history" className="border-t border-border/70 bg-popover px-3 py-1">
+        <div id={omniboxListId} role="listbox" aria-label="Address bar suggestions" className="border-t border-border/70 bg-popover px-3 py-1">
           {omniboxEntries.map((entry, index) => (
             <button
               key={entry.id}
@@ -621,12 +1081,24 @@ export function BrowserToolbar({
               type="button"
               role="option"
               aria-selected={selectedHistoryIndex === index}
+              data-suggestion-kind={entry.kind}
               onMouseDown={(event) => event.preventDefault()}
-              onClick={() => navigateFromHistory(entry.url)}
+              onClick={() => acceptSuggestion(entry)}
               className={`flex w-full items-center gap-3 rounded px-2 py-1.5 text-left ${selectedHistoryIndex === index ? "bg-accent" : "hover:bg-accent/60"}`}
             >
+              {entry.kind === "search" ? (
+                <SearchIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              ) : entry.kind === "tab" ? (
+                <AppWindow className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              ) : entry.bookmarked ? (
+                <BookmarkIcon className="size-3 shrink-0 text-amber-400" aria-hidden="true" />
+              ) : (
+                <HistoryIcon className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              )}
               <span className="min-w-0 flex-1 truncate text-xs">{entry.title || entry.url}</span>
-              <span className="max-w-[45%] truncate font-mono text-[10px] text-muted-foreground">{entry.url}</span>
+              <span className="max-w-[45%] truncate font-mono text-[10px] text-muted-foreground">
+                {entry.kind === "tab" ? `Switch to tab · ${entry.url}` : entry.url}
+              </span>
             </button>
           ))}
         </div>
@@ -640,11 +1112,22 @@ export function BrowserToolbar({
               {historyEntries.length === 0 ? (
                 <div className="px-3 py-4 text-center text-[11px] text-muted-foreground">No browsing history yet.</div>
               ) : historyEntries.slice(0, 20).map((entry) => (
-                <button key={entry.id} type="button" role="menuitem" onClick={() => navigateFromHistory(entry.url)} className="block w-full px-3 py-2 text-left hover:bg-accent">
+                <button key={entry.url} type="button" role="menuitem" onClick={() => navigateFromHistory(entry.url)} className="block w-full px-3 py-2 text-left hover:bg-accent">
                   <div className="truncate text-xs font-medium text-foreground">{entry.title || entry.url}</div>
                   <div className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{entry.url}</div>
                 </button>
               ))}
+            </div>
+            <div className="flex border-t border-border">
+              <button type="button" role="menuitem" onClick={() => { setHistoryOpen(false); openBrowserLibrary({ browserId: tab.browserId, view: "history" }); }} className="flex flex-1 items-center gap-1.5 px-3 py-2 text-left text-[11px] hover:bg-accent">
+                <HistoryIcon className="size-3" aria-hidden="true" /> Show all history
+              </button>
+              <button type="button" role="menuitem" onClick={() => { setHistoryOpen(false); openBrowserLibrary({ browserId: tab.browserId, view: "bookmarks" }); }} className="flex flex-1 items-center gap-1.5 px-3 py-2 text-left text-[11px] hover:bg-accent">
+                <LibraryIcon className="size-3" aria-hidden="true" /> Bookmarks manager
+              </button>
+              <button type="button" role="menuitem" onClick={() => { setHistoryOpen(false); openBrowserLibraryView({ browserId: tab.browserId, view: "downloads" }); }} className="flex flex-1 items-center gap-1.5 px-3 py-2 text-left text-[11px] hover:bg-accent">
+                <DownloadIcon className="size-3" aria-hidden="true" /> Downloads
+              </button>
             </div>
             <label className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-[11px] text-muted-foreground">
               <span>Remember browsing history</span>

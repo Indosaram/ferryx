@@ -39,11 +39,17 @@ impl Fixture {
             // Attached acknowledges the gateway, not completion of a user's
             // login shell startup. These Unix input tests need a shell that
             // reads commands without profiles, prompt hooks, or line editors.
-            let mut command = portable_pty::CommandBuilder::new("/bin/sh");
-            command.args(["-s"]);
-            command.env_remove("ENV");
-            command.env_remove("BASH_ENV");
-            owner.session_service().set_test_shell_command(command);
+            // Windows has no /bin/sh: forcing it there made every session spawn fail, so the
+            // create request answered 409. Windows keeps the default ConPTY shell, which the
+            // Windows cleanup path below already drives (cursor report, then `exit`).
+            #[cfg(unix)]
+            {
+                let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+                command.args(["-s"]);
+                command.env_remove("ENV");
+                command.env_remove("BASH_ENV");
+                owner.session_service().set_test_shell_command(command);
+            }
             (root, owner)
         })
         .await

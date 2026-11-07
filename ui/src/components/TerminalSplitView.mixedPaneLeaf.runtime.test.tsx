@@ -237,8 +237,9 @@ describe("TerminalSplitView mixed terminal and browser pane layout", () => {
     expect(browserToolbar).toHaveClass("pointer-events-auto", "h-5");
     const browserContent = within(paneLeaves[1]).getByTestId("pane-content");
     expect(browserContent).toContainElement(browserPane);
-    expect(browserContent).toHaveClass("pt-5");
-    expect(within(paneLeaves[0]).getByTestId("pane-content")).not.toHaveClass("pt-5");
+    expect(browserContent).toHaveAttribute("data-pane-toolbar-inset", "20");
+    expect(browserContent.style.paddingTop).toBe("20px");
+    expect(within(paneLeaves[0]).getByTestId("pane-content")).toHaveAttribute("data-pane-toolbar-inset", "0");
   });
 
   it("shows Copy Debug Info button only for terminal content, omitting it on browser and file panes", () => {

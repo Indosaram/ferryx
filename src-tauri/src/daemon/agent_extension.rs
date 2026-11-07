@@ -881,7 +881,15 @@ mod p09_tests {
             for event in target.events {
                 let command =
                     crate::daemon::agent_hook_install::hook_command(&exe, target.agent, event);
-                assert!(written.contains(&command), "{} {event}: {written}", target.agent);
+                // A JSON settings file holds the command as a JSON string: a Windows path's `\`
+                // and the quotes around it are escaped there.
+                let quoted = serde_json::to_string(&command).unwrap();
+                let escaped = &quoted[1..quoted.len() - 1];
+                assert!(
+                    written.contains(&command) || written.contains(escaped),
+                    "{} {event}: {written}",
+                    target.agent
+                );
             }
         }
         for (_, _, dir) in &plugins {

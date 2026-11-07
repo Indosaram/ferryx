@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { loadBrowserSettings, resolveSupportedBrowserProfileId } from "./browserSettings";
+import { loadBrowserSettings, resolveSupportedBrowserProfileId, setChromiumEngineAvailable } from "./browserSettings";
 import type {
+  BrowserActOutcome,
   BrowserAutomationRequest,
   BrowserAutomationSnapshot,
   BrowserSessionSummary,
@@ -55,7 +56,8 @@ export type BrowserDownloadRequestedPayload = {
   requiresConfirmation?: boolean;
 };
 
-export type DownloadStatus = "pending" | "inProgress" | "completed" | "failed" | "cancelled";
+export type DownloadStatus = "pending" | "inProgress" | "paused" | "completed" | "failed" | "cancelled";
+export type DownloadFailureKind = "diskFull" | "accessDenied" | "network" | "server" | "other";
 
 export interface DownloadRecord {
   id: string;
@@ -67,15 +69,27 @@ export interface DownloadRecord {
   error?: string | null;
   createdAtMs: number;
   updatedAtMs: number;
+  /** False until the engine hands over a way to stop the download (a system-webview download
+   * on an OS without the hook, or before its hook attached); absent means cancellable. */
+  canCancel?: boolean;
+  /** The engine can pause and resume it (Chromium, WebView2, WKWebView; never WebKitGTK). */
+  canPause?: boolean;
+  failure?: DownloadFailureKind | null;
+  /** The tab that started the download; absent or null when no tab owns it. */
+  browserId?: string | null;
 }
 
 export type BrowserShortcutAction =
   | "focus-address"
+  | "bookmark-page"
   | "reload"
   | "reload-hard"
   | "back"
   | "forward"
   | "find"
+  | "zoom-in"
+  | "zoom-out"
+  | "zoom-reset"
   | "tab-next"
   | "tab-previous"
   | "tab-select-1"
@@ -362,6 +376,14 @@ export function extractBrowserErrorCode(err: unknown): string {
   return "UNKNOWN_ERROR";
 }
 
+/** Whether a failed download IPC call left a registry record, i.e. its failure is on the
+ * downloads shelf. The host sets `details.downloadRegistered` from the registry itself. */
+export function browserDownloadErrorRegistered(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const details = (err as Record<string, unknown>).details;
+  return !!details && typeof details === "object" && (details as Record<string, unknown>).downloadRegistered === true;
+}
+
 export async function setBrowserBounds(
   browserId: string,
   bounds: LogicalRect,
@@ -389,8 +411,16 @@ export async function setBrowserZoom(browserId: string, zoomFactor: number): Pro
   return invoke<number>("cmd_browser_set_zoom", { browserId, zoomFactor });
 }
 
-export async function focusBrowser(browserId: string): Promise<void> {
-  return invoke<void>("cmd_browser_focus", { browserId });
+export async function focusBrowser(browserId: string, options: { address?: boolean } = {}): Promise<void> {
+  return invoke<void>("cmd_browser_focus", { browserId, address: options.address ?? false });
+}
+
+/**
+ * Moves OS keyboard focus from a native page view back to the app webview. Call it before
+ * focusing an app input that must take typed keys while a page is shown.
+ */
+export async function focusAppWebview(): Promise<void> {
+  return invoke<void>("cmd_browser_focus_app");
 }
 
 export async function openBrowserDevtools(browserId: string): Promise<void> {
@@ -427,14 +457,28 @@ export async function listBrowsers(): Promise<BrowserSessionSummary[]> {
   return invoke<BrowserSessionSummary[]>("cmd_browser_list");
 }
 
-/** The on-demand Chromium engine: "unsupported" on platforms without a build. */
+/**
+ * The on-demand Chromium engine: "unsupported" on platforms without a build. `inactive` names
+ * why an installed engine cannot run in this session ("wayland-session": a native Wayland
+ * window cannot host it), in which case tabs stay on the system webview.
+ */
 export type BrowserEngineStatus =
   | { state: "unsupported" }
   | { state: "notInstalled" }
-  | { state: "installed"; version: string };
+  | { state: "installed"; version: string; previous?: string | null; inactive?: string };
 
 export async function getBrowserEngineStatus(): Promise<BrowserEngineStatus> {
   return invoke<BrowserEngineStatus>("cmd_browser_engine_status");
+}
+
+/** Feeds the installed-engine flag that gates named profiles on macOS; errors leave it unchanged. */
+export async function syncChromiumEngineAvailability(): Promise<void> {
+  try {
+    const status = await getBrowserEngineStatus();
+    setChromiumEngineAvailable(status?.state === "installed");
+  } catch {
+    // Status unavailable: keep the current flag (false until an engine is seen).
+  }
 }
 
 export async function installBrowserEngine(): Promise<BrowserEngineStatus> {
@@ -443,6 +487,31 @@ export async function installBrowserEngine(): Promise<BrowserEngineStatus> {
 
 export async function removeBrowserEngine(): Promise<BrowserEngineStatus> {
   return invoke<BrowserEngineStatus>("cmd_browser_engine_remove");
+}
+
+/** Makes the previously installed engine active again. */
+export async function rollbackBrowserEngine(): Promise<BrowserEngineStatus> {
+  return invoke<BrowserEngineStatus>("cmd_browser_engine_rollback");
+}
+
+/**
+ * Why an engine install failed, from the structured IPC error: `details.reason` of a
+ * BROWSER_ENGINE_INSTALL_FAILED error (badSignature, unsigned, checksumMismatch, partial,
+ * oversized, diskFull, versionMismatch, network, ...), else the error code.
+ */
+export type BrowserEngineFailure = { code: string; reason: string | null; message: string | null };
+
+export function parseBrowserEngineFailure(err: unknown): BrowserEngineFailure {
+  const code = extractBrowserErrorCode(err);
+  if (!err || typeof err !== "object") return { code, reason: null, message: null };
+  const record = err as Record<string, unknown>;
+  const details = record.details;
+  const reason =
+    details && typeof details === "object" && typeof (details as Record<string, unknown>).reason === "string"
+      ? ((details as Record<string, unknown>).reason as string)
+      : null;
+  const message = typeof record.message === "string" && record.message.trim() ? record.message.trim() : null;
+  return { code, reason, message };
 }
 
 export async function importBrowserCookies(profileId: string, filePath: string): Promise<number> {
@@ -499,6 +568,21 @@ export async function downloadBrowserUrlWithSession(
   });
 }
 
+/** Saves `url` with the tab's session into the download folder (Settings, else the OS one). */
+export async function downloadBrowserUrlToFolder(browserId: string, url: string): Promise<DownloadRecord> {
+  return invoke<DownloadRecord>("cmd_browser_download_to_folder", { browserId, url });
+}
+
+/** Shows a saved download in the OS file manager (Finder, Explorer, the Linux file manager). */
+export async function revealDownloadedFile(path: string): Promise<void> {
+  return invoke<void>("cmd_path_reveal", { path });
+}
+
+/** Every record in the download registry. */
+export async function listBrowserDownloads(): Promise<DownloadRecord[]> {
+  return invoke<DownloadRecord[]>("cmd_browser_download_list");
+}
+
 export function onBrowserDownloadUpdated(
   listener: (payload: DownloadRecord) => void,
 ): Promise<UnlistenFn> {
@@ -549,8 +633,8 @@ export async function browserAutomationSnapshot(
 
 export async function browserAutomationAct(
   request: BrowserAutomationRequest,
-): Promise<void> {
-  return invoke<void>("cmd_browser_automation_act", { request });
+): Promise<BrowserActOutcome> {
+  return invoke<BrowserActOutcome>("cmd_browser_automation_act", { request });
 }
 
 export type BrowserOpenerLink = { browserId: string; handle: string };
@@ -617,6 +701,7 @@ export type BrowserStateChangedPayload = {
   browserId: string;
   url: string;
   title?: string | null;
+  loading?: boolean;
   engine?: import("./types").BrowserEngine;
 };
 
@@ -654,3 +739,107 @@ export function onBrowserTabSwitch(
 ): Promise<UnlistenFn> {
   return listen<BrowserTabSwitchPayload>(BROWSER_TAB_SWITCH_EVENT, (event) => listener(event.payload));
 }
+
+/** Whether Ferryx is the system default browser (Settings > Browser > Default Browser). */
+export type DefaultBrowserStatus =
+  | { state: "default" }
+  | { state: "notDefault"; current: string | null }
+  | { state: "unsupported" };
+
+export type MakeDefaultBrowserOutcome = { outcome: "requested" } | { outcome: "openedSystemSettings" };
+
+export async function getDefaultBrowserStatus(): Promise<DefaultBrowserStatus> {
+  return invoke<DefaultBrowserStatus>("cmd_default_browser_status");
+}
+
+export async function makeDefaultBrowser(): Promise<MakeDefaultBrowserOutcome> {
+  return invoke<MakeDefaultBrowserOutcome>("cmd_default_browser_make_default");
+}
+
+/** Emitted (empty payload) when the OS handed Ferryx http(s) URLs; drain them with takeInboundUrls. */
+export const INBOUND_URL_EVENT = "ferryx:inbound-url";
+
+export async function takeInboundUrls(): Promise<string[]> {
+  const urls: unknown = await invoke("cmd_default_browser_take_inbound_urls");
+  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
+}
+
+export function onInboundUrls(listener: () => void): Promise<UnlistenFn> {
+  return listen(INBOUND_URL_EVENT, () => listener());
+}
+
+export type SignInProvider = "google" | "apple" | "microsoft" | "okta";
+
+export type SignInBlock =
+  | { kind: "blocked"; provider: SignInProvider; retryUrl: string }
+  | { kind: "notBlocked" };
+
+/** Classifies a page as an identity provider refusing sign-in in this browser engine. */
+export async function detectSignInBlock(url: string, title?: string | null): Promise<SignInBlock> {
+  return invoke<SignInBlock>("cmd_browser_detect_sign_in_block", { url, title: title ?? null });
+}
+
+/** Callback the OS auth session waits for: a custom-scheme or an https redirect. */
+export type AuthCallback = { kind: "scheme"; scheme: string } | { kind: "https"; host: string; path: string };
+
+export type HandoffAction =
+  | { kind: "chromiumTab"; url: string }
+  | { kind: "installEngine"; url: string }
+  | { kind: "systemAuthSession"; authorizeUrl: string; callback: AuthCallback }
+  | { kind: "externalBrowser"; url: string };
+
+export type HandoffPlan = {
+  provider: SignInProvider;
+  engine: "ready" | "notInstalled" | "unusable" | "unsupported";
+  /** The offered action. */
+  primary: HandoffAction;
+  /** Other in-app actions, tried in order when the primary fails. */
+  alternatives: HandoffAction[];
+  /** Shown only after the user declines the in-app actions. */
+  onDecline: HandoffAction[];
+};
+
+/** The sign-in handoff plan for a tab's page, or null when the page is not a blocked sign-in. */
+export async function getSignInHandoffPlan(
+  browserId: string,
+  url: string,
+  title?: string | null,
+): Promise<HandoffPlan | null> {
+  return invoke<HandoffPlan | null>("cmd_browser_sign_in_handoff_plan", { browserId, url, title: title ?? null });
+}
+
+export type AuthSessionResult =
+  | { outcome: "completed"; callbackUrl: string }
+  | { outcome: "cancelled" }
+  | { outcome: "unavailable"; reason: string };
+
+/** Runs the OS web-authentication session; on completion the callback loads in the original tab. */
+export async function runSignInAuthSession(
+  browserId: string,
+  authorizeUrl: string,
+  callback: AuthCallback,
+): Promise<AuthSessionResult> {
+  return invoke<AuthSessionResult>("cmd_browser_sign_in_auth_session", { browserId, authorizeUrl, callback });
+}
+
+/**
+ * Watches a Chromium handoff tab; once it leaves the identity provider host, its cookies are
+ * copied into the profile's system-webview tabs.
+ */
+export async function trackSignInHandoff(
+  chromiumBrowserId: string,
+  profileId: string,
+  targetUrl: string,
+  idpHost: string,
+): Promise<void> {
+  return invoke<void>("cmd_browser_sign_in_track", { chromiumBrowserId, profileId, targetUrl, idpHost });
+}
+
+/** Window event asking the app to reopen a blocked sign-in in a Chromium tab of the same profile. */
+export const SIGN_IN_HANDOFF_EVENT = "ferryx:browser-sign-in-handoff";
+
+/**
+ * `browserId` is the pre-generated id for the Chromium tab; `idpHost` is the identity provider
+ * host the sign-in started on.
+ */
+export type SignInHandoffDetail = { url: string; profileId?: string; browserId?: string; idpHost?: string };
