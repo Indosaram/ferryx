@@ -494,7 +494,7 @@ export function PlanSection({
               data-status={entitlement.status}
               data-days-left={graceDays ?? undefined}
               data-grace-ends-at={entitlement.graceEndsAt ?? undefined}
-              className="mt-4 flex flex-wrap items-start gap-2 rounded-md border border-status-warning/40 bg-status-warning/10 p-3 [&>svg]:static [&>svg~*]:pl-0"
+              className="mt-4 flex flex-wrap items-start gap-2 rounded-md border border-status-warning-border bg-status-warning-container p-3 [&>svg]:static [&>svg~*]:pl-0"
             >
               <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-status-warning" />
               <AlertDescription className="min-w-0 text-[11px] leading-normal text-foreground">

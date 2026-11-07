@@ -99,7 +99,7 @@ function AgentSummaryPill({ summary }: { summary: HostAgentSummary }) {
       {summary.running > 0 ? (
         <span
           data-testid="mobile-host-agent-running"
-          className="inline-flex items-center gap-0.5 rounded bg-status-working/15 px-1.5 text-xs leading-tight text-status-working"
+          className="inline-flex items-center gap-0.5 rounded bg-status-working-container px-1.5 text-xs leading-tight text-status-working-on"
         >
           {summary.running} running
         </span>
@@ -107,7 +107,7 @@ function AgentSummaryPill({ summary }: { summary: HostAgentSummary }) {
       {summary.waiting > 0 ? (
         <span
           data-testid="mobile-host-agent-waiting"
-          className="inline-flex items-center gap-0.5 rounded bg-status-warning/15 px-1.5 text-xs leading-tight text-status-warning"
+          className="inline-flex items-center gap-0.5 rounded bg-status-warning-container px-1.5 text-xs leading-tight text-status-warning-on"
         >
           {summary.waiting} waiting
         </span>

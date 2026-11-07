@@ -459,7 +459,7 @@ export function WorktreeDiskDialog({
 
           {/* Cancelled Banner */}
           {isCancelled ? (
-            <div className="mb-4 flex items-center justify-between rounded-lg border border-status-warning/30 bg-status-warning/10 p-3 text-status-warning">
+            <div className="mb-4 flex items-center justify-between rounded-lg border border-status-warning-border bg-status-warning-container p-3 text-status-warning-on">
               <div className="flex items-center gap-2 text-xs">
                 <Clock className="size-4 shrink-0" />
                 <span>Scan was cancelled before completion.</span>
@@ -467,7 +467,7 @@ export function WorktreeDiskDialog({
               <button
                 type="button"
                 onClick={() => void startScan(true)}
-                className="rounded-md bg-status-warning/20 px-2.5 py-1 text-xs font-medium hover:bg-status-warning/30"
+                className="rounded-md bg-status-warning-container px-2.5 py-1 text-xs font-medium hover:bg-status-warning/30"
               >
                 Restart scan
               </button>
@@ -531,7 +531,7 @@ export function WorktreeDiskDialog({
               {candidateCount > 0 ? (
                 <>
                   <span className="text-border">|</span>
-                  <Badge variant="secondary" className="border border-status-warning/40 bg-status-warning/15 text-status-warning text-[10px]">
+                  <Badge variant="secondary" className="border border-status-warning-border bg-status-warning-container text-status-warning-on text-[10px]">
                     {candidateCount} cleanup candidate{candidateCount === 1 ? "" : "s"}
                   </Badge>
                 </>
@@ -629,7 +629,7 @@ export function WorktreeDiskDialog({
                                 <Badge
                                   variant="secondary"
                                   data-testid={`candidate-badge-${slug}`}
-                                  className="border border-status-warning/40 bg-status-warning/15 text-[10px] font-medium text-status-warning"
+                                  className="border border-status-warning-border bg-status-warning-container text-[10px] font-medium text-status-warning-on"
                                 >
                                   Candidate: {reason}
                                 </Badge>

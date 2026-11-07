@@ -134,10 +134,13 @@
 
   /* Status container layer. -solid mirrors the flat --status-X hex above (which stays
      the literal source of truth because the contract tests pin it as hex); -container is
-     mix(solid, canvas, 0.14) and -border is the solid itself. Nothing consumes these yet:
-     the ad-hoc bg-status-XX/NN sites migrate in a separate sweep. Dark text on these
-     containers is -solid itself (6.47 / 9.29 / 10.68 contrast); idle keeps --status-idle
-     because 3.71 would be too low for body text. */
+     mix(solid, canvas, 0.14) and -border is the solid itself. Container-shaped status
+     surfaces (badges, banners, alert panels) pair -container with -border and
+     -on-container; translucent bg-status-XX/NN stays only where the surface is a
+     single-pixel marker or a diff line, never a chip. Text on these containers is
+     -on-container (dark: the solid itself at 6.47 / 9.29 / 10.68 contrast; light: a
+     darkened solid), and idle keeps a distinct on-color because the solid would sit at
+     3.71 on its own container. */
   --status-working-solid: #60a5fa;
   --status-working-solid-rgb: 96 165 250;
   --status-working-container: #2c384a;
