@@ -952,7 +952,17 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
         opened = folders();
         folder = opened.find((row) => !before.has(row.hwnd)) ?? opened.at(-1) ?? null;
       }
-      if (folder) ctx.host.ps("focus", ["-Hwnd", String(folder.hwnd)]);
+      // Explorer opens maximised and covers the app: on Windows run 42241235674 the drop
+      // point was [845, 817] and the source window was a full-screen CabinetWClass, so the
+      // drag was released over Explorer and the page never saw it (DROP_NOT_OBSERVED, and
+      // the following G6/G9 steps typed at an app that was not in front). Put the source in
+      // the left third before focusing it, the way the Linux helper window sits at (40, 40),
+      // so the drop point over the page stays uncovered.
+      if (folder) {
+        ctx.host.ps("resize", ["-Hwnd", String(folder.hwnd), "-Width", "420", "-Height", "620"]);
+        ctx.host.ps("focus", ["-Hwnd", String(folder.hwnd)]);
+        await sleep(800);
+      }
       await sleep(1200);
       const from = await until(() => {
         const hit = screenWords(ctx).find((word) => /upload-fixture|upload-?fix|fixture[.,]txt/i.test(word.text));
