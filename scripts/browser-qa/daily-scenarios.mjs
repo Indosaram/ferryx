@@ -1622,9 +1622,10 @@ export async function dailyWebviewBefore(ctx) {
           }
         }
         g6.allow_at = allow;
-        const granted = await until(() => /^perm:granted/.test(tab(ctx, daily.tabB)?.title ?? ""), 10000);
+        const granted = await until(() => /^perm:granted/.test(permTitle()), 10000);
         g6.checks.prompt_allowed = Boolean(allow) && Boolean(granted);
-        g6.title = tab(ctx, daily.tabB)?.title ?? null;
+        g6.title = permTitle() || null;
+        g6.title_tab = notifyTab();
         if (ctx.platform === "linux") {
           const seen = await until(() => readFileSync(log, "utf8").includes("ferryx-qa"), 10000);
           g6.dbus = readFileSync(log, "utf8").split("\n").filter((line) => /string "/.test(line)).slice(0, 12);
