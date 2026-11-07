@@ -82,7 +82,10 @@ function drawDecision() {
   process.stdout.write([
     '', `● Running the ${title} migration`, `  ⎿  $ ${command}`, '────────────────────────────────────────',
     ' Bash command', `   ${command}`, `   Apply migration ${nonce} to the production database`,
-    ' Do you want to proceed?', ' ❯ 1. Yes', '   2. Yes, and always allow access to this database from this project',
+    // The question names its own session and migration: the card paints it, so the screen can tell
+    // one card from another (F3-D5), including the f3decision and f3push sessions that both start at
+    // nonce 1. `^Do you want to .+\?$` still matches, so the Claude parser keeps it as the question.
+    ` Do you want to proceed with ${title} migration ${nonce}?`, ' ❯ 1. Yes', '   2. Yes, and always allow access to this database from this project',
     '   3. Yes, and switch to auto mode · auto mode handles these prompts for you', '   4. No', ' Esc to cancel · Tab to amend', '',
   ].join('\r\n'));
   record({ kind: 'prompt-drawn', nonce, command });

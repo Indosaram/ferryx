@@ -46,7 +46,12 @@ export async function runStep(lane, scenarioId, body) {
     },
     artifact(kind, name, bytes) {
       const entry = lane.write(kind, `${scenarioId}/${name}`, bytes);
-      step.artifacts.push(entry);
+      // One artifact is one file. A retrying body (the until() OCR poll below writes the same
+      // typed-token TSV on every attempt) rewrites the file each time, so appending would leave
+      // receipts whose bytes and sha256 no longer exist on disk and no later attempt could ever
+      // satisfy them. Keep only the receipt that matches the file the run ends with.
+      const at = step.artifacts.findIndex((existing) => existing.path === entry.path);
+      if (at === -1) step.artifacts.push(entry); else step.artifacts[at] = entry;
       return entry;
     },
   };

@@ -228,6 +228,12 @@ impl PushStore {
         self.muted.lock().contains(session_ref)
     }
 
+    /// Every muted session ref, so a client can render the real state after a remount instead
+    /// of assuming nothing is muted.
+    pub fn muted_sessions(&self) -> Vec<String> {
+        self.muted.lock().iter().cloned().collect()
+    }
+
     pub fn subscribe(&self, device_id: &str, request: PushSubscribeRequest) -> Result<(), PushStoreError> {
         validate_endpoint(
             &request.endpoint,

@@ -404,6 +404,12 @@ async function processIsolation({ pid }) {
   return { env: null, openPaths: out.split('\n').filter((line) => line.startsWith('n/')).map((line) => line.slice(1)), ownerRoots };
 }
 
+function gitTopLevel(root) {
+  try {
+    return realpathSync(execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', env: gitEnv() }).trim());
+  } catch { return null; }
+}
+
 /**
  * macOS: brings the run-owned GUI (exact pid) to the front through NSRunningApplication, which
  * needs no accessibility grant. It only ever names the pid it is given.
@@ -416,7 +422,10 @@ function guiExecutable(executable, checkout, code) {
     root = realpathSync(checkout);
     binary = realpathSync(executable);
   } catch { throw refused(); }
-  if (root !== checkout || !inside(root, binary)) throw refused();
+  // N1: the checkout must be the top level of its own git work tree. Without this a caller
+  // could pass `/` (or any ancestor) and have every executable on the machine accepted as
+  // "inside" the checkout it claims to be a candidate binary of.
+  if (root !== checkout || gitTopLevel(root) !== root || !inside(root, binary)) throw refused();
   return binary;
 }
 

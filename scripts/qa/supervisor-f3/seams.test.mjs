@@ -561,15 +561,15 @@ describe('session host in the verdict', () => {
 });
 
 describe('frame OCR input', () => {
-  test('a frame is cut to the run window, inverted to dark-on-light and doubled, boxes mapping back', () => {
+  test('a frame is cut to the run window, inverted to dark-on-light and tripled, boxes mapping back', () => {
     // 4x2 RGB frame: white text pixel (255) on dark (20) at (2,1).
     const gray = Buffer.from([20, 20, 20, 20, 20, 20, 255, 20]);
     const rgb = Buffer.alloc(8 * 3); gray.forEach((v, i) => rgb.fill(v, i * 3, i * 3 + 3));
     const frame = encodePng(4, 2, 3, rgb);
-    const image = ocrImage(frame, { x: 1, y: 0, width: 3, height: 2 }, 2);
+    const image = ocrImage(frame, { x: 1, y: 0, width: 3, height: 2 }, 3);
     const out = decodePng(image.png);
-    expect([out.width, out.height, out.channels]).toEqual([6, 4, 1]);
-    expect(out.px[2 * 6 + 2]).toBe(0); // the white pixel is now black
+    expect([out.width, out.height, out.channels]).toEqual([9, 6, 1]);
+    expect(out.px[3 * 9 + 3]).toBe(0); // the white pixel is now black
     expect(out.px[0]).toBe(235); // the dark background is now light
     expect(image.origin).toEqual({ x: 1, y: 0 });
   });
@@ -616,5 +616,24 @@ describe('OCR text matching', () => {
     expect(ocrShows('F3 long report maci326cf22', 'F3 long report mac1326cf22')).toBe(true);
     expect(ocrShows('Section 19 Migration check 19 for x', 'Migration check 9 for')).toBe(false);
     expect(ocrShows('Conversation Export transcript', 'supv-f3-mac-3428ce97')).toBe(false);
+  });
+
+  test("the F3-D5 screen predicate tells the answered card from the next one and from the sibling session", () => {
+    // What a desktop frame actually paints for the decision card: its question, which the fixture
+    // names per session and nonce (fixture-agent.mjs), so the daemon keeps it verbatim as `question`
+    // (prompt_claude.rs clean_line). The command is ellipsized before the nonce and the aria-label is
+    // never painted, so neither can identify the card.
+    const onScreen = (text, title, nonce) => ocrShows(text, `${title} migration ${nonce}`);
+    const cardFor = (title, nonce) => `Do you want to proceed with ${title} migration ${nonce}?\n❯ 1. Yes\n2. Yes, and always allow access to this database from this project\n3. No`;
+    // The answered card is identified while it is up ...
+    expect(onScreen(cardFor('f3decision', 1), 'f3decision', 1)).toBe(true);
+    // ... the successor card the fixture draws (nonce 2) must fail that ...
+    expect(onScreen(cardFor('f3decision', 2), 'f3decision', 1)).toBe(false);
+    // ... and so must the sibling session's card, which also starts at nonce 1. Without the session
+    // title in the question these two collide, which is what the earlier predicate got wrong.
+    expect(onScreen(cardFor('f3push', 1), 'f3decision', 1)).toBe(false);
+    // The aria-label and the nonce behind the ellipsis cannot be the signal either.
+    expect(ocrShows(cardFor('f3decision', 1), 'Decision for A repo')).toBe(false);
+    expect(namesNonce(cardFor('f3decision', 1), 'f3decision', 1)).toBe(false);
   });
 });

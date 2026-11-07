@@ -18,9 +18,18 @@ function RowText({ title, detail }: { title: string; detail: string }) {
 
 /**
  * The row menu. It is rendered in place (no portal) so no overlay sits above the native
- * terminal surfaces; one item: pause or resume the session's supervisor goal.
+ * terminal surfaces. It carries the session's own actions, independent of any legacy goal
+ * (D10 Stop, D13 per-session mute), plus pause/resume when a legacy goal exists.
  */
-function GoalMenu({ title, goal, touch }: { title: string; goal: SessionGoalProps; touch?: boolean }) {
+function SessionMenu({
+  title, goal, touch, onStop, mute,
+}: {
+  title: string;
+  goal?: SessionGoalProps;
+  touch?: boolean;
+  onStop?: () => void;
+  mute?: { muted: boolean; onToggleMuted: () => void };
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -35,6 +44,10 @@ function GoalMenu({ title, goal, touch }: { title: string; goal: SessionGoalProp
       document.removeEventListener('keydown', close);
     };
   }, [open]);
+  const item = cn(
+    'flex w-full items-center rounded-sm px-2 text-left text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
+    touch ? 'min-h-11 text-sm' : 'min-h-8 text-xs',
+  );
   return (
     <div ref={ref} className="relative shrink-0">
       <button
@@ -51,29 +64,61 @@ function GoalMenu({ title, goal, touch }: { title: string; goal: SessionGoalProp
         <span aria-hidden="true">⋯</span>
       </button>
       {open ? (
-        <div role="menu" className="absolute right-0 top-full z-20 mt-1 min-w-[9rem] rounded-md border border-border bg-popover p-1 shadow-md">
-          <button
-            type="button"
-            role="menuitem"
-            disabled={goal.pending}
-            onClick={() => {
-              setOpen(false);
-              goal.onTogglePaused();
-            }}
-            className={cn(
-              'flex w-full items-center rounded-sm px-2 text-left text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
-              touch ? 'min-h-11 text-sm' : 'min-h-8 text-xs',
-            )}
-          >
-            {goal.paused ? 'Resume supervisor' : 'Pause supervisor'}
-          </button>
+        <div
+          role="menu"
+          data-testid="session-row-menu"
+          className="absolute right-0 top-full z-10 mt-1 flex w-44 flex-col rounded-md border border-border bg-popover p-1 shadow-md"
+        >
+          {onStop ? (
+            <button
+              type="button"
+              role="menuitem"
+              data-testid="session-row-stop"
+              onClick={() => {
+                setOpen(false);
+                onStop();
+              }}
+              className={item}
+            >
+              Stop
+            </button>
+          ) : null}
+          {mute ? (
+            <button
+              type="button"
+              role="menuitem"
+              data-testid="session-row-mute"
+              aria-pressed={mute.muted}
+              onClick={() => {
+                setOpen(false);
+                mute.onToggleMuted();
+              }}
+              className={item}
+            >
+              {mute.muted ? 'Unmute phone alerts' : 'Mute phone alerts'}
+            </button>
+          ) : null}
+          {goal ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={goal.pending}
+              onClick={() => {
+                setOpen(false);
+                goal.onTogglePaused();
+              }}
+              className={item}
+            >
+              {goal.paused ? 'Resume supervisor' : 'Pause supervisor'}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>
   );
 }
 
-export function SessionRow({ title, detail, computer, state, selected, touch, onOpen, goal }: SessionRowProps) {
+export function SessionRow({ title, detail, computer, state, selected, touch, onOpen, goal, onStop, mute }: SessionRowProps) {
   const button = (
     <button
       type="button"
@@ -97,11 +142,10 @@ export function SessionRow({ title, detail, computer, state, selected, touch, on
       <span className="mt-0.5 shrink-0 text-xs text-muted-foreground">{computer}</span>
     </button>
   );
-  if (!goal) return button;
   return (
     <div className="flex items-start gap-1">
       {button}
-      <GoalMenu title={title} goal={goal} touch={touch} />
+      <SessionMenu title={title} goal={goal} touch={touch} onStop={onStop} mute={mute} />
     </div>
   );
 }

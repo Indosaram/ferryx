@@ -197,7 +197,7 @@ describe("SupervisorPanelHost", () => {
     const base = panelSnapshotFixture.sessions[0];
     const session = { ...base, sessionRef: "mac:killed", title: "Killed agent", state: "idle" as const, stale: false, updatedAtMs: NOW - 5000 };
     const { handlers } = renderHost({ ...emptyPanelSnapshot(), setupRequired: false, sessions: [session] });
-    const row = await screen.findByRole("button", { name: /Killed agent/ });
+    const row = await screen.findByTestId("session-row");
     expect(row.getAttribute("data-state")).toBe("idle");
     await waitFor(() => expect(handlers).toHaveLength(1));
     act(() =>
@@ -206,6 +206,6 @@ describe("SupervisorPanelHost", () => {
         session: { ...session, updatedAtMs: NOW, health: { type: "failed", reason: "the agent exited in the middle of a turn" } },
       }),
     );
-    expect(screen.getByRole("button", { name: /Killed agent/ }).getAttribute("data-state")).toBe("failed");
+    expect(screen.getByTestId("session-row").getAttribute("data-state")).toBe("failed");
   });
 });

@@ -167,11 +167,11 @@ jobs:
       # completed compiler log. Both stages use precisely the same suite list.
       - name: Compile Rust test targets
         shell: bash
-        timeout-minutes: 42
+        timeout-minutes: 60
         env:
           TEST_SUITE: ${{ inputs.suite || 'full' }}
           CARGO_BUILD_TARGET: aarch64-apple-darwin
-        run: python3 scripts/ci-run-bounded.py --timeout-seconds 2400 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-compile.log" -- bash scripts/ci-native-tests.sh compile
+        run: python3 scripts/ci-run-bounded.py --timeout-seconds 3300 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-compile.log" -- bash scripts/ci-native-tests.sh compile
 
       - name: Preserve successful native compilation if later tests fail
         # Keep the existing dependency cache scope; runtime fixture state is not cached.
@@ -180,11 +180,11 @@ jobs:
 
       - name: Cargo Test (unit and integration suites)
         shell: bash
-        timeout-minutes: 32
+        timeout-minutes: 48
         env:
           TEST_SUITE: ${{ inputs.suite || 'full' }}
           CARGO_BUILD_TARGET: aarch64-apple-darwin
-        run: python3 scripts/ci-run-bounded.py --timeout-seconds 1800 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-tests.log" -- bash scripts/ci-native-tests.sh run
+        run: python3 scripts/ci-run-bounded.py --timeout-seconds 2700 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-tests.log" -- bash scripts/ci-native-tests.sh run
 
       # The remote grid mirror spans Rust and TypeScript: this asserts real serialized backend
       # frames parse in the actual frontend parser. It lives here, not in the UI job, because it

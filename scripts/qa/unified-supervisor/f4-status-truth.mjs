@@ -35,6 +35,7 @@ import { createConnection } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { redact } from './evidence-redaction.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..', '..', '..');
@@ -64,7 +65,11 @@ mkdirSync(out, { recursive: true });
 
 const now = () => Date.now();
 const fail = (code, message) => Object.assign(new Error(message), { code });
-const jsonl = (name, value) => appendFileSync(join(out, name), `${JSON.stringify({ atMs: now(), at: new Date().toISOString(), ...value })}\n`);
+
+// Evidence is long-lived: fixture credentials (pairing codes, bearer tokens, socket tickets,
+// subscribe secrets) are still credentials, so they never reach a file. Redaction happens on
+// the way out, once, keeping the live values in memory only.
+const jsonl = (name, value) => appendFileSync(join(out, name), `${JSON.stringify(redact({ atMs: now(), at: new Date().toISOString(), ...value }))}\n`);
 const evidence = { schema: 'f4-status-truth/1', startedAtMs: now(), repo: null, binary: null, clauses: [], daemons: [], teardown: [] };
 const clause = (name, pass, detail) => {
   const entry = { clause: name, pass: pass === true, atMs: now(), detail };
@@ -117,11 +122,14 @@ function waitUntil(dir, check, deadlineMs, label) {
   return new Promise((resolveWait, rejectWait) => {
     let watcher = null;
     let done = false;
-    const finish = (fn, value) => { if (done) return; done = true; clearTimeout(timer); try { watcher?.close(); } catch { /* closed */ } fn(value); };
+    const finish = (fn, value) => { if (done) return; done = true; clearTimeout(timer); clearInterval(poll); try { watcher?.close(); } catch { /* closed */ } fn(value); };
     const evaluate = () => { try { const value = check(); if (value) finish(resolveWait, value); } catch { /* the next change re-reads */ } };
     const timer = setTimeout(() => finish(rejectWait, fail('DEADLINE_EXCEEDED', `${label} was not observed within ${deadlineMs}ms`)), deadlineMs);
     mkdirSync(dir, { recursive: true });
     watcher = watch(dir, evaluate);
+    // fs.watch on macOS coalesces or drops appends to a file inside the watched directory, so a
+    // change event is not guaranteed; the bounded poll keeps the same predicates authoritative.
+    const poll = setInterval(evaluate, 250);
     evaluate();
   });
 }
@@ -131,6 +139,9 @@ const paneRecords = (logDir) => (existsSync(logDir) ? readdirSync(logDir).filter
   .filter(Boolean);
 const waitPane = (logDir, predicate, deadlineMs, label) => waitUntil(logDir, () => paneRecords(logDir).find(predicate), deadlineMs, label);
 
+// A port no other process holds right now, so the daemon's gateway can bind it.
+const freePort = () => new Promise((resolvePort) => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const port = server.port; server.stop(true); resolvePort(port); });
+
 // --- one isolated daemon with its owner device ------------------------------------------------
 async function bringUp(label, hub) {
   const base = join(root, label);
@@ -138,6 +149,11 @@ async function bringUp(label, hub) {
     PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C.UTF-8', TERM: 'xterm-256color', USER: process.env.USER ?? 'qa',
     HOME: join(base, 'home'), TMPDIR: join(base, 'tmp'), FERRYX_DATA_DIR: join(base, 'data'), FERRYX_RUNTIME_DIR: join(base, 'runtime'),
     FERRYX_HUB_DB: join(base, 'hub', 'hub.sqlite'), FERRYX_HUB: hub ? 'on' : 'off', FERRYX_HUB_QUIET_HOURS: 'off', SHELL: '/bin/bash', RUST_LOG: 'info',
+    // The daemon binds its gateway to a fixed product port unless a QA run id is present, which
+    // would collide with any Ferryx desktop already listening; the run id plus a claimed port let
+    // this run own its gateway. Both must be in the spawn env: the daemon reads them at startup.
+    FERRYX_QA_RUN_ID: label,
+    FERRYX_QA_GATEWAY_PORT: String(await freePort()),
   };
   for (const dir of [env.HOME, env.TMPDIR, env.FERRYX_RUNTIME_DIR, join(base, 'ws', 'project'), join(base, 'panes'), join(base, 'bin')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(join(env.HOME, '.bashrc'), '');
@@ -180,11 +196,12 @@ async function bringUp(label, hub) {
   };
   const ws = await daemon.call('register-workspace', { type: 'registerWorkspace', workspaceId: WORKSPACE, repoRoot: realpathSync(join(base, 'ws')) });
   const control = await daemon.call('agent-control-on', { type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] });
-  const configured = await daemon.call('gateway-configure', { type: 'remoteConfigure', config: { mode: 'localNetwork', port: 0, allowControl: true } });
+  const gatewayPort = Number(env.FERRYX_QA_GATEWAY_PORT);
+  const configured = await daemon.call('gateway-configure', { type: 'remoteConfigure', config: { mode: 'localNetwork', port: gatewayPort, allowControl: true } });
   const status = await daemon.call('gateway-status', { type: 'remoteGetStatus' });
   const bound = status?.status?.boundAddress ?? null;
   if (ws?.type !== 'registerWorkspaceOk' || control?.type !== 'agentControlSettingsOk' || configured?.type !== 'remoteConfigureOk' || !bound) {
-    throw fail('GATEWAY_UNAVAILABLE', `${label}: ${JSON.stringify({ ws, control, configured, status })}`);
+    throw fail('GATEWAY_UNAVAILABLE', `${label}: ${JSON.stringify(redact({ ws, control, configured, status }))}`);
   }
   const url = `http://${bound.replace('0.0.0.0', '127.0.0.1')}`;
   daemon.http = async (name, method, path, body) => {
@@ -203,7 +220,7 @@ async function bringUp(label, hub) {
   const code = await daemon.call('pairing-code', { type: 'remoteCreateMachinePairingCode' });
   const paired = await daemon.http('owner-pair', 'POST', '/api/v1/pair/exchange', { code: code?.code, deviceName: `f4-owner-${label}`, installationId: `f4-${label}-${randomUUID()}` });
   daemon.token = paired.body?.token ?? null;
-  if (!daemon.token) throw fail('PAIRING_FAILED', `${label}: ${JSON.stringify(paired.body)}`);
+  if (!daemon.token) throw fail('PAIRING_FAILED', `${label}: ${JSON.stringify(redact(paired.body))}`);
   const ticket = await daemon.http('socket-ticket', 'POST', '/api/v1/socket-ticket', { target: '/api/v1/events' });
   daemon.socketWs = new WebSocket(`${url.replace('http', 'ws')}/api/v1/events?ticket=${encodeURIComponent(ticket.body?.ticket ?? '')}`);
   daemon.socketWs.addEventListener('message', (message) => {
@@ -276,8 +293,13 @@ const logLineChunk = (html, summary) => html.split('data-testid="action-log-line
 // A zombie (exited, not yet reaped by its new parent) is not alive, and neither is a process
 // mid-exit: the kernel empties /proc/<pid>/cmdline once its address space is released, so it
 // can never run user code again.
-const procState = (pid) => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '')[0] ?? null; } catch { return null; } };
-const exiting = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`).length === 0; } catch { return false; } };
+// Linux reads /proc; macOS has none, so ask ps for the one state letter ("Z" = zombie).
+const procState = (pid) => {
+  try { return readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '')[0] ?? null; } catch { /* not Linux */ }
+  const state = spawnSync('ps', ['-o', 'state=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
+  return state ? state[0] : null;
+};
+const exiting = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`).length === 0; } catch { return procState(pid) === 'Z'; } };
 const alive = (pid) => { try { process.kill(pid, 0); return procState(pid) !== 'Z' && !exiting(pid); } catch (error) { return error?.code === 'EPERM'; } };
 const argvOf = (pid) => { try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').join(' '); } catch { return spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim() || null; } };
 async function teardown(daemon) {

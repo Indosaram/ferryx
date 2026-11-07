@@ -338,7 +338,7 @@ function checkRealEngine(value, context) {
 }
 // f1Fleet (f1-acceptance, plan F1): the hub computer's agent root and the two ssh target
 // computers. Every host, path and binary is config; nothing names a personal machine.
-const F1_TARGET_FIELDS = Object.freeze({ required: ['label', 'ssh', 'bun', 'repoDir', 'ferryxCli', 'dataRoot'], optional: ['sshOptions', 'relayTunnel'] });
+const F1_TARGET_FIELDS = Object.freeze({ required: ['label', 'ssh', 'bun', 'repoDir', 'ferryxCli', 'dataRoot'], optional: ['sshOptions', 'relayTunnel', 'gatewayPort'] });
 function checkF1Fleet(value, context, config) {
   if (typeof value !== 'object' || Array.isArray(value)) throw new HarnessError('CONFIG_INVALID', 'f1Fleet must be an object or null');
   const allowed = ['hub', 'targets', 'relayHost', 'sshBin', 'outageDurationMs', 'quotaResetMs'];
@@ -367,6 +367,11 @@ function checkF1Fleet(value, context, config) {
     if (extra.length > 0) throw new HarnessError('CONFIG_INVALID', `f1Fleet.targets[${index}] has unknown field(s): ${extra.join(', ')}`);
     const missing = F1_TARGET_FIELDS.required.filter((key) => typeof target[key] !== 'string' || target[key].trim() === '');
     if (missing.length > 0) throw new HarnessError('CONFIG_INVALID', `f1Fleet.targets[${index}] is missing field(s): ${missing.join(', ')}`);
+    // A computer that already runs a production Ferryx daemon holds 43821 on loopback and the
+    // harness must not stop it; such a target names another port for its own isolated gateway.
+    if (target.gatewayPort !== undefined && (!Number.isInteger(target.gatewayPort) || target.gatewayPort < 1024 || target.gatewayPort > 65_535)) {
+      throw new HarnessError('CONFIG_INVALID', `f1Fleet.targets[${index}].gatewayPort must be an integer 1024..65535`);
+    }
     for (const key of ['bun', 'repoDir', 'ferryxCli', 'dataRoot']) absolute(target[key], `f1Fleet.targets[${index}].${key}`);
     // bun and repoDir are placed on the remote ssh command line: shell-inert characters only.
     for (const key of ['bun', 'repoDir']) {

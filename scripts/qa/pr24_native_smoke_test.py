@@ -143,7 +143,85 @@ class SkipSetupGuardTests(unittest.TestCase):
                 smoke.guarded_skip_setup_point(1278, 850, expected, owner, window, active)
 
 
+class SkipSetupAffordanceTests(unittest.TestCase):
+    # Constants measured from the two reviewed 1278x850 startup frames of the same build:
+    # wizard showing -> 113 colors, mean luma 0.112054; main UI -> 1 color, mean luma 0.154248.
+    # The discriminator is color diversity, not brightness.
+    def test_reviewed_wizard_region_reads_as_present(self):
+        self.assertTrue(smoke.skip_setup_affordance_present(113, 0.112054))
+
+    def test_reviewed_main_ui_region_reads_as_absent(self):
+        self.assertFalse(smoke.skip_setup_affordance_present(1, 0.154248))
+
+    def test_flat_brighter_region_is_not_treated_as_the_button(self):
+        # A blank light panel must not be mistaken for the antialiased label.
+        self.assertFalse(smoke.skip_setup_affordance_present(1, 0.93))
+        self.assertFalse(smoke.skip_setup_affordance_present(2, 0.5))
+
+    def test_non_normalized_luma_is_rejected(self):
+        for luma in [-0.01, 1.01, float('nan'), float('inf')]:
+            with self.subTest(luma=luma):
+                with self.assertRaisesRegex(RuntimeError, 'invalid skip-setup region luma'):
+                    smoke.skip_setup_affordance_present(1, luma)
+
+
 class SparsePostStartupTests(unittest.TestCase):
+    def test_reviewed_empty_workspace_is_post_startup_valid_only(self):
+        metrics = smoke.parse_capture_metrics('1022 680 329 0.0135897')
+        self.assertFalse(smoke.meaningful_content(metrics))
+        self.assertTrue(smoke.nonblank_post_startup_content(metrics))
+
+    def test_actual_blank_capture_fails_both_gates(self):
+        metrics = smoke.parse_capture_metrics('1022 680 1 0')
+        self.assertFalse(smoke.meaningful_content(metrics))
+        self.assertFalse(smoke.nonblank_post_startup_content(metrics))
+
+    def test_post_startup_still_rejects_invalid_or_tiny_frames(self):
+        for width, height, colors, entropy in [(1022, 680, 15, .01), (100, 60, 329, .01),
+                                               (1022, 680, 329, 0), (1022, 680, 329, float('nan')),
+                                               (1022, 680, 329, float('inf'))]:
+            metrics = dict(width=width, height=height, colors=colors, entropy=entropy)
+            with self.subTest(metrics=metrics):
+                self.assertFalse(smoke.nonblank_post_startup_content(metrics))
+
+
+class SetupSettleTests(unittest.TestCase):
+    # The wizard opens 1200 ms after mount plus async probes. Measured probes of two runs of the
+    # same build: content appears at 2.31-3.48 s in one and 5.14-6.62 s in the other, and the
+    # wizard frame in the slower run was not final until after the second content probe.
+    @staticmethod
+    def frame(t, present):
+        return {'monotonic_seconds': t, 'wizard_present': present}
+
+    def test_early_frame_is_not_accepted_even_when_stable(self):
+        # A main-UI frame held for 2.5 s still precedes the 1200 ms timer's effect on slow hosts.
+        observations = [self.frame(0.0, False), self.frame(1.5, False), self.frame(3.0, False)]
+        self.assertIsNone(smoke.setup_state_settled(observations, 8.0, 2.5))
+
+    def test_late_stable_absent_state_is_accepted(self):
+        observations = [self.frame(0.0, False) for _ in range(5)]
+        observations += [self.frame(8.0, False), self.frame(10.5, False)]
+        self.assertIs(smoke.setup_state_settled(observations, 8.0, 2.5), False)
+
+    def test_late_stable_present_state_is_accepted(self):
+        observations = [self.frame(0.0, False), self.frame(2.0, False),
+                        self.frame(4.0, True), self.frame(6.5, True), self.frame(9.0, True)]
+        self.assertIs(smoke.setup_state_settled(observations, 8.0, 2.5), True)
+
+    def test_fresh_flip_is_not_accepted_until_it_holds(self):
+        # The late-open wizard: past the minimum but flipped only 1 s ago.
+        observations = [self.frame(0.0, False), self.frame(4.0, False),
+                        self.frame(8.0, True), self.frame(9.0, True)]
+        self.assertIsNone(smoke.setup_state_settled(observations, 8.0, 2.5))
+        observations.append(self.frame(10.6, True))
+        self.assertIs(smoke.setup_state_settled(observations, 8.0, 2.5), True)
+
+    def test_empty_or_single_probe_never_settles(self):
+        self.assertIsNone(smoke.setup_state_settled([], 8.0, 2.5))
+        self.assertIsNone(smoke.setup_state_settled([self.frame(0.0, True)], 8.0, 2.5))
+
+
+class SparsePostStartupRealTests(unittest.TestCase):
     def test_reviewed_empty_workspace_is_post_startup_valid_only(self):
         metrics = smoke.parse_capture_metrics('1022 680 329 0.0135897')
         self.assertFalse(smoke.meaningful_content(metrics))

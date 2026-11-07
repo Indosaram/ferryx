@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gitObjectsSource } from './f1-git-objects.mjs';
@@ -29,19 +29,42 @@ for (const variant of ['explicit', 'missing', 'relative', 'empty', 'repository']
   });
 }
 
-test('F1 bubblewrap remains a required Linux prerequisite', async () => {
-  const previous = process.env.F1_GIT_OBJECTS;
-  process.env.F1_GIT_OBJECTS = '/missing-f1-objects';
+test('F1 bubblewrap alone keeps the run not-ready', async () => {
+  // N3.2: a missing bwrap must by itself make ready===false. Every other precondition is a valid
+  // object here, so a `typeof ... === 'boolean'` assertion can no longer pass vacuously.
+  const objects = mkdtempSync(join(tmpdir(), 'f1-objects-'));
+  const fanout = join(objects, 'ab');
+  mkdirSync(fanout);
+  writeFileSync(join(fanout, 'c'.repeat(38)), 'object');
   const checks = [];
-  try { await f1IsolationChecks((...entry) => checks.push(entry), '/unused'); }
-  finally {
-    if (previous === undefined) delete process.env.F1_GIT_OBJECTS;
-    else process.env.F1_GIT_OBJECTS = previous;
-  }
+  await f1IsolationChecks((...entry) => checks.push(entry), '/unused', {
+    platform: 'linux',
+    bwrapPath: '/usr/bin/bwrap',
+    exists: (path) => path !== '/usr/bin/bwrap',
+    gitObjects: { path: objects, reason: null },
+    pythonExitWatch: true,
+  });
   const check = checks.find(([name]) => name === 'f1-isolation-requirements-available');
   expect(check).toBeDefined();
+  expect(check[2].required).toEqual({ bwrap: false, helperSource: true, wrapperSource: true, gitObjects: true, pythonExitWatch: true });
+  expect(check[2].gitObjects.reason).toBeNull();
   expect(check[1]).toBe(false);
-  expect(typeof check[2].required.bwrap).toBe('boolean');
+  rmSync(objects, { recursive: true, force: true });
+});
+
+test('F1 refuses a git-objects source that is not a populated repository', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'f1-empty-'));
+  const checks = [];
+  await f1IsolationChecks((...entry) => checks.push(entry), '/unused', {
+    platform: 'linux',
+    bwrapPath: '/usr/bin/bwrap',
+    exists: () => true,
+    gitObjects: { path: null, reason: 'no object entry under ' + root },
+    pythonExitWatch: true,
+  });
+  const check = checks.find(([name]) => name === 'f1-isolation-requirements-available');
   expect(check[2].required.gitObjects).toBe(false);
   expect(check[2].gitObjects.reason).toBeTruthy();
+  expect(check[1]).toBe(false);
+  rmSync(root, { recursive: true, force: true });
 });

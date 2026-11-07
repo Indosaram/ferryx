@@ -38,7 +38,11 @@ import { decodePng, encodePng, ocrImage } from './png.mjs';
 async function ocr(tesseract, pngPath, rect = null, singleLine = false) {
   let input = pngPath; let map = (x, y) => ({ x, y }); let scale = 1;
   if (rect) {
-    const image = ocrImage(readFileSync(pngPath), rect, singleLine ? 3 : 2);
+    // Scale 3, never 2: at 2 the nearest-neighbour doubling merges the last glyph of a token
+    // with the punctuation after it (f3tok025137b7: reads as f3tok025137b/), so a correct
+    // screenshot never matches its own token. 1, 3 and 4 read it exactly; 3 keeps the boxes small
+    // enough for the click mapping and is what the single-line path already used.
+    const image = ocrImage(readFileSync(pngPath), rect, 3);
     if (singleLine) {
       const gray = decodePng(image.png);
       for (let i = 0; i < gray.px.length; i += 1) gray.px[i] = Math.max(0, Math.min(255, (gray.px[i] - 20) * 255 / 190));
@@ -89,6 +93,16 @@ function locate(read, phrase, { below = -1 } = {}) {
 
 /** The isolated-profile keys a live GUI process must carry with exactly the run's values. */
 const ISOLATED_ENV = ['FERRYX_QA_ISOLATED', 'FERRYX_QA_RUN_ID', 'FERRYX_DATA_DIR', 'FERRYX_RUNTIME_DIR', 'FERRYX_SESSION_DIR', 'HOME'];
+
+/**
+ * The arguments for every host-helper call that names the run's own GUI (N3.1). Both the raise
+ * before each frame and the bounds read that follows it go through here, so neither can drift to
+ * a caller-supplied checkout: the host helper refuses any checkout that is not the recorded
+ * candidate's git top level, and this is the only place that checkout is read from.
+ */
+export function guiIdentity(lane, gui) {
+  return { pid: gui.pid, executable: gui.executable, checkout: lane.receipt.candidate.checkout };
+}
 
 export async function runDesktopLane(lane, { host, run, shared, signal }) {
   const ids = scenariosForLane(lane.name);
@@ -195,7 +209,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // every frame, so every OCR read and every click lands on the run's own window.
     const raise = async () => {
       if (host.platform !== 'darwin') return;
-      const raised = await helper.call('activate-gui', { pid: gui.pid, executable: gui.executable, checkout: lane.receipt.candidate.checkout });
+      const raised = await helper.call('activate-gui', guiIdentity(lane, gui));
       if (raised.activated !== true) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} was not raised: ${JSON.stringify(raised)}`);
     };
     // macOS: MahoRD types ASCII as key codes, which an input method (e.g. Korean 2-Set) composes
@@ -224,7 +238,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     const windowOf = async (frameWidth) => {
       const seen = host.platform === 'win32'
         ? await agent.call('setup-target', { profile: setup.profile, gui, boundsOnly: true })
-        : await helper.call('gui-bounds', { pid: gui.pid, executable: gui.executable, checkout: lane.receipt.candidate.checkout });
+        : await helper.call('gui-bounds', guiIdentity(lane, gui));
       // Read right after the capture: a frame taken while another app was in front is never OCRed.
       if (!seen.bounds || seen.frontPid !== gui.pid) throw new StepFailed('GUI_NOT_FRONT', `run-owned GUI pid ${gui.pid} not frontmost with a window at capture: ${JSON.stringify(seen)}`);
       return windowRect(seen.bounds, seen.screen, frameWidth);
@@ -283,6 +297,34 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       await until('initial import dialog dismissed', () => frame('import-dismissed', null, { marker: null }),
         ({ read }) => !locate(read, "Don't import"), { deadlineMs: 30_000 });
     }
+    // A first launch from the installer raises the Store migration toast with duration Infinity,
+    // anchored over the panel's lower half: the rules line and the Export row never appear while
+    // it is open. It is a real product surface, so the run dismisses it with the same real click
+    // the owner uses ("Got it") rather than reading around it. The toast is raised only after the
+    // frontend's `cmd_distribution_channel` round trip resolves, so it is normally absent from the
+    // first rendered frame and can appear during any later clause; every wait that needs the
+    // panel's lower half therefore clears it first.
+    const dismissStoreMigrationToast = async (step = null, name = 'store-toast') => {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const seen = await frame(name, step, { marker: null });
+        // The toast's own "Got it" action is the owner's path, but its small label is the one
+        // string on this panel tesseract cannot read back reliably at this frame scale, so the
+        // panel's own "Clear all" pill is the documented fallback: it dismisses every toast, and
+        // sonner runs the toast's onDismiss, which is the same persistence the button performs.
+        const target = locate(seen.read, 'Got it') ?? locate(seen.read, 'Clear all');
+        if (!target) return false;
+        await click(target);
+        await until('store migration toast dismissed', () => frame('store-toast-dismissed', step, { marker: null }),
+          ({ read }) => locate(read, 'Got it') === null && locate(read, 'moving to the Microsoft') === null, { deadlineMs: 30_000 });
+      }
+      throw new StepFailed('STORE_TOAST_NOT_DISMISSED', 'the Store migration toast kept covering the panel after three real dismissal clicks');
+    };
+    // The notice appears on its own schedule, so give it a bounded window to show up before the
+    // first clause reads the panel; a run that never raises it simply clears the window unclicked.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      if (await dismissStoreMigrationToast()) break;
+      await new Promise((resolveWait) => { setTimeout(resolveWait, 1_000); });
+    }
     const panel = async (step, name = 'poll') => {
       const reply = await call(`panel-${name}`, [panelReadRequest('panel')]);
       if (step) step.artifact('panel-read', `${name}.panel.json`, reply);
@@ -303,6 +345,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       }, ({ read }) => predicate(read), { deadlineMs: 30_000 }));
     };
     const sendComposer = async (step, text, token) => {
+      await dismissStoreMigrationToast(step, 'composer-store-toast');
       const seen = await visible(step, 'composer-visible', (r) => locate(r, 'Tell the supervisor') !== null, { scroll: true });
       await click(locate(seen.read, 'Tell the supervisor'));
       await typeText(text);
@@ -317,9 +360,19 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     await runStep(lane, 'F3-D1', async (step) => {
       step.artifact('gui-receipt', 'gui-launch.json', gui);
       const card = await shared.decisionCard();
+      // D5 judges the screen by this fragment; D1 has just asserted it is readable there.
+      shared.decisionCardPainted = card;
       const view = await until('decision card in this desktop panel', () => panel(null), (v) => (v?.decisions ?? []).some((d) => d.sessionRef === card.sessionRef), { deadlineMs: 120_000 });
       step.artifact('panel-read', 'decision.panel.json', view);
       const shown = keep(step, 'decision', await until('decision card text on screen', () => frame('decision'), ({ read }) => read.text.includes(card.commandFragment), { deadlineMs: 60_000 }));
+      // D5 judges the screen after the phone answers, but by then the card is gone, so the control
+      // that proves its detector works must be taken here, while D1 has just proved the card is up.
+      // Identifying it by its question (which the fixture names per session and nonce) is what D5
+      // uses; a desktop that cannot read it here would make D5 vacuously pass, so record whether it
+      // could rather than failing D1, whose own assertions are about the command and the options.
+      const cardQuestion = card.decision?.prompt?.question ?? '';
+      const questionShown = cardQuestion !== '' && ocrShows(shown.read.text, cardQuestion);
+      shared.record('F3-D1', `${lane.name}-card-question`, { cardQuestion, questionShown, text: shown.read.text.slice(0, 1500) });
       const decision = view.decisions.find((d) => d.sessionRef === card.sessionRef);
       shared.record('F3-D1', lane.name, { sessionRef: decision.sessionRef, promptId: decision.promptId, question: decision.question, command: decision.command });
       step.assert('card-is-the-fleet-decision', decision.promptId === card.promptId, { decision, card });
@@ -541,6 +594,7 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
     // lane) is gone from this desktop's panel read and from its screen. Waits for the phone.
     await runStep(lane, 'F3-D5', async (step) => {
       if (!run.lanes.includes('iphone')) throw new LaneBlocked('LANE_NOT_IN_RUN', 'no iPhone lane in this run answers a decision');
+      // The positive control is recorded by F3-D1 while the card is provably on screen; see there.
       await shared.phoneAnswersDone;
       const answers = shared.phoneAnswers;
       step.assert('phone-answered-card', answers.length > 0 && answers.every((a) => Number.isInteger(a.nonce)), { answers });
@@ -548,9 +602,20 @@ export async function runDesktopLane(lane, { host, run, shared, signal }) {
       const view = await until('the answered cards gone from the panel', () => panel(null), gone, { deadlineMs: 60_000 });
       step.artifact('panel-read', 'answered.panel.json', view);
       step.assert('answered-card-gone-from-panel', gone(view), { answers, decisions: view.decisions });
-      const offScreen = ({ read: r }) => answers.every((a) => !namesNonce(r.text, shared.decisionTitle, a.nonce));
+      // D1 took the positive control while the card was provably up, because by the time the phone
+      // has answered a correct desktop has already removed it. Each card is identified by its own
+      // question, which the fixture names per session and nonce (f3decision and f3push both start at
+      // nonce 1, so the nonce alone would collide).
+      const answeredNonces = answers.map((a) => a.nonce);
+      const onScreen = (r, nonce) => ocrShows(r.text, `${shared.decisionTitle} migration ${nonce}`);
+      const control = shared.observed['F3-D1']?.[`${lane.name}-card-question`];
+      if (!control?.questionShown) {
+        throw new StepFailed('CARD_QUESTION_UNREADABLE', `F3-D1 could not read this desktop's card question "${control?.cardQuestion ?? ''}" on screen, so the on-screen half of F3-D5 would prove nothing`);
+      }
+      step.assert('card-question-readable-before-answer', control.questionShown === true, { control });
+      const offScreen = ({ read: r }) => !answeredNonces.some((n) => onScreen(r, n));
       const shown = keep(step, 'answered', await until('the answered cards gone from screen', () => frame('answered'), offScreen, { deadlineMs: 60_000 }));
-      step.assert('answered-card-gone-from-screen', offScreen(shown), { answers, text: shown.read.text.slice(0, 1500) });
+      step.assert('answered-card-gone-from-screen', offScreen(shown), { answeredNonces, text: shown.read.text.slice(0, 1500) });
     });
   } catch (error) {
     if (error instanceof LaneBlocked) lane.receipt.blocked = { code: error.code, detail: error.detail, at: new Date().toISOString() };
