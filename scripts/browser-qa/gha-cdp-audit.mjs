@@ -2293,16 +2293,9 @@ await section("import", async (record) => {
     if (found) return { ...host.click(found.x, found.y), at: [found.x, found.y], via: "pixels" };
     return { ...(await clickWord(word, { timeout: 4000, pick: "last" })), via: "ocr" };
   };
-  // `exclude` is the results panel as it stood before this import. The panel keeps the previous
-  // import's lines until the new one lands, so without it a click that never imported anything
-  // (run 42319828844: the JSON pass missed the format dropdown and read the Chrome import again)
-  // still looks like a finished import.
-  const results = async (exclude = []) => until(() => {
+  const results = async () => until(() => {
     const words = ocr(probeShot()) ?? [];
-    const used = words.some((word) => word.text === "imported" || word.text === "imported,");
-    if (!used) return null;
-    const key = exclude.join("|");
-    return key && lines(words).join("|") === key ? null : words;
+    return words.some((word) => word.text === "imported" || word.text === "imported,") ? words : null;
   }, 120000, 1500);
   const lines = (words) => {
     const rows = new Map();
@@ -2434,16 +2427,21 @@ await section("import", async (record) => {
       await sleep(300);
       rawKey({ key: "Enter" });
     }
-    // The picked path shows next to "Choose file…"; Import stays disabled until it does.
-    const chosen = Boolean(await until(() => findWord(ocr(probeShot()) ?? [], "", { match: (word) => word.text.includes(basename(path)) }), 10000));
-    // Only import once the format and the file are both really chosen: pressing Import without
-    // them re-runs whatever format the dialog still held, and the panel then shows that import's
-    // lines, which read as success. The step fails here instead, naming the stage it stopped at.
-    const blocked = !formatPicked ? "FORMAT_NOT_PICKED" : !choose.ok ? "CHOOSE_NOT_CLICKED" : !chosen ? "FILE_NOT_SHOWN" : null;
-    const before = lines(ocr(probeShot()) ?? []);
+    // The picked path renders next to "Choose file…" in 11 px muted text, which OCR misses even
+    // when the file is attached: run 42339358967's macOS screenshot shows
+    // /Users/runner/work/_temp/ferryx-cdp-isolation/bitwarden.json beside an enabled Import while
+    // OCR read nothing, so this is recorded as an observation, not used to block.
+    const chosen = Boolean(await until(() => findWord(ocr(probeShot()) ?? [], "", { match: (word) => word.text.toLowerCase().includes("bitwarden") }), 10000));
+    // Only import once the dialog really holds a password-file format. Pressing Import with the
+    // stale source re-runs the previous format, and its result lines then read as this import's
+    // success (run 42335816106: the JSON pass never picked its format and re-read the Chrome
+    // import). A missing file needs no guard of its own: `canRun` disables Import without one
+    // (ui/src/components/settings/ImportBrowserDataDialog.tsx:91), and the authoritative checks
+    // below still require the imported origin to appear in the vault.
+    const blocked = !formatPicked ? "FORMAT_NOT_PICKED" : !choose.ok ? "CHOOSE_NOT_CLICKED" : null;
     const imported = blocked ? { ok: false } : await clickDialogButton("primary", "Import");
-    const done = blocked ? null : await results(before);
-    const outcome = { dialog: opened.ok, format_picked: formatPicked, format_via: formatVia, format_anchor: chooser ? "label" : value ? "value" : null, choose: choose.ok, file_shown: chosen, import_clicked: imported.ok, blocked, before, lines: lines(done) };
+    const done = blocked ? null : await results();
+    const outcome = { dialog: opened.ok, format_picked: formatPicked, format_via: formatVia, format_anchor: chooser ? "label" : value ? "value" : null, choose: choose.ok, file_shown: chosen, import_clicked: imported.ok, blocked, lines: lines(done) };
     if (blocked) {
       await step(`import-${label}`, `Import a ${format} file through the dialog's file picker`, [["import", () => ({ ok: false, stderr: `${blocked}: the dialog never showed the ${format} file selected`, ...outcome })]], { any: ["imported"] });
       await clickDialogButton("secondary", "Done");
