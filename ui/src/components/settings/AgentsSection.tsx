@@ -567,7 +567,7 @@ export function AgentsSection() {
                       {agent.available ? (
                         <Badge
                           variant="outline"
-                          className="border-transparent bg-status-success/10 px-1.5 py-0.5 text-[11px] font-medium text-status-success shadow-none"
+                          className="border-transparent bg-status-success-container px-1.5 py-0.5 text-[11px] font-medium text-status-success-on shadow-none"
                         >
                           Detected
                         </Badge>
