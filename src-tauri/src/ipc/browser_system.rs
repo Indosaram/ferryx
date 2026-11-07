@@ -321,6 +321,11 @@ pub async fn cmd_browser_drop_paths<R: Runtime>(
         }
         return Ok(true);
     }
+    // macOS hands the drop to the child webview natively, so only Windows and Linux need the
+    // replay; doing it on macOS too would deliver the same files twice.
+    if cfg!(target_os = "macos") {
+        return Ok(false);
+    }
     // The platform webview cannot receive an OS drop as Files, and both Windows and Linux
     // consume the drop before a child webview sees it, so the page is given the same
     // DataTransfer a real drop would carry.

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { dragDropPositionToLogical } from "./NativeTerminalPane";
+import { isMacHost } from "../lib/platform";
 import { isMacShortcutPlatform } from "../lib/shortcuts";
 import { save } from "@tauri-apps/plugin-dialog";
 import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, CircleAlert, Download, ExternalLink, RefreshCw, X } from "lucide-react";
@@ -402,7 +403,10 @@ export function BrowserPane({
   // discarded. Take the app-level drop when it is inside this pane and let the backend hand it
   // to the tab (Chromium through DevTools, the platform webview through a replayed DragEvent).
   useEffect(() => {
-    if (!isTauri() || !visible) return;
+    // macOS hands the drop to the child webview natively (lib.rs unregisters the window as a
+    // dragged type so the WKWebView is the destination), so replaying it there would deliver the
+    // same files twice. Only Windows and Linux discard it at app level.
+    if (!isTauri() || !visible || isMacHost()) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<{ paths?: string[]; position: { x: number; y: number } }>(
