@@ -583,5 +583,10 @@ carries a ring one shade darker than its primary, and its own `--primary-foregro
 hex, and `--status-X-container` / `-border` / `-on-container` are the tinted container
 layer: container is `mix(solid, canvas, 0.14)` in dark and `0.08` in light. Both
 `.remote-app-root` blocks carry the same set so the remote client cannot diverge.
-Nothing consumes the container tokens yet; migrating the `bg-status-*/NN` sites is a
-separate sweep.
+
+Container-shaped status surfaces -- badges, banners, alert panels, notice rows -- use
+`bg-status-X-container` with `border-status-X-border` and `text-status-X-on`, never a
+translucent `bg-status-X/NN`. The alpha form survives only where the surface is a
+single-pixel marker or a line of text: the active search match in `FilePreviewText`, the
+`+`/`-` lines of a diff body, a hover ground under an existing container button, and a
+count pill nested inside one. Everything else has been migrated; add no new `bg-status-X/NN`.
