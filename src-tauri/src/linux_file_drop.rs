@@ -58,12 +58,13 @@ pub fn install<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Re
         let Some(paths) = uri_list_paths(selection) else {
             return;
         };
-        let Some((browser_id, engine, point)) = tab_at(&drop_handle, x, y) else {
+        let Some((browser_id, engine, point, origin)) = tab_at(&drop_handle, x, y) else {
             tracing::debug!("file drop over no browser tab was left unconsumed");
             return;
         };
         if engine == crate::browser::BrowserEngine::System {
-            deliver_to_system_tab(&drop_handle, &browser_id, &paths, point);
+            let viewport = (origin.0 + point.0, origin.1 + point.1);
+            deliver_to_system_tab(&drop_handle, &browser_id, &paths, viewport);
             return;
         }
         tauri::async_runtime::spawn(async move {
@@ -138,11 +139,14 @@ fn tab_at<R: tauri::Runtime>(
                 && point_x < bounds.x + bounds.width
                 && point_y >= bounds.y
                 && point_y < bounds.y + bounds.height;
+            // Tab-relative, which is what the Chromium drop protocol expects; the system path
+            // adds the pane origin back for elementFromPoint.
             inside.then(|| {
                 (
                     session.browser_id,
                     session.engine,
                     (point_x - bounds.x, point_y - bounds.y),
+                    (bounds.x, bounds.y),
                 )
             })
         })
