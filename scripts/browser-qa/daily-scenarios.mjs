@@ -507,6 +507,22 @@ function closeFileManager(ctx) {
 }
 
 /**
+ * Waits until the first focus-chain row belongs to the Ferryx process, re-asserting focus each
+ * poll, and returns that row as "process@pid" (null when it never got there). Windows run
+ * 42368667682 typed /notify.html and /print.html after a native file panel had been cancelled:
+ * the app was not foreground, so the tab stayed on upload-idle (g6) and the OCR read the desktop
+ * instead of the page (g9).
+ */
+async function waitForAppForeground(ctx) {
+  if (ctx.platform !== "win32") return null;
+  return await until(() => {
+    ctx.host.focus();
+    const top = ctx.win.windowRows("focuschain")[0];
+    return top && top.pid === ctx.win.pid ? `${top.process ?? top.class}@${top.pid}` : null;
+  }, 5000, 500);
+}
+
+/**
  * Navigates through the real address bar (click, select all, type, Enter), confirms through
  * `ferryx browser list` that a visible tab reached the URL's path (retyped once otherwise), then
  * waits for OCR text. Windows run 41801115761: the /doc.pdf visit never landed and the PDF check
@@ -514,6 +530,9 @@ function closeFileManager(ctx) {
  */
 async function visit(ctx, url, expect, timeout = 20000) {
   const path = new URL(url).pathname;
+  // Typing only reaches the app while it owns the keyboard; a visit that cannot prove it still
+  // types, but records the miss so the failure names the lost focus instead of the page.
+  const foreground = await waitForAppForeground(ctx);
   const landed = () => ctx.sessions().list.some((entry) => entry.visible !== false && (entry.url ?? "").split(/[?#]/)[0].endsWith(path));
   let ok = false;
   let attempts = 0;
@@ -531,6 +550,7 @@ async function visit(ctx, url, expect, timeout = 20000) {
   // A visit that did not land also records where the input went.
   (ctx.summary.daily_visits ??= []).push({
     path, landed: ok, attempts, text_seen: expect ? Boolean(seen) : null,
+    foreground,
     ...(ok ? { at: new Date().toISOString() } : inputState(ctx)),
   });
   return seen;
@@ -754,6 +774,15 @@ async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0, wh
     const all = ctx.ocr(path) ?? [];
     let words = all.filter(match);
     let pass = "regular";
+    if (!words.length && ctx.ocrOutside) {
+      // A popup menu can be drawn outside the window the OCR crops to (Linux run 42368667682
+      // probe-265: the Duplicate submenu sat at x=1694, past the window's right edge at 1600, so
+      // "work" was on screen and no cropped pass could read it). Miss-only, so nothing pays for it
+      // unless the normal passes already failed.
+      const wide = ctx.ocrOutside(path) ?? [];
+      words = wide.filter(match);
+      pass = "outside window";
+    }
     if (!words.length && ctx.ocrStrips) {
       const strips = ctx.ocrStrips(path);
       words = strips.filter(match);
@@ -787,9 +816,14 @@ async function duplicateSubmenuAnchor(ctx, duplicate) {
     const words = screenWords(ctx);
     const current = words.filter((word) => /current/i.test(word.text)).sort((a, b) => a.top - b.top)[0];
     if (!current) return null;
-    // Rows start at the first word of the same line, left of "(current)".
+    // Rows start at the nearest word to the left on the same line. A 420px window took the
+    // leftmost word in range, which on macOS run 42368667682 was the sidebar (anchor [90,184]
+    // while the submenu column was ~797) and on Linux the parent menu (anchor [1494,284] while
+    // the column was ~1691), so "Private" and "work" were reported missing while both were on
+    // screen. A fixed distance cap cannot work: the row start is one label away, which is ~70px
+    // here and varies with scale, so the nearest left neighbour is used instead.
     const line = words.filter((word) => Math.abs(word.top - current.top) <= 8 && word.left <= current.left)
-      .sort((a, b) => a.left - b.left)[0];
+      .sort((a, b) => b.left - a.left)[0];
     return [line?.left ?? current.left, current.top];
   }, 3000, 500);
 }
@@ -1974,6 +2008,10 @@ export async function dailyChromium(ctx) {
   const { g8, g13, g11 } = ctx.summary.daily;
   const file = fixtureFile(ctx);
   const chromiumNavigate = async (browserId, url) => {
+    // Same foreground gate as visit(): the address bar only takes the keystrokes while the app
+    // owns the keyboard. Windows run 42368667682 recorded chromium_nav {typed:false} right after
+    // the native picker had been cancelled, and the CLI fallback then did the navigation.
+    if (ctx.platform === "win32") await waitForAppForeground(ctx);
     ctx.host.focus();
     ctx.host.key({ key: "l", mods: ["mod"] });
     await sleep(800);
