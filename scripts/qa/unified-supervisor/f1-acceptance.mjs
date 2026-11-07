@@ -57,6 +57,13 @@ const AGENT = join(dirname(fileURLToPath(import.meta.url)), 'f1-host-agent.mjs')
 const REAL_OUTAGE_MS = 20 * 60_000;
 const REAL_QUOTA_RESET_MS = 3 * 60_000;
 const GATEWAY_PORT = 43821;
+// A computer that already runs a production Ferryx daemon holds 43821 on loopback and the harness
+// must not stop it, so each target may name its own gateway port. Every other use stays fixed.
+const gatewayPortFor = (target) => {
+  const port = target?.gatewayPort ?? GATEWAY_PORT;
+  if (!Number.isInteger(port) || port < 1024 || port > 65_535) throw new HarnessError('CONFIG_INVALID', `${target?.label}: gatewayPort must be an integer 1024..65535`);
+  return port;
+};
 const PUSH_BATCH_WINDOW_MS = 30_000;
 const HUB_WORKSPACE = 'f1-hub';
 const TARGET_WORKSPACE = 'f1-target';
@@ -407,12 +414,13 @@ export async function runF1Acceptance(ctx, deps) {
     for (const [index, target] of fleet.targets.entries()) {
       const agent = agents[index + 1];
       const targetUrl = targetRelayUrl(target, fleet.relayHost, relayPort);
-      const free = await agent.rpc('portFree', { port: GATEWAY_PORT });
-      if (!free.free) throw new HarnessError('PREREQUISITE_MISSING', `${target.label}: port ${GATEWAY_PORT} is in use there; nothing is stopped to free it`);
+      const gatewayPort = gatewayPortFor(target);
+      const free = await agent.rpc('portFree', { port: gatewayPort });
+      if (!free.free) throw new HarnessError('PREREQUISITE_MISSING', `${target.label}: port ${gatewayPort} is in use there; nothing is stopped to free it`);
       const daemon = await agent.rpc('daemonStart', { ferryxCli: target.ferryxCli, env: { FERRYX_ALLOW_INSECURE_RELAY: '1', FERRYX_MACHINE_TOKEN: machineToken, FERRYX_RELAY_URL: targetUrl } });
       const call = (request) => agent.rpc('call', { request });
       const control = await call({ type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] });
-      const relayMode = await call({ type: 'remoteConfigure', config: { mode: 'relay', port: GATEWAY_PORT, allowControl: true, relayUrl: targetUrl } });
+      const relayMode = await call({ type: 'remoteConfigure', config: { mode: 'relay', port: gatewayPort, allowControl: true, relayUrl: targetUrl } });
       await agent.rpc('waitLog', { path: daemon.log, needle: 'relay control channel connected', deadlineMs: 90_000 }, 100_000);
       const pin = await call({ type: 'remoteCreateMachinePairingCode' });
       const pair = await hubCall(`hub-pair-${target.label}`, { type: 'pairedHostPair', request: { relayOrigin: hubRelayOrigin, pin: pin?.code, displayLabel: target.label } }, 90_000);
