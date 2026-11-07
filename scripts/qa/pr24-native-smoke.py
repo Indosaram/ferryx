@@ -149,6 +149,39 @@ def skip_setup_affordance_present(colors, mean_luma):
     return colors >= 8
 
 
+# The wizard decision is made in a 1200 ms timer after mount plus async permission/agent
+# probes, so the first frame with content is not final. The minimum covers the measured
+# late-open window, stability rejects a mid-transition frame, and the timeout keeps a hung
+# probe from stalling the gate.
+SETUP_SETTLE_MIN_SECONDS = 8.0
+SETUP_SETTLE_STABLE_SECONDS = 2.5
+SETUP_SETTLE_TIMEOUT_SECONDS = 30.0
+
+
+def setup_state_settled(observations, min_seconds, stable_seconds):
+    """Settled wizard classification, or None while the product can still flip the frame.
+
+    Pure and time-injectable so the rule is unit tested without a display. A classification is
+    accepted only when the window has been observed at least min_seconds and the newest run of
+    identical observations spans stable_seconds; anything shorter is a frame the 1200 ms
+    onboarding timer can still replace.
+    """
+    if not observations:
+        return None
+    newest = observations[-1]
+    if newest['monotonic_seconds'] - observations[0]['monotonic_seconds'] < min_seconds:
+        return None
+    present = newest['wizard_present']
+    since = None
+    for observation in reversed(observations):
+        if observation['wizard_present'] != present:
+            break
+        since = observation['monotonic_seconds']
+    if since is None or newest['monotonic_seconds'] - since < stable_seconds:
+        return None
+    return present
+
+
 def xprop_window_ids(output, property_name):
     match = re.fullmatch(re.escape(property_name) + r"\(WINDOW\): window id #\s*(.*)", output.strip())
     if not match:
@@ -460,25 +493,53 @@ def main():
             raise RuntimeError('owned-window activation failed; see bounded activation_error diagnostics') from None
 
         await_rendered_content()
-        capture('01-startup', startup=True)
         geometry = run(['xdotool', 'getwindowgeometry', '--shell', window], env=env).stdout
         values = dict(line.split('=', 1) for line in geometry.splitlines() if '=' in line)
         owner_pid = int(run(['xdotool', 'getwindowpid', window], env=env).stdout.strip())
         active_window = int(run(['xdotool', 'getactivewindow'], env=env).stdout.strip())
         x, y = guarded_skip_setup_point(int(values['WIDTH']), int(values['HEIGHT']),
                                        app.pid, owner_pid, int(window), active_window)
+        # Await the settled wizard decision before touching the frame. Reading one early capture
+        # used to see the pre-wizard main UI, skip the click, and then send Ctrl+O into a window
+        # that had already opened the wizard: the wizard swallowed the key and the Escape that
+        # followed dismissed it, so both frames were identical and add_project measured 0.
+        observations = []
+        settle_end = time.monotonic() + SETUP_SETTLE_TIMEOUT_SECONDS
+        settled = None
+        while time.monotonic() < settle_end:
+            run(['import', '-window', window, str(evidence / '01-setup-probe.png')], env=env)
+            region = run(['convert', str(evidence / '01-setup-probe.png'),
+                          '-crop', '140x34+460+699', '+repage',
+                          '-format', '%k %[fx:mean]', 'info:'], env=env).stdout.split()
+            region_colors, region_luma = int(region[0]), float(region[1])
+            observations.append({'monotonic_seconds': time.monotonic(),
+                                 'region_colors': region_colors,
+                                 'region_mean_luma': region_luma,
+                                 'wizard_present': skip_setup_affordance_present(
+                                     region_colors, region_luma)})
+            settled = setup_state_settled(observations, SETUP_SETTLE_MIN_SECONDS,
+                                          SETUP_SETTLE_STABLE_SECONDS)
+            if settled is not None:
+                break
+            time.sleep(0.5)
+        (evidence / '01-setup-probe.png').unlink(missing_ok=True)
+        if settled is None:
+            raise RuntimeError('first-run setup state never settled; probes in result.json')
+        wizard_present = settled
+        # Re-capture now that the decision is settled, so the recorded startup frame and the
+        # pixel baseline for the next interaction come from the same state the branch reads.
+        capture('01-startup', startup=True)
         screenshot_size = run(['identify', '-format', '%w %h',
                                str(evidence / '01-startup.png')], env=env).stdout.strip()
         if screenshot_size != '1278 850':
             raise RuntimeError('Skip setup screenshot geometry differs from reviewed client')
-        region = run(['convert', str(evidence / '01-startup.png'), '-crop', '140x34+460+699',
-                      '+repage', '-format', '%k %[fx:mean]', 'info:'], env=env).stdout.split()
-        region_colors, region_luma = int(region[0]), float(region[1])
-        wizard_present = skip_setup_affordance_present(region_colors, region_luma)
         result['setup_action'] = {'window': window, 'client_x': x, 'client_y': y,
-                                  'region_colors': region_colors,
-                                  'region_mean_luma': region_luma,
-                                  'wizard_present': wizard_present}
+                                  'region_colors': observations[-1]['region_colors'],
+                                  'region_mean_luma': observations[-1]['region_mean_luma'],
+                                  'wizard_present': wizard_present,
+                                  'settle_seconds': observations[-1]['monotonic_seconds']
+                                  - observations[0]['monotonic_seconds'],
+                                  'probes': observations}
         if wizard_present:
             # Exactly one visible normal-UI Skip setup click. Never enter account details,
             # submit Sign in/Continue, or fabricate onboarding state through IPC/storage.
