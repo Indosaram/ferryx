@@ -134,6 +134,9 @@ const paneRecords = (logDir) => (existsSync(logDir) ? readdirSync(logDir).filter
   .filter(Boolean);
 const waitPane = (logDir, predicate, deadlineMs, label) => waitUntil(logDir, () => paneRecords(logDir).find(predicate), deadlineMs, label);
 
+// A port no other process holds right now, so the daemon's gateway can bind it.
+const freePort = () => new Promise((resolvePort) => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const port = server.port; server.stop(true); resolvePort(port); });
+
 // --- one isolated daemon with its owner device ------------------------------------------------
 async function bringUp(label, hub) {
   const base = join(root, label);
@@ -142,8 +145,10 @@ async function bringUp(label, hub) {
     HOME: join(base, 'home'), TMPDIR: join(base, 'tmp'), FERRYX_DATA_DIR: join(base, 'data'), FERRYX_RUNTIME_DIR: join(base, 'runtime'),
     FERRYX_HUB_DB: join(base, 'hub', 'hub.sqlite'), FERRYX_HUB: hub ? 'on' : 'off', FERRYX_HUB_QUIET_HOURS: 'off', SHELL: '/bin/bash', RUST_LOG: 'info',
     // The daemon binds its gateway to a fixed product port unless a QA run id is present, which
-    // would collide with any Ferryx desktop already listening; the run id lets it take ours below.
+    // would collide with any Ferryx desktop already listening; the run id plus a claimed port let
+    // this run own its gateway. Both must be in the spawn env: the daemon reads them at startup.
     FERRYX_QA_RUN_ID: label,
+    FERRYX_QA_GATEWAY_PORT: String(await freePort()),
   };
   for (const dir of [env.HOME, env.TMPDIR, env.FERRYX_RUNTIME_DIR, join(base, 'ws', 'project'), join(base, 'panes'), join(base, 'bin')]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(join(env.HOME, '.bashrc'), '');
@@ -186,12 +191,7 @@ async function bringUp(label, hub) {
   };
   const ws = await daemon.call('register-workspace', { type: 'registerWorkspace', workspaceId: WORKSPACE, repoRoot: realpathSync(join(base, 'ws')) });
   const control = await daemon.call('agent-control-on', { type: 'agentControlSettingsSet', enabled: true, excludedDeviceIds: [] });
-  // Port 0 means "the default port" to the daemon, which collides with any Ferryx desktop already
-  // listening; claim a free ephemeral port first so this run owns its gateway.
-  const gatewayPort = await new Promise((resolvePort) => { const server = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } }); const port = server.port; server.stop(true); resolvePort(port); });
-  // The daemon prefers FERRYX_QA_GATEWAY_PORT over the request's own port when the QA run id is
-  // set, and that env is fixed at spawn time, so pass the chosen port to the daemon it starts.
-  process.env.FERRYX_QA_GATEWAY_PORT = String(gatewayPort);
+  const gatewayPort = Number(env.FERRYX_QA_GATEWAY_PORT);
   const configured = await daemon.call('gateway-configure', { type: 'remoteConfigure', config: { mode: 'localNetwork', port: gatewayPort, allowControl: true } });
   const status = await daemon.call('gateway-status', { type: 'remoteGetStatus' });
   const bound = status?.status?.boundAddress ?? null;
