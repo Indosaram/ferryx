@@ -66,7 +66,7 @@ const browserMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: eventMocks.listen }));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: coreMocks.invoke }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: coreMocks.invoke, isTauri: () => true }));
 vi.mock("./BrowserPermissionPrompt", () => ({ BrowserPermissionPrompts: () => null, BrowserMediaCaptureIndicator: () => null }));
 vi.mock("./BrowserVaultBar", () => ({ BrowserVaultBar: () => null }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMocks.save }));
