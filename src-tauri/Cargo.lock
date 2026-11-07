@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "ferryx"
-version = "2026.1107.1"
+version = "2026.1107.2"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
