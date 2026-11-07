@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { cn } from '../../lib/cn';
 import {
@@ -162,7 +162,7 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
   // neither is available, which hides the menu item rather than offering a control that does nothing.
   const muteFromContext = useSessionMute();
   const muteSession = useMemo(() => {
-    if (muteFromContext) return muteFromContext;
+    if (muteFromContext) return muteFromContext.set;
     if (!isTauriRuntime()) return null;
     return async (sessionRef: string, muted: boolean) => {
       try {
@@ -174,6 +174,15 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
     };
   }, [muteFromContext]);
   const [mutedRefs, setMutedRefs] = useState<ReadonlySet<SessionRef>>(() => new Set());
+  useEffect(() => {
+    const read = muteFromContext?.read;
+    if (!read) return;
+    let live = true;
+    void read().then((stored) => {
+      if (live && stored) setMutedRefs(new Set(stored));
+    });
+    return () => { live = false; };
+  }, [muteFromContext]);
   const toggleMuted = async (sessionRef: SessionRef) => {
     if (!muteSession) return;
     const muted = !mutedRefs.has(sessionRef);

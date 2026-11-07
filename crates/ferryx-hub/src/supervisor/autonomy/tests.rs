@@ -184,7 +184,7 @@ async fn three_owner_answers_teach_it_and_the_fourth_is_answered_with_a_log_line
     assert!(fixture.autonomy.escalation_source().pending().await.unwrap().is_empty());
     let history = AnswerHistory::new(fixture.pool.clone());
     let probe = question("x", "Which package manager should I use?", None);
-    assert_eq!(history.recent_labels(&probe, "/nonexistent/ferryx-autonomy-test", "claude").await.unwrap().len(), 3);
+    assert_eq!(history.recent_labels(&probe, &history_key().await, "claude").await.unwrap().len(), 3);
 
     let fourth = question("p4", "Which package manager should I use?", None);
     fixture.autonomy.observe(&session(Some(fourth))).await;
@@ -207,7 +207,7 @@ async fn three_owner_answers_teach_it_and_the_fourth_is_answered_with_a_log_line
 
     // The supervisor's own answer is never learned as the owner's.
     fixture.autonomy.owner_answered("s1", "p4", 1).await;
-    assert_eq!(history.recent_labels(&probe, "/nonexistent/ferryx-autonomy-test", "claude").await.unwrap().len(), 3);
+    assert_eq!(history.recent_labels(&probe, &history_key().await, "claude").await.unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -240,7 +240,7 @@ async fn an_owner_answer_recorded_twice_is_learned_once() {
 
     let history = AnswerHistory::new(fixture.pool.clone());
     let labels = history
-        .recent_labels(&prompt, "/nonexistent/ferryx-autonomy-test", "claude")
+        .recent_labels(&prompt, &history_key().await, "claude")
         .await
         .unwrap();
     assert_eq!(labels, vec!["pnpm".to_owned()]);
@@ -400,6 +400,31 @@ async fn the_gate_uses_the_irreversible_classifier_not_a_word_list() {
 
 const POOL_CWD: &str = "/nonexistent/ferryx-autonomy-test";
 
+/// The history key the supervisor stores for the fixture session, resolved the same way the
+/// supervisor resolves it so the probe looks under the real key rather than a raw path.
+async fn history_key() -> String {
+    RepoResolver::default().key("mac", POOL_CWD).await
+}
+
+#[tokio::test]
+async fn two_computers_that_share_a_path_do_not_share_learned_answers() {
+    let repos = RepoResolver::default();
+    let here = repos.key("mac", POOL_CWD).await;
+    let there = repos.key("maho-win", POOL_CWD).await;
+    assert_ne!(here, there, "the same path on two computers is two repositories");
+    assert!(!there.starts_with("git@") && !there.starts_with("https://"), "{there}");
+
+    let fixture = fixture().await;
+    teach(&fixture, 1, 3).await;
+    let history = AnswerHistory::new(fixture.pool.clone());
+    let probe = question("x", "Which package manager should I use?", None);
+    assert_eq!(history.recent_labels(&probe, &here, "claude").await.unwrap().len(), 3);
+    assert!(
+        history.recent_labels(&probe, &there, "claude").await.unwrap().is_empty(),
+        "a session on another computer inherits nothing from this one"
+    );
+}
+
 /// Teaches three owner answers, lets the supervisor answer `p4` on its own, and returns the
 /// answered action entry.
 async fn autonomous_answer(fixture: &Fixture) -> ActionEntry {
@@ -416,6 +441,27 @@ async fn autonomous_answer(fixture: &Fixture) -> ActionEntry {
         .into_iter()
         .find(|entry| entry.summary.starts_with("Answered"))
         .expect("the autonomous answer is logged")
+}
+
+#[tokio::test]
+async fn undo_is_stale_once_the_session_no_longer_shows_the_prompt() {
+    let fixture = fixture().await;
+    let answered = autonomous_answer(&fixture).await;
+    let opened_before = fixture.frames.count("decision mac:s1 open");
+
+    // The agent consumed the answer and its prompt is gone from the session.
+    fixture.autonomy.observe(&session(None)).await;
+
+    assert_eq!(
+        fixture.autonomy.undo(answered.id).await,
+        Err(UndoError::Stale(answered.id)),
+        "a prompt the session no longer shows cannot be restored as answerable"
+    );
+    assert!(
+        fixture.autonomy.escalation_source().pending().await.unwrap().is_empty(),
+        "undo may not advertise a card over a prompt that is gone"
+    );
+    assert_eq!(fixture.frames.count("decision mac:s1 open"), opened_before);
 }
 
 #[tokio::test]
@@ -455,7 +501,7 @@ async fn undoing_an_autonomous_answer_restores_the_decision_card_without_a_secon
     // Neither the autonomous answer nor its undo became an owner precedent.
     let history = AnswerHistory::new(fixture.pool.clone());
     let probe = question("x", "Which package manager should I use?", None);
-    assert_eq!(history.recent_labels(&probe, POOL_CWD, "claude").await.unwrap().len(), 3);
+    assert_eq!(history.recent_labels(&probe, &history_key().await, "claude").await.unwrap().len(), 3);
 
     // Repeating the undo is a typed refusal and changes nothing.
     assert_eq!(fixture.autonomy.undo(answered.id).await, Err(UndoError::Nothing(answered.id)));

@@ -283,7 +283,7 @@ describe('PanelSurface', () => {
     // client's gateway call is supplied here the way RemoteApp supplies it.
     const mute = vi.fn(async () => true);
     render(
-      <SessionMuteContext.Provider value={mute}>
+      <SessionMuteContext.Provider value={{ set: mute, read: null }}>
         <PanelSurface snapshot={{ ...panelSnapshotFixture, decisions: [], handling: [] }} actions={actions} nowMs={NOW} />
       </SessionMuteContext.Provider>,
     );
@@ -297,6 +297,21 @@ describe('PanelSurface', () => {
     expect(screen.getByTestId('session-row-mute')).toHaveAttribute('aria-pressed', 'true');
     fireEvent.click(screen.getByTestId('session-row-stop'));
     await waitFor(() => expect(stop).toHaveBeenCalledWith('mac:wtlist'));
+  });
+
+  it('shows a session already muted on the gateway after a remount (D13)', async () => {
+    const set = vi.fn(async () => true);
+    const read = vi.fn(async () => new Set(['mac:wtlist']));
+    render(
+      <SessionMuteContext.Provider value={{ set, read }}>
+        <PanelSurface snapshot={{ ...panelSnapshotFixture, decisions: [], handling: [] }} actions={inert} nowMs={NOW} />
+      </SessionMuteContext.Provider>,
+    );
+    await waitFor(() => expect(read).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Worktree list refresh' }));
+    await waitFor(() => expect(screen.getByTestId('session-row-mute')).toHaveAttribute('aria-pressed', 'true'));
+    fireEvent.click(screen.getByTestId('session-row-mute'));
+    await waitFor(() => expect(set).toHaveBeenCalledWith('mac:wtlist', false), { timeout: 2_000 });
   });
 
   it('shows a refused lane pause where the owner acted', async () => {

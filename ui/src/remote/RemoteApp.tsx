@@ -34,11 +34,11 @@ import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
 import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
 import { MobileSheet } from "./chat/MobileSheet";
 import { PhoneAlertsSettings } from "../components/settings/NotificationsSection";
-import { muteSessionPush, type PushRequest } from "../lib/pushSubscription";
+import { muteSessionPush, readSessionMute, type PushRequest } from "../lib/pushSubscription";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { DecisionFocusContext, useDecisionDeepLink, type DecisionFocus } from "./decisionDeepLink";
 import { usePanelPresence } from "./panelPresence";
-import { SessionMuteContext, type SessionMute } from "./sessionMute";
+import { SessionMuteContext, type SessionMuteBinding } from "./sessionMute";
 import { capRetainedMessages } from "./agentConversation";
 import {
   ReferenceHistoryFetchError,
@@ -5778,8 +5778,13 @@ export const RemoteHostConnection: React.FC<{
   const panelIsScreen = (phoneHome && phoneNav.screen.kind === "home" && phoneNav.destination === "supervisor")
     || (desktopSidebar && isAccountMode && sidebarView === "supervisor");
   usePanelPresence(token ? phonePushRequest : null, panelIsScreen);
-  const sessionMute = useMemo<SessionMute | null>(
-    () => (token ? (sessionRef, muted) => muteSessionPush(phonePushRequest, sessionRef, muted) : null),
+  const sessionMute = useMemo<SessionMuteBinding | null>(
+    () => (token
+      ? {
+        set: (sessionRef, muted) => muteSessionPush(phonePushRequest, sessionRef, muted),
+        read: () => readSessionMute(phonePushRequest),
+      }
+      : null),
     [token, phonePushRequest],
   );
 

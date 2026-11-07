@@ -216,6 +216,19 @@ export async function muteSessionPush(request: PushRequest, sessionRef: string, 
 
 export type PhoneTestResult = { ok: true; delivered: number } | { ok: false; message: string };
 
+/** The gateway's persisted mute set; null when it cannot be read, so the caller keeps its state. */
+export async function readSessionMute(request: PushRequest): Promise<ReadonlySet<string> | null> {
+  try {
+    const res = await request("/api/v1/push/session-mute", { method: "GET" });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { muted?: unknown };
+    if (!Array.isArray(body.muted)) return null;
+    return new Set(body.muted.filter((ref): ref is string => typeof ref === "string"));
+  } catch {
+    return null;
+  }
+}
+
 export async function sendPhoneTestAlert(request: PushRequest): Promise<PhoneTestResult> {
   try {
     const res = await request("/api/v1/push/test", { method: "POST" });

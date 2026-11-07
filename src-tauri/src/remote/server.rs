@@ -4156,6 +4156,26 @@ struct SessionMuteRequest {
     muted: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMuteStateResponse {
+    muted: Vec<String>,
+}
+
+/// Every muted session ref. A client that mounts again (phone home screen, app restart) reads
+/// this instead of assuming nothing is muted, so the row menu shows the real policy.
+async fn push_session_mute_state(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<Json<SessionMuteStateResponse>, (StatusCode, String)> {
+    push_device(&state, &headers)?;
+    let push = Arc::clone(&state.push);
+    let muted = crate::ipc::run_blocking(move || Ok(push.store.muted_sessions()))
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.message))?;
+    Ok(Json(SessionMuteStateResponse { muted }))
+}
+
 /// Mutes or unmutes phone push for one session (`<hostId>:<sessionId>`); the panel still lists
 /// it. Muting changes what every paired phone receives, so only a Control device may do it.
 async fn push_session_mute(
@@ -9299,7 +9319,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(super::dag_api::ws_dag_handler),
         )
         .route("/api/v1/push/test", post(push_test))
-        .route("/api/v1/push/session-mute", post(push_session_mute))
+        .route("/api/v1/push/session-mute", post(push_session_mute).get(push_session_mute_state))
         .route("/api/v1/push/panel-presence", post(push_panel_presence))
         .route("/api/v1/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/v1/push/subscribe", post(push_subscribe))

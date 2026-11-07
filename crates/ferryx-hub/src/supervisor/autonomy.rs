@@ -173,27 +173,41 @@ fn normalize_remote(url: &str) -> String {
 
 /// The repository key of a working directory: its normalized `origin` URL, so every worktree
 /// of one repository shares its history; the directory itself when there is no origin.
+///
+/// A session on another computer names a path on that computer, so the hub cannot read it.
+/// Those keys are host-qualified and never share a precedent with another host: the same path
+/// on two computers is two repositories, and the same repository at two paths on one computer
+/// is one.
 #[derive(Default)]
 pub struct RepoResolver {
-    cache: Mutex<HashMap<String, String>>,
+    cache: Mutex<HashMap<(String, String), String>>,
 }
 
 impl RepoResolver {
-    pub async fn key(&self, cwd: &str) -> String {
+    pub async fn key(&self, host_id: &str, cwd: &str) -> String {
+        let cache_key = (host_id.to_owned(), cwd.to_owned());
         if let Some(known) = self
             .cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(cwd)
+            .get(&cache_key)
             .cloned()
         {
             return known;
         }
-        let key = origin_key(cwd).await.unwrap_or_else(|| cwd.to_owned());
+        let key = if host_id == crate::agent_control::LOCAL_HOST_ID {
+            match origin_key(cwd).await {
+                Some(url) => url,
+                // No origin: the path alone is ambiguous, so keep it host-qualified.
+                None => format!("{host_id}:{cwd}"),
+            }
+        } else {
+            format!("{host_id}:{cwd}")
+        };
         self.cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(cwd.to_owned(), key.clone());
+            .insert(cache_key, key.clone());
         key
     }
 }
@@ -242,7 +256,7 @@ impl DecisionGate {
         session: &FleetSession,
         prompt: &PendingPrompt,
     ) -> Result<AnswerDecision> {
-        let repo = self.repos.key(&session.cwd).await;
+        let repo = self.repos.key(&session.host_id, &session.cwd).await;
         let rules = self.rules.list().await?;
         let worktree = (!session.cwd.is_empty()).then_some(session.cwd.as_str());
         let context = AnswerContext {
@@ -397,9 +411,12 @@ impl Autonomy {
     }
 
     /// The session has no pending prompt any more (answered, in the terminal or elsewhere, or
-    /// gone): its card disappears.
+    /// gone): its card disappears, and so does the record Undo would restore from. A prompt the
+    /// agent no longer shows cannot be answered again, so offering an actionable Undo over it
+    /// would advertise a correction the session cannot take; the handle then answers `Stale`.
     pub fn clear(&self, session_ref: &SessionRef) {
         self.tracked().remove(session_ref);
+        self.answered().remove(session_ref);
         if self.escalations.remove(session_ref).is_some() {
             self.publisher.decision(session_ref, None);
         }
@@ -415,7 +432,7 @@ impl Autonomy {
         if session.stale {
             return;
         }
-        let repo = self.repos.key(&session.cwd).await;
+        let repo = self.repos.key(&session.host_id, &session.cwd).await;
         // A different prompt or screen revision supersedes the last autonomous answer: its
         // Undo may not resurrect a card over it.
         self.answered().retain(|key, answered| {
@@ -502,7 +519,7 @@ impl Autonomy {
         if let Some(known) = self.tracked().get_mut(&session.session_ref) {
             known.settled = true;
         }
-        let repo = self.repos.key(&session.cwd).await;
+        let repo = self.repos.key(&session.host_id, &session.cwd).await;
         self.answered().insert(
             session.session_ref.clone(),
             AutonomousAnswer {

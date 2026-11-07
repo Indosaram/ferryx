@@ -35,6 +35,7 @@ import { createConnection } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { redact } from './evidence-redaction.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..', '..', '..');
@@ -64,7 +65,11 @@ mkdirSync(out, { recursive: true });
 
 const now = () => Date.now();
 const fail = (code, message) => Object.assign(new Error(message), { code });
-const jsonl = (name, value) => appendFileSync(join(out, name), `${JSON.stringify({ atMs: now(), at: new Date().toISOString(), ...value })}\n`);
+
+// Evidence is long-lived: fixture credentials (pairing codes, bearer tokens, socket tickets,
+// subscribe secrets) are still credentials, so they never reach a file. Redaction happens on
+// the way out, once, keeping the live values in memory only.
+const jsonl = (name, value) => appendFileSync(join(out, name), `${JSON.stringify(redact({ atMs: now(), at: new Date().toISOString(), ...value }))}\n`);
 const evidence = { schema: 'f4-status-truth/1', startedAtMs: now(), repo: null, binary: null, clauses: [], daemons: [], teardown: [] };
 const clause = (name, pass, detail) => {
   const entry = { clause: name, pass: pass === true, atMs: now(), detail };
@@ -196,7 +201,7 @@ async function bringUp(label, hub) {
   const status = await daemon.call('gateway-status', { type: 'remoteGetStatus' });
   const bound = status?.status?.boundAddress ?? null;
   if (ws?.type !== 'registerWorkspaceOk' || control?.type !== 'agentControlSettingsOk' || configured?.type !== 'remoteConfigureOk' || !bound) {
-    throw fail('GATEWAY_UNAVAILABLE', `${label}: ${JSON.stringify({ ws, control, configured, status })}`);
+    throw fail('GATEWAY_UNAVAILABLE', `${label}: ${JSON.stringify(redact({ ws, control, configured, status }))}`);
   }
   const url = `http://${bound.replace('0.0.0.0', '127.0.0.1')}`;
   daemon.http = async (name, method, path, body) => {
@@ -215,7 +220,7 @@ async function bringUp(label, hub) {
   const code = await daemon.call('pairing-code', { type: 'remoteCreateMachinePairingCode' });
   const paired = await daemon.http('owner-pair', 'POST', '/api/v1/pair/exchange', { code: code?.code, deviceName: `f4-owner-${label}`, installationId: `f4-${label}-${randomUUID()}` });
   daemon.token = paired.body?.token ?? null;
-  if (!daemon.token) throw fail('PAIRING_FAILED', `${label}: ${JSON.stringify(paired.body)}`);
+  if (!daemon.token) throw fail('PAIRING_FAILED', `${label}: ${JSON.stringify(redact(paired.body))}`);
   const ticket = await daemon.http('socket-ticket', 'POST', '/api/v1/socket-ticket', { target: '/api/v1/events' });
   daemon.socketWs = new WebSocket(`${url.replace('http', 'ws')}/api/v1/events?ticket=${encodeURIComponent(ticket.body?.ticket ?? '')}`);
   daemon.socketWs.addEventListener('message', (message) => {
