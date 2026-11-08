@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { PanelSnapshot } from "../../lib/supervisorPanel/contract";
 import { panelSnapshotFixture } from "../../lib/supervisorPanel/fixtures";
 import { applyPanelEvent as canonicalApplyPanelEvent } from "../../lib/supervisorPanel/model";
-import { applyPanelEvent, orderedOptions, panelSections, parsePanelFrame } from "./panelModel";
+import { applyPanelEvent, orderedOptions, panelSections, parsePanelFrame, statusLine } from "./panelModel";
 
 describe("panelModel", () => {
   it("folds frames with the one canonical reducer", () => {
@@ -19,6 +19,41 @@ describe("panelModel", () => {
     const sections = panelSections(panelSnapshotFixture);
     const listed = sections.sessions.map((session) => session.sessionRef);
     expect(listed).toEqual(["omarchy:notes", "mac:wtlist"]);
+  });
+
+  it("never reports an all-clear while a blocked lane is waiting, and says when it is judging", () => {
+    const blocked: PanelSnapshot = {
+      ...panelSnapshotFixture,
+      decisions: [],
+      handling: [],
+      sessions: [
+        {
+          ...panelSnapshotFixture.sessions[0],
+          sessionRef: "omarchy:blocked",
+          state: "blocked",
+          stale: false,
+          pendingPrompt: null,
+        },
+      ],
+    };
+    expect(statusLine(blocked)).toBe("1 lane is waiting for you.");
+    const judging: PanelSnapshot = {
+      ...blocked,
+      sessions: [
+        {
+          ...blocked.sessions[0],
+          pendingPrompt: {
+            promptId: "p-1",
+            kind: "question",
+            question: "Ship it?",
+            command: null,
+            options: ["Yes", "No"],
+            screenRevision: "rev-1",
+          },
+        },
+      ],
+    };
+    expect(statusLine(judging)).toBe("1 lane is waiting for you. The supervisor is still deciding.");
   });
 
   it("parses panel frames from text and ignores other frames", () => {

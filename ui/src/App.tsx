@@ -2719,10 +2719,27 @@ function WorkspaceApp({
           ...queue,
           { backendSessionIds: [backendSessionId], activate: true, attemptGenerations: {}, attempts: 0, origin: "supervisor" },
         ]);
+        // The adoption runs asynchronously over the daemon, so without this the click looks like
+        // a no-op until the tab appears (or until the miss toast fires).
+        toast.info("Opening this session…");
         return;
       }
       toast.info("That session is not open on this computer");
       return;
+    }
+    // A row can name a pane this window cannot focus (its tab closed while the agent kept
+    // running). Say so instead of returning silently through the notification path.
+    if (target.workspaceId === activeProjectRef.current.workspaceId) {
+      if (!hasNavigableSession(stateRef.current, target.sessionId)) {
+        toast.info("That session's tab is closed. Open it again to see it here.");
+        return;
+      }
+    } else {
+      const cached = getHmrWorkspaceState(target.workspaceId) ?? getWorkspaceSnapshot(target.workspaceId);
+      if (!cached || !hasNavigableSession(cached, target.sessionId)) {
+        toast.info("That session's tab is closed. Open it again to see it here.");
+        return;
+      }
     }
     handleNotificationTarget(target);
     flashPane(target.sessionId);

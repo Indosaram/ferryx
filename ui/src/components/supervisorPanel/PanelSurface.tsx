@@ -194,7 +194,8 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
         summary={view.paused ? 'Paused · nothing is answered or retried' : view.headerLine}
         headline={headline}
         detail={detail}
-        clear={view.decisions.length === 0}
+        // A blocked row the hub has not escalated still needs the owner: never an all-clear.
+        clear={view.decisions.length === 0 && view.waitingCount === 0}
         paused={view.paused}
         onTogglePause={() => void togglePause()}
       />

@@ -80,6 +80,8 @@ export interface SessionRowView {
   /** One-line why: last assistant line, or "status unknown". */
   why: string;
   stale: boolean;
+  /** Blocked with a prompt the hub has not turned into a decision card (yet). */
+  judging: boolean;
   /** Blocked rows are waiting; an inject-now nudge makes sense. */
   injectable: boolean;
 }
@@ -97,6 +99,8 @@ export interface PanelView {
   headerLine: string;
   runningCount: number;
   handledToday: number;
+  /** Sessions waiting on the owner that no decision card covers: the headline may not say "all clear". */
+  waitingCount: number;
   paused: boolean;
   setupRequired: boolean;
   decisions: DecisionView[];
@@ -211,10 +215,19 @@ export function applyPanelEvent(
 // ---------------------------------------------------------------------------
 // Selectors
 
-export function formatStatusLine(decisionCount: number): string {
-  if (decisionCount <= 0) return "Nothing needs you.";
-  const noun = decisionCount === 1 ? "decision" : "decisions";
-  return `${decisionCount} ${noun} for you. The rest is running.`;
+export function formatStatusLine(decisionCount: number, waitingCount = 0, judging = 0): string {
+  if (decisionCount > 0) {
+    const noun = decisionCount === 1 ? "decision" : "decisions";
+    return `${decisionCount} ${noun} for you. The rest is running.`;
+  }
+  // A blocked session the hub has not escalated is still work the owner must do: never report
+  // the all-clear while one is on screen, and say plainly when the hub is still deciding.
+  if (waitingCount > 0) {
+    const noun = waitingCount === 1 ? "lane is" : "lanes are";
+    const tail = judging > 0 ? " The supervisor is still deciding." : "";
+    return `${waitingCount} ${noun} waiting for you.${tail}`;
+  }
+  return "Nothing needs you.";
 }
 
 function formatMinutes(ms: number): string {
@@ -387,6 +400,8 @@ function sessionRow(
   health: SessionHealth | undefined,
 ): SessionRowView {
   const glyph = hasFailed(session, health) ? "failed" : glyphFor(session.state);
+  // A prompt the hub holds but has not escalated: the supervisor is judging this lane.
+  const judging = session.pendingPrompt !== null && !session.stale;
   const stalled =
     session.state === "working" &&
     session.stateSource === "provider" &&
@@ -395,8 +410,10 @@ function sessionRow(
   let age: string | null = null;
   if (stalled && session.screenChangedAtMs !== null) {
     age = `screen unchanged for ${formatMinutes(nowMs - session.screenChangedAtMs)}`;
-  } else if (session.state === "blocked" && session.stateSinceMs !== null) {
-    age = `waiting ${formatMinutes(nowMs - session.stateSinceMs)}`;
+  } else if (session.state === "blocked") {
+    const waited =
+      session.stateSinceMs !== null ? `waiting ${formatMinutes(nowMs - session.stateSinceMs)}` : null;
+    age = judging ? (waited ? `judging \u00b7 ${waited}` : "judging") : waited;
   }
   return {
     sessionRef: session.sessionRef,
@@ -407,6 +424,7 @@ function sessionRow(
     age,
     why: session.state === "unknown" ? "status unknown" : (session.lastAssistantLine ?? ""),
     stale: session.stale,
+    judging,
     injectable: session.state === "blocked",
   };
 }
@@ -519,13 +537,19 @@ export function buildPanelView(
     (session) => session.state === "working",
   ).length;
 
+  const waitingCount = sessions.filter(
+    (row) => row.glyph === "needsYou" || row.glyph === "failed",
+  ).length;
+  const judgingCount = sessions.filter((row) => row.judging).length;
+
   return {
-    statusLine: formatStatusLine(decisions.length),
+    statusLine: formatStatusLine(decisions.length, waitingCount, judgingCount),
     headerLine: `${runningCount} running · handled ${handledToday} ${
       handledToday === 1 ? "thing" : "things"
     } today`,
     runningCount,
     handledToday,
+    waitingCount,
     paused: snapshot.paused,
     setupRequired: snapshot.setupRequired,
     decisions,
