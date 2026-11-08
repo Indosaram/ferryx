@@ -440,7 +440,6 @@ impl DaemonServer {
             crate::daemon::owner_admission::unix_now_ms(),
         );
         let runtime_dir = get_runtime_dir();
-        let transfers_before = request_file::transfers_started();
         let outcome = {
             let (runtime_dir, request) = (runtime_dir.clone(), request.clone());
             #[cfg(test)]
@@ -472,7 +471,7 @@ impl DaemonServer {
                     "RequestUpgrade accepted: successor generation job started as handover candidate"
                 );
                 Arc::clone(self).serve_legacy_handover_socket(legacy_listener);
-                Arc::clone(self).abandon_handover_if_never_claimed(runtime_dir, transfers_before);
+                Arc::clone(self).abandon_handover_if_never_claimed(runtime_dir);
                 ControlReply::UpgradeAccepted
             }
             refused => {
@@ -485,7 +484,8 @@ impl DaemonServer {
     }
 
     /// Pre-commit rollback for a request no candidate acted on: removes the request, records the
-    /// abort decision and returns to Active. Only valid while still Prepared.
+    /// abort decision, returns to Active and hands every exported session back to this daemon.
+    /// Only valid while still Prepared.
     #[cfg(unix)]
     async fn abandon_prepared_handover(&self, runtime_dir: PathBuf) {
         let manager = Arc::clone(&self.handover_manager);
@@ -496,22 +496,37 @@ impl DaemonServer {
         .await;
         if let Err(error) = result {
             tracing::warn!(%error, "Could not abandon the prepared handover");
+            return;
+        }
+        // Mirrors the AbortHandover path: a candidate may have exported sessions before it died.
+        // Without this the predecessor would keep them recorded as foreign and their readers
+        // paused forever, which is exactly the non-self-healing state this rollback exists for.
+        self.handover_manager.clear_transferred_locals();
+        let resumed = self.terminal_service.pty_manager().resume_paused_readers();
+        if resumed > 0 {
+            tracing::warn!(
+                resumed_count = resumed,
+                "Predecessor resumed serving exported session(s) after an expired handover"
+            );
         }
     }
 
-    /// When the request expires and no candidate ever asked for a session transfer, the
-    /// predecessor leaves Prepared on its own (the candidate exits 0 on an expired request).
+    /// When the request expires and no candidate committed, the predecessor leaves Prepared on its
+    /// own (the candidate exits 0 on an expired request).
+    ///
+    /// The transfer counter is deliberately not part of this decision: a candidate that exported
+    /// some sessions and then died must still be abandoned, otherwise the predecessor stays in
+    /// Prepared forever and refuses every later upgrade. `abort_handover` is Prepared-guarded, and
+    /// the rollback above returns the exported sessions to this daemon.
     #[cfg(unix)]
-    fn abandon_handover_if_never_claimed(self: Arc<Self>, runtime_dir: PathBuf, transfers_before: u64) {
+    fn abandon_handover_if_never_claimed(self: Arc<Self>, runtime_dir: PathBuf) {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(
                 crate::daemon::handover_request::REQUEST_TTL_MS,
             ))
             .await;
-            if crate::daemon::handover_request::transfers_started() == transfers_before
-                && self.handover_manager.status() == crate::daemon::handover::HandoverStatus::Prepared
-            {
-                tracing::warn!("Handover request expired unclaimed; predecessor stays the owner");
+            if self.handover_manager.status() == crate::daemon::handover::HandoverStatus::Prepared {
+                tracing::warn!("Handover request expired without a commit; predecessor stays the owner");
                 self.abandon_prepared_handover(runtime_dir).await;
             }
         });

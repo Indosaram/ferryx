@@ -175,6 +175,75 @@ async fn rejected_commit_after_reader_pause_keeps_the_session_on_the_predecessor
     manager.close_session(&session_id).await.expect("close the resumed session");
 }
 
+/// An expired request must roll back even when a candidate had already exported sessions and then
+/// died before committing. The predecessor has to return to Active and hand every exported session
+/// back, otherwise it stays Prepared forever and refuses all later upgrades while the parked
+/// readers never see another byte.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_handover_with_an_exported_session_rolls_back_and_resumes_the_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let (server, legacy) = prepared_v5_predecessor(root.path());
+    let manager = server.terminal_service.pty_manager();
+    let (session_id, mut output) = manager
+        .spawn(portable_pty::CommandBuilder::new("/bin/sh"), 80, 24)
+        .expect("spawn a local session");
+    // The candidate exported the session (its reader is parked) and then died before committing.
+    let export = manager.export_session(&session_id).expect("export parks the reader");
+    server.handover_manager.note_transferred_local(&session_id);
+    assert_eq!(
+        server.handover_manager.status(),
+        crate::daemon::handover::HandoverStatus::Prepared,
+        "precondition: the predecessor is still Prepared"
+    );
+
+    // The request expires: the rollback must not be gated on the transfer counter.
+    server.abandon_prepared_handover(root.path().to_path_buf()).await;
+
+    assert_eq!(
+        server.handover_manager.status(),
+        crate::daemon::handover::HandoverStatus::Active,
+        "an expired request must return the predecessor to Active"
+    );
+    assert!(server.handover_manager.accept_gate_open());
+    assert!(
+        server.handover_manager.transferred_locals().is_empty(),
+        "the exported set must be forgotten so the sessions are the predecessor's again"
+    );
+    assert!(
+        !server.handover_manager.session_not_owned(&session_id),
+        "the session must be owned by the predecessor again"
+    );
+    assert_eq!(
+        crate::daemon::handover::HandoverManager::recorded_decision(&legacy).unwrap(),
+        Some(crate::daemon::handover_transaction::HandoverState::Active),
+        "the only durable decision is the abort, never Retired"
+    );
+    drop(export);
+
+    manager
+        .write_input(&session_id, b"printf 'EXPIRED_%s\\n' 'HANDOVER_RESUMED'\n")
+        .expect("write after the expired handover");
+    let mut seen = Vec::new();
+    let found = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(chunk) = output.recv().await {
+            seen.extend_from_slice(&chunk);
+            if String::from_utf8_lossy(&seen).contains("EXPIRED_HANDOVER_RESUMED") {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        found,
+        "the resumed reader must deliver the child's output: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    manager.close_session(&session_id).await.expect("close the resumed session");
+}
+
 #[tokio::test]
 async fn control_retiring_spawn_answers_typed_daemon_retiring_code() {
     let server = Arc::new(DaemonServer::new());

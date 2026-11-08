@@ -72,17 +72,13 @@ pub(crate) fn own_generation_key() -> Option<String> {
     })
 }
 
-/// Counts TransferSessions requests this process has served. The predecessor snapshots it when it
-/// writes a request; an unchanged count once the request has expired means no candidate ever
-/// started a transfer, so the predecessor may abandon the prepared handover on its own.
+/// Counts TransferSessions requests this process has served. Kept as an operational counter for
+/// handover diagnostics; it no longer gates the expired-request rollback, because a candidate
+/// that exported sessions and then died must still be abandoned by the predecessor.
 static TRANSFERS_STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(crate) fn note_transfer_started() {
     TRANSFERS_STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-}
-
-pub(crate) fn transfers_started() -> u64 {
-    TRANSFERS_STARTED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Writes the request atomically with mode 0600.
