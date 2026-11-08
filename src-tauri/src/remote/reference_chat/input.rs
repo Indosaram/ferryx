@@ -534,9 +534,11 @@ impl ReferenceInputQueue {
     /// milliseconds), so a submit right behind them waits [REFERENCE_TYPED_SETTLE_MS].
     pub fn note_raw_input(&self, backend_session_id: &str, at_ms: u64) {
         let mut typed = self.raw_typed_at.lock();
-        // Only a stamp inside the settle window can still delay a submit; older ones are dropped
-        // so the map stays as small as the set of panes typed into just now.
-        typed.retain(|_, last| at_ms.saturating_sub(*last) < REFERENCE_TYPED_SETTLE_MS);
+        // Both paste settling and the supervisor's human-typing guard use these stamps.
+        // Keep them until neither consumer needs them, even when another pane receives input.
+        let retention_ms =
+            REFERENCE_TYPED_SETTLE_MS.max(crate::agent_control::policy::HUMAN_TYPING_WINDOW_MS);
+        typed.retain(|_, last| at_ms.saturating_sub(*last) < retention_ms);
         typed.insert(backend_session_id.to_string(), at_ms);
     }
 
@@ -1803,6 +1805,71 @@ mod tests {
 
         assert!(outcome.is_typed());
         assert_eq!(clock.sleeps(), vec![REFERENCE_TYPED_SETTLE_MS - 100, REFERENCE_SUBMIT_DELAY_MS]);
+    }
+
+    #[test]
+    fn raw_input_on_another_pane_preserves_the_human_typing_window() {
+        let queue = ReferenceInputQueue::new();
+        let typed_at = 1_000;
+        queue.note_raw_input("sess-a", typed_at);
+
+        // The paste settle window is over, but supervisor input must still be refused.
+        queue.note_raw_input("sess-b", typed_at + 500);
+        assert_eq!(queue.last_raw_input_ms("sess-a"), Some(typed_at));
+        assert_eq!(queue.last_raw_input_ms("sess-b"), Some(typed_at + 500));
+
+        queue.note_raw_input(
+            "sess-b",
+            typed_at + crate::agent_control::policy::HUMAN_TYPING_WINDOW_MS - 1,
+        );
+        assert_eq!(queue.last_raw_input_ms("sess-a"), Some(typed_at));
+    }
+
+    #[test]
+    fn raw_input_stamps_are_pruned_when_both_consumers_windows_expire() {
+        let queue = ReferenceInputQueue::new();
+        let typed_at = 1_000;
+        let retention_ms =
+            REFERENCE_TYPED_SETTLE_MS.max(crate::agent_control::policy::HUMAN_TYPING_WINDOW_MS);
+        queue.note_raw_input("sess-a", typed_at);
+        queue.note_raw_input("sess-b", typed_at + retention_ms - 1);
+        assert_eq!(queue.last_raw_input_ms("sess-a"), Some(typed_at));
+
+        queue.note_raw_input("sess-b", typed_at + retention_ms);
+        assert_eq!(queue.last_raw_input_ms("sess-a"), None);
+        assert_eq!(queue.last_raw_input_ms("sess-b"), Some(typed_at + retention_ms));
+    }
+
+    #[test]
+    fn a_new_keystroke_refreshes_only_its_own_panes_stamp() {
+        let queue = ReferenceInputQueue::new();
+        let typed_at = 1_000;
+        let retention_ms =
+            REFERENCE_TYPED_SETTLE_MS.max(crate::agent_control::policy::HUMAN_TYPING_WINDOW_MS);
+        queue.note_raw_input("sess-a", typed_at);
+        queue.note_raw_input("sess-b", typed_at);
+        queue.note_raw_input("sess-a", typed_at + 500);
+        queue.note_raw_input("sess-c", typed_at + retention_ms);
+
+        assert_eq!(queue.last_raw_input_ms("sess-a"), Some(typed_at + 500));
+        assert_eq!(queue.last_raw_input_ms("sess-b"), None);
+    }
+
+    #[tokio::test]
+    async fn a_retained_human_typing_stamp_does_not_extend_the_paste_settle_window() {
+        let queue = ReferenceInputQueue::new();
+        let writer = RecordingWriter::new();
+        let clock = ManualClock::at(1_500);
+        let target = target("sess-a");
+        queue.note_raw_input("sess-a", 1_000);
+        queue.note_raw_input("sess-b", 1_500);
+        assert_eq!(queue.last_raw_input_ms("sess-a"), Some(1_000));
+
+        let outcome =
+            submit_ok(&queue, writer.as_ref(), &clock, &target, "r1", &submit_payload("hello")).await;
+
+        assert!(outcome.is_typed());
+        assert_eq!(clock.sleeps(), vec![REFERENCE_SUBMIT_DELAY_MS]);
     }
 
     #[tokio::test]
