@@ -8,7 +8,8 @@ import { applyPanelEvent } from '../../lib/supervisorPanel/model';
 import { legacyGoalsBySession } from '../../lib/supervisorPanel/legacyGoals';
 import { loadDesktopTranscriptPage, type TranscriptPageLoader } from '../../lib/supervisorPanel/transcript';
 import { useTranscript } from '../../lib/supervisorPanel/useTranscript';
-import { adoptArchivedGoals, moveSupervisorHere, useSupervisor } from '../../lib/supervisor';
+import { adoptArchivedGoals, desktopUnifiedClient, getLastUnifiedSupervisor, moveSupervisorHere, useSupervisor } from '../../lib/supervisor';
+import { SupervisorCallButton } from '../supervisor/SupervisorCallButton';
 import { isStandbyRole } from '../../lib/supervisorModel';
 import type { SupervisorCallResult, SupervisorMoveResult } from '../../lib/unifiedSupervisor';
 import { getSupervisorPanel, onSupervisorPanelEvent } from '../../lib/tauri';
@@ -114,6 +115,9 @@ export function SupervisorPanelHost({
   // Legacy lanes are a property of their session: the hub snapshot is read only to find which
   // sessions carry a goal and whether it is paused.
   const { snapshot: hub } = useSupervisor();
+  // The call reads the supervisor through the daemon the same way the panel does; before the
+  // first unified view arrives there is nothing to talk to, so no button is offered.
+  const lastUnified = getLastUnifiedSupervisor();
   const goals = useMemo(
     () => legacyGoalsBySession(snapshot?.sessions.map((session) => session.sessionRef) ?? [], hub.lanes),
     [snapshot, hub.lanes],
@@ -141,6 +145,16 @@ export function SupervisorPanelHost({
       ) : snapshot ? (
         <div className="flex flex-col gap-3">
           <LeaseNotices hub={hub.hub} here="This computer" />
+          {lastUnified ? (
+            <div data-testid="supervisor-call" className="flex min-h-9 items-center gap-2">
+              <span className="text-muted-foreground">Talk to the supervisor</span>
+              <SupervisorCallButton
+                view={lastUnified}
+                client={desktopUnifiedClient}
+                projectId={lastUnified.projects[0]?.projectId ?? null}
+              />
+            </div>
+          ) : null}
           <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} />
         </div>
       ) : (

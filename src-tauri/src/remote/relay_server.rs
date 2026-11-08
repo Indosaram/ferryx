@@ -3432,6 +3432,8 @@ async fn host_http_handler(
     // and only those paths, which allowed_http_route has already admitted above.
     let body_limit = if reference_chat_http_path(&path) {
         REFERENCE_CHAT_RELAY_BODY_MAX
+    } else if voice_http_path(&path) {
+        VOICE_RELAY_BODY_MAX
     } else {
         64 * 1024
     };
@@ -3454,6 +3456,18 @@ async fn host_http_handler(
 }
 
 const MAX_HTTP_SIZE: usize = 8 * 1024 * 1024;
+
+/// One voice recording or one spoken reply, base64 in a JSON envelope: the daemon admits an
+/// 8 MiB WAV, so the relay admits the same shape instead of the generic 64 KiB body bound.
+const VOICE_RELAY_BODY_MAX: usize = 12 * 1024 * 1024;
+
+/// The voice routes the relay may forward; everything else keeps the generic bound.
+fn voice_http_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/v1/voice/transcribe" | "/api/v1/voice/speak" | "/api/v1/voice/status"
+    )
+}
 /// Most informational (1xx) responses one forwarded request may receive before its final one.
 const MAX_INFORMATIONAL_RESPONSES: usize = 8;
 /// How long a request on a pooled (idle) data channel waits for its first response byte before
@@ -3563,6 +3577,10 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["workspace", "operations", _])
             | ("GET", ["workspace", "state"])
             | ("GET", ["terminal", "preferences"])
+            // The supervisor voice call: the phone reads the speech status, posts a recording
+            // and receives the spoken reply through the same machine routes the desktop uses.
+            | ("GET", ["voice", "status"])
+            | ("POST", ["voice", "transcribe" | "speak"])
             | ("GET", ["browser", "sessions" | "identify"])
             | ("POST", ["workspace", "select" | "selection"])
             // Paired desktop machine reads/uploads. Paste-upload and file-write chunks are

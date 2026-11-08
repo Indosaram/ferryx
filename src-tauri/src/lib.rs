@@ -2223,6 +2223,17 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             ]);
             return handler(invoke);
         }
+        if matches!(
+            invoke.message.command(),
+            "cmd_voice_call_status" | "cmd_voice_call_transcribe" | "cmd_voice_call_speak"
+        ) {
+            let handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
+                crate::ipc::voice_call::cmd_voice_call_status,
+                crate::ipc::voice_call::cmd_voice_call_transcribe,
+                crate::ipc::voice_call::cmd_voice_call_speak,
+            ]);
+            return handler(invoke);
+        }
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         if invoke.message.command() == "cmd_qa_native_binding_persisted" {
             let handler: Box<tauri::ipc::InvokeHandler<R>> =

@@ -3421,6 +3421,19 @@ export const RemoteHostConnection: React.FC<{
   // The account supervisor lease: each computer on standby says where the supervisor runs and
   // offers the move; the holder's own warnings (hosts it cannot reach, ...) show above the panel.
   const panelLease = supervisorLeaseCards(phoneSupervisor, phoneHome);
+  // The phone's call entry: the same overlay as the desktop, carried by the host's own signed
+  // fetch. It exists only while a live host can answer, so a dead computer never offers a call.
+  const phoneCallHost = phoneSupervisor.host;
+  const phoneCallPort = phoneCallHost ? phoneSupervisor.voicePortFor(phoneCallHost.machineId) : null;
+  const phoneCall =
+    phoneCallHost && phoneCallHost.client && phoneCallPort
+      ? {
+          port: phoneCallPort,
+          view: phoneCallHost.view,
+          client: phoneCallHost.client,
+          projectId: phoneCallHost.view.projects[0]?.projectId ?? null,
+        }
+      : null;
   const panelBody = (
     <WidePanel
       lease={panelLease}
@@ -6183,6 +6196,7 @@ export const RemoteHostConnection: React.FC<{
             headerAction: <AccountButton onOpen={() => setAccountSheetOpen(true)} />,
             resume: phoneResume,
             lease: panelLease,
+            voice: phoneCall,
           }}
           destination={phoneNav.destination}
           onSelectTab={phoneNav.selectTab}

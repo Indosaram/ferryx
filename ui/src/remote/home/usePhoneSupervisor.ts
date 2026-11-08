@@ -25,6 +25,8 @@ import {
 import type { UseAccountWorktreesResult } from "../useAccountWorktrees";
 import { useMachineSupervisorSources, type MachineLink, type SupervisorFrameBus } from "./machineSupervisorSources";
 import type { SupervisorMachineView } from "./phoneHomeModel";
+import type { VoiceCallPort } from "../../lib/voiceCall";
+import { remoteVoicePort } from "../../lib/voiceCallPort";
 
 export type PhoneSupervisorInput = {
   readonly enabled: boolean;
@@ -51,6 +53,8 @@ export type PhoneSupervisor = {
   readonly host: UnifiedHostView | null;
   /** The account supervisor host as a list (`host` or nothing): a standby's own hub is never in it. */
   readonly unified: UnifiedHostView[];
+  /** A call transport for one computer; null when this device cannot reach it. */
+  readonly voicePortFor: (machineId: string) => VoiceCallPort | null;
 };
 
 /** One supervisor host as the phone reaches it. `view` is the last one seen while it is not live. */
@@ -294,5 +298,23 @@ export function usePhoneSupervisor({ enabled, discovery, active, bus }: PhoneSup
 
   const unified = useMemo(() => panelClaimants(machines, host), [machines, host]);
 
-  return { machines, lanes: feed.lanes, now: feed.now, setPaused, moveHere, adoptArchived, startHub, resync, fetchFor, host, unified };
+  return {
+    machines,
+    lanes: feed.lanes,
+    now: feed.now,
+    setPaused,
+    moveHere,
+    adoptArchived,
+    startHub,
+    resync,
+    fetchFor,
+    host,
+    unified,
+    // The call travels the same signed fetch the supervisor snapshot does, so a recording, a
+    // transcript and a spoken reply reach the computer by the one path this phone already trusts.
+    voicePortFor: (machineId: string) => {
+      const fetchLike = fetchFor(machineId);
+      return fetchLike ? remoteVoicePort(fetchLike) : null;
+    },
+  };
 }

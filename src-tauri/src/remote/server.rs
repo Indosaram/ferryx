@@ -4,6 +4,8 @@ mod machine_owner_socket;
 pub(crate) mod agent_control_service;
 #[path = "supervisor_api.rs"]
 pub(crate) mod supervisor_api;
+#[path = "voice_api.rs"]
+pub(crate) mod voice_api;
 use crate::remote::auth::{AuthError, DeviceAccessScope, DeviceInfo, DevicePermission};
 use crate::remote::backend::{RecoveryStream, RemoteRecoveryStatus, RemoteSessionBackend};
 #[cfg(test)]
@@ -9087,6 +9089,17 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/agent-control/sessions",
             get(agent_control_service::http_sessions),
+        )
+        .route("/api/v1/voice/status", get(voice_api::http_status))
+        .route(
+            "/api/v1/voice/transcribe",
+            post(voice_api::http_transcribe)
+                .layer(axum::extract::DefaultBodyLimit::max(voice_api::VOICE_TRANSCRIBE_BODY_MAX)),
+        )
+        .route(
+            "/api/v1/voice/speak",
+            post(voice_api::http_speak)
+                .layer(axum::extract::DefaultBodyLimit::max(voice_api::VOICE_TRANSCRIBE_BODY_MAX)),
         )
         .route(
             "/api/v1/agent-control/events",
