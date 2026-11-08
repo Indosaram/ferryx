@@ -58,8 +58,22 @@ export function sessionStatus(session: FleetSession): SessionStatus {
 
 export function statusLine(snapshot: PanelSnapshot): string {
   if (snapshot.paused) return "Paused · the supervisor is not acting";
+  const decided = new Set(snapshot.decisions.map((decision) => decision.sessionRef));
   const decisions = snapshot.decisions.length;
   if (decisions > 0) return decisions === 1 ? "1 decision needs you" : `${decisions} decisions need you`;
+  // A blocked session no card covers is still the owner's work: never report all-clear for it.
+  const waiting = snapshot.sessions.filter(
+    (session) => !decided.has(session.sessionRef) && !session.stale && (session.state === "blocked" || session.health?.type === "failed"),
+  ).length;
+  if (waiting > 0) {
+    // A prompt the hub holds but has not escalated means the supervisor is still deciding, not
+    // that the lane is stuck; say so instead of reporting a silent wait.
+    const judging = snapshot.sessions.filter(
+      (session) => !decided.has(session.sessionRef) && !session.stale && session.pendingPrompt !== null,
+    ).length;
+    const tail = judging > 0 ? " The supervisor is still deciding." : "";
+    return (waiting === 1 ? "1 lane is waiting for you" : `${waiting} lanes are waiting for you`) + "." + tail;
+  }
   const handling = snapshot.handling.length;
   if (handling > 0) return handling === 1 ? "Handling 1 problem" : `Handling ${handling} problems`;
   const working = snapshot.sessions.filter((session) => session.state === "working" && !session.stale).length;

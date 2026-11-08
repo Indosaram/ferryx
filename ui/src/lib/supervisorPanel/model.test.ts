@@ -149,7 +149,10 @@ describe("supervisor panel view", () => {
 
     expect(view.decisions).toEqual([]);
     expect(view.rejected.map((r) => r.sessionRef)).toEqual(["mac:relay", "win:roblox"]);
-    expect(view.statusLine).toBe("Nothing needs you.");
+    // Both lanes stay blocked with a prompt: a rejected card may not become an all-clear.
+    expect(view.statusLine).toBe(
+      "2 lanes are waiting for you. The supervisor is still deciding.",
+    );
   });
 
   it("maps unknown state to Idle with 'status unknown', never Working", () => {
@@ -170,8 +173,44 @@ describe("supervisor panel view", () => {
     expect(buildPanelView(panelSnapshotFixture, options).statusLine).toBe(
       "2 decisions for you. The rest is running.",
     );
+    // Without cards the fixture's two blocked lanes are still work: name them, never all-clear.
     expect(buildPanelView({ ...panelSnapshotFixture, decisions: [] }, options).statusLine).toBe(
-      "Nothing needs you.",
+      "2 lanes are waiting for you. The supervisor is still deciding.",
+    );
+  });
+
+  it("never reports an all-clear while a blocked lane has no decision card", () => {
+    const view = buildPanelView(
+      withSessions([fleetSession({ state: "blocked", lastAssistantLine: "Ship it?" })]),
+      options,
+    );
+
+    expect(view.decisions).toEqual([]);
+    expect(view.waitingCount).toBe(1);
+    expect(view.statusLine).toBe("1 lane is waiting for you.");
+
+    // A prompt the hub holds but has not escalated is a judging lane, and the row says so.
+    const judging = buildPanelView(
+      withSessions([
+        fleetSession({
+          state: "blocked",
+          pendingPrompt: {
+            promptId: "p-1",
+            kind: "question",
+            question: "Ship it?",
+            command: null,
+            options: ["Yes", "No"],
+            screenRevision: "rev-1",
+          },
+        }),
+      ]),
+      options,
+    );
+
+    expect(judging.sessions[0]).toMatchObject({ judging: true });
+    expect(judging.sessions[0]?.age).toBe("judging · waiting 1 min");
+    expect(judging.statusLine).toBe(
+      "1 lane is waiting for you. The supervisor is still deciding.",
     );
   });
 
