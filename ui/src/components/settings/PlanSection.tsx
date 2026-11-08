@@ -30,7 +30,7 @@ import { Progress } from "../ui/progress";
 import { SettingRow, SettingsHeading } from "./primitives";
 
 const DAY_MS = 86_400_000;
-const TEAM_MIN_SEATS = 2;
+const TEAM_MIN_SEATS = 3;
 const MAX_PACKS = 100;
 const PRICING_DOCS_URL = "https://ferryx.dev/docs/pricing/";
 
@@ -594,7 +594,7 @@ export function PlanSection({
 
                 <SettingRow
                   label="Team"
-                  description="10 machines per seat (minimum 2 seats), plus 5 for each additional pack."
+                  description="10 machines per seat (minimum 3 seats), plus 5 for each additional pack."
                 >
                   {paidPlansOpen ? (
                     <div className="flex flex-wrap items-center justify-end gap-2">

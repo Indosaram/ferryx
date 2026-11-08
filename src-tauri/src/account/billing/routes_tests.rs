@@ -958,15 +958,18 @@ async fn team_pool_counts_member_machines() {
     assert_eq!(status, 200);
     assert_eq!(entitlement["plan"], "team_monthly");
     assert_eq!(entitlement["status"], "ok");
-    assert_eq!(entitlement["machineLimit"], 20);
+    assert_eq!(entitlement["machineLimit"], 30);
     assert_eq!(entitlement["machinesUsed"], 3);
-    assert_eq!(entitlement["seats"], 2);
+    assert_eq!(
+        entitlement["seats"], 3,
+        "a legacy 2-seat record is reported at the published minimum"
+    );
     assert_eq!(entitlement["orgId"], "org-1");
     assert_eq!(entitlement["role"], ROLE_MEMBER);
     assert!(entitlement["graceEndsAt"].is_null());
 
     seed_store(&server.data_dir, |store| {
-        for index in 0..18 {
+        for index in 0..28 {
             seed_machine(
                 store,
                 "u2",
@@ -979,8 +982,8 @@ async fn team_pool_counts_member_machines() {
     let (over_status, over) = get_entitlement(&server, &client, Some(&member_token)).await;
     assert_eq!(over_status, 200);
     assert_eq!(over["status"], "over_limit");
-    assert_eq!(over["machinesUsed"], 21);
-    assert_eq!(over["machineLimit"], 20);
+    assert_eq!(over["machinesUsed"], 31);
+    assert_eq!(over["machineLimit"], 30);
     let grace_ends_at = over["graceEndsAt"].as_u64().expect("grace deadline");
     assert!(grace_ends_at > billing_now());
     assert!(grace_ends_at <= billing_now() + GRACE_SECS + 5);
@@ -1040,9 +1043,12 @@ async fn team_hostpack_subscription_adds_to_pool() {
     let (entitlement_status, entitlement) =
         get_entitlement(&server, &client, Some(&owner_token)).await;
     assert_eq!(entitlement_status, 200);
-    assert_eq!(entitlement["machineLimit"], 30);
+    assert_eq!(entitlement["machineLimit"], 40);
     assert_eq!(entitlement["hostPacks"], 2);
-    assert_eq!(entitlement["seats"], 2);
+    assert_eq!(
+        entitlement["seats"], 3,
+        "a legacy 2-seat record is reported at the published minimum"
+    );
 }
 
 #[tokio::test]
@@ -2089,7 +2095,7 @@ async fn org_invite_accept_adds_member_to_pool() {
     assert_eq!(status, 200);
     assert_eq!(entitlement["orgId"], fixture.org_id.as_str());
     assert_eq!(entitlement["machinesUsed"], 1);
-    assert_eq!(entitlement["machineLimit"], 20);
+    assert_eq!(entitlement["machineLimit"], 30);
 }
 
 #[tokio::test]
@@ -2883,7 +2889,7 @@ async fn org_accept_preserves_existing_owner_or_admin_role_and_recomputes_grace(
 
     // 2. Before accepting, user u4 is created and promoted to ROLE_ADMIN in the org
     // (e.g. via prior administrative join or concurrent write), and machines are seeded
-    // such that adding u4's machines causes the org pool to exceed its machineLimit (20).
+    // such that adding u4's machines causes the org pool to exceed its machineLimit (30).
     let mut admin_token = String::new();
     seed_store(&server.data_dir, |store| {
         admin_token = seed_user(store, "u4", "admin@test.local");
@@ -2896,8 +2902,8 @@ async fn org_accept_preserves_existing_owner_or_admin_role_and_recomputes_grace(
                 joined_at: 1,
             },
         );
-        // Seed 19 machines for owner u1, and 2 machines for admin u4 (total = 21 > 20 limit)
-        for i in 0..19 {
+        // Seed 29 machines for owner u1, and 2 machines for admin u4 (total = 31 > 30 limit)
+        for i in 0..29 {
             seed_machine(store, "u1", &format!("m-owner-{i}"), &format!("key-owner-{i}"));
         }
         seed_machine(store, "u4", "m-admin-0", "key-admin-0");
@@ -2945,7 +2951,7 @@ async fn org_accept_preserves_existing_owner_or_admin_role_and_recomputes_grace(
         .expect("org pool billing state must be persisted during accept");
     let grace_started = billing_state
         .grace_started_at
-        .expect("grace_started_at must be populated when pool machinesUsed (21) exceeds limit (20)");
+        .expect("grace_started_at must be populated when pool machinesUsed (31) exceeds limit (30)");
     assert!(
         grace_started >= before_request && grace_started <= after_response,
         "grace_started_at must fall inclusively between request start and response end: {before_request} <= {grace_started} <= {after_response}"
@@ -2955,8 +2961,8 @@ async fn org_accept_preserves_existing_owner_or_admin_role_and_recomputes_grace(
     let (status, ent) = get_entitlement(&server, &client, Some(&admin_token)).await;
     assert_eq!(status, 200);
     assert_eq!(ent["status"], "over_limit");
-    assert_eq!(ent["machinesUsed"], 21);
-    assert_eq!(ent["machineLimit"], 20);
+    assert_eq!(ent["machinesUsed"], 31);
+    assert_eq!(ent["machineLimit"], 30);
     assert_eq!(ent["role"], ROLE_ADMIN);
     assert_eq!(ent["graceEndsAt"], grace_started + GRACE_SECS);
 }

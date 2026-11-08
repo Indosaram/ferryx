@@ -1024,8 +1024,9 @@ fn quantity_helpers_encode_the_documented_variant_axes() {
     // not), so these compare the unwrapped quantity instead of `Result` values.
     assert_eq!(pro_subscription_quantity(0).expect("0 packs"), 1);
     assert_eq!(pro_subscription_quantity(3).expect("3 packs"), 4);
-    assert_eq!(team_subscription_quantity(0).expect("0 seats"), 2);
-    assert_eq!(team_subscription_quantity(1).expect("1 seat"), 2);
+    assert_eq!(team_subscription_quantity(0).expect("0 seats"), 3);
+    assert_eq!(team_subscription_quantity(1).expect("1 seat"), 3);
+    assert_eq!(team_subscription_quantity(2).expect("2 seats"), 3);
     assert_eq!(team_subscription_quantity(5).expect("5 seats"), 5);
     assert_eq!(team_hostpack_quantity(0).expect("0 packs"), 1);
     assert_eq!(team_hostpack_quantity(4).expect("4 packs"), 4);
@@ -1103,7 +1104,7 @@ async fn checkout_quantity_mapping_covers_all_five_choices() {
         (
             CheckoutPlanChoice::TeamMonthly { seats: 1 },
             VARIANT_TEAM_MONTHLY,
-            2,
+            3,
         ),
         (
             CheckoutPlanChoice::TeamMonthly { seats: 5 },
@@ -1113,7 +1114,7 @@ async fn checkout_quantity_mapping_covers_all_five_choices() {
         (
             CheckoutPlanChoice::TeamAnnual { seats: 0 },
             VARIANT_TEAM_ANNUAL,
-            2,
+            3,
         ),
         (
             CheckoutPlanChoice::TeamHostpackAnnual { packs: 4 },

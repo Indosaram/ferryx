@@ -3882,7 +3882,7 @@ mod tests {
                         joined_at: now,
                     },
                 );
-                // Team subscription: 2 seats (minimum seats = 2), 0 host packs => machineLimit = 20
+                // Team subscription: 3 seats (minimum seats = 3), 0 host packs => machineLimit = 30
                 store.subscriptions.insert(
                     "sub-team-1".into(),
                     crate::account::store::SubscriptionRecord {
@@ -3890,7 +3890,7 @@ mod tests {
                         owner_user_id: owner_user_id.into(),
                         org_id: Some(org_id.into()),
                         plan_key: "team_monthly".into(),
-                        seats: 2,
+                        seats: 3,
                         host_packs: 0,
                         kind: "base".into(),
                         status: "active".into(),
@@ -3901,8 +3901,8 @@ mod tests {
                     },
                 );
 
-                // Populate 20 machines in the pool: 10 owned by owner, 10 owned by member
-                for i in 0..10 {
+                // Populate 30 machines in the pool: 15 owned by owner, 15 owned by member
+                for i in 0..15 {
                     store.machines.insert(
                         format!("rec-owner-{i}"),
                         MachineRecord {
@@ -3920,7 +3920,7 @@ mod tests {
                         },
                     );
                 }
-                for i in 0..10 {
+                for i in 0..15 {
                     store.machines.insert(
                         format!("rec-member-{i}"),
                         MachineRecord {
@@ -3939,7 +3939,7 @@ mod tests {
                     );
                 }
 
-                // Member gets an enrollment code to enroll the 21st machine
+                // Member gets an enrollment code to enroll the 31st machine
                 store.enrollment_codes.insert(
                     crate::remote::auth::enrollment_code_hash(member_code_21),
                     EnrollmentCodeRecord {
@@ -3954,8 +3954,8 @@ mod tests {
             })
             .unwrap();
 
-        // Member attempts to enroll machine 21
-        let member_id_21 = test_identity("member-machine-21");
+        // Member attempts to enroll machine 31
+        let member_id_21 = test_identity("member-machine-31");
         let req21 = test_enroll_request(&state, &member_id_21, member_code_21);
 
         let err21 = enroll(
@@ -3963,20 +3963,20 @@ mod tests {
             Bytes::from(serde_json::to_vec(&req21).unwrap()),
         )
         .await
-        .expect_err("enrolling 21st machine in 20-machine team pool must fail with 402");
+        .expect_err("enrolling 31st machine in 30-machine team pool must fail with 402");
 
         assert_eq!(err21.status, StatusCode::PAYMENT_REQUIRED);
         assert_eq!(err21.code, "PLAN_LIMIT_REACHED");
         let details = err21.details.expect("PLAN_LIMIT_REACHED carries details");
         assert_eq!(details["plan"], "team_monthly");
-        assert_eq!(details["limit"], 20);
-        assert_eq!(details["used"], 20);
+        assert_eq!(details["limit"], 30);
+        assert_eq!(details["used"], 30);
 
         let store_after = state.load().expect("load store after refusal");
         assert_eq!(
             store_after.machines.len(),
-            20,
-            "machine count must remain exactly 20 (rejected machine was not added)"
+            30,
+            "machine count must remain exactly 30 (rejected machine was not added)"
         );
         assert_eq!(
             store_after.enrollment_codes.len(),

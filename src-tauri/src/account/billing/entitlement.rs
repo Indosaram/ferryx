@@ -5,7 +5,7 @@ pub const GRACE_SECS: u64 = 604_800;
 pub const FREE_HOSTS: u32 = 3;
 pub const PRO_BASE_HOSTS: u32 = 10;
 pub const TEAM_HOSTS_PER_SEAT: u32 = 10;
-pub const TEAM_MIN_SEATS: u32 = 2;
+pub const TEAM_MIN_SEATS: u32 = 3;
 pub const HOSTS_PER_PACK: u32 = 5;
 
 pub const MAX_TRUSTED_SEATS: u32 = 10_000;

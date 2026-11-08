@@ -1,5 +1,50 @@
 use super::*;
 
+/// The published price sheet is the single source of truth for plan limits
+/// (owner decision 2026-11-07). Pinning the Rust constants to it means a price or
+/// limit change cannot land in one place only.
+#[test]
+fn test_entitlement_constants_match_published_pricing() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../site/src/data/pricing.json");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let pricing: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse pricing.json: {error}"));
+    let plan = |name: &str| &pricing["plans"][name];
+
+    assert_eq!(
+        plan("free")["machine_limit"].as_u64(),
+        Some(u64::from(FREE_HOSTS)),
+        "free.machine_limit must equal FREE_HOSTS"
+    );
+    assert_eq!(
+        plan("pro")["machine_limit"].as_u64(),
+        Some(u64::from(PRO_BASE_HOSTS)),
+        "pro.machine_limit must equal PRO_BASE_HOSTS"
+    );
+    assert_eq!(
+        plan("team")["min_seats"].as_u64(),
+        Some(u64::from(TEAM_MIN_SEATS)),
+        "team.min_seats must equal TEAM_MIN_SEATS"
+    );
+    assert_eq!(
+        plan("team")["hosts_per_seat"].as_u64(),
+        Some(u64::from(TEAM_HOSTS_PER_SEAT)),
+        "team.hosts_per_seat must equal TEAM_HOSTS_PER_SEAT"
+    );
+    assert_eq!(
+        plan("pro")["extra_host_pack"]["hosts"].as_u64(),
+        Some(u64::from(HOSTS_PER_PACK)),
+        "pro.extra_host_pack.hosts must equal HOSTS_PER_PACK"
+    );
+    assert_eq!(
+        plan("team")["extra_host_pack"]["hosts"].as_u64(),
+        Some(u64::from(HOSTS_PER_PACK)),
+        "team.extra_host_pack.hosts must equal HOSTS_PER_PACK"
+    );
+}
+
 #[test]
 fn test_machine_limit_free_plan() {
     assert_eq!(machine_limit(PlanKey::Free, 0, 0), FREE_HOSTS);
@@ -17,9 +62,9 @@ fn test_machine_limit_pro_plan() {
 
 #[test]
 fn test_machine_limit_team_plan() {
-    assert_eq!(machine_limit(PlanKey::TeamMonthly, 1, 0), 20);
-    assert_eq!(machine_limit(PlanKey::TeamAnnual, 0, 0), 20);
-    assert_eq!(machine_limit(PlanKey::TeamMonthly, 2, 0), 20);
+    assert_eq!(machine_limit(PlanKey::TeamMonthly, 1, 0), 30);
+    assert_eq!(machine_limit(PlanKey::TeamAnnual, 0, 0), 30);
+    assert_eq!(machine_limit(PlanKey::TeamMonthly, 2, 0), 30);
 
     assert_eq!(machine_limit(PlanKey::TeamMonthly, 3, 2), 40);
     assert_eq!(machine_limit(PlanKey::TeamAnnual, 3, 2), 40);
@@ -259,7 +304,7 @@ fn test_active_and_on_trial_status_aware_ends_at_expiry() {
 
     let snap_trial = BillingSnapshot {
         plan: PlanKey::TeamMonthly,
-        seats: 2,
+        seats: 3,
         host_packs: 0,
         status: SubscriptionStatus::OnTrial,
         ends_at: Some(ends_at),
@@ -269,7 +314,7 @@ fn test_active_and_on_trial_status_aware_ends_at_expiry() {
 
     let ent_trial_before = evaluate(&snap_trial, 1_400_000);
     assert_eq!(ent_trial_before.effective_plan, PlanKey::TeamMonthly);
-    assert_eq!(ent_trial_before.machine_limit, 20);
+    assert_eq!(ent_trial_before.machine_limit, 30);
     assert_eq!(ent_trial_before.status, EntitlementStatus::Ok);
 
     let ent_trial_expired = evaluate(&snap_trial, 1_500_001);

@@ -1036,7 +1036,7 @@ describe("PlanSection team management", () => {
     expect(seats.value).toBe("10");
     fireEvent.change(seats, { target: { value: "1" } });
     fireEvent.blur(seats);
-    expect(seats.value).toBe("2");
+    expect(seats.value).toBe("3");
 
     const packs = screen.getByLabelText("Additional machine packs") as HTMLInputElement;
     fireEvent.change(packs, { target: { value: "" } });
