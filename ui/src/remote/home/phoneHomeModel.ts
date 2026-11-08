@@ -1,7 +1,7 @@
 // Pure derivations for the phone home: the supervisor headline across machines, lane status,
 // the cross-machine Inbox, and the merged audit list. No React, no transport.
 import { formatAttentionTime } from "../../features/ferryx/attention/attentionModel";
-import { actingSessionIds, type SupervisorAction, type SupervisorLane, type SupervisorSnapshot } from "../../lib/supervisorModel";
+import { actingSessionIds, proposalAwaitingApproval, type SupervisorAction, type SupervisorLane, type SupervisorSnapshot } from "../../lib/supervisorModel";
 import { setupNeedsAttention } from "../../lib/supervisorSetupModel";
 import type { RemoteSupervisorEntry, RemoteSupervisorLane } from "../remoteSupervisor";
 import type { RemoteSessionInventory } from "../remoteSessionInventory";
@@ -25,6 +25,7 @@ export type SupervisorHeadline =
   | { readonly kind: "needs_setup"; readonly machine: string }
   | { readonly kind: "paused"; readonly lanes: number }
   | { readonly kind: "typing"; readonly lanes: number }
+  | { readonly kind: "needs-you"; readonly lanes: number }
   | { readonly kind: "active"; readonly lanes: number; readonly watched: number };
 
 /** The first readable machine whose supervisor setup needs the person, or null. */
@@ -34,10 +35,16 @@ export function setupMachine(machines: readonly SupervisorMachineView[]): Superv
 
 /**
  * The SupervisorPanelView headline, over every machine whose snapshot is readable:
- * off > needs setup > paused > typing > active. A machine that does not report setup
+ * off > needs setup > paused > typing > needs you > active. A machine that does not report setup
  * (older daemon) never reads as needing it.
  */
-export function supervisorHeadline(machines: readonly SupervisorMachineView[], now: number, discovering = false): SupervisorHeadline {
+export function supervisorHeadline(
+  machines: readonly SupervisorMachineView[],
+  now: number,
+  discovering = false,
+  /** `machineId\u0000sessionId` rows the parent already painted as "Needs you". */
+  needsYouKeys?: ReadonlySet<string>,
+): SupervisorHeadline {
   const snapshots = machines.flatMap((m) => (m.snapshot ? [m.snapshot] : []));
   if (snapshots.length === 0) {
     // Never claim "can't reach" while the answer is still coming (H-03).
@@ -53,6 +60,18 @@ export function supervisorHeadline(machines: readonly SupervisorMachineView[], n
     const acting = actingSessionIds(s, now);
     return s.lanes.some((lane) => lane.sessionId !== null && acting.has(lane.sessionId));
   })) return { kind: "typing", lanes: lanes.length };
+  const needsYou = machines.reduce(
+    (count, machine) =>
+      count +
+      (machine.snapshot?.lanes ?? []).filter(
+        (lane) =>
+          !lane.paused &&
+          (laneNeedsAttention(lane) ||
+            Boolean(lane.sessionId && needsYouKeys?.has(`${machine.machineId}\u0000${lane.sessionId}`))),
+      ).length,
+    0,
+  );
+  if (needsYou > 0) return { kind: "needs-you", lanes: needsYou };
   const watched = snapshots.reduce((sum, s) => sum + s.watched.length, 0);
   return { kind: "active", lanes: lanes.length, watched };
 }
@@ -75,6 +94,8 @@ export function headlineSentence(headline: SupervisorHeadline): string {
       return "Paused on every lane. It still reads your sessions but sends nothing.";
     case "typing":
       return "Typing in a lane right now. Open the lane to take over.";
+    case "needs-you":
+      return headline.lanes === 1 ? "1 lane is waiting on you." : `${headline.lanes} lanes are waiting on you.`;
     case "active": {
       if (headline.lanes === 0 && headline.watched === 0) return "Running, with no lanes yet.";
       const watched = headline.watched > 0 ? `, watching ${plural(headline.watched, "more session")}` : "";
@@ -94,28 +115,53 @@ export function laneFolder(lane: Pick<SupervisorLane, "cwd">): string | null {
 
 export type LaneStatus = { readonly kind: "paused" | "typing" | "needs-you" | "status"; readonly label: string };
 
+/**
+ * The hub's `LaneStatus` values plus the older aliases other surfaces still send. A status the
+ * phone has never heard of reads as unknown, never as "Working": claiming a lane runs when the
+ * hub is waiting on the person is the one wrong reading this view must not make.
+ */
 const LANE_STATUS_LABEL: Readonly<Record<string, string>> = {
-  running: "Working",
+  queued: "Queued",
   working: "Working",
+  running: "Working",
   active: "Working",
   idle: "Idle",
   waiting: "Waiting",
   waiting_on_review: "Waiting for review",
   waiting_on_user: "Needs you",
-  blocked: "Blocked",
   blocked_on_ci: "Waiting for checks",
+  done_claimed: "Verifying",
   done: "Done",
   completed: "Done",
+  verified_done: "Done",
+  closed: "Closed",
   failed: "Failed",
   stopped: "Stopped",
 };
+
+/** Statuses that are over: whatever a finished lane still records, it no longer waits on anyone. */
+const LANE_STATUS_OVER: ReadonlySet<string> = new Set(["verified_done", "closed", "failed"]);
+
+/**
+ * True when the lane's turn belongs to the person, whatever its status field says: the hub stopped
+ * the goal loop (`blocked`), settlement refused the lane (`not_done`), a stop reason is recorded on
+ * the contract, or a proposal is held for approval. The supervisor sends nothing more on such a
+ * lane until the owner acts. `done_claimed` is the hub's own settlement step, not an owner wait.
+ */
+export function laneNeedsAttention(lane: SupervisorLane): boolean {
+  const status = lane.status.trim().toLowerCase();
+  if (LANE_STATUS_OVER.has(status)) return false;
+  if (status === "blocked" || status === "not_done" || status === "waiting_on_user") return true;
+  if (typeof lane.goalContract?.stopReason === "string" && lane.goalContract.stopReason !== "") return true;
+  return proposalAwaitingApproval(lane);
+}
 
 /** One status slot per lane: paused > typing > needs you > the hub's status, from a fixed label set. */
 export function laneStatus(lane: SupervisorLane, acting: ReadonlySet<string>, needsYou: boolean): LaneStatus {
   if (lane.paused) return { kind: "paused", label: "Paused" };
   if (lane.sessionId && acting.has(lane.sessionId)) return { kind: "typing", label: "Typing" };
-  if (needsYou) return { kind: "needs-you", label: "Needs you" };
-  return { kind: "status", label: LANE_STATUS_LABEL[lane.status.trim().toLowerCase()] ?? "Working" };
+  if (needsYou || laneNeedsAttention(lane)) return { kind: "needs-you", label: "Needs you" };
+  return { kind: "status", label: LANE_STATUS_LABEL[lane.status.trim().toLowerCase()] ?? "Status unknown" };
 }
 
 /** The home's one time format: the Inbox's relative time. */
@@ -174,6 +220,9 @@ export const INBOX_WHY: Record<InboxRowKind, string> = {
  * Needs-you sessions across every machine: waiting (and supervisor-held waiting) first, then
  * finished; newest observation first inside each group. Built from the account options, so a row
  * is exactly as openable as the matching worktree row.
+ *
+ * A lane the hub stopped is included even when the inventory reports no activity: `running` there
+ * only says the pane is alive, and a stopped lane's pane stays alive.
  */
 export function buildInboxRows(input: {
   readonly options: readonly AccountWorktreeOption[];
@@ -181,16 +230,25 @@ export function buildInboxRows(input: {
   readonly lanes: readonly RemoteSupervisorLane[];
 }): InboxRow[] {
   const rows: InboxRow[] = [];
+  const seen = new Set<string>();
   for (const option of input.options) {
-    const state = option.inventoryActivityState;
-    if (!option.sessionId || (state !== "waiting" && state !== "done")) continue;
+    if (!option.sessionId) continue;
+    const key = `${option.machineId}\u0000${option.sessionId}`;
+    if (seen.has(key)) continue;
+    const activity = option.inventoryActivityState;
+    const state = activity === "waiting" || activity === "done" ? activity : null;
+    const stopped = state === null && input.lanes.some(
+      (lane) => lane.machineId === option.machineId && lane.sessionId === option.sessionId && !lane.paused && laneNeedsAttention(lane),
+    );
+    if (!state && !stopped) continue;
+    seen.add(key);
     const entry = input.inventories[option.machineId]?.entries.find((item) => item.sessionId === option.sessionId);
     const held = state === "waiting" && input.lanes.some(
       (lane) => lane.machineId === option.machineId && lane.sessionId === option.sessionId && lane.paused,
     );
     const worktree = option.worktreeLabel ?? option.worktreeSlug ?? "main";
     rows.push({
-      key: `${option.machineId}\u0000${option.sessionId}`,
+      key,
       kind: state === "done" ? "done" : held ? "held" : "waiting",
       machineId: option.machineId,
       sessionId: option.sessionId,

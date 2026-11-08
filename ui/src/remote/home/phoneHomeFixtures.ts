@@ -1,6 +1,6 @@
 // Fixture builders for the phone home: supervisor snapshots, machine views, account options and
 // inventories. Shared by the component tests and the mobile QA harness (no network).
-import type { SupervisorAction, SupervisorLane, SupervisorSnapshot } from "../../lib/supervisorModel";
+import type { SupervisorAction, SupervisorGoalView, SupervisorLane, SupervisorSnapshot } from "../../lib/supervisorModel";
 import type { RemoteSessionInventory, RemoteSessionInventoryEntry } from "../remoteSessionInventory";
 import type { AccountWorktreeOption } from "../useAccountWorktrees";
 import type { SupervisorMachineView } from "./phoneHomeModel";
@@ -8,13 +8,30 @@ import type { SupervisorMachineView } from "./phoneHomeModel";
 export function fixtureLane(overrides: Partial<SupervisorLane> & Pick<SupervisorLane, "key">): SupervisorLane {
   return {
     title: "Ship the remote inbox",
-    status: "running",
+    // The hub's own vocabulary: `insert_lane` starts at `queued` and `LaneStatus` has no
+    // `running`. A fixture default outside that set would let the model pass here while the
+    // real phone showed "Status unknown" for every freshly queued lane.
+    status: "working",
     sessionId: `session-${overrides.key}`,
     cwd: "/Users/me/code/ferryx",
     goal: "Land the inbox and keep CI green",
     paused: false,
     lastActivityAt: "2026-10-24T09:00:00Z",
     lastReason: null,
+    ...overrides,
+  };
+}
+
+export function fixtureGoalContract(overrides: Partial<SupervisorGoalView> = {}): SupervisorGoalView {
+  return {
+    mode: "supervised",
+    turnsUsed: 0,
+    turnLimit: 10,
+    revision: 1,
+    requirements: [],
+    stopReason: null,
+    proposal: null,
+    pendingRevisions: [],
     ...overrides,
   };
 }

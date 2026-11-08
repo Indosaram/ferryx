@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { fixtureAction, fixtureInventory, fixtureLane, fixtureMachine, fixtureOption, fixtureSnapshot } from "./phoneHomeFixtures";
+import { fixtureAction, fixtureGoalContract, fixtureInventory, fixtureLane, fixtureMachine, fixtureOption, fixtureSnapshot } from "./phoneHomeFixtures";
 import { normalizeSetupStatus, type SetupNextAction } from "../../lib/supervisorSetupModel";
 import { actionText, buildInboxRows, headlineSentence, laneFolder, laneStatus, optionForSession, recentActions, supervisorHeadline } from "./phoneHomeModel";
 
@@ -57,6 +59,24 @@ describe("supervisorHeadline", () => {
     expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "active", lanes: 2, watched: 1 });
   });
 
+  it("never counts a row the lanes already paint as Needs you as running", () => {
+    // The phone paints "Needs you" from the account inventory's `waiting` state, which is not the
+    // lane's own status field. A headline that only reads lane status called this screen "Running
+    // 4 lanes" while one row under it said "Stopped: tests failed twice" (measured on the harness).
+    const lane = fixtureLane({ key: "auth", status: "working", sessionId: "session-auth" });
+    const machines = [fixtureMachine({ machineId: "studio", snapshot: fixtureSnapshot({ lanes: [lane] }) })];
+    expect(supervisorHeadline(machines, NOW, false, new Set(["studio\u0000session-auth"]))).toEqual({
+      kind: "needs-you",
+      lanes: 1,
+    });
+    // A key for another machine must not leak across the boundary.
+    expect(supervisorHeadline(machines, NOW, false, new Set(["other\u0000session-auth"]))).toEqual({
+      kind: "active",
+      lanes: 1,
+      watched: 0,
+    });
+  });
+
   it("ranks needs_setup after off and before paused", () => {
     const pausedNeedsSetup = fixtureSnapshot({ lanes: [fixtureLane({ key: "a", paused: true })], setup: setup("enable_engine") });
     expect(supervisorHeadline([fixtureMachine({ machineId: "m1", snapshot: pausedNeedsSetup })], NOW)).toEqual({ kind: "needs_setup", machine: "m1" });
@@ -88,6 +108,23 @@ describe("supervisorHeadline", () => {
   it("names the machine in the needs_setup sentence", () => {
     expect(headlineSentence({ kind: "needs_setup", machine: "Studio Mac" })).toBe("Supervisor setup isn't finished on Studio Mac.");
   });
+
+  it("says how many lanes are waiting on the person, after typing and before active", () => {
+    const machines = [
+      fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a", status: "blocked" }), fixtureLane({ key: "b", status: "working" })] }) }),
+      fixtureMachine({ machineId: "m2", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "c", status: "not_done" })] }) }),
+    ];
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "needs-you", lanes: 2 });
+    expect(headlineSentence({ kind: "needs-you", lanes: 1 })).toBe("1 lane is waiting on you.");
+    expect(headlineSentence({ kind: "needs-you", lanes: 3 })).toBe("3 lanes are waiting on you.");
+  });
+
+  it("keeps paused over needs-you when the person paused the stopped lane", () => {
+    const machines = [
+      fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a", status: "blocked", paused: true })] }) }),
+    ];
+    expect(supervisorHeadline(machines, NOW)).toEqual({ kind: "paused", lanes: 1 });
+  });
 });
 
 describe("laneStatus", () => {
@@ -100,8 +137,52 @@ describe("laneStatus", () => {
     expect(laneStatus(lane, new Set(), false)).toEqual({ kind: "status", label: "Waiting for review" });
   });
 
-  it("never shows a raw hub status: unknown values read as Working", () => {
-    expect(laneStatus(fixtureLane({ key: "a", status: "blocked_on_flux_capacitor" }), new Set(), false).label).toBe("Working");
+  it("never shows a raw hub status: unknown values read as unknown, never Working", () => {
+    expect(laneStatus(fixtureLane({ key: "a", status: "blocked_on_flux_capacitor" }), new Set(), false)).toEqual({
+      kind: "status",
+      label: "Status unknown",
+    });
+  });
+
+  it.each([
+    ["queued", { kind: "status", label: "Queued" }],
+    ["working", { kind: "status", label: "Working" }],
+    ["done_claimed", { kind: "status", label: "Verifying" }],
+    ["verified_done", { kind: "status", label: "Done" }],
+    ["closed", { kind: "status", label: "Closed" }],
+    ["failed", { kind: "status", label: "Failed" }],
+  ] as const)("reads the hub status %s as %o", (status, expected) => {
+    expect(laneStatus(fixtureLane({ key: "a", status }), new Set(), false)).toEqual(expected);
+  });
+
+  it.each(["blocked", "not_done", "waiting_on_user"])("reads a %s lane as needing you even with no other signal", (status) => {
+    expect(laneStatus(fixtureLane({ key: "a", status }), new Set(), false)).toEqual({ kind: "needs-you", label: "Needs you" });
+  });
+
+  it("reads a recorded stop reason as needing you whatever the status says", () => {
+    const lane = fixtureLane({ key: "a", status: "working", goalContract: fixtureGoalContract({ stopReason: "high_stakes_user_required" }) });
+    expect(laneStatus(lane, new Set(), false)).toEqual({ kind: "needs-you", label: "Needs you" });
+  });
+
+  it("reads a proposal awaiting approval as needing you", () => {
+    const lane = fixtureLane({
+      key: "a",
+      status: "working",
+      goalContract: fixtureGoalContract({ proposal: { text: "ship it", state: "awaiting_approval", gapIds: [] } }),
+    });
+    expect(laneStatus(lane, new Set(), false)).toEqual({ kind: "needs-you", label: "Needs you" });
+  });
+
+  it("never reads an over lane as needing you, whatever its contract still records", () => {
+    for (const status of ["verified_done", "closed", "failed"]) {
+      const lane = fixtureLane({ key: "a", status, goalContract: fixtureGoalContract({ stopReason: "no_further_progress" }) });
+      expect(laneStatus(lane, new Set(), false).kind).toBe("status");
+    }
+  });
+
+  it("keeps paused over a stopped lane the person paused themselves", () => {
+    const lane = fixtureLane({ key: "a", status: "blocked", paused: true });
+    expect(laneStatus(lane, new Set(), false)).toEqual({ kind: "paused", label: "Paused" });
   });
 
   it("takes the folder from the lane's cwd leaf", () => {
@@ -162,6 +243,35 @@ describe("buildInboxRows", () => {
     const lanes = [{ ...fixtureLane({ key: "l", sessionId: "s", paused: true }), machineId: "m2" }];
     expect(buildInboxRows({ options, inventories: {}, lanes })[0].kind).toBe("waiting");
   });
+
+  it("lists a stopped lane the inventory reports no activity for, because a stopped pane stays alive", () => {
+    const options = [fixtureOption({ machineId: "m1", sessionId: "s", inventoryActivityState: null })];
+    const lanes = [{ ...fixtureLane({ key: "l", sessionId: "s", status: "blocked" }), machineId: "m1" }];
+    const rows = buildInboxRows({ options, inventories: {}, lanes });
+    expect(rows.map((row) => [row.machineId, row.sessionId, row.kind])).toEqual([["m1", "s", "waiting"]]);
+  });
+
+  it("never lists a stopped lane the person paused, nor one stopped on another machine", () => {
+    const options = [
+      fixtureOption({ machineId: "m1", sessionId: "s-paused" }),
+      fixtureOption({ machineId: "m1", sessionId: "s-elsewhere" }),
+      fixtureOption({ machineId: "m1", sessionId: "s-done", inventoryActivityState: "done" }),
+    ];
+    const lanes = [
+      { ...fixtureLane({ key: "a", sessionId: "s-paused", status: "blocked", paused: true }), machineId: "m1" },
+      { ...fixtureLane({ key: "b", sessionId: "s-elsewhere", status: "blocked" }), machineId: "m2" },
+      { ...fixtureLane({ key: "c", sessionId: "s-done", status: "blocked" }), machineId: "m1" },
+    ];
+    expect(buildInboxRows({ options, inventories: {}, lanes }).map((row) => [row.sessionId, row.kind])).toEqual([["s-done", "done"]]);
+  });
+
+  it("lists a session once when two account options share its machine and session", () => {
+    const options = [
+      fixtureOption({ machineId: "m1", sessionId: "s", inventoryActivityState: "waiting" }),
+      fixtureOption({ machineId: "m1", sessionId: "s", inventoryActivityState: "waiting", worktreeLabel: "other" }),
+    ];
+    expect(buildInboxRows({ options, inventories: {}, lanes: [] })).toHaveLength(1);
+  });
 });
 
 describe("optionForSession", () => {
@@ -173,5 +283,52 @@ describe("optionForSession", () => {
     expect(optionForSession(options, "m1", "s")?.machineId).toBe("m1");
     expect(optionForSession(options, "m2", "s")).toBeNull();
     expect(optionForSession(options, "m1", null)).toBeNull();
+  });
+});
+
+/* The hub owns the status vocabulary (`LaneStatus`, serde `snake_case`). Reading it here means a
+   status added on the Rust side fails this suite instead of silently reading as an unknown lane on
+   the phone: that drift is what made a waiting lane render as "Working". Vitest runs with `ui/` as
+   its root, so the contract sits one level up. */
+const rustLaneStatus = readFileSync(resolve(process.cwd(), "../crates/ferryx-hub/src/lanes/state.rs"), "utf8");
+
+function rustLaneStatusWireNames(): string[] {
+  const body = /pub enum LaneStatus \{([\s\S]*?)\n\}/.exec(rustLaneStatus)?.[1] ?? "";
+  const variants = [...body.matchAll(/^\s{4}([A-Z][A-Za-z0-9]*),$/gm)].map((match) => match[1]);
+  // `#[serde(rename_all = "snake_case")]` maps `DoneClaimed` to `done_claimed`.
+  return variants.map((variant) => variant.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase());
+}
+
+describe("hub lane status vocabulary", () => {
+  it("reads the hub's own enum", () => {
+    expect(rustLaneStatusWireNames()).toEqual([
+      "queued",
+      "working",
+      "blocked",
+      "done_claimed",
+      "not_done",
+      "verified_done",
+      "closed",
+      "failed",
+    ]);
+  });
+
+  it("reads every status the hub can send as a real state, never as unknown", () => {
+    const acting = new Set<string>();
+    for (const status of rustLaneStatusWireNames()) {
+      const reading = laneStatus(fixtureLane({ key: "a", status }), acting, false);
+      expect(reading.label, `hub status "${status}" must not read as unknown`).not.toBe("Status unknown");
+    }
+  });
+
+  it("only calls a lane needing you when the hub is actually holding it for the person", () => {
+    const acting = new Set<string>();
+    const waitingOnPerson = new Set(["blocked", "not_done"]);
+    for (const status of rustLaneStatusWireNames()) {
+      const reading = laneStatus(fixtureLane({ key: "a", status }), acting, false);
+      const expected = waitingOnPerson.has(status) ? "Needs you" : null;
+      if (expected) expect(reading.label).toBe(expected);
+      else expect(reading.label).not.toBe("Needs you");
+    }
   });
 });

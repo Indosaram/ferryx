@@ -59,6 +59,15 @@ describe("SupervisorHome", () => {
     expect(screen.getByTestId("supervisor-home-empty")).toBeInTheDocument();
   });
 
+  it("leads with the lane waiting on the person instead of claiming it is running", () => {
+    renderHome({
+      machines: [fixtureMachine({ machineId: "m1", snapshot: fixtureSnapshot({ lanes: [fixtureLane({ key: "a", status: "not_done" })] }) })],
+    });
+    expect(screen.getByTestId("supervisor-home")).toHaveAttribute("data-headline", "needs-you");
+    expect(screen.getByTestId("supervisor-home-headline")).toHaveTextContent("1 lane is waiting on you.");
+    expect(screen.getByTestId("supervisor-lane-status")).toHaveTextContent("Needs you");
+  });
+
   it("does not claim the supervisor is off when no computer can be read, and offers a retry", () => {
     const onRetry = vi.fn();
     renderHome({ onRetry, machines: [fixtureMachine({ machineId: "m1", label: "Studio", state: "offline", snapshot: null })] });

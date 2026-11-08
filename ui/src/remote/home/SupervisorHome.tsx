@@ -393,7 +393,7 @@ export function SupervisorHome({
       return copy;
     });
   }, [machines, optimistic]);
-  const headline = supervisorHeadline(machines, now, discovering);
+  const headline = supervisorHeadline(machines, now, discovering, needsYou);
   const hostId = host?.machineId ?? null;
   const hostMachine = machines.find((item) => item.machineId === hostId);
   const setupFor = (machine: SupervisorMachineView) => ({
