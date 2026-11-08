@@ -78,6 +78,16 @@ function splitStatus(statusLine: string): { headline: string; detail?: string } 
   return split < 0 ? { headline: statusLine } : { headline: statusLine.slice(0, split + 1), detail: statusLine.slice(split + 2) };
 }
 
+/** A visible section title, so each list says what it is (the region keeps its short name). */
+function SectionHeading({ title, count, touch }: { title: string; count: number; touch?: boolean }) {
+  return (
+    <h2 className={cn('flex items-baseline gap-1.5 font-medium text-muted-foreground', touch ? 'text-sm' : 'text-xs')}>
+      <span className="flex-1">{title}</span>
+      <span className="tabular-nums">{count}</span>
+    </h2>
+  );
+}
+
 function Decision({
   decision,
   actions,
@@ -186,6 +196,35 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
       return next;
     });
   };
+  // A waiting or failed session is the owner's work: it sits with the decisions under "Needs you",
+  // not among the running sessions where the headline's count could not be traced to a row.
+  const waitingRows = view.sessions.filter((row) => row.glyph === 'needsYou' || row.glyph === 'failed');
+  const otherRows = view.sessions.filter((row) => row.glyph !== 'needsYou' && row.glyph !== 'failed');
+  const needsYouCount = view.decisions.length + waitingRows.length;
+  const sessionRow = (row: (typeof view.sessions)[number]) => {
+    const goal = goals?.get(row.sessionRef);
+    return (
+      <SessionRow
+        key={row.sessionRef}
+        touch={touch}
+        title={row.title}
+        detail={row.age ?? row.why}
+        computer={row.hostLabel}
+        state={SESSION_GLYPH[row.glyph]}
+        onOpen={() => actions.openSession(row.sessionRef)}
+        goal={
+          goal
+            ? {
+                text: goal.text,
+                paused: goal.paused,
+                pending: pausingLanes.has(goal.laneKey),
+                onTogglePaused: () => void toggleLane(goal),
+              }
+            : undefined
+        }
+      />
+    );
+  };
 
   return (
     <div data-testid="supervisor-panel-surface" className="flex flex-col gap-4">
@@ -204,15 +243,18 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
           {actionError}
         </p>
       ) : null}
-      {view.decisions.length > 0 ? (
+      {needsYouCount > 0 ? (
         <section aria-label="Needs you" className="flex flex-col gap-3">
+          <SectionHeading title="Needs you" count={needsYouCount} touch={touch} />
           {view.decisions.map((decision) => (
             <Decision key={decision.sessionRef} decision={decision} actions={actions} touch={touch} />
           ))}
+          {waitingRows.length > 0 ? <div className="flex flex-col gap-1">{waitingRows.map(sessionRow)}</div> : null}
         </section>
       ) : null}
       {view.handling.length > 0 ? (
         <section aria-label="Handling" className="flex flex-col gap-1">
+          <SectionHeading title="The supervisor is on it" count={view.handling.length} touch={touch} />
           {view.handling.map((entry) => {
             const ref = entry.sessionRef;
             const session = ref ? titleOf.get(ref) : undefined;
@@ -232,32 +274,10 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
           })}
         </section>
       ) : null}
-      {view.sessions.length > 0 ? (
+      {otherRows.length > 0 ? (
         <section aria-label="Sessions" className="flex flex-col gap-1">
-          {view.sessions.map((row) => {
-            const goal = goals?.get(row.sessionRef);
-            return (
-              <SessionRow
-                key={row.sessionRef}
-                touch={touch}
-                title={row.title}
-                detail={row.age ?? row.why}
-                computer={row.hostLabel}
-                state={SESSION_GLYPH[row.glyph]}
-                onOpen={() => actions.openSession(row.sessionRef)}
-                goal={
-                  goal
-                    ? {
-                        text: goal.text,
-                        paused: goal.paused,
-                        pending: pausingLanes.has(goal.laneKey),
-                        onTogglePaused: () => void toggleLane(goal),
-                      }
-                    : undefined
-                }
-              />
-            );
-          })}
+          <SectionHeading title="Sessions" count={otherRows.length} touch={touch} />
+          {otherRows.map(sessionRow)}
         </section>
       ) : null}
       {view.log.total > 0 ? (

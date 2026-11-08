@@ -249,6 +249,17 @@ describe('PanelSurface', () => {
     expect(document.querySelectorAll('[data-testid="session-row"] [data-glyph="done"]')).toHaveLength(0);
   });
 
+  it('puts a waiting session under Needs you, so the headline count matches the rows there', () => {
+    // Without cards the two blocked sessions are still the owner's work.
+    render(<PanelSurface snapshot={{ ...panelSnapshotFixture, decisions: [] }} actions={inert} nowMs={NOW} />);
+    const needsYou = screen.getByRole('region', { name: 'Needs you' });
+    expect(within(needsYou).getByRole('heading', { name: /Needs you/ })).toHaveTextContent('2');
+    const waiting = within(needsYou).getAllByTestId('session-row').map((row) => row.getAttribute('data-state'));
+    expect(waiting).toEqual(['needs', 'needs']);
+    const sessions = screen.getByRole('region', { name: 'Sessions' });
+    expect(within(sessions).queryAllByTestId('session-row').filter((row) => row.getAttribute('data-state') === 'needs')).toHaveLength(0);
+  });
+
   it('carries a legacy goal on its session row, with pause and resume as the row menu item', async () => {
     const setLanePaused = vi.fn(async () => ({ ok: true }) as const);
     const actions = { ...(inert as object), setLanePaused } as never;

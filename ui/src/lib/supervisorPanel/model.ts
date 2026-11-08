@@ -413,7 +413,8 @@ function sessionRow(
   } else if (session.state === "blocked") {
     const waited =
       session.stateSinceMs !== null ? `waiting ${formatMinutes(nowMs - session.stateSinceMs)}` : null;
-    age = judging ? (waited ? `judging \u00b7 ${waited}` : "judging") : waited;
+    // Plain words, not the hub's term: the supervisor holds this prompt and has not decided yet.
+    age = judging ? (waited ? `supervisor deciding \u00b7 ${waited}` : "supervisor deciding") : waited;
   }
   return {
     sessionRef: session.sessionRef,

@@ -208,7 +208,7 @@ describe("supervisor panel view", () => {
     );
 
     expect(judging.sessions[0]).toMatchObject({ judging: true });
-    expect(judging.sessions[0]?.age).toBe("judging · waiting 1 min");
+    expect(judging.sessions[0]?.age).toBe("supervisor deciding · waiting 1 min");
     expect(judging.statusLine).toBe(
       "1 lane is waiting for you. The supervisor is still deciding.",
     );

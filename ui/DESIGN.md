@@ -545,6 +545,9 @@ Cut-outs use `stroke-background`. Unknown state renders idle with the detail "St
 - Session and handling rows: glyph, title (`font-medium truncate`), one `text-muted-foreground`
   detail line, computer name at the end. A handling row has a sibling Stop button (never nested in the
   row button), `aria-label="Stop <title>"`, `min-h-11 min-w-11` on phone.
+- Sections carry a visible `text-muted-foreground` title with a count: "Needs you", "The
+  supervisor is on it", "Sessions". A waiting or failed session without a card sits under "Needs
+  you" after the cards, so the headline's count always points at rows in that section.
 - Action log: two lines by default, "All N" / "Less" toggle; a line is one sentence, a muted time, a
   "Why" disclosure (`aria-expanded`, basis in words) and "Undo" when reversible. Unverified claims
   carry a grey "Unverified" chip (`bg-muted text-muted-foreground`), never a colour.
