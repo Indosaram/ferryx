@@ -155,7 +155,16 @@ export function SidebarView({
 
       {supervisor && actions.onViewChange ? <SidebarViewTabs view={activeView} onViewChange={actions.onViewChange} /> : null}
 
-      {activeView === "supervisor" && supervisor ? supervisor.content : null}
+      {/* Kept mounted while Worktrees shows, so switching back is instant: no reload, no "Loading" flash. */}
+      {supervisor ? (
+        <div
+          data-testid="supervisor-region"
+          hidden={activeView !== "supervisor" || undefined}
+          className={cn("min-h-0 flex-1 flex-col", activeView === "supervisor" ? "flex" : "hidden")}
+        >
+          {supervisor.content}
+        </div>
+      ) : null}
 
       <div
         data-testid="worktree-region"

@@ -75,11 +75,14 @@ describe("Sidebar top: view segment", () => {
     fireEvent.click(within(tablist()).getByRole("tab", { name: "Worktrees" }));
     expect(within(tablist()).getByRole("tab", { name: "Worktrees" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("worktree-region")).not.toHaveAttribute("hidden");
-    expect(screen.queryByTestId("supervisor-panel")).toBeNull();
+    // The panel stays mounted behind the tree, so coming back shows it at once.
+    expect(screen.getByTestId("supervisor-panel")).not.toBeVisible();
 
     // Arrow-key roving moves selection back to the panel.
     fireEvent.keyDown(within(tablist()).getByRole("tab", { name: "Worktrees" }), { key: "ArrowLeft" });
     expect(within(tablist()).getByRole("tab", { name: "Supervisor" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("supervisor-panel")).toBeVisible();
+    expect(screen.queryByText("Loading supervisor…")).toBeNull();
   });
 });
 
