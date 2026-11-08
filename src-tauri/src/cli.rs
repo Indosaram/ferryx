@@ -2444,12 +2444,43 @@ where
     }
 }
 
+/// Drops a leading `CODE: ` prefix so a coded message is not prefixed twice.
+fn strip_code_prefix(message: &str) -> String {
+    match message.split_once(": ") {
+        Some((code, rest))
+            if !code.is_empty()
+                && code
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_') =>
+        {
+            rest.to_string()
+        }
+        _ => message.to_string(),
+    }
+}
+
+/// The origin this machine enrolled to, when the enrollment record has one.
+fn enrolled_origin() -> Option<String> {
+    crate::account::enroll_client::load_enrollment_record()
+        .map(|record| record.account_origin.trim().to_string())
+        .filter(|origin| !origin.is_empty())
+}
+
 fn account_cli_origin(origin: Option<String>) -> Result<String, AccountCliError> {
     match origin {
         Some(value) => crate::account::origin::normalize_account_origin(&value)
             .map_err(|error| AccountCliError::usage(error.to_string())),
-        None => crate::account::origin::account_origin()
-            .map_err(|error| AccountCliError::usage(error.to_string())),
+        // A machine that already enrolled knows the origin it enrolled to. Falling back to the
+        // enrollment record keeps every later command (`up`, `account plan`) working without
+        // re-exporting FERRYX_ACCOUNT_ORIGIN on each invocation.
+        None => match crate::account::origin::account_origin() {
+            Ok(origin) => Ok(origin),
+            Err(error) => match enrolled_origin() {
+                Some(origin) => crate::account::origin::normalize_account_origin(&origin)
+                    .map_err(|error| AccountCliError::usage(error.to_string())),
+                None => Err(AccountCliError::usage(error.to_string())),
+            },
+        },
     }
 }
 
@@ -3199,8 +3230,10 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
     // The process is still single-threaded at this point.
     std::env::remove_var(INSTALL_KEY_ENV);
 
+    // `account_cli_origin` already returns a coded message (`CODE: detail`). Re-prefixing it
+    // produced `ACCOUNT_ORIGIN_INVALID: ACCOUNT_ORIGIN_UNSET: ...`; keep only the detail.
     let origin = account_cli_origin(command.origin.clone())
-        .map_err(|error| UpCliError::usage("ACCOUNT_ORIGIN_INVALID", error.message))?;
+        .map_err(|error| UpCliError::usage("ACCOUNT_ORIGIN_INVALID", strip_code_prefix(&error.message)))?;
 
     // 1. Identity first, so the approval request and the enrollment present the same machine.
     let identity_dir = crate::remote::auth::canonical_remote_dir().ok_or_else(|| {
@@ -4626,6 +4659,18 @@ mod tests {
             .await
         });
         assert!(waited.is_err());
+    }
+
+    #[test]
+    fn strip_code_prefix_keeps_the_detail() {
+        assert_eq!(
+            strip_code_prefix("ACCOUNT_ORIGIN_UNSET: set FERRYX_ACCOUNT_ORIGIN"),
+            "set FERRYX_ACCOUNT_ORIGIN"
+        );
+        assert_eq!(strip_code_prefix("MAIL_FAILED: boom"), "boom");
+        // A message without a leading code is returned untouched.
+        assert_eq!(strip_code_prefix("boom: detail"), "boom: detail");
+        assert_eq!(strip_code_prefix("plain message"), "plain message");
     }
 
     fn up_args(extra: &[&str]) -> Vec<String> {

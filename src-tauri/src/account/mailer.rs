@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MailerError {
-    #[error("MAIL_FAILED: {0}")]
+    // The Display text is the detail only: every wire and CLI site prefixes `MAIL_FAILED`
+    // itself, so `#[error("MAIL_FAILED: {0}")]` produced `MAIL_FAILED: MAIL_FAILED: ...`.
+    #[error("{0}")]
     MailFailed(String),
 }
 
