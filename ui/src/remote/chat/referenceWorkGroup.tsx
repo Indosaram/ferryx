@@ -401,7 +401,7 @@ export function ReferenceWorkGroup({
         aria-expanded={expanded}
         aria-controls={bodyId}
         onClick={() => setExpanded((prev) => !prev)}
-        className="flex min-h-11 w-full items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex min-h-11 w-full items-center gap-1.5 px-0 py-1 text-left text-sm text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         <ChevronRight
           aria-hidden="true"
@@ -475,7 +475,7 @@ export function ReferenceDiffPart({
         <pre
           data-testid="reference-diff-body"
           tabIndex={0}
-          className="ml-7 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-chat-surface px-3 py-2 font-mono text-[0.8125rem] leading-relaxed text-chat-foreground"
+          className="ml-7 max-h-40 overflow-auto whitespace-pre-wrap break-words border-l border-chat-border pl-3 py-1 font-mono text-[0.8125rem] leading-relaxed text-chat-foreground"
         >
           {body}
         </pre>
