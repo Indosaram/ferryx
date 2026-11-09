@@ -926,6 +926,29 @@ async fn an_engine_exit_mid_turn_is_never_retransmitted_and_an_early_exit_backs_
     assert_eq!(supervisor.health().generation, 2);
 }
 
++/// An owner's conversation turn that arrives while an early-exited engine is backing off waits
+/// for the relaunch and is answered, instead of failing with the exit fault.
+#[tokio::test(start_paused = true)]
+async fn a_conversation_turn_inside_the_exit_backoff_waits_for_the_relaunch() {
+    let harness = Harness::new("conversation-backoff", all_capabilities());
+    let supervisor = harness.supervisor();
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:D1:1700.1".to_owned(),
+    };
+    assert_eq!(supervisor.decide("first").await.unwrap(), "answer:first");
+    harness.peer.disconnect();
+    let early = supervisor.decide("too soon").await.unwrap_err();
+    assert_eq!(early.code(), "MHC_ENGINE_EXITED");
+    let reply = tokio::time::timeout(WAIT + MIN_BACKOFF, supervisor.converse(&scope, "hello"))
+        .await
+        .expect("bounded")
+        .expect("the turn waits for the relaunch");
+    assert!(!reply.is_empty());
+    assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 2);
+    assert_eq!(count(&harness.peer.frames(), "prompt", "too soon"), 0);
+}
+
 /// Health alone tells the Slack gate (`chat::slack_supervisor::engine_ready`) whether an
 /// exited engine may take a turn, since it lets an exit without a fault through: an early
 /// exit keeps its fault there until the backoff ends and the supervising loop relaunches the
@@ -1014,7 +1037,7 @@ async fn work_tool_requests_reach_the_typed_handler_with_the_hub_scope() {
     assert_eq!(
         opens[0]["context"],
         json!({"ferryx_role": "conversation", "ferryx_scope": scope.key(), "memory_write": "deny",
-            "supervisor_tools": "work", "tools_exclude": "bash,edit,write"})
+            "supervisor_tools": "work", "tools_exclude": "bash,edit,write,ask_user_question"})
     );
 
     // A request naming a session that is not a supervisor conversation is rejected.
