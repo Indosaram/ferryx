@@ -468,6 +468,24 @@ const win = {
     }
     return rows.map((row) => ({ ...row, process: names.get(row.pid) ?? null }));
   },
+  /**
+   * The app window's whole native view tree (every descendant HWND with visibility and screen
+   * rect, in z-order) plus the Chrome_WidgetWin_1 top windows of other processes. Diagnostic:
+   * tells a stale WebView2/engine view left over the active one from the one the tab list names.
+   */
+  windowTree() {
+    const result = this.ps("tree", ["-ProcessId", String(this.pid)]);
+    const names = new Map();
+    for (const line of run("tasklist", ["/FO", "CSV", "/NH"]).stdout.split(/\r?\n/)) {
+      const match = /^"([^"]+)","(\d+)"/.exec(line.trim());
+      if (match) names.set(Number(match[2]), match[1]);
+    }
+    return result.stdout.split(/\r?\n/).map((line) => line.split("\t")).filter((cells) => cells.length >= 8)
+      .map(([kind, hwnd, pid, cls, title, visible, rect, parent]) => ({
+        kind, hwnd: Number(hwnd), pid: Number(pid), process: names.get(Number(pid)) ?? null, class: cls, title,
+        visible: visible === "1", rect: rect.split(",").map(Number), parent: Number(parent),
+      }));
+  },
   scale: () => 1,
 };
 if (platform === "win32") {
@@ -566,6 +584,28 @@ public static class FxInput {
     EnumWindows((h, l) => { if (IsWindowVisible(h)) lines.Add("top\t" + Describe(h)); return true; }, IntPtr.Zero);
     return string.Join("\n", lines);
   }
+  [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr l);
+  /** Every window (visible or not) of process ProcessId's top-level windows, their descendants
+   * and every msedgewebview2/ferryx_engine top window, as "kind hwnd pid class title" plus
+   * "<TAB>visible<TAB>left,top,right,bottom<TAB>parent". Children are listed in z-order. */
+  public static string Tree(uint pid) {
+    var lines = new System.Collections.Generic.List<string>();
+    EnumWindows((h, l) => {
+      uint p; GetWindowThreadProcessId(h, out p);
+      var cls = new System.Text.StringBuilder(128); GetClassName(h, cls, 128);
+      if (p != pid && cls.ToString() != "Chrome_WidgetWin_1") return true;
+      RECT r; GetWindowRect(h, out r);
+      lines.Add("top\t" + Describe(h) + "\t" + (IsWindowVisible(h) ? "1" : "0") + "\t" + r.Left + "," + r.Top + "," + r.Right + "," + r.Bottom + "\t0");
+      if (p != pid) return true;
+      EnumChildWindows(h, (c, l2) => {
+        RECT cr; GetWindowRect(c, out cr);
+        lines.Add("child\t" + Describe(c) + "\t" + (IsWindowVisible(c) ? "1" : "0") + "\t" + cr.Left + "," + cr.Top + "," + cr.Right + "," + cr.Bottom + "\t" + ((long)GetParent(c)).ToString());
+        return true;
+      }, IntPtr.Zero);
+      return true;
+    }, IntPtr.Zero);
+    return string.Join("\n", lines);
+  }
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -650,6 +690,7 @@ switch ($Action) {
   "focusowner" { Write-Output ([FxInput]::FocusOwner()) }
   "focuschain" { Write-Output ([FxInput]::FocusChain()) }
   "topwindows" { Write-Output ([FxInput]::TopWindows()) }
+  "tree" { Write-Output ([FxInput]::Tree([uint32]$ProcessId)) }
   "wheel" { $n = [FxInput]::Wheel($Width, $Height, [int]$Codes); if ($n -eq 0) { exit 4 } }
   # A maximised window ignores SetWindowPos size changes, so restore it first (SW_RESTORE = 9);
   # the Explorer drag source opened maximised and covered the page's drop point.
