@@ -257,7 +257,7 @@ export const WorkRow: React.FC<WorkRowProps> = ({
           data-testid="work-row"
           onClick={onToggle}
           className={cn(
-            "w-full min-h-11 flex items-center gap-1.5 px-1 py-1 text-left rounded hover:bg-chat-row-hover transition-colors group focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "w-full min-h-11 flex items-center gap-1.5 px-0 py-1 text-left transition-colors group focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
             isError ? "text-chat-danger" : "text-chat-foreground-secondary"
           )}
         >
@@ -267,7 +267,7 @@ export const WorkRow: React.FC<WorkRowProps> = ({
         <div
           data-testid="work-row"
           className={cn(
-            "w-full min-h-11 flex items-center gap-1.5 px-1 py-1 text-left rounded transition-colors group",
+            "w-full min-h-11 flex items-center gap-1.5 px-0 py-1 text-left transition-colors group",
             isError ? "text-chat-danger" : "text-chat-foreground-secondary"
           )}
         >
@@ -920,6 +920,45 @@ export const CHAT_MARKDOWN_COMPONENTS = {
   },
   ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
   ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
+  h1: ({ children }: any) => (
+    <h1 className="mt-1 mb-2 text-xl font-semibold tracking-tight first:mt-0">{children}</h1>
+  ),
+  h2: ({ children }: any) => (
+    <h2 className="mt-1 mb-2 text-lg font-semibold tracking-tight first:mt-0">{children}</h2>
+  ),
+  h3: ({ children }: any) => (
+    <h3 className="mt-1 mb-2 text-base font-semibold tracking-tight first:mt-0">{children}</h3>
+  ),
+  h4: ({ children }: any) => (
+    <h4 className="mt-1 mb-2 text-sm font-semibold tracking-tight first:mt-0">{children}</h4>
+  ),
+  h5: ({ children }: any) => (
+    <h5 className="mt-1 mb-2 text-sm font-semibold first:mt-0">{children}</h5>
+  ),
+  h6: ({ children }: any) => (
+    <h6 className="mt-1 mb-2 text-xs font-semibold uppercase tracking-wide text-chat-foreground-secondary first:mt-0">
+      {children}
+    </h6>
+  ),
+  hr: () => <hr className="my-4 border-0 border-t border-chat-border" />,
+  table: ({ children }: any) => (
+    <div className="my-2 w-full overflow-x-auto">
+      <table className="w-full border-collapse text-sm">{children}</table>
+    </div>
+  ),
+  thead: ({ children }: any) => <thead>{children}</thead>,
+  tbody: ({ children }: any) => <tbody>{children}</tbody>,
+  tr: ({ children }: any) => <tr>{children}</tr>,
+  th: ({ children }: any) => (
+    <th className="border-b border-chat-border px-0 py-2 pr-6 text-left text-xs font-medium text-chat-foreground-secondary">
+      {children}
+    </th>
+  ),
+  td: ({ children }: any) => (
+    <td className="border-b border-chat-border px-0 py-2 pr-6 align-top text-chat-foreground">
+      {children}
+    </td>
+  ),
   a: ({ href, children }: any) => (
     <a
       href={href}

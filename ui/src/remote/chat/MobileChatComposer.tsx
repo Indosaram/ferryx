@@ -558,7 +558,7 @@ export const MobileChatComposer = React.forwardRef<
     <div
       data-testid="mobile-chat-composer"
       className={cn(
-        "flex flex-col w-full bg-chat-composer-panel border-t border-chat-composer-border rounded-t-2xl pb-safe select-none",
+        "mx-auto mb-2 flex w-[calc(100%-1.5rem)] max-w-[60rem] flex-col rounded-xl border border-chat-composer-border bg-chat-composer-panel pb-safe select-none",
         className
       )}
     >
