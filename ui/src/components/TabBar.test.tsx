@@ -188,10 +188,12 @@ describe("TabBar", () => {
       return key ? rectFor(rects[key].left, rects[key].right) : rectFor(0, 0);
     });
     try {
-      const { rerender } = render(<TabBar groupId="group-a" tabs={tabs} activeTabId="tab-a" onActivate={vi.fn()} onClose={vi.fn()} />);
+      const { rerender } = render(
+        <TabBar groupId="group-a" tabs={tabs} activeTabId="tab-a" onActivate={vi.fn()} onClose={vi.fn()} onAdd={vi.fn()} />,
+      );
       const tablist = screen.getByRole("tablist");
       expect(tablist.scrollLeft).toBe(0);
-      rerender(<TabBar groupId="group-a" tabs={tabs} activeTabId="tab-c" onActivate={vi.fn()} onClose={vi.fn()} />);
+      rerender(<TabBar groupId="group-a" tabs={tabs} activeTabId="tab-c" onActivate={vi.fn()} onClose={vi.fn()} onAdd={vi.fn()} />);
       expect(tablist.scrollLeft).toBe(200);
     } finally {
       spy.mockRestore();
