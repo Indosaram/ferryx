@@ -78,6 +78,9 @@ impl DaemonLogging {
             .try_init()?;
         let task = tokio::spawn(async move {
             let (mut file, mut path) = (file, path);
+            // A failed write (a full disk) drops its record and is reported once; the next
+            // record tries again, so the log resumes once space is back instead of ending.
+            let mut reported = false;
             while let Some(message) = rx.recv().await {
                 let (mut bytes, stop) = match message {
                     Message::Record(bytes) => (bytes, false),
@@ -89,20 +92,29 @@ impl DaemonLogging {
                         format!("daemon_log_dropped_records={lost}\n").as_bytes(),
                     );
                 }
+                let records = usize::from(!bytes.is_empty());
                 let written = crate::ipc::run_blocking(move || {
-                    append_bounded(&mut file, &path, &bytes).map_err(|e| {
-                        crate::ipc::error::IpcError::internal(format!("daemon log write: {e}"))
-                    })?;
-                    Ok((file, path))
+                    let result = append_bounded(&mut file, &path, &bytes);
+                    Ok((file, path, result))
                 })
                 .await;
-                (file, path) = match written {
+                let result;
+                (file, path, result) = match written {
                     Ok(state) => state,
                     Err(error) => {
                         report_failure(&anyhow::anyhow!("{error:?}"));
                         return;
                     }
                 };
+                if let Err(error) = result {
+                    dropped.fetch_add(lost + records, Ordering::Relaxed);
+                    if !reported {
+                        reported = true;
+                        report_failure(&anyhow::anyhow!("daemon log write: {error}"));
+                    }
+                } else {
+                    reported = false;
+                }
                 if stop {
                     break;
                 }
