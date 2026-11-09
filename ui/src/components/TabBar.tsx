@@ -41,6 +41,8 @@ type TabBarProps = {
   onRenameTab?: (id: string, newLabel: string) => void;
   onTogglePin?: (id: string, pinned: boolean) => void;
   onResetAgentState?: (tabId: string) => void;
+  /** Restart the tab's pane process in place instead of tearing the session down. */
+  onRestartPane?: (sessionId: string) => void;
   /**
    * Multi-window: moves a terminal tab to another window (`null` opens a new one). Only passed
    * when the multi-window shell is available, so the menu items stay hidden otherwise.
@@ -136,6 +138,7 @@ export function TabBar({
   onRenameTab,
   onTogglePin,
   onResetAgentState,
+  onRestartPane,
   onMoveTabToWindow,
   listOtherWindows,
   sessionIdForLifecycle,
@@ -458,10 +461,12 @@ export function TabBar({
     if (isTerminalTab(tab)) {
       const lifecycleSessionId = sessionIdForLifecycle?.(tab) ?? tab.sessionId;
       items.push({ kind: "separator" });
-      items.push({ kind: "item", id: "restart-session", label: "Restart Session" });
+      items.push({ kind: "item", id: "restart-session", label: onRestartPane ? "Restart pane" : "Restart Session" });
       actions["restart-session"] = () => {
         onActivate(tab.id);
-        requestSessionLifecycleAction("restart", lifecycleSessionId);
+        // Restarting in place keeps the tab, pane and session; the lifecycle path destroys them.
+        if (onRestartPane) onRestartPane(lifecycleSessionId);
+        else requestSessionLifecycleAction("restart", lifecycleSessionId);
       };
     }
     items.push({ kind: "separator" });
@@ -513,7 +518,7 @@ export function TabBar({
       return;
     }
     void listOtherWindows().catch(() => [] as string[]).then(openWithWindows);
-  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onMoveTabToWindow, listOtherWindows, onResetAgentState, onSplitDown, onSplitRight, onTogglePin, sessionIdForLifecycle, filePathsForTab, onReloadFileTab, onOpenFileExternally, onRevealFileTab]);
+  }, [browserSettings, tabs, handleStartRename, onActivate, onClose, onCloseOthers, onCloseToLeft, onCloseToRight, onDuplicateBrowser, onMoveTabToSplit, onMoveTabToWindow, listOtherWindows, onResetAgentState, onRestartPane, onSplitDown, onSplitRight, onTogglePin, sessionIdForLifecycle, filePathsForTab, onReloadFileTab, onOpenFileExternally, onRevealFileTab]);
 
   const handleCommitRename = useCallback((tabId: string) => {
     const cancelled = renameCancelledRef.current;

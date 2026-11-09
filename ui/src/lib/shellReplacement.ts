@@ -1,7 +1,7 @@
 import { closeTerminal, listTerminalSessions, spawnTerminalDetailed, toIpcError } from "./tauri";
 import { isStandbyBackendSessionId } from "./sessionLifecycle";
 import { safeRandomUUID } from "./uuid";
-import type { SpawnTerminalResult } from "./tauri";
+import type { SpawnTerminalRequest, SpawnTerminalResult } from "./tauri";
 import type { StructuredIpcError, TerminalSession } from "./types";
 import { isPairedWorkspaceId, isRemoteWorkspaceId, resolvePairedStartup } from "./remoteProject";
 
@@ -47,6 +47,20 @@ function hasReplaceableBackend(session: TerminalSession): boolean {
 
 export type ShellReplacementOptions = {
   clearAgent?: boolean;
+};
+
+/**
+ * A pane restart replaces the process behind an already-live pane without changing its identity.
+ * Unlike `replaceExitedShellSession` it accepts a running session: the caller has already decided
+ * that the pane's process should start over (Ctrl+Shift+R or the pane's restart affordance).
+ */
+export type RestartPaneOptions = ShellReplacementOptions & {
+  cols?: number | null;
+  rows?: number | null;
+  /** Force the new process to start in this directory instead of the session's live CWD. */
+  cwd?: string | null;
+  /** Startup command for the replacement, e.g. an agent continuation chosen by the user. */
+  startup?: SpawnTerminalRequest["startup"];
 };
 
 function hasConfirmedGoneBackend(session: TerminalSession): boolean {
@@ -118,6 +132,85 @@ export function replaceExitedShellSession(
 
 export function clearShellReplacementInflightForTests(): void {
   inFlightReplacements.clear();
+}
+
+/**
+ * Restart the process behind a live pane, keeping the pane, its tab and its local session id.
+ *
+ * The old backend is closed only after the replacement exists, so a failed spawn leaves the pane
+ * with its original process (the caller keeps the pane mounted and offers a retry). Agent panes
+ * need an explicit choice: `clearAgent` starts a plain shell, while the default keeps the detected
+ * agent type so the resumed agent can continue the same provider session.
+ */
+export function restartPaneSession(
+  localSessionId: string,
+  dependencies: ShellReplacementDependencies,
+  options?: RestartPaneOptions,
+): Promise<SpawnTerminalResult> {
+  const existing = inFlightReplacements.get(localSessionId);
+  if (existing) return existing;
+
+  const attempt = (async () => {
+    const initial = dependencies.getSessions()[localSessionId];
+    if (!initial) throw invalidReplacement("Terminal session cannot be restarted");
+    // A paired pane restarts through its host's daemon, exactly like an exited paired shell does.
+    const pairedStartup = isPairedWorkspaceId(initial.workspaceId)
+      ? resolvePairedStartup(initial.workspaceId)
+      : null;
+    if (isPairedWorkspaceId(initial.workspaceId) && !pairedStartup) {
+      throw invalidReplacement("Paired workspace is not registered for this machine");
+    }
+
+    const previousBackendSessionId = initial.backendSessionId;
+    let spawned: SpawnTerminalResult | null = null;
+    try {
+      const clearAgent = options?.clearAgent === true;
+      spawned = await (dependencies.spawn ?? spawnTerminalDetailed)({
+        workspaceId: initial.workspaceId,
+        worktree: initial.worktree,
+        cwd: options?.cwd ?? initial.cwd,
+        cols: options?.cols ?? null,
+        rows: options?.rows ?? null,
+        clientRequestId: (dependencies.createRequestId ?? (() => `pane-restart-${safeRandomUUID()}`))(),
+        startup: options?.startup ?? pairedStartup,
+      });
+      const requireCurrent = (): TerminalSession => {
+        const current = dependencies.getSessions()[localSessionId];
+        if (!current || current.workspaceId !== initial.workspaceId) {
+          throw invalidReplacement("Terminal session changed while restarting the pane");
+        }
+        return current;
+      };
+      let current = requireCurrent();
+      await dependencies.persist?.(spawned, current);
+      current = requireCurrent();
+      dependencies.dispatch({
+        type: "REBIND_SESSION_BACKEND",
+        sessionId: localSessionId,
+        backendSessionId: spawned.sessionId,
+        cwd: spawned.session.cwd ?? options?.cwd ?? current.cwd,
+        daemonEpoch: spawned.daemonEpoch,
+        ...(spawned.session.incarnation != null ? { incarnation: spawned.session.incarnation } : {}),
+        clearAgent,
+      });
+    } catch (error) {
+      // The pane keeps its original process: retire only a replacement that never took over.
+      if (spawned) await (dependencies.close ?? closeTerminal)(spawned.sessionId).catch(() => undefined);
+      throw toIpcError(error);
+    }
+
+    // The replacement owns the pane now; retire the old process only after the rebind landed.
+    if (previousBackendSessionId) {
+      await (dependencies.close ?? closeTerminal)(previousBackendSessionId).catch(() => undefined);
+    }
+    return spawned;
+  })();
+
+  inFlightReplacements.set(localSessionId, attempt);
+  void attempt.finally(() => {
+    if (inFlightReplacements.get(localSessionId) === attempt) inFlightReplacements.delete(localSessionId);
+  }).catch(() => undefined);
+  return attempt;
 }
 
 export type ReconnectLocalSessionDependencies = {

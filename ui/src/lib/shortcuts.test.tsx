@@ -39,6 +39,7 @@ const TERMINAL_CHORD_CASES: readonly [string, ShortcutActionId, KeyboardEventIni
   ["find in terminal", "terminal.search", { key: "f", metaKey: true }],
   ["toggle terminal copy mode", "terminal.copyMode", { key: " ", code: "Space", metaKey: true, shiftKey: true }],
   ["toggle terminal copy mode alias cmd-shift-x", "terminal.copyMode", { key: "x", metaKey: true, shiftKey: true }],
+  ["restart terminal pane", "terminal.restart", { key: "r", metaKey: true, shiftKey: true }],
   ["toggle sidebar", "sidebar.left.toggle", { key: "b", metaKey: true }],
   ["add project primary", "project.add", { key: "o", metaKey: true }],
   ["add project alias cmd-n", "project.add", { key: "n", metaKey: true }],
@@ -143,6 +144,7 @@ describe("shortcut registry", () => {
       "terminal.focusDown",
       "terminal.search",
       "terminal.copyMode",
+      "terminal.restart",
       "sidebar.left.toggle",
       "project.add",
       "commandPalette.open",
@@ -182,6 +184,9 @@ describe("shortcut registry", () => {
     expect(shortcutLabel("terminal.copyMode", true)).toBe("⌘⇧Space");
     expect(shortcutLabel("terminal.copyMode", false)).toBe("Ctrl+Shift+Space");
     expect(shortcutAliasesLabels("terminal.copyMode", false)).toEqual(["Ctrl+Shift+X"]);
+    // Shares its chord with browser hard reload; only one surface registers at a time.
+    expect(shortcutLabel("terminal.restart", true)).toBe("⌘⇧R");
+    expect(shortcutLabel("terminal.restart", false)).toBe("Ctrl+Shift+R");
     expect(shortcutLabel("settings.toggle", true)).toBe("⌘,");
     expect(shortcutLabel("settings.toggle", false)).toBe("Ctrl+,");
     expect(shortcutLabel("workspace.select1", true)).toBe("⌘1");
@@ -343,6 +348,7 @@ describe("shortcut registry", () => {
       "terminal.focusDown": vi.fn(),
       "terminal.search": vi.fn(),
       "terminal.copyMode": vi.fn(),
+      "terminal.restart": vi.fn(),
       "sidebar.left.toggle": vi.fn(),
       "project.add": vi.fn(),
       "commandPalette.open": vi.fn(),
@@ -553,6 +559,7 @@ describe("shortcut chord collision invariants", () => {
       "Mod+[": ["browser.back", "terminal.focusPrevious"],
       "Mod+]": ["browser.forward", "terminal.focusNext"],
       "Mod+f": ["browser.find", "terminal.search"],
+      "Mod+Shift+r": ["browser.hardReload", "terminal.restart"],
     });
     // terminal.copyMode (Mod+Shift+Space) shares its chord with nothing.
     expect(Object.values(collisions).flat()).not.toContain("terminal.copyMode");

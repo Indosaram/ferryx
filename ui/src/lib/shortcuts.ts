@@ -48,6 +48,7 @@ export type ShortcutActionId =
   | "terminal.focusDown"
   | "terminal.search"
   | "terminal.copyMode"
+  | "terminal.restart"
   | "sidebar.left.toggle"
   | "project.add"
   | "commandPalette.open"
@@ -381,6 +382,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     source: "ferryx",
   },
   {
+    id: "terminal.restart",
+    title: "Restart terminal pane",
+    group: "Terminal Panes",
+    binding: { key: "r", mod: true, shift: true },
+    source: "ferryx",
+  },
+  {
     id: "sidebar.left.toggle",
     title: "Toggle sidebar",
     group: "Global",
@@ -569,7 +577,7 @@ export type ShortcutConflict =
   | { readonly kind: "reserved"; readonly chord: ReservedChord };
 
 /** Terminal actions App disables while a browser surface owns shortcuts, so they may share browser chords. */
-const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>(["terminal.focusNext", "terminal.focusPrevious", "terminal.search"]);
+const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>(["terminal.focusNext", "terminal.focusPrevious", "terminal.search", "terminal.restart"]);
 
 function surfacesAreExclusive(a: ShortcutActionId, b: ShortcutActionId): boolean {
   return (a.startsWith("browser.") && BROWSER_EXCLUSIVE_TERMINAL_ACTIONS.has(b))
