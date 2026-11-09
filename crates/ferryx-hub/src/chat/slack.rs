@@ -2265,7 +2265,7 @@ mod tests {
         (port, log)
     }
 
-    #[cfg(feature = "hub-slack")]
+    #[cfg(all(unix, feature = "hub-slack"))]
     #[tokio::test]
     async fn e2e_a_slack_message_becomes_an_omo_turn_answered_in_its_thread() {
         use crate::chat::slack_turn::SlackTurnConfig;
