@@ -20,6 +20,7 @@ import { PullToRefreshIndicator } from "../home/PullToRefreshIndicator";
 import { pullContentProps, usePullToRefresh } from "../home/usePullToRefresh";
 import type { PanelState } from "./usePhonePanel";
 import { SupervisorCallButton } from "../../components/supervisor/SupervisorCallButton";
+import { useVoiceConversation } from "../../lib/useVoiceConversation";
 import type { VoiceCallPort } from "../../lib/voiceCall";
 import type { UnifiedSupervisorClient, UnifiedSupervisorView } from "../../lib/unifiedSupervisor";
 
@@ -56,6 +57,10 @@ const ROW_BUTTON =
 
 export function PhoneSupervisorHome(props: PhoneSupervisorHomeProps) {
   const { state, now, actions, headerAction, resume, onStartSession } = props;
+  const voiceConversation = useVoiceConversation({
+    port: props.voice?.port ?? null,
+    send: (text) => actions.converse(text, []).then((result) => (result.ok && result.reply ? result.reply.text : "")),
+  });
   const scrollRef = useRef<HTMLDivElement>(null);
   const pull = usePullToRefresh(scrollRef, props.onRefresh);
   const pullContent = pullContentProps(pull);
@@ -138,7 +143,7 @@ export function PhoneSupervisorHome(props: PhoneSupervisorHomeProps) {
       ) : null}
       {snapshot && !snapshot.setupRequired ? (
         <div data-testid="phone-panel-composer" className="shrink-0 border-t border-chat-border bg-chat-header px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-          <Composer touch sessions={mentions} seed={seed} onSend={async (text, refs) => toComposerResult(await actions.converse(text, refs))} />
+          <Composer touch sessions={mentions} seed={seed} voiceConversation={voiceConversation} onSend={async (text, refs) => toComposerResult(await actions.converse(text, refs))} />
         </div>
       ) : null}
     </div>

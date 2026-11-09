@@ -29,17 +29,32 @@ fn refusal(code: &str, message: impl Into<String>) -> IpcError {
 ///
 /// Kept as a pure function of the settings' flags so the three reasons are testable without a
 /// provider, and so the Discord wording in `VoiceSettings::unavailable_reason` is never shown here.
-fn unavailability(built: bool, enabled: bool, has_stt: bool, has_tts: bool) -> Option<&'static str> {
+fn unavailability(built: bool, enabled: bool, has_stt: bool, has_codex: bool) -> Option<&'static str> {
     if !built {
         return Some("This build has no speech support. Type the request instead.");
     }
     if !enabled {
         return Some("Voice is switched off. Set OMON_VOICE_ENABLED=1 to talk to the supervisor.");
     }
-    if !has_stt || !has_tts {
+    if !has_stt && !has_codex {
         return Some(
-            "Voice needs a speech key. Set OPENAI_API_KEY, or OMON_STT_API_KEY and OMON_TTS_API_KEY, then reopen this call.",
+            "Voice needs a speech key or a Codex sign-in. Set OPENAI_API_KEY, or run `codex login` to dictate free.",
         );
+    }
+    None
+}
+
+/// Spoken replies are the only part that needs a paid key: the Codex sign-in covers dictation but
+/// exposes no speech synthesis, so a keyless machine can hear nothing back yet.
+fn speak_unavailability(built: bool, enabled: bool, has_tts: bool) -> Option<&'static str> {
+    if !built {
+        return Some("This build has no speech support.");
+    }
+    if !enabled {
+        return Some("Voice is switched off. Set OMON_VOICE_ENABLED=1 to talk to the supervisor.");
+    }
+    if !has_tts {
+        return Some("Spoken replies need a speech key. Set OPENAI_API_KEY or OMON_TTS_API_KEY.");
     }
     None
 }
@@ -92,6 +107,11 @@ fn decode_wav(wav_base64: &str) -> Result<Vec<u8>, IpcError> {
 pub struct VoiceCallStatus {
     pub available: bool,
     pub reason: Option<&'static str>,
+    /// Which credential pays for dictation, so the surface can say "free" without guessing.
+    pub stt_source: Option<&'static str>,
+    /// Dictation can work while spoken replies cannot: the Codex sign-in has no synthesis.
+    pub speak_available: bool,
+    pub speak_reason: Option<&'static str>,
     pub stt_model: Option<String>,
     pub tts_model: Option<String>,
     pub tts_voice: String,
@@ -159,15 +179,30 @@ mod live {
 #[tauri::command]
 pub fn cmd_voice_call_status() -> VoiceCallStatus {
     let settings = settings();
+    let codex = codex_dictation_available();
+    let speak_reason = speak_unavailability(
+        cfg!(feature = "hub-voice"),
+        voice_enabled(&settings),
+        settings.tts().is_some(),
+    );
     let reason = unavailability(
         cfg!(feature = "hub-voice"),
-        settings.enabled(),
+        voice_enabled(&settings),
         settings.stt().is_some(),
-        settings.tts().is_some(),
+        codex,
     );
     VoiceCallStatus {
         available: reason.is_none(),
         reason,
+        stt_source: if settings.stt().is_some() {
+            Some("key")
+        } else if codex {
+            Some("codex")
+        } else {
+            None
+        },
+        speak_available: speak_reason.is_none(),
+        speak_reason,
         stt_model: settings.stt().map(|endpoint| endpoint.model.clone()),
         tts_model: settings.tts().map(|endpoint| endpoint.model.clone()),
         tts_voice: settings.tts_voice().to_owned(),
@@ -179,21 +214,99 @@ pub fn cmd_voice_call_status() -> VoiceCallStatus {
     }
 }
 
+/// Where the owner's speech key lives: the hub env file, never an IPC response.
+const SPEECH_KEY_VAR: &str = "OPENAI_API_KEY";
+
+/// Whether a speech key is saved, without reading or returning it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechKeyState {
+    pub saved: bool,
+    /// `file` when the owner saved one, `environment` when only the process has one.
+    pub source: Option<&'static str>,
+}
+
+#[tauri::command]
+pub fn cmd_voice_call_key_state() -> SpeechKeyState {
+    let file = ferryx_hub::hub_env::read_file_env();
+    if file.get(SPEECH_KEY_VAR).is_some_and(|value| !value.trim().is_empty()) {
+        return SpeechKeyState { saved: true, source: Some("file") };
+    }
+    if std::env::var(SPEECH_KEY_VAR).is_ok_and(|value| !value.trim().is_empty()) {
+        return SpeechKeyState { saved: true, source: Some("environment") };
+    }
+    SpeechKeyState { saved: false, source: None }
+}
+
+/// Saves the owner's speech key for the next call. An empty key removes it.
+#[tauri::command]
+pub fn cmd_voice_call_set_key(api_key: String) -> Result<SpeechKeyState, IpcError> {
+    let trimmed = api_key.trim();
+    let mut entries = std::collections::BTreeMap::new();
+    entries.insert(SPEECH_KEY_VAR.to_owned(), trimmed.to_owned());
+    ferryx_hub::hub_env::set_file_entries(&entries)
+        .map_err(|error| IpcError::internal(error.to_string()))?;
+    Ok(cmd_voice_call_key_state())
+}
+
 /// One utterance as text. The caller records at `VoiceCallStatus::sample_rate`.
 #[tauri::command]
 pub async fn cmd_voice_call_transcribe(wav_base64: String) -> Result<serde_json::Value, IpcError> {
     let settings = settings();
     if let Some(reason) = unavailability(
         cfg!(feature = "hub-voice"),
-        settings.enabled(),
+        voice_enabled(&settings),
         settings.stt().is_some(),
-        settings.tts().is_some(),
+        codex_dictation_available(),
     ) {
         return Err(refusal(UNAVAILABLE, reason));
     }
     let wav = decode_wav(&wav_base64)?;
-    let text = transcribe_wav(&settings, &wav).await?;
-    Ok(serde_json::json!({ "text": text.trim() }))
+    // A saved key wins: the owner paid for it and expects its model. The Codex sign-in is the
+    // fallback that makes dictation work on a machine with no key at all.
+    let (text, source) = if settings.stt().is_some() {
+        (transcribe_wav(&settings, &wav).await?, "key")
+    } else {
+        (transcribe_with_codex(&wav).await?, "codex")
+    };
+    Ok(serde_json::json!({ "text": text.trim(), "source": source }))
+}
+
+/// Whether this machine's Codex sign-in can dictate, without reading the token out.
+fn codex_dictation_available() -> bool {
+    cfg!(feature = "hub-voice") && ferryx_hub::codex_speech::available()
+}
+
+/// Enabled when a key is configured, or when a Codex sign-in can dictate instead. The hub
+/// derives `enabled` from the presence of a key, so a keyless machine with a Codex login would
+/// otherwise be told voice is switched off; an explicit `OMON_VOICE_ENABLED=0` still wins.
+fn voice_enabled(settings: &ferryx_hub::voice::VoiceSettings) -> bool {
+    if settings.enabled() {
+        return true;
+    }
+    if !codex_dictation_available() {
+        return false;
+    }
+    let file = ferryx_hub::hub_env::read_file_env();
+    let explicit = std::env::var("OMON_VOICE_ENABLED")
+        .ok()
+        .or_else(|| file.get("OMON_VOICE_ENABLED").cloned());
+    !matches!(
+        explicit.as_deref().map(str::to_ascii_lowercase).as_deref(),
+        Some("0") | Some("false") | Some("no") | Some("off")
+    )
+}
+
+#[cfg(feature = "hub-voice")]
+async fn transcribe_with_codex(wav: &[u8]) -> Result<String, IpcError> {
+    ferryx_hub::codex_speech::transcribe(wav)
+        .await
+        .map_err(|error| refusal(PROVIDER_FAILED, format!("Speech to text failed: {error}")))
+}
+
+#[cfg(not(feature = "hub-voice"))]
+async fn transcribe_with_codex(_wav: &[u8]) -> Result<String, IpcError> {
+    Err(refusal(UNAVAILABLE, "This build has no speech support."))
 }
 
 #[cfg(feature = "hub-voice")]
@@ -221,10 +334,9 @@ async fn transcribe_wav(
 #[tauri::command]
 pub async fn cmd_voice_call_speak(text: String) -> Result<SpokenAudio, IpcError> {
     let settings = settings();
-    if let Some(reason) = unavailability(
+    if let Some(reason) = speak_unavailability(
         cfg!(feature = "hub-voice"),
-        settings.enabled(),
-        settings.stt().is_some(),
+        voice_enabled(&settings),
         settings.tts().is_some(),
     ) {
         return Err(refusal(UNAVAILABLE, reason));
@@ -306,8 +418,35 @@ mod tests {
 
     #[test]
     fn a_half_configured_endpoint_still_reports_the_key() {
-        assert!(unavailability(true, true, true, false).is_some());
-        assert!(unavailability(true, true, false, true).is_some());
+        assert!(unavailability(true, true, false, false).is_some());
+    }
+
+    #[test]
+    fn a_codex_sign_in_alone_makes_dictation_available() {
+        assert_eq!(unavailability(true, true, false, true), None);
+        assert_eq!(unavailability(true, true, true, false), None);
+    }
+
+    /// The env var is a race with any other test that reads the hub env file, so this test only
+    /// asserts the precedence rule it owns: an explicit off switches a keyless machine off too.
+    #[test]
+    fn an_explicit_off_switches_voice_off_without_a_key() {
+        let settings = ferryx_hub::voice::VoiceSettings::from_lookup(&|name| match name {
+            "OMON_VOICE_ENABLED" => Some("0".into()),
+            _ => None,
+        });
+        assert!(!settings.enabled());
+        // With no key and no sign-in the reason is the key, not a stale "switched off" line.
+        assert!(unavailability(true, false, false, false).unwrap().contains("OMON_VOICE_ENABLED"));
+    }
+
+    #[test]
+    fn spoken_replies_still_need_a_paid_key() {
+        let no_tts = speak_unavailability(true, true, false).unwrap();
+        assert!(no_tts.contains("OPENAI_API_KEY"));
+        assert_eq!(speak_unavailability(true, true, true), None);
+        assert!(speak_unavailability(false, true, true).is_some());
+        assert!(speak_unavailability(true, false, true).is_some());
     }
 
     #[test]

@@ -16,6 +16,7 @@ import {
 } from '../../lib/supervisorPanel/model';
 import { ActionLog } from './ActionLog';
 import { Composer } from './Composer';
+import type { VoiceConversationProps } from '../supervisor/VoiceConversationButton';
 import { DecisionCard } from './DecisionCard';
 import { RulesLine } from './RulesLine';
 import { HandlingRow, SessionRow } from './Rows';
@@ -44,6 +45,8 @@ export type PanelSurfaceProps = {
    */
   hideComposer?: boolean;
   onComposerText?: (text: string) => void;
+  /** Free-form voice for the supervisor conversation; absent hides the talk button. */
+  voiceConversation?: VoiceConversationProps;
   /** The stored owner/supervisor conversation; omitted, the panel shows no conversation. */
   transcript?: Pick<TranscriptSource, 'messages' | 'exportFile'>;
 };
@@ -159,7 +162,7 @@ function SetupSection({ actions, touch, computerLabel }: Pick<PanelSurfaceProps,
  * and the phone renders it with `touch`. All content comes from `buildPanelView`; all writes go
  * through `actions`, and a refused write shows its message where the user acted.
  */
-export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, computerLabel, hideComposer, onComposerText, transcript }: PanelSurfaceProps) {
+export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, computerLabel, hideComposer, onComposerText, voiceConversation, transcript }: PanelSurfaceProps) {
   const view = useMemo(() => buildPanelView(snapshot, { nowMs, health }), [snapshot, nowMs, health]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pausing, setPausing] = useState(false);
@@ -304,6 +307,7 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
           touch={touch}
           sessions={mentions}
           seed={seed}
+          voiceConversation={voiceConversation}
           onSend={async (text, refs) => toComposerResult(await actions.converse(text, refs))}
         />
       )}

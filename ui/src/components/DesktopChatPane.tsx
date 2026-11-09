@@ -1,9 +1,11 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { MobileChatWorkspace } from "../remote/chat/MobileChatWorkspace";
 import type { MobileChatComposerHandle } from "../remote/chat/MobileChatComposer";
 import { ReferencePromptCard } from "../remote/chat/ReferencePromptCard";
 import type { DesktopChatIdentity, DesktopChatTransport } from "../lib/desktopChat";
 import { useDesktopChat } from "../lib/desktopChatLane";
+import { desktopVoicePort } from "../lib/voiceCallPort";
+import { useVoiceConversation } from "../lib/useVoiceConversation";
 import type { TerminalSession } from "../lib/types";
 
 export interface DesktopChatPaneProps {
@@ -29,6 +31,8 @@ export function DesktopChatPane({
 }: DesktopChatPaneProps) {
   const lane = useDesktopChat({ session, identity, transport, visible, pollMs });
   const composerRef = useRef<MobileChatComposerHandle | null>(null);
+  const [voicePort] = useState(() => desktopVoicePort());
+  const voiceConversation = useVoiceConversation({ port: voicePort, send: lane.send, messages: lane.messages });
   const worktreeLabel = session.worktree?.slug ?? undefined;
 
   const promptCard =
@@ -69,6 +73,7 @@ export function DesktopChatPane({
         isRunning={lane.isRunning}
         activityState={lane.isRunning && lane.prompt === null ? "thinking" : "idle"}
         onSendMessage={lane.send}
+        voiceConversation={voiceConversation}
         onStopExecution={() => void lane.stop()}
         pageDisclosure={lane.pageDisclosure}
         hasOlderPage={lane.hasOlderPage}

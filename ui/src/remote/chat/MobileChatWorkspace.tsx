@@ -12,6 +12,7 @@ import {
 } from "./MobileChatComponents";
 import { MobileChatMessage, MobileChatMessageProps } from "./MobileChatMessage";
 import { MobileChatComposer, MobileChatComposerHandle } from "./MobileChatComposer";
+import type { VoiceConversationProps } from "../../components/supervisor/VoiceConversationButton";
 import type { ComposerControlChange, ComposerControlNotice } from "./MobileChatComposer";
 import type { HeldMessage } from "./referenceQueue";
 import type { FollowUpMessage } from "./referenceFollowUp";
@@ -37,6 +38,7 @@ export interface MobileChatWorkspaceProps {
   readonly messages: readonly MobileChatMessageProps[];
   /** `false` means the owner kept the draft (held, refused); the box must not clear it. */
   readonly onSendMessage: (text: string) => boolean | void;
+  readonly voiceConversation?: VoiceConversationProps;
   readonly onStopExecution?: () => void;
   readonly isRunning?: boolean;
   readonly activityState?: ActivityState;
@@ -253,6 +255,7 @@ function aggregateReferenceAbandoned(
 export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   messages,
   onSendMessage,
+  voiceConversation,
   onStopExecution,
   isRunning = false,
   activityState = "idle",
@@ -679,6 +682,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             warning={composerWarning}
             warningAction={composerWarningAction}
             onSend={onSendMessage}
+            voiceConversation={voiceConversation}
             onStop={onStopExecution}
             isRunning={isRunning}
             disabled={disabled}

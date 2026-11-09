@@ -15,6 +15,8 @@ import type { SupervisorCallResult, SupervisorMoveResult } from '../../lib/unifi
 import { getSupervisorPanel, onSupervisorPanelEvent } from '../../lib/tauri';
 import { LeaseNotices, StandbyCard, type LeaseAdoptResult } from './LeaseStatus';
 import { PanelSurface } from './PanelSurface';
+import { desktopVoicePort } from '../../lib/voiceCallPort';
+import { useVoiceConversation } from '../../lib/useVoiceConversation';
 
 export type SupervisorPanelHostProps = {
   onFocusSession: (sessionRef: SessionRef) => void;
@@ -111,6 +113,12 @@ export function SupervisorPanelHost({
     () => actionsFor({ openSession: onFocusSession, onChanged: reload }),
     [actionsFor, onFocusSession, reload],
   );
+  const [voicePort] = useState(() => desktopVoicePort());
+  const voiceConversation = useVoiceConversation({
+    port: voicePort,
+    send: (text) =>
+      actions.converse(text, []).then((result) => (result.ok && result.reply ? result.reply.text : "")),
+  });
 
   // Legacy lanes are a property of their session: the hub snapshot is read only to find which
   // sessions carry a goal and whether it is paused.
@@ -155,7 +163,7 @@ export function SupervisorPanelHost({
               />
             </div>
           ) : null}
-          <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} />
+          <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} voiceConversation={voiceConversation} />
         </div>
       ) : (
         <p className="text-muted-foreground">Loading supervisor…</p>
