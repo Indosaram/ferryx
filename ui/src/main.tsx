@@ -1,5 +1,7 @@
-import { isDesktopShell, isMobileCompanion } from "./lib/clientRuntime";
+// First import: installs the crypto.randomUUID polyfill before any other module evaluates.
+// It replaces an inline <script> in index.html, so the desktop CSP needs no 'unsafe-inline'.
 import "./lib/uuid";
+import { isDesktopShell, isMobileCompanion } from "./lib/clientRuntime";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BUILD_STAMP } from "./lib/buildStamp";

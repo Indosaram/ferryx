@@ -730,6 +730,8 @@ async fn a_reference_chat_submit_through_the_relay_reaches_the_real_pane() {
         fixture._root.path().join("relay-keys.json"),
     )
     .expect("isolated relay key store");
+    // The PIN-paired fixture host still uses the legacy plaintext relay proxy.
+    relay_state.set_require_e2e(false);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("relay listener");

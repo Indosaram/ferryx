@@ -21,6 +21,26 @@ describe("ferryx browser document identity", () => {
     expect(html).not.toContain("text-[#fafafa]");
   });
 
+  it("ships no inline script, so the desktop CSP can drop 'unsafe-inline' from script-src", () => {
+    const html = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
+    const scripts = [...html.matchAll(/<script\b([^>]*)>/g)].map((match) => match[1]);
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const attributes of scripts) expect(attributes).toMatch(/\bsrc=/);
+
+    const config = JSON.parse(readFileSync(resolve(process.cwd(), "../src-tauri/tauri.conf.json"), "utf8"));
+    const scriptSrc = String(config.app.security.csp)
+      .split(";")
+      .map((directive: string) => directive.trim())
+      .find((directive: string) => directive.startsWith("script-src"));
+    expect(scriptSrc).toBe("script-src 'self'");
+  });
+
+  it("installs the crypto polyfill as the first module main.tsx evaluates", () => {
+    const source = readFileSync(resolve(process.cwd(), "src/main.tsx"), "utf8");
+    const firstImport = source.match(/^import\s+[^;]+;/m)?.[0];
+    expect(firstImport).toBe('import "./lib/uuid";');
+  });
+
   it("does not statically import both App and RemoteApp in main.tsx", () => {
     const source = readFileSync(resolve(process.cwd(), "src/main.tsx"), "utf8");
     const hasStaticApp = /^\s*import\s+App\s+from\s+["']\.\/App["'];?/m.test(source);

@@ -733,10 +733,7 @@ pub(crate) fn extract_session_id_from_path(agent_type: &str, path: &str) -> Opti
         }
         // Every other store root - omo's two spellings, maho's `~/.maho/agent/sessions/`, and the
         // rest - is the agent's own registry entry, so a new agent needs no arm here.
-        other => match registry::store_markers(other) {
-            Some(markers) => markers,
-            None => return None,
-        },
+        other => registry::store_markers(other)?,
     };
     // A provider may own more than one store spelling (omo does, above), so this is a set of
     // accepted roots rather than one string.

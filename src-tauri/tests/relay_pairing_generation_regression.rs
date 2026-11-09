@@ -102,6 +102,7 @@ async fn a11_joint_fixture(inject_failure: bool) {
     let actual_identity = tokio::task::spawn_blocking(move || ferryx_lib::remote::auth::load_or_generate_machine_identity(&identity_path).unwrap()).await.unwrap();
     let machine = actual_identity.machine_id.clone();
     let state = RelayState::new_with_key_store(vec![], dir.path().join("keys.json")).unwrap();
+    state.set_require_e2e(false);
     // Hold exactly one completed relay response before Axum can write any
     // headers to the requesting TCP client. Receiving it proves durable create
     // completed; aborting the client before release really loses the reply.
@@ -347,6 +348,7 @@ async fn absolute_filename_fixture() {
         (dir, daemon, path)
     }).await.unwrap();
     let state = RelayState::new_with_key_store(vec![], dir.path().join("keys.json")).unwrap();
+    state.set_require_e2e(false);
     let (base, relay) = serve(state).await;
     let (direct, gateway) = serve_router(ferryx_lib::remote::server::create_remote_router(daemon.remote_state().clone())).await;
     let reverse = RelayClient::with_identity(&base, identity(96, "r4-machine"), direct.strip_prefix("http://").unwrap())
@@ -393,6 +395,8 @@ async fn isolated_state(tokens: Vec<String>) -> (tempfile::TempDir, RelayState) 
     tokio::task::spawn_blocking(move || {
         let dir = tempfile::tempdir().unwrap();
         let state = RelayState::new_with_key_store(tokens, dir.path().join("keys.json")).unwrap();
+        // These fixtures exercise the legacy plaintext relay proxy.
+        state.set_require_e2e(false);
         (dir, state)
     }).await.unwrap()
 }

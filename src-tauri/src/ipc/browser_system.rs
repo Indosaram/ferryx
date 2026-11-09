@@ -294,17 +294,15 @@ pub async fn cmd_browser_drop_paths<R: Runtime>(
         .find_map(|session| {
             let bounds = manager.get_bounds(&session.browser_id).ok().flatten()?;
             let rect = (bounds.x, bounds.y, bounds.width, bounds.height);
-            drop_point_inside((x, y), rect).then(|| {
-                (
-                    session.browser_id,
-                    session.webview_label,
-                    session.engine,
-                    x - bounds.x,
-                    y - bounds.y,
-                    bounds.x,
-                    bounds.y,
-                )
-            })
+            drop_point_inside((x, y), rect).then_some((
+                session.browser_id,
+                session.webview_label,
+                session.engine,
+                x - bounds.x,
+                y - bounds.y,
+                bounds.x,
+                bounds.y,
+            ))
         });
     let Some((browser_id, webview_label, engine, local_x, local_y, origin_x, origin_y)) =
         target

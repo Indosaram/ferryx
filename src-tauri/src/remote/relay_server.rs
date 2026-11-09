@@ -191,15 +191,16 @@ const RELAY_E2E_HEADER: &str = "x-ferryx-relay-e2e";
 pub const RELAY_STAGE_DATA_PAIRING_TIMEOUT: &str = "data_pairing_timeout";
 pub const RELAY_STAGE_UPSTREAM_TRANSFER_TIMEOUT: &str = "upstream_transfer_timeout";
 
-/// Logged once per plaintext relay-proxied request so operators can see which clients still
-/// bypass end-to-end encryption before the relay starts refusing them.
-pub(crate) const RELAY_PLAINTEXT_DEPRECATION: &str = "plaintext relay proxy is deprecated and will be refused in the next release; update this client so it connects end-to-end encrypted (?e2e=1)";
+/// Logged once per plaintext relay-proxied request on a relay whose operator opted out of the
+/// end-to-end requirement (`FERRYX_RELAY_REQUIRE_E2E=0`), so the remaining clients are visible.
+pub(crate) const RELAY_PLAINTEXT_DEPRECATION: &str = "plaintext relay proxy is deprecated and only served because FERRYX_RELAY_REQUIRE_E2E=0; relays refuse it by default, so update this client so it connects end-to-end encrypted (?e2e=1)";
 const CLIENT_BUILD_HEADER: &str = "x-ferryx-client-build";
 const MAX_CLIENT_BUILD_LEN: usize = 128;
 
-/// `FERRYX_RELAY_REQUIRE_E2E=1` makes every plaintext relay proxy route refuse with 426.
+/// Every plaintext relay proxy route refuses with 426 unless the operator sets
+/// `FERRYX_RELAY_REQUIRE_E2E=0`.
 fn require_e2e_from_env() -> AtomicBool {
-    AtomicBool::new(std::env::var("FERRYX_RELAY_REQUIRE_E2E").is_ok_and(|value| value == "1"))
+    AtomicBool::new(!std::env::var("FERRYX_RELAY_REQUIRE_E2E").is_ok_and(|value| value.trim() == "0"))
 }
 
 /// The client build a request names: `X-Ferryx-Client-Build`, else `User-Agent`, else
@@ -221,8 +222,9 @@ fn client_build(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Admits one plaintext relay-proxied request: logs the deprecation, or, when the relay
-/// requires end-to-end encryption, answers 426 `E2E_REQUIRED` before any data channel opens.
+/// Admits one plaintext relay-proxied request: by default answers 426 `E2E_REQUIRED` before
+/// any data channel opens; a relay that opted out (`FERRYX_RELAY_REQUIRE_E2E=0`) logs the
+/// deprecation and serves it.
 // The refusal is a full `Response`, matching what every caller hands back to axum.
 #[allow(clippy::result_large_err)]
 fn plaintext_gate(
@@ -623,7 +625,7 @@ struct RelayInner {
     rejected_device_tokens: Mutex<HashMap<(String, String), Instant>>,
     /// Lock order: always after `control_channels`.
     data_pool: Mutex<HashMap<String, Vec<PooledDataSocket>>>,
-    /// Refuse plaintext relay proxy routes (`FERRYX_RELAY_REQUIRE_E2E=1`).
+    /// Refuse plaintext relay proxy routes (default; `FERRYX_RELAY_REQUIRE_E2E=0` opts out).
     require_e2e: AtomicBool,
     /// Relay-clock second until which a writable relay refuses supervisor lease acquires by a
     /// machine other than the un-released row's holder: process start + `TTL_SECS` +
@@ -1335,7 +1337,8 @@ async fn send_supervisor_lease_ack(
 }
 
 impl RelayState {
-    #[cfg(test)]
+    /// Overrides the `FERRYX_RELAY_REQUIRE_E2E` default. Fixtures that exercise the legacy
+    /// plaintext relay proxy opt out explicitly with `set_require_e2e(false)`.
     pub fn set_require_e2e(&self, on: bool) {
         self.inner.require_e2e.store(on, Ordering::Relaxed);
     }
@@ -6829,8 +6832,23 @@ mod tests {
         assert!(!response_is_reusable(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}extra", false));
     }
 
+    /// A relay that still serves the legacy plaintext proxy, for tests exercising it.
     fn test_state(tokens: Vec<String>) -> RelayState {
-        RelayState::with_key_store(tokens, None).unwrap()
+        let state = RelayState::with_key_store(tokens, None).unwrap();
+        state.set_require_e2e(false);
+        state
+    }
+
+    #[tokio::test]
+    async fn a_fresh_relay_refuses_plaintext_with_e2e_required() {
+        let state = RelayState::with_key_store(vec![], None).unwrap();
+        let refusal = plaintext_gate(&state, &HeaderMap::new(), "fresh-machine", "/api/v1/health")
+            .expect_err("a relay refuses plaintext by default");
+        assert_eq!(refusal.status(), StatusCode::UPGRADE_REQUIRED);
+        let body = to_bytes(refusal.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "E2E_REQUIRED");
+        assert_eq!(state.inner.plaintext_deprecations.load(Ordering::Relaxed), 0);
     }
     use super::*;
     use tokio::net::TcpListener;

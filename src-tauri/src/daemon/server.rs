@@ -3125,6 +3125,8 @@ mod paired_host_native_tests {
             root.join("relay-keys.json"),
         )
         .map_err(anyhow::Error::msg)?;
+        // PIN-paired fixture hosts still use the legacy plaintext relay proxy.
+        relay_state.set_require_e2e(false);
         let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let origin = format!("http://{}", relay_listener.local_addr()?);
         tasks.spawn(async move {

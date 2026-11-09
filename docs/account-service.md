@@ -108,11 +108,12 @@ plaintext client cannot attach.
 That handshake now carries relay-proxied web and paired-host traffic. Updated web and desktop
 clients that hold an attach key reach the `/host/...` APIs and WebSockets only through
 `POST /api/v1/attach/session?e2e=1` followed by `/tunnel/opaque/{id}`, and the relay splices
-ciphertext it cannot read. Devices paired by PIN have no attach key. They see a `REPAIR_REQUIRED`
-re-pair prompt and stay on plaintext, with a deprecation warning in the relay log, until todo 11.
+ciphertext it cannot read. Devices paired by PIN have no attach key; they get a `REPAIR_REQUIRED`
+prompt to re-enroll through the account.
 
-Setting `FERRYX_RELAY_REQUIRE_E2E=1` on the relay refuses every plaintext route with
-`E2E_REQUIRED` (HTTP 426). It is unset by default.
+The relay refuses every plaintext route with `E2E_REQUIRED` (HTTP 426) by default. An operator
+can set `FERRYX_RELAY_REQUIRE_E2E=0` to serve plaintext temporarily; each such request logs a
+deprecation warning.
 
 Tests: `an_e2e_host_proxy_request_never_reaches_the_relay_in_plaintext`,
 `a_legacy_client_without_e2e_still_works_and_logs_deprecation`,

@@ -186,6 +186,15 @@ jobs:
           CARGO_BUILD_TARGET: aarch64-apple-darwin
         run: python3 scripts/ci-run-bounded.py --timeout-seconds 1800 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-tests.log" -- bash scripts/ci-native-tests.sh run
 
+      # The relay end-to-end suites (a real in-process relay and the E2E attach handshake) must
+      # all run: an ignored, filtered, empty or missing suite fails this step instead of passing.
+      - name: Relay E2E gate (no skips)
+        shell: bash
+        timeout-minutes: 22
+        env:
+          CARGO_BUILD_TARGET: aarch64-apple-darwin
+        run: python3 scripts/ci-run-bounded.py --timeout-seconds 1200 --log "$RUNNER_TEMP/ferryx-ci-logs/relay-e2e.log" -- python3 scripts/ci-relay-e2e-gate.py
+
       # The remote grid mirror spans Rust and TypeScript: this asserts real serialized backend
       # frames parse in the actual frontend parser. It lives here, not in the UI job, because it
       # needs the Rust toolchain and the Ghostty submodule.

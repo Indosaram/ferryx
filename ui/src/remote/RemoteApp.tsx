@@ -1844,9 +1844,7 @@ export const RemoteHostConnection: React.FC<{
   // active tunnel, and a relay-paired host with attach info gets its own encrypted transport.
   // remoteFetch/remoteOpenSocket route every request for the registered base through it.
   const relayE2EMode = activeTunnelConnection ? "e2e" : relayE2EState(activeHost, transport.url);
-  // A plaintext fallback keeps the encrypted transport registered: re-registering it (new token)
-  // retries encryption, and remoteFetch routes around it while the fallback holds.
-  const e2eHost = !activeTunnelConnection && (relayE2EMode === "e2e" || relayE2EMode === "plaintext-fallback")
+  const e2eHost = !activeTunnelConnection && relayE2EMode === "e2e"
     ? activeHost
     : null;
   const e2eRelayOrigin = e2eHost?.relayOrigin ?? null;

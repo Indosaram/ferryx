@@ -226,6 +226,8 @@ async fn exercise(root: &Path, fixture: &mut Fixture) -> anyhow::Result<()> {
     })
     .await
     .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    // PIN-paired fixture hosts still use the legacy plaintext relay proxy.
+    relay.set_require_e2e(false);
     // The relay keeps one socket for the whole test: each serve gets a duplicate of it, so the
     // restart below reuses the same origin without releasing and rebinding the port, which a
     // concurrent test could take in between.
@@ -304,6 +306,7 @@ async fn exercise(root: &Path, fixture: &mut Fixture) -> anyhow::Result<()> {
     })
     .await
     .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    relay.set_require_e2e(false);
     // Same origin: serve the relay again on a duplicate of the socket held since the start.
     let restarted = fixture.serve_on(
         tokio::net::TcpListener::from_std(relay_socket.try_clone()?)?,

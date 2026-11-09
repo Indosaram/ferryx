@@ -1337,7 +1337,8 @@ impl MachineClient {
 
     /// A relay socket: end-to-end encrypted when this generation was paired with the
     /// machine's attach key (the bearer travels inside the tunnel, no ticket), else the
-    /// legacy plaintext relay path with a one-time `REPAIR_REQUIRED` warning.
+    /// legacy plaintext relay path with a one-time `REPAIR_REQUIRED` warning. A relay that
+    /// cannot allocate an encrypted session (`E2E_UNSUPPORTED`) is a hard error.
     #[allow(clippy::too_many_arguments)]
     async fn open_relay_socket(
         &self,
@@ -1372,17 +1373,9 @@ impl MachineClient {
             session_kind: relay_session_kind(ticket_target),
         };
         let mut cancelled = lease.cancellation();
-        let result = tokio::select! { biased;
+        tokio::select! { biased;
             _ = cancelled.changed() => Err(ClientError::local("PAIRED_HOST_STALE_GENERATION")),
             result = super::secure_http::open_secure_websocket(&target, &path, config) => result,
-        };
-        match result {
-            Err(error) if error.code == "E2E_UNSUPPORTED" => {
-                super::secure_http::warn_e2e_unsupported(&host.host_id, lease.generation().0);
-                self.open_socket_at(relay, lease, segments, query, ticket_target, max_frame)
-                    .await
-            }
-            other => other,
         }
     }
 
@@ -1571,6 +1564,7 @@ impl MachineClient {
 
     /// A relay request: through the host's shared end-to-end encrypted session when this
     /// generation carries the machine attach key, else the legacy plaintext relay path.
+    /// A relay that cannot allocate an encrypted session (`E2E_UNSUPPORTED`) is a hard error.
     async fn http_relay(
         &self,
         host: &HostView,
@@ -1580,13 +1574,7 @@ impl MachineClient {
         directory: bool,
     ) -> Result<(Vec<u8>, Option<String>)> {
         match lease.attach() {
-            Some(attach) => match self.http_secure(host, attach, lease, route, directory).await {
-                Err(error) if error.code == "E2E_UNSUPPORTED" => {
-                    super::secure_http::warn_e2e_unsupported(&host.host_id, lease.generation().0);
-                    self.http_at(relay, lease, route, directory).await
-                }
-                other => other,
-            },
+            Some(attach) => self.http_secure(host, attach, lease, route, directory).await,
             None => {
                 super::secure_http::warn_repair_required(&host.host_id, lease.generation().0);
                 self.http_at(relay, lease, route, directory).await

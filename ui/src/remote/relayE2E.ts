@@ -35,25 +35,11 @@ export class RelayE2EError extends Error {
 export const CLIENT_BUILD_HEADER = "X-Ferryx-Client-Build";
 /**
  * Response header a relay that understands `?e2e=1` sends on every `/attach/session` answer.
- * With it present, a 4xx is a real refusal (typed RelayE2EError), never "unsupported".
+ * With it present, a 4xx is a real refusal (typed RelayE2EError) rather than E2E_UNSUPPORTED.
  */
 export const RELAY_E2E_AWARE_HEADER = "x-ferryx-relay-e2e";
-
-/**
- * The relay does not know the device-token `?e2e=1` allocation yet (400, 404, 405, or any 401 -
- * an old account relay answers a device token with 401 UNAUTHORIZED): clients ship before the
- * relay, so a paired relay host falls back to the plaintext path for that base. Account mode
- * never allocates here (it rides its own account tunnel), so it is unaffected.
- */
-export class RelayE2EUnsupportedError extends Error {
-  readonly code = "E2E_UNSUPPORTED";
-  readonly status: number;
-  constructor(status: number) {
-    super(`Relay does not support encrypted sessions yet (${status})`);
-    this.name = "RelayE2EUnsupportedError";
-    this.status = status;
-  }
-}
+/** Typed code for a relay that predates device-token `?e2e=1` allocation; never a plaintext downgrade. */
+export const E2E_UNSUPPORTED = "E2E_UNSUPPORTED";
 
 /** The build identity sent to the relay so it can tell which clients still use plaintext. */
 export function clientBuild(): string {
@@ -67,8 +53,6 @@ export interface RelayE2ETransport {
 }
 
 const registry = new Map<string, RelayE2ETransport>();
-/** Bases whose relay answered the `?e2e=1` allocation as unsupported; plaintext for this page session. */
-const plaintextFallback = new Set<string>();
 
 function registryKey(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
@@ -78,29 +62,13 @@ function registryKey(baseUrl: string): string {
 export function registerRelayE2E(baseUrl: string, transport: RelayE2ETransport): () => void {
   const key = registryKey(baseUrl);
   registry.set(key, transport);
-  // A fresh registration (new token, new connection) gets a fresh chance at encryption.
-  plaintextFallback.delete(key);
   return () => {
     if (registry.get(key) === transport) registry.delete(key);
   };
 }
 
 export function relayE2EFor(baseUrl: string): RelayE2ETransport | null {
-  const key = registryKey(baseUrl);
-  if (plaintextFallback.has(key)) return null;
-  return registry.get(key) ?? null;
-}
-
-function rememberPlaintextFallback(baseUrl: string): void {
-  const key = registryKey(baseUrl);
-  if (plaintextFallback.has(key)) return;
-  plaintextFallback.add(key);
-  console.warn(`Relay does not support end-to-end encrypted sessions yet; using the plaintext relay path for ${key}`);
-}
-
-/** Test hook: forget every remembered plaintext fallback. */
-export function resetRelayE2EFallbacks(): void {
-  plaintextFallback.clear();
+  return registry.get(registryKey(baseUrl)) ?? null;
 }
 
 function isRelayHostUrl(url: string): boolean {
@@ -182,19 +150,14 @@ export async function remoteFetch(baseUrl: string, path: string, init: RequestIn
   const e2e = relayE2EFor(baseUrl);
   if (e2e) {
     init.signal?.throwIfAborted();
-    try {
-      const raw = await e2e.fetchLike(path, {
-        method: init.method,
-        headers: headerRecord(init.headers),
-        body: await bodyBytes(init.body),
-        signal: init.signal ?? undefined,
-      });
-      init.signal?.throwIfAborted();
-      return tunnelResponse(raw);
-    } catch (error) {
-      if (!(error instanceof RelayE2EUnsupportedError)) throw error;
-      rememberPlaintextFallback(baseUrl);
-    }
+    const raw = await e2e.fetchLike(path, {
+      method: init.method,
+      headers: headerRecord(init.headers),
+      body: await bodyBytes(init.body),
+      signal: init.signal ?? undefined,
+    });
+    init.signal?.throwIfAborted();
+    return tunnelResponse(raw);
   }
   const url = remoteApiUrl(baseUrl, path);
   const response = await fetchWithDeadline(url, isRelayHostUrl(url) ? { ...init, headers: withClientBuild(init.headers) } : init);
@@ -214,14 +177,7 @@ export async function remoteSocketTarget(
   signal?: AbortSignal,
 ): Promise<string | TunnelWebSocket> {
   const e2e = relayE2EFor(baseUrl);
-  if (e2e) {
-    try {
-      return await e2e.openWebSocket(target, { Authorization: `Bearer ${token}` });
-    } catch (error) {
-      if (!(error instanceof RelayE2EUnsupportedError)) throw error;
-      rememberPlaintextFallback(baseUrl);
-    }
-  }
+  if (e2e) return await e2e.openWebSocket(target, { Authorization: `Bearer ${token}` });
   let url: string;
   // Tickets bind the path; a query (terminal geometry) rides on the socket URL itself.
   const queryAt = target.indexOf("?");
@@ -334,14 +290,18 @@ export async function allocateE2ESession(
     if (e2eAware && response.status === 401) {
       throw new RelayE2EError("UNAUTHORIZED", "Encrypted session allocation was refused (401)", 401);
     }
-    // Only an old relay without that header falls back to plaintext: 400, 404, 405, or any 401
-    // (an old account relay answers a device token with 401 {"code":"UNAUTHORIZED"}). 426/E2E_REQUIRED,
-    // 409, 402 and other statuses stay typed errors.
+    // An old relay without that header (400, 404, 405, or any 401 - an old account relay answers
+    // a device token with 401 {"code":"UNAUTHORIZED"}) cannot carry ciphertext: a typed
+    // E2E_UNSUPPORTED error, never a plaintext downgrade.
     if (
       !e2eAware
       && (response.status === 400 || response.status === 401 || response.status === 404 || response.status === 405)
     ) {
-      throw new RelayE2EUnsupportedError(response.status);
+      throw new RelayE2EError(
+        E2E_UNSUPPORTED,
+        `Relay does not support encrypted sessions (${response.status})`,
+        response.status,
+      );
     }
     throw new RelayE2EError(
       code ?? "ALLOCATE_SESSION_FAILED",
@@ -492,13 +452,12 @@ export function openRelayE2ETransport(params: OpenRelayE2ETransportParams): Rela
 
 /**
  * How traffic to `host` travels: "direct" when not through its relay, "e2e" when the relay only
- * carries ciphertext, "plaintext-fallback" when an old relay forced this page session back to
- * the plaintext path, REPAIR_REQUIRED for a relay host this client holds no attach info for.
+ * carries ciphertext, REPAIR_REQUIRED for a relay host this client holds no attach info for.
  */
 export function relayE2EState(
   host: HostEndpoint | null,
   transportUrl: string,
-): "direct" | "e2e" | "plaintext-fallback" | typeof REPAIR_REQUIRED {
+): "direct" | "e2e" | typeof REPAIR_REQUIRED {
   if (!host?.relayOrigin || !host.machineId) return "direct";
   let origin: string;
   try {
@@ -508,6 +467,5 @@ export function relayE2EState(
   }
   if (origin !== host.relayOrigin) return "direct";
   if (!host.attachPublicKey || !host.enrollmentEpoch) return REPAIR_REQUIRED;
-  const base = registryKey(`${host.relayOrigin}/host/${encodeURIComponent(host.machineId)}`);
-  return plaintextFallback.has(base) ? "plaintext-fallback" : "e2e";
+  return "e2e";
 }

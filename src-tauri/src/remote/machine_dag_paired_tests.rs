@@ -56,6 +56,8 @@ impl Fixture {
         })
         .await
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        // The PIN-paired fixture host still uses the legacy plaintext relay proxy.
+        relay.set_require_e2e(false);
         let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let origin = format!("http://{}", relay_listener.local_addr()?);
         tasks.spawn(async move {

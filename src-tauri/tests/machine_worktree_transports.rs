@@ -105,6 +105,7 @@ async fn scenario(root: &Path) {
     let gateway = tokio::spawn(async move { axum::serve(gateway_listener, create_remote_router(state)).await.unwrap() });
     let key_path = root.join("data/relay-keys.json");
     let relay_state = tokio::task::spawn_blocking(move || RelayState::new_with_key_store(vec![], key_path).unwrap()).await.unwrap();
+    relay_state.set_require_e2e(false);
     let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay_address = relay_listener.local_addr().unwrap();
     let relay = tokio::spawn(async move { axum::serve(relay_listener, relay_router(relay_state).into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });

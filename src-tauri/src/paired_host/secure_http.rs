@@ -164,6 +164,7 @@ fn allocation_error(status: u16, body: &[u8]) -> ClientError {
     ClientError::local(match (status, code) {
         // An account relay that only accepts account sessions answers the device token
         // with a bare or generic 401; a relay that knows `?e2e=1` names a specific code.
+        // `E2E_UNSUPPORTED` is a hard error: there is no plaintext relay route to fall back to.
         (401, None) | (401, Some("UNAUTHORIZED")) => "E2E_UNSUPPORTED",
         (401, _) => "UNAUTHORIZED",
         (409, _) | (502, _) | (503, _) => "HOST_UNAVAILABLE",
@@ -620,26 +621,6 @@ pub async fn open_secure_websocket(
 }
 
 static REPAIR_WARNED: LazyLock<Mutex<HashSet<(String, u64)>>> = LazyLock::new(Default::default);
-static UNSUPPORTED_WARNED: LazyLock<Mutex<HashSet<(String, u64)>>> =
-    LazyLock::new(Default::default);
-
-/// The relay predates `?e2e=1` device-token allocation, so this host generation falls back
-/// to the legacy plaintext relay path; say so once per host generation.
-pub fn warn_e2e_unsupported(host_id: &str, generation: u64) {
-    let first = UNSUPPORTED_WARNED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert((host_id.to_owned(), generation));
-    if first {
-        tracing::warn!(
-            target: "ferryx::paired_host::e2e",
-            code = "E2E_UNSUPPORTED",
-            host = %host_id,
-            generation,
-            "relay does not support end-to-end device-token allocation; falling back to the plaintext relay path"
-        );
-    }
-}
 
 /// A relay-connected host this client cannot encrypt to keeps working in plaintext; say so
 /// once per host generation so the re-pair prompt has a trail.

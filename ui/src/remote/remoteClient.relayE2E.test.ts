@@ -5,15 +5,14 @@ import type { TunnelTransport, TunnelWebSocket } from "./attachTunnel";
 import {
   allocateE2ESession,
   CLIENT_BUILD_HEADER,
+  E2E_UNSUPPORTED,
   openRelayE2ETransport,
   RELAY_E2E_AWARE_HEADER,
   RelayE2EError,
-  RelayE2EUnsupportedError,
   registerRelayE2E,
   REPAIR_REQUIRED,
   RelayRepairRequiredError,
   relayE2EState,
-  resetRelayE2EFallbacks,
 } from "./relayE2E";
 import { remoteFetch, remoteOpenSocket, remoteSocketUrl, RemoteRequestTimeoutError, REMOTE_REQUEST_TIMEOUT_MS } from "./remoteClient";
 
@@ -43,7 +42,6 @@ describe("relay end-to-end encryption", () => {
 
   afterEach(() => {
     for (const fn of unregister.splice(0)) fn();
-    resetRelayE2EFallbacks();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -138,7 +136,7 @@ describe("relay end-to-end encryption", () => {
     ["405", () => new Response("method not allowed", { status: 405 })],
     ["401 without a JSON code from an old relay", () => new Response("unauthorized", { status: 401 })],
     ["401 UNAUTHORIZED from an old account relay", () => jsonResponse(401, { code: "UNAUTHORIZED" })],
-  ])("falls back to plaintext when the relay answers %s to ?e2e=1", async (_label, answer) => {
+  ])("never falls back to plaintext when an old relay answers %s to ?e2e=1", async (_label, answer) => {
     const globalFetch = vi.fn(async () => jsonResponse(200, { ok: true }));
     vi.stubGlobal("fetch", globalFetch);
     const allocate = vi.fn(async () => answer());
@@ -154,11 +152,11 @@ describe("relay end-to-end encryption", () => {
     });
     unregister.push(registerRelayE2E(BASE, connection), () => connection.close());
 
-    expect((await remoteFetch(BASE, "/api/v1/health")).status).toBe(200);
-    expect((await remoteFetch(BASE, "/api/v1/health")).status).toBe(200);
-    expect(allocate).toHaveBeenCalledTimes(1);
+    const error = await remoteFetch(BASE, "/api/v1/health").then(() => null, (err: unknown) => err);
+    expect(error).toBeInstanceOf(RelayE2EError);
+    expect(error).toMatchObject({ code: E2E_UNSUPPORTED });
     expect(openTunnel).not.toHaveBeenCalled();
-    expect(globalFetch).toHaveBeenCalledTimes(2);
+    expect(globalFetch).not.toHaveBeenCalled();
   });
 
   it("does not fall back when the relay requires E2E or the machine is offline", async () => {
@@ -214,15 +212,16 @@ describe("relay end-to-end encryption", () => {
 
       const error = await remoteFetch(BASE, "/api/v1/health").then(() => null, (err: unknown) => err);
       expect(error).toBeInstanceOf(RelayE2EError);
-      expect(error).not.toBeInstanceOf(RelayE2EUnsupportedError);
+      expect(error).not.toMatchObject({ code: E2E_UNSUPPORTED });
       expect(error).toMatchObject({ status });
       if (status === 401) expect(error).toMatchObject({ code: "UNAUTHORIZED" });
       expect(globalFetch).not.toHaveBeenCalled();
     },
   );
 
-  it("reports and clears a plaintext fallback per registration", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { ok: true })));
+  it("keeps an old relay on e2e and fails typed instead of downgrading", async () => {
+    const globalFetch = vi.fn(async () => jsonResponse(200, { ok: true }));
+    vi.stubGlobal("fetch", globalFetch);
     const host: HostEndpoint = {
       hostId: BASE,
       name: "Machine",
@@ -236,20 +235,11 @@ describe("relay end-to-end encryption", () => {
       enrollmentEpoch: "7",
     };
     const old = connectionWith(async () => new Response("not found", { status: 404 }));
-    const unregisterOld = registerRelayE2E(BASE, old);
+    unregister.push(registerRelayE2E(BASE, old), () => old.close());
     expect(relayE2EState(host, RELAY)).toBe("e2e");
-    expect((await remoteFetch(BASE, "/api/v1/health")).status).toBe(200);
-    expect(relayE2EState(host, RELAY)).toBe("plaintext-fallback");
-    unregisterOld();
-    old.close();
-
-    // When the host is registered again (e.g. after a token change)
-    const fresh = connectionWith(async () => jsonResponse(409, { code: "MACHINE_OFFLINE" }));
-    unregister.push(registerRelayE2E(BASE, fresh), () => fresh.close());
-
-    // Then encryption is tried again instead of staying on plaintext
+    await expect(remoteFetch(BASE, "/api/v1/health")).rejects.toMatchObject({ code: E2E_UNSUPPORTED, status: 404 });
     expect(relayE2EState(host, RELAY)).toBe("e2e");
-    await expect(remoteFetch(BASE, "/api/v1/health")).rejects.toMatchObject({ code: "MACHINE_OFFLINE" });
+    expect(globalFetch).not.toHaveBeenCalled();
   });
 
   it.each(["MACHINE_OFFLINE", "RATE_LIMITED"])(
