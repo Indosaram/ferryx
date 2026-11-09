@@ -3,6 +3,7 @@ import {
   clearShellReplacementInflightForTests,
   reconnectLocalSession,
   replaceExitedShellSession,
+  restartPaneSession,
 } from "./shellReplacement";
 import type { TerminalSession } from "./types";
 import { PROJECTS_STORAGE_KEY } from "./storageKeys";
@@ -330,5 +331,94 @@ describe("shell replacement", () => {
       expect(openNewShell).not.toHaveBeenCalled();
       expect(dispatch).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("pane restart", () => {
+  const local = (over: Partial<TerminalSession> = {}): TerminalSession => ({
+    id: "pane", workspaceId: "local-ws", cwd: "/repo", worktree: null,
+    backendSessionId: "old-pty", lifecycle: "running", ...over,
+  });
+
+  it("restarts a plain shell immediately, rebinding before closing the old backend", async () => {
+    const session = local();
+    const order: string[] = [];
+    const spawn = vi.fn().mockImplementation(async () => {
+      order.push("spawn");
+      return { sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" };
+    });
+    const close = vi.fn().mockImplementation(async () => { order.push("close"); });
+    const dispatch = vi.fn().mockImplementation(() => { order.push("rebind"); });
+
+    const result = await restartPaneSession("pane", { getSessions: () => ({ pane: session }), spawn, close, dispatch });
+
+    expect(result.sessionId).toBe("new-pty");
+    expect(order).toEqual(["spawn", "rebind", "close"]);
+    expect(close).toHaveBeenCalledWith("old-pty");
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "REBIND_SESSION_BACKEND", backendSessionId: "new-pty" }));
+  });
+
+  it("keeps the agent unless the caller asks for a plain shell", async () => {
+    const session = local({ agentType: "omo" });
+    const spawn = vi.fn().mockResolvedValue({ sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" });
+    const dispatch = vi.fn();
+
+    await restartPaneSession("pane", { getSessions: () => ({ pane: session }), spawn, dispatch });
+    expect(spawn.mock.calls[0][0].startup).toBeNull();
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ clearAgent: false }));
+
+    dispatch.mockClear();
+    await restartPaneSession("pane", { getSessions: () => ({ pane: session }), spawn, dispatch }, { clearAgent: true });
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ clearAgent: true }));
+  });
+
+  it("passes the resumed agent startup through to the new process", async () => {
+    const session = local({ agentType: "omo" });
+    const startup = { kind: "agent" } as never;
+    const spawn = vi.fn().mockResolvedValue({ sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" });
+
+    await restartPaneSession("pane", { getSessions: () => ({ pane: session }), spawn, dispatch: vi.fn() }, { startup });
+
+    expect(spawn.mock.calls[0][0]).toEqual(expect.objectContaining({ startup }));
+  });
+
+  it("keeps the pane on its original process when the new shell fails to start", async () => {
+    const session = local();
+    const close = vi.fn();
+    const spawn = vi.fn()
+      .mockResolvedValueOnce({ sessionId: "half-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" })
+      .mockResolvedValueOnce({ sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" });
+
+    // The rebind itself fails after the spawn succeeded.
+    const result = await restartPaneSession("pane", {
+      getSessions: () => ({ pane: session }),
+      spawn,
+      close,
+      dispatch: () => { throw new Error("rebind rejected"); },
+    }).catch((error: unknown) => error);
+
+    expect(result).toBeInstanceOf(Error);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledWith("half-pty");
+    expect(close).not.toHaveBeenCalledWith("old-pty");
+  });
+
+  it("shares one restart between concurrent callers", async () => {
+    const session = local();
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const spawn = vi.fn().mockImplementation(async () => {
+      await gate;
+      return { sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" };
+    });
+
+    const first = restartPaneSession("pane", { getSessions: () => ({ pane: session }), spawn, dispatch: vi.fn() });
+    const second = restartPaneSession("pane", { getSessions: () => ({ pane: session }), spawn, dispatch: vi.fn() });
+    release!();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(a.sessionId).toBe("new-pty");
+    expect(b.sessionId).toBe("new-pty");
   });
 });

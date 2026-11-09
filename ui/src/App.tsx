@@ -15,6 +15,8 @@ import { Sidebar } from "./components/Sidebar";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { TerminalSplitView } from "./components/TerminalSplitView";
 import { LocalChatPane } from "./components/LocalChatPane";
+import { RestartPaneDialog } from "./components/RestartPaneDialog";
+import { agentDisplayNameForType } from "./lib/agentTitle";
 import { TERMINAL_COPY_MODE_EVENT, type TerminalCopyModeEventDetail } from "./components/TerminalCopyMode";
 import { RemoteHostConnection } from "./remote/RemoteApp";
 import { RemoteBrowserSharingIndicator } from "./components/RemoteBrowserSharingIndicator";
@@ -181,10 +183,10 @@ import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
 import { findSessionByBackendId, localBackendSessionId } from "./components/supervisorPanel/findSession";
-import { extractNormalizedProviderSession, getAgentReconnectAffordance, isExitedContinuationSource } from "./lib/agentResumeAffordance";
+import { extractNormalizedProviderSession, getAgentReconnectAffordance, getContinuationAffordance, isExitedContinuationSource } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
-import { reconnectLocalSession, replaceExitedShellSession } from "./lib/shellReplacement";
+import { reconnectLocalSession, replaceExitedShellSession, restartPaneSession } from "./lib/shellReplacement";
 import { initialGridFields, measureInitialGeometry } from "./lib/initialPtyGeometry";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
 import { workspaceReducer, requestLocalRecoveryAdmission, type LocalRecoveryAdmissionResult } from "./state/workspaceStore";
@@ -1666,6 +1668,77 @@ function WorkspaceApp({
     [activeProject.repoRoot, activeProject.workspaceId, dispatchWorkspaceAction, persistSessionStrict, reportRuntimeError],
   );
 
+  /**
+   * Start the pane's process over, keeping the pane, its tab and its local session id.
+   *
+   * A plain shell restarts immediately. An agent pane asks first, because restarting it destroys
+   * the running conversation: the dialog offers resuming that provider session or a plain shell.
+   */
+  const runPaneRestart = useCallback(
+    (sessionId: string, startup?: SpawnTerminalRequest["startup"]) => {
+      const session = stateRef.current.sessions[sessionId];
+      const clearAgent = Boolean(session?.agentType && !startup);
+      if (clearAgent) dispatchWorkspaceAction({ type: "RESET_AGENT_STATE", sessionId });
+      return restartPaneSession(
+        sessionId,
+        {
+          getSessions: () => stateRef.current.sessions,
+          dispatch: dispatchWorkspaceAction,
+          // The pane stays mounted through a restart, so its measured viewport sizes the new PTY.
+          spawn: async (request, options) => {
+            const grid = await measureInitialGeometry({ kind: "session", sessionId }).catch(() => null);
+            return spawnTerminalDetailed({ ...request, ...initialGridFields(grid) }, options);
+          },
+          persist: async (result, localSession) => {
+            const current = stateRef.current;
+            const nextState = workspaceReducer(current, {
+              type: "REBIND_SESSION_BACKEND",
+              sessionId: localSession.id,
+              backendSessionId: result.sessionId,
+              cwd: result.session.cwd ?? localSession.cwd,
+              daemonEpoch: result.daemonEpoch,
+              incarnation: result.session.incarnation ?? null,
+              clearAgent,
+            });
+            await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
+          },
+        },
+        { clearAgent, startup: startup ?? undefined },
+      ).then(() => undefined);
+    },
+    [activeProject.repoRoot, activeProject.workspaceId, dispatchWorkspaceAction, persistSessionStrict],
+  );
+
+  const handleRestartPane = useCallback(
+    (sessionId: string) => {
+      const session = stateRef.current.sessions[sessionId];
+      const continuation = session ? getContinuationAffordance(session, {}) : null;
+      const canResume = Boolean(continuation?.availableModes.length);
+      if (!session?.agentType && !canResume) return runPaneRestart(sessionId);
+      setRestartPaneRequest({
+        sessionId,
+        agentName: agentDisplayNameForType(session.agentType ?? undefined) ?? session.agentType ?? "Agent",
+        canResume,
+      });
+      return Promise.resolve();
+    },
+    [runPaneRestart],
+  );
+
+  const restartFocusedPane = useCallback(() => {
+    const current = stateRef.current;
+    const tabId = current.layout.activeTabId;
+    const candidate = tabId ? current.layout.tabs.find((tab) => tab.id === tabId) : undefined;
+    const terminalTab = candidate && isTerminalTab(candidate) ? candidate : null;
+    if (!terminalTab) return;
+    const ownerLayout = current.layout.layoutsByTabId?.[terminalTab.id];
+    const activeLeaf =
+      ownerLayout?.activeLeafId ?? (ownerLayout?.root ? collectLeafIds(ownerLayout.root)[0] : null);
+    const sessionId =
+      (activeLeaf && ownerLayout?.sessionIdsByLeafId?.[activeLeaf]) || terminalTab.sessionId;
+    if (sessionId) void handleRestartPane(sessionId);
+  }, [handleRestartPane]);
+
   const handleReconnectLocalSession = useCallback(
     async (sessionId: string) => {
       await reconnectLocalSession(sessionId, {
@@ -2221,6 +2294,12 @@ function WorkspaceApp({
   const [settingsInitialSection, setSettingsInitialSection] = useState<SectionId | undefined>(undefined);
   const [settingsRemoteContext, setSettingsRemoteContext] = useState<RemoteContext | undefined>(undefined);
   const [searchLeafId, setSearchLeafId] = useState<string | null>(null);
+  // A pane restart that needs the user to pick between resuming its agent and a plain shell.
+  const [restartPaneRequest, setRestartPaneRequest] = useState<{
+    sessionId: string;
+    agentName: string;
+    canResume: boolean;
+  } | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
   const deleteOwnerId = deleteTarget ? resolveWorktreeOwnerId(deleteTarget, projects, activeProject.workspaceId) : undefined;
@@ -4422,6 +4501,7 @@ function WorkspaceApp({
         "terminal.focusDown": browserShortcutsActive ? undefined : () => handleDirectionalPaneFocus("down"),
         "terminal.search": browserShortcutsActive ? undefined : handleOpenTerminalSearch,
         "terminal.copyMode": browserShortcutsActive ? undefined : handleToggleTerminalCopyMode,
+        "terminal.restart": browserShortcutsActive ? undefined : restartFocusedPane,
         "sidebar.left.toggle": toggleSidebar,
         "project.add": handleOpenAddProject,
         "commandPalette.open": handleOpenCommandPalette,
@@ -4451,6 +4531,8 @@ function WorkspaceApp({
       isNativeRuntime,
       handleOpenTerminalSearch,
       handleToggleTerminalCopyMode,
+      handleRestartPane,
+      restartFocusedPane,
       handleSelectTerminalTabByIndex,
       handleSelectWorktreeByIndex,
       handleSplitActive,
@@ -4693,6 +4775,7 @@ function WorkspaceApp({
             onReconnectLocalSession={handleReconnectLocalSession}
             onRefreshSessionIdentity={handleRefreshSessionIdentity}
             onOpenNewShell={handleOpenNewShell}
+            onRestartPane={handleRestartPane}
             onBackendSessionUnavailable={(sessionId, backendSessionId, reason, bindingKey) => {
               markBackendSessionUnavailable(sessionId, backendSessionId, reason, bindingKey);
             }}
@@ -4776,6 +4859,27 @@ function WorkspaceApp({
             }}
           />
         </Suspense>
+      ) : null}
+      {restartPaneRequest ? (
+        <RestartPaneDialog
+          agentName={restartPaneRequest.agentName}
+          canResume={restartPaneRequest.canResume}
+          onCancel={() => setRestartPaneRequest(null)}
+          onResume={() => {
+            const target = restartPaneRequest;
+            setRestartPaneRequest(null);
+            const session = stateRef.current.sessions[target.sessionId];
+            const continuation = session ? getContinuationAffordance(session, {}) : null;
+            const mode = continuation?.availableModes[0];
+            const startup = mode ? continuation?.startup(mode) ?? null : null;
+            void runPaneRestart(target.sessionId, startup ?? undefined).catch(reportRuntimeError);
+          }}
+          onFreshShell={() => {
+            const target = restartPaneRequest;
+            setRestartPaneRequest(null);
+            void runPaneRestart(target.sessionId).catch(reportRuntimeError);
+          }}
+        />
       ) : null}
       {!activeRemoteHost && whatsNew && (!onboardingSteps || onboardingSteps.length === 0) ? (
         <Suspense fallback={null}>
