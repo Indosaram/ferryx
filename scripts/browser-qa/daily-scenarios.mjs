@@ -1105,6 +1105,13 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       await sleep(80);
     }
     await sleep(500);
+    // Whether the page saw dragenter/dragover while the button is still held (DROPZONE turns
+    // DROPHOVER), and which window is under the pointer: tells "no drag over the page" from
+    // "the drop itself was lost".
+    if (ctx.platform === "win32") {
+      record.hover_words = screenWords(ctx).map((word) => word.text).filter((text) => /^DROP/i.test(text));
+      record.hover_hit = ctx.host.hit ? ctx.host.hit(to[0], to[1]) : null;
+    }
     ctx.host.mouseUp(to[0], to[1]);
     // The source stays alive until the page shows the drop or `verify` gives up.
     record.dropped = Boolean(await verify());
@@ -2102,6 +2109,14 @@ export async function dailyChromium(ctx) {
     g8.chromium_tab = created.browserId;
     nativeState(ctx, "g8c-tab");
     g8.chromium_nav = await chromiumNavigate(created.browserId, `${fixtureBase}/upload.html`);
+    // A pointer resting on the page's file input makes Chromium show its "No file chosen" tooltip
+    // window over the label (Windows run 42628093547 probe-262: the tooltip at 673,470 hid the
+    // "U" and OCR read "PLOADPICK", so the click was never made). Park the pointer on the desktop
+    // right of the app window (the window spans x 40..1320 on the 1920px runner screen).
+    if (ctx.platform === "win32") {
+      ctx.host.mouseMove(1700, 600);
+      await sleep(800);
+    }
     await waitWords(ctx, ["uploadpick"], 15000);
     const pick = await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
     if (pick && ctx.host.hit) g8.chromium_pick_hit = ctx.host.hit(...pick);
@@ -2133,7 +2148,10 @@ export async function dailyChromium(ctx) {
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     // Stage-1 probe, Linux only: can the engine hand the page real File objects from a CDP drop
     // alone (no X drag)? Diagnostic: runs after the real-drag check above and changes no check.
-    if (ctx.platform === "linux" && zone) g8.chromium_cdp_drop_probe = await cdpDropProbe(ctx, created.browserId, file);
+    // Windows too: run 42628093547 left DROPZONE untouched (no dragenter) with the drop point over
+    // the engine's Chrome_RenderWidgetHostHWND, so this separates "the OS drop never reached the
+    // engine" from "the engine cannot hand the page files".
+    if ((ctx.platform === "linux" || (ctx.platform === "win32" && !g8.checks.drag_in_chromium)) && zone) g8.chromium_cdp_drop_probe = await cdpDropProbe(ctx, created.browserId, file);
     ctx.host.focus();
     return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium, stderr: g8.checks.upload_picker_chromium ? (g8.chromium_drag?.stderr ?? (zone ? undefined : "DROPZONE not visible")) : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
   }
