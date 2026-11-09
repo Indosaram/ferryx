@@ -743,7 +743,7 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let model = Scripted {
-            text: r#"{"wake":true,"reason":"sign","suggested":"sign the contract today","target_lane":null}"#.into(),
+            text: r#"{"wake":true,"reason":"sign","suggested":"오늘 계약서에 서명해 주세요","target_lane":null}"#.into(),
             fail: false,
             expect: &[],
             reject: &[],
@@ -763,7 +763,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(notices, vec![(lead.to_owned(), "sign the contract today".to_owned())]);
+        assert_eq!(notices, vec![(lead.to_owned(), "오늘 계약서에 서명해 주세요".to_owned())]);
     }
 
     #[tokio::test]
