@@ -2051,6 +2051,14 @@ export async function dailyChromium(ctx) {
         return null;
       }
     }
+    // A new or reused Chromium tab is not necessarily the active one: Windows runs 42378753806
+    // and 42579681577 left the system-webview upload-idle tab active (screenshots 56-58), so the
+    // whole Chromium g8 step clicked and dragged on the wrong page. Activation is confirmed with
+    // `ferryx browser list` (only the active tab's webview is visible) before anything acts.
+    const listed = ctx.sessions().list;
+    const active = listed.find((entry) => entry.browserId === created.browserId)?.visible === true
+      && listed.filter((entry) => entry.browserId !== created.browserId).every((entry) => entry.visible === false);
+    if (!active) g11.chromium_tab_activate_after = await activateTab(ctx, created.browserId, null);
     await sleep(3000);
     return created;
   };
