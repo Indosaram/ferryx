@@ -613,6 +613,12 @@ fn pick_files<R: Runtime>(
 ) -> Vec<String> {
     use ferryx_browser_engine_protocol::FileDialogMode;
     let mut dialog = app.dialog().file();
+    // Windows: an unowned common dialog opens behind the Ferryx window while focus stays in
+    // the engine's child HWND, so the page's file chooser never gets an answer. Own it.
+    #[cfg(target_os = "windows")]
+    if let Some(owner) = file_dialog_owner(app) {
+        dialog = dialog.set_parent(&owner);
+    }
     let extensions = accept_extensions(accept);
     if !extensions.is_empty() {
         let refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
@@ -635,6 +641,17 @@ fn pick_files<R: Runtime>(
         FileDialogMode::OpenFolder => dialog.blocking_pick_folder().and_then(into).into_iter().collect(),
         FileDialogMode::Save => dialog.blocking_save_file().and_then(into).into_iter().collect(),
     }
+}
+
+/// The window a Chromium page's file chooser belongs to: the focused Ferryx window, else main.
+#[cfg(target_os = "windows")]
+fn file_dialog_owner<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
+    let windows = app.webview_windows();
+    windows
+        .values()
+        .find(|window| window.is_focused().unwrap_or(false))
+        .or_else(|| windows.get("main"))
+        .cloned()
 }
 
 // ---------------------------------------------------------------------------------------------
