@@ -54,7 +54,7 @@ pub(crate) fn get_session_file_path<R: Runtime>(app: &AppHandle<R>) -> Result<Pa
 
 /// The session file owned by `label`: "main" keeps today's path, "ws-<id>" maps to
 /// `session-ws-<id>.json` in the same directory. Any other label is rejected.
-fn get_window_session_file_path<R: Runtime>(
+pub(crate) fn get_window_session_file_path<R: Runtime>(
     app: &AppHandle<R>,
     label: &str,
 ) -> Result<PathBuf, IpcError> {
@@ -91,6 +91,27 @@ pub async fn cmd_session_clear<R: Runtime>(
     run_blocking(move || with_session_path_lock(&path, || clear_session_from_path(&path))).await
 }
 
+/// Copies one window's session file onto another's so a newly opened window boots with exactly
+/// the source window's projects, workspace, tabs and split layout. Live PTY sessions are handed
+/// over separately (`cmd_window_move_sessions`); nothing here spawns, closes or kills anything.
+pub(crate) async fn clone_window_session<R: Runtime>(
+    app: &AppHandle<R>,
+    source_label: &str,
+    target_label: &str,
+) -> Result<(), IpcError> {
+    let source = get_window_session_file_path(app, source_label)?;
+    let target = get_window_session_file_path(app, target_label)?;
+    run_blocking(move || clone_session_file(&source, &target)).await
+}
+
+fn clone_session_file(source: &Path, target: &Path) -> Result<(), IpcError> {
+    let loaded = with_session_path_lock(source, || load_session_from_path(source))?;
+    let Some(session) = loaded else {
+        return Ok(());
+    };
+    with_session_path_lock(target, || save_session_to_path(target, &session))
+}
+
 /// Deletes a closed secondary window's session file after its tabs were adopted by another
 /// window. The primary window's file is never discarded through this path.
 #[tauri::command]
@@ -110,9 +131,12 @@ pub async fn cmd_session_discard_window<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::session_file_path;
+    use super::*;
+    use crate::session::{PersistedLayout, PersistedTab, PersistedWorkspace};
+    use std::collections::HashMap;
     use std::ffi::OsStr;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     /// An app data dir that must not be consulted.
     fn no_app_dir() -> Result<PathBuf, ()> {
@@ -151,5 +175,49 @@ mod tests {
                 Ok(PathBuf::from("/app/dev/session_state.json"))
             );
         }
+    }
+
+    #[test]
+    fn clone_session_file_copies_the_complete_workspace_layout() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("session_state.json");
+        let target = session_path_for_window(&source, "ws-clone").unwrap();
+        let mut workspace = PersistedWorkspace {
+            workspace_id: "alpha".into(),
+            repo_root: PathBuf::from("/repo"),
+            ..Default::default()
+        };
+        workspace.layout = PersistedLayout {
+            tabs: vec![PersistedTab {
+                id: "tab-agent".into(),
+                label: "Agent".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let original = PersistedWorkspaceSession {
+            version: 3,
+            timestamp: 42,
+            active_workspace_id: "alpha".into(),
+            workspaces: HashMap::from([("alpha".into(), workspace)]),
+            extra: HashMap::new(),
+        };
+        save_session_to_path(&source, &original).unwrap();
+
+        clone_session_file(&source, &target).unwrap();
+
+        assert_eq!(load_session_from_path(&target).unwrap(), Some(original));
+        assert!(source.exists());
+    }
+
+    #[test]
+    fn clone_session_file_without_a_source_leaves_the_target_empty() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("session_state.json");
+        let target = session_path_for_window(&source, "ws-clone").unwrap();
+
+        clone_session_file(&source, &target).unwrap();
+
+        assert!(!target.exists());
     }
 }

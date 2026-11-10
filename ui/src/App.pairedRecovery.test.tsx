@@ -66,6 +66,7 @@ vi.mock("./lib/tauri", async (importOriginal) => ({
   },
   onTerminalOutput: async () => () => undefined,
   onNewTerminalTabMenu: async () => () => undefined,
+  onNewWindowMenu: async () => () => undefined,
   onSplitRightMenu: async () => () => undefined,
   onCommandPaletteMenu: async () => () => undefined,
   onCloseTabMenu: async () => () => undefined,
