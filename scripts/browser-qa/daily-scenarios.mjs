@@ -1293,11 +1293,32 @@ export async function dailyWebviewBefore(ctx) {
     const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent", "manager"], 8000)) !== null);
     g2.history_menu = opened;
     if (!opened.ok) return { ok: false, stderr: "History menu did not open", opened };
-    // "Show all history": OCR reads it as separate words.
-    const all = await clickWord(ctx, (text) => /^all$/i.test(text) || /showall/i.test(text), { timeout: 5000 });
-    const page = await waitWords(ctx, ["clearbrowsing", "browsing"], 8000);
-    if (!all || !page) return { ok: false, stderr: "history page did not open" };
-    const search = await clickWord(ctx, (text) => /^search$/i.test(text), { timeout: 5000, pick: "first" });
+    // "Show all history": OCR reads it as separate words. The open menu itself reads
+    // "Remember browsing history", so "browsing" alone proved nothing: windows run 42864283166
+    // (13-daily-g2-history.png) left the menu open, took it for the page, and the search click
+    // then fell through to the taskbar's "Type here to search" and typed into the Start menu.
+    // The page is open once the menu is gone and the library's "Clear browsing data" shows.
+    const pageOpen = async (timeout) => Boolean(await until(() => {
+      const words = screenWords(ctx);
+      return !has(words, "remember") && !has(words, "manager") && has(words, "browsing");
+    }, timeout));
+    const tries = [];
+    let page = false;
+    for (const test of [(text) => /^all$/i.test(text) || /showall/i.test(text), (text) => /^show$/i.test(text)]) {
+      if (tries.length && !(await waitWords(ctx, ["recent", "manager"], 1000))) {
+        const again = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent", "manager"], 8000)) !== null);
+        if (!again.ok) break;
+      }
+      const at = await clickWord(ctx, test, { timeout: 5000, where: (word) => word.top > opened.at[1] });
+      page = Boolean(at) && (await pageOpen(6000));
+      tries.push({ at, page });
+      if (page) break;
+    }
+    g2.history_page_tries = tries;
+    if (!page) return { ok: false, stderr: "history page did not open", tries };
+    // Only the library's own search box: never the taskbar below the window.
+    const screenHeight = ctx.decodePng(ctx.probeShot()).height;
+    const search = await clickWord(ctx, (text) => /^search$/i.test(text), { timeout: 5000, pick: "first", where: (word) => word.top > opened.at[1] && word.top < screenHeight - 80 });
     ctx.host.type("Alpha");
     await sleep(2000);
     let words = screenWords(ctx);
