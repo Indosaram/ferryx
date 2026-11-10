@@ -183,7 +183,7 @@ import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
 import { findSessionByBackendId, localBackendSessionId } from "./components/supervisorPanel/findSession";
-import { extractNormalizedProviderSession, getAgentReconnectAffordance, getContinuationAffordance, isExitedContinuationSource } from "./lib/agentResumeAffordance";
+import { extractNormalizedProviderSession, getAgentReconnectAffordance, getContinuationAffordance, getInPlaceRestartStartup, isExitedContinuationSource } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { reconnectLocalSession, replaceExitedShellSession, restartPaneSession } from "./lib/shellReplacement";
@@ -1675,9 +1675,11 @@ function WorkspaceApp({
    * the running conversation: the dialog offers resuming that provider session or a plain shell.
    */
   const runPaneRestart = useCallback(
-    (sessionId: string, startup?: SpawnTerminalRequest["startup"]) => {
+    (sessionId: string, startup?: SpawnTerminalRequest["startup"], dropAgent?: boolean) => {
       const session = stateRef.current.sessions[sessionId];
-      const clearAgent = Boolean(session?.agentType && !startup);
+      // An agent pane keeps its identity only when the restart continues its conversation; a
+      // plain-shell restart is destructive and the dialog has already said so.
+      const clearAgent = Boolean(session?.agentType && (dropAgent === true || !startup));
       if (clearAgent) dispatchWorkspaceAction({ type: "RESET_AGENT_STATE", sessionId });
       return restartPaneSession(
         sessionId,
@@ -1712,13 +1714,28 @@ function WorkspaceApp({
   const handleRestartPane = useCallback(
     (sessionId: string) => {
       const session = stateRef.current.sessions[sessionId];
-      const continuation = session ? getContinuationAffordance(session, {}) : null;
-      const canResume = Boolean(continuation?.availableModes.length);
-      if (!session?.agentType && !canResume) return runPaneRestart(sessionId);
+      // Restart replaces this pane's process, so its own conversation is resumable even while it
+      // is live: the exit-state continuation aside only covers opening a *second* pane.
+      const inPlace = session ? getInPlaceRestartStartup(session) : null;
+      // A pane whose backend is already gone (remote or paired included) restarts on the existing
+      // continuation path; resuming that same conversation still beats dropping the agent.
+      const continuation = !inPlace && session
+        ? getContinuationAffordance(session, {
+            sessions: Object.values(stateRef.current.sessions),
+            activityState: stateRef.current.activityBySessionId?.[sessionId]?.state,
+            terminalContinueV1: true,
+          })
+        : null;
+      const resumeMode = continuation?.availableModes.includes("resume")
+        ? "resume"
+        : continuation?.availableModes[0];
+      const resumeStartup = inPlace ?? (resumeMode ? continuation?.startup(resumeMode) ?? null : null);
+      if (!session?.agentType && !resumeStartup) return runPaneRestart(sessionId);
       setRestartPaneRequest({
         sessionId,
         agentName: agentDisplayNameForType(session.agentType ?? undefined) ?? session.agentType ?? "Agent",
-        canResume,
+        canResume: resumeStartup !== null,
+        resumeStartup,
       });
       return Promise.resolve();
     },
@@ -2299,6 +2316,7 @@ function WorkspaceApp({
     sessionId: string;
     agentName: string;
     canResume: boolean;
+    resumeStartup: SpawnTerminalRequest["startup"] | null;
   } | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(loadSidebarOpen);
   const [deleteTarget, setDeleteTarget] = useState<Worktree | null>(null);
@@ -4868,16 +4886,12 @@ function WorkspaceApp({
           onResume={() => {
             const target = restartPaneRequest;
             setRestartPaneRequest(null);
-            const session = stateRef.current.sessions[target.sessionId];
-            const continuation = session ? getContinuationAffordance(session, {}) : null;
-            const mode = continuation?.availableModes[0];
-            const startup = mode ? continuation?.startup(mode) ?? null : null;
-            void runPaneRestart(target.sessionId, startup ?? undefined).catch(reportRuntimeError);
+            void runPaneRestart(target.sessionId, target.resumeStartup ?? undefined).catch(reportRuntimeError);
           }}
           onFreshShell={() => {
             const target = restartPaneRequest;
             setRestartPaneRequest(null);
-            void runPaneRestart(target.sessionId).catch(reportRuntimeError);
+            void runPaneRestart(target.sessionId, undefined, true).catch(reportRuntimeError);
           }}
         />
       ) : null}

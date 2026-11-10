@@ -41,6 +41,12 @@ export function RestartPaneDialog({ agentName, onCancel, onResume, onFreshShell,
             This pane is running {agentName}. Restarting replaces the process in place; choose whether the agent
             session continues.
           </p>
+          {canResume ? null : (
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-amber-600 dark:text-amber-400" data-testid="restart-pane-drop-notice">
+              Restarting as a plain shell ends this {agentName} session and drops the pane&apos;s agent
+              identity. The conversation cannot be brought back from this pane.
+            </p>
+          )}
           <div className="flex flex-col gap-2">
             {canResume ? (
               <button
@@ -58,7 +64,7 @@ export function RestartPaneDialog({ agentName, onCancel, onResume, onFreshShell,
               onClick={onFreshShell}
               className="rounded-md border border-border px-3 py-2 text-foreground hover:bg-accent"
             >
-              Restart as plain shell
+              {canResume ? "Restart as plain shell" : "End session and restart as plain shell"}
             </button>
           </div>
           <div className="flex justify-end">

@@ -5,6 +5,7 @@ import {
   collectResumableAgentPanes,
   getAgentReconnectAffordance,
   getContinuationAffordance,
+  getInPlaceRestartStartup,
   resumableAgentPane,
   type AgentReconnectAffordance,
   type ResumableAgentPane,
@@ -437,5 +438,27 @@ describe("continuation affordance", () => {
     expect(reason(remote, "fork")).toBe("remoteCapabilityAbsent");
     expect(reason(remote, "resume", { terminalContinueV1: false })).toBe("remoteCapabilityAbsent");
     expect(getContinuationAffordance(remote, { terminalContinueV1: true }).availableModes).toEqual(["fork", "resume"]);
+  });
+});
+
+describe("in-place restart startup", () => {
+  it("resumes a live agent pane's own conversation, where opening a second pane is refused", () => {
+    const live = createSession({ lifecycle: "running", backendSessionId: "pty-live" });
+
+    // A second pane cannot take a conversation that a live pane still owns.
+    expect(getContinuationAffordance(live).availableModes).toEqual(["fork"]);
+    // Replacing that very pane's process is that owner handing the conversation over.
+    expect(getInPlaceRestartStartup(live)).toEqual({
+      kind: "agentResume",
+      agentType: "claude",
+      providerSession: { key: "session_id", id: "claude-uuid-123" },
+    });
+    expect(getInPlaceRestartStartup(createSession({ lifecycle: "exited", backendSessionId: null }))).not.toBeNull();
+  });
+
+  it("stays unavailable without a provider reference or a resume builder", () => {
+    expect(getInPlaceRestartStartup(createSession({ providerSession: null, agentSessionId: null }))).toBeNull();
+    expect(getInPlaceRestartStartup(createSession({ agentType: "aider" }))).toBeNull();
+    expect(getInPlaceRestartStartup(createSession({ agentType: null }))).toBeNull();
   });
 });

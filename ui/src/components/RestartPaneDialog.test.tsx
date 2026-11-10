@@ -35,6 +35,21 @@ describe("RestartPaneDialog", () => {
     expect(getByTestId("restart-pane-shell")).toBeTruthy();
   });
 
+  it("states that a non-resumable restart ends the session", () => {
+    const { getByTestId } = render(<RestartPaneDialog {...baseProps} canResume={false} />);
+
+    // The old single-click path silently dropped the agent; the destructive choice must say so.
+    expect(getByTestId("restart-pane-drop-notice").textContent).toContain("ends this");
+    expect(getByTestId("restart-pane-shell").textContent).toContain("End session");
+  });
+
+  it("keeps the plain-shell label neutral when resuming is offered", () => {
+    const { getByTestId, queryByTestId } = render(<RestartPaneDialog {...baseProps} />);
+
+    expect(queryByTestId("restart-pane-drop-notice")).toBeNull();
+    expect(getByTestId("restart-pane-shell").textContent).toBe("Restart as plain shell");
+  });
+
   it("cancels on Escape and on backdrop click without choosing", () => {
     const onCancel = vi.fn();
     const onResume = vi.fn();

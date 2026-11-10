@@ -388,3 +388,28 @@ export function getContinuationAffordance(
     },
   };
 }
+
+/** Startup DTO for replacing the process behind the *same* pane with its own conversation. */
+export type InPlaceRestartStartup = {
+  readonly kind: "agentResume";
+  readonly agentType: string;
+  readonly providerSession: AgentProviderSession;
+};
+
+/**
+ * Restarting a pane in place keeps its local session, so the replacement may take over the
+ * provider session that pane already holds. Unlike `getContinuationAffordance` - which refuses a
+ * live source because a *second* pane would be a real conflict - this never consults exit state:
+ * the source process is the one being replaced. The daemon admits it once that owner is closed.
+ */
+export function getInPlaceRestartStartup(session: TerminalSession): InPlaceRestartStartup | null {
+  const agentType = session.agentType?.trim();
+  if (!agentType || !canResumeAgent(agentType)) return null;
+  // A remote or paired pane is restarted by its owning host; this desktop daemon must not claim
+  // a conversation that lives on another machine.
+  if (isRemoteWorkspaceId(session.workspaceId) || isPairedWorkspaceId(session.workspaceId)) return null;
+  const providerSession = extractNormalizedProviderSession(session);
+  if (!providerSession) return null;
+  if (!buildResumeArgv({ agentType, providerSession })) return null;
+  return { kind: "agentResume", agentType: agentType.toLowerCase(), providerSession };
+}

@@ -382,6 +382,30 @@ describe("pane restart", () => {
     expect(spawn.mock.calls[0][0]).toEqual(expect.objectContaining({ startup }));
   });
 
+  it("retires the old owner before resuming the same pane's conversation", async () => {
+    const session = local({ agentType: "omo" });
+    const order: string[] = [];
+    const spawn = vi.fn().mockImplementation(async () => {
+      order.push("spawn");
+      return { sessionId: "new-pty", session: { cwd: "/repo" }, daemonEpoch: "epoch-1" };
+    });
+    const close = vi.fn().mockImplementation(async () => { order.push("close"); });
+    const dispatch = vi.fn().mockImplementation(() => { order.push("rebind"); });
+    const startup = {
+      kind: "agentResume" as const,
+      agentType: "omo",
+      providerSession: { key: "session_id" as const, id: "01a1c496-874e-7b60-b1e0-3f97e7436328" },
+    };
+
+    await restartPaneSession("pane", { getSessions: () => ({ pane: session }), spawn, close, dispatch }, { startup });
+
+    // The daemon admits a resume only for a conversation nobody else owns, so the outgoing
+    // process is ended first - and its close is not repeated once the rebind lands.
+    expect(order).toEqual(["close", "spawn", "rebind"]);
+    expect(close.mock.calls).toEqual([["old-pty"]]);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ clearAgent: false }));
+  });
+
   it("keeps the pane on its original process when the new shell fails to start", async () => {
     const session = local();
     const close = vi.fn();

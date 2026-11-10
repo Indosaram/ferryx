@@ -141,6 +141,11 @@ export function clearShellReplacementInflightForTests(): void {
  * with its original process (the caller keeps the pane mounted and offers a retry). Agent panes
  * need an explicit choice: `clearAgent` starts a plain shell, while the default keeps the detected
  * agent type so the resumed agent can continue the same provider session.
+ *
+ * The one exception is continuing the pane's own conversation (`startup.kind === "agentResume"`):
+ * the daemon admits that spawn only once the outgoing process no longer claims the provider
+ * session, so the old backend is retired first. A failure after that point leaves the pane on its
+ * inline restart error with Retry, and the retry spawns against a freed claim.
  */
 export function restartPaneSession(
   localSessionId: string,
@@ -165,6 +170,15 @@ export function restartPaneSession(
     let spawned: SpawnTerminalResult | null = null;
     try {
       const clearAgent = options?.clearAgent === true;
+      // Continuing this pane's own agent conversation is a take-over, not a second owner: the
+      // daemon refuses a spawn whose provider session is still claimed, and that claim belongs to
+      // the process being replaced. Retire the old process first so the replacement can adopt it.
+      // A backend that is already gone fails here harmlessly - the daemon prunes dead ownership
+      // when it admits the spawn.
+      const continuesOwnConversation = options?.startup?.kind === "agentResume";
+      if (continuesOwnConversation && previousBackendSessionId) {
+        await (dependencies.close ?? closeTerminal)(previousBackendSessionId).catch(() => undefined);
+      }
       spawned = await (dependencies.spawn ?? spawnTerminalDetailed)({
         workspaceId: initial.workspaceId,
         worktree: initial.worktree,
@@ -194,13 +208,15 @@ export function restartPaneSession(
         clearAgent,
       });
     } catch (error) {
-      // The pane keeps its original process: retire only a replacement that never took over.
+      // Retire only a replacement that never took over. After a resume the original process is
+      // already gone, so the pane stays on its inline restart error and Retry spawns a fresh one.
       if (spawned) await (dependencies.close ?? closeTerminal)(spawned.sessionId).catch(() => undefined);
       throw toIpcError(error);
     }
 
     // The replacement owns the pane now; retire the old process only after the rebind landed.
-    if (previousBackendSessionId) {
+    // A resume restart already retired it, because the conversation could not have two owners.
+    if (previousBackendSessionId && options?.startup?.kind !== "agentResume") {
       await (dependencies.close ?? closeTerminal)(previousBackendSessionId).catch(() => undefined);
     }
     return spawned;
