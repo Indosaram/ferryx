@@ -231,6 +231,8 @@ import {
   REPAIR_REQUIRED,
 } from "./relayE2E";
 import { userFacingError } from "./userFacingError";
+import { remoteVoicePort, type VoiceFetch } from "../lib/voiceCallPort";
+import { useVoiceConversation } from "../lib/useVoiceConversation";
 
 type SelectionFailureCode =
   | "LIST_FAILED"
@@ -3419,6 +3421,19 @@ export const RemoteHostConnection: React.FC<{
   // The account supervisor lease: each computer on standby says where the supervisor runs and
   // offers the move; the holder's own warnings (hosts it cannot reach, ...) show above the panel.
   const panelLease = supervisorLeaseCards(phoneSupervisor, phoneHome);
+  // The phone's call entry: the same overlay as the desktop, carried by the host's own signed
+  // fetch. It exists only while a live host can answer, so a dead computer never offers a call.
+  const phoneCallHost = phoneSupervisor.host;
+  const phoneCallPort = phoneCallHost ? phoneSupervisor.voicePortFor(phoneCallHost.machineId) : null;
+  const phoneCall =
+    phoneCallHost && phoneCallHost.client && phoneCallPort
+      ? {
+          port: phoneCallPort,
+          view: phoneCallHost.view,
+          client: phoneCallHost.client,
+          projectId: phoneCallHost.view.projects[0]?.projectId ?? null,
+        }
+      : null;
   const panelBody = (
     <WidePanel
       lease={panelLease}
@@ -5613,6 +5628,27 @@ export const RemoteHostConnection: React.FC<{
     [chatMessages, chatOlderMessages],
   );
 
+  const chatVoiceFetch = useMemo<VoiceFetch | null>(() => {
+    const base = transportBaseUrl;
+    const bearer = token;
+    if (!base || !bearer) return null;
+    return async (path, init) => {
+      const response = await remoteFetch(base, path, {
+        method: init?.method ?? "GET",
+        headers: { Authorization: `Bearer ${bearer}`, ...(init?.body === undefined ? {} : { "Content-Type": "application/json" }) },
+        body: init?.body,
+      });
+      const body = new Uint8Array(await response.arrayBuffer());
+      return { status: response.status, body };
+    };
+  }, [token, transportBaseUrl]);
+  const chatVoicePort = useMemo(() => (chatVoiceFetch ? remoteVoicePort(chatVoiceFetch) : null), [chatVoiceFetch]);
+  const chatVoiceConversation = useVoiceConversation({
+    port: chatVoicePort,
+    send: handleChatComposerSend,
+    messages: chatTranscript,
+  });
+
   /** What the message box says while a prompt waits, so the user knows what typing does. */
   const chatComposerPlaceholder =
     chatPrompt !== null ? referenceAnswerHint(chatPrompt) : undefined;
@@ -6181,6 +6217,7 @@ export const RemoteHostConnection: React.FC<{
             headerAction: <AccountButton onOpen={() => setAccountSheetOpen(true)} />,
             resume: phoneResume,
             lease: panelLease,
+            voice: phoneCall,
           }}
           destination={phoneNav.destination}
           onSelectTab={phoneNav.selectTab}
@@ -6514,6 +6551,7 @@ export const RemoteHostConnection: React.FC<{
                 isRunning={chatIsRunning}
                 activityState={chatActivity === "working" ? "thinking" : "idle"}
                 onSendMessage={handleChatComposerSend}
+                voiceConversation={chatVoiceConversation}
                 onStopExecution={() => void stopChatExecution()}
                 onOpenTerminal={() => setViewMode("terminal")}
                 continuationOffers={continuationAffordance?.modes}

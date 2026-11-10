@@ -82,6 +82,7 @@ if [[ ! -f "$DEV_PLIST" ]]; then
     <key>CFBundleShortVersionString</key><string>0.0.0-dev</string>
     <key>CFBundleVersion</key><string>0.0.0-dev</string>
     <key>CFBundleIconFile</key><string>icon</string>
+    <key>NSMicrophoneUsageDescription</key><string>The supervisor voice call uses the microphone to hear what you say.</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key><string>10.15</string>
     <key>NSHighResolutionCapable</key><true/>

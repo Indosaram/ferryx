@@ -1647,12 +1647,31 @@ impl Inner {
             return (Err(SupervisorFault::Cancelled), None);
         }
         let engine = tokio::select! {
-            engine = self.engine() => match engine {
-                Ok(engine) => engine,
-                Err(fault) => return (Err(fault), None),
-            },
+            engine = self.engine() => engine,
             () = cancel_signal(cancel, epoch, spec.cancellable) => return (Err(SupervisorFault::Cancelled), None),
             () = caller.closed() => return (Err(SupervisorFault::Cancelled), None),
+        };
+        // An engine that just exited is relaunched after its backoff; an owner's conversation
+        // turn arriving inside that window waits for the relaunch once instead of answering
+        // with an error. Nothing was sent to the exited engine, so this is not a
+        // retransmission. Background roles keep failing fast.
+        let engine = match engine {
+            Ok(engine) => engine,
+            Err(SupervisorFault::EngineExited { .. })
+                if spec.role == "conversation" && !self.is_stopped() =>
+            {
+                let delay = self.retry_delay().await;
+                tokio::select! {
+                    () = tokio::time::sleep(delay) => {}
+                    () = cancel_signal(cancel, epoch, spec.cancellable) => return (Err(SupervisorFault::Cancelled), None),
+                    () = caller.closed() => return (Err(SupervisorFault::Cancelled), None),
+                }
+                match self.engine().await {
+                    Ok(engine) => engine,
+                    Err(fault) => return (Err(fault), None),
+                }
+            }
+            Err(fault) => return (Err(fault), None),
         };
         let session = match self.session(&engine, spec).await {
             Ok(session) => session,

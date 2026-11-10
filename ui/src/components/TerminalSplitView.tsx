@@ -18,7 +18,7 @@ import {
 } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { getEventCoordinates } from "@dnd-kit/utilities";
-import { Columns2, Copy, MessageSquare, Rows2, SquareTerminal, X } from "lucide-react";
+import { Columns2, Copy, MessageSquare, RotateCcw, Rows2, SquareTerminal, X } from "lucide-react";
 import { continuationOutcomeUnknown, continuationUnknownHeld } from "../lib/agentResume";
 import { getContinuationAffordance } from "../lib/agentResumeAffordance";
 import type { AgentContinueMode, SpawnTerminalRequest } from "../lib/tauri";
@@ -270,6 +270,8 @@ type TerminalSplitViewProps = {
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
   onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
+  /** Restart this pane's process in place, keeping its tab, pane and session id. */
+  onRestartPane?: (sessionId: string) => void;
   onResetAgentState?: (tabId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
@@ -336,6 +338,7 @@ export function TerminalSplitView({
   onReconnectLocalSession,
   onRefreshSessionIdentity,
   onOpenNewShell,
+  onRestartPane,
   onResetAgentState,
   onBackendSessionUnavailable,
 }: TerminalSplitViewProps) {
@@ -584,6 +587,7 @@ export function TerminalSplitView({
     onReconnectLocalSession,
     onRefreshSessionIdentity,
     onOpenNewShell,
+  onRestartPane,
     onResetAgentState,
     onBackendSessionUnavailable,
     splitTerminalTab,
@@ -779,6 +783,8 @@ type TabGroupViewProps = {
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
   onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
+  /** Restart this pane's process in place, keeping its tab, pane and session id. */
+  onRestartPane?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
     backendSessionId: string,
@@ -842,6 +848,7 @@ function TabGroupView({
   onReconnectLocalSession,
   onRefreshSessionIdentity,
   onOpenNewShell,
+  onRestartPane,
   onBackendSessionUnavailable,
   splitTerminalTab,
   browserPanesVisible,
@@ -912,6 +919,7 @@ function TabGroupView({
         onMoveTabToWindow={onMoveTabToWindow}
         listOtherWindows={listOtherWindows}
         onResetAgentState={onResetAgentState}
+        onRestartPane={onRestartPane}
         sessionIdForLifecycle={(tab) => focusedPaneSessionId(layout, tab)}
         onSplitRight={(tabId) => splitTerminalTab(tabId, "horizontal")}
         onSplitDown={(tabId) => splitTerminalTab(tabId, "vertical")}
@@ -1003,6 +1011,7 @@ function TabGroupView({
                     onReconnectLocalSession={onReconnectLocalSession}
                     onRefreshSessionIdentity={onRefreshSessionIdentity}
                     onOpenNewShell={onOpenNewShell}
+                    onRestartPane={onRestartPane}
                     onBackendSessionUnavailable={onBackendSessionUnavailable}
                     onSplitPane={onSplitPane}
                     onClosePane={onClosePane}
@@ -1053,6 +1062,8 @@ type PaneRendererProps = {
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
   onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
+  /** Restart this pane's process in place, keeping its tab, pane and session id. */
+  onRestartPane?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
     backendSessionId: string,
@@ -1100,6 +1111,7 @@ const PaneRenderer = React.memo(function PaneRenderer(props: PaneRendererProps) 
         onReconnectLocalSession={props.onReconnectLocalSession}
         onRefreshSessionIdentity={props.onRefreshSessionIdentity}
         onOpenNewShell={props.onOpenNewShell}
+        onRestartPane={props.onRestartPane}
         onBackendSessionUnavailable={props.onBackendSessionUnavailable}
         onNavigateBrowserTab={onNavigateBrowserTab}
         onReloadBrowserTab={onReloadBrowserTab}
@@ -1161,6 +1173,8 @@ type PaneLeafViewProps = {
   onReconnectLocalSession?: (sessionId: string) => Promise<void> | void;
   onRefreshSessionIdentity?: (sessionId: string, onResult: (result: import("../state/workspaceStore").LocalRecoveryAdmissionResult) => void) => () => void;
   onOpenNewShell?: (sessionId: string) => void;
+  /** Restart this pane's process in place, keeping its tab, pane and session id. */
+  onRestartPane?: (sessionId: string) => void;
   onBackendSessionUnavailable?: (
     sessionId: string,
     backendSessionId: string,
@@ -1197,6 +1211,7 @@ const PaneLeafView = React.memo(function PaneLeafView({
   onReconnectLocalSession,
   onRefreshSessionIdentity,
   onOpenNewShell,
+  onRestartPane,
   onBackendSessionUnavailable,
   onNavigateBrowserTab,
   onReloadBrowserTab,
@@ -1213,6 +1228,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
   // it back); Enter/Space typed afterwards belongs to the page, not to a keyboard pane drag.
   const handleFocusedByPointerRef = React.useRef(false);
   const [continuationHeld, setContinuationHeld] = React.useState(false);
+  const [restartBusy, setRestartBusy] = React.useState(false);
+  const [restartError, setRestartError] = React.useState<string | null>(null);
   const leafRef = React.useRef<HTMLDivElement | null>(null);
   const focusFrameRef = React.useRef<number | null>(null);
   const focusTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1281,6 +1298,19 @@ const PaneLeafView = React.memo(function PaneLeafView({
           : true,
       })
     : null;
+  const runRestart = () => {
+    if (!onRestartPane || !session || restartBusy) return;
+    setRestartBusy(true);
+    setRestartError(null);
+    void Promise.resolve(onRestartPane(session.id)).then(
+      () => setRestartError(null),
+      (error: unknown) => {
+        // The pane keeps its original process: surface the failure here instead of closing it.
+        setRestartError(error instanceof Error ? error.message : String(error));
+      },
+    ).finally(() => setRestartBusy(false));
+  };
+
   const continueInNewPane = (mode: AgentContinueMode) => {
     if (!continuation || continuationHeld) return;
     const startup = continuation.startup(mode);
@@ -1467,6 +1497,23 @@ const PaneLeafView = React.memo(function PaneLeafView({
               {chatShown ? <SquareTerminal className="size-3" /> : <MessageSquare className="size-3" />}
             </IconButton>
           ) : null}
+          {content.kind === "terminal" && onRestartPane && session ? (
+            <IconButton
+              label="Restart terminal pane"
+              data-testid="pane-restart"
+              data-shortcut={tab.kind === "terminal" || tab.kind === undefined ? "terminal.restart" : undefined}
+              disabled={restartBusy}
+              size="sm"
+              className="size-5 rounded p-0 text-muted-foreground/70 hover:bg-accent/60 hover:text-foreground"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                runRestart();
+              }}
+            >
+              <RotateCcw className="size-3" />
+            </IconButton>
+          ) : null}
         </div>
         <div className="ml-auto flex items-center gap-0.5">
           <ContinueInNewPaneButtons
@@ -1519,8 +1566,22 @@ const PaneLeafView = React.memo(function PaneLeafView({
         </div>
       </div>
 
-      {/* Browser panes keep their own toolbar at the top; the inset clears the hover overlay so
-          it never covers the address bar. */}
+      {restartError ? (
+        <div
+          data-testid="pane-restart-error"
+          role="alert"
+          className="absolute inset-x-0 top-5 z-30 flex items-center gap-2 border-b border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive"
+        >
+          <span className="min-w-0 flex-1 truncate">{restartError}</span>
+          <button type="button" className="rounded px-1.5 py-0.5 underline hover:bg-destructive/20" onClick={() => { setRestartError(null); runRestart(); }}>
+            Retry
+          </button>
+          <button type="button" className="rounded px-1.5 py-0.5 hover:bg-destructive/20" onClick={() => setRestartError(null)}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+      {/* Browser panes keep their own toolbar at the top; clear the h-5 hover overlay off it. */}
       <div
         className={`relative box-border h-full w-full min-h-0 flex-1 overflow-hidden ${content.kind === "browser" ? "pt-5" : ""}`}
         style={toolbarInset > 0 ? { paddingTop: toolbarInset } : undefined}

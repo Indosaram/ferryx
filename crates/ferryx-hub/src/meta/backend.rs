@@ -125,7 +125,7 @@ impl crate::lanes::kibitzer::ModelTurn for RpcModel {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "hub-slack")]
+    #[cfg(all(unix, feature = "hub-slack"))]
     #[tokio::test]
     async fn rpc_model_runs_a_full_turn() {
         use crate::lanes::kibitzer::ModelTurn;

@@ -54,6 +54,7 @@ export type ShortcutActionId =
   | "terminal.focusDown"
   | "terminal.search"
   | "terminal.copyMode"
+  | "terminal.restart"
   | "sidebar.left.toggle"
   | "project.add"
   | "commandPalette.open"
@@ -433,6 +434,13 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     source: "ferryx",
   },
   {
+    id: "terminal.restart",
+    title: "Restart terminal pane",
+    group: "Terminal Panes",
+    binding: { key: "r", mod: true, shift: true },
+    source: "ferryx",
+  },
+  {
     id: "sidebar.left.toggle",
     title: "Toggle sidebar",
     group: "Global",
@@ -626,6 +634,7 @@ const BROWSER_EXCLUSIVE_TERMINAL_ACTIONS = new Set<ShortcutActionId>([
   "terminal.focusPrevious",
   "terminal.search",
   "terminal.splitRight",
+  "terminal.restart",
   "zoom.in",
   "zoom.out",
   "zoom.reset",

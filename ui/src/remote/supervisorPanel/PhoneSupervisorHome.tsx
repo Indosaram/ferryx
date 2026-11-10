@@ -19,6 +19,10 @@ import { PhoneHomeHeader } from "../home/PhoneHomeHeader";
 import { PullToRefreshIndicator } from "../home/PullToRefreshIndicator";
 import { pullContentProps, usePullToRefresh } from "../home/usePullToRefresh";
 import type { PanelState } from "./usePhonePanel";
+import { SupervisorCallButton } from "../../components/supervisor/SupervisorCallButton";
+import { useVoiceConversation } from "../../lib/useVoiceConversation";
+import type { VoiceCallPort } from "../../lib/voiceCall";
+import type { UnifiedSupervisorClient, UnifiedSupervisorView } from "../../lib/unifiedSupervisor";
 
 export type PhoneSupervisorHomeProps = {
   readonly state: PanelState;
@@ -36,6 +40,16 @@ export type PhoneSupervisorHomeProps = {
   readonly resume?: { readonly title: string; readonly subtitle: string; readonly onOpen: () => void } | null;
   /** Supervisor lease cards (standby computers, lease warnings), shown above the panel. */
   readonly lease?: ReactNode;
+  /**
+   * The supervisor voice call: how this phone reaches the host's speech commands, and the host
+   * connection the call turns a transcript into. Absent: this build offers no call entry.
+   */
+  readonly voice?: {
+    readonly port: VoiceCallPort;
+    readonly view: UnifiedSupervisorView;
+    readonly client: UnifiedSupervisorClient;
+    readonly projectId: string | null;
+  } | null;
 };
 
 const ROW_BUTTON =
@@ -43,6 +57,10 @@ const ROW_BUTTON =
 
 export function PhoneSupervisorHome(props: PhoneSupervisorHomeProps) {
   const { state, now, actions, headerAction, resume, onStartSession } = props;
+  const voiceConversation = useVoiceConversation({
+    port: props.voice?.port ?? null,
+    send: (text) => actions.converse(text, []).then((result) => (result.ok && result.reply ? result.reply.text : "")),
+  });
   const scrollRef = useRef<HTMLDivElement>(null);
   const pull = usePullToRefresh(scrollRef, props.onRefresh);
   const pullContent = pullContentProps(pull);
@@ -77,6 +95,17 @@ export function PhoneSupervisorHome(props: PhoneSupervisorHomeProps) {
           <PullToRefreshIndicator {...pull} />
           <div className={cn("flex w-full flex-col gap-5 px-4 pb-6", pullContent.className)} style={pullContent.style}>
             {props.lease}
+            {props.voice ? (
+              <div data-testid="phone-supervisor-call" className="flex min-h-11 items-center gap-2 px-1">
+                <span className="text-sm font-medium text-chat-foreground-secondary">Talk to the supervisor</span>
+                <SupervisorCallButton
+                  view={props.voice.view}
+                  client={props.voice.client}
+                  projectId={props.voice.projectId}
+                  port={() => props.voice!.port}
+                />
+              </div>
+            ) : null}
             {state.kind === "loading" ? (
               <p data-testid="phone-panel-loading" className="px-1 text-sm text-chat-foreground-secondary">
                 Checking your computers…
@@ -114,7 +143,7 @@ export function PhoneSupervisorHome(props: PhoneSupervisorHomeProps) {
       ) : null}
       {snapshot && !snapshot.setupRequired ? (
         <div data-testid="phone-panel-composer" className="shrink-0 border-t border-chat-border bg-chat-header px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-          <Composer touch sessions={mentions} seed={seed} onSend={async (text, refs) => toComposerResult(await actions.converse(text, refs))} />
+          <Composer touch sessions={mentions} seed={seed} voiceConversation={voiceConversation} onSend={async (text, refs) => toComposerResult(await actions.converse(text, refs))} />
         </div>
       ) : null}
     </div>

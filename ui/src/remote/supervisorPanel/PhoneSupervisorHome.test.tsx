@@ -285,4 +285,25 @@ describe("PhoneSupervisorHome", () => {
     fireEvent.click(screen.getByTestId("phone-panel-start-back"));
     expect(onSelectTab).toHaveBeenCalledWith("supervisor");
   });
+
+  // The call entry is the only way the phone reaches the host's speech commands: a build that
+  // cannot reach the computer must not show a button that would fail on its first tap.
+  it("offers the call entry only when this phone can reach the host's voice path", () => {
+    const { unmount } = renderHome();
+    expect(screen.queryByTestId("phone-supervisor-call")).toBeNull();
+    unmount();
+
+    const voice = {
+      port: {
+        status: vi.fn(),
+        transcribe: vi.fn(),
+        speak: vi.fn(),
+      },
+      view: { identity: null, projects: [], goals: [], health: null, error: null },
+      client: { answer: vi.fn(), converse: vi.fn(), stop: vi.fn(), undo: vi.fn(), refresh: vi.fn() },
+      projectId: null,
+    } as unknown as NonNullable<PhoneSupervisorHomeProps["voice"]>;
+    renderHome({ voice });
+    expect(screen.getByTestId("phone-supervisor-call")).toHaveTextContent("Talk to the supervisor");
+  });
 });

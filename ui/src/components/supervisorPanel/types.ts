@@ -1,6 +1,7 @@
 // Plain view-model props for the supervisor panel components. These mirror the shapes in
 // ui/src/lib/supervisorPanel/contract.ts but carry only display-ready strings, so the
 // components stay independent of the reducer (todo 10) that produces them.
+import type { VoiceConversationProps } from '../supervisor/VoiceConversationButton';
 
 /** D12 status vocabulary. */
 export type GlyphState = 'needs' | 'working' | 'done' | 'failed' | 'idle';
@@ -115,6 +116,8 @@ export interface ComposerProps extends TouchProps {
   onSend: (text: string, mentions: string[]) => void | Promise<ComposerSendResult | void>;
   /** Putting text in the box and focusing it (the rules line's "Change"). `nonce` re-applies. */
   seed?: { text: string; nonce: number } | null;
+  /** Free-form voice for this same conversation; absent hides the talk button. */
+  voiceConversation?: VoiceConversationProps;
 }
 
 export interface SetupCardProps extends TouchProps {

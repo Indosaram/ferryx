@@ -6834,7 +6834,11 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::RemoteSessionDetails { session_id }) => {
-                    let local_details = self.terminal_service.remote().details(&session_id);
+                    // A session that already settled out of the runtime still has to answer for
+                    // itself: the pane kept the id and waits to resume on it. Without the recorded
+                    // terminal observation the answer degrades to "details absent", which the GUI
+                    // cannot tell apart from "this daemon never owned it".
+                    let local_details = self.terminal_service.remote().settled_details(&session_id);
                     // A rolling handover leaves live remote sessions with the draining
                     // predecessor (restore_remote_sessions_at skips them on purpose), so the
                     // local runtime legitimately has no entry. Answering `details: null` would

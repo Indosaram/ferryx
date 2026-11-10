@@ -1439,18 +1439,34 @@ pub async fn prepare_prompt(pool: &SqlitePool, admitted: &Admitted) -> String {
     prepare_prompt_in(pool, admitted, &super::slack_ingress::attachment_dir()).await
 }
 
+/// [`prepare_prompt`] that always quotes the thread root of a reply. A supervisor conversation
+/// keeps no record of which roots it saw (its first turn may have failed before the engine
+/// read it), so every reply carries the message it answers.
+async fn prepare_supervised_prompt(pool: &SqlitePool, admitted: &Admitted) -> String {
+    prepare_prompt_with(pool, admitted, &super::slack_ingress::attachment_dir(), true).await
+}
+
 /// [`prepare_prompt`] with attachments saved under `dir`.
 pub async fn prepare_prompt_in(
     pool: &SqlitePool,
     admitted: &Admitted,
     dir: &std::path::Path,
 ) -> String {
+    prepare_prompt_with(pool, admitted, dir, false).await
+}
+
+async fn prepare_prompt_with(
+    pool: &SqlitePool,
+    admitted: &Admitted,
+    dir: &std::path::Path,
+    always_root: bool,
+) -> String {
     if admitted.event.is_null() {
         return admitted.text.clone();
     }
     let mut content = admitted.text.clone();
     let mut files = admitted.files.clone();
-    let root_known = load_state(pool, &admitted.key).await.is_some();
+    let root_known = !always_root && load_state(pool, &admitted.key).await.is_some();
     super::slack_ingress::enrich(
         &super::slack_ingress::Enrich {
             event: &admitted.event,
@@ -1519,11 +1535,16 @@ pub async fn handle(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admit
 
 /// The agent turn of an admitted message: the supervisor's conversation or an omo turn.
 async fn run_admitted_turn(config: &SlackTurnConfig, pool: &SqlitePool, admitted: Admitted) {
-    let text = Box::pin(prepare_prompt(pool, &admitted)).await;
     // The owner's DM and the channels/threads the owner bound to the supervisor are the
     // supervisor's conversation once its engine is ready; every other message keeps the omo
     // app-server turn.
-    let supervised = match super::slack_supervisor::engine() {
+    let engine = super::slack_supervisor::engine();
+    let text = if engine.is_ok() {
+        Box::pin(prepare_supervised_prompt(pool, &admitted)).await
+    } else {
+        Box::pin(prepare_prompt(pool, &admitted)).await
+    };
+    let supervised = match engine {
         Ok(conversation) => Box::pin(super::slack_supervisor::try_handle(
             config,
             pool,

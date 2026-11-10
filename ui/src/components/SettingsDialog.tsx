@@ -6,6 +6,7 @@ import {
   CreditCard,
   Globe,
   Keyboard,
+  Mic,
   Palette,
   Radio,
   Settings2,
@@ -24,6 +25,7 @@ import { BrowserSection } from "./settings/BrowserSection";
 import { GeneralSection } from "./settings/GeneralSection";
 import { NotificationsSection } from "./settings/NotificationsSection";
 import { PermissionsSection } from "./settings/PermissionsSection";
+import { VoiceSection } from "./settings/VoiceSection";
 import { PlanSection } from "./settings/PlanSection";
 import { RemoteSection } from "./settings/RemoteSection";
 import type { MachineProjectTarget, RemoteContext } from "../lib/machineNavigation";
@@ -63,6 +65,7 @@ const VALID_SECTIONS: readonly SectionId[] = [
   "remote",
   "permissions",
   "ssh",
+  "voice",
   "plan",
 ];
 
@@ -199,6 +202,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
               </>
             ) : null}
             <NavButton active={section === "permissions"} icon={<Shield />} label="Permissions" onClick={() => setSection("permissions")} />
+            <NavButton active={section === "voice"} icon={<Mic />} label="Voice" onClick={() => setSection("voice")} />
             <NavButton active={section === "remote"} icon={<Radio />} label="Remote" onClick={() => setSection("remote")} />
             {planAvailable ? (
               <NavButton active={section === "plan"} icon={<CreditCard />} label="Plan" onClick={() => setSection("plan")} />
@@ -257,6 +261,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
           {section === "browser" ? <BrowserSection /> : null}
           {section === "notifications" ? <NotificationsSection /> : null}
           {section === "permissions" ? <PermissionsSection /> : null}
+          {section === "voice" ? <VoiceSection /> : null}
           {section === "remote" ? (
             <RemoteSection
               initialContext={remoteContext}

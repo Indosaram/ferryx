@@ -12,6 +12,7 @@ import {
 } from "./MobileChatComponents";
 import { MobileChatMessage, MobileChatMessageProps } from "./MobileChatMessage";
 import { MobileChatComposer, MobileChatComposerHandle } from "./MobileChatComposer";
+import type { VoiceConversationProps } from "../../components/supervisor/VoiceConversationButton";
 import type { ComposerControlChange, ComposerControlNotice } from "./MobileChatComposer";
 import type { HeldMessage } from "./referenceQueue";
 import type { FollowUpMessage } from "./referenceFollowUp";
@@ -37,6 +38,7 @@ export interface MobileChatWorkspaceProps {
   readonly messages: readonly MobileChatMessageProps[];
   /** `false` means the owner kept the draft (held, refused); the box must not clear it. */
   readonly onSendMessage: (text: string) => boolean | void;
+  readonly voiceConversation?: VoiceConversationProps;
   readonly onStopExecution?: () => void;
   readonly isRunning?: boolean;
   readonly activityState?: ActivityState;
@@ -253,6 +255,7 @@ function aggregateReferenceAbandoned(
 export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
   messages,
   onSendMessage,
+  voiceConversation,
   onStopExecution,
   isRunning = false,
   activityState = "idle",
@@ -476,7 +479,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             </button>
           )}
           <div className="flex flex-col min-w-0">
-            <span className="text-base font-medium text-chat-foreground">
+            <span className="text-sm font-semibold tracking-tight text-chat-foreground">
               {headerTitle ?? "Chat"}
             </span>
             {headerSubtitle ? (
@@ -530,8 +533,9 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         onScroll={handleScroll}
         data-testid="chat-message-stream"
         aria-busy={isRunning}
-        className="flex-1 min-h-0 overflow-y-auto px-3 pt-4 pb-14 space-y-3.5 overscroll-contain select-text sm:px-5"
+        className="flex-1 min-h-0 overflow-y-auto px-3 pt-4 pb-14 overscroll-contain select-text sm:px-5"
       >
+        <div className="mx-auto w-full max-w-[60rem] space-y-3.5">
         {warnings && warnings.length > 0 ? (
           <div
             data-testid="chat-history-warning"
@@ -559,9 +563,9 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         {!hasMessages ? (
           <div
             data-testid="chat-empty-state"
-            className="flex flex-col items-start justify-center min-h-[40vh] max-w-md mx-auto w-full px-2 my-auto select-text"
+            className="mx-auto flex min-h-[40vh] w-full max-w-2xl flex-col items-start justify-center px-1 my-auto select-text"
           >
-            <div className="w-full rounded-lg border border-chat-border bg-chat-surface px-3 py-2.5 space-y-1">
+            <div className="w-full space-y-1 border-l border-chat-border pl-3">
               {workspaceLabel ? (
                 <div
                   data-testid="chat-empty-context"
@@ -625,6 +629,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
         ) : null}
 
         <div ref={messagesEndRef} className="h-2 w-full" />
+        </div>
       </div>
 
       <footer className="relative z-20 flex max-h-[50%] shrink-0 flex-col">
@@ -679,6 +684,7 @@ export const MobileChatWorkspace: React.FC<MobileChatWorkspaceProps> = ({
             warning={composerWarning}
             warningAction={composerWarningAction}
             onSend={onSendMessage}
+            voiceConversation={voiceConversation}
             onStop={onStopExecution}
             isRunning={isRunning}
             disabled={disabled}

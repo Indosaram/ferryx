@@ -1841,3 +1841,52 @@ async fn ssh_late_control_failure_preserves_terminal_expiry() {
     assert_eq!(current.generation, expired.generation);
     assert!(runtime.settle_ended("local-stable"));
 }
+
+#[tokio::test]
+async fn settled_expiry_stays_answerable_after_the_entry_leaves_the_runtime() {
+    let (runtime, hub, _dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+
+    tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
+    let expired = state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+    assert!(runtime.settle_ended("local-stable"));
+
+    // The pane keeps this id while it waits to resume, so the daemon must still be able to
+    // explain what happened instead of reporting that it never knew the session.
+    assert!(!runtime.contains("local-stable"));
+    assert!(runtime.details("local-stable").is_none());
+    assert!(!hub.has_session("local-stable"));
+    let settled = runtime
+        .settled_details("local-stable")
+        .expect("terminal observation outlives the entry");
+    assert_eq!(settled.state, RemoteConnectionState::Expired);
+    assert_eq!(settled.generation, expired.generation);
+    assert_eq!(
+        settled.failure.expect("exit cause retained").kind,
+        RemoteFailureKind::Expired
+    );
+}
+
+#[tokio::test]
+async fn never_owned_session_is_not_reported_as_settled() {
+    let (runtime, _, _, _) = fixture();
+    assert!(runtime.settled_details("never-registered").is_none());
+}
+
+#[tokio::test]
+async fn explicit_close_forgets_the_settled_observation() {
+    let (runtime, _, _dialer, tx) = fixture();
+    runtime.restore(descriptor()).unwrap();
+    let mut updates = runtime.subscribe("local-stable").unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Connected).await;
+    tx.send(Err(BridgeError::RemoteTargetExpired)).unwrap();
+    state(&mut updates, |d| d.state == RemoteConnectionState::Expired).await;
+    assert!(runtime.settle_ended("local-stable"));
+    assert!(runtime.settled_details("local-stable").is_some());
+
+    // Closing a pane is deliberate: the id must not resurrect from the record.
+    let _ = runtime.close("local-stable").await;
+    assert!(runtime.settled_details("local-stable").is_none());
+}

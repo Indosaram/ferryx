@@ -104,6 +104,10 @@ pub const DEFAULT_EFFECT_TOOLS: [&str; 3] = ["bash", "edit", "write"];
 /// publish browser state to the app (maho-omo-browser-bridge index.rs:9,97-124). `get_goal`
 /// reads and stays.
 pub const DECISION_EXCLUDED_TOOLS: [&str; 3] = ["create_goal", "update_goal", "omo_browser_bridge"];
+/// Tools a conversation session additionally never registers: its turn answers a chat message
+/// and nobody can answer an in-engine question there, so the turn would block until its
+/// deadline. The conversation asks in its reply instead.
+pub const CONVERSATION_EXCLUDED_TOOLS: [&str; 1] = ["ask_user_question"];
 /// Concurrent decision contexts.
 pub const DECISION_SLOTS: usize = 4;
 /// Most recent owner source message ids remembered for idempotent ingest.
@@ -537,7 +541,11 @@ impl MhcProfile {
             }
             SessionRole::Conversation(scope) => {
                 let scope_key = scope.key();
-                context.insert("tools_exclude".to_owned(), self.effect_tools());
+                let tools = std::iter::once(self.effect_tools())
+                    .chain(CONVERSATION_EXCLUDED_TOOLS.iter().map(|tool| (*tool).to_owned()))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                context.insert("tools_exclude".to_owned(), tools);
                 context.insert("memory_write".to_owned(), "deny".to_owned());
                 context.insert("supervisor_tools".to_owned(), "work".to_owned());
                 context.insert("ferryx_scope".to_owned(), scope_key.clone());

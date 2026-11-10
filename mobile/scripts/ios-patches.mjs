@@ -23,7 +23,7 @@ export function patchProjectYml(source, team) {
   s = replaceRequired(
     s,
     /(\n        LSRequiresIPhoneOS: true\n)/,
-    "$1        ITSAppUsesNonExemptEncryption: false\n",
+    "$1        ITSAppUsesNonExemptEncryption: false\n        NSMicrophoneUsageDescription: Talk to the supervisor by voice.\n",
     "Info.plist properties",
   );
   return replaceRequired(s, /(\n      - path: LaunchScreen\.storyboard\n)/, "$1      - path: PrivacyInfo.xcprivacy\n        buildPhase: resources\n", "target sources");

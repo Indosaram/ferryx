@@ -1778,6 +1778,25 @@ impl DaemonSessionService {
         .map_err(|e| e.to_string())?;
         for mut record in records {
             if record.terminal {
+                // The pane keeps this id after a daemon restart and asks about it before it can
+                // resume. Publish the retained exit evidence before the record is deleted, so the
+                // answer is "expired" rather than "never heard of it".
+                let id = record.descriptor.backend_session_id.clone();
+                self.terminal_service.remote().record_settled(
+                    &id,
+                    crate::terminal::remote::RemoteSessionDetails {
+                        descriptor: record.descriptor.clone(),
+                        state: crate::terminal::remote::RemoteConnectionState::Expired,
+                        generation: 0,
+                        attempts: 0,
+                        failure: Some(crate::terminal::remote::RemoteFailure {
+                            kind: crate::terminal::remote::RemoteFailureKind::Expired,
+                            message: "Remote target exited before this daemon started".into(),
+                        }),
+                        replay_gap: None,
+                        pid: None,
+                    },
+                );
                 // Cleanup may fail again; retained terminal evidence must never restore.
                 if let Err(error) = Self::remove_persisted_remote_record(
                     path.clone(), Arc::clone(&self.remote_persistence_lock),

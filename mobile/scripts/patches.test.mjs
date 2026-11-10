@@ -55,6 +55,8 @@ describe("ios patches", () => {
     const out = patchProjectYml(yml, undefined);
     expect(out).toMatch(/settings:\n      base:\n        TARGETED_DEVICE_FAMILY: "1"\n/);
     expect(out).toContain("        ITSAppUsesNonExemptEncryption: false\n");
+    // The call surface records audio; without the purpose string iOS kills the app on first record.
+    expect(out).toContain("        NSMicrophoneUsageDescription: Talk to the supervisor by voice.\n");
     expect(out).not.toContain("DEVELOPMENT_TEAM: undefined");
   });
 

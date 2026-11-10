@@ -93,6 +93,7 @@ pub mod terminal_grid;
 pub mod pane_liveness_contract;
 #[cfg(feature = "desktop")]
 pub mod updater;
+pub mod voice_call;
 #[cfg(feature = "desktop")]
 pub mod window;
 pub mod worktree;
