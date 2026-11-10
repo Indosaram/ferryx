@@ -112,7 +112,6 @@ import {
   ACTIVE_PROJECT_STORAGE_KEY,
   getMigratedItem,
   PROJECTS_STORAGE_KEY,
-  SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY,
   SIDEBAR_OPEN_STORAGE_KEY,
 } from "./lib/storageKeys";
 import {
@@ -179,7 +178,6 @@ import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegi
 import { previewRequestForSource } from "./lib/filePreviewTabRegistry";
 import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
-import { groupProjects } from "./lib/projectGrouping";
 import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
 import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
@@ -218,7 +216,8 @@ import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
-import { emptySidebarWorkspaceIds, worktreeHasOpenTabs } from "./state/sidebarWorkspaceState";
+import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
+import { describeLadderRow, listShortcutWorktrees } from "./state/shortcutLadder";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
 import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
@@ -3420,16 +3419,22 @@ function WorkspaceApp({
 
   const handleSelectWorktreeByIndex = useCallback(
     (index: number) => {
-      if (activeRemoteHostRef.current) return;
-      const visible = listShortcutWorktrees(
-        projectsRef.current,
-        stateRef.current.worktrees,
-        activeProjectRef.current.workspaceId,
-        inactiveProjectWorktreesRef.current,
-        stateRef.current,
-        listWorkspaceSnapshots(),
-      );
-      const target = visible[index];
+      if (activeRemoteHostRef.current) {
+        switchDebug("worktree.shortcut.ignored", { reason: "remote-host", index });
+        return;
+      }
+      const ladder = listShortcutWorktrees({
+        projects: projectsRef.current,
+        activeProjectId: activeProjectRef.current.workspaceId,
+        activeWorktrees: stateRef.current.worktrees,
+        inactiveProjectWorktrees: inactiveProjectWorktreesRef.current,
+      });
+      const target = ladder[index];
+      switchDebug("worktree.shortcut.select", {
+        index,
+        ladderLength: ladder.length,
+        target: describeLadderRow(target),
+      });
       if (target) handleSelectWorktree(target);
     },
     [handleSelectWorktree],
@@ -4593,12 +4598,12 @@ function WorkspaceApp({
           return {
             tabIds: Array.from({ length: 9 }, (_, index) => group?.tabIds[index] ?? current.layout.tabs[index]?.id ?? ""),
             closeTabId: activeTab && !activeTab.pinned && (!paneLayout || paneLayout.root.type === "leaf") ? activeTab.id : null,
-            worktrees: listShortcutWorktrees(
-              projectsRef.current, current.worktrees, activeProjectRef.current.workspaceId,
-              inactiveProjectWorktreesRef.current,
-              current,
-              listWorkspaceSnapshots(),
-            ),
+            worktrees: listShortcutWorktrees({
+              projects: projectsRef.current,
+              activeProjectId: activeProjectRef.current.workspaceId,
+              activeWorktrees: current.worktrees,
+              inactiveProjectWorktrees: inactiveProjectWorktreesRef.current,
+            }),
           };
         }}
       />
@@ -5042,103 +5047,6 @@ function WorkspaceApp({
   );
 }
 
-function listVisibleWorktrees(
-  projects: RegisteredProject[],
-  worktrees: Worktree[],
-  activeProjectId: string,
-  inactiveProjectWorktrees: Record<string, Worktree[]> = {},
-  emptyWorkspaceIds: readonly string[] = [],
-): Worktree[] {
-  const groups = groupProjects(projects);
-  const collapsed = loadCollapsedProjectIds(projects, activeProjectId);
-  const visible: Worktree[] = [];
-
-  for (const group of groups) {
-    if (collapsed.has(group.groupId)) continue;
-    if (group.memberProjects.every((member) => emptyWorkspaceIds.includes(member.workspaceId))) continue;
-    const project = group.primaryProject;
-    const owned = worktrees.filter(
-      (worktree) => resolveWorktreeOwnerId(worktree, projects, activeProjectId) === project.workspaceId,
-    );
-    const cached = inactiveProjectWorktrees[project.workspaceId] ?? [];
-    let rows =
-      project.workspaceId === activeProjectId
-        ? (owned.length > 0 ? owned : cached)
-        : [...cached, ...owned];
-    if (project.target?.kind === "ssh" && group.memberProjects.length === 1) {
-      if (!rows.some((candidate) => candidate.path === project.repoRoot && candidate.workspaceId === project.workspaceId)) {
-        const target = project.target;
-        const hostLabel = typeof getCachedSshHosts === "function"
-          ? getCachedSshHosts()?.find((h) => h.id === target.hostId)?.label ?? target.hostId
-          : target.hostId;
-        rows.push(projectRootWorktree(project, hostLabel));
-      }
-    } else {
-      if (project.gitRoot === null && rows.length === 0) rows = [projectRootWorktree(project)];
-      for (const member of group.memberProjects) {
-        const target = member.target;
-        if (member.workspaceId !== project.workspaceId && target?.kind !== "ssh") {
-          const memberRows = member.workspaceId === activeProjectId
-            ? worktrees.filter((row) => resolveWorktreeOwnerId(row, projects, activeProjectId) === member.workspaceId)
-            : inactiveProjectWorktrees[member.workspaceId] ?? [];
-          rows.push(...memberRows.map((row) => ({ ...row, workspaceId: row.workspaceId ?? member.workspaceId })));
-        }
-        if (target?.kind === "ssh") {
-          if (!rows.some((candidate) => candidate.path === member.repoRoot && candidate.workspaceId === member.workspaceId)) {
-            const hostLabel = typeof getCachedSshHosts === "function"
-              ? getCachedSshHosts()?.find((h) => h.id === target.hostId)?.label ?? target.hostId
-              : target.hostId;
-            rows.push(projectRootWorktree(member, hostLabel));
-          }
-        }
-      }
-    }
-    for (const row of rows) {
-      if (visible.some((candidate) => candidate.path === row.path && candidate.workspaceId === row.workspaceId)) continue;
-      visible.push(row);
-    }
-  }
-
-  return visible;
-}
-
-/**
- * Shortcut navigation (Cmd+1..9) targets only worktrees whose layouts currently
- * own tabs; tabless worktrees stay listed in the sidebar but off the shortcut
- * ladder so a digit never lands on an empty workspace.
- */
-function listShortcutWorktrees(
-  projects: RegisteredProject[],
-  worktrees: Worktree[],
-  activeProjectId: string,
-  inactiveProjectWorktrees: Record<string, Worktree[]>,
-  liveState: WorkspaceState,
-  snapshots: ReadonlyArray<readonly [string, WorkspaceState]>,
-): Worktree[] {
-  const visible = listVisibleWorktrees(
-    projects, worktrees, activeProjectId, inactiveProjectWorktrees,
-    emptySidebarWorkspaceIds(projects, activeProjectId, liveState, snapshots),
-  );
-  const states = new Map(snapshots);
-  states.set(liveState.workspaceId ?? activeProjectId, liveState);
-  return visible.filter((row) =>
-    worktreeHasOpenTabs(
-      states.get(resolveWorktreeOwnerId(row, projects, activeProjectId) ?? (liveState.workspaceId ?? activeProjectId)),
-      row.path,
-    ),
-  );
-}
-
-function loadCollapsedProjectIds(projects: RegisteredProject[], activeProjectId: string): Set<string> {
-  try {
-    const raw = getMigratedItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY);
-    const parsed: unknown = raw ? JSON.parse(raw) : null;
-    if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
-    return new Set(projects.filter((project) => project.workspaceId !== activeProjectId).map((project) => project.workspaceId));
-  } catch {
-    return new Set<string>();
-  }
-}
 
 export function loadProjects(): RegisteredProject[] {
   try {
