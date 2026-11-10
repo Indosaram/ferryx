@@ -1054,8 +1054,13 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
         await sleep(800);
       }
       await sleep(1200);
+      // Only a word inside the Explorer window counts: `resize` puts it at (40, 40) 420x620. Once
+      // the picker works the Chromium tab is titled "picked:upload-fixture.txt:25", and Windows run
+      // 42844790734 read that tab label in Ferryx's tab strip (from [947, 217]), pressed on the tab
+      // and dragged it, which left a tab drag that swallowed every later G11 click and key.
+      const inFolder = (word) => !folder || (word.left >= 40 && word.left + word.width <= 460 && word.top >= 40 && word.top + word.height <= 660);
       const from = await until(() => {
-        const hit = screenWords(ctx).find((word) => /upload-fixture|upload-?fix|fixture[.,]txt/i.test(word.text));
+        const hit = screenWords(ctx).find((word) => /upload-fixture|upload-?fix|fixture[.,]txt/i.test(word.text) && !/picked/i.test(word.text) && inFolder(word));
         return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
       }, 10000, 800);
       record.from = from;
