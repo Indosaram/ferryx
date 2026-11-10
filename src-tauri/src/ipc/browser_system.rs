@@ -351,6 +351,34 @@ pub async fn cmd_browser_drop_paths<R: Runtime>(
 // Print and Save as PDF
 // ---------------------------------------------------------------------------------------------
 
+/// Opens the OS print dialog for a system-webview tab. On Windows, wry's `print()` only runs
+/// `window.print()` through ExecuteScript, which WebView2 ignored on both the CI runner and a
+/// real Windows 11 desktop (no print UI after Mod+P or the toolbar button), so the tab asks
+/// WebView2 for the system print dialog directly. Other platforms keep wry's print panel.
+#[cfg(target_os = "windows")]
+fn show_print_ui<R: Runtime>(webview: &tauri::Webview<R>) -> Result<(), IpcError> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2_16, COREWEBVIEW2_PRINT_DIALOG_KIND_SYSTEM};
+    use windows::core::Interface;
+    webview
+        .with_webview(|platform| {
+            // SAFETY: the tab's live controller and its ICoreWebView2_16, on the UI thread that owns them.
+            let shown = unsafe { platform.controller().CoreWebView2() }
+                .and_then(|core| core.cast::<ICoreWebView2_16>())
+                .and_then(|core| unsafe { core.ShowPrintUI(COREWEBVIEW2_PRINT_DIALOG_KIND_SYSTEM) });
+            if let Err(error) = shown {
+                tracing::warn!(%error, "WebView2 could not show the system print dialog");
+            }
+        })
+        .map_err(|error| IpcError::new(IpcErrorCode::Unsupported, format!("print failed: {error}")))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_print_ui<R: Runtime>(webview: &tauri::Webview<R>) -> Result<(), IpcError> {
+    webview
+        .print()
+        .map_err(|error| IpcError::new(IpcErrorCode::Unsupported, format!("print failed: {error}")))
+}
+
 /// Opens the print dialog for the tab (Cmd/Ctrl+P, toolbar). On the system webview it is the
 /// platform's print panel, which also offers Save as PDF (macOS, Windows, Linux).
 #[tauri::command]
@@ -367,9 +395,7 @@ pub async fn cmd_browser_print<R: Runtime>(
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    webview
-        .print()
-        .map_err(|error| IpcError::new(IpcErrorCode::Unsupported, format!("print failed: {error}")))
+    show_print_ui(&webview)
 }
 
 /// Saves the page as a PDF after a save dialog. Chromium tabs write it directly (the result
@@ -406,9 +432,7 @@ pub async fn cmd_browser_save_pdf<R: Runtime>(
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    webview
-        .print()
-        .map_err(|error| IpcError::new(IpcErrorCode::Unsupported, format!("print failed: {error}")))?;
+    show_print_ui(&webview)?;
     Ok(true)
 }
 
