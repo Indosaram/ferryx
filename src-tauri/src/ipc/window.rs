@@ -426,12 +426,29 @@ pub fn app_window_labels<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
 }
 
 /// Opens a new desktop window and returns its label (`ws-<id>`).
+///
+/// `clone_from` makes the new window a clone of that window: its session file is copied before the
+/// webview is created, so its first boot reads the same projects, workspace, tabs and split layout
+/// instead of an empty picker. Restored panes re-attach to the same daemon PTYs by session identity.
 #[tauri::command]
 pub async fn cmd_window_new<R: Runtime>(
     app: AppHandle<R>,
     bounds: Option<WindowBounds>,
+    clone_from: Option<String>,
 ) -> Result<String, IpcError> {
-    create_app_window(&app, bounds).await
+    if let Some(source) = clone_from.as_deref() {
+        if !is_app_window_label(source) || app.get_window(source).is_none() {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidArgument,
+                format!("Window {source} is not open"),
+            ));
+        }
+    }
+    let label = new_window_label();
+    if let Some(source) = clone_from {
+        crate::ipc::session::clone_window_session(&app, &source, &label).await?;
+    }
+    build_app_window(&app, &label, bounds).await
 }
 
 /// Labels of the open app windows (`main` and `ws-*`).

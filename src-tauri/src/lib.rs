@@ -292,12 +292,7 @@ fn install_app_menu<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()>
                 }
             }
             "window.new" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(error) = crate::ipc::window::create_app_window(&app, None).await {
-                        tracing::warn!(?error, "Failed to open a new window from the menu");
-                    }
-                });
+                shortcut_dispatch::dispatch(app, "menu_new_window", ());
             }
             _ => {}
         }

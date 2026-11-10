@@ -45,6 +45,7 @@ import {
   scrollNativeTerminalViewport,
   onNativeTerminalCopyOrInterrupt,
   onNewTerminalTabMenu,
+  onNewWindowMenu,
   onCloseTabMenu,
   listWorktrees,
   listExternalWorktrees,
@@ -73,6 +74,7 @@ import {
   describeRejection,
   getAccountEnrollmentStatus,
   enrollThisMachine,
+  openNewWindow,
   type AccountEnrollmentStatus,
 } from "./tauri";
 import { registerDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "./nativeTerminalLifecycle";
@@ -252,6 +254,15 @@ describe("Tauri IPC wrapper contract", () => {
       backendSessionIds: ["s1"],
       workspaceId: "w1",
     });
+  });
+  it("clones the calling window's persisted session into a new window", async () => {
+    core.invoke.mockReset();
+    core.isTauri.mockReturnValue(true);
+    core.invoke.mockResolvedValueOnce("ws-clone");
+
+    await expect(openNewWindow("main")).resolves.toBe("ws-clone");
+
+    expect(core.invoke).toHaveBeenCalledWith("cmd_window_new", { cloneFrom: "main" });
   });
   beforeEach(() => {
     core.invoke.mockReset();
@@ -693,6 +704,26 @@ describe("Tauri IPC wrapper contract", () => {
     const handler = vi.fn();
 
     const dispose = await onNewTerminalTabMenu(handler);
+    dispose();
+    expect(unlisten).toHaveBeenCalledOnce();
+    expect(listener).toBeTypeOf("function");
+    if (typeof listener === "function") {
+      (listener as (event: { payload: void }) => void)({ payload: undefined });
+    }
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it("bridges the native new-window menu event into the frontend callback", async () => {
+    const unlisten = vi.fn();
+    let listener: ((event: { payload: void }) => void) | null = null;
+    events.listen.mockImplementation(async (eventName: string, callback: (event: { payload: void }) => void) => {
+      expect(eventName).toBe("menu_new_window");
+      listener = callback;
+      return unlisten;
+    });
+    const handler = vi.fn();
+
+    const dispose = await onNewWindowMenu(handler);
     dispose();
     expect(unlisten).toHaveBeenCalledOnce();
     expect(listener).toBeTypeOf("function");
