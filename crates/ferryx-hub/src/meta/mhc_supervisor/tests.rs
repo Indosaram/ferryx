@@ -946,7 +946,7 @@ async fn a_conversation_turn_inside_the_exit_backoff_waits_for_the_relaunch() {
         .expect("the turn waits for the relaunch");
     assert!(!reply.is_empty());
     assert_eq!(harness.launcher.launches.load(Ordering::SeqCst), 2);
-    assert_eq!(count(&harness.peer.frames(), "prompt", "too soon"), 0);
+    assert_eq!(count(&harness.peer.frames(), "prompt", "hello"), 1, "sent once, to the relaunched engine");
 }
 
 /// Health alone tells the Slack gate (`chat::slack_supervisor::engine_ready`) whether an
