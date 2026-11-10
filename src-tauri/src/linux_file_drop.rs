@@ -143,13 +143,11 @@ fn tab_at<R: tauri::Runtime>(
                 && point_y < bounds.y + bounds.height;
             // Tab-relative, which is what both the Chromium drop protocol and the system
             // webview's elementFromPoint expect.
-            inside.then(|| {
-                (
-                    session.browser_id,
-                    session.engine,
-                    (point_x - bounds.x, point_y - bounds.y),
-                )
-            })
+            inside.then_some((
+                session.browser_id,
+                session.engine,
+                (point_x - bounds.x, point_y - bounds.y),
+            ))
         })
 }
 
