@@ -170,6 +170,26 @@ function inputState(ctx) {
   };
 }
 
+/**
+ * Diagnostic only, Windows: under summary.daily_native[label], the tab list, the focus chain,
+ * every native view of the app window (WRY_WEBVIEW / Chrome_WidgetWin_* children with visibility
+ * and screen rect, in z-order), the window under `at` when given, and the probe frame taken now.
+ * Tells a stale or extra page view left over the active tab from the tab `ferryx browser list`
+ * names (Windows run 42597361242: the page and the address bar showed /upload.html while the
+ * list had just reported /notify.html in the same tab).
+ */
+function nativeState(ctx, label, at = null) {
+  if (ctx.platform !== "win32") return;
+  const views = ctx.win.windowTree ? ctx.win.windowTree().filter((row) => row.kind === "top" || /WRY_WEBVIEW|Chrome_|Intermediate D3D/.test(row.class)) : null;
+  const record = {
+    ...inputState(ctx),
+    views,
+    hit: at && ctx.host.hit ? { at, ...ctx.host.hit(...at) } : null,
+    probe: ctx.probeShot().split(/[\\/]/).pop(),
+  };
+  ((ctx.summary.daily_native ??= {})[label] ??= []).push(record);
+}
+
 async function historyRows(ctx) {
   const path = join(ctx.dirs.data, "browser", "history.sqlite");
   if (!existsSync(path)) return [];
@@ -507,6 +527,22 @@ function closeFileManager(ctx) {
 }
 
 /**
+ * Waits until the first focus-chain row belongs to the Ferryx process, re-asserting focus each
+ * poll, and returns that row as "process@pid" (null when it never got there). Windows run
+ * 42368667682 typed /notify.html and /print.html after a native file panel had been cancelled:
+ * the app was not foreground, so the tab stayed on upload-idle (g6) and the OCR read the desktop
+ * instead of the page (g9).
+ */
+async function waitForAppForeground(ctx) {
+  if (ctx.platform !== "win32") return null;
+  return await until(() => {
+    ctx.host.focus();
+    const top = ctx.win.windowRows("focuschain")[0];
+    return top && top.pid === ctx.win.pid ? `${top.process ?? top.class}@${top.pid}` : null;
+  }, 5000, 500);
+}
+
+/**
  * Navigates through the real address bar (click, select all, type, Enter), confirms through
  * `ferryx browser list` that a visible tab reached the URL's path (retyped once otherwise), then
  * waits for OCR text. Windows run 41801115761: the /doc.pdf visit never landed and the PDF check
@@ -514,6 +550,9 @@ function closeFileManager(ctx) {
  */
 async function visit(ctx, url, expect, timeout = 20000) {
   const path = new URL(url).pathname;
+  // Typing only reaches the app while it owns the keyboard; a visit that cannot prove it still
+  // types, but records the miss so the failure names the lost focus instead of the page.
+  const foreground = await waitForAppForeground(ctx);
   const landed = () => ctx.sessions().list.some((entry) => entry.visible !== false && (entry.url ?? "").split(/[?#]/)[0].endsWith(path));
   let ok = false;
   let attempts = 0;
@@ -531,6 +570,7 @@ async function visit(ctx, url, expect, timeout = 20000) {
   // A visit that did not land also records where the input went.
   (ctx.summary.daily_visits ??= []).push({
     path, landed: ok, attempts, text_seen: expect ? Boolean(seen) : null,
+    foreground,
     ...(ok ? { at: new Date().toISOString() } : inputState(ctx)),
   });
   return seen;
@@ -642,14 +682,18 @@ function toolbarIcons(ctx) {
     at = runs.findLastIndex((run) => width(run) >= median * 1.6 && width(run) <= median * 4);
   }
   if (at < 0 && anchor !== label) {
-    // No wider run: OCR missed the "100%" readout and the row holds only icons. macOS run
-    // 42352352939 measured this exactly (screenshot 14): five 10-14px runs at 862/902/931/962/993
-    // and no readout, so every earlier attempt returned "zoom readout run not found" with 0
-    // icons and g2 history/folder never opened. Every icon is right of the URL, and the readout
-    // renders at 100% too (BrowserToolbar.tsx:879), so its absence is an OCR miss, not a control
-    // that is not there: the icons are every run after the URL.
-    if (!runs.length) return { icons: [], label: null, via: "no runs right of the url", runs: runs.length, y };
-    via = "no readout run (icons after the url)";
+    // The browser pane here is ~640px wide, under BROWSER_TOOLBAR_COMPACT_WIDTH (720), so the
+    // toolbar renders no zoom group at all (BrowserToolbar.tsx:971 `compact ? null`) and the
+    // readout this scan keys on genuinely is not on screen: screenshot 14 of run 42352352939
+    // shows five runs at 867/907/937/967/997 -- bookmark star, History, Extensions, external,
+    // overflow. Every earlier attempt returned "zoom readout run not found" with 0 icons, so the
+    // History menu (`clickToolbarIcon(ctx, 1, ...)`) and the bookmark folder never opened.
+    // History is index 1 in both layouts: uncompact counts [zoom in, History, ...] because the
+    // slice below starts after the readout; compact counts [star, History, ...]. Steps that need
+    // a control only the wide toolbar has (index 7, Save as PDF) find no icon at that index and
+    // fail without clicking something else.
+    if (!runs.length) return { icons: [], label: null, via: "no runs right of the url", runs: runs.length, y, compact: true };
+    via = "no zoom group (compact toolbar)";
     at = -1;
   }
   // Icons are 14px glyphs; a separator line is 1px, a wider run is not an icon.
@@ -750,6 +794,15 @@ async function clickWord(ctx, test, { timeout = 8000, pick = "first", dx = 0, wh
     const all = ctx.ocr(path) ?? [];
     let words = all.filter(match);
     let pass = "regular";
+    if (!words.length && ctx.ocrOutside) {
+      // A popup menu can be drawn outside the window the OCR crops to (Linux run 42368667682
+      // probe-265: the Duplicate submenu sat at x=1694, past the window's right edge at 1600, so
+      // "work" was on screen and no cropped pass could read it). Miss-only, so nothing pays for it
+      // unless the normal passes already failed.
+      const wide = ctx.ocrOutside(path) ?? [];
+      words = wide.filter(match);
+      pass = "outside window";
+    }
     if (!words.length && ctx.ocrStrips) {
       const strips = ctx.ocrStrips(path);
       words = strips.filter(match);
@@ -783,9 +836,14 @@ async function duplicateSubmenuAnchor(ctx, duplicate) {
     const words = screenWords(ctx);
     const current = words.filter((word) => /current/i.test(word.text)).sort((a, b) => a.top - b.top)[0];
     if (!current) return null;
-    // Rows start at the first word of the same line, left of "(current)".
+    // Rows start at the nearest word to the left on the same line. A 420px window took the
+    // leftmost word in range, which on macOS run 42368667682 was the sidebar (anchor [90,184]
+    // while the submenu column was ~797) and on Linux the parent menu (anchor [1494,284] while
+    // the column was ~1691), so "Private" and "work" were reported missing while both were on
+    // screen. A fixed distance cap cannot work: the row start is one label away, which is ~70px
+    // here and varies with scale, so the nearest left neighbour is used instead.
     const line = words.filter((word) => Math.abs(word.top - current.top) <= 8 && word.left <= current.left)
-      .sort((a, b) => a.left - b.left)[0];
+      .sort((a, b) => b.left - a.left)[0];
     return [line?.left ?? current.left, current.top];
   }, 3000, 500);
 }
@@ -996,8 +1054,13 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
         await sleep(800);
       }
       await sleep(1200);
+      // Only a word inside the Explorer window counts: `resize` puts it at (40, 40) 420x620. Once
+      // the picker works the Chromium tab is titled "picked:upload-fixture.txt:25", and Windows run
+      // 42844790734 read that tab label in Ferryx's tab strip (from [947, 217]), pressed on the tab
+      // and dragged it, which left a tab drag that swallowed every later G11 click and key.
+      const inFolder = (word) => !folder || (word.left >= 40 && word.left + word.width <= 460 && word.top >= 40 && word.top + word.height <= 660);
       const from = await until(() => {
-        const hit = screenWords(ctx).find((word) => /upload-fixture|upload-?fix|fixture[.,]txt/i.test(word.text));
+        const hit = screenWords(ctx).find((word) => /upload-fixture|upload-?fix|fixture[.,]txt/i.test(word.text) && !/picked/i.test(word.text) && inFolder(word));
         return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
       }, 10000, 800);
       record.from = from;
@@ -1047,6 +1110,13 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       await sleep(80);
     }
     await sleep(500);
+    // Whether the page saw dragenter/dragover while the button is still held (DROPZONE turns
+    // DROPHOVER), and which window is under the pointer: tells "no drag over the page" from
+    // "the drop itself was lost".
+    if (ctx.platform === "win32") {
+      record.hover_words = screenWords(ctx).map((word) => word.text).filter((text) => /^DROP/i.test(text));
+      record.hover_hit = ctx.host.hit ? ctx.host.hit(to[0], to[1]) : null;
+    }
     ctx.host.mouseUp(to[0], to[1]);
     // The source stays alive until the page shows the drop or `verify` gives up.
     record.dropped = Boolean(await verify());
@@ -1223,11 +1293,32 @@ export async function dailyWebviewBefore(ctx) {
     const opened = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent", "manager"], 8000)) !== null);
     g2.history_menu = opened;
     if (!opened.ok) return { ok: false, stderr: "History menu did not open", opened };
-    // "Show all history": OCR reads it as separate words.
-    const all = await clickWord(ctx, (text) => /^all$/i.test(text) || /showall/i.test(text), { timeout: 5000 });
-    const page = await waitWords(ctx, ["clearbrowsing", "browsing"], 8000);
-    if (!all || !page) return { ok: false, stderr: "history page did not open" };
-    const search = await clickWord(ctx, (text) => /^search$/i.test(text), { timeout: 5000, pick: "first" });
+    // "Show all history": OCR reads it as separate words. The open menu itself reads
+    // "Remember browsing history", so "browsing" alone proved nothing: windows run 42864283166
+    // (13-daily-g2-history.png) left the menu open, took it for the page, and the search click
+    // then fell through to the taskbar's "Type here to search" and typed into the Start menu.
+    // The page is open once the menu is gone and the library's "Clear browsing data" shows.
+    const pageOpen = async (timeout) => Boolean(await until(() => {
+      const words = screenWords(ctx);
+      return !has(words, "remember") && !has(words, "manager") && has(words, "browsing");
+    }, timeout));
+    const tries = [];
+    let page = false;
+    for (const test of [(text) => /^all$/i.test(text) || /showall/i.test(text), (text) => /^show$/i.test(text)]) {
+      if (tries.length && !(await waitWords(ctx, ["recent", "manager"], 1000))) {
+        const again = await clickToolbarIcon(ctx, 1, async () => (await waitWords(ctx, ["showall", "recent", "manager"], 8000)) !== null);
+        if (!again.ok) break;
+      }
+      const at = await clickWord(ctx, test, { timeout: 5000, where: (word) => word.top > opened.at[1] });
+      page = Boolean(at) && (await pageOpen(6000));
+      tries.push({ at, page });
+      if (page) break;
+    }
+    g2.history_page_tries = tries;
+    if (!page) return { ok: false, stderr: "history page did not open", tries };
+    // Only the library's own search box: never the taskbar below the window.
+    const screenHeight = ctx.decodePng(ctx.probeShot()).height;
+    const search = await clickWord(ctx, (text) => /^search$/i.test(text), { timeout: 5000, pick: "first", where: (word) => word.top > opened.at[1] && word.top < screenHeight - 80 });
     ctx.host.type("Alpha");
     await sleep(2000);
     let words = screenWords(ctx);
@@ -1588,14 +1679,22 @@ export async function dailyWebviewBefore(ctx) {
       }
       try {
         await visit(ctx, `${fixtureBase}/notify.html`, "NOTIFYME");
+        nativeState(ctx, "g6-after-visit");
         await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 8000 });
+        // Windows run 42352352939 read the title of a remembered tab id and got "upload-idle"
+        // while /notify.html had landed in another tab, so the permission was reported as never
+        // granted and the prompt stayed open into the print step (screenshots 20 and 21 both show
+        // it). Read the tab that actually shows the page, as `tabAt` exists for.
+        const notifyTab = () => tabAt(ctx, "/notify.html")?.browserId ?? daily.tabB;
+        const permTitle = () => tab(ctx, notifyTab())?.title ?? "";
         // The page sets "perm:asking" on the click. Linux run 41824966041 stayed on "perm:idle":
         // the click never reached the page, so it is repeated once before waiting for the prompt.
-        g6.asked = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(tab(ctx, daily.tabB)?.title ?? ""), 4000, 500));
+        g6.asked = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(permTitle()), 4000, 500));
+        nativeState(ctx, "g6-after-notifyme");
         if (!g6.asked) {
           ctx.host.focus();
           await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 5000 });
-          g6.asked_retry = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(tab(ctx, daily.tabB)?.title ?? ""), 4000, 500));
+          g6.asked_retry = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(permTitle()), 4000, 500));
         }
         await waitWords(ctx, ["wants"], 10000);
         // OCR reads the small "Allow" as "atow" or misses it (linux run 41767162699), so fuzzy
@@ -1612,9 +1711,12 @@ export async function dailyWebviewBefore(ctx) {
           }
         }
         g6.allow_at = allow;
-        const granted = await until(() => /^perm:granted/.test(tab(ctx, daily.tabB)?.title ?? ""), 10000);
+        nativeState(ctx, "g6-after-allow", allow);
+        const granted = await until(() => /^perm:granted/.test(permTitle()), 10000);
         g6.checks.prompt_allowed = Boolean(allow) && Boolean(granted);
-        g6.title = tab(ctx, daily.tabB)?.title ?? null;
+        if (!granted) nativeState(ctx, "g6-not-granted", allow);
+        g6.title = permTitle() || null;
+        g6.title_tab = notifyTab();
         if (ctx.platform === "linux") {
           const seen = await until(() => readFileSync(log, "utf8").includes("ferryx-qa"), 10000);
           g6.dbus = readFileSync(log, "utf8").split("\n").filter((line) => /string "/.test(line)).slice(0, 12);
@@ -1637,6 +1739,7 @@ export async function dailyWebviewBefore(ctx) {
     const g9 = gap(ctx, "g9", ["print_dialog", "print_cancelled", "pdf_saved"]);
     await run(ctx, "daily-g9-print", "Webview /print.html: Mod+P opens the OS print UI; cancel; Save as PDF writes a %PDF file", async () => {
       await visit(ctx, `${fixtureBase}/print.html`, "PRINTPAGE");
+      nativeState(ctx, "g9-after-visit");
       await shortcut(ctx, { key: "p", mods: ["mod"] });
       let seen = await until(() => (printUiSeen(ctx).length >= 2 ? printUiSeen(ctx) : null), 20000);
       g9.print_words = seen;
@@ -1963,6 +2066,10 @@ export async function dailyChromium(ctx) {
   const { g8, g13, g11 } = ctx.summary.daily;
   const file = fixtureFile(ctx);
   const chromiumNavigate = async (browserId, url) => {
+    // Same foreground gate as visit(): the address bar only takes the keystrokes while the app
+    // owns the keyboard. Windows run 42368667682 recorded chromium_nav {typed:false} right after
+    // the native picker had been cancelled, and the CLI fallback then did the navigation.
+    if (ctx.platform === "win32") await waitForAppForeground(ctx);
     ctx.host.focus();
     ctx.host.key({ key: "l", mods: ["mod"] });
     await sleep(800);
@@ -1978,10 +2085,40 @@ export async function dailyChromium(ctx) {
   };
   const newChromiumTab = async () => {
     const before = new Set(ctx.sessions().list.map((entry) => entry.browserId));
+    const reuse = () => ctx.sessions().list.find((entry) => entry.engine === "chromium") ?? null;
     await shortcut(ctx, { key: "b", mods: ["mod", "shift"] });
-    const created = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.engine === "chromium"), 30000);
+    let created = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.engine === "chromium"), 30000);
+    // Windows run 42352352939: Mod+Shift+B added no tab at all, so both daily Chromium steps
+    // reported "no chromium tab" (screenshots 58 and 59 are byte-identical) while the engine group
+    // above had already proven a Chromium tab works. The step needs a Chromium tab, not a fresh
+    // one, so an existing one is reused before the CLI opens another.
+    if (created) {
+      g11.chromium_tab_via = "Mod+Shift+B";
+    } else if ((created = reuse())) {
+      // A reused tab is not necessarily the active one, and `chromiumNavigate` types into the
+      // active tab's address bar, so it is activated first.
+      g11.chromium_tab_activate = await activateTab(ctx, created.browserId, null);
+      g11.chromium_tab_via = "reused the open chromium tab";
+    } else {
+      g11.chromium_tab_via = "ferryx browser tab new";
+      const opened = await ctx.cliAsync("tab", "new");
+      created = await until(() => ctx.sessions().list.find((entry) => !before.has(entry.browserId) && entry.engine === "chromium") ?? reuse(), 30000);
+      if (!created) {
+        const added = ctx.sessions().list.filter((entry) => !before.has(entry.browserId));
+        g11.chromium_tab_new = { cli: opened.ok ? "ok" : opened.stderr, added: added.map((entry) => `${entry.browserId}:${entry.engine}`) };
+        return null;
+      }
+    }
+    // A new or reused Chromium tab is not necessarily the active one: Windows runs 42378753806
+    // and 42579681577 left the system-webview upload-idle tab active (screenshots 56-58), so the
+    // whole Chromium g8 step clicked and dragged on the wrong page. Activation is confirmed with
+    // `ferryx browser list` (only the active tab's webview is visible) before anything acts.
+    const listed = ctx.sessions().list;
+    const active = listed.find((entry) => entry.browserId === created.browserId)?.visible === true
+      && listed.filter((entry) => entry.browserId !== created.browserId).every((entry) => entry.visible === false);
+    if (!active) g11.chromium_tab_activate_after = await activateTab(ctx, created.browserId, null);
     await sleep(3000);
-    return created ?? null;
+    return created;
   };
 
   await run(ctx, "daily-g8-chromium", "Chromium tab /upload.html: native file chooser and an OS file drag onto DROPZONE", async () => {
@@ -1996,10 +2133,23 @@ export async function dailyChromium(ctx) {
     const created = await newChromiumTab();
     if (!created) return { ok: false, stderr: "no chromium tab" };
     g8.chromium_tab = created.browserId;
+    nativeState(ctx, "g8c-tab");
     g8.chromium_nav = await chromiumNavigate(created.browserId, `${fixtureBase}/upload.html`);
+    // A pointer resting on the page's file input makes Chromium show its "No file chosen" tooltip
+    // window over the label (Windows run 42628093547 probe-262: the tooltip at 673,470 hid the
+    // "U" and OCR read "PLOADPICK", so the click was never made). Park the pointer on the desktop
+    // right of the app window (the window spans x 40..1320 on the 1920px runner screen).
+    if (ctx.platform === "win32") {
+      ctx.host.mouseMove(1700, 600);
+      await sleep(800);
+    }
     await waitWords(ctx, ["uploadpick"], 15000);
     const pick = await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
     if (pick && ctx.host.hit) g8.chromium_pick_hit = ctx.host.hit(...pick);
+    // What OCR read when it found no UPLOADPICK (Windows run 42597361242 probe-258 shows the
+    // word on screen, yet the click was never made).
+    if (!pick) g8.chromium_pick_words = screenWords(ctx).map((word) => `${word.text}@${word.left},${word.top}`).slice(0, 60);
+    nativeState(ctx, "g8c-after-pick", pick);
     // No UPLOADPICK click, no dialog: typing the path would go into the page or the address bar.
     // Whether the engine opened its own chooser at all: run 42204359085 recorded the keystrokes'
     // foreground as the Ferryx Tauri window, so the path may have gone into the app instead of a
@@ -2015,6 +2165,8 @@ export async function dailyChromium(ctx) {
       const hit = screenWords(ctx).find((word) => /DROPZONE/i.test(word.text));
       return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
     }, 8000);
+    // Which window takes the OS drop at the zone: the engine's own top window or Ferryx's.
+    if (zone) nativeState(ctx, "g8c-before-drag", zone);
     if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) });
     g8.checks.drag_in_chromium = Boolean(g8.chromium_drag?.dropped);
     g8.chromium_drop_zone_text = screenWords(ctx).find((word) => /^DROP(ZONE|HOVER|PED)$/i.test(word.text))?.text ?? null;
@@ -2022,7 +2174,10 @@ export async function dailyChromium(ctx) {
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     // Stage-1 probe, Linux only: can the engine hand the page real File objects from a CDP drop
     // alone (no X drag)? Diagnostic: runs after the real-drag check above and changes no check.
-    if (ctx.platform === "linux" && zone) g8.chromium_cdp_drop_probe = await cdpDropProbe(ctx, created.browserId, file);
+    // Windows too: run 42628093547 left DROPZONE untouched (no dragenter) with the drop point over
+    // the engine's Chrome_RenderWidgetHostHWND, so this separates "the OS drop never reached the
+    // engine" from "the engine cannot hand the page files".
+    if ((ctx.platform === "linux" || (ctx.platform === "win32" && !g8.checks.drag_in_chromium)) && zone) g8.chromium_cdp_drop_probe = await cdpDropProbe(ctx, created.browserId, file);
     ctx.host.focus();
     return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium, stderr: g8.checks.upload_picker_chromium ? (g8.chromium_drag?.stderr ?? (zone ? undefined : "DROPZONE not visible")) : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
   }
@@ -2061,18 +2216,29 @@ export async function dailyChromium(ctx) {
     let input = null;
     let inputVia = "placeholder 'Profile name'";
     const readInput = async () => {
-      const words = await until(() => screenWords(ctx), 4000, 400) ?? [];
+      const words = await until(() => {
+        const read = screenWords(ctx);
+        return read.length ? read : null;
+      }, 4000, 400) ?? [];
       const placeholderWord = words.filter((word) => /^Profile$/.test(word.text)).find((word) => words.some((next) => /^name$/i.test(next.text)
         && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40));
-      if (placeholderWord) {
-        return { at: [placeholderWord.left + Math.round(placeholderWord.width / 2), placeholderWord.top + Math.round(placeholderWord.height / 2)], via: "placeholder 'Profile name'" };
-      }
       // The muted placeholder is easy for OCR to miss; the input (w-36, 144px) ends 6px left of
       // the "Add Profile" button, so its middle is about 100px left of the word "Add".
       const addWord = words.filter((word) => /^Add$/.test(word.text)).find((word) => words.some((next) => /^Profile$/.test(next.text)
         && Math.abs(next.top - word.top) < 10 && next.left > word.left && next.left - (word.left + word.width) < 40));
+      // Input and Add are siblings of one `flex items-center` row (BrowserSection's
+      // Session & Cookies action), so their vertical centres differ by a couple of pixels. Linux
+      // run 42352352939 matched a "Profile name" 63px above the Add button, i.e. some other
+      // element, and typing there added no profile. When the two anchors disagree on the row, Add
+      // wins: it is bold 11px text that OCR reads reliably, while the placeholder is muted.
+      const rowGap = placeholderWord && addWord
+        ? Math.abs((placeholderWord.top + placeholderWord.height / 2) - (addWord.top + addWord.height / 2))
+        : null;
+      if (placeholderWord && (rowGap === null || rowGap <= 16)) {
+        return { at: [placeholderWord.left + Math.round(placeholderWord.width / 2), placeholderWord.top + Math.round(placeholderWord.height / 2)], via: "placeholder 'Profile name'", rowGap };
+      }
       if (addWord) {
-        return { at: [addWord.left - 100 * (ctx.host.scale?.() ?? 1), addWord.top + Math.round(addWord.height / 2)], via: "left of 'Add Profile'" };
+        return { at: [addWord.left - 100 * (ctx.host.scale?.() ?? 1), addWord.top + Math.round(addWord.height / 2)], via: "left of 'Add Profile'", rowGap };
       }
       return null;
     };

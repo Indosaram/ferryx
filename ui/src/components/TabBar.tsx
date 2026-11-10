@@ -178,6 +178,7 @@ export function TabBar({
   const renameCancelledRef = useRef(false);
   const fileTabLabelById = useMemo(() => computeFileTabLabels(tabs), [tabs]);
   const addButtonRef = useRef<HTMLDivElement>(null);
+  const tablistRef = useRef<HTMLDivElement>(null);
   const menuUnlistenRef = useRef<(() => void) | null>(null);
   const [hostPlatform, setHostPlatform] = useState<string | null>(null);
   const isMac = isMacShortcutPlatform();
@@ -195,6 +196,20 @@ export function TabBar({
   useEffect(() => {
     if (renamingTabId && !tabs.some((tab) => tab.id === renamingTabId)) setRenamingTabId(null);
   }, [renamingTabId, tabs]);
+
+  // The strip scrolls horizontally with its scrollbar hidden, so a tab activated from outside
+  // the strip (shortcut, CLI, a newly opened tab) could stay scrolled out of view: macOS run
+  // 42579681577 showed a Chromium tab active in the pane but absent from the visible strip.
+  // Only the strip itself is scrolled; scrollIntoView would also move scrollable ancestors.
+  useEffect(() => {
+    const tablist = tablistRef.current;
+    const activeTab = tablist?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+    if (!tablist || !activeTab) return;
+    const strip = tablist.getBoundingClientRect();
+    const tab = activeTab.getBoundingClientRect();
+    if (tab.left < strip.left) tablist.scrollLeft -= strip.left - tab.left;
+    else if (tab.right > strip.right) tablist.scrollLeft += tab.right - strip.right;
+  }, [activeTabId, tabs.length]);
 
   useEffect(() => {
     return () => {
@@ -628,7 +643,7 @@ export function TabBar({
         />
       ) : null}
       <SortableContext items={sortableItems} strategy={horizontalListSortingStrategy}>
-        <div className="flex min-w-0 items-stretch overflow-x-auto scrollbar-none" role="tablist">
+        <div ref={tablistRef} className="flex min-w-0 items-stretch overflow-x-auto scrollbar-none" role="tablist">
           {tabs.map((tab, index) => {
             const active = tab.id === activeTabId;
             const sleeping = isTerminalTab(tab) && sleepingSessionIds.has(tab.sessionId);
