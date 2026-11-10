@@ -926,7 +926,7 @@ async fn an_engine_exit_mid_turn_is_never_retransmitted_and_an_early_exit_backs_
     assert_eq!(supervisor.health().generation, 2);
 }
 
-+/// An owner's conversation turn that arrives while an early-exited engine is backing off waits
+/// An owner's conversation turn that arrives while an early-exited engine is backing off waits
 /// for the relaunch and is answered, instead of failing with the exit fault.
 #[tokio::test(start_paused = true)]
 async fn a_conversation_turn_inside_the_exit_backoff_waits_for_the_relaunch() {
