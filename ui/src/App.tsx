@@ -3547,6 +3547,10 @@ function WorkspaceApp({
     setIsCommandPaletteOpen(true);
   }, []);
   const handleCloseCommandPalette = useCallback(() => setIsCommandPaletteOpen(false), []);
+  // Flush the in-memory layout before cloning it: the normal save is debounced, so opening a
+  // window immediately after editing tabs must not clone a stale file. Restored panes re-attach
+  // to the same daemon PTYs with a newer attach generation. Closing a window never kills those
+  // PTYs; ownership follows the latest attach and any remaining sessions use the orphan handoff.
   const handleNewWindow = useCallback(() => {
     void (async () => {
       const snapshot = stateRef.current;
@@ -3590,10 +3594,6 @@ function WorkspaceApp({
       switchDebug("window.orphans.plan", {
         fromLabel,
         adopt: plan.adopt.map((entry) => entry.backend.sessionId),
-  // Flush the in-memory layout before cloning it: the normal save is debounced, so opening a
-  // window immediately after editing tabs must not clone a stale file. Restored panes re-attach
-  // to the same daemon PTYs with a newer attach generation. Closing a window never kills those
-  // PTYs; ownership follows the latest attach and any remaining sessions use the orphan handoff.
         alreadyAttached: plan.alreadyAttached,
         missing: plan.missing,
       });
