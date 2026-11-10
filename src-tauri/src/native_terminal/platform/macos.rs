@@ -271,7 +271,8 @@ unsafe fn apply_viewport(
 /// them there is inert, which left the drawable stretched into the layer box and
 /// every glyph resampled whenever the two disagreed -- the split-pane softness.
 /// Walking the sublayers keeps a transient mismatch cropping one edge rather than
-/// blurring the whole frame.
+/// blurring the whole frame, and the mask below is what makes that crop real: without
+/// it the oversized contents were drawn past the layer box instead.
 ///
 /// `setDrawableSize:` is deliberately never sent: the backing layer does not
 /// implement it and that call is the `199761a` SIGABRT.
@@ -312,6 +313,15 @@ unsafe fn configure_terminal_layers(view: &AnyObject, scale_factor: f64) {
             // remains the GPU thread's configure call.
             let view_bounds: NSRect = msg_send![view, bounds];
             let _: () = msg_send![sublayer, setFrame: view_bounds];
+            // The drawable is sized from the rounded physical surface while this frame is the
+            // logical view bounds times `contentsScale`, and the GPU thread republishes the
+            // drawable on its own cadence, so the two routinely disagree by a whole frame
+            // after an attach or resize (measured: a 448pt pane holding a 900pt-wide
+            // drawable). `contentsGravity` is `topLeft` and an unmasked layer draws its
+            // oversized contents past its own bounds, so that surplus painted over the pane
+            // edge and the divider between panes as glyph slivers. Masking crops it to this
+            // pane, which is the cropping behaviour the gravity comment above already promises.
+            let _: () = msg_send![sublayer, setMasksToBounds: true];
             let _: () = msg_send![sublayer, setContentsScale: scale];
             let _: () = msg_send![sublayer, setContentsGravity: &*gravity];
             let _: () = msg_send![sublayer, setMagnificationFilter: &*nearest];
