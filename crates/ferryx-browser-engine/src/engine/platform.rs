@@ -703,3 +703,17 @@ pub use imp::{embed, focus, handle, native_focus, place, raise};
 pub use imp::click_and_select_all;
 #[cfg(target_os = "windows")]
 pub use imp::post_click;
+
+/// Lets Ferryx bring its own window (a file chooser it opens for this engine) to the
+/// foreground. While a page has keyboard focus, this engine's child window holds the
+/// foreground input, so Windows refuses Ferryx's dialog activation and the dialog opens
+/// without focus (Windows run 42808822985: the typed path went to the Ferryx window).
+#[cfg(target_os = "windows")]
+pub fn allow_foreground_handoff() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+    unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+}
+
+/// Other platforms have no foreground lock to release.
+#[cfg(not(target_os = "windows"))]
+pub fn allow_foreground_handoff() {}
