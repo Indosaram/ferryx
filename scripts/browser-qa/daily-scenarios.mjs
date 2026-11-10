@@ -170,6 +170,26 @@ function inputState(ctx) {
   };
 }
 
+/**
+ * Diagnostic only, Windows: under summary.daily_native[label], the tab list, the focus chain,
+ * every native view of the app window (WRY_WEBVIEW / Chrome_WidgetWin_* children with visibility
+ * and screen rect, in z-order), the window under `at` when given, and the probe frame taken now.
+ * Tells a stale or extra page view left over the active tab from the tab `ferryx browser list`
+ * names (Windows run 42597361242: the page and the address bar showed /upload.html while the
+ * list had just reported /notify.html in the same tab).
+ */
+function nativeState(ctx, label, at = null) {
+  if (ctx.platform !== "win32") return;
+  const views = ctx.win.windowTree ? ctx.win.windowTree().filter((row) => row.kind === "top" || /WRY_WEBVIEW|Chrome_|Intermediate D3D/.test(row.class)) : null;
+  const record = {
+    ...inputState(ctx),
+    views,
+    hit: at && ctx.host.hit ? { at, ...ctx.host.hit(...at) } : null,
+    probe: ctx.probeShot().split(/[\\/]/).pop(),
+  };
+  ((ctx.summary.daily_native ??= {})[label] ??= []).push(record);
+}
+
 async function historyRows(ctx) {
   const path = join(ctx.dirs.data, "browser", "history.sqlite");
   if (!existsSync(path)) return [];
@@ -1085,6 +1105,13 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       await sleep(80);
     }
     await sleep(500);
+    // Whether the page saw dragenter/dragover while the button is still held (DROPZONE turns
+    // DROPHOVER), and which window is under the pointer: tells "no drag over the page" from
+    // "the drop itself was lost".
+    if (ctx.platform === "win32") {
+      record.hover_words = screenWords(ctx).map((word) => word.text).filter((text) => /^DROP/i.test(text));
+      record.hover_hit = ctx.host.hit ? ctx.host.hit(to[0], to[1]) : null;
+    }
     ctx.host.mouseUp(to[0], to[1]);
     // The source stays alive until the page shows the drop or `verify` gives up.
     record.dropped = Boolean(await verify());
@@ -1626,6 +1653,7 @@ export async function dailyWebviewBefore(ctx) {
       }
       try {
         await visit(ctx, `${fixtureBase}/notify.html`, "NOTIFYME");
+        nativeState(ctx, "g6-after-visit");
         await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 8000 });
         // Windows run 42352352939 read the title of a remembered tab id and got "upload-idle"
         // while /notify.html had landed in another tab, so the permission was reported as never
@@ -1636,6 +1664,7 @@ export async function dailyWebviewBefore(ctx) {
         // The page sets "perm:asking" on the click. Linux run 41824966041 stayed on "perm:idle":
         // the click never reached the page, so it is repeated once before waiting for the prompt.
         g6.asked = Boolean(await until(() => /^perm:(asking|granted|denied)/.test(permTitle()), 4000, 500));
+        nativeState(ctx, "g6-after-notifyme");
         if (!g6.asked) {
           ctx.host.focus();
           await clickWord(ctx, (text) => /NOTIFYME/i.test(text), { timeout: 5000 });
@@ -1656,8 +1685,10 @@ export async function dailyWebviewBefore(ctx) {
           }
         }
         g6.allow_at = allow;
+        nativeState(ctx, "g6-after-allow", allow);
         const granted = await until(() => /^perm:granted/.test(permTitle()), 10000);
         g6.checks.prompt_allowed = Boolean(allow) && Boolean(granted);
+        if (!granted) nativeState(ctx, "g6-not-granted", allow);
         g6.title = permTitle() || null;
         g6.title_tab = notifyTab();
         if (ctx.platform === "linux") {
@@ -1682,6 +1713,7 @@ export async function dailyWebviewBefore(ctx) {
     const g9 = gap(ctx, "g9", ["print_dialog", "print_cancelled", "pdf_saved"]);
     await run(ctx, "daily-g9-print", "Webview /print.html: Mod+P opens the OS print UI; cancel; Save as PDF writes a %PDF file", async () => {
       await visit(ctx, `${fixtureBase}/print.html`, "PRINTPAGE");
+      nativeState(ctx, "g9-after-visit");
       await shortcut(ctx, { key: "p", mods: ["mod"] });
       let seen = await until(() => (printUiSeen(ctx).length >= 2 ? printUiSeen(ctx) : null), 20000);
       g9.print_words = seen;
@@ -2075,10 +2107,23 @@ export async function dailyChromium(ctx) {
     const created = await newChromiumTab();
     if (!created) return { ok: false, stderr: "no chromium tab" };
     g8.chromium_tab = created.browserId;
+    nativeState(ctx, "g8c-tab");
     g8.chromium_nav = await chromiumNavigate(created.browserId, `${fixtureBase}/upload.html`);
+    // A pointer resting on the page's file input makes Chromium show its "No file chosen" tooltip
+    // window over the label (Windows run 42628093547 probe-262: the tooltip at 673,470 hid the
+    // "U" and OCR read "PLOADPICK", so the click was never made). Park the pointer on the desktop
+    // right of the app window (the window spans x 40..1320 on the 1920px runner screen).
+    if (ctx.platform === "win32") {
+      ctx.host.mouseMove(1700, 600);
+      await sleep(800);
+    }
     await waitWords(ctx, ["uploadpick"], 15000);
     const pick = await clickWord(ctx, (text) => /UPLOADPICK/i.test(text), { timeout: 8000 });
     if (pick && ctx.host.hit) g8.chromium_pick_hit = ctx.host.hit(...pick);
+    // What OCR read when it found no UPLOADPICK (Windows run 42597361242 probe-258 shows the
+    // word on screen, yet the click was never made).
+    if (!pick) g8.chromium_pick_words = screenWords(ctx).map((word) => `${word.text}@${word.left},${word.top}`).slice(0, 60);
+    nativeState(ctx, "g8c-after-pick", pick);
     // No UPLOADPICK click, no dialog: typing the path would go into the page or the address bar.
     // Whether the engine opened its own chooser at all: run 42204359085 recorded the keystrokes'
     // foreground as the Ferryx Tauri window, so the path may have gone into the app instead of a
@@ -2094,6 +2139,8 @@ export async function dailyChromium(ctx) {
       const hit = screenWords(ctx).find((word) => /DROPZONE/i.test(word.text));
       return hit ? [hit.left + Math.round(hit.width / 2), hit.top + Math.round(hit.height / 2)] : null;
     }, 8000);
+    // Which window takes the OS drop at the zone: the engine's own top window or Ferryx's.
+    if (zone) nativeState(ctx, "g8c-before-drag", zone);
     if (zone) g8.chromium_drag = await dragFileTo(ctx, file, zone, { verify: () => until(() => tab(ctx, created.browserId)?.title === `dropped:${file.name}:${file.size}`, 8000) });
     g8.checks.drag_in_chromium = Boolean(g8.chromium_drag?.dropped);
     g8.chromium_drop_zone_text = screenWords(ctx).find((word) => /^DROP(ZONE|HOVER|PED)$/i.test(word.text))?.text ?? null;
@@ -2101,7 +2148,10 @@ export async function dailyChromium(ctx) {
     g8.chromium_drop_title = tab(ctx, created.browserId)?.title ?? null;
     // Stage-1 probe, Linux only: can the engine hand the page real File objects from a CDP drop
     // alone (no X drag)? Diagnostic: runs after the real-drag check above and changes no check.
-    if (ctx.platform === "linux" && zone) g8.chromium_cdp_drop_probe = await cdpDropProbe(ctx, created.browserId, file);
+    // Windows too: run 42628093547 left DROPZONE untouched (no dragenter) with the drop point over
+    // the engine's Chrome_RenderWidgetHostHWND, so this separates "the OS drop never reached the
+    // engine" from "the engine cannot hand the page files".
+    if ((ctx.platform === "linux" || (ctx.platform === "win32" && !g8.checks.drag_in_chromium)) && zone) g8.chromium_cdp_drop_probe = await cdpDropProbe(ctx, created.browserId, file);
     ctx.host.focus();
     return { ok: g8.checks.upload_picker_chromium && g8.checks.drag_in_chromium, stderr: g8.checks.upload_picker_chromium ? (g8.chromium_drag?.stderr ?? (zone ? undefined : "DROPZONE not visible")) : "UPLOAD_CHOOSER_FAILED: the page title never showed the picked file" };
   }

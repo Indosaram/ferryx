@@ -4386,6 +4386,12 @@ function WorkspaceApp({
         if (targetId) void handleBrowserZoom(targetId, "reset");
         return;
       }
+      // The page owns OS focus, so Ctrl/Cmd+P reaches the app only as this native chord.
+      if ((action as string) === "print") {
+        const targetId = payload.browserId || shortcutBrowserId;
+        if (targetId) handleBrowserPrint(targetId);
+        return;
+      }
       if (action === "tab-close") {
         handleCloseActiveSurface();
         return;

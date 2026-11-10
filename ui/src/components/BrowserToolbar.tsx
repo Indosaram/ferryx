@@ -323,10 +323,17 @@ export function BrowserToolbar({
 
   // Clicking into the page moves focus to the native page view, which the toolbar sees only as
   // the app window losing focus; the suggestion list must not stay drawn over the page then.
+  // The address input is blurred as well: the DOM keeps it as the active element across the
+  // window blur, so the next click anywhere in the app UI re-activates the window and Chromium
+  // fires `focus` on it again, which reopened the list under that click. Windows run
+  // 42597361242: the click on the permission prompt's Allow re-focused the omnibox, the list
+  // pushed the prompt down, and the click chose the /upload.html history row instead
+  // (probe-120: tab back on upload-idle, caret in the address bar, prompt unanswered).
   useEffect(() => {
     const closeOnWindowBlur = () => {
       setOmniboxOpen(false);
       setSelectedHistoryIndex(-1);
+      if (document.activeElement === inputRef.current) inputRef.current?.blur();
     };
     window.addEventListener("blur", closeOnWindowBlur);
     return () => window.removeEventListener("blur", closeOnWindowBlur);

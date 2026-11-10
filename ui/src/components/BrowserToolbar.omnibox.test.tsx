@@ -210,6 +210,18 @@ describe("BrowserToolbar omnibox", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
+  it("lets go of the address bar when the page takes focus, so the next app click cannot reopen the list", async () => {
+    render(<BrowserToolbar tab={tab} onNavigate={vi.fn()} onReload={vi.fn()} />);
+    const input = screen.getByLabelText("URL address bar") as HTMLInputElement;
+    act(() => input.focus());
+    await screen.findByRole("listbox", { name: "Address bar suggestions" });
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(document.activeElement).not.toBe(input);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
   it("keeps half-typed omnibox text when the page url changes, and syncs again after blur", () => {
     const props = { onNavigate: vi.fn(), onReload: vi.fn() };
     const { rerender } = render(<BrowserToolbar tab={tab} {...props} />);
