@@ -1031,8 +1031,8 @@ describe("App project workspace flow", () => {
     expect(screen.getByTestId("mock-sidebar")).toHaveAttribute("data-empty-workspaces", '["default"]');
   });
 
-  it("does not select tabless workspace rows through Cmd+digit", async () => {
-    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "." }]));
+  it("selects a tabless workspace row through Cmd+digit", async () => {
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo", gitRoot: "/repo" }]));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
     workspace.storeState.layout.tabs = [];
@@ -1040,24 +1040,18 @@ describe("App project workspace flow", () => {
 
     fireEvent.keyDown(window, { key: "1", metaKey: true });
 
-    expect(workspace.ensureTabForWorktree).not.toHaveBeenCalled();
+    // Selecting a tabless row opens a tab; a digit never has to be silent.
+    await waitFor(() => expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(workspace.storeState.worktrees[0]));
   });
 
-  it("skips tabless background worktrees when indexing Cmd+N targets", async () => {
+  it("keeps Cmd+N indices stable for tabless background worktrees", async () => {
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo", gitRoot: "/repo" }]));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
     localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify([]));
     await act(async () => { render(<App />); });
 
-    // In the default fixture, /repo/main is active with tabs; /repo/feature has no parked tabs.
-    // Cmd+2 must not select /repo/feature because it owns no open tabs.
-    fireEvent.keyDown(window, { key: "2", metaKey: true });
-    expect(workspace.ensureTabForWorktree).not.toHaveBeenCalled();
-
-    // Parking an open tab under /repo/feature makes it a valid shortcut navigation target.
-    workspace.storeState.worktreeLayouts = {
-      "/repo/feature": createLayoutState([{ id: "tab-feature-parked", label: "feature", sessionId: "sess-2" }]),
-    };
+    // /repo/main is active with tabs; /repo/feature has no parked tabs. The ladder must not
+    // shift, so Cmd+2 still means /repo/feature and selecting it opens a tab there.
     fireEvent.keyDown(window, { key: "2", metaKey: true });
     await waitFor(() => expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(workspace.storeState.worktrees[1]));
   });
@@ -2306,14 +2300,19 @@ describe("App project workspace flow", () => {
       cleanup();
       workspace.ensureTabForWorktree.mockClear();
 
-      // Collapsing "alpha" removes its four worktrees from the tree, so "beta"'s worktrees move up
-      // to positions 1 and 2 and the same keys now cross into the other project.
+      // Collapsing "alpha" hides its rows but must not renumber them: the same digits keep
+      // meaning the same worktrees, and "beta" keeps its slots after them.
       localStorage.setItem(SIDEBAR_COLLAPSED_PROJECTS_STORAGE_KEY, JSON.stringify(["alpha"]));
       render(<App />);
 
       fireEvent.keyDown(window, { key: "2", metaKey: true });
+      expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(workspace.storeState.worktrees[1]);
+      expect(screen.queryByText("Active project beta")).not.toBeInTheDocument();
 
-      // Crossing projects switches the active project and still focuses that worktree's tab.
+      workspace.ensureTabForWorktree.mockClear();
+      fireEvent.keyDown(window, { key: "6", metaKey: true });
+
+      // Crossing projects still works through the digit that owns the other project's row.
       await waitFor(() => expect(screen.getByText("Active project beta")).toBeInTheDocument());
       await waitFor(() => expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(betaDocs));
     } finally {
@@ -2322,7 +2321,7 @@ describe("App project workspace flow", () => {
     }
   });
 
-  it("skips a collapsed project's rows when counting Cmd+N positions", async () => {
+  it("keeps a collapsed project's rows on their Cmd+N positions", async () => {
     seedSidebarBrowserTab("beta");
     const projects = [
       { workspaceId: "alpha", repoRoot: "/repos/alpha", gitRoot: "/repos/alpha" },
@@ -2346,8 +2345,17 @@ describe("App project workspace flow", () => {
     try {
       render(<App />);
 
-      // Cmd+1 must hit beta's row, not alpha's hidden rows.
+      // Cmd+1 stays on alpha's first row even though alpha is collapsed; beta's nested row
+      // keeps the position after alpha's rows instead of sliding up to digit 1.
       fireEvent.keyDown(window, { key: "1", metaKey: true });
+      expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(workspace.storeState.worktrees[0]);
+
+      const handler = native.selectWorktreeMenuHandler;
+      if (!handler) throw new Error("Expected selectWorktreeMenuHandler to be registered");
+      await waitFor(() => expect(native.listWorktrees).toHaveBeenCalledWith("beta"));
+      act(() => {
+        handler(5);
+      });
 
       await waitFor(() =>
         expect(workspace.ensureTabForWorktree).toHaveBeenCalledWith(
