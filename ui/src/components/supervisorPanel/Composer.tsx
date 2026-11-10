@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type ChangeEvent, type KeyboardEven
 import { ArrowRight } from 'lucide-react';
 
 import { cn } from '../../lib/cn';
+import { VoiceConversationButton } from '../supervisor/VoiceConversationButton';
 import { parseMentions } from '../../lib/supervisorPanel/model';
 import type { ComposerProps, ComposerSendResult, MentionOption } from './types';
 
@@ -11,7 +12,7 @@ function mentionLabel(option: MentionOption): string {
   return `${option.title} · ${option.computer}`;
 }
 
-export function Composer({ sessions, touch, onSend, seed }: ComposerProps) {
+export function Composer({ sessions, touch, onSend, seed, voiceConversation }: ComposerProps) {
   const listId = useId();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState('');
@@ -182,6 +183,7 @@ export function Composer({ sessions, touch, onSend, seed }: ComposerProps) {
         >
           <ArrowRight aria-hidden="true" className="size-4" />
         </button>
+        {voiceConversation ? <VoiceConversationButton {...voiceConversation} /> : null}
       </div>
       {error ? (
         <p role="alert" data-testid="supervisor-composer-error" className={cn('mt-1 px-1 text-status-warning', touch ? 'text-sm' : 'text-xs')}>

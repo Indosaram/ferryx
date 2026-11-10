@@ -943,6 +943,10 @@ pub struct ClaimedJob {
 }
 
 pub const LEASE_EXPIRED_ERROR: &str = "lease expired before completion";
+
+/// Payload flag: a run interrupted by a lost owner (daemon restart, crash) is run again at
+/// once instead of waiting for the next occurrence. Only for jobs that are safe to repeat.
+pub const RETRY_INTERRUPTED_KEY: &str = "retry_interrupted";
 /// How often a running batch pushes its leases forward.
 pub const LEASE_RENEW_EVERY: Duration = Duration::from_secs(60);
 
@@ -1085,8 +1089,12 @@ where
             continue;
         };
         let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+        // A job that opted in runs the interrupted occurrence again at once; others (publishers
+        // whose side effects may already have happened) wait for their next occurrence.
+        let retry = payload.get(RETRY_INTERRUPTED_KEY).and_then(Value::as_bool) == Some(true);
         let expression = job_expression(&expression, &payload);
         let next = match next_run_tz(&expression, now, payload_timezone(&payload)) {
+            Ok(_) if retry => now,
             Ok(next) if next > now => next,
             Ok(_) | Err(_) => {
                 tracing::warn!(%job_id, "recovered cron job has no future occurrence; left unscheduled");
@@ -3103,6 +3111,22 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(runs, 1);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_run_of_a_retry_job_runs_again_at_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, next_run_at, delivery_json) VALUES('digest', '0 9 * * *', '{\"command\":\"printf hi\",\"retry_interrupted\":true}', 1, NULL, '[]')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_running(&pool, "cut", "digest", 69535, now - TimeDelta::minutes(5)).await;
+        assert_eq!(recover_stale_runs(&pool, now, |_| false).await.unwrap(), 1);
+        let (_, next) = job_row(&pool, "digest").await;
+        assert_eq!(at(&next.expect("the job is rescheduled")), now);
+        let due = claim_due(&pool, now, 1).await.unwrap();
+        assert_eq!(due.len(), 1, "the interrupted occurrence is due again now");
     }
 
     #[tokio::test]

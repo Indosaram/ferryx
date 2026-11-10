@@ -6,7 +6,7 @@ pub mod debounce;
 pub mod discord;
 pub mod fence;
 pub mod mrkdwn;
-#[cfg(all(test, feature = "hub-slack"))]
+#[cfg(all(test, unix, feature = "hub-slack"))]
 mod omo_parity_e2e;
 pub mod reply;
 #[cfg(feature = "hub-slack")]

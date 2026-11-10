@@ -1199,6 +1199,54 @@ async fn ssh_handover_persistence_keeps_predecessor_owned_records() {
     assert!(ids.contains(&"local-session".to_string()));
 }
 
+/// A reboot kills the remote target while the pane keeps its remote backend id. The pane asks
+/// that id for its final state before it can resume; `details: null` is indistinguishable from
+/// "this daemon never heard of it" and strands the pane in `missing` forever. The retained
+/// terminal record must answer `expired` with exit evidence instead.
+#[tokio::test]
+async fn restored_terminal_remote_record_answers_expired_for_the_pane() {
+    let dir = tempfile::tempdir().unwrap();
+    let durable_dir = dir.path().join("durable");
+    std::fs::create_dir_all(&durable_dir).unwrap();
+    let durable = durable_dir.join("remote_sessions.json");
+    let mut persisted = crate::session::PersistedWorkspaceSession { version: 3, ..Default::default() };
+    let mut record = handover_persistence_record("rebooted-ssh", "rebooted-target");
+    record["terminal"] = serde_json::json!(true);
+    persisted.extra.insert("remoteSessions".into(), serde_json::json!([record]));
+    crate::session::save_session_to_path(&durable, &persisted).unwrap();
+
+    let server = Arc::new(DaemonServer::new_with_paths(
+        Some(dir.path().join("config")),
+        Some(dir.path().join("auth")),
+    ));
+    server.restore_remote_sessions_at(durable.clone()).await.unwrap();
+    assert!(
+        server.terminal_service.remote().list().is_empty(),
+        "terminal evidence must never be restored as a live remote controller"
+    );
+
+    let reply = request_response(
+        &server,
+        serde_json::json!({"type":"remoteSessionDetails","sessionId":"rebooted-ssh"}),
+    )
+    .await;
+    let DaemonResponse::RemoteSessionDetailsOk { details, legacy_direct_ssh } = reply else {
+        panic!("expected remoteSessionDetailsOk, got {reply:?}");
+    };
+    assert!(!legacy_direct_ssh, "a settled remote session must not degrade into legacy direct SSH");
+    let details = details.expect("the pane's retained id must stay answerable after restart");
+    assert_eq!(details.descriptor.backend_session_id, "rebooted-ssh");
+    assert_eq!(details.state, crate::terminal::remote::RemoteConnectionState::Expired);
+    assert_eq!(
+        details.failure.expect("expired must carry the exit evidence").kind,
+        crate::terminal::remote::RemoteFailureKind::Expired
+    );
+    assert!(
+        !persisted_durable_ids(&durable).contains(&"rebooted-ssh".to_string()),
+        "the answered obligation must not restore or redial"
+    );
+}
+
 type FakeRpc<'a, T> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<T, crate::ssh::bridge::BridgeError>> + Send + 'a>,
 >;

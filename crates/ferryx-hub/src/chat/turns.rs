@@ -171,7 +171,7 @@ mod tests {
     }
 
     /// The executable mhc peer acknowledges prompt but leaves the turn running.
-    #[cfg(feature = "hub-slack")]
+    #[cfg(all(unix, feature = "hub-slack"))]
     #[tokio::test]
     async fn e2e_a_live_omo_turn_is_steered_then_stopped() {
         use crate::meta::omo_client::{run_turn, steer, OmoClientConfig, TurnRequest, STOPPED};

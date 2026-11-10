@@ -24,6 +24,11 @@ export type VoiceControl = "pause" | "resume" | "cancel" | "approve";
 export type VoiceCallStatus = {
   available: boolean;
   reason: string | null;
+  /** Which credential pays for dictation: a saved key, or the machine's Codex sign-in. */
+  sttSource: "key" | "codex" | null;
+  /** Dictation can work while spoken replies cannot: the Codex sign-in has no synthesis. */
+  speakAvailable: boolean;
+  speakReason: string | null;
   sttModel: string | null;
   ttsModel: string | null;
   ttsVoice: string;

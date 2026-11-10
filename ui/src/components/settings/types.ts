@@ -12,7 +12,8 @@ export type SectionId =
   | "remote"
   | "plan"
   | "permissions"
-  | "ssh";
+  | "ssh"
+  | "voice";
 
 export interface TerminalSectionProps {
   fontFamily: string;

@@ -25,6 +25,7 @@ import type {
 import { insertAtCaret, probeDictation, type DictationSession } from "./referenceDictation";
 import { REFERENCE_CONTROL_EFFORT_ID, REFERENCE_CONTROL_MODEL_ID } from "./referenceControl";
 import { isImeConfirmingKey } from "./imeKeys";
+import { VoiceConversationButton, type VoiceConversationProps } from "../../components/supervisor/VoiceConversationButton";
 
 export type { ChatAttachment };
 
@@ -101,6 +102,11 @@ export interface MobileChatComposerProps {
   readonly warningAction?: { readonly label: string; readonly onAction: () => void } | null;
   /** Send the draft. `false` means the owner kept it (held, refused) and the box must not clear. */
   readonly onSend: (text: string) => boolean | void;
+  /**
+   * Free-form voice for this conversation. Present, the composer draws a talk button beside
+   * dictation and sends what was said through this same `onSend`, so a voice turn is a normal turn.
+   */
+  readonly voiceConversation?: VoiceConversationProps;
   readonly onStop?: () => void;
   readonly onClearDraft?: () => void;
   readonly isRunning?: boolean;
@@ -189,6 +195,7 @@ export const MobileChatComposer = React.forwardRef<
   warning = null,
   warningAction = null,
   onSend,
+  voiceConversation,
   onStop,
   onClearDraft,
   isRunning = false,
@@ -551,7 +558,7 @@ export const MobileChatComposer = React.forwardRef<
     <div
       data-testid="mobile-chat-composer"
       className={cn(
-        "flex flex-col w-full bg-chat-composer-panel border-t border-chat-composer-border rounded-t-2xl pb-safe select-none",
+        "mx-auto mb-2 flex w-[calc(100%-1.5rem)] max-w-[60rem] flex-col rounded-xl border border-chat-composer-border bg-chat-composer-panel pb-safe select-none",
         className
       )}
     >
@@ -976,6 +983,7 @@ export const MobileChatComposer = React.forwardRef<
                   <Mic aria-hidden="true" className="size-5" />
                 </button>
               )}
+              {voiceConversation ? <VoiceConversationButton {...voiceConversation} /> : null}
 
               {isRunning && (
                 <button

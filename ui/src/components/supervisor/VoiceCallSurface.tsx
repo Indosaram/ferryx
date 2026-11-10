@@ -108,7 +108,9 @@ export function VoiceCallSurface({
       if (!alive.current) return;
       if (turn.mutated) client.refresh();
       say("supervisor", turn.speech);
-      if (!turn.speech.trim()) {
+      // Without a paid key there is no synthesis: the turn still happened and the answer is
+      // readable above. Falling through to speak() would surface a provider error instead.
+      if (!turn.speech.trim() || !status.speakAvailable) {
         setPhase("idle");
         return;
       }

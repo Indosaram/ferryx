@@ -12,6 +12,9 @@ const available: VoiceCallStatus = {
   reason: null,
   sttModel: "whisper-1",
   ttsModel: "tts-1",
+  sttSource: "key",
+  speakAvailable: true,
+  speakReason: null,
   ttsVoice: "alloy",
   sampleRate: 24_000,
   channels: 1,
@@ -104,6 +107,31 @@ describe("VoiceCallSurface", () => {
     expect(port.transcribe).toHaveBeenCalledWith("UklGRg==");
     expect(client.request).not.toHaveBeenCalled(); // "status" is answered from the snapshot
     expect(played.map((audio) => atob(audio.audioBase64)).join(" ")).toContain("Write result.txt");
+    expect(screen.getByTestId("voice-call-transcript").textContent).toContain("status");
+  });
+
+  it("asks the hub and shows the answer without synthesizing it when no key pays for speech", async () => {
+    const keyless: VoiceCallStatus = {
+      ...available,
+      sttSource: "codex",
+      speakAvailable: false,
+      speakReason: "Spoken replies need a speech key.",
+      ttsModel: null,
+    };
+    const { port, played } = fakePort({ status: vi.fn(async () => keyless) });
+    const client = fakeClient({ outcome: "admitted", receipt: { goal_id: "g-8" }, revision: 1, acknowledgment: "Goal g-8 is queued." });
+    renderSurface(port, client);
+    await waitFor(() => expect(screen.getByTestId("voice-call").dataset.phase).toBe("idle"));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("voice-call-orb"));
+    });
+
+    await waitFor(() => expect(screen.getByTestId("voice-call").dataset.phase).toBe("idle"));
+    expect(port.transcribe).toHaveBeenCalledWith("UklGRg==");
+    expect(port.speak).not.toHaveBeenCalled();
+    expect(played).toHaveLength(0);
+    expect(screen.queryByTestId("voice-call-error")).toBeNull();
     expect(screen.getByTestId("voice-call-transcript").textContent).toContain("status");
   });
 

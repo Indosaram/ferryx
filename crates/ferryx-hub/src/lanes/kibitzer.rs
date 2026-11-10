@@ -243,10 +243,9 @@ pub async fn evaluate_at(
     now: DateTime<Utc>,
 ) -> Result<bool> {
     ensure_lead(pool, lead).await?;
-    // The kibitzer is a legacy intake: after a cutover it never wakes the owner lead.
-    if !crate::supervisor::cutover::legacy_intake_runs(pool).await? {
-        return Ok(false);
-    }
+    // Before a cutover a wake becomes a lead turn (a legacy intake). After it the legacy turn
+    // is closed, so the same heartbeat reaches the owner as a gated notice instead of stopping.
+    let legacy = crate::supervisor::cutover::legacy_intake_runs(pool).await?;
     let state = load_arm(pool, lead, now).await?;
     if next_due(now, &state).is_none_or(|due| due > now) {
         return Ok(false);
@@ -320,20 +319,41 @@ pub async fn evaluate_at(
     let body = format!("[report_state={state}] {}",
         serde_json::to_string(&decision).map_err(|error| HubError::message(error.to_string()))?);
     let start = day_start(now);
+    // After a cutover the event is recorded already delivered: it counts toward the daily cap
+    // and the lane dispatcher never turns it into a legacy lead turn.
+    let delivered = (!legacy).then(|| now.to_rfc3339());
     let inserted = sqlx::query(
-        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at)
-         SELECT NULL, ?, 'kibitzer', ?, ?
+        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at, delivered_at, delivery_reason)
+         SELECT NULL, ?, 'kibitzer', ?, ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE 'owner_notice' END
          WHERE (SELECT count(*) FROM lane_events WHERE kind = 'kibitzer' AND lead_session_key = ? AND julianday(created_at) >= julianday(?) AND julianday(created_at) < julianday(?)) < 6",
     )
     .bind(lead)
     .bind(body)
     .bind(now.to_rfc3339())
+    .bind(&delivered)
+    .bind(&delivered)
     .bind(lead)
     .bind(start.to_rfc3339())
     .bind((start + TimeDelta::days(1)).to_rfc3339())
     .execute(pool)
     .await?;
-    Ok(inserted.rows_affected() == 1)
+    if inserted.rows_affected() != 1 {
+        return Ok(false);
+    }
+    if !legacy {
+        // The same topic and state identity the lead-turn path uses, so an unchanged reminder
+        // is not repeated.
+        let report = crate::report_gate::Report::new(
+            uuid::Uuid::new_v4().to_string(),
+            "kibitzer",
+            format!("kibitzer:open-items:{lead}"),
+            crate::report_gate::Salience::Action,
+            decision.suggested,
+        )
+        .with_state(&state);
+        crate::owner_alert::notify_report(pool, lead, &report).await?;
+    }
+    Ok(true)
 }
 
 async fn load_arm(pool: &SqlitePool, lead: &str, now: DateTime<Utc>) -> Result<ArmState> {
@@ -690,6 +710,61 @@ mod tests {
     }
 
 
+
+    /// After a cutover the legacy lead turn is closed; the heartbeat still reaches the owner,
+    /// as a gated notice in the outbox, and never as a pending lane event.
+    #[tokio::test]
+    async fn after_a_cutover_a_wake_becomes_an_owner_notice_not_a_lead_turn() {
+        let pool = crate::storage::memory().await.unwrap();
+        ensure_schema(&pool).await.unwrap();
+        let lead = crate::chat::session::SessionKey::new(
+            "slack",
+            None::<String>,
+            "DOWNR",
+            None::<String>,
+            "UOWNR",
+        )
+        .storage_key();
+        let lead = lead.as_str();
+        ensure_lead(&pool, lead).await.unwrap();
+        let supervisor = "00000000-0000-4000-8000-000000000001";
+        sqlx::query("INSERT INTO supervisor_identity(supervisor_id, owner_principal, created_at) VALUES(?, 'slack:T1:UOWNR', '2026-10-21T00:00:00Z')")
+            .bind(supervisor).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO supervisor_cutover(supervisor_id, legacy_intake, unified_intake, origin, updated_at) VALUES(?, 'stopped', 'open', 'cutover', '2026-10-21T00:00:00Z')")
+            .bind(supervisor).execute(&pool).await.unwrap();
+        assert!(!crate::supervisor::cutover::legacy_intake_runs(&pool).await.unwrap());
+        sqlx::query(
+            "INSERT INTO inbox_items(id, source, source_ref, snippet, received_at, raw_hash, collected_at) VALUES('i1','mail','r1','please sign today','2026-10-21T02:00:00Z','h','2026-10-21T02:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-21T02:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let model = Scripted {
+            text: r#"{"wake":true,"reason":"sign","suggested":"오늘 계약서에 서명해 주세요","target_lane":null}"#.into(),
+            fail: false,
+            expect: &[],
+            reject: &[],
+        };
+        assert!(evaluate_at(&pool, lead, &Judge::forced("wake"), &model, now)
+            .await
+            .unwrap());
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lane_events WHERE kind = 'kibitzer' AND delivered_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 0, "no legacy lead turn is queued");
+        let notices: Vec<(String, String)> =
+            sqlx::query_as("SELECT session_key, text FROM chat_outbox")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(notices, vec![(lead.to_owned(), "오늘 계약서에 서명해 주세요".to_owned())]);
+    }
 
     #[tokio::test]
     async fn the_state_document_groups_open_owner_items_and_skips_dismissed_ones() {

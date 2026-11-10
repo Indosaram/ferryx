@@ -764,13 +764,21 @@ async fn copy_cron_jobs(from: &SqlitePool, into: &SqlitePool) -> Result<u64> {
     Ok(copied)
 }
 
-/// Home channel copied by the last import, if the omo-gateway config named one.
+/// The Slack home channel: the one copied by the last import, else `SLACK_HOME_CHANNEL` from
+/// the hub settings. A hub that was never imported from omo-gateway has no `hub_meta` row, and
+/// without this fallback every cron failure notice and `deliver: slack` job was dropped.
 pub async fn imported_slack_home(pool: &SqlitePool) -> Result<Option<String>> {
     let value: Option<String> =
         sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'slack_home_channel'")
             .fetch_optional(pool)
             .await?;
-    Ok(value.and_then(|value| crate::config::normalize_slack_home(&value)))
+    Ok(value
+        .and_then(|value| crate::config::normalize_slack_home(&value))
+        .or_else(|| {
+            crate::hub_env::var("SLACK_HOME_CHANNEL")
+                .ok()
+                .and_then(|value| crate::config::normalize_slack_home(&value))
+        }))
 }
 
 async fn store_imported_notify_mode(pool: &SqlitePool, source: &Path) -> Result<()> {

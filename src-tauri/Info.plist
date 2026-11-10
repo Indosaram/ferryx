@@ -5,7 +5,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Websites you open in Ferryx's built-in browser can use the camera after you allow them, for example for video calls.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Websites you open in Ferryx's built-in browser can use the microphone after you allow them, for example for calls and voice input.</string>
+	<string>Ferryx's built-in browser can use the microphone for websites you allow, and the supervisor voice call uses it to hear what you say.</string>
   <!-- Lets Launch Services offer Ferryx as the default web browser (Settings > Browser). -->
   <key>CFBundleURLTypes</key>
   <array>

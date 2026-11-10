@@ -229,7 +229,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
         <ReferenceTurnUsage meta={referenceMeta} />
         <div
           data-testid="user-message-bubble"
-          className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5 bg-chat-user-bubble text-chat-foreground leading-relaxed text-base break-words select-text"
+          className="min-w-0 gap-2 rounded-2xl border border-chat-border px-3.5 py-2.5 bg-chat-user-bubble text-chat-foreground leading-relaxed text-base break-words select-text"
         >
           <p className="whitespace-pre-wrap">{copyText}</p>
           {pending && (

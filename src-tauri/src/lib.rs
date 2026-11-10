@@ -2225,10 +2225,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         }
         if matches!(
             invoke.message.command(),
-            "cmd_voice_call_status" | "cmd_voice_call_transcribe" | "cmd_voice_call_speak"
+            "cmd_voice_call_status" | "cmd_voice_call_transcribe" | "cmd_voice_call_speak" | "cmd_voice_call_key_state" | "cmd_voice_call_set_key"
         ) {
             let handler: Box<tauri::ipc::InvokeHandler<R>> = Box::new(tauri::generate_handler![
                 crate::ipc::voice_call::cmd_voice_call_status,
+                crate::ipc::voice_call::cmd_voice_call_key_state,
+                crate::ipc::voice_call::cmd_voice_call_set_key,
                 crate::ipc::voice_call::cmd_voice_call_transcribe,
                 crate::ipc::voice_call::cmd_voice_call_speak,
             ]);
