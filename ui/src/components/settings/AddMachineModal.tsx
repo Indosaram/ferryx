@@ -58,6 +58,8 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dia
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { EnrollmentStep } from "./remote/EnrollmentStep";
+import { applySshTarget, hostnamePasteHandler, SshCommandField } from "./remote/SshCommandField";
+import { parseSshTarget, type ParsedSshTarget } from "../../lib/sshTarget";
 import { MachineApprovalCard, machineApprovalErrorMessage } from "./remote/MachineApprovalCard";
 
 export interface HostFormData {
@@ -468,10 +470,6 @@ function AddMachineWizard({
     e.preventDefault();
     if (busy) return;
 
-    if (!sshForm.label.trim()) {
-      showError("Label is required.");
-      return;
-    }
     if (!sshForm.hostname.trim()) {
       showError("Hostname or IP is required.");
       return;
@@ -487,7 +485,7 @@ function AddMachineWizard({
 
     const candidateHost: SshHost = {
       id: safeRandomUUID(),
-      label: sshForm.label.trim(),
+      label: sshForm.label.trim() || sshForm.hostname.trim(),
       hostname: sshForm.hostname.trim(),
       username: sshForm.username.trim() || undefined,
       port: portNumber,
@@ -530,9 +528,23 @@ function AddMachineWizard({
     }
   };
 
+  const fillSshForm = (target: ParsedSshTarget) => {
+    setSshForm(f => applySshTarget(f, target));
+    if (target.jumpHost || target.identityFile) setShowAdvancedSsh(true);
+  };
+
   const handleImportTextSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (busy || !configText.trim()) return;
+
+    // A one-line `ssh user@host` is a connection, not a config file: open it in the SSH form.
+    const sshCommand = /\bHost(Name)?\s/i.test(configText) ? null : parseSshTarget(configText);
+    if (sshCommand) {
+      fillSshForm(sshCommand);
+      setMethod("ssh");
+      setError(null);
+      return;
+    }
 
     setBusy(true);
     setError(null);
@@ -808,6 +820,7 @@ function AddMachineWizard({
 
         {!showingResult && step === "details" && method === "ssh" ? (
           <form className="space-y-3" onSubmit={handleSshSubmit}>
+            <SshCommandField disabled={busy} onParsed={fillSshForm} />
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="space-y-1">
                 <Label htmlFor="ssh-label" className="text-[11px] font-medium">Label</Label>
@@ -815,9 +828,8 @@ function AddMachineWizard({
                   id="ssh-label"
                   aria-label="Label"
                   disabled={busy}
-                  required
                   value={sshForm.label}
-                  placeholder="e.g., dev-server"
+                  placeholder={sshForm.hostname.trim() || "Defaults to the hostname"}
                   onChange={e => setSshForm(f => ({ ...f, label: e.target.value }))}
                 />
               </div>
@@ -830,6 +842,9 @@ function AddMachineWizard({
                   required
                   value={sshForm.hostname}
                   placeholder="IP or hostname"
+                  autoComplete="off"
+                  spellCheck={false}
+                  onPaste={hostnamePasteHandler(fillSshForm)}
                   onChange={e => setSshForm(f => ({ ...f, hostname: e.target.value }))}
                 />
               </div>
@@ -1048,7 +1063,7 @@ function AddMachineWizard({
                     disabled={busy}
                     rows={6}
                     className="w-full rounded-md border border-input bg-transparent p-2 font-mono text-[11px] shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                    placeholder={"Host dev-box\n  HostName 10.0.0.1\n  User ubuntu\n  Port 22"}
+                    placeholder={"Host dev-box\n  HostName 10.0.0.1\n  User ubuntu\n  Port 22\n\nor a single command: ssh -J bastion ubuntu@10.0.0.1"}
                     value={configText}
                     onChange={e => setConfigText(e.target.value)}
                   />
