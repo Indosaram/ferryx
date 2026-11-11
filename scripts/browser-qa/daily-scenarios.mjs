@@ -1081,7 +1081,9 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       // 42987064420 (probe-274) shows "upload-fixture" in a rename box after this click, and
       // the drag press then only selected "-fixture" in it, so no file drag ever started.
       // Escape ends a rename and leaves the item selected; with no rename it does nothing.
-      ctx.host.key({ key: "Escape" });
+      // `keysraw`, not `ctx.host.key`: the latter focuses Ferryx first (run 43045730678 raised
+      // Ferryx over Explorer here, so both drag presses landed on Ferryx and neither drag began).
+      ctx.win.ps("keysraw", ["-Codes", "27"]);
       await sleep(300);
     } else {
       ctx.run("open", ["-R", file.path]);
