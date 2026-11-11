@@ -9,7 +9,7 @@
 //! is not managed (unit tests, headless harnesses) or a session has no live owner, the helpers fall
 //! back to today's single-window behaviour: the primary window, or a broadcast emit.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -27,6 +27,8 @@ pub fn is_app_window_label(label: &str) -> bool {
 struct RegistryInner {
     /// session id -> owning window label.
     owners: HashMap<String, String>,
+    /// session id -> every window presenting it (owner included). Session events reach all of them.
+    viewers: HashMap<String, BTreeSet<String>>,
     /// Most recently focused app window.
     focused: Option<String>,
 }
@@ -44,8 +46,56 @@ impl WindowRegistry {
             .insert(session_id.to_string(), window_label.to_string());
     }
 
+    /// Adds `window_label` as a viewer of `session_id`; the first viewer also becomes the owner.
+    pub fn add_viewer(&self, session_id: &str, window_label: &str) {
+        let mut inner = self.inner.lock();
+        inner
+            .viewers
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(window_label.to_string());
+        inner
+            .owners
+            .entry(session_id.to_string())
+            .or_insert_with(|| window_label.to_string());
+    }
+
+    /// Removes one viewer. When it owned the session, ownership moves to the first remaining
+    /// viewer; with no viewer left the owner is kept (the session is merely backgrounded).
+    pub fn remove_viewer(&self, session_id: &str, window_label: &str) {
+        let mut inner = self.inner.lock();
+        let next = match inner.viewers.get_mut(session_id) {
+            Some(viewers) => {
+                viewers.remove(window_label);
+                viewers.iter().next().cloned()
+            }
+            None => None,
+        };
+        if inner.viewers.get(session_id).is_some_and(BTreeSet::is_empty) {
+            inner.viewers.remove(session_id);
+        }
+        if let Some(next) = next {
+            if inner.owners.get(session_id).map(String::as_str) == Some(window_label) {
+                inner.owners.insert(session_id.to_string(), next);
+            }
+        }
+    }
+
+    /// Windows presenting `session_id` (owner included), sorted.
+    pub fn viewers_of(&self, session_id: &str) -> Vec<String> {
+        let inner = self.inner.lock();
+        let mut labels: BTreeSet<String> =
+            inner.viewers.get(session_id).cloned().unwrap_or_default();
+        if let Some(owner) = inner.owners.get(session_id) {
+            labels.insert(owner.clone());
+        }
+        labels.into_iter().collect()
+    }
+
     pub fn clear_owner(&self, session_id: &str) {
-        self.inner.lock().owners.remove(session_id);
+        let mut inner = self.inner.lock();
+        inner.owners.remove(session_id);
+        inner.viewers.remove(session_id);
     }
 
     pub fn owner(&self, session_id: &str) -> Option<String> {
@@ -74,17 +124,36 @@ impl WindowRegistry {
         self.inner.lock().focused.clone()
     }
 
-    /// Drops a closed window: returns the sessions it owned (sorted) and clears their ownership.
+    /// Drops a closed window. Sessions it owned that another window still presents are handed to
+    /// that window (ownership transfer, never reported). Returns only the sessions left with no
+    /// viewer (sorted) - those are the orphans another window must adopt - and clears their owner.
     pub fn forget_window(&self, window_label: &str) -> Vec<String> {
         let mut inner = self.inner.lock();
-        let mut released: Vec<String> = inner
+        for viewers in inner.viewers.values_mut() {
+            viewers.remove(window_label);
+        }
+        inner.viewers.retain(|_, viewers| !viewers.is_empty());
+        let owned: Vec<String> = inner
             .owners
             .iter()
             .filter(|(_, owner)| owner.as_str() == window_label)
             .map(|(session_id, _)| session_id.clone())
             .collect();
-        for session_id in &released {
-            inner.owners.remove(session_id);
+        let mut released = Vec::new();
+        for session_id in owned {
+            let survivor = inner
+                .viewers
+                .get(&session_id)
+                .and_then(|viewers| viewers.iter().next().cloned());
+            match survivor {
+                Some(survivor) => {
+                    inner.owners.insert(session_id, survivor);
+                }
+                None => {
+                    inner.owners.remove(&session_id);
+                    released.push(session_id);
+                }
+            }
         }
         if inner.focused.as_deref() == Some(window_label) {
             inner.focused = None;
@@ -151,17 +220,42 @@ pub fn window_for_session<R: Runtime>(app: &AppHandle<R>, session_id: &str) -> O
     live_owner_window(app, session_id).or_else(|| primary_window(app))
 }
 
-/// Emits a session-scoped event to the session's owner window when it is known and alive;
-/// otherwise broadcasts exactly like `app.emit`.
+/// Emits a session-scoped event to every live window presenting the session (owner and viewers);
+/// when none is known and alive, broadcasts exactly like `app.emit`.
 pub fn emit_to_session_owner<R: Runtime, S: Serialize + Clone>(
     app: &AppHandle<R>,
     session_id: &str,
     event: &str,
     payload: S,
 ) -> tauri::Result<()> {
-    match live_owner_window(app, session_id) {
-        Some(window) => app.emit_to(window.label(), event, payload),
-        None => app.emit(event, payload),
+    let labels: Vec<String> = app
+        .try_state::<WindowRegistry>()
+        .map(|registry| registry.viewers_of(session_id))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|label| live_app_window(app, label).is_some())
+        .collect();
+    if labels.is_empty() {
+        return app.emit(event, payload);
+    }
+    for label in labels {
+        app.emit_to(label.as_str(), event, payload.clone())?;
+    }
+    Ok(())
+}
+
+/// Records `window_label` as a viewer of `session_id` (owner if it has none) when the registry
+/// is managed.
+pub fn record_viewer<R: Runtime>(app: &AppHandle<R>, session_id: &str, window_label: &str) {
+    if let Some(registry) = app.try_state::<WindowRegistry>() {
+        registry.add_viewer(session_id, window_label);
+    }
+}
+
+/// Removes `window_label` from the viewers of `session_id` when the registry is managed.
+pub fn forget_viewer<R: Runtime>(app: &AppHandle<R>, session_id: &str, window_label: &str) {
+    if let Some(registry) = app.try_state::<WindowRegistry>() {
+        registry.remove_viewer(session_id, window_label);
     }
 }
 
@@ -343,5 +437,52 @@ mod tests {
         let main_events = record_payloads(&main, "registry-test-event");
         emit_to_session_owner(app.handle(), "s1", "registry-test-event", 7u32).unwrap();
         assert_eq!(main_events.try_recv().unwrap(), "7");
+    }
+
+    #[test]
+    fn session_events_reach_every_viewer_window_once() {
+        let (app, main, secondary) = two_window_app(true);
+        let handle = app.handle();
+        record_viewer(handle, "s-shared", "main");
+        record_viewer(handle, "s-shared", "ws-test");
+        let main_events = record_payloads(&main, "registry-test-event");
+        let ws_events = record_payloads(&secondary, "registry-test-event");
+
+        emit_to_session_owner(handle, "s-shared", "registry-test-event", "both").unwrap();
+        assert_eq!(main_events.try_recv().unwrap(), "\"both\"");
+        assert_eq!(ws_events.try_recv().unwrap(), "\"both\"");
+        assert!(main_events.try_recv().is_err(), "one delivery per window");
+        assert!(ws_events.try_recv().is_err(), "one delivery per window");
+    }
+
+    #[test]
+    fn first_viewer_owns_and_ownership_transfers_on_viewer_removal() {
+        let registry = WindowRegistry::default();
+        registry.add_viewer("s", "main");
+        registry.add_viewer("s", "ws-b");
+        assert_eq!(registry.owner("s").as_deref(), Some("main"));
+        assert_eq!(registry.viewers_of("s"), vec!["main", "ws-b"]);
+        registry.remove_viewer("s", "main");
+        assert_eq!(registry.owner("s").as_deref(), Some("ws-b"));
+        assert_eq!(registry.viewers_of("s"), vec!["ws-b"]);
+    }
+
+    #[test]
+    fn closing_a_window_hands_shared_sessions_to_a_surviving_viewer() {
+        let registry = WindowRegistry::default();
+        registry.add_viewer("shared", "main");
+        registry.add_viewer("shared", "ws-clone");
+        registry.add_viewer("solo", "main");
+        // Only the session no other window presents is orphaned.
+        assert_eq!(registry.forget_window("main"), vec!["solo"]);
+        assert_eq!(registry.owner("shared").as_deref(), Some("ws-clone"));
+        assert_eq!(registry.owner("solo"), None);
+        assert_eq!(registry.viewers_of("shared"), vec!["ws-clone"]);
+        // Closing the clone instead leaves the original as the owner.
+        let registry = WindowRegistry::default();
+        registry.add_viewer("shared", "main");
+        registry.add_viewer("shared", "ws-clone");
+        assert!(registry.forget_window("ws-clone").is_empty());
+        assert_eq!(registry.owner("shared").as_deref(), Some("main"));
     }
 }

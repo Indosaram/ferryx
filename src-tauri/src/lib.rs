@@ -1572,6 +1572,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                     {
                         registry.note_focused(window.label());
                     }
+                    // PTY size policy: the focused window drives the size of the sessions it shows.
+                    #[cfg(feature = "native-terminal")]
+                    if let Some(surfaces) = window.try_state::<NativeTerminalSurfaceHostState>() {
+                        surfaces.note_window_focused(window.label());
+                    }
                     #[cfg(target_os = "windows")]
                     crate::ipc::browser::forward_frame_focus(window);
                 }
@@ -1922,6 +1927,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_terminal_apply_overrides,
         cmd_terminal_set_appearance,
         cmd_native_terminal_attach,
+        cmd_native_terminal_attach_viewer,
         cmd_native_terminal_detach,
         cmd_native_terminal_close,
         cmd_native_terminal_set_bounds,
@@ -3161,6 +3167,12 @@ fn handle_app_window_destroyed<R: tauri::Runtime>(window: &tauri::Window<R>) {
     }
     crate::ipc::window::note_window_destroyed(window);
     let app = window.app_handle();
+    // Drop the closed window's frame targets only. Sessions it presented keep running and keep
+    // rendering in every other window that shows them.
+    #[cfg(feature = "native-terminal")]
+    if let Some(surfaces) = app.try_state::<NativeTerminalSurfaceHostState>() {
+        surfaces.forget_window_viewers(label);
+    }
     let Some(registry) = app.try_state::<window_registry::WindowRegistry>() else {
         return;
     };

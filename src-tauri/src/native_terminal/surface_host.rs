@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::{Manager, PhysicalSize, Runtime, Window};
 
-use crate::window_registry::{emit_to_session_owner, record_owner, window_for_session};
+use crate::window_registry::{emit_to_session_owner, window_for_session};
 
 use super::composition::{
     CellMetrics, LogicalBounds, PhysicalBounds, PlatformCompositorDescriptor,
@@ -667,10 +667,146 @@ impl NativeTerminalSession {
     }
 }
 
+/// Per-window viewers of one session.
+///
+/// A backend session keeps exactly ONE daemon attach, pump, VT terminal and attach tuple in this
+/// process. Every app window that shows the session owns its own surface host here (frame target,
+/// bounds, layout), keyed by window label, and every published frame is presented in each of them.
+/// Registering or dropping a viewer never touches the attach tuple, the attempt generation or the
+/// pump, so one window can never take a session over from another.
+#[derive(Default)]
+struct SessionViewers {
+    hosts: HashMap<String, NativeTerminalSurfaceHost>,
+    /// PTY size policy (tmux "latest"): one PTY has one size, driven by the most recently focused
+    /// viewer window. Other viewers render the shared grid at their own bounds (padded or
+    /// clipped) and never resize the PTY, so two windows of different sizes cannot ping-pong.
+    size_driver: Option<String>,
+}
+
+type HostMap = HashMap<String, SessionViewers>;
+type SharedHosts = Arc<Mutex<HostMap>>;
+
+fn viewer_host<'a>(
+    hosts: &'a HostMap,
+    session_id: &str,
+    label: &str,
+) -> Option<&'a NativeTerminalSurfaceHost> {
+    hosts.get(session_id)?.hosts.get(label)
+}
+
+fn viewer_host_mut<'a>(
+    hosts: &'a mut HostMap,
+    session_id: &str,
+    label: &str,
+) -> Option<&'a mut NativeTerminalSurfaceHost> {
+    hosts.get_mut(session_id)?.hosts.get_mut(label)
+}
+
+fn session_has_any_host(hosts: &HostMap, session_id: &str) -> bool {
+    hosts.get(session_id).is_some_and(|viewers| !viewers.hosts.is_empty())
+}
+
+/// Installs `host` as the viewer of `session_id` in window `label`. The first viewer of a session
+/// drives its PTY size until another viewer is focused.
+fn insert_viewer_host<'a>(
+    hosts: &'a mut HostMap,
+    session_id: &str,
+    label: &str,
+    host: NativeTerminalSurfaceHost,
+) -> &'a mut NativeTerminalSurfaceHost {
+    let viewers = hosts.entry(session_id.to_string()).or_default();
+    if viewers.size_driver.is_none() {
+        viewers.size_driver = Some(label.to_string());
+    }
+    match viewers.hosts.entry(label.to_string()) {
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            entry.insert(host);
+            entry.into_mut()
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => entry.insert(host),
+    }
+}
+
+/// Drops one viewer. The size driver moves to a remaining viewer; the session entry goes away
+/// with its last viewer. Returns whether a host was removed.
+fn remove_viewer_host(hosts: &mut HostMap, session_id: &str, label: &str) -> bool {
+    let Some(viewers) = hosts.get_mut(session_id) else {
+        return false;
+    };
+    let removed = viewers.hosts.remove(label).is_some();
+    if viewers.size_driver.as_deref() == Some(label) {
+        let mut remaining: Vec<&String> = viewers.hosts.keys().collect();
+        remaining.sort();
+        viewers.size_driver = remaining.first().map(|label| (*label).clone());
+    }
+    if viewers.hosts.is_empty() {
+        hosts.remove(session_id);
+    }
+    removed
+}
+
+/// Window labels presenting `session_id`, sorted for a stable dispatch order.
+fn viewer_labels(hosts: &HostMap, session_id: &str) -> Vec<String> {
+    let mut labels: Vec<String> = hosts
+        .get(session_id)
+        .map(|viewers| viewers.hosts.keys().cloned().collect())
+        .unwrap_or_default();
+    labels.sort();
+    labels
+}
+
+/// True when the viewer in `label` drives the session's PTY size (or is its only viewer).
+fn is_size_driver(hosts: &HostMap, session_id: &str, label: &str) -> bool {
+    hosts.get(session_id).is_none_or(|viewers| {
+        viewers.hosts.len() <= 1 || viewers.size_driver.as_deref().is_none_or(|driver| driver == label)
+    })
+}
+
+/// The viewer whose GPU leg drives the session's render coordinator for one frame: the requested
+/// window when it presents the session (or when the session has no viewer yet, so the first frame
+/// lazily creates the surface there as before), else the size driver, else the first viewer.
+fn coordinator_leg_label(hosts: &HostMap, session_id: &str, requested: &str) -> String {
+    let Some(viewers) = hosts.get(session_id).filter(|viewers| !viewers.hosts.is_empty()) else {
+        return requested.to_string();
+    };
+    if viewers.hosts.contains_key(requested) {
+        return requested.to_string();
+    }
+    if let Some(driver) = viewers.size_driver.as_ref().filter(|driver| viewers.hosts.contains_key(*driver)) {
+        return driver.clone();
+    }
+    viewer_labels(hosts, session_id).into_iter().next().unwrap_or_else(|| requested.to_string())
+}
+
+/// Geometry a non-driving viewer presents a shared frame at: the session's grid (cols/rows) inside
+/// the viewer's own surface size and viewport, padded or clipped instead of resizing the PTY.
+fn viewer_frame_geometry(
+    host: &NativeTerminalSurfaceHost,
+    frame_layout: SurfaceCompositionLayout,
+    frame_bounds: LogicalBounds,
+) -> (SurfaceCompositionLayout, LogicalBounds) {
+    match (host.layout, host.logical_bounds) {
+        (Some(own), Some(bounds)) => (
+            SurfaceCompositionLayout {
+                physical_bounds: own.physical_bounds,
+                cols: frame_layout.cols,
+                rows: frame_layout.rows,
+            },
+            bounds,
+        ),
+        _ => (
+            frame_layout,
+            host.active_presentation_geometry()
+                .resolve(frame_bounds)
+                .unwrap_or(frame_bounds),
+        ),
+    }
+}
+
 pub struct NativeTerminalSurfaceHostState {
     // Lock order: hosts, then one session. The sessions map is a leaf lock held only to look up,
     // insert or remove a handle; never wait on a session lock while holding it.
-    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    hosts: SharedHosts,
     sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
     event_sink: Arc<RwLock<Option<NativeTerminalEventSink>>>,
     pty_resize_sink: Arc<RwLock<Option<NativeTerminalPtyResizeSink>>>,
@@ -1529,7 +1665,7 @@ pub fn write_gui_presentation_audit_packet(
 
 fn dispatch_scheduled_render<R: Runtime>(
     window: Window<R>,
-    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    hosts: SharedHosts,
     slot: Arc<SnapshotSlot>,
     session_id: String,
     coordinator: Arc<RenderScheduleCoordinator>,
@@ -1541,7 +1677,7 @@ fn dispatch_scheduled_render<R: Runtime>(
 
 fn dispatch_owned_render<R: Runtime>(
     window: Window<R>,
-    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    hosts: SharedHosts,
     slot: Arc<SnapshotSlot>,
     session_id: String,
     coordinator: Arc<RenderScheduleCoordinator>,
@@ -1591,7 +1727,7 @@ fn dispatch_owned_render<R: Runtime>(
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_armed_presentation_barrier<R: Runtime>(
     window: Window<R>,
-    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    hosts: SharedHosts,
     slot: Arc<SnapshotSlot>,
     session_id: String,
     coordinator: Arc<RenderScheduleCoordinator>,
@@ -1866,7 +2002,7 @@ async fn dispatch_armed_presentation_barrier<R: Runtime>(
 
 fn dispatch_owned_render_inner<R: Runtime>(
     window: Window<R>,
-    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    hosts: SharedHosts,
     slot: Arc<SnapshotSlot>,
     session_id: String,
     coordinator: Arc<RenderScheduleCoordinator>,
@@ -1906,11 +2042,31 @@ fn dispatch_owned_render_inner<R: Runtime>(
             coordinator.abandon_render(owner);
             return;
         }
-        let host = match hosts_guard.entry(session_id.clone()) {
-            std::collections::hash_map::Entry::Occupied(entry) => Some(entry.into_mut()),
-            std::collections::hash_map::Entry::Vacant(entry) => {
+        // Exactly one viewer's GPU leg drives the coordinator for this frame; every other viewer
+        // window presents the same published frame through `dispatch_viewer_frame`.
+        let requested_label = surface_window.label().to_string();
+        let leg_label = coordinator_leg_label(&hosts_guard, &session_id, &requested_label);
+        let leg_window = if leg_label == requested_label {
+            Some(surface_window.clone())
+        } else {
+            surface_window.app_handle().get_window(&leg_label)
+        };
+        let Some(surface_window) = leg_window else {
+            drop(hosts_guard);
+            coordinator.abandon_render(owner);
+            return;
+        };
+        let other_viewers: Vec<String> = viewer_labels(&hosts_guard, &session_id)
+            .into_iter()
+            .filter(|label| label != &leg_label)
+            .collect();
+        let leg_drives_size = is_size_driver(&hosts_guard, &session_id, &leg_label);
+        let host = if viewer_host(&hosts_guard, &session_id, &leg_label).is_some() {
+            viewer_host_mut(&mut hosts_guard, &session_id, &leg_label)
+        } else {
+            {
                 match NativeTerminalSurfaceHost::new(&surface_window, logical_bounds.scale_factor) {
-                    Ok(new_host) => Some(entry.insert(new_host)),
+                    Ok(new_host) => Some(insert_viewer_host(&mut hosts_guard, &session_id, &leg_label, new_host)),
                     Err(err) => {
                         tracing::warn!(
                             session_id = %session_id,
@@ -1928,12 +2084,17 @@ fn dispatch_owned_render_inner<R: Runtime>(
             return;
         };
 
-        let effective_bounds = host
-            .active_presentation_geometry()
-            .resolve(logical_bounds)
-            .unwrap_or(logical_bounds);
-        host.layout = Some(layout);
-        host.logical_bounds = Some(effective_bounds);
+        let (layout, effective_bounds) = if leg_drives_size {
+            let effective_bounds = host
+                .active_presentation_geometry()
+                .resolve(logical_bounds)
+                .unwrap_or(logical_bounds);
+            host.layout = Some(layout);
+            host.logical_bounds = Some(effective_bounds);
+            (layout, effective_bounds)
+        } else {
+            viewer_frame_geometry(host, layout, logical_bounds)
+        };
         host.presentation_slot = Some(Arc::downgrade(&slot));
         host.update_viewport(Some(effective_bounds));
 
@@ -1941,6 +2102,22 @@ fn dispatch_owned_render_inner<R: Runtime>(
             drop(hosts_guard);
             coordinator.abandon_render(owner);
             return;
+        }
+
+        // Fan the frame out to every other viewer window. Spawned, never inline: Wry may run a
+        // main-thread dispatch inline, and the hosts guard is still held here.
+        for label in other_viewers {
+            if let Some(viewer_window) = surface_window.app_handle().get_window(&label) {
+                spawn_viewer_render(
+                    viewer_window,
+                    Arc::clone(&hosts),
+                    Arc::clone(&slot),
+                    session_id.clone(),
+                    Arc::clone(&coordinator),
+                    Arc::clone(&gpu_worker),
+                    std::time::Duration::ZERO,
+                );
+            }
         }
 
         match &mut host.frame_target {
@@ -2025,9 +2202,11 @@ fn dispatch_owned_render_inner<R: Runtime>(
                             }
                             return;
                         }
-                        let current_owner = completion_hosts
-                            .lock()
-                            .get(&completion_session_id)
+                        let current_owner = viewer_host(
+                            &completion_hosts.lock(),
+                            &completion_session_id,
+                            completion_host_window.label(),
+                        )
                             .is_some_and(|host| {
                                 host.active_presentation_generation() == Some(frame_generation)
                                     && host.active_presentation_epoch() == Some(frame_epoch)
@@ -2039,15 +2218,16 @@ fn dispatch_owned_render_inner<R: Runtime>(
                             // generation unrendered until unrelated output arrives. While the host
                             // is still attached, end the superseded frame with exactly one
                             // follow-up dispatch instead.
-                            let host_alive = completion_hosts
-                                .lock()
-                                .contains_key(&completion_session_id);
+                            let host_alive = session_has_any_host(
+                                &completion_hosts.lock(),
+                                &completion_session_id,
+                            );
                             let followup_scheduled =
                                 host_alive && completion_coordinator.finish_owned_render(owner, true);
                             #[cfg(feature = "local-split-qa")]
                             if crate::ipc::qa_barrier::active_channel().is_some() && frame_generation <= 5 {
-                                let active_gen = completion_hosts.lock().get(&completion_session_id).and_then(|h| h.active_presentation_generation());
-                                let active_epoch = completion_hosts.lock().get(&completion_session_id).and_then(|h| h.active_presentation_epoch());
+                                let active_gen = viewer_host(&completion_hosts.lock(), &completion_session_id, completion_host_window.label()).and_then(|h| h.active_presentation_generation());
+                                let active_epoch = viewer_host(&completion_hosts.lock(), &completion_session_id, completion_host_window.label()).and_then(|h| h.active_presentation_epoch());
                                 eprintln!(
                                     "[native_qa_predicates] session={completion_session_id} gen={frame_generation} epoch={frame_epoch} stage=completion current_owner=false active_gen={active_gen:?} active_epoch={active_epoch:?} followup_scheduled={followup_scheduled}"
                                 );
@@ -2133,7 +2313,11 @@ fn dispatch_owned_render_inner<R: Runtime>(
                                 receipt,
                             );
                             if accepted {
-                                if let Some(host) = hosts_guard.get_mut(&completion_session_id) {
+                                if let Some(host) = viewer_host_mut(
+                                    &mut hosts_guard,
+                                    &completion_session_id,
+                                    completion_host_window.label(),
+                                ) {
                                     host.finish_presentation(&completion_host_window);
                                     #[cfg(feature = "local-split-qa")]
                                     {
@@ -2438,9 +2622,139 @@ mod frame_clock_tests {
     }
 }
 
+/// Presents the session's latest published frame in one non-driving viewer window.
+///
+/// The session's render coordinator is owned by the leg chosen in `dispatch_owned_render_inner`;
+/// viewer legs never touch it. A viewer whose GPU leg is still busy skips the frame; its completion
+/// re-dispatches when a newer generation was published meanwhile, so the newest frame always lands.
+fn spawn_viewer_render<R: Runtime>(
+    window: Window<R>,
+    hosts: SharedHosts,
+    slot: Arc<SnapshotSlot>,
+    session_id: String,
+    coordinator: Arc<RenderScheduleCoordinator>,
+    gpu_worker: Arc<GpuWorker>,
+    delay: std::time::Duration,
+) {
+    #[cfg(test)]
+    let test_window = window.clone();
+    let _task = tauri::async_runtime::spawn(async move {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        dispatch_viewer_frame(window, hosts, slot, session_id, coordinator, gpu_worker);
+    });
+    #[cfg(test)]
+    if let Some(dispatch) = test_window.try_state::<tests::RenderDispatch>() {
+        dispatch.submissions.lock().push(_task);
+    }
+}
+
+fn dispatch_viewer_frame<R: Runtime>(
+    window: Window<R>,
+    hosts: SharedHosts,
+    slot: Arc<SnapshotSlot>,
+    session_id: String,
+    coordinator: Arc<RenderScheduleCoordinator>,
+    gpu_worker: Arc<GpuWorker>,
+) {
+    let surface_window = window.clone();
+    let failure_session_id = session_id.clone();
+    let rejected_session_id = session_id.clone();
+    if let Err(err) = dispatch_render_on_main_thread(&window, move || {
+        let label = surface_window.label().to_string();
+        let mut hosts_guard = hosts.lock();
+        let Some(frame) = slot.consume() else {
+            return;
+        };
+        if !slot.is_attached_with_epoch(frame.attachment_epoch) || frame.input.synchronized_output {
+            return;
+        }
+        let Some(host) = viewer_host_mut(&mut hosts_guard, &session_id, &label) else {
+            return;
+        };
+        let (layout, effective_bounds) = viewer_frame_geometry(host, frame.layout, frame.logical_bounds);
+        host.presentation_slot = Some(Arc::downgrade(&slot));
+        host.update_viewport(Some(effective_bounds));
+        let frame_generation = frame.generation;
+        let frame_epoch = frame.attachment_epoch;
+        match &mut host.frame_target {
+            HostFrameTarget::Native(target) => {
+                let completion_slot = target.leg.clone();
+                let Some(loan) = target.leg.lend_loan() else {
+                    // This viewer's previous frame is still on the GPU; its completion
+                    // re-dispatches if this generation is newer than what it painted.
+                    return;
+                };
+                drop(hosts_guard);
+                let completion_window = surface_window.clone();
+                let worker_slot = Arc::clone(&slot);
+                let render_frame = Arc::clone(&frame);
+                if !gpu_worker.clone().enqueue(move |gpu| {
+                    let mut loan = loan;
+                    let receipt = if worker_slot.is_attached_with_epoch(frame_epoch) {
+                        run_gpu_frame(|| loan.render_snapshot(
+                            gpu,
+                            Some(effective_bounds),
+                            layout,
+                            &render_frame.input,
+                            &session_id,
+                            frame_generation,
+                        ))
+                    } else {
+                        Err(NativeTerminalError::SessionDetached(session_id.clone()))
+                    };
+                    loan.return_to_slot();
+                    let main_window = completion_window.clone();
+                    let _ = dispatch_render_on_main_thread(&main_window, move || {
+                        if discard_retired_completion(&completion_slot) {
+                            return;
+                        }
+                        let label = completion_window.label().to_string();
+                        let presented = matches!(&receipt, Ok(receipt) if receipt.presented);
+                        if presented && worker_slot.is_attached_with_epoch(frame_epoch) {
+                            if let Some(host) = viewer_host_mut(&mut hosts.lock(), &session_id, &label) {
+                                host.finish_presentation(&completion_window);
+                            }
+                        }
+                        let newer = worker_slot
+                            .consume()
+                            .is_some_and(|latest| latest.generation > frame_generation);
+                        let still_viewing = viewer_host(&hosts.lock(), &session_id, &label).is_some();
+                        if still_viewing && (newer || gpu_completion_requires_retry(&receipt)) {
+                            let delay = coordinator.delay_before_retry();
+                            spawn_viewer_render(
+                                completion_window,
+                                hosts,
+                                worker_slot,
+                                session_id,
+                                coordinator,
+                                gpu_worker,
+                                delay,
+                            );
+                        }
+                    });
+                }) {
+                    tracing::warn!(session_id = %rejected_session_id, "GPU worker rejected viewer frame");
+                }
+            }
+            #[cfg(test)]
+            HostFrameTarget::Injected(target) => {
+                let _ = target.render_snapshot(layout, &frame.input.snapshot);
+            }
+        }
+    }) {
+        tracing::warn!(
+            session_id = %failure_session_id,
+            error = %err,
+            "Failed to dispatch viewer frame to main thread"
+        );
+    }
+}
+
 fn defer_scheduled_render<R: Runtime>(
     window: Window<R>,
-    hosts: Arc<Mutex<HashMap<String, NativeTerminalSurfaceHost>>>,
+    hosts: SharedHosts,
     slot: Arc<SnapshotSlot>,
     session_id: String,
     coordinator: Arc<RenderScheduleCoordinator>,
@@ -3796,7 +4110,7 @@ impl NativeTerminalSurfaceHostState {
         &self,
         session_id: &str,
     ) -> Result<
-        parking_lot::MutexGuard<'_, HashMap<String, NativeTerminalSurfaceHost>>,
+        parking_lot::MutexGuard<'_, HostMap>,
         NativeTerminalError,
     > {
         let hosts = self.hosts.lock();
@@ -3979,9 +4293,16 @@ impl NativeTerminalSurfaceHostState {
     }
 
     fn presentation_geometry_for_session(&self, session_id: &str) -> SurfacePresentationGeometry {
-        self.hosts
-            .lock()
-            .get(session_id)
+        let hosts = self.hosts.lock();
+        let viewers = hosts.get(session_id);
+        viewers
+            .and_then(|viewers| {
+                viewers
+                    .size_driver
+                    .as_ref()
+                    .and_then(|driver| viewers.hosts.get(driver))
+                    .or_else(|| viewers.hosts.values().next())
+            })
             .map_or(SurfacePresentationGeometry::Default, |host| {
                 host.active_presentation_geometry()
             })
@@ -5493,6 +5814,41 @@ impl NativeTerminalSurfaceHostState {
         tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
     ) -> bool {
         let mut hosts = self.hosts.lock();
+        self.detach_session_locked(&mut hosts, session_id, tuple)
+    }
+
+    /// Fenced detach of ONE window's viewer. Other windows presenting the session keep their
+    /// hosts and keep rendering; only when the last viewer goes is the surface background-detached
+    /// exactly like `detach_session_fenced`. The pump and daemon attach are never touched.
+    pub fn detach_viewer_fenced(
+        &self,
+        session_id: &str,
+        tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
+        label: &str,
+    ) -> bool {
+        let mut hosts = self.hosts.lock();
+        let others = viewer_labels(&hosts, session_id)
+            .into_iter()
+            .any(|viewer| viewer != label);
+        if !others {
+            return self.detach_session_locked(&mut hosts, session_id, tuple);
+        }
+        let fenced = read_session(&self.sessions, session_id, |session| {
+            session.active_attach_tuple.as_ref() == tuple
+        });
+        if fenced != Some(true) {
+            return false;
+        }
+        remove_viewer_host(&mut hosts, session_id, label);
+        true
+    }
+
+    fn detach_session_locked(
+        &self,
+        hosts: &mut HostMap,
+        session_id: &str,
+        tuple: Option<&crate::daemon::protocol::PaneAttachTuple>,
+    ) -> bool {
         let Some(handle) = self.session(session_id) else {
             return false;
         };
@@ -5576,7 +5932,7 @@ impl NativeTerminalSurfaceHostState {
 
     pub fn target_descriptor(&self) -> PlatformCompositorDescriptor {
         let hosts = self.hosts.lock();
-        if let Some(host) = hosts.values().next() {
+        if let Some(host) = hosts.values().flat_map(|viewers| viewers.hosts.values()).next() {
             host.descriptor()
         } else {
             PlatformCompositorDescriptor::active_for_platform()
@@ -5584,11 +5940,164 @@ impl NativeTerminalSurfaceHostState {
     }
 
     pub fn has_session_host(&self, session_id: &str) -> bool {
-        self.hosts.lock().contains_key(session_id)
+        session_has_any_host(&self.hosts.lock(), session_id)
     }
 
+    /// Window labels currently presenting `session_id`, sorted.
+    pub fn viewer_windows(&self, session_id: &str) -> Vec<String> {
+        viewer_labels(&self.hosts.lock(), session_id)
+    }
+
+    /// Number of (session, window) viewer hosts.
     pub fn session_host_count(&self) -> usize {
-        self.hosts.lock().len()
+        self.hosts.lock().values().map(|viewers| viewers.hosts.len()).sum()
+    }
+
+    /// True when `session_id` is live in this process (stream and pump running, surface attached)
+    /// and presented by at least one window: a further window can join it as a viewer.
+    pub fn session_is_shareable(&self, session_id: &str) -> bool {
+        let hosts = self.hosts.lock();
+        if !session_has_any_host(&hosts, session_id) {
+            return false;
+        }
+        read_session(&self.sessions, session_id, |session| {
+            session.surface_attached
+                && !session.output_stream_ended
+                && session.stream_task.as_ref().is_some_and(|task| !task.is_finished())
+                && session.pump_task.as_ref().is_some_and(|task| !task.is_finished())
+        })
+        .unwrap_or(false)
+    }
+
+    /// Registers window `label` as a viewer of a live session and presents the current frame there.
+    ///
+    /// Never re-attaches to the daemon, never fences the pump and never changes the attach tuple
+    /// or attempt generation: the returned tuple is the active one, adopted verbatim by the
+    /// viewer pane. Returns `None` when the session is not shareable (the caller attaches normally).
+    pub fn register_viewer<R: Runtime>(
+        &self,
+        window: &Window<R>,
+        session_id: &str,
+        bounds: Option<LogicalBounds>,
+    ) -> Result<Option<Option<crate::daemon::protocol::PaneAttachTuple>>, NativeTerminalError> {
+        self.register_viewer_with(window, session_id, bounds, NativeTerminalSurfaceHost::new)
+    }
+
+    fn register_viewer_with<R: Runtime>(
+        &self,
+        window: &Window<R>,
+        session_id: &str,
+        bounds: Option<LogicalBounds>,
+        create_host: impl FnOnce(&Window<R>, f64) -> Result<NativeTerminalSurfaceHost, NativeTerminalError>,
+    ) -> Result<Option<Option<crate::daemon::protocol::PaneAttachTuple>>, NativeTerminalError> {
+        validate_session_id(session_id)?;
+        if !self.session_is_shareable(session_id) {
+            return Ok(None);
+        }
+        let label = window.label().to_string();
+        {
+            let mut hosts = self.hosts.lock();
+            if viewer_host(&hosts, session_id, &label).is_none() {
+                let scale = bounds.map_or(1.0, |bounds| bounds.scale_factor);
+                let mut host = create_host(window, scale)?;
+                if let Some(bounds) = bounds {
+                    let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
+                    let own = NativeTerminalBoundsRequest { session_id: session_id.to_string(), bounds }
+                        .layout(metrics)?;
+                    host.layout = Some(own);
+                    host.logical_bounds = Some(bounds);
+                }
+                insert_viewer_host(&mut hosts, session_id, &label, host);
+            }
+        }
+        crate::window_registry::record_viewer(window.app_handle(), session_id, &label);
+        if let Some((coordinator, slot)) = self.attached_render_target(session_id) {
+            spawn_viewer_render(
+                window.clone(),
+                Arc::clone(&self.hosts),
+                slot,
+                session_id.to_string(),
+                coordinator,
+                Arc::clone(&self.gpu_worker),
+                std::time::Duration::ZERO,
+            );
+        }
+        Ok(Some(self.session_attach_tuple(session_id)))
+    }
+
+    /// Drops the viewer of `session_id` in window `label` only. The session, its pump and the
+    /// other viewers are untouched. Dropping the LAST viewer is a plain background detach, exactly
+    /// like `detach_session`. Returns whether a viewer was removed.
+    pub fn detach_viewer(&self, session_id: &str, label: &str) -> bool {
+        let tuple = self.session_attach_tuple(session_id);
+        self.detach_viewer_fenced(session_id, tuple.as_ref(), label)
+    }
+
+    /// Drops every viewer a closed window held. Sessions keep running; a session whose last
+    /// viewer was this window is background-detached (the daemon keeps the PTY).
+    pub fn forget_window_viewers(&self, label: &str) -> Vec<String> {
+        let affected: Vec<String> = {
+            let hosts = self.hosts.lock();
+            let mut affected: Vec<String> = hosts
+                .iter()
+                .filter(|(_, viewers)| viewers.hosts.contains_key(label))
+                .map(|(session_id, _)| session_id.clone())
+                .collect();
+            affected.sort();
+            affected
+        };
+        for session_id in &affected {
+            self.detach_viewer(session_id, label);
+        }
+        affected
+    }
+
+    /// Size policy hook: the viewer in `label` was focused or received input, so it now drives the
+    /// session's PTY size (tmux "latest"). The VT/PTY is resized to that viewer's grid at once.
+    /// Returns true when the driver changed.
+    pub fn note_viewer_focused(&self, session_id: &str, label: &str) -> bool {
+        let bounds = {
+            let mut hosts = self.hosts.lock();
+            let Some(viewers) = hosts.get_mut(session_id) else {
+                return false;
+            };
+            let Some(host) = viewers.hosts.get(label) else {
+                return false;
+            };
+            if viewers.size_driver.as_deref() == Some(label) {
+                return false;
+            }
+            let bounds = host.logical_bounds;
+            viewers.size_driver = Some(label.to_string());
+            bounds
+        };
+        if let Some(bounds) = bounds {
+            let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
+            let request = NativeTerminalBoundsRequest { session_id: session_id.to_string(), bounds };
+            if let Err(error) = self.prepare_session_layout(request, metrics) {
+                tracing::debug!(session_id, ?error, "size driver change could not resize the session");
+            }
+        }
+        true
+    }
+
+    /// Window focus: the focused window becomes the size driver of every session it presents.
+    pub fn note_window_focused(&self, label: &str) {
+        let sessions: Vec<String> = self
+            .hosts
+            .lock()
+            .iter()
+            .filter(|(_, viewers)| viewers.hosts.contains_key(label))
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in sessions {
+            self.note_viewer_focused(&session_id, label);
+        }
+    }
+
+    /// Window label driving the session's PTY size, if any viewer exists.
+    pub fn size_driver(&self, session_id: &str) -> Option<String> {
+        self.hosts.lock().get(session_id).and_then(|viewers| viewers.size_driver.clone())
     }
 
     pub fn subscribe_session_update(
@@ -6299,15 +6808,19 @@ impl NativeTerminalSurfaceHostState {
         {
             return Err(NativeTerminalError::SessionDetached(session_id));
         }
-        let host = match hosts.entry(session_id.clone()) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let host = entry.insert(NativeTerminalSurfaceHost::new(
-                    window,
-                    request.bounds.scale_factor,
-                )?);
-                // The window that creates a session's surface owns the session.
-                record_owner(window.app_handle(), &session_id, window.label());
+        let label = window.label().to_string();
+        let drives_size = is_size_driver(&hosts, &session_id, &label);
+        let host = match viewer_host(&hosts, &session_id, &label).is_some() {
+            true => viewer_host_mut(&mut hosts, &session_id, &label).expect("viewer host present"),
+            false => {
+                let host = insert_viewer_host(
+                    &mut hosts,
+                    &session_id,
+                    &label,
+                    NativeTerminalSurfaceHost::new(window, request.bounds.scale_factor)?,
+                );
+                // Every window presenting a session is one of its viewers; the first one owns it.
+                crate::window_registry::record_viewer(window.app_handle(), &session_id, &label);
                 host
             }
         };
@@ -6317,7 +6830,15 @@ impl NativeTerminalSurfaceHostState {
         let scale_factor = request.bounds.scale_factor;
         let cell_metrics = font_manager::derived_cell_metrics_for_scale(scale_factor);
         let logical_bounds = request.bounds;
-        let layout = self.prepare_session_layout(request, cell_metrics)?;
+        // Only the size-driving viewer resizes the shared VT/PTY. Any other viewer keeps its own
+        // surface size and presents the shared grid inside it (padded or clipped).
+        let layout = if drives_size {
+            self.prepare_session_layout(request, cell_metrics)?
+        } else {
+            let own = request.layout(cell_metrics)?;
+            let shared = self.session_layout(&session_id).unwrap_or(own);
+            SurfaceCompositionLayout { physical_bounds: own.physical_bounds, cols: shared.cols, rows: shared.rows }
+        };
         let render_input = {
             let handle = self.session(&session_id).ok_or(NativeTerminalError::NoValue)?;
             let render_input = session_render_snapshot(&handle.lock())?;
@@ -6430,7 +6951,14 @@ impl NativeTerminalSurfaceHostState {
             (layout, logical_bounds, cell_metrics, render_input)
         };
 
-        if let Some(host) = hosts.get_mut(session_id) {
+        let label = window.label().to_string();
+        let drives_size = is_size_driver(&hosts, session_id, &label);
+        if let Some(host) = viewer_host_mut(&mut hosts, session_id, &label) {
+            let (layout, logical_bounds) = if drives_size {
+                (layout, logical_bounds)
+            } else {
+                viewer_frame_geometry(host, layout, logical_bounds)
+            };
             host.layout = Some(layout);
             host.logical_bounds = Some(logical_bounds);
             host.update_viewport(Some(logical_bounds));
@@ -7903,7 +8431,7 @@ mod tests {
                 logical_bounds: Some(request.bounds),
                 presentation_slot: state.session_snapshot_slot(&request.session_id).map(|slot| Arc::downgrade(&slot)),
             };
-            state.hosts.lock().insert(request.session_id.clone(), host);
+            insert_viewer_host(&mut state.hosts.lock(), &request.session_id, "main", host);
             assert!(!state.is_session_render_pending(&request.session_id));
             Self {
                 state,
@@ -7923,8 +8451,7 @@ mod tests {
             let harness = Self::new(acquisitions);
             {
                 let mut hosts = harness.state.hosts.lock();
-                let host = hosts
-                    .get_mut(&harness.request.session_id)
+                let host = viewer_host_mut(&mut hosts, &harness.request.session_id, "main")
                     .expect("harness installs an injected host");
                 match &mut host.frame_target {
                     HostFrameTarget::Injected(target) => target.defer_direct = true,
@@ -8057,13 +8584,13 @@ mod tests {
         let frame = slot.consume().unwrap();
         {
             let hosts = harness.state.hosts.lock();
-            let host = hosts.get(&harness.request.session_id).unwrap();
+            let host = viewer_host(&hosts, &harness.request.session_id, "main").unwrap();
             assert_eq!(host.active_presentation_generation(), Some(frame.generation));
             assert_eq!(host.active_presentation_epoch(), Some(frame.attachment_epoch));
         }
         slot.set_attached(false);
         let hosts = harness.state.hosts.lock();
-        let host = hosts.get(&harness.request.session_id).unwrap();
+        let host = viewer_host(&hosts, &harness.request.session_id, "main").unwrap();
         assert_eq!(host.active_presentation_generation(), None);
         assert_eq!(host.active_presentation_epoch(), None);
     }
@@ -8393,6 +8920,196 @@ mod tests {
         secondary.as_ref().window()
     }
 
+    fn injected_viewer_host(
+        state: &NativeTerminalSurfaceHostState,
+        session_id: &str,
+        frames: usize,
+        events: Arc<Mutex<Vec<FrameEvent>>>,
+    ) -> NativeTerminalSurfaceHost {
+        NativeTerminalSurfaceHost {
+            frame_target: HostFrameTarget::Injected(InjectedFrameTarget {
+                acquisitions: (0..frames).map(|_| SimulatedAcquisition::Frame).collect(),
+                cell_metrics: font_manager::derived_cell_metrics(),
+                events,
+                defer_direct: false,
+                assert_host_locked: Box::new(|| {}),
+            }),
+            layout: None,
+            logical_bounds: None,
+            presentation_slot: state.session_snapshot_slot(session_id).map(|slot| Arc::downgrade(&slot)),
+        }
+    }
+
+    /// Second window joins the harness session as a viewer through the production registration.
+    fn join_as_viewer(
+        harness: &DirectRenderHarness,
+        secondary: &Window<tauri::test::MockRuntime>,
+        bounds: Option<LogicalBounds>,
+        events: Arc<Mutex<Vec<FrameEvent>>>,
+    ) -> Option<crate::daemon::protocol::PaneAttachTuple> {
+        let state = &harness.state;
+        let session_id = harness.request.session_id.clone();
+        state
+            .register_viewer_with(secondary, &session_id, bounds, |_, _| {
+                Ok(injected_viewer_host(state, &session_id, 16, events))
+            })
+            .expect("viewer registration")
+            .expect("a live session is shareable")
+    }
+
+    /// Runs every queued main-thread task (and the tasks they queue) until none is left.
+    async fn drain_dispatched(harness: &mut DirectRenderHarness) {
+        for _ in 0..32 {
+            harness.await_submissions().await;
+            match harness.dispatched.try_recv() {
+                Ok(task) => task(),
+                Err(_) => return,
+            }
+        }
+    }
+
+    fn presented_count(events: &Arc<Mutex<Vec<FrameEvent>>>) -> usize {
+        events.lock().iter().filter(|event| **event == FrameEvent::Presented).count()
+    }
+
+    fn viewer_test_harness() -> (DirectRenderHarness, Window<tauri::test::MockRuntime>) {
+        let harness = DirectRenderHarness::new((0..16).map(|_| SimulatedAcquisition::Frame).collect());
+        harness
+            .window
+            .state::<RenderDispatch>()
+            .require_deferred
+            .store(false, Ordering::SeqCst);
+        let secondary = add_secondary_owner_window(&harness);
+        crate::window_registry::record_viewer(harness._app.handle(), &harness.request.session_id, "main");
+        (harness, secondary)
+    }
+
+    #[tokio::test]
+    async fn two_viewers_of_one_session_both_receive_frames_without_a_new_attempt() {
+        let (mut harness, secondary) = viewer_test_harness();
+        let session_id = harness.request.session_id.clone();
+        let generation_before = harness.state.session_attempt_generation(&session_id);
+        let tuple_before = harness.state.session_attach_tuple(&session_id);
+        let viewer_events = Arc::new(Mutex::new(Vec::new()));
+
+        let adopted = join_as_viewer(&harness, &secondary, None, Arc::clone(&viewer_events));
+
+        assert_eq!(adopted, tuple_before, "the viewer adopts the active tuple verbatim");
+        assert_eq!(harness.state.session_attempt_generation(&session_id), generation_before);
+        assert_eq!(harness.state.session_attach_tuple(&session_id), tuple_before);
+        assert!(harness.state.session_is_shareable(&session_id), "pump and stream stay live");
+        assert_eq!(harness.state.viewer_windows(&session_id), vec!["main", "ws-test"]);
+
+        harness
+            ._output
+            .send(DaemonStreamMessage::Output {
+                session_id: session_id.clone().into(),
+                sequence: 2,
+                data: b"shared output\r\n".to_vec().into(),
+                metrics_read_unix_micros: None,
+            })
+            .await
+            .unwrap();
+        // The output publish schedules exactly one coordinator dispatch; await it.
+        harness.execute_dispatched().await;
+        drain_dispatched(&mut harness).await;
+
+        assert!(presented_count(&harness.events) >= 1, "the original window presents");
+        assert!(presented_count(&viewer_events) >= 1, "the viewer window presents too");
+        let windows = harness.window.state::<RenderDispatch>().dispatch_windows.lock().clone();
+        assert!(windows.iter().any(|label| label == "main"), "{windows:?}");
+        assert!(windows.iter().any(|label| label == "ws-test"), "{windows:?}");
+    }
+
+    #[tokio::test]
+    async fn viewer_detach_leaves_the_other_window_presenting() {
+        let (mut harness, secondary) = viewer_test_harness();
+        let session_id = harness.request.session_id.clone();
+        join_as_viewer(&harness, &secondary, None, Arc::new(Mutex::new(Vec::new())));
+        drain_dispatched(&mut harness).await;
+        let tuple = harness.state.session_attach_tuple(&session_id);
+
+        assert!(harness.state.detach_viewer_fenced(&session_id, tuple.as_ref(), "ws-test"));
+        assert_eq!(harness.state.viewer_windows(&session_id), vec!["main"]);
+        assert!(harness.state.ensure_surface_attached(&session_id).is_ok(), "main keeps its surface");
+        assert!(harness.state.session_is_shareable(&session_id));
+
+        harness
+            ._output
+            .send(DaemonStreamMessage::Output {
+                session_id: session_id.clone().into(),
+                sequence: 2,
+                data: b"after viewer detach\r\n".to_vec().into(),
+                metrics_read_unix_micros: None,
+            })
+            .await
+            .unwrap();
+        harness.execute_dispatched().await;
+        assert!(presented_count(&harness.events) >= 1);
+
+        // The last viewer's detach is the ordinary background detach.
+        assert!(harness.state.detach_viewer_fenced(&session_id, tuple.as_ref(), "main"));
+        assert!(!harness.state.has_session_host(&session_id));
+        assert!(harness.state.ensure_surface_attached(&session_id).is_err());
+    }
+
+    #[tokio::test]
+    async fn pty_size_follows_the_most_recently_focused_viewer() {
+        let (mut harness, secondary) = viewer_test_harness();
+        let session_id = harness.request.session_id.clone();
+        let original = harness.state.session_layout(&session_id).unwrap();
+        let small = LogicalBounds { x: 0.0, y: 0.0, width: 400.0, height: 240.0, scale_factor: 1.0 };
+        join_as_viewer(&harness, &secondary, Some(small), Arc::new(Mutex::new(Vec::new())));
+        drain_dispatched(&mut harness).await;
+
+        // Joining never resizes the shared PTY: main still drives it.
+        assert_eq!(harness.state.size_driver(&session_id).as_deref(), Some("main"));
+        let after_join = harness.state.session_layout(&session_id).unwrap();
+        assert_eq!((after_join.cols, after_join.rows), (original.cols, original.rows));
+
+        assert!(harness.state.note_viewer_focused(&session_id, "ws-test"));
+        assert_eq!(harness.state.size_driver(&session_id).as_deref(), Some("ws-test"));
+        let driven = harness.state.session_layout(&session_id).unwrap();
+        assert!(driven.cols < original.cols && driven.rows < original.rows, "{driven:?} vs {original:?}");
+        // Re-focusing the current driver is a no-op, so focus churn cannot ping-pong the PTY.
+        assert!(!harness.state.note_viewer_focused(&session_id, "ws-test"));
+
+        assert!(harness.state.note_viewer_focused(&session_id, "main"));
+        let back = harness.state.session_layout(&session_id).unwrap();
+        assert_eq!((back.cols, back.rows), (original.cols, original.rows));
+    }
+
+    #[tokio::test]
+    async fn closing_the_original_window_keeps_the_viewer_presenting() {
+        let (mut harness, secondary) = viewer_test_harness();
+        let session_id = harness.request.session_id.clone();
+        let viewer_events = Arc::new(Mutex::new(Vec::new()));
+        join_as_viewer(&harness, &secondary, None, Arc::clone(&viewer_events));
+        drain_dispatched(&mut harness).await;
+        let presented_before = presented_count(&viewer_events);
+
+        assert_eq!(harness.state.forget_window_viewers("main"), vec![session_id.clone()]);
+        let registry = harness._app.state::<crate::window_registry::WindowRegistry>();
+        assert!(registry.forget_window("main").is_empty(), "a still-presented session is not orphaned");
+        assert_eq!(registry.owner(&session_id).as_deref(), Some("ws-test"));
+        assert_eq!(harness.state.viewer_windows(&session_id), vec!["ws-test"]);
+        assert_eq!(harness.state.size_driver(&session_id).as_deref(), Some("ws-test"));
+        assert!(harness.state.session_is_shareable(&session_id), "session and pump survive");
+
+        harness
+            ._output
+            .send(DaemonStreamMessage::Output {
+                session_id: session_id.clone().into(),
+                sequence: 2,
+                data: b"after close\r\n".to_vec().into(),
+                metrics_read_unix_micros: None,
+            })
+            .await
+            .unwrap();
+        drain_dispatched(&mut harness).await;
+        assert!(presented_count(&viewer_events) > presented_before, "the clone keeps presenting");
+    }
+
     #[tokio::test]
     async fn output_for_a_session_owned_by_a_secondary_window_renders_on_that_window() {
         let mut harness = DirectRenderHarness::new(vec![SimulatedAcquisition::Frame]);
@@ -8406,6 +9123,14 @@ mod tests {
             ._app
             .state::<crate::window_registry::WindowRegistry>()
             .set_owner(&harness.request.session_id, "ws-test");
+        // The surface lives in the owning window: renders follow the window presenting it.
+        {
+            let mut hosts = harness.state.hosts.lock();
+            let viewers = hosts.get_mut(&harness.request.session_id).unwrap();
+            let host = viewers.hosts.remove("main").unwrap();
+            viewers.hosts.insert("ws-test".into(), host);
+            viewers.size_driver = Some("ws-test".into());
+        }
 
         harness
             ._output
@@ -8839,11 +9564,7 @@ mod tests {
                 900.0
             );
             assert_eq!(
-                harness
-                    .state
-                    .hosts
-                    .lock()
-                    .get(&harness.request.session_id)
+                viewer_host(&harness.state.hosts.lock(), &harness.request.session_id, "main")
                     .unwrap()
                     .logical_bounds
                     .unwrap()
@@ -9973,7 +10694,7 @@ mod tests {
                 scale_factor: 1.0,
             }),
         };
-        state.hosts.lock().insert(session_b.to_string(), injected_host);
+        insert_viewer_host(&mut state.hosts.lock(), session_b, "main", injected_host);
 
         // Pane B has its own render coordinator and snapshot slot obtained before Pane A's lock
         let coordinator = state.session_render_coordinator(session_b).unwrap();
@@ -10374,9 +11095,9 @@ mod tests {
         let mut hosts_guard = state.hosts.lock();
         let resurrected = if !slot.is_attached_with_epoch(frame_epoch) {
             false
-        } else if let std::collections::hash_map::Entry::Vacant(entry) = hosts_guard.entry(session_id.to_string()) {
+        } else if viewer_host(&hosts_guard, session_id, window.label()).is_none() {
             if let Ok(new_host) = NativeTerminalSurfaceHost::new(&window, bounds.scale_factor) {
-                entry.insert(new_host);
+                insert_viewer_host(&mut hosts_guard, session_id, window.label(), new_host);
                 true
             } else {
                 false
