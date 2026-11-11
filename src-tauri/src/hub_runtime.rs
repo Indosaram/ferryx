@@ -3956,6 +3956,7 @@ static PANEL_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub const PANEL_DECISION_EVENT: &str = "panel.decision";
 pub const PANEL_ACTION_EVENT: &str = "panel.action";
 pub const PANEL_RULES_EVENT: &str = "panel.rules";
+pub const PANEL_PRS_EVENT: &str = "panel.prs";
 
 /// Owner-scoped panel frames on their way to owner event sockets. The supervisor workers that
 /// own decisions, the action log and rules call the `publish_panel_*` functions below; the
@@ -4000,6 +4001,41 @@ pub fn publish_panel_action(action: &ferryx_hub::supervisor::panel_contract::Act
 /// The standing rules list changed; `rules` is the whole new list.
 pub fn publish_panel_rules(rules: &[ferryx_hub::supervisor::panel_contract::StandingRule]) {
     let _ = PANEL_EVENTS.send(json!({ "type": PANEL_RULES_EVENT, "rules": rules }));
+}
+
+/// The last pull-request lane the hub fetched; `None` until the first refresh of this process.
+static PR_LANE: std::sync::RwLock<Option<ferryx_hub::supervisor::pr_lane::PrLane>> =
+    std::sync::RwLock::new(None);
+
+/// The last fetched pull-request lane (`GET supervisor/prs`); `None` before the first refresh.
+pub fn supervisor_prs() -> Option<ferryx_hub::supervisor::pr_lane::PrLane> {
+    PR_LANE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Stores a refreshed pull-request lane and publishes `panel.prs` when its PRs or outage moved.
+/// The frame is never a push (`push_policy::classify_frame`).
+pub fn publish_panel_prs(lane: &ferryx_hub::supervisor::pr_lane::PrLane) {
+    let changed = {
+        let mut slot = PR_LANE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = slot.as_ref().is_none_or(|previous| !previous.same_content(lane));
+        *slot = Some(lane.clone());
+        changed
+    };
+    if changed {
+        let _ = PANEL_EVENTS.send(json!({ "type": PANEL_PRS_EVENT, "lane": lane }));
+    }
+}
+
+/// The head branches live agent sessions are on, which mark a PR `agent_working`.
+/// TODO(agent-attention-parity todo 9 branch wiring): fill from each live session's worktree
+/// branch once sessions carry it; until then no PR is classified `agent_working`.
+fn live_session_branches() -> std::collections::HashSet<String> {
+    std::collections::HashSet::new()
 }
 
 /// Sets the supervisor pause flag the panel reports.
@@ -5250,6 +5286,13 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         launch.hub.owner_session().storage_key(),
     )));
     tasks.push(tokio::spawn(ferryx_hub::retention::serve(launch.hub.pool.clone())));
+    // The pull-request lane: refreshed every minute with the owner's gh sign-in, published as
+    // `panel.prs` and served by `GET supervisor/prs`. Only the lease holder's generation runs it.
+    tasks.push(tokio::spawn(ferryx_hub::supervisor::pr_lane::serve(
+        launch.hub.pool.clone(),
+        live_session_branches,
+        publish_panel_prs,
+    )));
     // The tracker's Sessions board and SES issues read and drive panes through the hub's control.
     ferryx_hub::tracker_sessions::install(launch.bridge.clone());
     // omo's judge breaker alert reaches the owner through the owner alert sweep.

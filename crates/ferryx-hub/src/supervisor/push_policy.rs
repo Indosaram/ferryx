@@ -48,10 +48,13 @@ pub enum PanelFrame {
 
 /// Reads a frame from the owner panel channel. Only `panel.decision` can matter; the frame's
 /// `sessionRef` must name the same session as the escalation inside it, so a card can never push
-/// a deep link to another session.
+/// a deep link to another session. `panel.prs` (the pull-request lane) is never a push: it
+/// refreshes every minute and the owner reads it in the panel.
 pub fn classify_frame(frame: &Value) -> PanelFrame {
-    if frame.get("type").and_then(Value::as_str) != Some("panel.decision") {
-        return PanelFrame::Ignore;
+    match frame.get("type").and_then(Value::as_str) {
+        Some("panel.decision") => {}
+        // `panel.prs`, `panel.session`, `panel.action`, `panel.rules` and anything unknown.
+        _ => return PanelFrame::Ignore,
     }
     let Some(session_ref) = frame
         .get("sessionRef")
@@ -285,6 +288,16 @@ mod tests {
             classify_frame(&json!({"type": "panel.decision", "sessionRef": "mac:s1", "decision": null})),
             PanelFrame::Resolved { session_ref: "mac:s1".into() }
         );
+    }
+
+    #[test]
+    fn a_pr_lane_frame_is_never_a_push() {
+        let lane = json!({
+            "type": "panel.prs",
+            "sessionRef": "mac:s1",
+            "lane": {"prs": [{"url": "https://github.com/a/b/pull/1", "lane": "waits_on_owner"}], "outage": null, "refreshedAtMs": 1}
+        });
+        assert_eq!(classify_frame(&lane), PanelFrame::Ignore);
     }
 
     #[test]
