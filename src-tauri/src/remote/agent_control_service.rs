@@ -245,13 +245,59 @@ fn session_reason(question: Option<&str>, last_line: Option<&str>, cause: Option
     })
 }
 
-/// The screen's last line that says something: bullet and input-box glyphs are trimmed off
-/// its start, and a line with no letter or digit left (a rule, an empty input box) is skipped.
+/// Characters a box rule is drawn with.
+const RULE_CHARS: &[char] = &['─', '━', '═', '╭', '╮', '╰', '╯', '┌', '┐', '└', '┘', '│', '-'];
+
+/// A horizontal rule or box edge: nothing but rule characters.
+fn is_rule_line(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty() && line.chars().all(|c| RULE_CHARS.contains(&c) || c.is_whitespace())
+}
+
+/// The agent's input line: it starts with a prompt marker.
+fn is_prompt_line(line: &str) -> bool {
+    line.trim_start().starts_with(['❯', '›', '>'])
+}
+
+/// A turn's timing line (`... 4:03 PM`, `4:08 PM`): it ends with a clock time.
+fn ends_with_clock(line: &str) -> bool {
+    let line = line.trim_end();
+    let line = [" AM", " PM", " am", " pm"]
+        .iter()
+        .find_map(|suffix| line.strip_suffix(suffix))
+        .unwrap_or(line);
+    let Some((hours, minutes)) = line.rsplit_once(':') else { return false };
+    let hours: String = hours.chars().rev().take_while(char::is_ascii_digit).collect();
+    minutes.len() == 2 && minutes.chars().all(|c| c.is_ascii_digit()) && (1..=2).contains(&hours.len())
+}
+
+/// The agent's last line on the screen. The input box (the last prompt line with the rules
+/// framing it) and everything below it (mode and status footers) is cut off first, then the
+/// last line above it that says something is taken. Skipped on the way: rules, lines with no
+/// letter or digit, a turn's timing line, and right-aligned notices. Bullet glyphs are trimmed
+/// off its start. `None` when nothing is left above the box.
 fn last_screen_line(text: &str) -> Option<String> {
-    const GLYPHS: &[char] = &['●', '⏺', '•', '>', '›', '❯', '│', '|', '*', '-', '─', '╭', '╰', '╮', '╯'];
-    text.lines()
+    const GLYPHS: &[char] = &['●', '⏺', '•', '>', '›', '❯', '│', '|', '*', '-', '─', '╭', '╰', '╮', '╯', '✻', '✔', '└'];
+    /// Leading blanks that mark a right-aligned notice rather than transcript text.
+    const NOTICE_INDENT: usize = 40;
+    let lines: Vec<&str> = text.lines().collect();
+    let mut end = lines.len();
+    if let Some(prompt) = lines.iter().rposition(|line| is_prompt_line(line)) {
+        end = prompt;
+        while end > 0 && is_rule_line(lines[end - 1]) {
+            end -= 1;
+        }
+    }
+    lines[..end]
+        .iter()
         .rev()
-        .map(|line| line.trim().trim_start_matches(|c: char| c.is_whitespace() || GLYPHS.contains(&c)).trim_end_matches(|c: char| c.is_whitespace() || c == '│'))
+        .filter(|line| line.chars().take_while(|c| c.is_whitespace()).count() < NOTICE_INDENT)
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(|c: char| c.is_whitespace() || GLYPHS.contains(&c))
+                .trim_end_matches(|c: char| c.is_whitespace() || c == '│')
+        })
+        .filter(|line| !is_rule_line(line) && !ends_with_clock(line))
         .find(|line| line.chars().any(char::is_alphanumeric))
         .map(str::to_string)
 }
@@ -2522,6 +2568,44 @@ mod tests {
         let screen = "● Building the relay\n● Done.\n────────\n> \n";
         assert_eq!(last_screen_line(screen).as_deref(), Some("Done."));
         assert_eq!(last_screen_line("────\n\n"), None);
+    }
+
+    fn agent_screen(name: &str) -> &'static str {
+        match name {
+            "claude/done" => include_str!("../agent_detect/fixtures/screens/claude/done.screen"),
+            "claude/after-turn-idle" => include_str!("../agent_detect/fixtures/screens/claude/after-turn-idle.screen"),
+            "codex/done" => include_str!("../agent_detect/fixtures/screens/codex/done.screen"),
+            "codex/after-turn-idle" => include_str!("../agent_detect/fixtures/screens/codex/after-turn-idle.screen"),
+            _ => unreachable!("{name}"),
+        }
+    }
+
+    #[test]
+    fn reason_screen_line_is_the_transcript_line_above_the_input_box_not_the_footer() {
+        for (name, expected) in [
+            ("claude/done", "The serena MCP server failed to connect (timed out after 30s). It doesn't affect this ls command."),
+            ("claude/after-turn-idle", "plain ls."),
+            ("codex/done", "Command completed successfully."),
+            ("codex/after-turn-idle", "b.py"),
+        ] {
+            let screen = agent_screen(name);
+            let line = last_screen_line(screen).unwrap_or_else(|| panic!("{name}: no line"));
+            assert!(screen.lines().any(|row| row.contains(expected)), "{name}: fixture has the line");
+            assert!(expected.starts_with(line.as_str()) || line == expected, "{name}: {line:?}");
+            for footer in ["for shortcuts", "mode on", "warnings", "GPT-5.6", "Auto-update", "PM"] {
+                assert!(!line.contains(footer), "{name}: a footer or status line was taken: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn reason_with_nothing_above_the_input_box_falls_to_the_stop_cause() {
+        let screen = "\n\n────────\n❯ \n────────\n  ⏸ manual mode on · ? for shortcuts\n";
+        assert_eq!(last_screen_line(screen), None);
+        let codex = "  4:08 PM\n\n› Ask Codex to do anything\n\n  GPT-5.6-Luna medium · /tmp/x\n";
+        assert_eq!(last_screen_line(codex), None, "a timing line alone is not the agent's line");
+        let cause = stop_cause(AgentControlState::Idle, false, true);
+        assert_eq!(session_reason(None, last_screen_line(screen).as_deref(), cause).as_deref(), Some("Finished its turn"));
     }
 
     #[tokio::test]
