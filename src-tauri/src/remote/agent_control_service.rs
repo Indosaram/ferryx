@@ -35,6 +35,20 @@ pub(crate) fn note_raw_write(bus: &events::AgentEventBus, session_id: &str) {
     bus.note_input(session_id, None);
 }
 
+/// Mark `session_id`'s current attention episode read in this daemon's read store and publish
+/// the flip. False for a session whose readings this daemon does not own: an SSH or
+/// remote-helper pane (unsupported, it stays unread by episode) and a paired host's pane (its
+/// owner marks it when the acknowledgement reaches it).
+pub(crate) fn acknowledge_read(state: &RemoteGatewayState, session_id: &str) -> bool {
+    if state.terminal_service.remote().contains(session_id)
+        || crate::terminal::paired_runtime::Runtime::owns(session_id)
+    {
+        return false;
+    }
+    state.agent_events.acknowledge(session_id);
+    true
+}
+
 fn refuse_if_human_typing(session_id: &str) -> Result<(), ScopeError> {
     let Some(typed_at) = reference_chat_runtime().input.last_raw_input_ms(session_id) else {
         return Ok(());
@@ -701,6 +715,30 @@ async fn dispatch(
             }
         }
         AgentControlOp::Events { after } => Ok(replay_value(state.agent_events.replay(after))),
+        AgentControlOp::Acknowledge { session_id } => {
+            live(state, &session_id).await?;
+            if crate::terminal::paired_runtime::Runtime::owns(&session_id) {
+                // A paired pane: its owner keeps the read state and marks it on this ack.
+                state.session_backend.acknowledge_agent_outcome(&session_id).await.map_err(|error| {
+                    let code = match error {
+                        crate::remote::backend::OutcomeAckError::UnknownSession => ScopeErrorCode::NotFound,
+                        crate::remote::backend::OutcomeAckError::Uncertain(_) => ScopeErrorCode::OperationOutcomeUnknown,
+                        _ => ScopeErrorCode::Unsupported,
+                    };
+                    reference_chat_scope(code, error.to_string())
+                })?;
+                return Ok(serde_json::json!({ "session": { "sessionId": session_id, "read": true } }));
+            }
+            if !acknowledge_read(state, &session_id) {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::Unsupported,
+                    "an SSH or remote-helper pane keeps no read state; it stays unread until its next episode",
+                ));
+            }
+            Ok(serde_json::json!({
+                "session": { "sessionId": session_id, "read": state.agent_events.read_state(&session_id) }
+            }))
+        }
     }
 }
 
@@ -979,7 +1017,7 @@ fn stamp_remote_receipt_host(value: &mut serde_json::Value, host_id: &str) {
     }
 }
 
-fn forward_code(code: &str) -> String {
+pub(crate) fn forward_code(code: &str) -> String {
     match code {
         "PAIRED_HOST_CAPABILITY_UNAVAILABLE" => "UNSUPPORTED".into(),
         "SESSION_NOT_FOUND" | "SESSION_EXPIRED" => "NOT_FOUND".into(),
@@ -1370,6 +1408,18 @@ pub(crate) async fn http_events(
         Err(rejection) => return query_error(rejection),
     };
     control_finish(handle(&state, AgentControlOp::Events { after: query.after }).await)
+}
+
+pub(crate) async fn http_ack(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+) -> Response {
+    let device = match http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    control_finish(handle_as(&state, AgentControlOp::Acknowledge { session_id }, &device.id, None).await)
 }
 
 pub(crate) async fn http_wait(

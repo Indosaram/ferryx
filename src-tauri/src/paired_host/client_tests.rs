@@ -2002,6 +2002,42 @@ async fn a_delivery_to_a_host_without_receipts_reaches_nothing_and_is_a_capabili
     );
 }
 
+/// An acknowledgement to a host that does not advertise `agentControlAckV1` is never sent, and
+/// the caller sees `UNSUPPORTED`.
+#[tokio::test]
+async fn an_old_paired_host_without_ack_capability_refuses_unsupported() {
+    let ack = Operation::AgentControl {
+        op: crate::agent_control::AgentControlOp::Acknowledge { session_id: "s-1".into() },
+        fence: None,
+    };
+    let route = ack.route().expect("ack route");
+    assert_eq!(route.capability, Some("agentControlAckV1"));
+    assert_eq!(route.segments, vec!["agent-control", "sessions", "s-1", "ack"]);
+    assert_eq!(route.method, Method::POST);
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = hits.clone();
+    let ack_route = Router::new().route(
+        "/host/a/api/v1/agent-control/sessions/s-1/ack",
+        post(move || {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Json(json!({"session": {"sessionId": "s-1", "read": true}}))
+            }
+        }),
+    );
+    // The fixture host advertises no agent-control capability, like a host from before acks.
+    let (root, service, host, task) = fixture(ack_route).await;
+    let error = MachineClient::new().execute(&service, request(&host, ack)).await.unwrap_err();
+    cleanup(root, task).await;
+    assert_eq!(error.code, "PAIRED_HOST_CAPABILITY_UNAVAILABLE");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing was forwarded");
+    assert_eq!(
+        crate::remote::server::agent_control_service::forward_code(&error.code),
+        "UNSUPPORTED"
+    );
+}
+
 #[test]
 fn discover_repos_route_and_desktop_id_rewrite() {
     let op = Operation::DiscoverRepos {
