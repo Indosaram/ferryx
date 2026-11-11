@@ -625,6 +625,7 @@ mod panel_frame_tests {
             stale: false,
             health: None,
             attention: None,
+            reason: None,
         }
     }
 

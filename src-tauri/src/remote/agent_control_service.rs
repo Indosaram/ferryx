@@ -214,15 +214,29 @@ async fn observe_entry(
         // When this entry was read, so a hub that caches a list can show how old it is.
         "observedAt": observed_at_ms(),
     });
-    if with_last_line {
-        entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
-    }
     let failed = state.machine_services.as_ref().is_some_and(|services| services.sessions.agent_control_failed(session_id));
     if failed {
         entry["health"] = serde_json::json!({ "type": "failed", "reason": "the agent exited in the middle of a turn" });
     }
     let completed = state.agent_events.completion(session_id).is_some()
         || provider_outcome.is_some();
+    if with_last_line {
+        // A remote or non-native session has no transcript line; the screen's last line stands
+        // in for it, but only in a pane an agent runs in.
+        let screen_line = match (&agent, &screen) {
+            (Some(_), Some(snapshot)) if last_assistant_line.is_none() => last_screen_line(&snapshot.text),
+            _ => None,
+        };
+        let cause = (agent.is_some() || failed).then(|| stop_cause(status.state, failed, completed)).flatten();
+        let reason = session_reason(
+            pending.as_ref().map(|prompt| prompt.question.as_str()).filter(|question| !question.trim().is_empty())
+                .or(pending.as_ref().map(|prompt| prompt.title.as_str())),
+            last_assistant_line.as_deref().or(screen_line.as_deref()),
+            cause,
+        );
+        entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
+        entry["reason"] = serde_json::json!(reason);
+    }
     let axes = attention_axes(
         status.state,
         pending.as_ref().map(|prompt| prompt.kind),
@@ -233,6 +247,39 @@ async fn observe_entry(
     );
     entry["attention"] = serde_json::json!(ferryx_hub::supervisor::panel_contract::Attention::of(axes));
     Ok(Observed { entry, screen })
+}
+
+/// Why the session stopped, in one line: the pending prompt's question, else the agent's last
+/// line, else the stop cause. Whitespace is collapsed and the line cut to
+/// [`LAST_ASSISTANT_LINE_MAX_CHARS`]; nothing to say is `None`, never an empty string.
+fn session_reason(question: Option<&str>, last_line: Option<&str>, cause: Option<&str>) -> Option<String> {
+    [question, last_line, cause].into_iter().flatten().find_map(|text| {
+        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!line.is_empty()).then(|| line.chars().take(LAST_ASSISTANT_LINE_MAX_CHARS).collect())
+    })
+}
+
+/// The screen's last line that says something: bullet and input-box glyphs are trimmed off
+/// its start, and a line with no letter or digit left (a rule, an empty input box) is skipped.
+fn last_screen_line(text: &str) -> Option<String> {
+    const GLYPHS: &[char] = &['●', '⏺', '•', '>', '›', '❯', '│', '|', '*', '-', '─', '╭', '╰', '╮', '╯'];
+    text.lines()
+        .rev()
+        .map(|line| line.trim().trim_start_matches(|c: char| c.is_whitespace() || GLYPHS.contains(&c)).trim_end_matches(|c: char| c.is_whitespace() || c == '│'))
+        .find(|line| line.chars().any(char::is_alphanumeric))
+        .map(str::to_string)
+}
+
+/// A label for why an agent stopped when it said nothing itself.
+fn stop_cause(state: AgentControlState, failed: bool, completed: bool) -> Option<&'static str> {
+    if failed {
+        return Some("The agent exited in the middle of a turn");
+    }
+    match state {
+        AgentControlState::Blocked => Some("Waiting for input"),
+        AgentControlState::Idle | AgentControlState::Unknown if completed => Some("Finished its turn"),
+        _ => None,
+    }
 }
 
 /// Whether the owner acknowledged the session's current episode, from the daemon's read store.
@@ -2073,6 +2120,7 @@ mod tests {
             stale: false,
             health: None,
             attention: None,
+            reason: None,
         }
     }
 
@@ -2548,6 +2596,80 @@ mod tests {
         assert_eq!(state.agent_events.head(), sequence, "no agent reading was published");
     }
 
+    #[test]
+    fn reason_prompt_question_wins_over_last_line_and_cause() {
+        assert_eq!(
+            session_reason(Some("Run the migration?"), Some("I wrote the plan"), Some("Waiting for input")).as_deref(),
+            Some("Run the migration?")
+        );
+    }
+
+    #[test]
+    fn reason_falls_back_to_the_last_line_then_the_stop_cause() {
+        assert_eq!(session_reason(None, Some("  All tests pass\n "), Some("Finished its turn")).as_deref(), Some("All tests pass"));
+        assert_eq!(session_reason(Some("  "), None, Some("Finished its turn")).as_deref(), Some("Finished its turn"));
+        assert_eq!(stop_cause(AgentControlState::Blocked, false, false), Some("Waiting for input"));
+        assert_eq!(stop_cause(AgentControlState::Idle, false, true), Some("Finished its turn"));
+        assert_eq!(stop_cause(AgentControlState::Working, true, false), Some("The agent exited in the middle of a turn"));
+        assert_eq!(stop_cause(AgentControlState::Working, false, false), None);
+        assert_eq!(session_reason(None, None, None), None, "nothing to say is null, never empty");
+    }
+
+    #[test]
+    fn reason_is_one_line_capped_at_200_chars() {
+        let long = format!("{}\nsecond line", "é".repeat(300));
+        let reason = session_reason(Some(&long), None, None).expect("a reason");
+        assert_eq!(reason.chars().count(), LAST_ASSISTANT_LINE_MAX_CHARS);
+        assert!(!reason.contains('\n'));
+    }
+
+    #[test]
+    fn reason_screen_line_skips_rules_glyphs_and_empty_input_boxes() {
+        let screen = "● Building the relay\n● Done.\n────────\n> \n";
+        assert_eq!(last_screen_line(screen).as_deref(), Some("Done."));
+        assert_eq!(last_screen_line("────\n\n"), None);
+    }
+
+    #[tokio::test]
+    async fn reason_of_a_pane_with_a_question_is_the_question() {
+        let session_id = "agent-control-reason-prompt";
+        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+        let session = &read["session"];
+        let pending = &session["pending"];
+        let question = pending["question"].as_str().filter(|q| !q.trim().is_empty()).or(pending["title"].as_str()).expect("a prompt");
+        assert_eq!(session["reason"].as_str(), session_reason(Some(question), None, None).as_deref(), "{read}");
+        assert!(session["reason"].as_str().is_some_and(|reason| !reason.is_empty()), "{read}");
+    }
+
+    #[tokio::test]
+    async fn reason_of_a_session_without_a_transcript_uses_the_screen_line() {
+        let session_id = "agent-control-reason-screen";
+        let (_backend, state) = pane(session_id, CLAUDE_ANSWERED);
+        let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+        let session = &read["session"];
+        assert!(session["agent"].is_string(), "an agent is detected: {read}");
+        assert!(session["pending"].is_null(), "{read}");
+        assert!(session["lastAssistantLine"].is_null(), "{read}");
+        assert_eq!(session["reason"], "Done.", "{read}");
+    }
+
+    #[tokio::test]
+    async fn reason_of_a_plain_shell_pane_is_null_not_empty() {
+        let session_id = "agent-control-reason-shell";
+        let (_backend, state) = pane(session_id, "$ ls\nREADME.md\n$ ");
+        let listed = handle(&state, AgentControlOp::List).await.expect("list");
+        let entry = &listed["sessions"][0];
+        assert!(entry["agent"].is_null(), "{listed}");
+        assert!(entry.get("reason").is_some_and(serde_json::Value::is_null), "{listed}");
+        let fleet = ferryx_hub::fleet::merge_sessions(
+            &std::collections::HashMap::new(),
+            &[ferryx_hub::fleet::InventoryEntry { host_id: "h".into(), sessions: vec![entry.clone()], error: None, stale: false }],
+            1,
+        );
+        assert_eq!(fleet[0].reason, None);
+    }
+
     #[tokio::test]
     async fn a_mutation_path_observation_never_reads_the_history_store() {
         let session_id = "agent-control-no-line-on-mutation";
@@ -2562,6 +2684,7 @@ mod tests {
     }
 
     const CLAUDE_APPROVAL: &str = include_str!("reference_chat/fixtures/claude/prompt/approval-command.screen");
+    const CLAUDE_ANSWERED: &str = include_str!("reference_chat/fixtures/claude/prompt/answered.screen");
 
     /// One pane showing a fixed screen; every write and every signal it is handed is recorded.
     struct FixedPane {

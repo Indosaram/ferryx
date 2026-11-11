@@ -2367,6 +2367,7 @@ fn fleet_session(id: &str, question: &str) -> FleetSession {
         stale: false,
         health: None,
         attention: None,
+        reason: None,
     }
 }
 

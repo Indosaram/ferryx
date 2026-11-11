@@ -524,6 +524,7 @@ pub(crate) mod tests {
             stale: false,
             health: None,
             attention: None,
+            reason: None,
         }
     }
 
@@ -807,6 +808,7 @@ pub(crate) mod tests {
             stale: false,
             health: None,
             attention: None,
+            reason: None,
         }
     }
 
