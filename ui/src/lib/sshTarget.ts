@@ -105,7 +105,8 @@ function applyOption(target: Partial<ParsedSshTarget>, keyValue: string) {
 export function parseSshTarget(input: string): ParsedSshTarget | null {
   const tokens = tokenize(input.trim());
   if (!tokens || tokens.length === 0) return null;
-  if (tokens[0] === "ssh" || /[/\\]ssh(\.exe)?$/i.test(tokens[0])) tokens.shift();
+  const isCommand = tokens[0] === "ssh" || /[/\\]ssh(\.exe)?$/i.test(tokens[0]);
+  if (isCommand) tokens.shift();
 
   const flags: Partial<ParsedSshTarget> = {};
   let destination: ParsedSshTarget | null = null;
@@ -135,7 +136,10 @@ export function parseSshTarget(input: string): ParsedSshTarget | null {
       continue;
     }
     // ssh(1) keeps reading options after the destination; the next operand starts the remote command.
-    if (destination) break;
+    if (destination) {
+      if (!isCommand) return null;
+      break;
+    }
     destination = parseDestination(token);
     if (!destination) return null;
   }
