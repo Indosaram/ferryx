@@ -39,39 +39,21 @@ pub fn router() -> Router<SqlitePool> {
             get(get_project).patch(patch_project).delete(delete_project),
         )
         .route("/projects/{id}/updates", post(add_project_update))
-        .route(
-            "/project-updates/{id}",
-            axum::routing::patch(patch_row).delete(delete_named),
-        )
+        .route("/project-updates/{id}", resource_routes(&PROJECT_UPDATES))
         .route("/projects/{id}/milestones", post(add_milestone))
-        .route(
-            "/milestones/{id}",
-            axum::routing::patch(patch_row).delete(delete_named),
-        )
+        .route("/milestones/{id}", resource_routes(&MILESTONES))
         .route("/cycles", post(create_cycle))
-        .route(
-            "/cycles/{id}",
-            axum::routing::patch(patch_row).delete(delete_named),
-        )
+        .route("/cycles/{id}", resource_routes(&CYCLES))
         .route("/labels", post(create_label))
-        .route(
-            "/labels/{id}",
-            axum::routing::patch(patch_row).delete(delete_named),
-        )
+        .route("/labels/{id}", resource_routes(&LABELS))
         .route("/teams", post(create_team))
         .route("/teams/{id}", axum::routing::patch(patch_team))
         .route("/states", post(create_state))
-        .route(
-            "/states/{id}",
-            axum::routing::patch(patch_row).delete(delete_named),
-        )
+        .route("/states/{id}", resource_routes(&STATES))
         .route("/users", post(create_user))
         .route("/users/{id}", axum::routing::patch(patch_user))
         .route("/views", post(create_view))
-        .route(
-            "/views/{id}",
-            axum::routing::patch(patch_row).delete(delete_named),
-        )
+        .route("/views/{id}", resource_routes(&VIEWS))
         .route("/favorites", post(toggle_favorite))
         .route("/notifications", get(list_notifications))
         .route("/notifications/read-all", post(read_all_notifications))
@@ -270,15 +252,16 @@ async fn projects_json(pool: &SqlitePool) -> Result<Vec<Value>> {
 #[derive(Deserialize)]
 struct IssueQuery {
     team_id: Option<String>,
-    #[serde(default)]
-    include_archived: bool,
+    /// omo accepts `1` or `true`; the deployed web bundle sends `1`.
+    include_archived: Option<String>,
 }
 
 async fn list_issues(
     State(pool): State<SqlitePool>,
     Query(query): Query<IssueQuery>,
 ) -> (StatusCode, Json<Value>) {
-    match list_issue_values(&pool, query.team_id.as_deref(), query.include_archived).await {
+    let include_archived = matches!(query.include_archived.as_deref(), Some("1" | "true"));
+    match list_issue_values(&pool, query.team_id.as_deref(), include_archived).await {
         Ok(items) => ok(json!({"items": items})),
         Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
@@ -479,10 +462,238 @@ async fn issue_detail(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    match load_issue(&pool, &id).await {
-        Ok(issue) => ok(issue),
-        Err(error) => fail(StatusCode::NOT_FOUND, error.to_string()),
+    prepare(&pool).await;
+    let issue_id = match resolve_issue_id(&pool, &id).await {
+        Ok(Some(issue_id)) => issue_id,
+        Ok(None) => return fail(StatusCode::NOT_FOUND, format!("issue {id} was not found")),
+        Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    match issue_detail_value(&pool, &issue_id).await {
+        Ok(detail) => ok(detail),
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
+}
+
+/// omo's `resolve_issue_id`: routes take either the issue id or its identifier (`AGT-62`).
+async fn resolve_issue_id(pool: &SqlitePool, id_or_identifier: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM tracker_issues WHERE id = ? OR identifier = ? COLLATE NOCASE",
+    )
+    .bind(id_or_identifier)
+    .bind(id_or_identifier)
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn issue_id_or_404(
+    pool: &SqlitePool,
+    id_or_identifier: &str,
+) -> std::result::Result<String, (StatusCode, Json<Value>)> {
+    match resolve_issue_id(pool, id_or_identifier).await {
+        Ok(Some(id)) => Ok(id),
+        Ok(None) => Err(fail(
+            StatusCode::NOT_FOUND,
+            format!("issue {id_or_identifier} was not found"),
+        )),
+        Err(error) => Err(fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())),
+    }
+}
+
+/// omo's `relation_direction`: the relation as seen from `from_issue`.
+fn relation_direction(kind: &str, forward: bool) -> &'static str {
+    match (kind, forward) {
+        ("blocks", true) => "blocks",
+        ("blocks", false) => "blocked_by",
+        ("duplicate", true) => "duplicate",
+        ("duplicate", false) => "duplicated_by",
+        _ => "related",
+    }
+}
+
+/// Comments with their reactions grouped by emoji, as omo's `load_comments`.
+async fn comments_json(pool: &SqlitePool, issue_id: &str) -> Result<Vec<Value>> {
+    let mut comments = Vec::new();
+    let rows = sqlx::query(
+        "SELECT id, issue_id, user_id, body, parent_id, created_at, updated_at, edited, resolved_at FROM tracker_comments WHERE issue_id = ? ORDER BY created_at",
+    )
+    .bind(issue_id)
+    .fetch_all(pool)
+    .await?;
+    for row in rows {
+        use sqlx::Row;
+        let id: String = row.try_get("id")?;
+        let reactions: Vec<(String, String)> = sqlx::query_as(
+            "SELECT emoji, user_id FROM tracker_reactions WHERE comment_id = ? ORDER BY rowid",
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await?;
+        let mut grouped: Vec<Value> = Vec::new();
+        for (emoji, user) in reactions {
+            match grouped.iter_mut().find(|entry| entry["emoji"] == emoji.as_str()) {
+                Some(entry) => {
+                    if let Some(users) = entry["user_ids"].as_array_mut() {
+                        users.push(json!(user));
+                    }
+                }
+                None => grouped.push(json!({"emoji": emoji, "user_ids": [user]})),
+            }
+        }
+        comments.push(json!({
+            "id": id,
+            "issue_id": row.try_get::<String, _>("issue_id")?,
+            "user_id": row.try_get::<String, _>("user_id")?,
+            "body": row.try_get::<String, _>("body")?,
+            "parent_id": row.try_get::<Option<String>, _>("parent_id")?,
+            "created_at": row.try_get::<String, _>("created_at")?,
+            "updated_at": row.try_get::<String, _>("updated_at")?,
+            "edited": row.try_get::<i64, _>("edited")? != 0,
+            "resolved_at": row.try_get::<Option<String>, _>("resolved_at")?,
+            "reactions": grouped,
+        }));
+    }
+    Ok(comments)
+}
+
+/// omo's `load_lane_detail`: the lane row, its history and the last 200 transcript entries.
+async fn lane_detail_json(pool: &SqlitePool, lane_key: &str) -> Result<Value> {
+    let lane = sqlx::query(
+        "SELECT key, title, status, cwd, brief_path, model, done_signals, claim_evidence, objection, turns_run, last_turn_outcome, last_report, last_activity_at, thread_channel_id, created_at FROM lanes WHERE key = ?",
+    )
+    .bind(lane_key)
+    .fetch_optional(pool)
+    .await?;
+    let Some(lane) = lane else {
+        return Ok(Value::Null);
+    };
+    use sqlx::{Column, Row};
+    let mut object = serde_json::Map::new();
+    for column in lane.columns() {
+        let name = column.name().to_owned();
+        object.insert(name.clone(), json_cell(&lane, &name)?);
+    }
+    let history = rows_json_bound(
+        pool,
+        "SELECT id, at, from_status, to_status, reason FROM lane_history WHERE lane_key = ? ORDER BY id",
+        lane_key,
+    )
+    .await?;
+    let mut transcript: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT id, at, role, text FROM lane_transcript WHERE lane_key = ? ORDER BY id DESC LIMIT 200",
+    )
+    .bind(lane_key)
+    .fetch_all(pool)
+    .await?;
+    transcript.reverse();
+    let events = rows_json_bound(
+        pool,
+        "SELECT id, kind, body, created_at FROM lane_events WHERE lane_key = ? ORDER BY id DESC LIMIT 200",
+        lane_key,
+    )
+    .await?;
+    Ok(json!({
+        "lane": Value::Object(object),
+        "history": history,
+        "transcript": transcript.into_iter().map(|(id, at, role, text)| json!({"id": id, "at": at, "role": role, "text": text})).collect::<Vec<_>>(),
+        "events": events,
+    }))
+}
+
+async fn rows_json_bound(pool: &SqlitePool, sql: &str, bind: &str) -> Result<Vec<Value>> {
+    use sqlx::{Column, Row};
+    let rows = sqlx::query(sql).bind(bind).fetch_all(pool).await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut object = serde_json::Map::new();
+        for column in row.columns() {
+            let name = column.name().to_owned();
+            object.insert(name.clone(), json_cell(&row, &name)?);
+        }
+        out.push(Value::Object(object));
+    }
+    Ok(out)
+}
+
+/// omo's `fetch_issue_detail`: the `IssueDetail` the web UI's issue page renders.
+async fn issue_detail_value(pool: &SqlitePool, issue_id: &str) -> Result<Value> {
+    let issue = load_issue(pool, issue_id).await?;
+    let child_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM tracker_issues WHERE parent_id = ? ORDER BY sort_order, created_at",
+    )
+    .bind(issue_id)
+    .fetch_all(pool)
+    .await?;
+    let mut children = Vec::with_capacity(child_ids.len());
+    for child in child_ids {
+        children.push(load_issue(pool, &child).await?);
+    }
+    let parent = match issue["parent_id"].as_str() {
+        Some(parent) => load_issue(pool, parent).await.ok().unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+    let relation_rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT id, issue_id, related_issue_id, type, created_at FROM tracker_relations WHERE issue_id = ? OR related_issue_id = ? ORDER BY created_at",
+    )
+    .bind(issue_id)
+    .bind(issue_id)
+    .fetch_all(pool)
+    .await?;
+    let mut relations = Vec::with_capacity(relation_rows.len());
+    for (id, from, to, kind, created_at) in relation_rows {
+        let forward = from == issue_id;
+        let other = if forward { &to } else { &from };
+        let Ok(other_issue) = load_issue(pool, other).await else {
+            continue;
+        };
+        relations.push(json!({
+            "id": id,
+            "issue_id": from,
+            "related_issue_id": to,
+            "type": kind,
+            "created_at": created_at,
+            "issue": other_issue,
+            "direction": relation_direction(&kind, forward),
+        }));
+    }
+    let comments = comments_json(pool, issue_id).await?;
+    let activity = rows_json_bound(
+        pool,
+        "SELECT id, issue_id, actor_id, kind, from_value, to_value, created_at FROM tracker_activity WHERE issue_id = ? ORDER BY id",
+        issue_id,
+    )
+    .await?;
+    let links = rows_json_bound(
+        pool,
+        "SELECT id, issue_id, url, title, created_at FROM tracker_links WHERE issue_id = ? ORDER BY created_at",
+        issue_id,
+    )
+    .await?;
+    let lane_detail = match issue["lane_key"].as_str() {
+        Some(key) => lane_detail_json(pool, key).await?,
+        None => Value::Null,
+    };
+    let session_detail = match &issue["session"] {
+        Value::Object(summary) => {
+            let mut detail = summary.clone();
+            detail.entry("last_user").or_insert_with(|| json!(""));
+            detail.entry("last_assistant").or_insert_with(|| json!(""));
+            Value::Object(detail)
+        }
+        _ => Value::Null,
+    };
+    let subscriber_ids = issue["subscriber_ids"].clone();
+    Ok(json!({
+        "issue": issue,
+        "children": children,
+        "parent": parent,
+        "relations": relations,
+        "comments": comments,
+        "activity": activity,
+        "links": links,
+        "subscriber_ids": subscriber_ids,
+        "lane_detail": lane_detail,
+        "session_detail": session_detail,
+    }))
 }
 
 /// omo's `timestamps_for`: the started/completed/canceled stamps an issue gets in a state.
@@ -597,6 +808,10 @@ async fn patch_issue(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let id = match issue_id_or_404(&pool, &id).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let current: Option<PatchRow> = match sqlx::query_as(
         "SELECT state_id, started_at, lane_key, session_ref FROM tracker_issues WHERE id = ?",
     )
@@ -702,31 +917,151 @@ async fn patch_issue(
             .await;
         }
     }
+    if let Err(error) = apply_issue_fields(&pool, &id, &body).await {
+        return fail(StatusCode::BAD_REQUEST, error.to_string());
+    }
     match load_issue(&pool, &id).await {
         Ok(issue) => ok(issue),
         Err(error) => fail(StatusCode::NOT_FOUND, error.to_string()),
     }
 }
 
-async fn delete_issue(State(pool): State<SqlitePool>, Path(id): Path<String>) -> StatusCode {
-    let reference: Option<Option<String>> =
-        sqlx::query_scalar("SELECT session_ref FROM tracker_issues WHERE id = ?")
-            .bind(&id)
-            .fetch_optional(&pool)
-            .await
-            .unwrap_or_default();
-    if let Some(reference) = reference.flatten() {
+const ISSUE_FIELDS: &[&str] = &[
+    "priority",
+    "estimate",
+    "assignee_id",
+    "project_id",
+    "milestone_id",
+    "cycle_id",
+    "parent_id",
+    "due_date",
+    "sort_order",
+    "snoozed_until",
+];
+
+/// omo `apply_patch` fields beyond title/description/state, which keep their own lane rules above.
+async fn apply_issue_fields(pool: &SqlitePool, id: &str, body: &Value) -> Result<()> {
+    let now = now_rfc3339();
+    let mut changed = false;
+    for &column in ISSUE_FIELDS {
+        let Some(value) = body.get(column) else { continue };
+        let sql = format!("UPDATE tracker_issues SET {column} = ? WHERE id = ?");
+        let query = sqlx::query(&sql);
+        let query = match value {
+            Value::Null => query.bind(None::<String>),
+            Value::Number(number) if number.is_i64() => query.bind(number.as_i64()),
+            Value::Number(number) => query.bind(number.as_f64()),
+            Value::String(text) => query.bind(text.clone()),
+            other => return Err(HubError::message(format!("{column}: unsupported value {other}"))),
+        };
+        query.bind(id).execute(pool).await?;
+        if column != "sort_order" {
+            let to = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+            record_activity(pool, id, None, column, None, Some(&to)).await?;
+        }
+        changed = true;
+    }
+    if let Some(archived) = body.get("archived").and_then(Value::as_bool) {
+        sqlx::query("UPDATE tracker_issues SET archived_at = ? WHERE id = ?")
+            .bind(archived.then(|| now.clone()))
+            .bind(id)
+            .execute(pool)
+            .await?;
+        changed = true;
+    }
+    let mut labels: Vec<String> = Vec::new();
+    let mut labels_changed = false;
+    if let Some(set) = body.get("label_ids").and_then(Value::as_array) {
+        labels = set.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+        labels_changed = true;
+    } else if body.get("add_label_ids").is_some() || body.get("remove_label_ids").is_some() {
+        labels = sqlx::query_scalar("SELECT label_id FROM tracker_issue_labels WHERE issue_id = ?")
+            .bind(id)
+            .fetch_all(pool)
+            .await?;
+        for add in body["add_label_ids"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            if !labels.iter().any(|label| label == add) {
+                labels.push(add.to_owned());
+            }
+        }
+        let remove: Vec<&str> = body["remove_label_ids"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        labels.retain(|label| !remove.contains(&label.as_str()));
+        labels_changed = true;
+    }
+    if labels_changed {
+        let mut tx = pool.begin().await?;
+        sqlx::query("DELETE FROM tracker_issue_labels WHERE issue_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        for label in &labels {
+            sqlx::query("INSERT OR IGNORE INTO tracker_issue_labels(issue_id, label_id) VALUES(?,?)")
+                .bind(id)
+                .bind(label)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        changed = true;
+    }
+    if changed {
+        sqlx::query("UPDATE tracker_issues SET updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn delete_issue(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let row: Option<(String, Option<String>, Option<String>)> = match sqlx::query_as(
+        "SELECT id, lane_key, session_ref FROM tracker_issues WHERE id = ? OR identifier = ? COLLATE NOCASE",
+    )
+    .bind(&id)
+    .bind(&id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let Some((id, lane_key, reference)) = row else {
+        return fail(StatusCode::NOT_FOUND, format!("issue {id} was not found"));
+    };
+    if lane_key.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "a lane-linked issue cannot be deleted; close the lane instead", "code": "lane_linked"})),
+        );
+    }
+    if let Some(reference) = reference {
         // Session sync re-creates issues for live sessions; the tombstone keeps this one gone.
         if let Err(error) = crate::tracker_sessions::tombstone(&pool, &reference).await {
             tracing::warn!(%error, "session tombstone failed");
-            return StatusCode::INTERNAL_SERVER_ERROR;
+            return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
         }
     }
-    let _ = sqlx::query("DELETE FROM tracker_issues WHERE id = ?")
-        .bind(id)
-        .execute(&pool)
-        .await;
-    StatusCode::NO_CONTENT
+    let result: Result<()> = async {
+        let mut tx = pool.begin().await?;
+        for sql in [
+            "UPDATE tracker_issues SET parent_id = NULL WHERE parent_id = ?",
+            "DELETE FROM tracker_notifications WHERE issue_id = ?",
+            "DELETE FROM tracker_issues WHERE id = ?",
+        ] {
+            sqlx::query(sql).bind(&id).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => (StatusCode::NO_CONTENT, Json(Value::Null)),
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 async fn add_comment(
@@ -743,6 +1078,15 @@ async fn add_comment(
     if text.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "comment body is required");
     }
+    let id = match resolve_issue_id(&pool, &id).await {
+        Ok(Some(issue_id)) => issue_id,
+        Ok(None) => return fail(StatusCode::NOT_FOUND, format!("issue {id} was not found")),
+        Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let parent_id = body
+        .get("parent_id")
+        .and_then(Value::as_str)
+        .filter(|parent| !parent.is_empty());
     let user_id = match body.get("user_id").and_then(Value::as_str) {
         Some(user) if !user.is_empty() => user.to_owned(),
         _ => match sqlx::query_scalar("SELECT id FROM tracker_users WHERE is_me = 1 LIMIT 1")
@@ -756,12 +1100,13 @@ async fn add_comment(
     let comment_id = uuid::Uuid::new_v4().to_string();
     let now = now_rfc3339();
     if let Err(error) = sqlx::query(
-        "INSERT INTO tracker_comments(id, issue_id, user_id, body, created_at, updated_at) VALUES(?,?,?,?,?,?)",
+        "INSERT INTO tracker_comments(id, issue_id, user_id, body, parent_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
     )
     .bind(&comment_id)
     .bind(&id)
     .bind(&user_id)
     .bind(&text)
+    .bind(parent_id)
     .bind(&now)
     .bind(&now)
     .execute(&pool)
@@ -770,12 +1115,10 @@ async fn add_comment(
         return fail(StatusCode::BAD_REQUEST, error.to_string());
     }
     let _ = record_activity(&pool, &id, Some(&user_id), "comment", None, Some(&text)).await;
-    (
-        StatusCode::CREATED,
-        Json(
-            json!({"id": comment_id, "issue_id": id, "user_id": user_id, "body": text, "created_at": now}),
-        ),
-    )
+    match comment_response(&pool, &comment_id).await {
+        (StatusCode::OK, comment) => (StatusCode::CREATED, comment),
+        other => other,
+    }
 }
 
 async fn patch_comment(
@@ -783,16 +1126,56 @@ async fn patch_comment(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    let text = body.get("body").and_then(Value::as_str).unwrap_or("");
-    let _ = sqlx::query(
-        "UPDATE tracker_comments SET body = ?, edited = 1, updated_at = ? WHERE id = ?",
-    )
-    .bind(text)
-    .bind(now_rfc3339())
-    .bind(&id)
-    .execute(&pool)
-    .await;
-    ok(json!({"id": id, "body": text}))
+    let now = now_rfc3339();
+    if let Some(text) = body.get("body").and_then(Value::as_str) {
+        if text.trim().is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "comment body is required");
+        }
+        if let Err(error) = sqlx::query(
+            "UPDATE tracker_comments SET body = ?, edited = 1, updated_at = ? WHERE id = ?",
+        )
+        .bind(text.trim())
+        .bind(&now)
+        .bind(&id)
+        .execute(&pool)
+        .await
+        {
+            return fail(StatusCode::BAD_REQUEST, error.to_string());
+        }
+    }
+    if let Some(resolved) = body.get("resolved").and_then(Value::as_bool) {
+        if let Err(error) = sqlx::query("UPDATE tracker_comments SET resolved_at = ? WHERE id = ?")
+            .bind(resolved.then(|| now.clone()))
+            .bind(&id)
+            .execute(&pool)
+            .await
+        {
+            return fail(StatusCode::BAD_REQUEST, error.to_string());
+        }
+    }
+    comment_response(&pool, &id).await
+}
+
+async fn comment_response(pool: &SqlitePool, id: &str) -> (StatusCode, Json<Value>) {
+    let issue_id: Option<String> =
+        match sqlx::query_scalar("SELECT issue_id FROM tracker_comments WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(issue_id) => issue_id,
+            Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        };
+    let Some(issue_id) = issue_id else {
+        return fail(StatusCode::NOT_FOUND, format!("comment {id} was not found"));
+    };
+    match comments_json(pool, &issue_id).await {
+        Ok(comments) => match comments.into_iter().find(|comment| comment["id"] == id) {
+            Some(comment) => ok(comment),
+            None => fail(StatusCode::NOT_FOUND, format!("comment {id} was not found")),
+        },
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 async fn delete_comment(State(pool): State<SqlitePool>, Path(id): Path<String>) -> StatusCode {
@@ -813,13 +1196,12 @@ async fn toggle_reaction(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    let user_id = body
-        .get("user_id")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    if emoji.is_empty() || user_id.is_empty() {
-        return fail(StatusCode::BAD_REQUEST, "emoji and user_id are required");
+    let user_id = match body_user_or_me(&pool, &body).await {
+        Ok(user) => user,
+        Err(error) => return fail(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    if emoji.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "emoji is required");
     }
     let existing: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM tracker_reactions WHERE comment_id = ? AND user_id = ? AND emoji = ?",
@@ -840,7 +1222,7 @@ async fn toggle_reaction(
         .bind(&emoji)
         .execute(&pool)
         .await;
-        return ok(json!({"on": false}));
+        return comment_response(&pool, &id).await;
     }
     let inserted =
         sqlx::query("INSERT INTO tracker_reactions(comment_id, user_id, emoji) VALUES(?,?,?)")
@@ -850,7 +1232,7 @@ async fn toggle_reaction(
             .execute(&pool)
             .await;
     match inserted {
-        Ok(_) => ok(json!({"on": true})),
+        Ok(_) => comment_response(&pool, &id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -860,6 +1242,10 @@ async fn add_relation(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let id = match issue_id_or_404(&pool, &id).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let related = body
         .get("related_issue_id")
         .and_then(Value::as_str)
@@ -901,6 +1287,10 @@ async fn add_link(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let id = match issue_id_or_404(&pool, &id).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let url = body.get("url").and_then(Value::as_str).unwrap_or("");
     let title = body.get("title").and_then(Value::as_str).unwrap_or(url);
     let link_id = uuid::Uuid::new_v4().to_string();
@@ -933,16 +1323,50 @@ async fn subscribe(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    let user_id = body.get("user_id").and_then(Value::as_str).unwrap_or("");
-    let inserted =
-        sqlx::query("INSERT OR IGNORE INTO tracker_subscribers(issue_id, user_id) VALUES(?,?)")
-            .bind(&id)
-            .bind(user_id)
-            .execute(&pool)
-            .await;
-    match inserted {
-        Ok(_) => ok(json!({"issue_id": id, "user_id": user_id})),
+    let id = match issue_id_or_404(&pool, &id).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    let user_id = match body.get("user_id").and_then(Value::as_str) {
+        Some(user) if !user.is_empty() => user.to_owned(),
+        _ => match me_id(&pool).await {
+            Ok(user) => user,
+            Err(error) => return fail(StatusCode::BAD_REQUEST, error.to_string()),
+        },
+    };
+    let subscribed = body
+        .get("subscribed")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let sql = if subscribed {
+        "INSERT OR IGNORE INTO tracker_subscribers(issue_id, user_id) VALUES(?,?)"
+    } else {
+        "DELETE FROM tracker_subscribers WHERE issue_id = ? AND user_id = ?"
+    };
+    match sqlx::query(sql).bind(&id).bind(&user_id).execute(&pool).await {
+        Ok(_) => ok(json!({"subscribed": subscribed})),
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+async fn me_id(pool: &SqlitePool) -> Result<String> {
+    sqlx::query_scalar("SELECT id FROM tracker_users WHERE is_me = 1 ORDER BY created_at LIMIT 1")
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| HubError::message("tracker has no current user"))
+}
+
+async fn body_user_or_me(pool: &SqlitePool, body: &Value) -> Result<String> {
+    match body.get("user_id").and_then(Value::as_str) {
+        Some(user) if !user.is_empty() => Ok(user.to_owned()),
+        _ => me_id(pool).await,
+    }
+}
+
+fn detail_response(result: Result<Value>) -> (StatusCode, Json<Value>) {
+    match result {
+        Ok(detail) => ok(detail),
+        Err(error) => fail(StatusCode::NOT_FOUND, error.to_string()),
     }
 }
 
@@ -951,6 +1375,10 @@ async fn delegate(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let id = match issue_id_or_404(&pool, &id).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let assignee = body
         .get("assignee_id")
         .and_then(Value::as_str)
@@ -1004,10 +1432,7 @@ async fn delegate(
             Err(error) => return fail(StatusCode::CONFLICT, error.to_string()),
         }
     }
-    match load_issue(&pool, &id).await {
-        Ok(issue) => ok(issue),
-        Err(error) => fail(StatusCode::NOT_FOUND, error.to_string()),
-    }
+    detail_response(issue_detail_value(&pool, &id).await)
 }
 
 async fn open_delegated_lane(
@@ -1095,6 +1520,10 @@ async fn lane_action(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    let id = match issue_id_or_404(&pool, &id).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
     let action = body.get("action").and_then(Value::as_str).unwrap_or("note");
     let note = body
         .get("note")
@@ -1173,7 +1602,7 @@ async fn lane_action(
     if let Err(error) = record_activity(&pool, &id, None, "lane_action", None, Some(note)).await {
         return fail(StatusCode::BAD_REQUEST, error.to_string());
     }
-    ok(json!({"id": id, "action": action}))
+    detail_response(issue_detail_value(&pool, &id).await)
 }
 
 async fn batch_issues(
@@ -1185,13 +1614,16 @@ async fn batch_issues(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let patch = body.get("patch").cloned().unwrap_or_else(|| json!({}));
     let mut items = Vec::new();
     for id in ids {
-        if let Some(id) = id.as_str() {
-            if let Ok(issue) = load_issue(&pool, id).await {
-                items.push(issue);
-            }
+        let Some(id) = id.as_str() else { continue };
+        let (status, Json(issue)) =
+            patch_issue(State(pool.clone()), Path(id.to_owned()), Json(patch.clone())).await;
+        if status != StatusCode::OK {
+            return (status, Json(issue));
         }
+        items.push(issue);
     }
     ok(json!({"items": items}))
 }
@@ -1233,7 +1665,7 @@ async fn create_project(
     .execute(&pool)
     .await
     {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id, "name": name}))),
+        Ok(_) => created_project(&pool, &id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1242,13 +1674,36 @@ async fn get_project(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    match projects_json(&pool).await {
-        Ok(items) => items
-            .into_iter()
-            .find(|item| item["id"] == id)
-            .map(|project| ok(json!({"project": project, "updates": [], "milestones": [], "member_ids": project_or_empty(&project, "member_ids"), "team_ids": project_or_empty(&project, "team_ids")})))
-            .unwrap_or_else(|| fail(StatusCode::NOT_FOUND, "project was not found")),
-        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    let project = match projects_json(&pool).await {
+        Ok(items) => items.into_iter().find(|item| item["id"] == id),
+        Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let Some(project) = project else {
+        return fail(StatusCode::NOT_FOUND, "project was not found");
+    };
+    let updates = rows_json_bound(
+        &pool,
+        "SELECT id, project_id, user_id, health, body, created_at, updated_at FROM tracker_project_updates WHERE project_id = ? ORDER BY created_at DESC",
+        &id,
+    )
+    .await;
+    let milestones = rows_json_bound(
+        &pool,
+        "SELECT id, project_id, name, target_date, sort_order FROM tracker_milestones WHERE project_id = ? ORDER BY sort_order",
+        &id,
+    )
+    .await;
+    match (updates, milestones) {
+        (Ok(updates), Ok(milestones)) => ok(json!({
+            "member_ids": project_or_empty(&project, "member_ids"),
+            "team_ids": project_or_empty(&project, "team_ids"),
+            "project": project,
+            "updates": updates,
+            "milestones": milestones,
+        })),
+        (Err(error), _) | (_, Err(error)) => {
+            fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
     }
 }
 
@@ -1261,15 +1716,43 @@ async fn patch_project(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    if let Some(name) = body.get("name").and_then(Value::as_str) {
-        let _ = sqlx::query("UPDATE tracker_projects SET name = ?, updated_at = ? WHERE id = ?")
-            .bind(name)
-            .bind(now_rfc3339())
-            .bind(&id)
-            .execute(&pool)
-            .await;
+    let (status, response) = patch_resource(&PROJECTS, &pool, &id, &body).await;
+    if status != StatusCode::OK {
+        return (status, response);
     }
-    ok(json!({"id": id}))
+    for (key, table, column) in [
+        ("team_ids", "tracker_project_teams", "team_id"),
+        ("member_ids", "tracker_project_members", "user_id"),
+    ] {
+        let Some(ids) = body.get(key).and_then(Value::as_array) else { continue };
+        let result: Result<()> = async {
+            let mut tx = pool.begin().await?;
+            sqlx::query(&format!("DELETE FROM {table} WHERE project_id = ?"))
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            for value in ids.iter().filter_map(Value::as_str) {
+                sqlx::query(&format!("INSERT OR IGNORE INTO {table}(project_id, {column}) VALUES(?,?)"))
+                    .bind(&id)
+                    .bind(value)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            return fail(StatusCode::BAD_REQUEST, error.to_string());
+        }
+    }
+    match projects_json(&pool).await {
+        Ok(projects) => match projects.into_iter().find(|project| project["id"] == id) {
+            Some(project) => ok(project),
+            None => fail(StatusCode::NOT_FOUND, "project was not found"),
+        },
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 async fn delete_project(State(pool): State<SqlitePool>, Path(id): Path<String>) -> StatusCode {
@@ -1286,7 +1769,11 @@ async fn add_project_update(
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     let update_id = uuid::Uuid::new_v4().to_string();
-    let user_id = body.get("user_id").and_then(Value::as_str).unwrap_or("");
+    let user_id = match body_user_or_me(&pool, &body).await {
+        Ok(user) => user,
+        Err(error) => return fail(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let user_id = user_id.as_str();
     let health = body
         .get("health")
         .and_then(Value::as_str)
@@ -1306,7 +1793,7 @@ async fn add_project_update(
     .execute(&pool)
     .await
     {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": update_id}))),
+        Ok(_) => created(&PROJECT_UPDATES, &pool, &update_id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1328,10 +1815,7 @@ async fn add_milestone(
     .execute(&pool)
     .await
     {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(json!({"id": milestone_id, "name": name})),
-        ),
+        Ok(_) => created(&MILESTONES, &pool, &milestone_id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1355,7 +1839,7 @@ async fn create_cycle(
         .execute(&pool)
         .await
     {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id}))),
+        Ok(_) => created(&CYCLES, &pool, &id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1378,7 +1862,7 @@ async fn create_label(
     .execute(&pool)
     .await
     {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id}))),
+        Ok(_) => created(&LABELS, &pool, &id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1406,7 +1890,7 @@ async fn create_team(
     .execute(&pool)
     .await
     {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id, "key": key}))),
+        Ok(_) => created_row(&pool, &format!("SELECT {TEAM_COLUMNS} FROM tracker_teams WHERE id = ?"), &id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1416,14 +1900,16 @@ async fn patch_team(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    if let Some(name) = body.get("name").and_then(Value::as_str) {
-        let _ = sqlx::query("UPDATE tracker_teams SET name = ? WHERE id = ?")
-            .bind(name)
-            .bind(&id)
-            .execute(&pool)
-            .await;
+    let system: Option<i64> = sqlx::query_scalar("SELECT system FROM tracker_teams WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten();
+    if system == Some(1) {
+        return fail(StatusCode::CONFLICT, "system teams are managed by the hub");
     }
-    ok(json!({"id": id}))
+    patch_resource(&TEAMS, &pool, &id, &body).await
 }
 
 async fn create_state(
@@ -1446,7 +1932,7 @@ async fn create_state(
     .execute(&pool)
     .await
     {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id}))),
+        Ok(_) => created(&STATES, &pool, &id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1474,7 +1960,7 @@ async fn create_user(
     .execute(&pool)
     .await
     {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id, "name": name, "display_name": display}))),
+        Ok(_) => created_user(&pool, &id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1484,14 +1970,14 @@ async fn patch_user(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    if let Some(display) = body.get("display_name").and_then(Value::as_str) {
-        let _ = sqlx::query("UPDATE tracker_users SET display_name = ? WHERE id = ?")
-            .bind(display)
-            .bind(&id)
-            .execute(&pool)
-            .await;
+    let (status, response) = patch_resource(&USERS, &pool, &id, &body).await;
+    if status != StatusCode::OK {
+        return (status, response);
     }
-    ok(json!({"id": id}))
+    match created_user(&pool, &id).await {
+        (StatusCode::CREATED, user) => (StatusCode::OK, user),
+        other => other,
+    }
 }
 
 async fn create_view(
@@ -1500,18 +1986,35 @@ async fn create_view(
 ) -> (StatusCode, Json<Value>) {
     let id = uuid::Uuid::new_v4().to_string();
     let now = now_rfc3339();
+    let owner = match body_user_or_me(&pool, &json!({"user_id": body.get("owner_id")})).await {
+        Ok(owner) => owner,
+        Err(error) => return fail(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let json_text = |key: &str| {
+        body.get(key)
+            .filter(|value| value.is_object())
+            .map(Value::to_string)
+            .unwrap_or_else(|| "{}".to_owned())
+    };
     match sqlx::query(
-        "INSERT INTO tracker_views(id, name, owner_id, created_at, updated_at) VALUES(?,?,?,?,?)",
+        "INSERT INTO tracker_views(id, name, description, icon, color, owner_id, team_id, filters, display, shared, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(body.get("name").and_then(Value::as_str).unwrap_or("View"))
-    .bind(body.get("owner_id").and_then(Value::as_str).unwrap_or(""))
+    .bind(body.get("description").and_then(Value::as_str))
+    .bind(body.get("icon").and_then(Value::as_str).unwrap_or("layers"))
+    .bind(body.get("color").and_then(Value::as_str))
+    .bind(&owner)
+    .bind(body.get("team_id").and_then(Value::as_str))
+    .bind(json_text("filters"))
+    .bind(json_text("display"))
+    .bind(i64::from(body.get("shared").and_then(Value::as_bool).unwrap_or(true)))
     .bind(&now)
     .bind(&now)
     .execute(&pool)
     .await
     {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id}))),
+        Ok(_) => created(&VIEWS, &pool, &id).await,
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1520,7 +2023,11 @@ async fn toggle_favorite(
     State(pool): State<SqlitePool>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    let user_id = body.get("user_id").and_then(Value::as_str).unwrap_or("");
+    let user_id = match body_user_or_me(&pool, &body).await {
+        Ok(user) => user,
+        Err(error) => return fail(StatusCode::BAD_REQUEST, error.to_string()),
+    };
+    let user_id = user_id.as_str();
     let kind = body.get("kind").and_then(Value::as_str).unwrap_or("issue");
     let target = body.get("target_id").and_then(Value::as_str).unwrap_or("");
     let existing: Option<String> = sqlx::query_scalar(
@@ -1538,7 +2045,7 @@ async fn toggle_favorite(
             .bind(&id)
             .execute(&pool)
             .await;
-        return ok(json!({"on": false, "id": id}));
+        return ok(json!({"favorited": false, "favorite": Value::Null}));
     }
     let id = uuid::Uuid::new_v4().to_string();
     match sqlx::query("INSERT INTO tracker_favorites(id, user_id, kind, target_id) VALUES(?,?,?,?)")
@@ -1549,7 +2056,10 @@ async fn toggle_favorite(
         .execute(&pool)
         .await
     {
-        Ok(_) => ok(json!({"on": true, "id": id})),
+        Ok(_) => ok(json!({
+            "favorited": true,
+            "favorite": {"id": id, "user_id": user_id, "kind": kind, "target_id": target, "sort_order": 0},
+        })),
         Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }
@@ -1562,11 +2072,14 @@ async fn list_notifications(State(pool): State<SqlitePool>) -> (StatusCode, Json
 }
 
 async fn read_all_notifications(State(pool): State<SqlitePool>) -> (StatusCode, Json<Value>) {
-    let _ = sqlx::query("UPDATE tracker_notifications SET read_at = ? WHERE read_at IS NULL")
+    match sqlx::query("UPDATE tracker_notifications SET read_at = ? WHERE read_at IS NULL")
         .bind(now_rfc3339())
         .execute(&pool)
-        .await;
-    ok(json!({"ok": true}))
+        .await
+    {
+        Ok(done) => ok(json!({"updated": done.rows_affected()})),
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 async fn patch_notification(
@@ -1574,14 +2087,37 @@ async fn patch_notification(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    if body.get("read").and_then(Value::as_bool) == Some(true) {
-        let _ = sqlx::query("UPDATE tracker_notifications SET read_at = ? WHERE id = ?")
-            .bind(now_rfc3339())
-            .bind(&id)
-            .execute(&pool)
-            .await;
+    let now = now_rfc3339();
+    let stamp = |flag: Option<bool>| flag.map(|on| on.then(|| now.clone()));
+    let updates: [(&str, Option<Option<String>>); 3] = [
+        ("read_at", stamp(body.get("read").and_then(Value::as_bool))),
+        ("archived_at", stamp(body.get("archived").and_then(Value::as_bool))),
+        (
+            "snoozed_until",
+            body.get("snoozed_until")
+                .map(|value| value.as_str().map(str::to_owned)),
+        ),
+    ];
+    for (column, value) in updates {
+        let Some(value) = value else { continue };
+        let sql = format!("UPDATE tracker_notifications SET {column} = ? WHERE id = ?");
+        if let Err(error) = sqlx::query(&sql).bind(value).bind(&id).execute(&pool).await {
+            return fail(StatusCode::BAD_REQUEST, error.to_string());
+        }
     }
-    ok(json!({"id": id}))
+    match rows_json_bound(
+        &pool,
+        "SELECT id, user_id, issue_id, project_id, kind, actor_id, body, created_at, read_at, snoozed_until, archived_at FROM tracker_notifications WHERE id = ?",
+        &id,
+    )
+    .await
+    {
+        Ok(rows) => match rows.into_iter().next() {
+            Some(row) => ok(row),
+            None => fail(StatusCode::NOT_FOUND, format!("notification {id} was not found")),
+        },
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 async fn search(
@@ -1606,7 +2142,21 @@ async fn search(
                     items.push(issue);
                 }
             }
-            ok(json!({"items": items}))
+            let needle = q.to_lowercase();
+            let projects: Vec<Value> = match projects_json(&pool).await {
+                Ok(projects) => projects
+                    .into_iter()
+                    .filter(|project| {
+                        ["name", "summary", "description"].iter().any(|key| {
+                            project[*key]
+                                .as_str()
+                                .is_some_and(|text| text.to_lowercase().contains(&needle))
+                        })
+                    })
+                    .collect(),
+                Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+            };
+            ok(json!({"issues": items, "projects": projects}))
         }
         Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
@@ -1652,12 +2202,207 @@ async fn session_answer(
     )
 }
 
-async fn patch_row() -> StatusCode {
-    StatusCode::NO_CONTENT
+struct Resource {
+    table: &'static str,
+    columns: &'static str,
+    editable: &'static [&'static str],
+    touches_updated_at: bool,
+    in_use: Option<&'static str>,
 }
 
-async fn delete_named() -> StatusCode {
-    StatusCode::NO_CONTENT
+const LABELS: Resource = Resource {
+    table: "tracker_labels",
+    columns: "id, team_id, name, color, parent_id, description, created_at",
+    editable: &["name", "color", "parent_id", "description"],
+    touches_updated_at: false,
+    in_use: None,
+};
+const STATES: Resource = Resource {
+    table: "tracker_states",
+    columns: "id, team_id, name, type, color, position, lane_status, description, session_state, lane_paused",
+    editable: &["name", "color", "position", "description", "type"],
+    touches_updated_at: false,
+    in_use: Some("SELECT COUNT(*) FROM tracker_issues WHERE state_id = ?"),
+};
+const CYCLES: Resource = Resource {
+    table: "tracker_cycles",
+    columns: "id, team_id, number, name, description, starts_at, ends_at, completed_at",
+    editable: &["name", "description", "starts_at", "ends_at", "completed_at"],
+    touches_updated_at: false,
+    in_use: None,
+};
+const VIEWS: Resource = Resource {
+    table: "tracker_views",
+    columns: "id, name, description, icon, color, owner_id, team_id, filters, display, shared, created_at, updated_at",
+    editable: &["name", "description", "icon", "color", "team_id", "filters", "display", "shared"],
+    touches_updated_at: true,
+    in_use: None,
+};
+const MILESTONES: Resource = Resource {
+    table: "tracker_milestones",
+    columns: "id, project_id, name, target_date, sort_order",
+    editable: &["name", "target_date", "sort_order"],
+    touches_updated_at: false,
+    in_use: None,
+};
+const PROJECT_UPDATES: Resource = Resource {
+    table: "tracker_project_updates",
+    columns: "id, project_id, user_id, health, body, created_at, updated_at",
+    editable: &["health", "body"],
+    touches_updated_at: true,
+    in_use: None,
+};
+const PROJECTS: Resource = Resource {
+    table: "tracker_projects",
+    columns: "id, name, description, summary, icon, color, status, priority, lead_id, start_date, target_date, sort_order, created_at, updated_at, archived_at",
+    editable: &["name", "description", "summary", "icon", "color", "status", "priority", "lead_id", "start_date", "target_date", "sort_order", "archived_at"],
+    touches_updated_at: true,
+    in_use: None,
+};
+const TEAMS: Resource = Resource {
+    table: "tracker_teams",
+    columns: TEAM_COLUMNS,
+    editable: &["name", "icon", "color", "cycles_enabled", "cycle_weeks", "triage_enabled", "sort_order"],
+    touches_updated_at: false,
+    in_use: None,
+};
+const USERS: Resource = Resource {
+    table: "tracker_users",
+    columns: "id, name, display_name, email, avatar_color, kind, model, is_me, created_at",
+    editable: &["name", "display_name", "email", "avatar_color"],
+    touches_updated_at: false,
+    in_use: None,
+};
+
+fn resource_routes(resource: &'static Resource) -> axum::routing::MethodRouter<SqlitePool> {
+    axum::routing::patch(
+        move |State(pool): State<SqlitePool>, Path(id): Path<String>, Json(body): Json<Value>| async move {
+            patch_resource(resource, &pool, &id, &body).await
+        },
+    )
+    .delete(
+        move |State(pool): State<SqlitePool>, Path(id): Path<String>| async move {
+            delete_resource(resource, &pool, &id).await
+        },
+    )
+}
+
+async fn load_resource(resource: &Resource, pool: &SqlitePool, id: &str) -> Result<Option<Value>> {
+    let sql = format!("SELECT {} FROM {} WHERE id = ?", resource.columns, resource.table);
+    Ok(rows_json_bound(pool, &sql, id).await?.into_iter().next())
+}
+
+const TEAM_COLUMNS: &str = "id, key, name, icon, color, issue_seq, system, cycles_enabled, cycle_weeks, triage_enabled, sort_order, created_at";
+
+async fn created(resource: &Resource, pool: &SqlitePool, id: &str) -> (StatusCode, Json<Value>) {
+    let sql = format!("SELECT {} FROM {} WHERE id = ?", resource.columns, resource.table);
+    created_row(pool, &sql, id).await
+}
+
+async fn created_row(pool: &SqlitePool, sql: &str, id: &str) -> (StatusCode, Json<Value>) {
+    match rows_json_bound(pool, sql, id).await {
+        Ok(rows) => match rows.into_iter().next() {
+            Some(row) => (StatusCode::CREATED, Json(row)),
+            None => fail(StatusCode::NOT_FOUND, format!("{id} was not found")),
+        },
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn created_project(pool: &SqlitePool, id: &str) -> (StatusCode, Json<Value>) {
+    match projects_json(pool).await {
+        Ok(projects) => match projects.into_iter().find(|project| project["id"] == id) {
+            Some(project) => (StatusCode::CREATED, Json(project)),
+            None => fail(StatusCode::NOT_FOUND, format!("project {id} was not found")),
+        },
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn created_user(pool: &SqlitePool, id: &str) -> (StatusCode, Json<Value>) {
+    let row = sqlx::query(
+        "SELECT id, name, display_name, email, avatar_color, kind, model, is_me, created_at FROM tracker_users WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await;
+    match row {
+        Ok(Some(row)) => match user_json_row(&row) {
+            Ok(user) => (StatusCode::CREATED, Json(user)),
+            Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        },
+        Ok(None) => fail(StatusCode::NOT_FOUND, format!("user {id} was not found")),
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn patch_resource(
+    resource: &Resource,
+    pool: &SqlitePool,
+    id: &str,
+    body: &Value,
+) -> (StatusCode, Json<Value>) {
+    match load_resource(resource, pool, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return fail(StatusCode::NOT_FOUND, format!("{id} was not found")),
+        Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+    let Some(fields) = body.as_object() else {
+        return fail(StatusCode::BAD_REQUEST, "expected a JSON object");
+    };
+    for (column, value) in fields {
+        if !resource.editable.contains(&column.as_str()) {
+            continue;
+        }
+        let sql = format!("UPDATE {} SET {column} = ? WHERE id = ?", resource.table);
+        let query = sqlx::query(&sql);
+        let query = match value {
+            Value::Null => query.bind(None::<String>),
+            Value::Bool(flag) => query.bind(i64::from(*flag)),
+            Value::Number(number) if number.is_i64() => query.bind(number.as_i64()),
+            Value::Number(number) => query.bind(number.as_f64()),
+            Value::String(text) => query.bind(text.clone()),
+            other => query.bind(other.to_string()),
+        };
+        if let Err(error) = query.bind(id).execute(pool).await {
+            return fail(StatusCode::BAD_REQUEST, error.to_string());
+        }
+    }
+    if resource.touches_updated_at {
+        let sql = format!("UPDATE {} SET updated_at = ? WHERE id = ?", resource.table);
+        if let Err(error) = sqlx::query(&sql).bind(now_rfc3339()).bind(id).execute(pool).await {
+            return fail(StatusCode::BAD_REQUEST, error.to_string());
+        }
+    }
+    match load_resource(resource, pool, id).await {
+        Ok(Some(row)) => ok(row),
+        Ok(None) => fail(StatusCode::NOT_FOUND, format!("{id} was not found")),
+        Err(error) => fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn delete_resource(
+    resource: &Resource,
+    pool: &SqlitePool,
+    id: &str,
+) -> (StatusCode, Json<Value>) {
+    if let Some(sql) = resource.in_use {
+        match sqlx::query_scalar::<_, i64>(sql).bind(id).fetch_one(pool).await {
+            Ok(0) => {}
+            Ok(count) => {
+                return fail(StatusCode::CONFLICT, format!("{count} issues still use it"))
+            }
+            Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        }
+    }
+    let sql = format!("DELETE FROM {} WHERE id = ?", resource.table);
+    match sqlx::query(&sql).bind(id).execute(pool).await {
+        Ok(done) if done.rows_affected() == 0 => {
+            fail(StatusCode::NOT_FOUND, format!("{id} was not found"))
+        }
+        Ok(_) => (StatusCode::NO_CONTENT, Json(Value::Null)),
+        Err(error) => fail(StatusCode::BAD_REQUEST, error.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -1791,6 +2536,138 @@ mod tests {
 
     #[tokio::test]
     async fn session_issues_are_sync_owned_and_deleting_one_tombstones_it() {
+        session_issue_case().await;
+    }
+
+    #[tokio::test]
+    async fn web_bundle_reads_archived_list_and_detail_by_identifier() {
+        let pool = crate::storage::memory().await.unwrap();
+        seed(&pool).await;
+        let app = router().with_state(pool.clone());
+        let (status, issue) = call(&app, "POST", "/issues", r#"{"team_id":"t1","title":"Ledger"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = issue["id"].as_str().unwrap().to_owned();
+        let (status, _) = call(&app, "POST", &format!("/issues/{id}/comments"), r#"{"body":"noted"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        for flag in ["1", "true", "false"] {
+            let (status, list) = call(&app, "GET", &format!("/issues?include_archived={flag}"), "").await;
+            assert_eq!(status, StatusCode::OK, "include_archived={flag}");
+            assert_eq!(list["items"].as_array().unwrap().len(), 1);
+        }
+        let (status, detail) = call(&app, "GET", "/issues/agt-1", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["issue"]["id"], id.as_str());
+        assert_eq!(detail["comments"][0]["body"], "noted");
+        assert_eq!(detail["comments"][0]["reactions"], json!([]));
+        assert!(detail["activity"].as_array().unwrap().len() >= 2);
+        assert_eq!(detail["children"], json!([]));
+        let (status, sub) = call(&app, "POST", &format!("/issues/{id}/subscribe"), r#"{"subscribed":false}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(sub["subscribed"], false);
+        let (status, _) = call(&app, "GET", "/issues/AGT-404", "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn web_bundle_mutations_return_the_objects_it_upserts() {
+        let pool = crate::storage::memory().await.unwrap();
+        seed(&pool).await;
+        let app = router().with_state(pool.clone());
+        let (status, issue) = call(&app, "POST", "/issues", r#"{"team_id":"t1","title":"Ledger"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let issue_id = issue["id"].as_str().unwrap().to_owned();
+
+        let (status, label) = call(&app, "POST", "/labels", r##"{"name":"bug","color":"#f00","team_id":"t1"}"##).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(label["name"], "bug");
+        let label_id = label["id"].as_str().unwrap().to_owned();
+        let (status, label) = call(&app, "PATCH", &format!("/labels/{label_id}"), r#"{"name":"defect","id":"hijack"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(label["name"], "defect");
+        assert_eq!(label["id"], label_id.as_str());
+        let (status, _) = call(&app, "DELETE", &format!("/labels/{label_id}"), "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = call(&app, "PATCH", &format!("/labels/{label_id}"), r#"{"name":"x"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = call(&app, "DELETE", "/states/s1", "").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let (status, view) = call(&app, "POST", "/views", r#"{"name":"Mine","filters":{"priorities":[1]},"display":{"layout":"board"}}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(view["owner_id"], "u1");
+        assert!(view["filters"].as_str().unwrap().contains("priorities"));
+
+        let (status, comment) = call(&app, "POST", &format!("/issues/{issue_id}/comments"), r#"{"body":"first"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(comment["reactions"], json!([]));
+        let comment_id = comment["id"].as_str().unwrap().to_owned();
+        let (status, comment) = call(&app, "POST", &format!("/comments/{comment_id}/reactions"), r#"{"emoji":"+1"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(comment["reactions"][0]["user_ids"], json!(["u1"]));
+        let (status, comment) = call(&app, "PATCH", &format!("/comments/{comment_id}"), r#"{"resolved":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(comment["body"], "first");
+        assert!(comment["resolved_at"].is_string());
+
+        let (status, favorite) = call(&app, "POST", "/favorites", &json!({"kind":"issue","target_id":issue_id}).to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(favorite["favorited"], true);
+        assert_eq!(favorite["favorite"]["user_id"], "u1");
+        let (status, favorite) = call(&app, "POST", "/favorites", &json!({"kind":"issue","target_id":issue_id}).to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(favorite["favorited"], false);
+
+        sqlx::query("INSERT INTO tracker_notifications(id, user_id, kind, body, created_at) VALUES('n1','u1','assigned','x','2020'),('n2','u1','assigned','y','2020')")
+            .execute(&pool).await.unwrap();
+        let (status, notification) = call(&app, "PATCH", "/notifications/n1", r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(notification["archived_at"].is_string());
+        assert!(notification["read_at"].is_null());
+        let (status, result) = call(&app, "POST", "/notifications/read-all", "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["updated"], 2);
+
+        let (_, label) = call(&app, "POST", "/labels", r##"{"name":"ops","color":"#0f0"}"##).await;
+        let label_id = label["id"].as_str().unwrap().to_owned();
+        let (status, patched) = call(
+            &app,
+            "PATCH",
+            "/issues/AGT-1",
+            &json!({"priority": 2, "assignee_id": "u2", "add_label_ids": [label_id], "archived": true}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(patched["priority"], 2);
+        assert_eq!(patched["assignee_id"], "u2");
+        assert_eq!(patched["label_ids"], json!([label_id]));
+        assert!(patched["archived_at"].is_string());
+        let (_, batch) = call(&app, "POST", "/issues/batch", &json!({"ids": [issue_id], "patch": {"priority": 4, "archived": false}}).to_string()).await;
+        assert_eq!(batch["items"][0]["priority"], 4);
+        assert!(batch["items"][0]["archived_at"].is_null());
+
+        let (status, project) = call(&app, "POST", "/projects", r#"{"name":"Ledger rollout"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let (status, _) = call(&app, "POST", &format!("/projects/{project_id}/milestones"), r#"{"name":"Beta"}"#).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, project) = call(&app, "PATCH", &format!("/projects/{project_id}"), r#"{"status":"started","team_ids":["t1"]}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(project["status"], "started");
+        assert_eq!(project["team_ids"], json!(["t1"]));
+        let (_, detail) = call(&app, "GET", &format!("/projects/{project_id}"), "").await;
+        assert_eq!(detail["milestones"][0]["name"], "Beta");
+        let (_, found) = call(&app, "GET", "/search?q=rollout", "").await;
+        assert_eq!(found["projects"][0]["id"], project_id.as_str());
+        assert!(found["issues"].is_array());
+
+        let (status, _) = call(&app, "DELETE", "/issues/AGT-1", "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = call(&app, "GET", &format!("/issues/{issue_id}"), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    async fn session_issue_case() {
         let pool = crate::storage::memory().await.unwrap();
         seed(&pool).await;
         let live = vec![(
@@ -1812,8 +2689,9 @@ mod tests {
         let app = router().with_state(pool.clone());
         let (status, issue) = call(&app, "GET", &format!("/issues/{id}"), "").await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(issue["session"]["session_id"], "abc");
-        assert_eq!(issue["session"]["state"], "idle");
+        assert_eq!(issue["issue"]["session"]["session_id"], "abc");
+        assert_eq!(issue["issue"]["session"]["state"], "idle");
+        assert_eq!(issue["session_detail"]["session_id"], "abc");
         let (status, _) = call(&app, "PATCH", &format!("/issues/{id}"), r#"{"title":"x"}"#).await;
         assert_eq!(status, StatusCode::CONFLICT);
         // Ended is only reachable by interrupting a streaming session; an idle one is refused.
