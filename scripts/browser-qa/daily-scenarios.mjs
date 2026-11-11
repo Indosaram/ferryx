@@ -1077,6 +1077,12 @@ w.connect('destroy', Gtk.main_quit); w.show_all(); Gtk.main()
       // the foreground window with the item selected before the drag press.
       ctx.host.click(from[0], from[1]);
       await sleep(600);
+      // A click on an item that is already selected starts Explorer's rename: Windows run
+      // 42987064420 (probe-274) shows "upload-fixture" in a rename box after this click, and
+      // the drag press then only selected "-fixture" in it, so no file drag ever started.
+      // Escape ends a rename and leaves the item selected; with no rename it does nothing.
+      ctx.host.key({ key: "Escape" });
+      await sleep(300);
     } else {
       ctx.run("open", ["-R", file.path]);
       await sleep(3500);
