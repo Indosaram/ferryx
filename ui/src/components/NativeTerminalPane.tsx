@@ -1504,7 +1504,9 @@ export function NativeTerminalPane({
       // A session another window of this process already presents is joined as a per-window
       // viewer: the pane adopts the live attach tuple verbatim instead of minting a newer attempt,
       // so the other window keeps its binding and both windows render and drive the same PTY.
-      const viewerReceipt = !getDurableNativeBinding(targetId) && session?.backendSessionId === targetId && completedSpawn
+      // This also runs when this webview already holds an older binding (a tab shown again after
+      // the other window took the session while it was hidden), so windows never ping-pong.
+      const viewerReceipt = session?.backendSessionId === targetId && completedSpawn
         ? await run(invoke<NativeTerminalViewerReceipt>("cmd_native_terminal_attach_viewer", {
             sessionId: targetId,
             ...(initialGeometry
