@@ -47,6 +47,10 @@ function tokenize(text: string): string[] | null {
   return tokens;
 }
 
+const isHostname = (value: string) => /^[A-Za-z0-9._:-]+$/.test(value) && !value.startsWith("-");
+const isUsername = (value: string) => /^[A-Za-z0-9._-]+$/.test(value);
+const stripScheme = (value: string) => value.split(",").map(part => part.replace(/^ssh:\/\//i, "").replace(/\/+$/, "")).join(",");
+
 function parsePort(value: string): number | undefined {
   if (!/^\d{1,5}$/.test(value)) return undefined;
   const port = Number(value);
@@ -80,8 +84,7 @@ function parseDestination(raw: string): ParsedSshTarget | null {
       if (port === undefined) return null;
     }
   }
-  if (!hostname || /[\s/@]/.test(hostname) || hostname.startsWith("-")) return null;
-  if (username !== undefined && /[\s:]/.test(username)) return null;
+  if (!isHostname(hostname) || (username !== undefined && !isUsername(username))) return null;
   return { hostname, username, port };
 }
 
@@ -93,7 +96,7 @@ function applyOption(target: Partial<ParsedSshTarget>, keyValue: string) {
     case "user": target.username = value; break;
     case "port": target.port = parsePort(value) ?? target.port; break;
     case "hostname": target.hostname = value; break;
-    case "proxyjump": if (value.toLowerCase() !== "none") target.jumpHost = value; break;
+    case "proxyjump": if (value.toLowerCase() !== "none") target.jumpHost = stripScheme(value); break;
     case "identityfile": target.identityFile = value; break;
   }
 }
@@ -125,7 +128,7 @@ export function parseSshTarget(input: string): ParsedSshTarget | null {
         const value = inline !== "" ? inline : tokens[++i];
         if (value === undefined) return null;
         switch (flag) {
-          case "J": flags.jumpHost = value; break;
+          case "J": flags.jumpHost = stripScheme(value); break;
           case "l": flags.username = value; break;
           case "p": { const port = parsePort(value); if (port === undefined) return null; flags.port = port; break; }
           case "i": flags.identityFile = value; break;
@@ -147,6 +150,7 @@ export function parseSshTarget(input: string): ParsedSshTarget | null {
 
   const result: ParsedSshTarget = { hostname: flags.hostname ?? destination.hostname };
   const username = flags.username ?? destination.username;
+  if (!isHostname(result.hostname) || (username !== undefined && !isUsername(username))) return null;
   const port = flags.port ?? destination.port;
   if (username) result.username = username;
   if (port !== undefined) result.port = port;

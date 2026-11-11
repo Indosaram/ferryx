@@ -66,14 +66,22 @@ export function SshCommandField({ disabled, onParsed, compact }: {
           setText(value);
           const parsed = value.trim() ? parseSshTarget(value) : null;
           setResult(parsed);
-          if (parsed) onParsed(parsed);
+          // Typing only previews; a paste, Enter or leaving the field fills the form, so a
+          // half-typed command never overwrites fields edited by hand.
+          if (parsed && (event.nativeEvent as InputEvent).inputType === "insertFromPaste") onParsed(parsed);
+        }}
+        onBlur={() => { if (result) onParsed(result); }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          if (result) onParsed(result);
         }}
       />
       <p id={`${id}-hint`} role="status" className={invalid ? "text-[11px] text-destructive" : "flex items-center gap-1 text-[11px] text-muted-foreground"}>
         {result ? (
           <>
             <CheckCircle2 className="size-3 shrink-0 text-status-success" aria-hidden="true" />
-            <span className="min-w-0 break-all">Filled in {describe(result)}</span>
+            <span className="min-w-0 break-all">{describe(result)}</span>
           </>
         ) : invalid ? (
           "Not an SSH command or user@host address."

@@ -12,6 +12,7 @@ describe("parseSshTarget", () => {
     ["ssh://user@host:2200/", { hostname: "host", username: "user", port: 2200 }],
     ["ssh -l alice -i ~/.ssh/id_ed25519 host", { hostname: "host", username: "alice", identityFile: "~/.ssh/id_ed25519" }],
     ["ssh -o User=bob -o Port=2022 -o ProxyJump=j1,j2 host", { hostname: "host", username: "bob", port: 2022, jumpHost: "j1,j2" }],
+    ["ssh -J ssh://u@bastion:22,j2 h", { hostname: "h", jumpHost: "u@bastion:22,j2" }],
     ["ssh -At -J jump@bastion:2222 root@[fe80::1]:22", { hostname: "fe80::1", username: "root", port: 22, jumpHost: "jump@bastion:2222" }],
     ["ssh root@10.0.0.1 tmux attach", { hostname: "10.0.0.1", username: "root" }],
     ["/usr/bin/ssh -i '/keys/my key' me@h", { hostname: "h", username: "me", identityFile: "/keys/my key" }],
@@ -25,7 +26,7 @@ describe("parseSshTarget", () => {
     expect(parseSshTarget("ssh -p 2222 user@host:22")).toEqual({ hostname: "host", username: "user", port: 2222 });
   });
 
-  it.each(["", "ssh", "ssh -J indo", "ssh -p notaport host", "user@host:99999", "'unterminated", "user@", "a b@c/d"])(
+  it.each(["", "ssh", "ssh -J indo", "ssh -p notaport host", "user@host:99999", "'unterminated", "user@", "a b@c/d", "root@fe80::1%en0", "[fe80::1]x", "Host=dev", "ssh -l user@corp.com h", "ssh -l 'a b' h"])(
     "rejects %j",
     (input) => {
       expect(parseSshTarget(input)).toBeNull();
