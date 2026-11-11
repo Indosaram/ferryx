@@ -390,3 +390,137 @@ async fn the_agent_routes_sit_behind_the_hub_host_guard() {
         .unwrap();
     assert_eq!(cross.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn lane_detail_serves_the_panel_row_history_transcript_and_events() {
+    let pool = crate::storage::memory().await.unwrap();
+    lane(&pool, "a", "working", "").await;
+    sqlx::query("UPDATE lanes SET claim_evidence = 'ev', turns_run = 3, thread_channel_id = 'slack:C1:1.2' WHERE key = 'a'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::lanes::state::transition(&pool, "a", crate::lanes::state::LaneStatus::Blocked, Some("stuck"))
+        .await
+        .unwrap();
+    crate::lanes::state::transition(&pool, "a", crate::lanes::state::LaneStatus::Working, Some("unstuck"))
+        .await
+        .unwrap();
+    for n in 0..205 {
+        sqlx::query("INSERT INTO lane_transcript(lane_key, at, role, text) VALUES('a', '2020', 'assistant', ?)")
+            .bind(format!("t{n}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES('a', 'lead', 'note', ?, '2020')")
+            .bind(format!("e{n}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = router_with(pool.clone(), None);
+    let (status, _) = call(&app, "GET", "/lanes/zz", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = call(&app, "GET", "/lanes/a", "").await;
+    assert_eq!(status, StatusCode::OK);
+    let lane = &body["lane"];
+    assert_eq!(lane["key"], "a");
+    assert_eq!(lane["status"], "working");
+    assert_eq!(lane["done_signals"], "[]");
+    assert_eq!(lane["claim_evidence"], "ev");
+    assert_eq!(lane["turns_run"], 3);
+    assert_eq!(lane["thread_channel_id"], "slack:C1:1.2");
+    assert_eq!(lane["lead_session_key"], "lead");
+    for column in ["model", "objection", "last_turn_outcome", "last_report"] {
+        assert!(lane[column].is_null(), "{column}");
+    }
+    let history = body["history"].as_array().unwrap();
+    assert_eq!(
+        history.iter().map(|h| h["to_status"].as_str().unwrap()).collect::<Vec<_>>(),
+        vec!["blocked", "working"]
+    );
+    assert_eq!(history[1]["reason"], "unstuck");
+    let transcript = body["transcript"].as_array().unwrap();
+    assert_eq!(transcript.len(), 200);
+    assert_eq!(transcript[0]["text"], "t5");
+    assert_eq!(transcript[199]["text"], "t204");
+    assert_eq!(transcript[0]["role"], "assistant");
+    assert!(transcript[0]["id"].as_i64().unwrap() < transcript[1]["id"].as_i64().unwrap());
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 200);
+    assert_eq!(events[0]["body"], "e5");
+    assert_eq!(events[199]["body"], "e204");
+    let mut keys: Vec<String> = events[0].as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, vec!["body", "created_at", "id", "kind"]);
+}
+
+#[tokio::test]
+async fn a_supervisor_owned_lane_is_refused_before_the_transition_is_judged() {
+    use crate::goals::contract::RequirementSpec;
+    use crate::supervisor::admission::{
+        submit_work, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
+    };
+    const OWNER: &str = "qa-owner";
+    let pool = crate::storage::memory().await.unwrap();
+    crate::supervisor::provision_owner(&pool, OWNER, "qa", "qa:qa", "host-a", "/work/qa/.git")
+        .await
+        .unwrap();
+    let actor = ActorContext {
+        principal: OWNER.into(),
+        source_adapter: crate::supervisor::ChannelProvider::Cli,
+        source_message_id: "m-1".into(),
+        source_body: "Create result.txt containing READY. Run the verifier.".into(),
+        channel_binding_id: None,
+        choices: OwnerChoices::default(),
+    };
+    let work = SubmitWork {
+        project_id: None,
+        host_id: None,
+        kind: None,
+        title: "Write result.txt".into(),
+        instruction: "Create result.txt containing READY.".into(),
+        requirements: vec![RequirementSpec {
+            id: "r1".into(),
+            text: "result.txt contains READY".into(),
+            verifier: "verify.sh exits 0".into(),
+        }],
+        cwd: None,
+        operations: OperationClass::BASELINE.to_vec(),
+        turn_limit: None,
+    };
+    let key = match submit_work(&pool, &actor, &work).await.unwrap() {
+        SubmitOutcome::Admitted(work) => work.receipt.lane_key,
+        other => panic!("expected an admitted goal, got {other:?}"),
+    };
+    let status_of = || async {
+        sqlx::query_scalar::<_, String>("SELECT status FROM lanes WHERE key = ?")
+            .bind(&key)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let before = status_of().await;
+    let app = router_with(pool.clone(), None);
+    // An unforced close of a non-verified lane is also illegal; ownership is reported first.
+    for action in ["close", "send", "object", "reopen"] {
+        let (status, body) = call(
+            &app,
+            "POST",
+            &format!("/lanes/{key}/action"),
+            &json!({"action": action}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{action}");
+        assert!(
+            body["error"].as_str().unwrap().starts_with("SUPERVISOR_OWNED:"),
+            "{action}: {body}"
+        );
+    }
+    assert_eq!(status_of().await, before);
+    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE lane_key = ?")
+        .bind(&key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(events, 0);
+}

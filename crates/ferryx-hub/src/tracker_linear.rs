@@ -599,7 +599,7 @@ async fn lane_detail_json(pool: &SqlitePool, lane_key: &str) -> Result<Value> {
     }))
 }
 
-async fn rows_json_bound(pool: &SqlitePool, sql: &str, bind: &str) -> Result<Vec<Value>> {
+pub(crate) async fn rows_json_bound(pool: &SqlitePool, sql: &str, bind: &str) -> Result<Vec<Value>> {
     use sqlx::{Column, Row};
     let rows = sqlx::query(sql).bind(bind).fetch_all(pool).await?;
     let mut out = Vec::with_capacity(rows.len());

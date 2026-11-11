@@ -44,6 +44,7 @@ fn router_with<S: Clone + Send + Sync + 'static>(
 ) -> Router<S> {
     Router::new()
         .route("/lanes", get(list_lanes).post(create_lane))
+        .route("/lanes/{key}", get(lane_detail))
         .route("/lanes/{key}/action", post(lane_action))
         .route("/requests", get(requests))
         .route("/sessions", get(sessions))
@@ -161,6 +162,59 @@ async fn list_lanes(State(state): State<AgentState>) -> Reply {
     }
 }
 
+/// Columns the tracker's lane panel reads (`tracker_linear::lane_detail_json` selects them)
+/// that the hub's `lanes` table does not have; served as null so the panel's shape holds.
+const PANEL_ONLY_COLUMNS: [&str; 4] = ["model", "objection", "last_turn_outcome", "last_report"];
+
+/// The issue page's lane panel: every `lanes` column, all `lane_history` rows, and the last
+/// 200 `lane_transcript` and `lane_events` rows, each ascending by id. None for an unknown lane.
+async fn lane_detail_value(pool: &SqlitePool, key: &str) -> Result<Option<Value>> {
+    let lane = crate::tracker_linear::rows_json_bound(pool, "SELECT * FROM lanes WHERE key = ?", key)
+        .await?
+        .into_iter()
+        .next();
+    let Some(Value::Object(mut lane)) = lane else {
+        return Ok(None);
+    };
+    for column in PANEL_ONLY_COLUMNS {
+        lane.entry(column).or_insert(Value::Null);
+    }
+    let history = crate::tracker_linear::rows_json_bound(
+        pool,
+        "SELECT id, at, from_status, to_status, reason FROM lane_history WHERE lane_key = ? ORDER BY id",
+        key,
+    )
+    .await?;
+    let transcript = crate::tracker_linear::rows_json_bound(
+        pool,
+        "SELECT id, at, role, text FROM (SELECT id, at, role, text FROM lane_transcript
+          WHERE lane_key = ? ORDER BY id DESC LIMIT 200) ORDER BY id",
+        key,
+    )
+    .await?;
+    let events = crate::tracker_linear::rows_json_bound(
+        pool,
+        "SELECT id, kind, body, created_at FROM (SELECT id, kind, body, created_at FROM lane_events
+          WHERE lane_key = ? ORDER BY id DESC LIMIT 200) ORDER BY id",
+        key,
+    )
+    .await?;
+    Ok(Some(json!({
+        "lane": Value::Object(lane),
+        "history": history,
+        "transcript": transcript,
+        "events": events,
+    })))
+}
+
+async fn lane_detail(State(state): State<AgentState>, Path(key): Path<String>) -> Reply {
+    match lane_detail_value(&state.pool, &key).await {
+        Ok(Some(detail)) => (StatusCode::OK, Json(detail)),
+        Ok(None) => fail(StatusCode::NOT_FOUND, format!("lane {key} was not found")),
+        Err(error) => internal(error),
+    }
+}
+
 #[derive(Deserialize)]
 struct NewLane {
     #[serde(default)]
@@ -241,6 +295,21 @@ async fn lane_action(
         Ok(Some(_)) => {}
         Ok(None) => return fail(StatusCode::NOT_FOUND, format!("lane {key} was not found")),
         Err(error) => return internal(error),
+    }
+    // Ownership is refused before the transition is judged, as the tracker lane-action does:
+    // an owned lane answers SUPERVISOR_OWNED whatever the action would have done.
+    match crate::supervisor::supervisor_owns_lane(&state.pool, &key).await {
+        Ok(false) => {}
+        Ok(true) => {
+            return fail(
+                StatusCode::CONFLICT,
+                format!(
+                    "{}: lane {key} belongs to a supervisor goal; act on it through the supervisor",
+                    crate::supervisor::SUPERVISOR_OWNED
+                ),
+            )
+        }
+        Err(error) => return fail(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
     let note = body.note.or(body.text).unwrap_or_else(|| action.to_owned());
     if let Err(error) =
