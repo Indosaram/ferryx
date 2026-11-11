@@ -444,13 +444,13 @@ describe("native terminal presentation retention", () => {
     expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-presented", "false");
   });
 
-  it("yields an exited native surface outside macOS so the disconnect overlay is not occluded", async () => {
+  it("retains the exited final frame outside macOS because the status bar docks beside it", async () => {
     vi.spyOn(shortcuts, "isMacShortcutPlatform").mockReturnValue(false);
     const view = render(<NativeTerminalPane session={session()} />);
     await act(async () => {});
     await act(async () => { view.rerender(<NativeTerminalPane session={session(null)} />); });
-    expect(commands("cmd_native_terminal_detach")).toHaveLength(1);
-    expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-presented", "false");
+    expect(commands("cmd_native_terminal_detach")).toHaveLength(0);
+    expect(view.getByTestId("native-terminal-pane")).toHaveAttribute("data-native-terminal-presented", "true");
   });
 
   it("never reattaches a dead PTY when retained-frame geometry recovery is requested", async () => {

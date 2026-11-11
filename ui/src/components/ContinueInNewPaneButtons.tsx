@@ -56,7 +56,7 @@ export function ContinueInNewPaneButtons({
             onClick={() => {
               if (!held) onContinue(mode);
             }}
-            className="w-full max-w-[220px]"
+            className="h-7 text-[11px]"
           >
             <span>{label}</span>
           </Button>

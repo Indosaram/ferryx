@@ -780,7 +780,9 @@ export function NativeTerminalPane({
       suspended,
     });
   }, [covered, paneIdentity, surfaceVisible, suspended, targetSessionId]);
-  const surfaceSessionId = targetSessionId ?? (isExited && !suspended && isMacShortcutPlatform() ? retainedPresentation?.backendSessionId ?? null : null);
+  // The exit/disconnect bar docks outside the native viewport, so the last presented frame is kept
+  // on every platform: no DOM notice sits under the surface for it to occlude.
+  const surfaceSessionId = targetSessionId ?? (isExited && !suspended ? retainedPresentation?.backendSessionId ?? null : null);
   // Exiting stops input, not the presented surface's attachment lifetime.
   // Keep its exact identity even if the exited session drops epoch/generation metadata.
   const bindingKey = targetSessionId
