@@ -1516,13 +1516,18 @@ impl RemoteGatewayState {
     /// Feeds one owner-channel panel frame to phone push. Only a `panel.decision` frame that
     /// carries a new escalation can push; every other frame (retries and recovery are
     /// `panel.action`, finished sessions are `panel.session`) is ignored, and a resolved
-    /// decision (`decision: null`) re-arms its session. Returns how many sends were made now.
+    /// decision (`decision: null`) re-arms its session. A `panel.session` frame that takes the
+    /// session out of `needsYou` withdraws its held push. Returns how many sends were made now.
     pub async fn handle_panel_frame(self: &Arc<Self>, frame: &serde_json::Value) -> usize {
         use ferryx_hub::supervisor::push_policy::{classify_frame, PanelFrame};
         match classify_frame(frame) {
             PanelFrame::Ignore => 0,
             PanelFrame::Resolved { session_ref } => {
                 self.decision_gate.resolved(&session_ref);
+                0
+            }
+            PanelFrame::LeftNeedsYou { session_ref } => {
+                self.decision_gate.left_needs_you(&session_ref);
                 0
             }
             PanelFrame::Decision { session_ref, prompt_id } => {

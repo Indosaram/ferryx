@@ -45,6 +45,7 @@ import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { startSupervisorFeed } from "./lib/supervisor";
+import { startDaemonAttentionFeed } from "./lib/attentionFeed";
 import { usePanelDecisionCount } from "./lib/supervisorPanel/usePanelDecisionCount";
 import { getSetupStatus, setupFinished, setupProjectsFrom } from "./lib/supervisorSetup";
 import { DesktopSupervisorSetupBanner } from "./components/supervisor/DesktopSupervisorSetupBanner";
@@ -1062,6 +1063,8 @@ function WorkspaceApp({
 
   // The supervisor snapshot feeds the setup banner and the panes' supervision; start it once.
   useEffect(() => { void startSupervisorFeed(); }, []);
+  // The daemon's attention groups drive the badge and the agent notifications.
+  useEffect(() => { void startDaemonAttentionFeed(); }, []);
 
   const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget: import("./state/workspaceStore").ActivityNotificationTarget | undefined) => {
     const targets = activityNotificationTargetsRef.current ?? [];
