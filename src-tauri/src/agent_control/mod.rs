@@ -183,6 +183,8 @@ pub struct ProviderReport {
     /// daemon release or a manual reset.
     pub self_reported: bool,
     pub detail: Option<String>,
+    /// How the reported turn ended, when the report says.
+    pub outcome: Option<crate::daemon::protocol::AgentOutcome>,
 }
 
 /// The derived status of one session.
@@ -584,7 +586,7 @@ mod tests {
     }
 
     fn report(state: &str, self_reported: bool) -> ProviderReport {
-        ProviderReport { agent: Some("omo".into()), state: state.into(), self_reported, detail: None }
+        ProviderReport { agent: Some("omo".into()), state: state.into(), self_reported, detail: None, outcome: None }
     }
 
     #[test]

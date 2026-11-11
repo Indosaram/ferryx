@@ -855,6 +855,7 @@ impl DaemonSessionService {
             state: current.state,
             self_reported: current.origin.is_provider_report(),
             detail: current.detail,
+            outcome: current.outcome,
         })
     }
 

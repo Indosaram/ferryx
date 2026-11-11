@@ -149,6 +149,7 @@ async fn observe_entry(
         }
         _ => None,
     };
+    let provider_outcome = provider.as_ref().and_then(|report| report.outcome);
     let mut status = derive_status(provider.as_ref(), detection.map(|found| found.state), pending.is_some());
     // The observer's quiet timer is the only thing that can call a quiet screen idle. When it
     // has already judged this exact screen, read and list report the same state events did.
@@ -191,7 +192,7 @@ async fn observe_entry(
         "state": status.state,
         "stateSource": status.source,
         "stateSince": state_since,
-        "detail": provider.and_then(|report| report.detail),
+        "detail": provider.as_ref().and_then(|report| report.detail.clone()),
         "pending": pending,
         "screenRevision": screen_revision,
         "screenChangedAt": screen_changed_at,
@@ -202,10 +203,63 @@ async fn observe_entry(
     if with_last_line {
         entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
     }
-    if state.machine_services.as_ref().is_some_and(|services| services.sessions.agent_control_failed(session_id)) {
+    let failed = state.machine_services.as_ref().is_some_and(|services| services.sessions.agent_control_failed(session_id));
+    if failed {
         entry["health"] = serde_json::json!({ "type": "failed", "reason": "the agent exited in the middle of a turn" });
     }
+    let completed = state.agent_events.completion(session_id).is_some()
+        || provider_outcome.is_some();
+    let axes = attention_axes(
+        status.state,
+        pending.as_ref().map(|prompt| prompt.kind),
+        failed,
+        completed,
+        read_for(session_id),
+        ownership_for(session_id),
+    );
+    entry["attention"] = serde_json::json!(ferryx_hub::supervisor::panel_contract::Attention::of(axes));
     Ok(Observed { entry, screen })
+}
+
+/// Whether the owner has looked at the session's current episode. The daemon's read store
+/// replaces this seam; until then every episode is unread.
+fn read_for(_session_id: &str) -> ferryx_hub::supervisor::panel_contract::AttentionRead {
+    ferryx_hub::supervisor::panel_contract::AttentionRead::Unread
+}
+
+/// Who acts on the session next, as this daemon knows it. Spawn lineage replaces this seam
+/// with `delegated` for a child pane; the hub alone sets `supervisor`.
+fn ownership_for(_session_id: &str) -> ferryx_hub::supervisor::panel_contract::AttentionOwnership {
+    ferryx_hub::supervisor::panel_contract::AttentionOwnership::Owner
+}
+
+/// The attention axes of one reading. A pending prompt is the demand (an approval or a plan
+/// asks for approval, anything else is a question), else an agent that died mid-turn is an
+/// error. A turn counts as completed once the agent left working (an observer edge) or
+/// reported an outcome.
+fn attention_axes(
+    state: AgentControlState,
+    pending: Option<reference_types::ReferencePromptKind>,
+    failed: bool,
+    completed: bool,
+    read: ferryx_hub::supervisor::panel_contract::AttentionRead,
+    ownership: ferryx_hub::supervisor::panel_contract::AttentionOwnership,
+) -> ferryx_hub::supervisor::panel_contract::AttentionAxes {
+    use ferryx_hub::supervisor::panel_contract::{AttentionActivity, AttentionAxes, AttentionCompletion, AttentionDemand};
+    use reference_types::ReferencePromptKind;
+    let demand = match pending {
+        Some(ReferencePromptKind::Approval | ReferencePromptKind::Plan) => AttentionDemand::Approval,
+        Some(ReferencePromptKind::Question | ReferencePromptKind::Menu) => AttentionDemand::Question,
+        None if failed => AttentionDemand::Error,
+        None => AttentionDemand::None,
+    };
+    let activity = match state {
+        AgentControlState::Working => AttentionActivity::Working,
+        AgentControlState::Blocked | AgentControlState::Idle => AttentionActivity::Stopped,
+        AgentControlState::Unknown => AttentionActivity::Unknown,
+    };
+    let completion = if completed { AttentionCompletion::Reported } else { AttentionCompletion::None };
+    AttentionAxes { demand, activity, completion, read, ownership }
 }
 
 fn observed_at_ms() -> i64 {
@@ -1967,6 +2021,7 @@ mod tests {
             updated_at_ms: 1,
             stale: false,
             health: None,
+            attention: None,
         }
     }
 
@@ -2187,6 +2242,204 @@ mod tests {
         assert!(entry["lastAssistantLine"].is_null(), "a pane with no transcript has no line: {listed}");
         let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
         assert!(read["session"].get("lastAssistantLine").is_some(), "{read}");
+    }
+
+    fn reading(session_id: &str, state: AgentControlState, source: AgentStateSource) -> events::ObservationDraft {
+        events::ObservationDraft {
+            session_id: session_id.to_string(),
+            state,
+            state_source: source,
+            tier: AgentTier::Native,
+            prompt_id: None,
+            kind: None,
+            screen_revision: None,
+            workspace_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_provider_working_to_idle_edge_with_no_outcome_is_unread() {
+        let session_id = "agent-control-attention-edge";
+        let (_backend, state) = pane(session_id, "$ ");
+        let attention = |read: &serde_json::Value| read["session"]["attention"].clone();
+        let before = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+        assert_eq!(attention(&before)["axes"]["completion"], "none", "{before}");
+        assert_ne!(attention(&before)["group"], "unread", "{before}");
+
+        state.agent_events.publish(reading(session_id, AgentControlState::Working, AgentStateSource::Provider));
+        state.agent_events.publish(reading(session_id, AgentControlState::Idle, AgentStateSource::Provider));
+        let after = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+        let attention = attention(&after);
+        assert_eq!(attention["axes"]["completion"], "reported", "{after}");
+        assert_eq!(attention["axes"]["read"], "unread", "{after}");
+        assert_eq!(attention["axes"]["ownership"], "owner", "{after}");
+        assert_eq!(attention["group"], "unread", "{after}");
+
+        state.agent_events.publish(reading(session_id, AgentControlState::Working, AgentStateSource::Provider));
+        let again = state.agent_events.completion(session_id);
+        assert_eq!(again, None, "a new turn ends the completion episode");
+    }
+
+    #[tokio::test]
+    async fn attention_of_a_pane_with_an_open_approval_needs_you() {
+        let session_id = "agent-control-attention-approval";
+        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let listed = handle(&state, AgentControlOp::List).await.expect("list");
+        let attention = &listed["sessions"][0]["attention"];
+        assert_eq!(attention["axes"]["demand"], "approval", "{listed}");
+        assert_eq!(attention["axes"]["activity"], "stopped", "{listed}");
+        assert_eq!(attention["group"], "needsYou", "{listed}");
+    }
+
+    #[test]
+    fn attention_axes_map_prompt_kinds_failure_and_state() {
+        use ferryx_hub::supervisor::panel_contract::{
+            AttentionActivity, AttentionCompletion, AttentionDemand, AttentionOwnership, AttentionRead,
+        };
+        use reference_types::ReferencePromptKind as K;
+        let axes = |state, pending, failed, completed| {
+            attention_axes(state, pending, failed, completed, AttentionRead::Unread, AttentionOwnership::Owner)
+        };
+        assert_eq!(axes(AgentControlState::Blocked, Some(K::Question), false, false).demand, AttentionDemand::Question);
+        assert_eq!(axes(AgentControlState::Blocked, Some(K::Menu), false, false).demand, AttentionDemand::Question);
+        assert_eq!(axes(AgentControlState::Blocked, Some(K::Approval), true, false).demand, AttentionDemand::Approval);
+        assert_eq!(axes(AgentControlState::Blocked, Some(K::Plan), false, false).demand, AttentionDemand::Approval);
+        assert_eq!(axes(AgentControlState::Idle, None, true, false).demand, AttentionDemand::Error);
+        assert_eq!(axes(AgentControlState::Idle, None, false, false).demand, AttentionDemand::None);
+        assert_eq!(axes(AgentControlState::Working, None, false, false).activity, AttentionActivity::Working);
+        assert_eq!(axes(AgentControlState::Unknown, None, false, false).activity, AttentionActivity::Unknown);
+        assert_eq!(axes(AgentControlState::Idle, None, false, true).completion, AttentionCompletion::Reported);
+    }
+
+    struct InertControl;
+
+    #[async_trait::async_trait]
+    impl ferryx_hub::supervisor::panel_contract::SessionControl for InertControl {
+        async fn stop(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef) -> ferryx_hub::error::Result<()> {
+            Ok(())
+        }
+        async fn send(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: &str) -> ferryx_hub::error::Result<()> {
+            Ok(())
+        }
+        async fn answer(
+            &self,
+            _: &ferryx_hub::supervisor::panel_contract::SessionRef,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> ferryx_hub::error::Result<Option<String>> {
+            Err(ferryx_hub::error::HubError::message("this test never answers"))
+        }
+        async fn read_tail(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    /// Autonomy over an in-memory hub whose owner channel refreshes this computer's panes.
+    async fn refreshing_autonomy(state: &Arc<RemoteGatewayState>) -> Arc<ferryx_hub::supervisor::autonomy::Autonomy> {
+        use crate::hub_runtime::panel_autonomy::{OwnerChannel, SessionRefresh};
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let slot: Arc<std::sync::OnceLock<Arc<ferryx_hub::supervisor::autonomy::Autonomy>>> = Arc::default();
+        let sources = {
+            let slot = Arc::clone(&slot);
+            Arc::new(move || {
+                slot.get().map_or_else(Default::default, |autonomy| ferryx_hub::fleet::PanelSources {
+                    log: Some(autonomy.action_log()),
+                    rules: Some(autonomy.rule_store()),
+                    escalations: Some(autonomy.escalation_source()),
+                })
+            })
+        };
+        let channel = OwnerChannel { sessions: Some(SessionRefresh { state: Arc::downgrade(state), sources }) };
+        let autonomy = ferryx_hub::supervisor::autonomy::Autonomy::open(pool, Arc::new(InertControl), Arc::new(channel))
+            .await
+            .unwrap();
+        let _ = slot.set(Arc::clone(&autonomy));
+        autonomy
+    }
+
+    /// The next `panel.session` frame for `session_ref` on the process-wide owner channel.
+    async fn next_panel_session(
+        frames: &mut tokio::sync::broadcast::Receiver<serde_json::Value>,
+        session_ref: &str,
+    ) -> serde_json::Value {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match frames.recv().await {
+                    Ok(frame) if frame["type"] == "panel.session" && frame["sessionRef"] == session_ref => {
+                        return frame["session"].clone()
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => panic!("the owner channel closed"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no panel.session for {session_ref}"))
+    }
+
+    fn local_ref(session_id: &str) -> ferryx_hub::supervisor::panel_contract::SessionRef {
+        ferryx_hub::supervisor::panel_contract::SessionRef::new(&reference_files::reference_host_id(), session_id)
+    }
+
+    #[tokio::test]
+    async fn a_decision_opened_or_resolved_emits_an_overlaid_panel_session() {
+        let session_id = format!("attention-decision-{}", uuid::Uuid::new_v4().simple());
+        let (_backend, state) = pane(&session_id, CLAUDE_APPROVAL);
+        let autonomy = refreshing_autonomy(&state).await;
+        let session_ref = local_ref(&session_id);
+        let mut frames = crate::hub_runtime::subscribe_panel_events();
+        let sequence = state.agent_events.head();
+
+        let mut session = crate::hub_runtime::local_fleet_session(&state, &session_id).await.expect("the pane");
+        session.session_ref = session_ref.clone();
+        autonomy.observe(&session).await;
+        assert_eq!(autonomy.escalation_source().pending().await.unwrap().len(), 1, "a decision opened");
+        let opened = next_panel_session(&mut frames, session_ref.as_str()).await;
+        assert_eq!(opened["attention"]["axes"]["ownership"], "owner", "{opened}");
+        assert_eq!(opened["attention"]["group"], "needsYou", "{opened}");
+
+        autonomy.clear(&session_ref);
+        let resolved = next_panel_session(&mut frames, session_ref.as_str()).await;
+        assert_eq!(resolved["attention"]["group"], "needsYou", "{resolved}");
+        assert_eq!(resolved["state"], opened["state"], "the agent state did not move");
+        assert_eq!(state.agent_events.head(), sequence, "no agent reading was published");
+    }
+
+    #[tokio::test]
+    async fn a_handling_entry_ending_emits_an_overlaid_panel_session() {
+        use ferryx_hub::supervisor::panel_contract::{ActionEntry, ActionKind};
+        let session_id = format!("attention-handling-{}", uuid::Uuid::new_v4().simple());
+        let (_backend, state) = pane(&session_id, CLAUDE_APPROVAL);
+        let autonomy = refreshing_autonomy(&state).await;
+        let session_ref = local_ref(&session_id);
+        let mut frames = crate::hub_runtime::subscribe_panel_events();
+        let sequence = state.agent_events.head();
+        let entry = |live| ActionEntry {
+            id: 0,
+            incident_key: format!("recovery:{session_id}"),
+            session_ref: Some(session_ref.clone()),
+            kind: ActionKind::Retried,
+            summary: "Retrying".into(),
+            basis: "default rule".into(),
+            evidence: Vec::new(),
+            undo: None,
+            live,
+            created_at_ms: 1,
+            updated_at_ms: observed_at_ms(),
+        };
+
+        autonomy.action_log().upsert_incident(entry(true)).await.unwrap();
+        let handled = next_panel_session(&mut frames, session_ref.as_str()).await;
+        assert_eq!(handled["attention"]["axes"]["ownership"], "supervisor", "{handled}");
+        assert_eq!(handled["attention"]["group"], "seen", "{handled}");
+
+        autonomy.action_log().upsert_incident(entry(false)).await.unwrap();
+        let ended = next_panel_session(&mut frames, session_ref.as_str()).await;
+        assert_eq!(ended["attention"]["axes"]["ownership"], "owner", "{ended}");
+        assert_eq!(ended["attention"]["group"], "needsYou", "{ended}");
+        assert_eq!(ended["state"], handled["state"], "the agent state did not move");
+        assert_eq!(state.agent_events.head(), sequence, "no agent reading was published");
     }
 
     #[tokio::test]

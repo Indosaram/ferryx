@@ -442,6 +442,7 @@ mod tests {
             updated_at_ms: 1,
             stale: false,
             health: None,
+            attention: None,
         }
     }
 

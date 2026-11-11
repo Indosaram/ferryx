@@ -2366,6 +2366,7 @@ fn fleet_session(id: &str, question: &str) -> FleetSession {
         updated_at_ms: 1,
         stale: false,
         health: None,
+        attention: None,
     }
 }
 
