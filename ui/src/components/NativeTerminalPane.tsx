@@ -557,10 +557,23 @@ export function dragDropPositionToLogical(
  * pane's. At DPR 1 a 0.5 px offset is a full 50/50 blend of neighbouring
  * pixels, which is exactly what the softness looks like.
  *
- * Edges are snapped, not sizes: `x`, `y`, `x + width` and `y + height` are each
- * rounded and the size is taken as the difference. Rounding the size instead
- * would let a pane creep over its neighbour, whereas snapping edges preserves
- * the 1 px divider gap exactly, because `round(aR + 1) === round(aR) + 1`.
+ * Edges are snapped outward, not to nearest, and never to a size. The macOS
+ * pane renders as a native view placed *below* the full-window `WryWebView`,
+ * and the DOM chain above it is transparent (see the
+ * `[data-native-terminal-presented]` rules in `index.css`). So the reported
+ * rect is a coverage contract rather than a hint: any part of it the native
+ * surface fails to cover stays transparent all the way down to the window
+ * backdrop, which reads as a lighter seam along that pane edge while the
+ * terminal is still loading.
+ *
+ * Rounding to nearest breaks that contract. A leading edge whose fraction is
+ * below .5 rounds inward, leaving up to half a device pixel of the reported box
+ * uncovered - measured at 0.16 px left, 0.50 px top and 0.42 px right on real
+ * split-pane geometry. Flooring the leading edges and ceiling the trailing
+ * edges makes the native rect a superset of the reported box, so none of it can
+ * go uncovered. That grows the surface by at most one device pixel per edge,
+ * and only towards a neighbouring pane or a divider, both of which the webview
+ * paints over it.
  */
 export function snapBoundsToDevicePixels(
   bounds: TerminalBounds,
@@ -568,11 +581,12 @@ export function snapBoundsToDevicePixels(
 ): TerminalBounds {
   if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) return bounds;
 
-  const snapEdge = (value: number) => Math.round(value * scaleFactor) / scaleFactor;
-  const left = Math.max(0, snapEdge(bounds.x));
-  const top = Math.max(0, snapEdge(bounds.y));
-  const right = Math.max(left, snapEdge(bounds.x + bounds.width));
-  const bottom = Math.max(top, snapEdge(bounds.y + bounds.height));
+  const floorEdge = (value: number) => Math.floor(value * scaleFactor) / scaleFactor;
+  const ceilEdge = (value: number) => Math.ceil(value * scaleFactor) / scaleFactor;
+  const left = Math.max(0, floorEdge(bounds.x));
+  const top = Math.max(0, floorEdge(bounds.y));
+  const right = Math.max(left, ceilEdge(bounds.x + bounds.width));
+  const bottom = Math.max(top, ceilEdge(bounds.y + bounds.height));
 
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
