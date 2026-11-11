@@ -141,6 +141,10 @@ pub struct FleetSession {
     /// stop cause). Absent from older peers and for a pane with nothing to say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The git branch checked out in the session's worktree, when the pane is a local one on a
+    /// branch. Absent from older peers, remote/SSH panes and a detached HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// What the session waits on the owner for.
@@ -519,6 +523,7 @@ mod tests {
             health: None,
             attention: None,
             reason: None,
+            branch: None,
         }
     }
 

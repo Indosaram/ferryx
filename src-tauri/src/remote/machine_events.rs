@@ -626,6 +626,7 @@ mod panel_frame_tests {
             health: None,
             attention: None,
             reason: None,
+            branch: None,
         }
     }
 

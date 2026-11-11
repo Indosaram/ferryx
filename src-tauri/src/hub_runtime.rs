@@ -4031,11 +4031,10 @@ pub fn publish_panel_prs(lane: &ferryx_hub::supervisor::pr_lane::PrLane) {
     }
 }
 
-/// The head branches live agent sessions are on, which mark a PR `agent_working`.
-/// TODO(agent-attention-parity todo 9 branch wiring): fill from each live session's worktree
-/// branch once sessions carry it; until then no PR is classified `agent_working`.
-fn live_session_branches() -> std::collections::HashSet<String> {
-    std::collections::HashSet::new()
+/// The head branches live agent sessions are on, which mark a PR `agent_working`: the whole
+/// fleet (this computer and paired hosts), read the way the panel reads it.
+async fn live_session_branches(state: Arc<RemoteGatewayState>) -> std::collections::HashSet<String> {
+    ferryx_hub::supervisor::pr_lane::live_branches(&panel_autonomy::fleet_sessions(&state).await)
 }
 
 /// Sets the supervisor pause flag the panel reports.
@@ -5288,11 +5287,14 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     tasks.push(tokio::spawn(ferryx_hub::retention::serve(launch.hub.pool.clone())));
     // The pull-request lane: refreshed every minute with the owner's gh sign-in, published as
     // `panel.prs` and served by `GET supervisor/prs`. Only the lease holder's generation runs it.
-    tasks.push(tokio::spawn(ferryx_hub::supervisor::pr_lane::serve(
-        launch.hub.pool.clone(),
-        live_session_branches,
-        publish_panel_prs,
-    )));
+    {
+        let state = Arc::clone(launch.server.remote_state());
+        tasks.push(tokio::spawn(ferryx_hub::supervisor::pr_lane::serve(
+            launch.hub.pool.clone(),
+            move || live_session_branches(Arc::clone(&state)),
+            publish_panel_prs,
+        )));
+    }
     // The tracker's Sessions board and SES issues read and drive panes through the hub's control.
     ferryx_hub::tracker_sessions::install(launch.bridge.clone());
     // omo's judge breaker alert reaches the owner through the owner alert sweep.

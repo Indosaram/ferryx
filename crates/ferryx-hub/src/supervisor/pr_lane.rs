@@ -210,6 +210,17 @@ pub fn build(
     Ok(prs)
 }
 
+/// The head branches live agent sessions are on: a session with an agent, a known branch and
+/// a fresh (not stale) reading. These mark a PR on that branch `agent_working`.
+pub fn live_branches(sessions: &[crate::supervisor::panel_contract::FleetSession]) -> HashSet<String> {
+    sessions
+        .iter()
+        .filter(|session| !session.stale && !session.agent.is_empty())
+        .filter_map(|session| session.branch.clone())
+        .filter(|branch| !branch.is_empty())
+        .collect()
+}
+
 /// Lane order, then most recently updated first, then URL for a stable tie.
 pub fn sort(prs: &mut [PullRequest]) {
     prs.sort_by(|a, b| {
@@ -278,16 +289,18 @@ pub async fn refresh(
 
 /// Refreshes the lane every [`REFRESH_EVERY`] with `gh` and hands each result to `publish`.
 /// `live_branches` is asked again on every refresh.
-pub async fn serve<B, P>(pool: SqlitePool, live_branches: B, publish: P)
+pub async fn serve<B, BFut, P>(pool: SqlitePool, live_branches: B, publish: P)
 where
-    B: Fn() -> HashSet<String> + Send,
+    B: Fn() -> BFut + Send,
+    BFut: std::future::Future<Output = HashSet<String>> + Send,
     P: Fn(&PrLane) + Send,
 {
     let mut ticks = tokio::time::interval(REFRESH_EVERY);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticks.tick().await;
-        let lane = refresh(&pool, "gh", &live_branches(), Utc::now()).await;
+        let branches = live_branches().await;
+        let lane = refresh(&pool, "gh", &branches, Utc::now()).await;
         publish(&lane);
     }
 }
@@ -339,6 +352,40 @@ mod tests {
         let failing = prs.iter().find(|pr| pr.number == 11).unwrap();
         assert_eq!(failing.review_decision.as_deref(), Some("REVIEW_REQUIRED"));
         assert!(!failing.review_requested);
+    }
+
+    fn fleet_session(id: &str, agent: &str, branch: Option<&str>, stale: bool) -> crate::supervisor::panel_contract::FleetSession {
+        let mut session: crate::supervisor::panel_contract::FleetSession = serde_json::from_value(serde_json::json!({
+            "sessionRef": format!("mac:{id}"), "hostId": "mac", "hostLabel": "Mac", "title": id,
+            "cwd": "/repo", "agent": agent, "state": "working", "stateSource": "provider",
+            "stateSinceMs": null, "screenChangedAtMs": null, "pendingPrompt": null,
+            "lastAssistantLine": null, "updatedAtMs": 1, "stale": stale
+        }))
+        .unwrap();
+        session.branch = branch.map(str::to_owned);
+        session
+    }
+
+    #[test]
+    fn pr_lane_a_session_on_the_head_branch_makes_that_pr_agent_working() {
+        let fleet = vec![
+            fleet_session("agent", "claude", Some("ferryx/ws1/refactor"), false),
+            // A plain shell, a stale reading and a session with no branch mark nothing.
+            fleet_session("shell", "", Some("wip/cache"), false),
+            fleet_session("gone", "codex", Some("chore/bump"), true),
+            fleet_session("detached", "codex", None, false),
+        ];
+        let branches = live_branches(&fleet);
+        assert_eq!(branches, ["ferryx/ws1/refactor".to_owned()].into_iter().collect());
+        let prs = build(&responses(), &branches).unwrap();
+        let refactor = prs.iter().find(|pr| pr.head_ref_name == "ferryx/ws1/refactor").unwrap();
+        assert_eq!(refactor.lane, PrLaneKind::AgentWorking);
+        let cache = prs.iter().find(|pr| pr.head_ref_name == "wip/cache").unwrap();
+        assert_eq!(cache.lane, PrLaneKind::Pending);
+        assert_eq!(
+            prs.iter().filter(|pr| pr.lane == PrLaneKind::AgentWorking).count(),
+            1
+        );
     }
 
     #[test]

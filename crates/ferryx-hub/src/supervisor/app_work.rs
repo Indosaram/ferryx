@@ -444,6 +444,7 @@ mod tests {
             health: None,
             attention: None,
             reason: None,
+            branch: None,
         }
     }
 
