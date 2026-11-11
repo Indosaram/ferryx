@@ -3479,6 +3479,11 @@ describe("App project workspace flow", () => {
   it("does not list state in registerWindowCloseGuard effect dependencies", () => {
     const appSource = readFileSync(resolve(import.meta.dirname ?? ".", "App.tsx"), "utf-8");
     const match = appSource.match(/registerWindowCloseGuard[\s\S]*?\},[\s\S]*?\[([\s\S]*?)\]\);/);
+    expect(match).toBeTruthy();
+    const deps = match ? match[1] : "";
+    expect(deps).not.toMatch(/\bstate\b/);
+  });
+
   it("saves the complete current layout before cloning through the native new-window menu", async () => {
     native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
     render(<App />);
@@ -3527,11 +3532,6 @@ describe("App project workspace flow", () => {
     act(() => emitOrphaned({ fromLabel: "ws-closed", sessionIds: [] }));
     await waitFor(() => expect(discard).toHaveBeenCalledWith("ws-closed"));
     expect(discard).not.toHaveBeenCalledWith("main");
-  });
-
-    expect(match).toBeTruthy();
-    const deps = match ? match[1] : "";
-    expect(deps).not.toMatch(/\bstate\b/);
   });
 
   it("does not starve debounced session persistence when transient title/activity ticks arrive faster than debounce interval", async () => {
