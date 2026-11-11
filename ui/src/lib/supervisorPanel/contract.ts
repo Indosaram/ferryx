@@ -31,7 +31,9 @@ export interface PendingPrompt {
 
 export type FleetSessionState = 'working' | 'blocked' | 'idle' | 'unknown';
 
-/** The independent facts the daemon judges a session's attention group from. */
+/** The one group every surface shows a session under (Rust `attention_group`). */
+export type AttentionGroup = 'needsYou' | 'unread' | 'working' | 'seen';
+
 export interface AttentionAxes {
   demand: 'none' | 'question' | 'approval' | 'error';
   activity: 'working' | 'stopped' | 'unknown';
@@ -39,9 +41,6 @@ export interface AttentionAxes {
   read: 'read' | 'unread';
   ownership: 'owner' | 'delegated' | 'supervisor';
 }
-
-/** The one group every surface shows a session under (Rust `attention_group`). */
-export type AttentionGroup = 'needsYou' | 'unread' | 'working' | 'seen';
 
 export interface Attention {
   axes: AttentionAxes;
@@ -67,9 +66,9 @@ export interface FleetSession {
   stale: boolean;
   /** Telemetry-derived health; only `failed` is produced (agent died mid-turn). Absent otherwise. */
   health?: HealthKind;
-  /** The daemon's attention axes and group. Absent from older peers (`groupOf` maps `state`). */
-  attention?: Attention;
-  /** Why the session stopped, in one line. Absent from older peers and for a pane with nothing to say. */
+  /** The daemon's attention axes and group. Absent from older peers. */
+  attention?: Attention | null;
+  /** Why the session stopped, in one line. Absent from older peers. */
   reason?: string | null;
 }
 

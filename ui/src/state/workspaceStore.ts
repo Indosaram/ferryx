@@ -33,6 +33,9 @@ import { canCaptureAuthoritativeProviderSession, continuationOutcomeUnknown, con
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
+import { getDaemonAttention, subscribeDaemonAttention } from "../lib/attentionFeed";
+import { groupOf } from "../lib/attentionGroup";
+import type { AttentionGroup } from "../lib/supervisorPanel/contract";
 import { listFilePreviewIds, releaseFilePreview, retainFilePreview } from "../lib/filePreviewTabRegistry";
 import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
 import {
@@ -991,9 +994,48 @@ export function useWorkspaceStore({
     for (const target of selectActivityNotificationTargets(next)) {
       const previousState = previous.activityBySessionId?.[target.sessionId]?.state;
       if (previousState === target.state) continue;
-      for (const listener of activityListenersRef.current) listener({ ...target, previousState });
+      // A session the daemon judges is notified by its group frames only; this local edge
+      // carries the unchanged group so it can never notify a second time.
+      const daemon = getDaemonAttention(next.sessions[target.sessionId]?.backendSessionId);
+      const groups = daemon ? { group: daemon.group, previousGroup: daemon.group } : {};
+      for (const listener of activityListenersRef.current) listener({ ...target, previousState, ...groups });
     }
   }, []);
+
+  // The daemon's group is the badge's and the notifications' source: a group change re-counts the
+  // badge, and entering a group is announced once. A reason change alone announces nothing.
+  const [daemonAttentionVersion, setDaemonAttentionVersion] = useState(0);
+  useEffect(() => subscribeDaemonAttention((changes, baseline) => {
+    setDaemonAttentionVersion((value) => value + 1);
+    if (baseline) return;
+    const mounted = stateRef.current;
+    const mountedWorkspaceId = mounted.workspaceId ?? mountedWorkspaceIdRef.current;
+    const states = [mounted, ...listWorkspaceSnapshots()
+      .filter(([id]) => id !== mountedWorkspaceId)
+      .map(([, snapshot]) => snapshot)];
+    for (const change of changes) {
+      const group = change.next?.group;
+      const previousGroup = change.previous?.group;
+      if (!group || group === previousGroup) continue;
+      for (const owner of states) {
+        const session = Object.values(owner.sessions).find((candidate) => candidate.backendSessionId === change.backendSessionId);
+        const tabId = session ? findTabIdForSession(owner, session.id) : null;
+        if (!session || !tabId) continue;
+        const target = notificationTarget(owner, session.id, tabId);
+        const event: ActivityNotificationEvent = {
+          ...target,
+          state: activityStateForGroup(group, target.state),
+          previousState: previousGroup ? activityStateForGroup(previousGroup, target.state) : undefined,
+          // The daemon's own episodes decide; a restore's quiet flag belongs to local edges.
+          notificationSuppressed: false,
+          group,
+          previousGroup,
+        };
+        for (const listener of activityListenersRef.current) listener(event);
+        break;
+      }
+    }
+  }), []);
 
   const dispatch = useCallback(
     (action: WorkspaceAction) => {
@@ -2739,9 +2781,9 @@ export function useWorkspaceStore({
   );
   const unreadBadgeCount = useMemo(
     () => selectGlobalUnreadBadgeCount(renderedState, workspaceId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is an external
-    // change signal that useMemo cannot observe directly from renderedState.
-    [renderedState, workspaceId, parkedActivityVersion],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion and
+    // daemonAttentionVersion are external change signals useMemo cannot observe from renderedState.
+    [renderedState, workspaceId, parkedActivityVersion, daemonAttentionVersion],
   );
 
   return {
@@ -3143,11 +3185,10 @@ export function selectWorktreeActivitySummariesAcrossWorkspaces(
 }
 
 /**
- * Global Dock badge count, aligned with the pane-attention signal:
- * each workspace contributes the larger of (unseen attention sessions — the
- * same `done`/`waiting && !seen` state that lights pane highlight frames) and
- * (bell-only unread tabs), summed across the live workspace and every parked
- * workspace snapshot, so an agent finishing anywhere still lights the badge.
+ * Global Dock badge count: each workspace contributes the larger of (sessions whose attention
+ * group is `needsYou` or `unread`, the daemon's group when it reports one, else `groupOf`'s
+ * mapping of the pane's own state) and (bell-only unread tabs), summed across the live workspace
+ * and every parked workspace snapshot, so an agent finishing anywhere still lights the badge.
  */
 export function selectGlobalUnreadBadgeCount(
   currentState?: WorkspaceState,
@@ -3155,13 +3196,15 @@ export function selectGlobalUnreadBadgeCount(
 ): number {
   if (!currentState) return 0;
 
-  const countAttention = (state: WorkspaceState): number =>
-    Object.values(state.activityBySessionId ?? {}).filter(
-      (activity) =>
-        activity &&
-        !activity.seen &&
-        (activity.state === "done" || activity.state === "waiting"),
-    ).length;
+  const countAttention = (state: WorkspaceState): number => {
+    const sessionIds = new Set([...Object.keys(state.activityBySessionId ?? {}), ...Object.keys(state.sessions ?? {})]);
+    let count = 0;
+    for (const sessionId of sessionIds) {
+      const group = sessionAttentionGroup(state, sessionId);
+      if (group === "needsYou" || group === "unread") count += 1;
+    }
+    return count;
+  };
   const countUnreadTabs = (state: WorkspaceState): number =>
     Object.values(state.unreadTabIds ?? {}).filter(Boolean).length;
   const badgeFor = (state: WorkspaceState): number =>
@@ -3174,6 +3217,22 @@ export function selectGlobalUnreadBadgeCount(
     count += badgeFor(snapshot);
   }
   return count;
+}
+
+/** The group a pane shows: the daemon's for its backend session, else its own state mapped. */
+function sessionAttentionGroup(state: WorkspaceState, sessionId: string): AttentionGroup | null {
+  const activity = state.activityBySessionId?.[sessionId];
+  const attention = getDaemonAttention(state.sessions?.[sessionId]?.backendSessionId);
+  if (!activity && !attention) return null;
+  return groupOf({ attention, state: activity?.state, seen: activity?.seen });
+}
+
+/** The activity word a notification names for a daemon group. */
+function activityStateForGroup(group: AttentionGroup, fallback: TerminalActivityState): TerminalActivityState {
+  if (group === "needsYou") return "waiting";
+  if (group === "unread") return "done";
+  if (group === "working") return "working";
+  return fallback;
 }
 
 export type ActivityNotificationTarget = {
@@ -3189,7 +3248,12 @@ export type ActivityNotificationTarget = {
   state: TerminalActivityState;
 };
 
-export type ActivityNotificationEvent = ActivityNotificationTarget & { previousState?: TerminalActivityState };
+export type ActivityNotificationEvent = ActivityNotificationTarget & {
+  previousState?: TerminalActivityState;
+  /** The daemon's attention group; when present it, not the state words, decides the edge. */
+  group?: AttentionGroup;
+  previousGroup?: AttentionGroup;
+};
 
 /** Match ProjectHeader labels without tying parked-workspace events to the active project. */
 export function selectNotificationWorkspaceLabel(state: WorkspaceState): string | undefined {

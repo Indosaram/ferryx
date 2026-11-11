@@ -3,9 +3,10 @@
 //! and persistence; it asks this module whether a card may push and what to send.
 //!
 //! Push is for new `panel.decision` escalations only: retries, recoveries and finished sessions
-//! arrive as other frames and never reach [`Admission::Send`].
+//! arrive as other frames and never reach [`Admission::Send`]. A `panel.session` frame whose
+//! attention group is no longer `needsYou` withdraws that session's held push.
 
-use super::panel_contract::{Escalation, SessionRef};
+use super::panel_contract::{AttentionGroup, Escalation, SessionRef};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
@@ -44,12 +45,19 @@ pub enum PanelFrame {
     Resolved { session_ref: String },
     /// An escalation appeared for `session_ref`.
     Decision { session_ref: String, prompt_id: String },
+    /// The session left `needsYou` (acknowledged, answered, handed to the supervisor): a push
+    /// still held for it must not go out.
+    LeftNeedsYou { session_ref: String },
 }
 
-/// Reads a frame from the owner panel channel. Only `panel.decision` can matter; the frame's
+/// Reads a frame from the owner panel channel. Only `panel.decision` can push; the frame's
 /// `sessionRef` must name the same session as the escalation inside it, so a card can never push
-/// a deep link to another session.
+/// a deep link to another session. A `panel.session` frame matters only through its attention
+/// group; an older peer's frame without one is ignored.
 pub fn classify_frame(frame: &Value) -> PanelFrame {
+    if frame.get("type").and_then(Value::as_str) == Some("panel.session") {
+        return classify_session_frame(frame);
+    }
     if frame.get("type").and_then(Value::as_str) != Some("panel.decision") {
         return PanelFrame::Ignore;
     }
@@ -68,6 +76,36 @@ pub fn classify_frame(frame: &Value) -> PanelFrame {
             session_ref: session_ref.to_string(),
             prompt_id: escalation.prompt.prompt_id,
         },
+        _ => PanelFrame::Ignore,
+    }
+}
+
+fn classify_session_frame(frame: &Value) -> PanelFrame {
+    let Some(session) = frame.get("session") else {
+        return PanelFrame::Ignore;
+    };
+    let Some(session_ref) = session
+        .get("sessionRef")
+        .and_then(Value::as_str)
+        .filter(|raw| SessionRef::parse(raw).is_ok())
+    else {
+        return PanelFrame::Ignore;
+    };
+    if frame
+        .get("sessionRef")
+        .and_then(Value::as_str)
+        .is_some_and(|outer| outer != session_ref)
+    {
+        return PanelFrame::Ignore;
+    }
+    let group = session
+        .get("attention")
+        .and_then(|attention| attention.get("group"))
+        .and_then(|group| serde_json::from_value::<AttentionGroup>(group.clone()).ok());
+    match group {
+        Some(group) if group != AttentionGroup::NeedsYou => {
+            PanelFrame::LeftNeedsYou { session_ref: session_ref.to_string() }
+        }
         _ => PanelFrame::Ignore,
     }
 }
@@ -158,6 +196,16 @@ impl DecisionGate {
     /// The card left the panel (answered or gone): its next escalation is new again.
     pub fn resolved(&self, session_ref: &str) {
         locked(&self.inner).announced.remove(session_ref);
+    }
+
+    /// The session no longer needs the owner: its held card is dropped from the next flush.
+    /// Returns whether a held card was withdrawn. The announced card stays announced, so the
+    /// same open prompt never pushes again after an acknowledgement.
+    pub fn left_needs_you(&self, session_ref: &str) -> bool {
+        let mut inner = locked(&self.inner);
+        let before = inner.held.len();
+        inner.held.retain(|held| held != session_ref);
+        inner.held.len() != before
     }
 
     /// Admits or holds one card against the batch window. A session already held stays held
@@ -292,6 +340,62 @@ mod tests {
         assert_eq!(decision_deep_link("mac:s1"), "/?panel=decision&session=mac%3As1");
         assert_eq!(decision_deep_link("a b:c&d"), "/?panel=decision&session=a+b%3Ac%26d");
         assert_eq!(PANEL_DEEP_LINK, "/?panel=decision");
+    }
+
+    fn session_frame(session_ref: &str, group: Option<&str>) -> Value {
+        let mut session = json!({"sessionRef": session_ref, "state": "blocked"});
+        if let Some(group) = group {
+            session["attention"] = json!({
+                "axes": {"demand": "question", "activity": "stopped", "completion": "none",
+                         "read": "read", "ownership": "owner"},
+                "group": group,
+            });
+        }
+        json!({"type": "panel.session", "sessionRef": session_ref, "session": session})
+    }
+
+    #[test]
+    fn a_session_frame_matters_only_when_it_leaves_needs_you() {
+        for group in ["unread", "working", "seen"] {
+            assert_eq!(
+                classify_frame(&session_frame("mac:s1", Some(group))),
+                PanelFrame::LeftNeedsYou { session_ref: "mac:s1".into() },
+                "{group}"
+            );
+        }
+        assert_eq!(classify_frame(&session_frame("mac:s1", Some("needsYou"))), PanelFrame::Ignore);
+        // An older peer sends no attention: nothing to judge, nothing withdrawn.
+        assert_eq!(classify_frame(&session_frame("mac:s1", None)), PanelFrame::Ignore);
+        assert_eq!(classify_frame(&session_frame("no-colon", Some("seen"))), PanelFrame::Ignore);
+        let mut crossed = session_frame("mac:s1", Some("seen"));
+        crossed["sessionRef"] = json!("mac:s2");
+        assert_eq!(classify_frame(&crossed), PanelFrame::Ignore);
+        let mut unknown = session_frame("mac:s1", Some("seen"));
+        unknown["session"]["attention"]["group"] = json!("later");
+        assert_eq!(classify_frame(&unknown), PanelFrame::Ignore);
+    }
+
+    #[test]
+    fn a_session_leaving_needs_you_resolves_its_push() {
+        let gate = DecisionGate::default();
+        let t0 = Instant::now();
+        assert_eq!(gate.admit("a", "p", false, false, t0), Admission::Send);
+        assert!(matches!(gate.admit("b", "p", false, false, t0 + Duration::from_secs(1)), Admission::Held { .. }));
+        assert!(matches!(gate.admit("c", "p", false, false, t0 + Duration::from_secs(2)), Admission::Held { .. }));
+
+        // The owner acknowledged b: its held push is withdrawn, c still goes out.
+        assert!(gate.left_needs_you("b"));
+        assert!(!gate.left_needs_you("b"), "nothing left to withdraw");
+        assert!(!gate.left_needs_you("a"), "a sent card is not held");
+        assert_eq!(gate.flush(t0 + DECISION_BATCH_WINDOW, |_| false, false), vec!["c".to_string()]);
+
+        // Acknowledging never re-arms the open prompt: the same card does not push again.
+        assert_eq!(
+            gate.admit("b", "p", false, false, t0 + DECISION_BATCH_WINDOW * 3),
+            Admission::Skipped(Skip::NotNew)
+        );
+        // A new prompt is a new card.
+        assert_eq!(gate.admit("b", "p2", false, false, t0 + DECISION_BATCH_WINDOW * 3), Admission::Send);
     }
 
     #[test]
