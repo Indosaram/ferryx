@@ -137,6 +137,10 @@ pub struct FleetSession {
     /// from older peers, which clients map from `state` themselves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<Attention>,
+    /// Why the session stopped, in one line (its question, else the agent's last line, else the
+    /// stop cause). Absent from older peers and for a pane with nothing to say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// What the session waits on the owner for.
@@ -514,6 +518,7 @@ mod tests {
             stale: false,
             health: None,
             attention: None,
+            reason: None,
         }
     }
 
