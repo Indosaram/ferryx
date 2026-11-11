@@ -259,61 +259,95 @@ fn session_reason(question: Option<&str>, last_line: Option<&str>, cause: Option
     })
 }
 
-/// Characters a box rule is drawn with.
-const RULE_CHARS: &[char] = &['─', '━', '═', '╭', '╮', '╰', '╯', '┌', '┐', '└', '┘', '│', '-'];
+/// How far in from the left edge a user echo, a reply bullet or the input line sits. Anything
+/// further in is a reply's own text (a quote, a list, a tool result), never a new turn.
+const TURN_MARGIN: usize = 1;
 
-/// A horizontal rule or box edge: nothing but rule characters.
-fn is_rule_line(line: &str) -> bool {
-    let line = line.trim();
-    !line.is_empty() && line.chars().all(|c| RULE_CHARS.contains(&c) || c.is_whitespace())
+/// How far in a turn's timing line sits (`✻ Worked for 12s · done 4:04 PM`, `  4:08 PM`).
+const TIMING_MARGIN: usize = 2;
+
+/// Leading blanks that mark a right-aligned notice rather than transcript text.
+const NOTICE_INDENT: usize = 40;
+
+/// How many non-empty bottom lines can hold the input box; it sits under the transcript, with
+/// at most its frame and a footer below it.
+const INPUT_BOX_TAIL: usize = 4;
+
+fn indent(line: &str) -> usize {
+    line.chars().take_while(|c| c.is_whitespace()).count()
 }
 
-/// The agent's input line: it starts with a prompt marker.
+/// A line that starts a turn's input: a prompt marker at the left margin.
 fn is_prompt_line(line: &str) -> bool {
-    line.trim_start().starts_with(['❯', '›', '>'])
+    indent(line) <= TURN_MARGIN && line.trim_start().starts_with(['❯', '›', '>'])
 }
 
-/// A turn's timing line (`... 4:03 PM`, `4:08 PM`): it ends with a clock time.
+/// A prompt line with something typed after the marker: a user turn in the transcript.
+fn is_user_echo(line: &str) -> bool {
+    is_prompt_line(line) && line.trim_start().chars().skip(1).any(char::is_alphanumeric)
+}
+
+/// The first line of an agent reply: a reply bullet at the left margin.
+fn is_reply_bullet(line: &str) -> bool {
+    indent(line) <= TURN_MARGIN && line.trim_start().starts_with(['⏺', '●', '•'])
+}
+
+/// A turn's timing line: near the left edge and ending with a clock time (`4:03 PM`).
+fn is_timing_line(line: &str) -> bool {
+    indent(line) <= TIMING_MARGIN && !line.trim().is_empty() && ends_with_clock(line)
+}
+
+/// Whether `line` ends with a clock time, with or without AM/PM after any kind of space.
 fn ends_with_clock(line: &str) -> bool {
     let line = line.trim_end();
-    let line = [" AM", " PM", " am", " pm"]
+    let line = ["AM", "PM", "am", "pm"]
         .iter()
         .find_map(|suffix| line.strip_suffix(suffix))
-        .unwrap_or(line);
+        .map_or(line, str::trim_end);
     let Some((hours, minutes)) = line.rsplit_once(':') else { return false };
     let hours: String = hours.chars().rev().take_while(char::is_ascii_digit).collect();
     minutes.len() == 2 && minutes.chars().all(|c| c.is_ascii_digit()) && (1..=2).contains(&hours.len())
 }
 
-/// The agent's last line on the screen. The input box (the last prompt line with the rules
-/// framing it) and everything below it (mode and status footers) is cut off first, then the
-/// last line above it that says something is taken. Skipped on the way: rules, lines with no
-/// letter or digit, a turn's timing line, and right-aligned notices. Bullet glyphs are trimmed
-/// off its start. `None` when nothing is left above the box.
+/// The last line of the agent's reply in the newest finished turn on the screen, or `None`.
+///
+/// Conservative on purpose: a screen only yields a line when it shows a whole turn, which every
+/// agent draws the same way: a user echo (`❯ ...`), then a reply bullet (`⏺`, `●`, `•`) with
+/// its continuation lines, then the turn's timing line. The input box at the bottom (a prompt
+/// line among the last few) is cut off first, and a user echo after the timing line means a new
+/// turn started. Banners, tips, footers, status bars, model or path lines and token counts are
+/// never part of that shape, so a screen without it (any agent that does not draw it) yields
+/// `None` and the reason falls back to the stop cause.
 fn last_screen_line(text: &str) -> Option<String> {
-    const GLYPHS: &[char] = &['●', '⏺', '•', '>', '›', '❯', '│', '|', '*', '-', '─', '╭', '╰', '╮', '╯', '✻', '✔', '└'];
-    /// Leading blanks that mark a right-aligned notice rather than transcript text.
-    const NOTICE_INDENT: usize = 40;
-    let lines: Vec<&str> = text.lines().collect();
-    let mut end = lines.len();
-    if let Some(prompt) = lines.iter().rposition(|line| is_prompt_line(line)) {
-        end = prompt;
-        while end > 0 && is_rule_line(lines[end - 1]) {
-            end -= 1;
+    const TOOL_MARKS: &[char] = &['⎿', '└'];
+    let mut lines: Vec<&str> = text.lines().collect();
+    let tail: Vec<usize> = (0..lines.len()).filter(|&at| !lines[at].trim().is_empty()).rev().take(INPUT_BOX_TAIL).collect();
+    // The input box is a prompt line among the last few with no reply under it; a prompt
+    // with a reply bullet below it is a user turn, not the box.
+    if let Some(&input) = tail.iter().find(|&&at| is_prompt_line(lines[at])) {
+        if !lines[input + 1..].iter().any(|line| is_reply_bullet(line)) {
+            lines.truncate(input);
         }
     }
-    lines[..end]
-        .iter()
-        .rev()
-        .filter(|line| line.chars().take_while(|c| c.is_whitespace()).count() < NOTICE_INDENT)
-        .map(|line| {
-            line.trim()
-                .trim_start_matches(|c: char| c.is_whitespace() || GLYPHS.contains(&c))
-                .trim_end_matches(|c: char| c.is_whitespace() || c == '│')
-        })
-        .filter(|line| !is_rule_line(line) && !ends_with_clock(line))
-        .find(|line| line.chars().any(char::is_alphanumeric))
-        .map(str::to_string)
+    let timing = lines.iter().rposition(|line| is_timing_line(line))?;
+    if lines[timing + 1..].iter().any(|line| is_user_echo(line)) {
+        return None;
+    }
+    let echo = lines[..timing].iter().rposition(|line| is_user_echo(line))?;
+    let bullet = echo + 1 + lines[echo + 1..timing].iter().rposition(|line| is_reply_bullet(line))?;
+    let mut last = lines[bullet].trim_start().chars().skip(1).collect::<String>();
+    for line in &lines[bullet + 1..timing] {
+        let text = line.trim_start();
+        if text.is_empty() || indent(line) >= NOTICE_INDENT || text.starts_with(TOOL_MARKS) {
+            continue;
+        }
+        if indent(line) <= indent(lines[bullet]) {
+            break;
+        }
+        last = text.to_string();
+    }
+    let last = last.trim_end_matches(|c: char| c.is_whitespace() || c == '│' || c == '█').trim();
+    (last.chars().any(char::is_alphanumeric) && !ends_with_clock(last)).then(|| last.to_string())
 }
 
 /// A label for why an agent stopped when it said nothing itself.
@@ -2615,37 +2649,180 @@ mod tests {
 
     #[test]
     fn reason_screen_line_skips_rules_glyphs_and_empty_input_boxes() {
-        let screen = "● Building the relay\n● Done.\n────────\n> \n";
+        let screen = "❯ build it\n⏺ Building the relay\n  Done.\n✻ Worked for 3s · done 4:04 PM\n────────\n> \n────────\n  ⏸ manual mode on\n";
         assert_eq!(last_screen_line(screen).as_deref(), Some("Done."));
         assert_eq!(last_screen_line("────\n\n"), None);
     }
 
-    fn agent_screen(name: &str) -> &'static str {
-        match name {
-            "claude/done" => include_str!("../agent_detect/fixtures/screens/claude/done.screen"),
-            "claude/after-turn-idle" => include_str!("../agent_detect/fixtures/screens/claude/after-turn-idle.screen"),
-            "codex/done" => include_str!("../agent_detect/fixtures/screens/codex/done.screen"),
-            "codex/after-turn-idle" => include_str!("../agent_detect/fixtures/screens/codex/after-turn-idle.screen"),
-            _ => unreachable!("{name}"),
+    /// Every captured agent screen, with the line it must yield. Reviewed by hand against each
+    /// fixture: a `Some` is the last line of the agent's reply in the newest whole turn, and
+    /// every other screen (banners, tips, footers, status bars, model or path lines, token
+    /// counts, menus, spinners) is `None`, so its reason falls back to the stop cause.
+    fn golden_screens() -> Vec<(&'static str, &'static str, Option<&'static str>)> {
+        macro_rules! golden {
+            ($name:literal, $line:expr) => {
+                ($name, include_str!(concat!("../agent_detect/fixtures/screens/", $name, ".screen")), $line)
+            };
         }
+        vec![
+            golden!("agy/idle", None),
+            golden!("agy/lc-idle", None),
+            golden!("agy/lc-working", None),
+            golden!("agy/resume", None),
+            golden!("agy/trust", None),
+            golden!("agy/working", None),
+            golden!("aider/approval-add-file", None),
+            golden!("aider/approval-gitignore-confirm", None),
+            golden!("aider/approval-run-shell", None),
+            golden!("aider/idle-after-turn", None),
+            golden!("aider/idle", None),
+            golden!("aider/login-wall", None),
+            golden!("aider/working-commit-message", None),
+            golden!("aider/working-waiting-spinner", None),
+            golden!("claude/after-turn-idle", Some("plain ls.")),
+            golden!("claude/approval", None),
+            golden!("claude/done", Some("The serena MCP server failed to connect (timed out after 30s). It doesn't affect this ls command.")),
+            golden!("claude/idle", None),
+            golden!("claude/lc-working", None),
+            golden!("claude/local1-idle", None),
+            golden!("claude/local1-working", None),
+            golden!("claude/resumed", Some("contains the current date: Thu Oct 22 16:04:12 KST 2026.")),
+            golden!("claude/working", Some("contains the current date: Thu Oct 22 16:04:12 KST 2026.")),
+            golden!("cline/after-turn-idle", None),
+            golden!("cline/approval", None),
+            golden!("cline/idle-after-turn", None),
+            golden!("cline/idle", None),
+            golden!("cline/lc-working", None),
+            golden!("cline/resumed", None),
+            golden!("cline/working", None),
+            golden!("codex/after-turn-idle", Some("b.py")),
+            golden!("codex/approval", None),
+            golden!("codex/done", Some("Command completed successfully.")),
+            golden!("codex/idle", None),
+            golden!("codex/lc-working", None),
+            golden!("codex/local1-working", None),
+            golden!("codex/resumed", Some("Command completed successfully.")),
+            golden!("codex/working", None),
+            golden!("copilot/after-turn", None),
+            golden!("copilot/approval", None),
+            golden!("copilot/idle", None),
+            golden!("copilot/local3-idle", None),
+            golden!("copilot/local3-working", None),
+            golden!("copilot/resumed", None),
+            golden!("copilot/working-modelfail", None),
+            golden!("copilot/working", None),
+            golden!("crush/after-allow", None),
+            golden!("crush/approval", None),
+            golden!("crush/idle-after-turn", None),
+            golden!("crush/idle", None),
+            golden!("crush/resumed-session", None),
+            golden!("crush/working", None),
+            golden!("cursor-agent/live-approval", None),
+            golden!("cursor-agent/live-idle", None),
+            golden!("cursor-agent/live-running", None),
+            golden!("cursor-agent/live-trust", None),
+            golden!("cursor-agent/live-working", None),
+            golden!("cursor-agent/live2-approval", None),
+            golden!("cursor-agent/live2-trust", None),
+            golden!("cursor-agent/login-required", None),
+            golden!("droid/login-device-auth", None),
+            golden!("droid/login-wall", None),
+            golden!("gjc/after-answer", None),
+            golden!("gjc/approval-ask", None),
+            golden!("gjc/idle-after-turn", None),
+            golden!("gjc/idle", None),
+            golden!("gjc/working", None),
+            golden!("grok/after-approve", None),
+            golden!("grok/approval", None),
+            golden!("grok/idle-after-turn", None),
+            golden!("grok/idle", None),
+            golden!("grok/login-wall", None),
+            golden!("grok/resumed", None),
+            golden!("grok/trust-folder", None),
+            golden!("grok/working", None),
+            golden!("kimi/idle", None),
+            golden!("kimi/resume", None),
+            golden!("kimi/working", None),
+            golden!("omp/approval", None),
+            golden!("omp/idle-after-cancel-retry", None),
+            golden!("omp/idle-after-interrupt", None),
+            golden!("omp/idle-after-turn", None),
+            golden!("omp/idle-no-model", None),
+            golden!("omp/idle-resumed", None),
+            golden!("omp/idle", None),
+            golden!("omp/question-multi", None),
+            golden!("omp/question-single", None),
+            golden!("omp/working-2", None),
+            golden!("omp/working", None),
+            golden!("opencode/approval", None),
+            golden!("opencode/done", None),
+            golden!("opencode/idle", None),
+            golden!("opencode/lc-approval", None),
+            golden!("opencode/lc-working", None),
+            golden!("opencode/local1-working", None),
+            golden!("opencode/resumed", None),
+            golden!("opencode/working", None),
+            golden!("pi/approval", None),
+            golden!("pi/done", None),
+            golden!("pi/idle", None),
+            golden!("pi/lc-idle-no-model", None),
+            golden!("pi/local1-idle", None),
+            golden!("pi/resumed", None),
+            golden!("pi/working", None),
+        ]
+    }
+
+    #[test]
+    fn reason_screen_line_matches_the_reviewed_line_of_every_agent_fixture() {
+        let golden = golden_screens();
+        let on_disk = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/agent_detect/fixtures/screens"))
+            .expect("the fixture directory")
+            .flat_map(|agent| std::fs::read_dir(agent.expect("an agent dir").path()).expect("its screens"))
+            .filter(|file| file.as_ref().is_ok_and(|file| file.path().extension().is_some_and(|ext| ext == "screen")))
+            .count();
+        assert_eq!(golden.len(), on_disk, "every fixture screen has a reviewed row");
+        const CHROME: &[&str] = &[
+            "for shortcuts", "mode on", "esc to", "ctrl+", "shift+tab", "Tip:", "warnings", "tok/s", "context:",
+            "(1x)", "128K", "Type your message", "/model", "/private/", "Changelog", "Working (", "Thinking",
+        ];
+        let mut wrong = Vec::new();
+        for (name, screen, expected) in &golden {
+            let line = last_screen_line(screen);
+            if line.as_deref() != *expected {
+                wrong.push(format!("{name}: got {line:?}, want {expected:?}"));
+            }
+            if let Some(line) = &line {
+                assert!(screen.lines().any(|row| row.contains(line.as_str())), "{name}: {line:?} is on the screen");
+                for chrome in CHROME {
+                    assert!(!line.contains(chrome), "{name}: chrome {chrome:?} was taken: {line:?}");
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{} of {} fixtures differ:\n{}", wrong.len(), golden.len(), wrong.join("\n"));
+        assert!(golden.iter().any(|(_, _, line)| line.is_some()), "the table has transcript lines");
     }
 
     #[test]
     fn reason_screen_line_is_the_transcript_line_above_the_input_box_not_the_footer() {
+        let screens = golden_screens();
         for (name, expected) in [
             ("claude/done", "The serena MCP server failed to connect (timed out after 30s). It doesn't affect this ls command."),
             ("claude/after-turn-idle", "plain ls."),
             ("codex/done", "Command completed successfully."),
             ("codex/after-turn-idle", "b.py"),
         ] {
-            let screen = agent_screen(name);
-            let line = last_screen_line(screen).unwrap_or_else(|| panic!("{name}: no line"));
-            assert!(screen.lines().any(|row| row.contains(expected)), "{name}: fixture has the line");
-            assert!(expected.starts_with(line.as_str()) || line == expected, "{name}: {line:?}");
-            for footer in ["for shortcuts", "mode on", "warnings", "GPT-5.6", "Auto-update", "PM"] {
-                assert!(!line.contains(footer), "{name}: a footer or status line was taken: {line:?}");
-            }
+            let screen = screens.iter().find(|(fixture, _, _)| *fixture == name).map(|(_, screen, _)| *screen).expect(name);
+            assert_eq!(last_screen_line(screen).as_deref(), Some(expected), "{name}");
         }
+    }
+
+    #[test]
+    fn reason_screen_line_ignores_quotes_and_needs_the_newest_turn() {
+        let quoted = "❯ check the doc\n⏺ It says:\n  > keep the relay\n  So the relay stays.\n✻ Worked for 3s · done 4:04 PM\n";
+        assert_eq!(last_screen_line(quoted).as_deref(), Some("So the relay stays."), "an indented > is a quote, not the input");
+        let newer = "❯ first\n⏺ First reply.\n✻ Worked for 3s · done 4:04 PM\n❯ second\n⏺ Thinking about it\n";
+        assert_eq!(last_screen_line(newer), None, "a newer turn without its timing line has no finished reply");
+        assert_eq!(last_screen_line("⏺ A reply with no user turn above it\n✻ done 4:04 PM\n"), None);
     }
 
     #[test]
@@ -2673,13 +2850,13 @@ mod tests {
     #[tokio::test]
     async fn reason_of_a_session_without_a_transcript_uses_the_screen_line() {
         let session_id = "agent-control-reason-screen";
-        let (_backend, state) = pane(session_id, CLAUDE_ANSWERED);
+        let (_backend, state) = pane(session_id, CLAUDE_TURN);
         let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
         let session = &read["session"];
         assert!(session["agent"].is_string(), "an agent is detected: {read}");
         assert!(session["pending"].is_null(), "{read}");
         assert!(session["lastAssistantLine"].is_null(), "{read}");
-        assert_eq!(session["reason"], "Done.", "{read}");
+        assert_eq!(session["reason"], "It has README.md and src.", "{read}");
     }
 
     #[tokio::test]
@@ -2712,7 +2889,9 @@ mod tests {
     }
 
     const CLAUDE_APPROVAL: &str = include_str!("reference_chat/fixtures/claude/prompt/approval-command.screen");
-    const CLAUDE_ANSWERED: &str = include_str!("reference_chat/fixtures/claude/prompt/answered.screen");
+    /// A finished Claude turn that fits the 100x30 test pane whole: user echo, reply, timing line,
+    /// input box and footer.
+    const CLAUDE_TURN: &str = "❯ list it\n\n⏺ Listed the directory.\n  It has README.md and src.\n\n✻ Baked for 4s · done 4:03 PM\n\n\n────────────────────────────────────────\n❯\n────────────────────────────────────────\n  ⏸ manual mode on · ? for shortcuts · ← for agents\n";
 
     /// One pane showing a fixed screen; every write and every signal it is handed is recorded.
     struct FixedPane {
