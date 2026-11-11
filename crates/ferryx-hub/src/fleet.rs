@@ -216,6 +216,7 @@ fn fleet_session(
         attention: value
             .get("attention")
             .and_then(|attention| serde_json::from_value::<Attention>(attention.clone()).ok()),
+        reason: text("reason").map(str::to_owned),
     })
 }
 

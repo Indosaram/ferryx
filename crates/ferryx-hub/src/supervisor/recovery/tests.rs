@@ -220,6 +220,7 @@ fn session(host: &str, id: &str, agent: &str, state: &str, source: &str, changed
         stale: false,
         health: None,
         attention: None,
+        reason: None,
     }
 }
 
