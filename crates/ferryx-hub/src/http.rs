@@ -76,6 +76,7 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
         .route("/api/logs", get(logs))
         .route("/api/logs/ws", get(logs_ws))
         .nest("/api/tracker", tracker)
+        .nest("/api/agent", crate::agent_api::router(pool.clone()))
         .fallback(static_or_missing)
         .layer(axum::middleware::from_fn(api::validate_host_and_origin))
         .with_state(HttpState { pool, web_root })

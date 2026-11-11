@@ -1456,9 +1456,39 @@ async fn open_delegated_lane(
             "issue already delegated to a lane",
         ));
     }
+    let lane_key = open_lane(
+        pool,
+        &identifier.to_lowercase(),
+        &title,
+        &format!("# {identifier}: {title}\n\n{description}"),
+        cwd,
+        done,
+        thread,
+    )
+    .await?;
+    sqlx::query("UPDATE tracker_issues SET lane_key = ?, updated_at = ? WHERE id = ?")
+        .bind(&lane_key)
+        .bind(now_rfc3339())
+        .bind(issue_id)
+        .execute(pool)
+        .await?;
+    Ok(lane_key)
+}
+
+/// The lane side of a delegation: a queued lane keyed `<key_base>-<4 hex>`, its brief written to
+/// the tracker brief dir (not linked to the lane, as before), and a valid Slack thread ref bound.
+pub(crate) async fn open_lane(
+    pool: &SqlitePool,
+    key_base: &str,
+    title: &str,
+    brief: &str,
+    cwd: &str,
+    done: &str,
+    thread: Option<&str>,
+) -> Result<String> {
     let lane_key = sanitize_lane_key(&format!(
         "{}-{:04x}",
-        identifier.to_lowercase(),
+        key_base,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.subsec_nanos() & 0xffff)
@@ -1471,13 +1501,10 @@ async fn open_delegated_lane(
         .await
         .map_err(|error| crate::error::HubError::message(error.to_string()))?;
     let brief_path = brief_dir.join(format!("{lane_key}.md"));
-    tokio::fs::write(
-        &brief_path,
-        format!("# {identifier}: {title}\n\n{description}"),
-    )
-    .await
-    .map_err(|error| crate::error::HubError::message(error.to_string()))?;
-    crate::lanes::state::insert_lane(pool, &lane_key, &title, "tracker", cwd, done)
+    tokio::fs::write(&brief_path, brief)
+        .await
+        .map_err(|error| crate::error::HubError::message(error.to_string()))?;
+    crate::lanes::state::insert_lane(pool, &lane_key, title, "tracker", cwd, done)
         .await
         .map_err(|error| crate::error::HubError::message(error.to_string()))?;
     if let Some(thread) = thread.filter(|value| crate::lanes::threads::parse_ref(value).is_some()) {
@@ -1487,13 +1514,6 @@ async fn open_delegated_lane(
             .execute(pool)
             .await?;
     }
-    sqlx::query("UPDATE tracker_issues SET lane_key = ?, updated_at = ? WHERE id = ?")
-        .bind(&lane_key)
-        .bind(now_rfc3339())
-        .bind(issue_id)
-        .execute(pool)
-        .await?;
-    let _ = brief_path;
     Ok(lane_key)
 }
 
@@ -1530,7 +1550,7 @@ async fn lane_action(
         .or_else(|| body.get("text"))
         .and_then(Value::as_str)
         .unwrap_or(action);
-    if matches!(action, "send" | "object" | "close" | "reopen") {
+    if is_lane_action(action) {
         let lane_key: Option<String> =
             match sqlx::query_scalar("SELECT lane_key FROM tracker_issues WHERE id = ?")
                 .bind(&id)
@@ -1544,65 +1564,82 @@ async fn lane_action(
             return fail(StatusCode::CONFLICT, "issue is not linked to a lane");
         };
         let force = body.get("force").and_then(Value::as_bool).unwrap_or(false);
-        let reason = match action {
-            "close" if force => Some(if note.starts_with("forced:") {
-                note.to_owned()
-            } else if note.is_empty() {
-                "forced: closed from tracker".into()
-            } else {
-                format!("forced: {note}")
-            }),
-            "reopen" => Some("note: reopened".into()),
-            _ => Some(note.to_owned()),
-        };
-        let target = match action {
-            "send" | "reopen" => crate::lanes::state::LaneStatus::Working,
-            "object" => crate::lanes::state::LaneStatus::Blocked,
-            "close" => crate::lanes::state::LaneStatus::Closed,
-            _ => crate::lanes::state::LaneStatus::Working,
-        };
-        // A lane the supervisor owns changes only through the supervisor, as in patch_issue;
-        // the UPDATE itself refuses it, also when it was adopted a moment ago.
-        match crate::lanes::state::transition_unless_supervised(
-            &pool,
-            &lane_key,
-            target,
-            reason.as_deref(),
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                return fail(
-                    StatusCode::CONFLICT,
-                    format!(
-                        "{}: lane {lane_key} belongs to a supervisor goal; act on it through the supervisor",
-                        crate::supervisor::SUPERVISOR_OWNED
-                    ),
-                )
-            }
-            Err(error) => return fail(StatusCode::CONFLICT, error.to_string()),
+        if let Err(error) = apply_lane_action(&pool, &lane_key, action, note, force).await {
+            return fail(StatusCode::CONFLICT, error);
         }
-        let kind = if action == "object" {
-            "blocked"
-        } else {
-            "lane_action"
-        };
-        let _ = sqlx::query(
-            "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES(?,?,?,?,?)",
-        )
-        .bind(&lane_key)
-        .bind("tracker")
-        .bind(kind)
-        .bind(note)
-        .bind(now_rfc3339())
-        .execute(&pool)
-        .await;
     }
     if let Err(error) = record_activity(&pool, &id, None, "lane_action", None, Some(note)).await {
         return fail(StatusCode::BAD_REQUEST, error.to_string());
     }
     detail_response(issue_detail_value(&pool, &id).await)
+}
+
+/// True for the actions that act on the lane: send, object, close and reopen.
+pub(crate) fn is_lane_action(action: &str) -> bool {
+    matches!(action, "send" | "object" | "close" | "reopen")
+}
+
+/// The lane side of a lane action ([`is_lane_action`]): the transition, refused for a lane the
+/// supervisor owns, then a `lane_events` row. The error is the conflict message.
+pub(crate) async fn apply_lane_action(
+    pool: &SqlitePool,
+    lane_key: &str,
+    action: &str,
+    note: &str,
+    force: bool,
+) -> std::result::Result<(), String> {
+    let reason = match action {
+        "close" if force => Some(if note.starts_with("forced:") {
+            note.to_owned()
+        } else if note.is_empty() {
+            "forced: closed from tracker".into()
+        } else {
+            format!("forced: {note}")
+        }),
+        "reopen" => Some("note: reopened".into()),
+        _ => Some(note.to_owned()),
+    };
+    let target = match action {
+        "send" | "reopen" => crate::lanes::state::LaneStatus::Working,
+        "object" => crate::lanes::state::LaneStatus::Blocked,
+        "close" => crate::lanes::state::LaneStatus::Closed,
+        _ => crate::lanes::state::LaneStatus::Working,
+    };
+    // A lane the supervisor owns changes only through the supervisor, as in patch_issue;
+    // the UPDATE itself refuses it, also when it was adopted a moment ago.
+    match crate::lanes::state::transition_unless_supervised(
+        pool,
+        lane_key,
+        target,
+        reason.as_deref(),
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "{}: lane {lane_key} belongs to a supervisor goal; act on it through the supervisor",
+                crate::supervisor::SUPERVISOR_OWNED
+            ))
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    let kind = if action == "object" {
+        "blocked"
+    } else {
+        "lane_action"
+    };
+    let _ = sqlx::query(
+        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at) VALUES(?,?,?,?,?)",
+    )
+    .bind(lane_key)
+    .bind("tracker")
+    .bind(kind)
+    .bind(note)
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await;
+    Ok(())
 }
 
 async fn batch_issues(

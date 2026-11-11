@@ -50,7 +50,7 @@ fn control() -> Option<&'static Arc<dyn AgentControl>> {
 }
 
 /// One live agent pane, read from an `agents.list` entry.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct LiveSession {
     pub session_id: String,
     pub name: Option<String>,
@@ -112,7 +112,41 @@ pub fn session_ref(machine: &str, session_id: &str) -> String {
     format!("{machine}:{session_id}")
 }
 
+fn last_snapshots() -> &'static RwLock<Option<Vec<Snapshot>>> {
+    static LAST: OnceLock<RwLock<Option<Vec<Snapshot>>>> = OnceLock::new();
+    LAST.get_or_init(|| RwLock::new(None))
+}
+
+/// The last collected snapshots, or a fresh `collect` on `control` when `refresh` is set or
+/// nothing was collected yet. Writes no tracker table.
+pub async fn snapshots_on(
+    control: &dyn AgentControl,
+    pool: &SqlitePool,
+    refresh: bool,
+) -> Vec<Snapshot> {
+    if !refresh {
+        let cached = last_snapshots()
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(cached) = cached {
+            return cached;
+        }
+    }
+    let snapshots = collect(pool, control).await;
+    remember(&snapshots);
+    snapshots
+}
+
+/// The agent control [`install`] gave the tracker, if any.
+pub fn installed() -> Option<Arc<dyn AgentControl>> {
+    control().cloned()
+}
+
 fn remember(snapshots: &[Snapshot]) {
+    *last_snapshots()
+        .write()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(snapshots.to_vec());
     let mut live = live_map()
         .write()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -324,7 +358,7 @@ pub async fn answer(
     .await
 }
 
-async fn send_on(
+pub(crate) async fn send_on(
     control: &dyn AgentControl,
     pool: &SqlitePool,
     machine: &str,
@@ -348,7 +382,7 @@ async fn send_on(
         .await
 }
 
-async fn interrupt_on(
+pub(crate) async fn interrupt_on(
     control: &dyn AgentControl,
     pool: &SqlitePool,
     machine: &str,
@@ -368,7 +402,7 @@ async fn interrupt_on(
 
 /// Answers the pane's pending question: a number picks that option (1-based), anything else
 /// is typed as the answer, as omo's `answer` took free text.
-async fn answer_on(
+pub(crate) async fn answer_on(
     control: &dyn AgentControl,
     pool: &SqlitePool,
     machine: &str,

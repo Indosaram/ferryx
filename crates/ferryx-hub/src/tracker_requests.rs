@@ -27,7 +27,7 @@ static SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Requester names from `TRACKER_REQUESTERS` (comma separated); each matches inbox authors
 /// containing it. Unset means no requesters: nothing is mirrored.
-fn requesters() -> Vec<String> {
+pub(crate) fn requesters() -> Vec<String> {
     crate::hub_env::var(REQUESTERS_ENV)
         .unwrap_or_default()
         .split(',')

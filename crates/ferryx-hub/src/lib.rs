@@ -4,6 +4,7 @@
 //! The connectors stay idle until a token or speech key is configured.
 #![deny(clippy::print_stdout)]
 
+pub mod agent_api;
 pub mod agent_control;
 pub mod adoption;
 pub mod autonomy;
