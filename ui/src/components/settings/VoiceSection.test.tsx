@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { VoiceSection } from "./VoiceSection";
 
@@ -17,7 +17,7 @@ function answers(overrides: {
   status?: { available: boolean; sttSource: "key" | "codex" | null; speakAvailable: boolean; speakReason: string | null };
   save?: () => Promise<unknown>;
 }) {
-  const key = overrides.key ?? { saved: false, source: null as const };
+  const key = overrides.key ?? { saved: false, source: null };
   const status = overrides.status ?? {
     available: true,
     sttSource: "codex" as const,
