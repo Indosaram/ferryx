@@ -228,17 +228,18 @@ async fn observe_entry(
         pending.as_ref().map(|prompt| prompt.kind),
         failed,
         completed,
-        read_for(session_id),
+        read_for(state, session_id),
         ownership_for(session_id),
     );
     entry["attention"] = serde_json::json!(ferryx_hub::supervisor::panel_contract::Attention::of(axes));
     Ok(Observed { entry, screen })
 }
 
-/// Whether the owner has looked at the session's current episode. The daemon's read store
-/// replaces this seam; until then every episode is unread.
-fn read_for(_session_id: &str) -> ferryx_hub::supervisor::panel_contract::AttentionRead {
-    ferryx_hub::supervisor::panel_contract::AttentionRead::Unread
+/// Whether the owner acknowledged the session's current episode, from the daemon's read store.
+/// A new prompt id or a new completion opens an unread episode there.
+fn read_for(state: &RemoteGatewayState, session_id: &str) -> ferryx_hub::supervisor::panel_contract::AttentionRead {
+    use ferryx_hub::supervisor::panel_contract::AttentionRead;
+    if state.agent_events.read_state(session_id) { AttentionRead::Read } else { AttentionRead::Unread }
 }
 
 /// Who acts on the session next, as this daemon knows it. Spawn lineage replaces this seam
@@ -2328,6 +2329,61 @@ mod tests {
         state.agent_events.publish(reading(session_id, AgentControlState::Working, AgentStateSource::Provider));
         let again = state.agent_events.completion(session_id);
         assert_eq!(again, None, "a new turn ends the completion episode");
+    }
+
+    #[tokio::test]
+    async fn an_acknowledged_completion_is_seen_until_the_next_one() {
+        let session_id = "agent-control-attention-acked-completion";
+        let (_backend, state) = pane(session_id, "$ ");
+        let read = |state: Arc<RemoteGatewayState>| async move {
+            let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+            read["session"]["attention"].clone()
+        };
+        state.agent_events.publish(reading(session_id, AgentControlState::Working, AgentStateSource::Provider));
+        state.agent_events.publish(reading(session_id, AgentControlState::Idle, AgentStateSource::Provider));
+        assert_eq!(read(Arc::clone(&state)).await["group"], "unread");
+
+        let acked = handle(&state, AgentControlOp::Acknowledge { session_id: session_id.to_string() }).await.expect("ack");
+        assert_eq!(acked["session"]["read"], true, "{acked}");
+        let seen = read(Arc::clone(&state)).await;
+        assert_eq!(seen["axes"]["completion"], "reported", "{seen}");
+        assert_eq!(seen["axes"]["read"], "read", "{seen}");
+        assert_eq!(seen["group"], "seen", "{seen}");
+        let frame = crate::hub_runtime::local_fleet_session(&state, session_id).await.expect("the pane");
+        let frame = serde_json::to_value(frame.attention).unwrap();
+        assert_eq!(frame["group"], "seen", "the panel frame reads the same read state: {frame}");
+
+        state.agent_events.publish(reading(session_id, AgentControlState::Working, AgentStateSource::Provider));
+        state.agent_events.publish(reading(session_id, AgentControlState::Idle, AgentStateSource::Provider));
+        assert_eq!(read(Arc::clone(&state)).await["group"], "unread", "a new completion starts unread");
+    }
+
+    #[tokio::test]
+    async fn an_acknowledged_open_prompt_is_seen_until_a_new_prompt_id() {
+        let session_id = "agent-control-attention-acked-prompt";
+        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
+        let prompt = |prompt_id: &str| events::ObservationDraft {
+            prompt_id: Some(prompt_id.to_string()),
+            kind: Some("approval".into()),
+            ..reading(session_id, AgentControlState::Blocked, AgentStateSource::Screen)
+        };
+        let read = |state: Arc<RemoteGatewayState>| async move {
+            let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
+            read["session"].clone()
+        };
+        state.agent_events.publish(prompt("p1"));
+        assert_eq!(read(Arc::clone(&state)).await["attention"]["group"], "needsYou");
+
+        handle(&state, AgentControlOp::Acknowledge { session_id: session_id.to_string() }).await.expect("ack");
+        let seen = read(Arc::clone(&state)).await;
+        assert_eq!(seen["attention"]["axes"]["demand"], "approval", "the prompt stays open: {seen}");
+        assert!(seen["pending"].is_object(), "an ack never answers the prompt: {seen}");
+        assert_eq!(seen["attention"]["group"], "seen", "{seen}");
+        state.agent_events.publish(prompt("p1"));
+        assert_eq!(read(Arc::clone(&state)).await["attention"]["group"], "seen", "the same prompt stays seen");
+
+        state.agent_events.publish(prompt("p2"));
+        assert_eq!(read(Arc::clone(&state)).await["attention"]["group"], "needsYou", "a new prompt id needs you again");
     }
 
     #[tokio::test]

@@ -199,9 +199,6 @@ struct Log {
     /// Stamps a previous daemon run persisted, until this run's first reading of the session
     /// replaces them. Never part of `latest`, `snapshot` or a replay: a seed is not a reading.
     seeds: HashMap<String, SessionStamps>,
-    /// Sessions whose agent stopped working since their last turn began: the `state_since` of
-    /// the reading that ended the turn (Working -> Idle/Unknown). Cleared when it works again.
-    completions: HashMap<String, Option<i64>>,
     /// The read store: per session, the current attention episode and whether it was
     /// acknowledged. Kept apart from drafts so an observer tick never undoes an acknowledgement.
     reads: HashMap<String, ReadMark>,
@@ -354,6 +351,9 @@ fn effective_stamps(log: &Log, session_id: &str) -> Option<SessionStamps> {
         .or_else(|| log.seeds.get(session_id).cloned())
 }
 
+/// The episode-key prefix of a completion, followed by the edge's `state_since`.
+const DONE_EPISODE: &str = "done:";
+
 /// The episode a reading opens, if it opens one: an open prompt is its own episode, and a
 /// `working` -> `idle`/`unknown` edge is a completion keyed by when it happened. Any other
 /// reading continues the current episode.
@@ -367,7 +367,7 @@ fn opened_episode(
     }
     let done = matches!(draft.state, AgentControlState::Idle | AgentControlState::Unknown);
     if done && previous == Some(AgentControlState::Working) {
-        return Some(format!("done:{}", state_since_ms.unwrap_or_default()));
+        return Some(format!("{DONE_EPISODE}{}", state_since_ms.unwrap_or_default()));
     }
     None
 }
@@ -378,7 +378,12 @@ fn next_read(log: &Log, draft: &ObservationDraft, state_since_ms: Option<i64>, a
     let previous = effective_stamps(log, &draft.session_id).map(|seen| seen.state);
     let current = log.reads.get(&draft.session_id);
     let mark = match opened_episode(previous, draft, state_since_ms) {
-        Some(episode) if current.and_then(|mark| mark.episode.as_ref()) != Some(&episode) => {
+        // A done edge always leaves `working`, so it is a new completion even when its time
+        // repeats the last one's; a prompt is new only under a new id.
+        Some(episode)
+            if episode.starts_with(DONE_EPISODE)
+                || current.and_then(|mark| mark.episode.as_ref()) != Some(&episode) =>
+        {
             Some(ReadMark { episode: Some(episode), read: false })
         }
         _ => current.cloned(),
@@ -405,7 +410,6 @@ impl AgentEventBus {
                 retained: VecDeque::new(),
                 latest: HashMap::new(),
                 seeds: HashMap::new(),
-                completions: HashMap::new(),
                 reads: HashMap::new(),
                 capacity,
             }),
@@ -460,9 +464,15 @@ impl AgentEventBus {
     }
 
     /// The completion episode of the session's last turn: `Some(state_since)` of the reading
-    /// that moved it from working to idle or unknown, until it works again.
+    /// that moved it from working to idle or unknown, until it works again or a prompt opens a
+    /// new episode. Read from the read store, so a completion and its read mark are one episode.
     pub fn completion(&self, session_id: &str) -> Option<Option<i64>> {
-        self.log.lock().completions.get(session_id).copied()
+        let log = self.log.lock();
+        if effective_stamps(&log, session_id).is_some_and(|seen| seen.state == AgentControlState::Working) {
+            return None;
+        }
+        let since = log.reads.get(session_id)?.episode.as_deref()?.strip_prefix(DONE_EPISODE)?;
+        Some(since.parse().ok())
     }
 
     /// Loads the stamps a previous run persisted. Call before the observers start: a seed only
@@ -675,20 +685,6 @@ impl AgentEventBus {
             let current = SessionStamps::of(&observation, read.as_ref());
             changed_stamps = (previous.as_ref() != Some(&current)).then_some(current);
             log.seeds.remove(&observation.session_id);
-            let was_working = log
-                .latest
-                .get(&observation.session_id)
-                .is_some_and(|latest| latest.state == AgentControlState::Working);
-            match observation.state {
-                AgentControlState::Working => {
-                    log.completions.remove(&observation.session_id);
-                }
-                AgentControlState::Idle | AgentControlState::Unknown if was_working => {
-                    log.completions
-                        .insert(observation.session_id.clone(), observation.state_since_ms);
-                }
-                _ => {}
-            }
             log.latest
                 .insert(observation.session_id.clone(), observation.clone());
             log.retained.push_back(observation.clone());
@@ -1459,6 +1455,25 @@ mod tests {
             assert!(restarted.read_state("s"));
             assert!(restarted.publish(prompt("s", "p1")).read);
             assert!(!restarted.publish(prompt("s", "p2")).read);
+        }
+
+        #[test]
+        fn an_unread_completion_survives_a_restart_and_a_new_turn_ends_it() {
+            let (bus, clock) = clocked_bus();
+            let heard = Arc::new(Mutex::new(None::<SessionStamps>));
+            let sink_heard = Arc::clone(&heard);
+            bus.set_stamp_sink(Arc::new(move |_, stamps| *sink_heard.lock() = Some(stamps.clone())));
+            bus.publish(draft("s", AgentControlState::Working));
+            clock.store(5_000, std::sync::atomic::Ordering::SeqCst);
+            bus.publish(draft("s", AgentControlState::Idle));
+            assert_eq!(bus.completion("s"), Some(Some(5_000)));
+            let persisted = heard.lock().clone().expect("the completion was journaled");
+            let restarted = AgentEventBus::new(8);
+            restarted.seed_stamps([("s".to_string(), persisted)]);
+            assert_eq!(restarted.completion("s"), Some(Some(5_000)), "a restart keeps the completion");
+            assert!(!restarted.read_state("s"), "and keeps it unread");
+            restarted.publish(draft("s", AgentControlState::Working));
+            assert_eq!(restarted.completion("s"), None, "a new turn ends it");
         }
     }
 
