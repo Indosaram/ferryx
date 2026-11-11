@@ -86,11 +86,21 @@ fn provider_report(state: &RemoteGatewayState, session_id: &str) -> Option<Provi
 
 /// The wire error a refusal travels as on the daemon socket.
 pub(crate) fn error_response(error: ScopeError) -> crate::daemon::protocol::DaemonResponse {
+    let code = control_wire_code(&error).to_string();
     crate::daemon::protocol::DaemonResponse::Error {
         message: error.message,
-        code: Some(reference_chat_wire_code(error.code).to_string()),
+        code: Some(code),
         details: None,
     }
+}
+
+/// The wire code a refusal travels as: its scope code, or the agent-control code a refusal
+/// names in its details (`SPAWN_LIMIT`).
+pub(crate) fn control_wire_code(error: &ScopeError) -> &'static str {
+    if error.details.get("code").and_then(serde_json::Value::as_str) == Some(crate::agent_control::SPAWN_LIMIT_CODE) {
+        return crate::agent_control::SPAWN_LIMIT_CODE;
+    }
+    reference_chat_wire_code(error.code)
 }
 
 /// One session's status, and the screen it was read from.
@@ -202,6 +212,12 @@ async fn observe_entry(
     if with_last_line {
         entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
     }
+    // A pane agent control spawned as another pane's child names its parent and depth, and is
+    // delegated; every other pane is the person's own (depth 0).
+    let lineage = state.machine_services.as_ref().and_then(|services| services.sessions.lineage_for(session_id));
+    entry["parent"] = serde_json::json!(lineage.as_ref().map(|lineage| lineage.parent.clone()));
+    entry["depth"] = serde_json::json!(lineage.as_ref().map_or(0, |lineage| lineage.depth));
+    entry["ownership"] = serde_json::json!(if lineage.is_some() { "delegated" } else { "owner" });
     if state.machine_services.as_ref().is_some_and(|services| services.sessions.agent_control_failed(session_id)) {
         entry["health"] = serde_json::json!({ "type": "failed", "reason": "the agent exited in the middle of a turn" });
     }
@@ -430,7 +446,7 @@ pub(crate) async fn handle_as(
             &op,
             match &result {
                 Ok(_) => "OK".to_string(),
-                Err(error) => reference_chat_wire_code(error.code).to_string(),
+                Err(error) => control_wire_code(error).to_string(),
             },
         ),
     );
@@ -647,6 +663,205 @@ async fn dispatch(
             }
         }
         AgentControlOp::Events { after } => Ok(replay_value(state.agent_events.replay(after))),
+        AgentControlOp::Spawn {
+            agent,
+            cwd,
+            workspace_id,
+            parent_session_id,
+            name,
+            prompt,
+            command,
+            args,
+            request_id,
+        } => {
+            spawn_agent(
+                state,
+                SpawnRequest { agent, cwd, workspace_id, parent_session_id, name, prompt, command, args, request_id },
+                authorize,
+            )
+            .await
+        }
+    }
+}
+
+/// Desktop event a spawned agent pane is announced with; the desktop adopts the live session
+/// as a split beside its parent's pane (or as a tab when it has no parent here).
+pub(crate) const AGENT_SPAWNED_EVENT: &str = "agent_spawned";
+
+/// How long a spawned pane may take to first read idle before its prompt is given up.
+const SPAWN_PROMPT_IDLE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// One `Spawn` op's fields.
+struct SpawnRequest {
+    agent: String,
+    cwd: String,
+    workspace_id: Option<String>,
+    parent_session_id: Option<String>,
+    name: Option<String>,
+    prompt: Option<String>,
+    command: Option<String>,
+    args: Vec<String>,
+    request_id: String,
+}
+
+/// Serializes the limit check and the spawn so concurrent spawns cannot pass the child cap
+/// together.
+fn spawn_admission() -> &'static tokio::sync::Mutex<()> {
+    static ADMISSION: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ADMISSION.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn spawn_agent(
+    state: &Arc<RemoteGatewayState>,
+    request: SpawnRequest,
+    authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
+) -> Result<serde_json::Value, ScopeError> {
+    let SpawnRequest { agent, cwd, workspace_id, parent_session_id, name, prompt, command, args, request_id } = request;
+    if request_id.trim().is_empty() {
+        return Err(reference_chat_scope(ScopeErrorCode::InvalidRequest, "a spawn needs its request id"));
+    }
+    if cwd.trim().is_empty() {
+        return Err(reference_chat_scope(ScopeErrorCode::InvalidRequest, "a spawn needs a cwd"));
+    }
+    if prompt.as_deref().is_some_and(|text| text.trim().is_empty() || text.contains('\0')) {
+        return Err(reference_chat_scope(ScopeErrorCode::InvalidRequest, "the prompt must not be empty or contain NUL"));
+    }
+    let Some(spec) = crate::agent_detect::registry::resolve(&agent) else {
+        return Err(reference_chat_scope(ScopeErrorCode::Unsupported, format!("no agent is named {agent}")));
+    };
+    let command = match command.filter(|command| !command.trim().is_empty()) {
+        Some(command) => command,
+        None => match spec.command_names.first() {
+            Some(name) => (*name).to_string(),
+            None => {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::Unsupported,
+                    format!("{} has no command to launch", spec.id),
+                ))
+            }
+        },
+    };
+    let Some(services) = state.machine_services.as_ref() else {
+        return Err(reference_chat_scope(ScopeErrorCode::Unsupported, "this host does not own sessions, so it cannot spawn one"));
+    };
+    let sessions = Arc::clone(&services.sessions);
+    if let Some(authorize) = &authorize {
+        authorize()?;
+    }
+    let admission = spawn_admission().lock().await;
+    // A retry of a spawn that already created its pane answers with that pane, not a new one.
+    if let Some(existing) = sessions.live_session_for_request(&request_id) {
+        return Ok(spawn_reply(&existing, sessions.lineage_for(&existing).as_ref(), spec.id));
+    }
+    let (workspace_id, worktree, lineage) = match parent_session_id.as_deref() {
+        Some(parent) => {
+            let Some((parent_workspace, parent_worktree)) = sessions.spawn_parent_scope(parent) else {
+                return Err(reference_chat_scope(ScopeErrorCode::NotFound, format!("no live pane {parent} runs on this host")));
+            };
+            let depth = crate::agent_control::spawn_child_depth(
+                sessions.lineage_for(parent).as_ref(),
+                sessions.live_spawned_children(parent),
+            )
+            .map_err(spawn_limit)?;
+            if workspace_id.as_deref().is_some_and(|requested| requested != parent_workspace) {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::InvalidRequest,
+                    "a child spawns in its parent's workspace",
+                ));
+            }
+            let lineage = crate::agent_control::Lineage { parent: parent.to_string(), depth, name: name.clone() };
+            (parent_workspace, parent_worktree, Some(lineage))
+        }
+        None => match workspace_id.filter(|id| !id.trim().is_empty()) {
+            Some(workspace_id) => (workspace_id, None, None),
+            None => {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::InvalidRequest,
+                    "a spawn without a parent needs a workspace id",
+                ))
+            }
+        },
+    };
+    let session_id = sessions
+        .spawn_agent_pane(&request_id, &workspace_id, worktree, cwd.clone(), command, args, lineage.clone())
+        .await
+        .map_err(|(code, message)| reference_chat_scope(code, message))?;
+    drop(admission);
+    state.emit_desktop_event(
+        AGENT_SPAWNED_EVENT,
+        serde_json::json!({
+            "sessionId": session_id,
+            "parentSessionId": lineage.as_ref().map(|lineage| lineage.parent.clone()),
+            "depth": lineage.as_ref().map_or(0, |lineage| lineage.depth),
+            "workspaceId": workspace_id,
+            "cwd": cwd,
+            "agent": spec.id,
+            "name": name,
+            "daemonEpoch": state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire).to_string(),
+        }),
+    );
+    if let Some(prompt) = prompt {
+        let state = Arc::clone(state);
+        let session_id = session_id.clone();
+        let request_id = format!("{request_id}:prompt");
+        tokio::spawn(async move {
+            deliver_spawn_prompt(&state, &session_id, prompt, request_id, authorize).await;
+        });
+    }
+    Ok(spawn_reply(&session_id, lineage.as_ref(), spec.id))
+}
+
+fn spawn_limit(message: String) -> ScopeError {
+    // Its own wire code, so a caller can tell a limit from any other refusal. It exits refused.
+    let mut error = reference_chat_scope(ScopeErrorCode::Forbidden, message);
+    error.details = serde_json::json!({ "code": crate::agent_control::SPAWN_LIMIT_CODE });
+    error
+}
+
+fn spawn_reply(session_id: &str, lineage: Option<&crate::agent_control::Lineage>, agent: &str) -> serde_json::Value {
+    serde_json::json!({
+        "session": {
+            "sessionId": session_id,
+            "agent": agent,
+            "parent": lineage.map(|lineage| lineage.parent.clone()),
+            "depth": lineage.map_or(0, |lineage| lineage.depth),
+            "name": lineage.and_then(|lineage| lineage.name.clone()),
+        }
+    })
+}
+
+/// Types a spawned pane's first prompt once the pane first reads idle. A pane that never gets
+/// there, or a delivery that is refused, is logged; nothing is retried.
+async fn deliver_spawn_prompt(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    prompt: String,
+    request_id: String,
+    authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
+) {
+    let idle = events::wait_for(&state.agent_events, session_id, "idle", 0, None, SPAWN_PROMPT_IDLE_WAIT).await;
+    if idle.is_none() {
+        tracing::warn!(session_id, "a spawned pane never read idle; its prompt was not delivered");
+        return;
+    }
+    // Straight to the delivery, not through `handle_as`: that path dispatches spawns, and a
+    // spawn whose task re-enters it would make this future's type recursive.
+    let op = AgentControlOp::Deliver {
+        session_id: session_id.to_string(),
+        text: prompt.clone(),
+        request_id: request_id.clone(),
+        observe_ms: 0,
+    };
+    let deadline = crate::agent_control::delivery::observe_deadline(0);
+    let result =
+        crate::agent_control::delivery::deliver(state, session_id, prompt, request_id, deadline, authorize).await;
+    let outcome = match &result {
+        Ok(_) => "OK".to_string(),
+        Err(error) => control_wire_code(error).to_string(),
+    };
+    record_audit(state, AuditRecord::for_op("owner", &op, outcome));
+    if let Err(error) = result {
+        tracing::warn!(session_id, code = ?error.code, "a spawned pane's prompt was not delivered");
     }
 }
 
@@ -1043,6 +1258,9 @@ fn control_json(value: serde_json::Value) -> Response {
 fn control_finish(result: Result<serde_json::Value, ScopeError>) -> Response {
     match result {
         Ok(value) => control_json(value),
+        Err(error) if control_wire_code(&error) == crate::agent_control::SPAWN_LIMIT_CODE => {
+            machine_error_with_details(StatusCode::CONFLICT, crate::agent_control::SPAWN_LIMIT_CODE, &error.message, serde_json::Map::new())
+        }
         Err(error) => reference_chat_refusal(&error),
     }
 }
@@ -1396,6 +1614,69 @@ pub(crate) async fn http_send(
     .await
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SpawnBody {
+    agent: String,
+    cwd: String,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    request_id: String,
+    #[serde(default)]
+    supervisor_fence: Option<u64>,
+    #[serde(default)]
+    supervisor_account: Option<String>,
+}
+
+/// `POST /api/v1/agent-control/spawn`: open an agent pane on this machine, optionally as the
+/// child of one of its panes.
+pub(crate) async fn http_spawn(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<Json<SpawnBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let device = match http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return reference_chat_error(ScopeErrorCode::InvalidRequest, "the spawn body is not readable")
+        }
+    };
+    let authorize = http_reauthorize(&state, &headers);
+    control_fenced(
+        &state,
+        AgentControlOp::Spawn {
+            agent: body.agent,
+            cwd: body.cwd,
+            workspace_id: body.workspace_id,
+            parent_session_id: body.parent_session_id,
+            name: body.name,
+            prompt: body.prompt,
+            command: body.command,
+            args: body.args,
+            request_id: body.request_id,
+        },
+        &device.id,
+        authorize,
+        body.supervisor_fence,
+        body.supervisor_account,
+    )
+    .await
+}
+
 pub(crate) async fn http_answer(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -1541,7 +1822,13 @@ async fn forward_with(
             )),
             Some(hosts) => forward_once(&hosts, &host_id, op.clone(), fence)
                 .await
-                .map_err(|failure| reference_chat_scope(forward_scope_code(&failure.code), failure.message)),
+                .map_err(|failure| {
+                    if failure.code == crate::agent_control::SPAWN_LIMIT_CODE {
+                        spawn_limit(failure.message)
+                    } else {
+                        reference_chat_scope(forward_scope_code(&failure.code), failure.message)
+                    }
+                }),
         },
     };
     if let (Ok(_), Some(answer)) = (&result, owner_answer) {
@@ -1554,7 +1841,7 @@ async fn forward_with(
             &op,
             match &result {
                 Ok(_) => "OK".to_string(),
-                Err(error) => reference_chat_wire_code(error.code).to_string(),
+                Err(error) => control_wire_code(error).to_string(),
             },
         ),
     );
@@ -2978,5 +3265,190 @@ mod tests {
         let wire = serde_json::to_value(&view).expect("wire");
         assert_eq!(wire["needsConfirmation"], false, "{wire}");
         assert_eq!(wire["kind"], "freeText", "{wire}");
+    }
+
+    /// A real daemon with one registered git workspace, for the spawn op.
+    async fn spawn_fixture() -> (tempfile::TempDir, crate::daemon::server::DaemonServer, String) {
+        crate::ipc::run_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            let project = root.path().join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            for args in [
+                vec!["init"],
+                vec!["config", "user.name", "Test"],
+                vec!["config", "user.email", "test@example.com"],
+            ] {
+                crate::worktree::git::run_git(&project, &args).unwrap();
+            }
+            std::fs::write(project.join("init.txt"), b"init").unwrap();
+            crate::worktree::git::run_git(&project, &["add", "init.txt"]).unwrap();
+            crate::worktree::git::run_git(&project, &["commit", "--no-gpg-sign", "-m", "init"]).unwrap();
+            let server = crate::daemon::server::DaemonServer::new_with_paths(
+                Some(root.path().join("config")),
+                Some(root.path().join("auth")),
+            );
+            server.handle_register_workspace("spawn-ws", project.to_str().unwrap()).unwrap();
+            let cwd = std::fs::canonicalize(&project).unwrap().to_string_lossy().into_owned();
+            Ok((root, server, cwd))
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A long-lived stand-in agent process, so a spawned pane stays live for the test.
+    fn sleeper() -> (String, Vec<String>) {
+        if cfg!(windows) {
+            ("cmd.exe".into(), vec!["/c".into(), "ping -n 120 127.0.0.1 >NUL".into()])
+        } else {
+            ("/bin/sh".into(), vec!["-c".into(), "sleep 120".into()])
+        }
+    }
+
+    fn spawn_op(cwd: &str, parent: Option<&str>, workspace: Option<&str>, request_id: &str) -> AgentControlOp {
+        let (command, args) = sleeper();
+        AgentControlOp::Spawn {
+            agent: "claude".into(),
+            cwd: cwd.to_string(),
+            workspace_id: workspace.map(str::to_string),
+            parent_session_id: parent.map(str::to_string),
+            name: Some(format!("worker-{request_id}")),
+            prompt: None,
+            command: Some(command),
+            args,
+            request_id: request_id.to_string(),
+        }
+    }
+
+    fn spawned_id(value: &serde_json::Value) -> String {
+        value["session"]["sessionId"].as_str().expect("a spawned session id").to_string()
+    }
+
+    /// Closes every pane the test spawned, then re-raises the body's panic. A failing test must
+    /// fail, not wait out its live stand-in agents.
+    async fn finish(server: &crate::daemon::server::DaemonServer, outcome: std::thread::Result<()>) {
+        for id in server.remote_state().session_backend.list_sessions().await {
+            let _ = server.terminal_service().close_session(&id).await;
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_an_unknown_agent_is_unsupported() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        let mut op = spawn_op(&cwd, None, Some("spawn-ws"), "unknown-agent");
+        if let AgentControlOp::Spawn { agent, .. } = &mut op {
+            *agent = "nobody".into();
+        }
+        let error = handle(server.remote_state(), op).await.expect_err("an unknown agent is refused");
+        assert_eq!(error.code, ScopeErrorCode::Unsupported);
+        assert_eq!(crate::agent_control::exit_code_for(control_wire_code(&error)), crate::agent_control::EXIT_REFUSED);
+    }
+
+    #[tokio::test]
+    async fn spawn_without_parent_or_workspace_is_invalid() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        let error = handle(server.remote_state(), spawn_op(&cwd, None, None, "no-workspace"))
+            .await
+            .expect_err("a root spawn needs a workspace");
+        assert_eq!(error.code, ScopeErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn spawn_takes_the_parents_workspace_stores_lineage_and_announces_the_pane() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        use futures_util::FutureExt as _;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let state = server.remote_state();
+            let announced = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = Arc::clone(&announced);
+            state.set_desktop_event_sink(Arc::new(move |event, payload| {
+                if event == AGENT_SPAWNED_EVENT {
+                    sink.lock().unwrap().push(payload);
+                }
+            }));
+            let root = spawned_id(&handle(state, spawn_op(&cwd, None, Some("spawn-ws"), "root")).await.expect("root spawn"));
+            let child_reply = handle(state, spawn_op(&cwd, Some(&root), None, "child")).await.expect("child spawn");
+            let child = spawned_id(&child_reply);
+            assert_eq!(child_reply["session"]["parent"], serde_json::json!(root));
+            assert_eq!(child_reply["session"]["depth"], 1);
+
+            let services = state.machine_services.as_ref().unwrap();
+            assert_eq!(services.sessions.lineage_for(&root), None, "a root pane has no lineage");
+            let lineage = services.sessions.lineage_for(&child).expect("the child's lineage is stored");
+            assert_eq!((lineage.parent.as_str(), lineage.depth), (root.as_str(), 1));
+
+            let read = handle(state, AgentControlOp::Read { session_id: child.clone() }).await.expect("read the child");
+            assert_eq!(read["session"]["workspaceId"], "spawn-ws", "the child inherits the parent's workspace");
+            assert_eq!(read["session"]["parent"], serde_json::json!(root));
+            assert_eq!(read["session"]["depth"], 1);
+            assert_eq!(read["session"]["ownership"], "delegated");
+            let listed = handle(state, AgentControlOp::List).await.expect("list");
+            let root_entry = listed["sessions"].as_array().unwrap().iter().find(|entry| entry["sessionId"] == root.as_str()).cloned().expect("root listed");
+            assert_eq!(root_entry["parent"], serde_json::Value::Null);
+            assert_eq!(root_entry["depth"], 0);
+            assert_eq!(root_entry["ownership"], "owner");
+
+            let events = announced.lock().unwrap().clone();
+            let child_event = events.iter().find(|event| event["sessionId"] == child.as_str()).expect("the child is announced");
+            assert_eq!(child_event["parentSessionId"], serde_json::json!(root));
+            assert_eq!(child_event["workspaceId"], "spawn-ws");
+
+            // A retry of the same request answers with the pane it already created.
+            let again = handle(state, spawn_op(&cwd, Some(&root), None, "child")).await.expect("retry");
+            assert_eq!(spawned_id(&again), child);
+        })
+        .catch_unwind()
+        .await;
+        finish(&server, outcome).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_depth_cap_refuses_a_grandchilds_child_with_spawn_limit() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        use futures_util::FutureExt as _;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let state = server.remote_state();
+            let root = spawned_id(&handle(state, spawn_op(&cwd, None, Some("spawn-ws"), "d-root")).await.unwrap());
+            let first = spawned_id(&handle(state, spawn_op(&cwd, Some(&root), None, "d-1")).await.unwrap());
+            let second_reply = handle(state, spawn_op(&cwd, Some(&first), None, "d-2")).await.expect("depth 2 is allowed");
+            assert_eq!(second_reply["session"]["depth"], 2);
+            let second = spawned_id(&second_reply);
+            let error = handle(state, spawn_op(&cwd, Some(&second), None, "d-3")).await.expect_err("depth 3 is refused");
+            assert_eq!(control_wire_code(&error), crate::agent_control::SPAWN_LIMIT_CODE);
+            assert_eq!(crate::agent_control::exit_code_for(control_wire_code(&error)), crate::agent_control::EXIT_REFUSED);
+            match error_response(error) {
+                crate::daemon::protocol::DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("SPAWN_LIMIT")),
+                other => panic!("unexpected {other:?}"),
+            }
+        })
+        .catch_unwind()
+        .await;
+        finish(&server, outcome).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_child_cap_refuses_a_ninth_live_child() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        use futures_util::FutureExt as _;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let state = server.remote_state();
+            let root = spawned_id(&handle(state, spawn_op(&cwd, None, Some("spawn-ws"), "c-root")).await.unwrap());
+            let mut children = Vec::new();
+            for index in 0..crate::agent_control::SPAWN_MAX_CHILDREN {
+                let reply = handle(state, spawn_op(&cwd, Some(&root), None, &format!("c-{index}"))).await.expect("under the cap");
+                children.push(spawned_id(&reply));
+            }
+            let error = handle(state, spawn_op(&cwd, Some(&root), None, "c-over")).await.expect_err("the ninth is refused");
+            assert_eq!(control_wire_code(&error), crate::agent_control::SPAWN_LIMIT_CODE);
+            // A closed child frees its slot.
+            let freed = children.pop().unwrap();
+            server.terminal_service().close_session(&freed).await.unwrap();
+            handle(state, spawn_op(&cwd, Some(&root), None, "c-again")).await.expect("a freed slot admits one more");
+        })
+        .catch_unwind()
+        .await;
+        finish(&server, outcome).await;
     }
 }

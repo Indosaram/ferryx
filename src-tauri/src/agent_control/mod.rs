@@ -33,6 +33,46 @@ pub const AGENT_CONTROL_REMOTE_CAPABILITY: &str = "agentControlRemoteV1";
 /// causal start receipt. A paired host without it is never sent a supervisor dispatch.
 pub const AGENT_CONTROL_RECEIPTS_CAPABILITY: &str = "agentControlReceiptsV1";
 
+/// Capability for [`AgentControlOp::Spawn`]: open a new agent pane, optionally as the child of
+/// another pane. A peer without it is never sent a spawn.
+pub const AGENT_CONTROL_SPAWN_CAPABILITY: &str = "agentControlSpawnV1";
+
+/// A spawned pane may be at most this many levels below a pane nobody spawned.
+pub const SPAWN_MAX_DEPTH: u32 = 2;
+
+/// A pane may have at most this many live spawned children at once.
+pub const SPAWN_MAX_CHILDREN: usize = 8;
+
+/// The error code of a spawn refused by the depth or child limit.
+pub const SPAWN_LIMIT_CODE: &str = "SPAWN_LIMIT";
+
+/// Where a spawned pane came from: its parent pane and how deep below an unspawned pane it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Lineage {
+    pub parent: String,
+    pub depth: u32,
+    /// The name the spawner gave the child, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// The depth a new child of a pane with `parent` lineage gets, or why it is refused.
+///
+/// A pane nobody spawned is depth 0, so its child is depth 1. A child deeper than
+/// [`SPAWN_MAX_DEPTH`], or a parent that already has [`SPAWN_MAX_CHILDREN`] live children,
+/// is refused.
+pub fn spawn_child_depth(parent: Option<&Lineage>, live_children: usize) -> Result<u32, String> {
+    let depth = parent.map_or(0, |lineage| lineage.depth).saturating_add(1);
+    if depth > SPAWN_MAX_DEPTH {
+        return Err(format!("a spawned pane may be at most {SPAWN_MAX_DEPTH} levels deep"));
+    }
+    if live_children >= SPAWN_MAX_CHILDREN {
+        return Err(format!("a pane may have at most {SPAWN_MAX_CHILDREN} live spawned children"));
+    }
+    Ok(depth)
+}
+
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_INVALID: i32 = 2;
 pub const EXIT_NOT_FOUND: i32 = 3;
@@ -95,6 +135,28 @@ pub enum AgentControlOp {
         #[serde(default, skip_serializing_if = "is_zero_u64")]
         after: u64,
     },
+    /// Open a new agent pane in `cwd`. With `parent_session_id` the pane is that pane's child:
+    /// it inherits the parent's workspace and worktree and records its lineage. `command` and
+    /// `args` are the caller's resolved launch; without them the agent's registry command runs
+    /// with no args. `prompt` is delivered once the new pane first reads idle. Never creates a
+    /// worktree. The reply is `{session:{sessionId,parentSessionId,depth,...}}`.
+    Spawn {
+        agent: String,
+        cwd: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+        request_id: String,
+    },
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -106,7 +168,11 @@ impl AgentControlOp {
     pub fn is_input_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Send { .. } | Self::Answer { .. } | Self::Stop { .. } | Self::Deliver { .. }
+            Self::Send { .. }
+                | Self::Answer { .. }
+                | Self::Stop { .. }
+                | Self::Deliver { .. }
+                | Self::Spawn { .. }
         )
     }
 
@@ -115,7 +181,9 @@ impl AgentControlOp {
             Self::Send { request_id, .. }
             | Self::Answer { request_id, .. }
             | Self::Stop { request_id, .. } => request_id.clone().filter(|id| !id.is_empty()),
-            Self::Deliver { request_id, .. } => Some(request_id.clone()).filter(|id| !id.is_empty()),
+            Self::Deliver { request_id, .. } | Self::Spawn { request_id, .. } => {
+                Some(request_id.clone()).filter(|id| !id.is_empty())
+            }
             _ => None,
         }
     }
@@ -128,6 +196,9 @@ impl AgentControlOp {
 pub fn required_capability(op: &AgentControlOp, host_id: Option<&str>) -> &'static str {
     if matches!(op, AgentControlOp::Deliver { .. }) {
         return AGENT_CONTROL_RECEIPTS_CAPABILITY;
+    }
+    if matches!(op, AgentControlOp::Spawn { .. }) {
+        return AGENT_CONTROL_SPAWN_CAPABILITY;
     }
     if host_id.is_some()
         || matches!(
@@ -245,12 +316,12 @@ pub fn exit_code_for(code: &str) -> i32 {
         "INVALID_REQUEST" | "PAYLOAD_TOO_LARGE" => EXIT_INVALID,
         "NOT_FOUND" | "TARGET_EXPIRED" => EXIT_NOT_FOUND,
         "UNAUTHORIZED" | "FORBIDDEN" | "CONTROL_CONFLICT" | "REQUEST_CONFLICT" | "PROVIDER_OWNED"
-        | "UNSUPPORTED" | "CAPTURE_UNSUPPORTED" => EXIT_REFUSED,
+        | "UNSUPPORTED" | "CAPTURE_UNSUPPORTED" | "SPAWN_LIMIT" => EXIT_REFUSED,
         _ => EXIT_OTHER,
     }
 }
 
-pub const AGENTS_USAGE: &str = "usage: ferryx-cli agents list [--host <id>] [--json]\n       ferryx-cli agents read <session> [--host <id>] [--json]\n       ferryx-cli agents send <session> <text> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> | --options <n,m> | --text <t>) [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]\n       ferryx-cli agents events [--after <seq>] [--host <id>] [--json]";
+pub const AGENTS_USAGE: &str = "usage: ferryx-cli agents list [--host <id>] [--json]\n       ferryx-cli agents read <session> [--host <id>] [--json]\n       ferryx-cli agents send <session> <text> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> | --options <n,m> | --text <t>) [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]\n       ferryx-cli agents events [--after <seq>] [--host <id>] [--json]\n       ferryx-cli agents spawn --agent <id> --cwd <dir> [--parent <session>] [--workspace <id>] [--name <n>] [--prompt <text>] [--command <cmd> [--arg <a>]...] [--request-id <id>] [--host <id>] [--json]";
 
 /// A CLI usage error: always exit 2, never contacts the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,11 +447,55 @@ pub fn parse_agents_cli(args: &[String]) -> Result<ParsedAgents, UsageError> {
             }
             AgentControlOp::Events { after }
         }
+        "spawn" => {
+            let agent = take_flag(&mut rest, "--agent")?
+                .filter(|agent| !agent.trim().is_empty())
+                .ok_or_else(|| UsageError("--agent is required".into()))?;
+            let cwd = take_flag(&mut rest, "--cwd")?
+                .filter(|cwd| !cwd.trim().is_empty())
+                .ok_or_else(|| UsageError("--cwd is required".into()))?;
+            let parent_session_id = take_flag(&mut rest, "--parent")?;
+            if let Some(parent) = &parent_session_id {
+                if !crate::agent_transcript::is_valid_session_id(parent) {
+                    return Err(UsageError(format!("not a session id: {parent}")));
+                }
+            }
+            let workspace_id = take_flag(&mut rest, "--workspace")?;
+            let name = take_flag(&mut rest, "--name")?;
+            let prompt = take_flag(&mut rest, "--prompt")?;
+            if prompt.as_deref().is_some_and(|text| text.trim().is_empty() || text.contains('\0')) {
+                return Err(UsageError("--prompt must not be empty or contain NUL".into()));
+            }
+            let command = take_flag(&mut rest, "--command")?;
+            let mut args = Vec::new();
+            while let Some(arg) = take_flag(&mut rest, "--arg")? {
+                args.push(arg);
+            }
+            if command.is_none() && !args.is_empty() {
+                return Err(UsageError("--arg needs --command".into()));
+            }
+            if !rest.is_empty() {
+                return Err(UsageError(AGENTS_USAGE.into()));
+            }
+            AgentControlOp::Spawn {
+                agent,
+                cwd,
+                workspace_id,
+                parent_session_id,
+                name,
+                prompt,
+                command,
+                args,
+                request_id: request_id
+                    .clone()
+                    .unwrap_or_else(|| format!("agent-spawn-{}", uuid::Uuid::new_v4())),
+            }
+        }
         _ => return Err(UsageError(AGENTS_USAGE.into())),
     };
     if request_id.is_some() && !op.is_input_mutation() {
         return Err(UsageError(
-            "--request-id applies to send, answer and stop only".into(),
+            "--request-id applies to send, answer, stop and spawn only".into(),
         ));
     }
     if let Some(host_id) = host_id.as_deref() {
@@ -807,6 +922,85 @@ mod tests {
         );
         let screen_only = derive_status(None, Some(AgentActivity::Idle), true);
         assert_eq!((screen_only.state, screen_only.source), (AgentControlState::Blocked, AgentStateSource::Screen));
+    }
+
+    #[test]
+    fn spawn_parses_its_flags_and_mints_a_request_id() {
+        let parsed = parse_agents_cli(&argv(&[
+            "agents", "spawn", "--agent", "claude", "--cwd", "/tmp/w", "--parent", "s-1", "--name", "helper",
+            "--prompt", "fix it", "--command", "claude", "--arg", "--model", "--arg", "opus", "--json",
+        ]))
+        .unwrap();
+        let AgentControlOp::Spawn { agent, cwd, parent_session_id, name, prompt, command, args, request_id, workspace_id } =
+            parsed.op
+        else {
+            panic!("not a spawn");
+        };
+        assert_eq!((agent.as_str(), cwd.as_str()), ("claude", "/tmp/w"));
+        assert_eq!(parent_session_id.as_deref(), Some("s-1"));
+        assert_eq!((name.as_deref(), prompt.as_deref()), (Some("helper"), Some("fix it")));
+        assert_eq!(command.as_deref(), Some("claude"));
+        assert_eq!(args, vec!["--model".to_string(), "opus".to_string()]);
+        assert!(request_id.starts_with("agent-spawn-"));
+        assert_eq!(workspace_id, None);
+        let explicit = parse_agents_cli(&argv(&["agents", "spawn", "--agent", "codex", "--cwd", "/w", "--request-id", "r9"])).unwrap();
+        assert!(matches!(explicit.op, AgentControlOp::Spawn { ref request_id, .. } if request_id == "r9"));
+        assert!(explicit.op.is_input_mutation());
+    }
+
+    #[test]
+    fn spawn_refuses_bad_flags_before_contacting_a_daemon() {
+        assert!(parse_agents_cli(&argv(&["agents", "spawn", "--cwd", "/w"])).is_err());
+        assert!(parse_agents_cli(&argv(&["agents", "spawn", "--agent", "claude"])).is_err());
+        assert!(parse_agents_cli(&argv(&["agents", "spawn", "--agent", "claude", "--cwd", "/w", "--parent", "../x"])).is_err());
+        assert!(parse_agents_cli(&argv(&["agents", "spawn", "--agent", "claude", "--cwd", "/w", "--arg", "x"])).is_err());
+        assert!(parse_agents_cli(&argv(&["agents", "spawn", "--agent", "claude", "--cwd", "/w", "--prompt", " "])).is_err());
+        assert!(parse_agents_cli(&argv(&["agents", "spawn", "--agent", "claude", "--cwd", "/w", "stray"])).is_err());
+    }
+
+    #[test]
+    fn spawn_requires_its_own_capability_locally_and_on_a_host() {
+        let op = AgentControlOp::Spawn {
+            agent: "claude".into(),
+            cwd: "/w".into(),
+            workspace_id: None,
+            parent_session_id: None,
+            name: None,
+            prompt: None,
+            command: None,
+            args: Vec::new(),
+            request_id: "r".into(),
+        };
+        assert_eq!(required_capability(&op, None), AGENT_CONTROL_SPAWN_CAPABILITY);
+        assert_eq!(required_capability(&op, Some("host-a")), AGENT_CONTROL_SPAWN_CAPABILITY);
+        let older = vec![
+            AGENT_CONTROL_CAPABILITY.to_string(),
+            AGENT_CONTROL_REMOTE_CAPABILITY.to_string(),
+            AGENT_CONTROL_RECEIPTS_CAPABILITY.to_string(),
+        ];
+        assert!(!capability_advertised(&older, required_capability(&op, Some("host-a"))));
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(json, serde_json::json!({ "op": "spawn", "agent": "claude", "cwd": "/w", "requestId": "r" }));
+    }
+
+    #[test]
+    fn spawn_depth_cap_refuses_a_third_level() {
+        assert_eq!(spawn_child_depth(None, 0), Ok(1));
+        let first = Lineage { parent: "root".into(), depth: 1, name: None };
+        assert_eq!(spawn_child_depth(Some(&first), 0), Ok(2));
+        let second = Lineage { parent: "first".into(), depth: 2, name: None };
+        assert!(spawn_child_depth(Some(&second), 0).is_err(), "a third level is refused");
+    }
+
+    #[test]
+    fn spawn_child_cap_refuses_a_ninth_live_child() {
+        assert_eq!(spawn_child_depth(None, SPAWN_MAX_CHILDREN - 1), Ok(1));
+        assert!(spawn_child_depth(None, SPAWN_MAX_CHILDREN).is_err());
+    }
+
+    #[test]
+    fn spawn_limit_exits_refused() {
+        assert_eq!(exit_code_for(SPAWN_LIMIT_CODE), EXIT_REFUSED);
     }
 
     #[test]

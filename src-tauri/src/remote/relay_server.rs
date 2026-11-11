@@ -3609,6 +3609,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["agent-control", "sessions", _])
             | ("GET", ["agent-control", "sessions", _, "wait"])
             | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
+            | ("POST", ["agent-control", "spawn"])
             // Direct session stop by `<hostId>:<backendSessionId>` and an owner's decision tap;
             // the machine authorizes the device and fences the stale screen revision.
             | ("POST", ["sessions", _, "stop"])
@@ -6486,6 +6487,8 @@ mod tests {
     fn agent_control_and_supervisor_routes_join_the_allowlist_without_loosening_it() {
         assert!(allowed_http_route(&Method::GET, "agent-control/sessions"));
         assert!(allowed_http_route(&Method::GET, "agent-control/events"));
+        assert!(allowed_http_route(&Method::POST, "agent-control/spawn"));
+        assert!(!allowed_http_route(&Method::GET, "agent-control/spawn"));
         assert!(allowed_http_route(
             &Method::GET,
             "agent-control/sessions/s-1"

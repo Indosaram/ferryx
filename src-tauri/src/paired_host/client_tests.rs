@@ -1920,6 +1920,51 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
 }
 
 #[test]
+fn agent_control_spawn_rides_its_own_route_only_to_a_host_that_can_spawn() {
+    use crate::agent_control::AgentControlOp;
+    let spawn = Operation::AgentControl {
+        op: AgentControlOp::Spawn {
+            agent: "claude".into(),
+            cwd: "/w".into(),
+            workspace_id: None,
+            parent_session_id: Some("s-1".into()),
+            name: None,
+            prompt: Some("go".into()),
+            command: None,
+            args: Vec::new(),
+            request_id: "spawn-r1".into(),
+        },
+        fence: None,
+    };
+    assert!(spawn.is_mutation());
+    assert_eq!(spawn.agent_control_mutation_id().as_deref(), Some("spawn-r1"));
+    let route = spawn.route().expect("spawn route");
+    assert_eq!(route.capability, Some("agentControlSpawnV1"));
+    assert_eq!(route.segments, vec!["agent-control", "spawn"]);
+    assert_eq!(route.method, Method::POST);
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        body,
+        json!({"agent": "claude", "cwd": "/w", "parentSessionId": "s-1", "prompt": "go", "requestId": "spawn-r1"})
+    );
+    let bad_parent = Operation::AgentControl {
+        op: AgentControlOp::Spawn {
+            agent: "claude".into(),
+            cwd: "/w".into(),
+            workspace_id: None,
+            parent_session_id: Some("../x".into()),
+            name: None,
+            prompt: None,
+            command: None,
+            args: Vec::new(),
+            request_id: "spawn-r2".into(),
+        },
+        fence: None,
+    };
+    assert!(bad_parent.route().is_err());
+}
+
+#[test]
 fn a_delivery_rides_the_send_route_only_to_a_host_with_receipts() {
     use crate::agent_control::AgentControlOp;
     let deliver = Operation::AgentControl {

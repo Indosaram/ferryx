@@ -4425,6 +4425,7 @@ fn gateway_capability_names(
         capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
         capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
+        capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
         if supervisor {
             capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
             capabilities.push(supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
@@ -9128,6 +9129,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/agent-control/sessions/{sessionId}/stop",
             post(agent_control_service::http_stop).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
+        .route(
+            "/api/v1/agent-control/spawn",
+            post(agent_control_service::http_spawn).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
         )

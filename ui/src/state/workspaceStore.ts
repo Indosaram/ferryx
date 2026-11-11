@@ -16,6 +16,7 @@ import { browserTabIdForBrowserId, closeBrowser, createBrowser, createPopupBrows
 import { browserTabNavigation } from "../lib/browserTabNavigation";
 import { closeTerminal, describeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
+import { onAgentSpawned, type AgentSpawnedEvent } from "../lib/agentSpawned";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { isAbsoluteTerminalCwd } from "../lib/terminalCwd";
 import { switchDebug } from "../lib/switchDebug";
@@ -1464,6 +1465,46 @@ export function useWorkspaceStore({
     },
     [createSpawnedTab, dispatch, workspaceId],
   );
+
+  // A pane agent control spawned as a child of a pane in this window opens beside its parent,
+  // attached to the live backend session. Nothing is spawned or closed here.
+  const adoptBackendSessionForSpawnRef = useRef(adoptBackendSession);
+  adoptBackendSessionForSpawnRef.current = adoptBackendSession;
+  useEffect(() => {
+    if (!tauriIpc.isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onAgentSpawned(async (event) => {
+      if (event.workspaceId !== workspaceId) return;
+      const described = await tauriIpc.describeTerminal(event.sessionId).catch(() => null);
+      if (disposed || mountedWorkspaceIdRef.current !== workspaceId) return;
+      const plan = planSpawnedAgentAdoption(stateRef.current, event, {
+        incarnation: described?.incarnation ?? null,
+        frontendSessionId: createId("session"),
+        newLeafId: createId("pane"),
+      });
+      switchDebug("agent.spawned.adopt", {
+        backendSessionId: event.sessionId,
+        reason: plan?.kind ?? "not-here",
+      });
+      if (!plan) return;
+      if (plan.kind === "split") {
+        dispatch(plan.action);
+        return;
+      }
+      const worktree = stateRef.current.worktrees.find((candidate) => candidate.path === plan.worktreePath);
+      if (worktree) await adoptBackendSessionForSpawnRef.current(worktree, plan.backend, event.name ?? undefined);
+    })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [dispatch, workspaceId]);
 
   const sshRearmsRef = useRef(new Map<string, number>());
   const sshRecoveryKey = useMemo(
@@ -5006,6 +5047,65 @@ function locateSessionAcrossLayouts(
  * only in the map without a root leaf, or a closed session, is not navigable. This mirrors
  * exactly what the FOCUS_EXISTING_SESSION reducer will accept.
  */
+/**
+ * Where a pane spawned by agent control lands in this window. A child whose parent pane is in
+ * the visible layout becomes a split beside the parent's leaf, adopting the live backend session
+ * (nothing is spawned or closed). A parent held elsewhere in this window (a parked worktree)
+ * gets the child as a tab in the parent's worktree. A pane this window already shows, a parent
+ * this window does not hold, or another project's pane is left alone (`null`).
+ */
+export type SpawnedAgentAdoption =
+  | { kind: "split"; action: Extract<WorkspaceAction, { type: "SPLIT_PANE" }> }
+  | { kind: "tab"; worktreePath: string; backend: PreSpawnedBackend };
+
+export function planSpawnedAgentAdoption(
+  state: WorkspaceState,
+  event: AgentSpawnedEvent,
+  identity: { incarnation: string | null; frontendSessionId: string; newLeafId: string },
+): SpawnedAgentAdoption | null {
+  if (!event.parentSessionId) return null;
+  if (state.workspaceId !== undefined && state.workspaceId !== event.workspaceId) return null;
+  const sessions = Object.values(state.sessions);
+  if (sessions.some((session) => session.backendSessionId === event.sessionId)) return null;
+  const parent = sessions.find((session) => session.backendSessionId === event.parentSessionId);
+  if (!parent) return null;
+  const backend: PreSpawnedBackend = {
+    sessionId: event.sessionId,
+    ...(event.agent ? { agentType: event.agent } : {}),
+    daemonEpoch: event.daemonEpoch,
+    incarnation: identity.incarnation,
+  };
+  const placed = locateSessionLeaf(state.layout, parent.id);
+  if (!placed) {
+    const worktreePath = sessionWorktreePath(parent);
+    return worktreePath ? { kind: "tab", worktreePath, backend } : null;
+  }
+  const session: TerminalSession = {
+    id: identity.frontendSessionId,
+    cwd: event.cwd ?? parent.cwd,
+    worktreePath: sessionWorktreePath(parent),
+    workspaceId: parent.workspaceId,
+    worktree: parent.worktree,
+    backendSessionId: event.sessionId,
+    ...(event.agent ? { agentType: event.agent } : {}),
+    ...(event.daemonEpoch !== null ? { daemonEpoch: event.daemonEpoch } : {}),
+    ...(identity.incarnation !== null ? { incarnation: identity.incarnation } : {}),
+    lifecycle: "working",
+  };
+  return {
+    kind: "split",
+    action: {
+      type: "SPLIT_PANE",
+      tabId: placed.tabId,
+      ...(placed.leafId ? { targetLeafId: placed.leafId } : {}),
+      direction: "horizontal",
+      position: "second",
+      newLeafId: identity.newLeafId,
+      session,
+    },
+  };
+}
+
 export function hasNavigableSession(state: WorkspaceState, sessionId: string): boolean {
   return Boolean(state.sessions[sessionId]) && locateSessionAcrossLayouts(state, sessionId) !== null;
 }
