@@ -1038,7 +1038,8 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
         DaemonRequest::AgentControl {
             host_id: Some(_),
             request: crate::agent_control::AgentControlOp::Stop { .. }
-                | crate::agent_control::AgentControlOp::Answer { .. },
+                | crate::agent_control::AgentControlOp::Answer { .. }
+                | crate::agent_control::AgentControlOp::Spawn { .. },
             ..
         } => DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT,
         // A move waits for the holder's final checkpoint, its transfer and the import.

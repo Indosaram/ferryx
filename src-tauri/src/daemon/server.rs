@@ -460,6 +460,7 @@ mod pane_liveness_adopted_ownership_tests {
 
     fn owner_record(workspace_id: &str, worktree: Option<WorktreeIdentity>) -> StoredSessionMeta {
         StoredSessionMeta {
+            lineage: None,
             machine_session: None,
             client_request_id: format!("req-{workspace_id}"),
             workspace_id: workspace_id.to_owned(),
@@ -8047,6 +8048,7 @@ impl DaemonServer {
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
@@ -14853,6 +14855,7 @@ mod instance_lock_deadline_tests {
         server.session_service.session_metadata.write().insert(
             local_id.clone(),
             crate::daemon::session_service::StoredSessionMeta {
+                lineage: None,
                 machine_session: None,
                 client_request_id: "retry-local-validation".into(),
                 workspace_id: missing_project.clone(),
