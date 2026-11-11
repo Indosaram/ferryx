@@ -7,7 +7,8 @@ import type { SidebarLiveSignals, SidebarModel } from "../components/sidebar/sid
 import { supervisorTypingIn } from "../components/sidebar/sidebarSupervisor";
 import type { SupervisorSnapshot } from "../lib/supervisorModel";
 import { summarizeActivities, type ActivitySummary, type TerminalActivity } from "../lib/activity";
-import type { AttentionBySessionId } from "../lib/attentionGroup";
+import { attentionBySessionIdOf, type AttentionBySessionId } from "../lib/attentionGroup";
+import type { FleetSession } from "../lib/supervisorPanel/contract";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 
 /** The worktree the remote is attached to, as the inventory names it. */
@@ -15,6 +16,22 @@ export type RemoteSidebarSelection = { readonly workspaceId: string; readonly wo
 
 /** A machine's hub supervisor snapshot and the clock that expires its acting window. */
 export type RemoteSidebarSupervisor = { readonly snapshot: SupervisorSnapshot; readonly now: number };
+
+/**
+ * The daemon attention groups every sidebar machine draws. The pinned hub's panel snapshot lists
+ * its own sessions and every paired machine's (the hub merges the paired fleet), keyed here by
+ * backend session id, which daemons mint as uuids, so one map serves every machine: a machine
+ * whose desktop publishes nothing still draws the hub's judgment, not its inventory state.
+ */
+export function sidebarAttentionByMachine(
+  machineIds: readonly string[],
+  pinnedHostId: string | null,
+  pinnedSessions: readonly FleetSession[] | null,
+): Readonly<Record<string, AttentionBySessionId>> | undefined {
+  if (!pinnedHostId || !pinnedSessions) return undefined;
+  const attention = attentionBySessionIdOf(pinnedSessions);
+  return Object.fromEntries([pinnedHostId, ...machineIds].map((machineId) => [machineId, attention]));
+}
 
 export function remoteSidebarSignals(
   model: SidebarModel,

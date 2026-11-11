@@ -409,7 +409,9 @@ function sessionRow(
   let age: string | null = null;
   if (stalled && session.screenChangedAtMs !== null) {
     age = `screen unchanged for ${formatMinutes(nowMs - session.screenChangedAtMs)}`;
-  } else if (session.state === "blocked") {
+  } else if (session.state === "blocked" && group === "needsYou") {
+    // Only a row that needs the owner says how long it has waited; an acknowledged (seen) or
+    // supervisor-handled prompt must not read like one that still needs them.
     const waited =
       session.stateSinceMs !== null ? `waiting ${formatMinutes(nowMs - session.stateSinceMs)}` : null;
     // Plain words, not the hub's term: the supervisor holds this prompt and has not decided yet.
