@@ -533,11 +533,6 @@ pub fn run_hub_cli(args: &[String]) -> i32 {
         match ferryx_hub::import::open_and_migrate(&path, &source, dry, cwd.as_deref(), record_as.as_deref()).await {
             Ok(report) => {
                 println!("dry_run {dry}");
-                println!("issues {}", report.issues);
-                println!("teams {}", report.teams);
-                println!("states {}", report.states);
-                println!("labels {}", report.labels);
-                println!("activity {}", report.activity);
                 println!("cron_jobs {}", report.cron_jobs);
                 println!("inbox_items {}", report.inbox_items);
                 println!("proposals {}", report.proposals);
@@ -5213,8 +5208,8 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         launch.hub.owner_session().storage_key(),
     )));
     tasks.push(tokio::spawn(ferryx_hub::retention::serve(launch.hub.pool.clone())));
-    // The tracker's Sessions board and SES issues read and drive panes through the hub's control.
-    ferryx_hub::tracker_sessions::install(launch.bridge.clone());
+    // `/api/agent/sessions` lists and drives panes through the hub's control.
+    ferryx_hub::sessions::live::install(launch.bridge.clone());
     // omo's judge breaker alert reaches the owner through the owner alert sweep.
     ferryx_hub::judge::install_alerts(
         launch.hub.pool.clone(),

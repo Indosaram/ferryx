@@ -41,11 +41,6 @@ pub async fn import_once(pool: &SqlitePool, source: &Path) -> Result<ImportRepor
         lanes: copied.lanes,
         watches: copied.watches,
         notices: copied.notices,
-        issues: copied.issues,
-        teams: copied.teams,
-        states: copied.states,
-        labels: copied.labels,
-        activity: copied.activity,
         cron_jobs: copied.cron_jobs,
         inbox_items: copied.inbox_items,
         proposals: copied.proposals,
@@ -193,11 +188,6 @@ pub struct ImportReport {
     pub lanes: u64,
     pub watches: u64,
     pub notices: u64,
-    pub issues: u64,
-    pub teams: u64,
-    pub states: u64,
-    pub labels: u64,
-    pub activity: u64,
     pub cron_jobs: u64,
     pub inbox_items: u64,
     pub proposals: u64,
@@ -213,11 +203,6 @@ struct Copied {
     lanes: u64,
     watches: u64,
     notices: u64,
-    issues: u64,
-    teams: u64,
-    states: u64,
-    labels: u64,
-    activity: u64,
     cron_jobs: u64,
     inbox_items: u64,
     proposals: u64,
@@ -313,11 +298,6 @@ async fn import_into(pool: &SqlitePool, source: &Path) -> Result<ImportReport> {
         lanes: copied.lanes,
         watches: copied.watches,
         notices: copied.notices,
-        issues: copied.issues,
-        teams: copied.teams,
-        states: copied.states,
-        labels: copied.labels,
-        activity: copied.activity,
         cron_jobs: copied.cron_jobs,
         inbox_items: copied.inbox_items,
         proposals: copied.proposals,
@@ -389,27 +369,6 @@ async fn remember_working_directory(pool: &SqlitePool, dir: &Path) -> Result<()>
 }
 
 const PARITY_TABLES: &[&str] = &[
-    "tracker_users",
-    "tracker_teams",
-    "tracker_states",
-    "tracker_labels",
-    "tracker_projects",
-    "tracker_project_teams",
-    "tracker_project_members",
-    "tracker_milestones",
-    "tracker_cycles",
-    "tracker_issues",
-    "tracker_issue_labels",
-    "tracker_subscribers",
-    "tracker_comments",
-    "tracker_reactions",
-    "tracker_relations",
-    "tracker_links",
-    "tracker_activity",
-    "tracker_views",
-    "tracker_favorites",
-    "tracker_notifications",
-    "tracker_meta",
     "inbox_items",
     "inbox_decisions",
     "inbox_cursors",
@@ -443,11 +402,6 @@ async fn copy_state(from: &SqlitePool, into: &SqlitePool) -> Result<Copied> {
         lanes,
         watches,
         notices,
-        issues: tables["tracker_issues"],
-        teams: tables["tracker_teams"],
-        states: tables["tracker_states"],
-        labels: tables["tracker_labels"],
-        activity: tables["tracker_activity"],
         cron_jobs,
         inbox_items: tables["inbox_items"],
         proposals: tables["action_proposals"],
@@ -514,30 +468,11 @@ async fn columns(pool: &SqlitePool, table: &str) -> Result<Vec<String>> {
 }
 
 /// Copies the columns that exist on both sides. A missing source table copies nothing.
-/// A source table that is the live tracker shape but cannot satisfy the destination
-/// returns the sqlite error instead of an empty success.
+/// A source row the destination cannot take returns the sqlite error instead of an empty
+/// success.
 async fn copy_named(from: &SqlitePool, into: &SqlitePool, table: &str) -> Result<(u64, u64)> {
     if !table_exists(from, table).await? || !table_exists(into, table).await? {
         return Ok((0, 0));
-    }
-    if table == "tracker_issues" {
-        let source_cols = columns(from, table).await?;
-        if source_cols.iter().any(|name| name == "description") {
-            for required in [
-                "id",
-                "title",
-                "description",
-                "state_id",
-                "team_id",
-                "creator_id",
-            ] {
-                if !source_cols.iter().any(|name| name == required) {
-                    return Err(HubError::message(format!(
-                        "tracker_issues import refused: source is missing column {required}"
-                    )));
-                }
-            }
-        }
     }
     let source_cols = columns(from, table).await?;
     let dest_cols = columns(into, table).await?;
@@ -647,7 +582,7 @@ async fn orphan_guards(
 fn refreshes_on_conflict(table: &str) -> bool {
     matches!(
         table,
-        "tracker_issues" | "inbox_items" | "inbox_decisions" | "inbox_cursors" | "action_proposals"
+        "inbox_items" | "inbox_decisions" | "inbox_cursors" | "action_proposals"
     )
 }
 
@@ -1138,7 +1073,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linear_tracker_cron_and_allowlist_import_and_a_missing_column_is_an_error() {
+    async fn cron_allowlist_and_inbox_import_and_omo_tracker_rows_stay_in_omo() {
         let dir = scratch("parity-import");
         let source = dir.join("omo.sqlite");
         raw_db(
@@ -1179,40 +1114,30 @@ mod tests {
 
         let dest = storage::memory().await.unwrap();
         let dry = migrate_from_omo(&dest, &source, true).await.unwrap();
-        assert_eq!(dry.issues, 1);
         assert_eq!(dry.allowlist, 5);
         assert_eq!(dry.bot_profiles, 4);
         assert_eq!(dry.cron_jobs, 1);
-        assert_eq!(dry.activity, 1);
-        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracker_issues")
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM approval_allowlist")
             .fetch_one(&dest)
             .await
             .unwrap();
         assert_eq!(stored, 0, "dry-run writes nothing");
 
         let report = migrate_from_omo(&dest, &source, false).await.unwrap();
-        assert_eq!(report.issues, 1);
-        assert_eq!(report.teams, 1);
-        assert_eq!(report.states, 1);
-        assert_eq!(report.labels, 1);
-        assert_eq!(report.activity, 1);
         assert_eq!(report.cron_jobs, 1);
         assert_eq!(report.inbox_items, 1);
         assert_eq!(report.proposals, 1);
         assert_eq!(report.allowlist, 5);
         assert_eq!(report.bot_profiles, 4);
-        let description: String =
-            sqlx::query_scalar("SELECT description FROM tracker_issues WHERE id = 'i1'")
+        // The Linear tracker lives in openlinear now; its omo rows are not copied.
+        for table in ["tracker_issues", "tracker_users", "tracker_activity"] {
+            let rows: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
                 .fetch_one(&dest)
                 .await
                 .unwrap();
-        assert_eq!(description, "the body");
-        let state_id: String =
-            sqlx::query_scalar("SELECT state_id FROM tracker_issues WHERE id = 'i1'")
-                .fetch_one(&dest)
-                .await
-                .unwrap();
-        assert_eq!(state_id, "s1");
+            assert_eq!(rows, 0, "{table}");
+            assert!(!report.tables.contains_key(table), "{table}");
+        }
         let delivery: String =
             sqlx::query_scalar("SELECT delivery_json FROM scheduled_jobs WHERE id = 'c1'")
                 .fetch_one(&dest)
@@ -1221,42 +1146,8 @@ mod tests {
         assert!(delivery.contains("1700.0001"), "{delivery}");
 
         let again = migrate_from_omo(&dest, &source, false).await.unwrap();
-        assert_eq!(again.issues, 0, "a second migrate inserts nothing new");
-        let still: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracker_issues")
-            .fetch_one(&dest)
-            .await
-            .unwrap();
-        assert_eq!(still, 1);
-
-        let broken = dir.join("broken.sqlite");
-        raw_db(
-            &broken,
-            "
-            CREATE TABLE tracker_issues (id TEXT, title TEXT, description TEXT, state_id TEXT, creator_id TEXT);
-            INSERT INTO tracker_issues VALUES ('i1','t','body','s1','u1');
-            ",
-        )
-        .await;
-        let refused = migrate_from_omo(&dest, &broken, false).await;
-        assert!(
-            refused.is_err(),
-            "a missing team_id must not import as zero issues"
-        );
-
-        let legacy = dir.join("legacy.sqlite");
-        raw_db(
-            &legacy,
-            "
-            CREATE TABLE tracker_issues (id INTEGER, title TEXT, body TEXT, status TEXT, created_at TEXT);
-            INSERT INTO tracker_issues VALUES (1,'old','body text','open','2020-01-01T00:00:00Z');
-            ",
-        )
-        .await;
-        let legacy_result = migrate_from_omo(&dest, &legacy, false).await;
-        assert!(
-            legacy_result.is_err(),
-            "the body/status shape must surface an error, not an empty success"
-        );
+        assert_eq!(again.cron_jobs, 0, "a second migrate inserts nothing new");
+        assert_eq!(again.allowlist, 0, "a second migrate inserts nothing new");
 
         let bad_cron = dir.join("bad-cron.sqlite");
         raw_db(
@@ -1274,83 +1165,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rows_of_a_deleted_issue_are_skipped_not_a_foreign_key_failure() {
-        let dir = scratch("orphans");
-        let source = dir.join("omo.sqlite");
-        raw_db(
-            &source,
-            "
-            CREATE TABLE tracker_users (id TEXT PRIMARY KEY, name TEXT, display_name TEXT, email TEXT, avatar_color TEXT, kind TEXT, model TEXT, is_me INTEGER, created_at TEXT);
-            INSERT INTO tracker_users VALUES ('u1','ada','Ada',NULL,'#000','human',NULL,1,'2020-01-01T00:00:00Z');
-            CREATE TABLE tracker_teams (id TEXT PRIMARY KEY, key TEXT, name TEXT, icon TEXT, color TEXT, issue_seq INTEGER, system INTEGER, cycles_enabled INTEGER, cycle_weeks INTEGER, triage_enabled INTEGER, created_at TEXT, sort_order REAL);
-            INSERT INTO tracker_teams VALUES ('t1','AGT','Agents','bot','#fff',1,0,0,2,0,'2020-01-01T00:00:00Z',0);
-            CREATE TABLE tracker_states (id TEXT PRIMARY KEY, team_id TEXT, name TEXT, type TEXT, color TEXT, position REAL, lane_status TEXT, description TEXT);
-            INSERT INTO tracker_states VALUES ('s1','t1','Todo','unstarted','#fff',0,NULL,NULL);
-            CREATE TABLE tracker_labels (id TEXT PRIMARY KEY, team_id TEXT, name TEXT, color TEXT, parent_id TEXT, description TEXT, created_at TEXT);
-            INSERT INTO tracker_labels VALUES ('l1','t1','bug','#f00',NULL,NULL,'2020-01-01T00:00:00Z');
-            CREATE TABLE tracker_issues (id TEXT PRIMARY KEY, team_id TEXT, number INTEGER, identifier TEXT, title TEXT, description TEXT, state_id TEXT, priority INTEGER, creator_id TEXT, created_at TEXT, updated_at TEXT);
-            INSERT INTO tracker_issues VALUES ('i1','t1',1,'AGT-1','Kept','body','s1',0,'u1','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z');
-            CREATE TABLE tracker_issue_labels (issue_id TEXT, label_id TEXT, PRIMARY KEY(issue_id, label_id));
-            INSERT INTO tracker_issue_labels VALUES ('i1','l1');
-            INSERT INTO tracker_issue_labels VALUES ('gone','l1');
-            CREATE TABLE tracker_activity (id INTEGER PRIMARY KEY, issue_id TEXT, actor_id TEXT, kind TEXT, created_at TEXT);
-            INSERT INTO tracker_activity (issue_id, actor_id, kind, created_at) VALUES ('i1','u1','created','2020-01-01T00:00:00Z');
-            INSERT INTO tracker_activity (issue_id, actor_id, kind, created_at) VALUES ('i1','ghost','edited','2020-01-01T00:00:00Z');
-            INSERT INTO tracker_activity (issue_id, actor_id, kind, created_at) VALUES ('gone','u1','created','2020-01-01T00:00:00Z');
-            ",
-        )
-        .await;
-        let dest_path = dir.join("hub.sqlite");
-        // The cutover dry run printed activity 3 here and the real import 2: the dry run
-        // must predict the orphan skips, not only count source rows.
-        let dry = open_and_migrate(&dest_path, &source, true, None, None)
-            .await
-            .unwrap();
-        assert!(
-            !dest_path.exists(),
-            "a dry run does not create the destination"
-        );
-        assert_eq!(dry.activity, 2);
-        assert_eq!(dry.tables["orphans_skipped.tracker_issue_labels"], 1);
-        assert_eq!(dry.tables["orphans_skipped.tracker_activity"], 1);
-        let dest = storage::connect(&dest_path).await.unwrap();
-        let report = migrate_from_omo(&dest, &source, false).await.unwrap();
-        assert_eq!(dry.issues, report.issues);
-        assert_eq!(dry.tables, report.tables, "dry run and first import agree");
-        assert_eq!(report.issues, 1);
-        assert_eq!(report.activity, 2);
-        assert_eq!(report.tables["tracker_issue_labels"], 1);
-        assert_eq!(report.tables["orphans_skipped.tracker_issue_labels"], 1);
-        assert_eq!(report.tables["orphans_skipped.tracker_activity"], 1);
-        let nulled: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM tracker_activity WHERE kind = 'edited' AND actor_id IS NULL",
-        )
-        .fetch_one(&dest)
-        .await
-        .unwrap();
-        assert_eq!(nulled, 1, "a missing SET NULL parent is copied as NULL");
-        let again = migrate_from_omo(&dest, &source, false).await.unwrap();
-        assert_eq!(again.activity, 0);
-        dest.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn a_second_import_refreshes_cron_issue_and_inbox_state() {
+    async fn a_second_import_refreshes_cron_and_inbox_state() {
         let dir = scratch("refresh");
         let source = dir.join("omo.sqlite");
         raw_db(
             &source,
             "
-            CREATE TABLE tracker_users (id TEXT PRIMARY KEY, name TEXT, display_name TEXT, email TEXT, avatar_color TEXT, kind TEXT, model TEXT, is_me INTEGER, created_at TEXT);
-            INSERT INTO tracker_users VALUES ('u1','ada','Ada',NULL,'#000','human',NULL,1,'2020-01-01T00:00:00Z');
-            CREATE TABLE tracker_teams (id TEXT PRIMARY KEY, key TEXT, name TEXT, icon TEXT, color TEXT, issue_seq INTEGER, system INTEGER, cycles_enabled INTEGER, cycle_weeks INTEGER, triage_enabled INTEGER, created_at TEXT, sort_order REAL);
-            INSERT INTO tracker_teams VALUES ('t1','AGT','Agents','bot','#fff',1,0,0,2,0,'2020-01-01T00:00:00Z',0);
-            CREATE TABLE tracker_states (id TEXT PRIMARY KEY, team_id TEXT, name TEXT, type TEXT, color TEXT, position REAL, lane_status TEXT, description TEXT);
-            INSERT INTO tracker_states VALUES ('s1','t1','Todo','unstarted','#fff',0,NULL,NULL);
-            INSERT INTO tracker_states VALUES ('s2','t1','Done','completed','#0f0',1,NULL,NULL);
-            CREATE TABLE tracker_issues (id TEXT PRIMARY KEY, team_id TEXT, number INTEGER, identifier TEXT, title TEXT, description TEXT, state_id TEXT, priority INTEGER, creator_id TEXT, created_at TEXT, updated_at TEXT);
-            INSERT INTO tracker_issues VALUES ('i1','t1',1,'AGT-1','Gate','body','s1',0,'u1','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z');
             CREATE TABLE cron_jobs (id TEXT, session_key TEXT, expression TEXT, payload_json TEXT, enabled INTEGER, next_run_at TEXT, created_at TEXT);
             INSERT INTO cron_jobs VALUES ('c1',NULL,'every 15m','{}',1,'2099-01-01T00:00:00Z','2020-01-01T00:00:00Z');
             CREATE TABLE inbox_items (id TEXT PRIMARY KEY, source TEXT, source_ref TEXT, thread_ref TEXT, author TEXT, title TEXT, snippet TEXT, received_at TEXT, link TEXT, raw_hash TEXT, collected_at TEXT);
@@ -1362,27 +1182,18 @@ mod tests {
         .await;
         let dest = storage::memory().await.unwrap();
         let first = migrate_from_omo(&dest, &source, false).await.unwrap();
-        assert_eq!(first.issues, 1);
         assert_eq!(first.cron_jobs, 1);
         raw_db(
             &source,
             "
-            UPDATE tracker_issues SET state_id = 's2', title = 'Moved' WHERE id = 'i1';
             UPDATE cron_jobs SET enabled = 0, next_run_at = '2020-06-01T00:00:00Z' WHERE id = 'c1';
             UPDATE inbox_decisions SET status = 'done' WHERE item_id = 'in1';
             ",
         )
         .await;
         let again = migrate_from_omo(&dest, &source, false).await.unwrap();
-        assert_eq!(again.issues, 1);
         assert_eq!(again.cron_jobs, 1);
         assert_eq!(again.tables["inbox_decisions"], 1);
-        let state: (String, String) =
-            sqlx::query_as("SELECT state_id, title FROM tracker_issues WHERE id = 'i1'")
-                .fetch_one(&dest)
-                .await
-                .unwrap();
-        assert_eq!(state, ("s2".into(), "Moved".into()));
         let cron: (i64, String) =
             sqlx::query_as("SELECT enabled, next_run_at FROM scheduled_jobs WHERE id = 'c1'")
                 .fetch_one(&dest)
@@ -1396,7 +1207,6 @@ mod tests {
                 .unwrap();
         assert_eq!(status, "done");
         let third = migrate_from_omo(&dest, &source, false).await.unwrap();
-        assert_eq!(third.issues, 0);
         assert_eq!(third.cron_jobs, 0);
         assert_eq!(third.tables.get("inbox_decisions").copied().unwrap_or(0), 0);
         dest.close().await;
@@ -1412,7 +1222,7 @@ mod tests {
         let report = open_and_migrate(&dest, &source, true, None, None)
             .await
             .unwrap();
-        assert_eq!(report.issues, 0);
+        assert_eq!(report.lanes, 0);
         assert!(!dest.exists());
         assert!(!dir.join("missing").exists());
         let work = dir.join("work");
@@ -1438,7 +1248,7 @@ mod tests {
         let imported = open_and_migrate(&dest, &snap, false, Some(&work), Some(&live))
             .await
             .unwrap();
-        assert_eq!(imported.issues, 0);
+        assert_eq!(imported.lanes, 0);
         let pool = storage::connect(&dest).await.unwrap();
         let recorded: String =
             sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = 'omo_working_directory'")

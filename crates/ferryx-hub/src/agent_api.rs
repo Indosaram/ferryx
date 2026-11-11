@@ -1,9 +1,7 @@
 //! `/api/agent/*`: the hub's lanes, inbox requests, agent sessions and owner locale as plain
-//! JSON for an external tracker (openlinear). Each response carries what the in-hub tracker
-//! mirrors (`tracker_lanes`, `tracker_requests`, `tracker_sessions`) and the lane side of
-//! `tracker_linear`'s delegate / lane-action read or do today, and no tracker concept: no issue,
-//! state or team. Nothing here writes a `tracker_*` table. The spec a client codes against is
-//! `.evidence/openlinear-split-20261111/HUB_API.md`.
+//! JSON for an external tracker (openlinear), which mirrors them into its own issues. No
+//! tracker concept lives here: no issue, state or team, and no `tracker_*` table is read or
+//! written. The spec a client codes against is `.evidence/openlinear-split-20261111/HUB_API.md`.
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -15,13 +13,13 @@ use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
 
 use crate::agent_control::AgentControl;
-use crate::error::Result;
-use crate::tracker_sessions::Snapshot;
+use crate::error::{HubError, Result};
+use crate::sessions::live::Snapshot;
 
 #[derive(Clone)]
 pub struct AgentState {
     pool: SqlitePool,
-    /// Tests inject a control; the hub uses the one `tracker_sessions::install` set, read per
+    /// Tests inject a control; the hub uses the one `sessions::live::install` set, read per
     /// request because it is installed after the router is built.
     control: Option<Arc<dyn AgentControl>>,
 }
@@ -30,7 +28,7 @@ impl AgentState {
     fn control(&self) -> Option<Arc<dyn AgentControl>> {
         self.control
             .clone()
-            .or_else(crate::tracker_sessions::installed)
+            .or_else(crate::sessions::live::installed)
     }
 }
 
@@ -77,7 +75,7 @@ fn internal(error: crate::error::HubError) -> Reply {
 
 const LANE_COLUMNS: &str = "key, title, cwd, brief_path, status, created_at";
 
-/// Lane statuses `tracker_lanes::sync` notifies the owner about.
+/// Lane statuses the tracker's lane mirror notifies the owner about.
 const NOTIFY_STATUSES: [&str; 4] = ["blocked", "done_claimed", "verified_done", "failed"];
 /// Transitions kept per lane, newest last.
 const TRANSITION_LIMIT: i64 = 20;
@@ -105,7 +103,7 @@ async fn transitions(pool: &SqlitePool, key: &str) -> Result<Vec<Value>> {
         .collect())
 }
 
-/// A lane as `tracker_lanes::sync` reads it: the row, whether an unresumed pause holds it,
+/// A lane as the tracker's lane mirror reads it: the row, whether an unresumed pause holds it,
 /// the brief text `read_brief_content` returns, and its notifying transitions. `model` is
 /// always null: lanes store none and the mirror's agent user falls back to "agent".
 async fn lane_value(
@@ -115,7 +113,7 @@ async fn lane_value(
 ) -> Result<Value> {
     let key: String = row.get("key");
     let brief_path: String = row.get("brief_path");
-    let brief = crate::tracker_lanes::read_brief_content(&brief_path).await;
+    let brief = crate::lanes::actions::read_brief_content(&brief_path).await;
     let transitions = transitions(pool, &key).await?;
     Ok(json!({
         "key": key,
@@ -162,14 +160,46 @@ async fn list_lanes(State(state): State<AgentState>) -> Reply {
     }
 }
 
-/// Columns the tracker's lane panel reads (`tracker_linear::lane_detail_json` selects them)
-/// that the hub's `lanes` table does not have; served as null so the panel's shape holds.
+/// Columns the tracker's lane panel reads that the hub's `lanes` table does not have; served
+/// as null so the panel's shape holds.
 const PANEL_ONLY_COLUMNS: [&str; 4] = ["model", "objection", "last_turn_outcome", "last_report"];
+
+/// One JSON cell: text, integer, real or null.
+fn json_cell(row: &sqlx::sqlite::SqliteRow, name: &str) -> Result<Value> {
+    if let Ok(value) = row.try_get::<Option<String>, _>(name) {
+        return Ok(value.map(Value::String).unwrap_or(Value::Null));
+    }
+    if let Ok(value) = row.try_get::<Option<i64>, _>(name) {
+        return Ok(value.map(|number| json!(number)).unwrap_or(Value::Null));
+    }
+    if let Ok(value) = row.try_get::<Option<f64>, _>(name) {
+        return Ok(value.map(|number| json!(number)).unwrap_or(Value::Null));
+    }
+    Err(HubError::message(format!(
+        "tracker column {name} has an unsupported type"
+    )))
+}
+
+/// Every row of `sql` (one `?` bound to `bind`) as a JSON object keyed by column name.
+async fn rows_json_bound(pool: &SqlitePool, sql: &str, bind: &str) -> Result<Vec<Value>> {
+    use sqlx::Column;
+    let rows = sqlx::query(sql).bind(bind).fetch_all(pool).await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut object = serde_json::Map::new();
+        for column in row.columns() {
+            let name = column.name().to_owned();
+            object.insert(name.clone(), json_cell(&row, &name)?);
+        }
+        out.push(Value::Object(object));
+    }
+    Ok(out)
+}
 
 /// The issue page's lane panel: every `lanes` column, all `lane_history` rows, and the last
 /// 200 `lane_transcript` and `lane_events` rows, each ascending by id. None for an unknown lane.
 async fn lane_detail_value(pool: &SqlitePool, key: &str) -> Result<Option<Value>> {
-    let lane = crate::tracker_linear::rows_json_bound(pool, "SELECT * FROM lanes WHERE key = ?", key)
+    let lane = rows_json_bound(pool, "SELECT * FROM lanes WHERE key = ?", key)
         .await?
         .into_iter()
         .next();
@@ -179,20 +209,20 @@ async fn lane_detail_value(pool: &SqlitePool, key: &str) -> Result<Option<Value>
     for column in PANEL_ONLY_COLUMNS {
         lane.entry(column).or_insert(Value::Null);
     }
-    let history = crate::tracker_linear::rows_json_bound(
+    let history = rows_json_bound(
         pool,
         "SELECT id, at, from_status, to_status, reason FROM lane_history WHERE lane_key = ? ORDER BY id",
         key,
     )
     .await?;
-    let transcript = crate::tracker_linear::rows_json_bound(
+    let transcript = rows_json_bound(
         pool,
         "SELECT id, at, role, text FROM (SELECT id, at, role, text FROM lane_transcript
           WHERE lane_key = ? ORDER BY id DESC LIMIT 200) ORDER BY id",
         key,
     )
     .await?;
-    let events = crate::tracker_linear::rows_json_bound(
+    let events = rows_json_bound(
         pool,
         "SELECT id, kind, body, created_at FROM (SELECT id, kind, body, created_at FROM lane_events
           WHERE lane_key = ? ORDER BY id DESC LIMIT 200) ORDER BY id",
@@ -231,8 +261,8 @@ struct NewLane {
     key_base: Option<String>,
 }
 
-/// The lane side of `tracker_linear::delegate`: opens a queued lane, writes its brief, binds
-/// the thread. 201 with the lane.
+/// The lane side of a tracker delegation: opens a queued lane, writes its brief, binds the
+/// thread. 201 with the lane.
 async fn create_lane(State(state): State<AgentState>, Json(body): Json<NewLane>) -> Reply {
     let title = body.title.trim();
     let cwd = body.cwd.trim();
@@ -247,7 +277,7 @@ async fn create_lane(State(state): State<AgentState>, Json(body): Json<NewLane>)
         .filter(|base| !base.is_empty())
         .unwrap_or("lane")
         .to_lowercase();
-    let key = match crate::tracker_linear::open_lane(
+    let key = match crate::lanes::actions::open_lane(
         &state.pool,
         &key_base,
         title,
@@ -278,14 +308,14 @@ struct LaneActionBody {
     force: bool,
 }
 
-/// The lane side of `tracker_linear::lane_action` for send / object / close / reopen.
+/// The lane side of a tracker lane action: send / object / close / reopen.
 async fn lane_action(
     State(state): State<AgentState>,
     Path(key): Path<String>,
     Json(body): Json<LaneActionBody>,
 ) -> Reply {
     let action = body.action.as_str();
-    if !crate::tracker_linear::is_lane_action(action) {
+    if !crate::lanes::actions::is_lane_action(action) {
         return fail(
             StatusCode::BAD_REQUEST,
             "action must be send, object, close or reopen",
@@ -313,7 +343,7 @@ async fn lane_action(
     }
     let note = body.note.or(body.text).unwrap_or_else(|| action.to_owned());
     if let Err(error) =
-        crate::tracker_linear::apply_lane_action(&state.pool, &key, action, &note, body.force)
+        crate::lanes::actions::apply_lane_action(&state.pool, &key, action, &note, body.force)
             .await
     {
         return fail(StatusCode::CONFLICT, error);
@@ -329,6 +359,19 @@ async fn lane_action(
 // Requests and locale
 // ---------------------------------------------------------------------------------------
 
+const REQUESTERS_ENV: &str = "TRACKER_REQUESTERS";
+
+/// Requester names from `TRACKER_REQUESTERS` (comma separated); each matches inbox authors
+/// containing it. Unset means no requesters.
+fn requesters() -> Vec<String> {
+    crate::hub_env::var(REQUESTERS_ENV)
+        .unwrap_or_default()
+        .split(',')
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
 fn locale_value() -> Value {
     let locale = crate::locale::current();
     json!({
@@ -342,8 +385,8 @@ async fn locale() -> Reply {
     (StatusCode::OK, Json(locale_value()))
 }
 
-/// What `tracker_requests::sync` reads: every `bot`-classed inbox item whose author contains
-/// a requester name, one entry per (requester, item) match, oldest first per requester.
+/// What the tracker's request mirror reads: every `bot`-classed inbox item whose author
+/// contains a requester name, one entry per (requester, item) match, oldest first per requester.
 async fn requests_value(pool: &SqlitePool, names: &[String]) -> Result<Value> {
     let mut items = Vec::new();
     for name in names {
@@ -382,7 +425,7 @@ async fn requests_value(pool: &SqlitePool, names: &[String]) -> Result<Value> {
 }
 
 async fn requests(State(state): State<AgentState>) -> Reply {
-    match requests_value(&state.pool, &crate::tracker_requests::requesters()).await {
+    match requests_value(&state.pool, &requesters()).await {
         Ok(value) => (StatusCode::OK, Json(value)),
         Err(error) => internal(error),
     }
@@ -411,7 +454,7 @@ async fn sessions(State(state): State<AgentState>, Query(query): Query<SessionsQ
         .is_some_and(|value| !matches!(value, "" | "0" | "false"));
     let snapshots = match state.control() {
         Some(control) => {
-            crate::tracker_sessions::snapshots_on(control.as_ref(), &state.pool, refresh).await
+            crate::sessions::live::snapshots_on(control.as_ref(), &state.pool, refresh).await
         }
         None => Vec::new(),
     };
@@ -419,12 +462,12 @@ async fn sessions(State(state): State<AgentState>, Query(query): Query<SessionsQ
         StatusCode::OK,
         Json(json!({
             "snapshots": snapshots.iter().map(snapshot_value).collect::<Vec<_>>(),
-            "board": crate::tracker_sessions::shape(&snapshots, chrono::Utc::now()),
+            "board": crate::sessions::live::shape(&snapshots, chrono::Utc::now()),
         })),
     )
 }
 
-/// Today's `/api/tracker/sessions/...` result shape.
+/// The session action result shape the tracker's Sessions board reads.
 fn session_result(result: Result<Value>) -> Reply {
     match result {
         Ok(result) => (StatusCode::OK, Json(json!({"ok": true, "result": result}))),
@@ -446,7 +489,7 @@ async fn session_send(
     };
     let text = body.get("text").and_then(Value::as_str).unwrap_or("");
     session_result(
-        crate::tracker_sessions::send_on(control.as_ref(), &state.pool, &machine, &session_id, text)
+        crate::sessions::live::send_on(control.as_ref(), &state.pool, &machine, &session_id, text)
             .await,
     )
 }
@@ -459,7 +502,7 @@ async fn session_interrupt(
         return no_control();
     };
     session_result(
-        crate::tracker_sessions::interrupt_on(control.as_ref(), &state.pool, &machine, &session_id)
+        crate::sessions::live::interrupt_on(control.as_ref(), &state.pool, &machine, &session_id)
             .await,
     )
 }
@@ -478,7 +521,7 @@ async fn session_answer(
         .or_else(|| body.get("request"))
         .and_then(Value::as_str);
     session_result(
-        crate::tracker_sessions::answer_on(
+        crate::sessions::live::answer_on(
             control.as_ref(),
             &state.pool,
             &machine,

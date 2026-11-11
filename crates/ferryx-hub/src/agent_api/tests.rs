@@ -284,7 +284,7 @@ async fn sessions_list_snapshots_and_the_board_and_actions_reach_the_pane() {
     let bare = router_with(pool.clone(), None);
     let (status, body) = call(&bare, "GET", "/sessions?refresh=1", "").await;
     assert_eq!(status, StatusCode::OK);
-    if crate::tracker_sessions::installed().is_none() {
+    if crate::sessions::live::installed().is_none() {
         assert_eq!(body["snapshots"], json!([]));
         assert_eq!(body["board"]["counts"]["total"], 0);
         let (status, _) = call(&bare, "POST", "/sessions/local/a/send", r#"{"text":"hi"}"#).await;
