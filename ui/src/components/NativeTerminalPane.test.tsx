@@ -780,21 +780,75 @@ describe("snapBoundsToDevicePixels", () => {
     ).toEqual({ x: 0, y: 0, width: 800, height: 600 });
   });
 
-  it("snaps the fractional origin a later split pane inherits", () => {
+  it("snaps the fractional origin a later split pane inherits outward", () => {
     // Pane B of the reported 4-pane layout: 3840px display, 319px sidebar.
+    // The surface must cover the whole reported box, so the origin floors and
+    // the trailing edge ceilings instead of rounding to nearest.
     expect(
       snapBoundsToDevicePixels({ x: 1936.8432, y: 44, width: 951.5784, height: 900 }, 1),
-    ).toEqual({ x: 1937, y: 44, width: 951, height: 900 });
+    ).toEqual({ x: 1936, y: 44, width: 953, height: 900 });
   });
 
-  it("preserves the 1px divider gap between adjacent panes", () => {
+  it("never leaves a pixel of the reported box uncovered", () => {
+    // Every case here used to round one edge inward and expose the webview
+    // through the DOM hole as a light seam along the pane border.
+    const rects = [
+      { x: 1936.8432, y: 44, width: 951.5784, height: 900 },
+      { x: 319.4, y: 44.1, width: 1616.3, height: 899.9 },
+      { x: 10.5, y: 20.25, width: 800.2, height: 600.49 },
+    ];
+    for (const rect of rects) {
+      for (const scale of [1, 2]) {
+        const snapped = snapBoundsToDevicePixels(rect, scale);
+        expect(snapped.x).toBeLessThanOrEqual(rect.x);
+        expect(snapped.y).toBeLessThanOrEqual(rect.y);
+        expect(snapped.x + snapped.width).toBeGreaterThanOrEqual(rect.x + rect.width);
+        expect(snapped.y + snapped.height).toBeGreaterThanOrEqual(rect.y + rect.height);
+        // Snapping still lands on the device pixel grid.
+        for (const edge of [snapped.x, snapped.y, snapped.x + snapped.width, snapped.y + snapped.height]) {
+          expect(Math.abs(edge * scale - Math.round(edge * scale))).toBeLessThan(1e-9);
+        }
+      }
+    }
+  });
+
+  it("covers a 1px inset relative to the DOM box instead of opening a seam", () => {
+    // A divider sits between the panes in the webview layer, so growing the
+    // surface to the divider costs nothing visually.
     const paneA = snapBoundsToDevicePixels({ x: 319, y: 44, width: 1616.8432, height: 900 }, 1);
     const paneB = snapBoundsToDevicePixels(
       { x: 319 + 1616.8432 + 1, y: 44, width: 951.5784, height: 900 },
       1,
     );
 
-    expect(paneB.x - (paneA.x + paneA.width)).toBe(1);
+    expect(paneB.x - (paneA.x + paneA.width)).toBeLessThanOrEqual(0);
+    expect(paneA.width).toBe(1617);
+  });
+
+  it("covers the panes the native compositor reported on a 448pt retina pane", () => {
+    // Geometry from the running app's layer dump: pane A x=381 w=448 and pane B
+    // x=832 w=447 at DPR 2, where the drawable was 900x1636 for a 448pt frame.
+    // Whole-point frames must pass through untouched at both scales.
+    for (const rect of [
+      { x: 381, y: 1, width: 448, height: 816 },
+      { x: 832, y: 1, width: 447, height: 816 },
+    ]) {
+      expect(snapBoundsToDevicePixels(rect, 2)).toEqual(rect);
+      expect(snapBoundsToDevicePixels(rect, 1)).toEqual(rect);
+    }
+  });
+
+  it("grows only towards the neighbour, never into the reported box", () => {
+    // The 1 px divider case: each pane's trailing edge ceilings towards the
+    // divider instead of stopping short of it.
+    const paneA = snapBoundsToDevicePixels({ x: 381.4, y: 1, width: 448.3, height: 816 }, 1);
+    const paneB = snapBoundsToDevicePixels({ x: 830.8, y: 1, width: 447.2, height: 816 }, 1);
+
+    expect(paneA).toEqual({ x: 381, y: 1, width: 449, height: 816 });
+    expect(paneB).toEqual({ x: 830, y: 1, width: 448, height: 816 });
+    // A ends exactly where B starts: no gap for the window backdrop to show
+    // through, which is what the nearest-rounding version failed to guarantee.
+    expect(paneB.x).toBe(paneA.x + paneA.width);
   });
 
   it("returns the rect unchanged when the scale factor is not usable", () => {
@@ -882,7 +936,7 @@ describe("NativeTerminalPane geometry reporting contract", () => {
     });
   });
 
-  it("snaps a fractional split-pane rect to whole device pixels before attaching", async () => {
+  it("snaps a fractional split-pane rect to cover the whole reported box before attaching", async () => {
     Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: 1 });
     HTMLElement.prototype.getBoundingClientRect = function () {
       return {
@@ -905,7 +959,11 @@ describe("NativeTerminalPane geometry reporting contract", () => {
         attachTuple: expectedNativeBinding("term-session-fractional"),
         remainingMs: expect.any(Number),
       sessionId: "term-session-fractional",
-      bounds: { x: 1937, y: 45, width: 951, height: 900 },
+      // 1936.8432 floors to 1936 and 2888.4216 ceilings to 2889: the surface
+      // is a superset of the DOM hole, so no webview chrome can show through
+      // an uncovered edge. Rounding to nearest used to give x: 1937 here,
+      // which started the surface 0.16px inside the pane.
+      bounds: { x: 1936, y: 44, width: 953, height: 901 },
       scaleFactor: 1,
     });
   });
