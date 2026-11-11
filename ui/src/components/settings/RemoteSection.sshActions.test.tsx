@@ -417,7 +417,7 @@ describe("RemoteSection SSH machine actions", () => {
       const form = screen.getByRole("button", { name: "Connect SSH Machine" }).closest("form")!;
 
       await act(async () => { fireEvent.submit(form); });
-      expect(screen.getByRole("alert")).toHaveTextContent("Label is required.");
+      expect(screen.getByRole("alert")).toHaveTextContent("Hostname or IP is required.");
 
       fireEvent.change(screen.getByLabelText("Label"), { target: { value: "My Machine" } });
       await act(async () => { fireEvent.submit(form); });

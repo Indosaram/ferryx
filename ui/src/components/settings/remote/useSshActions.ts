@@ -166,10 +166,6 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
     e.preventDefault();
     if (!editingSshHost || !editFormData || busy) return;
 
-    if (!editFormData.label.trim()) {
-      setActionError("Label is required.");
-      return;
-    }
     if (!editFormData.hostname.trim()) {
       setActionError("Hostname is required.");
       return;
@@ -185,7 +181,7 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
 
     const updated: SshHost = {
       ...editingSshHost,
-      label: editFormData.label.trim(),
+      label: editFormData.label.trim() || editFormData.hostname.trim(),
       hostname: editFormData.hostname.trim(),
       username: editFormData.username.trim() || undefined,
       port: portNum,
