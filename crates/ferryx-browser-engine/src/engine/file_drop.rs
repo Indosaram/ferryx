@@ -15,14 +15,17 @@ use ferryx_browser_engine_protocol::json_string;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
-use windows_sys::Win32::Foundation::{E_NOINTERFACE, HWND, POINTL, S_OK};
+use windows_sys::Win32::Foundation::{E_NOINTERFACE, HWND, LPARAM, POINTL, RECT, S_OK};
 use windows_sys::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
 use windows_sys::Win32::System::Ole::{
     CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
 };
 use windows_sys::Win32::UI::Shell::DragQueryFileW;
-use windows_sys::Win32::UI::WindowsAndMessaging::GetPropW;
-use windows_sys::core::{GUID, HRESULT, IID_IUnknown};
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumChildWindows, GetClassNameW, GetPropW, GetWindowRect, IsWindowVisible,
+};
+use windows_sys::core::{BOOL, GUID, HRESULT, IID_IUnknown};
 
 const IID_IDROPTARGET: GUID = GUID::from_u128(0x00000122_0000_0000_c000_000000000046);
 
@@ -198,25 +201,47 @@ fn tab_of(hwnd: HWND) -> Option<String> {
     })
 }
 
+/// Collects the visible `Chrome_RenderWidgetHostHWND` windows under a tab's window.
+unsafe extern "system" fn collect_page_window(window: HWND, found: LPARAM) -> BOOL {
+    let mut class = [0u16; 64];
+    let length = unsafe { GetClassNameW(window, class.as_mut_ptr(), class.len() as i32) };
+    let name = String::from_utf16_lossy(&class[..length.max(0) as usize]);
+    if name == "Chrome_RenderWidgetHostHWND" && unsafe { IsWindowVisible(window) } != 0 {
+        unsafe { (*(found as *mut Vec<HWND>)).push(window) };
+    }
+    1
+}
+
 /// The page point (CSS pixels in the main frame's viewport) under screen pixel `point`, or
 /// None when it is outside the page (over Chrome's toolbar).
-fn page_point(tab: &str, point: POINTL) -> Option<(i32, i32)> {
-    let (view, browser) = TABS.with_borrow(|tabs| {
-        let pane = tabs.get(tab)?;
-        Some((pane.view.clone(), pane.view.browser()?))
+///
+/// Measured from the page's own window (`Chrome_RenderWidgetHostHWND`, which covers exactly the
+/// viewport) with Win32, not through Views: once the window is a child of the Ferryx window,
+/// Views' screen position for it is stale, and a drag across the page stopped mapping to it
+/// partway (Windows probe run 42983241753: dragenter and two dragovers, then no drop).
+fn page_point(tab: &str, hwnd: HWND, point: POINTL) -> Option<(i32, i32)> {
+    let browser = TABS.with_borrow(|tabs| tabs.get(tab)?.view.browser())?;
+    let mut windows: Vec<HWND> = Vec::new();
+    unsafe { EnumChildWindows(hwnd, Some(collect_page_window), &mut windows as *mut Vec<HWND> as LPARAM) };
+    let (page, rect) = windows.into_iter().find_map(|window| {
+        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let inside = unsafe { GetWindowRect(window, &mut rect) } != 0
+            && point.x >= rect.left
+            && point.x < rect.right
+            && point.y >= rect.top
+            && point.y < rect.bottom;
+        inside.then_some((window, rect))
     })?;
-    let mut at = display_convert_screen_point_from_pixels(Some(&Point { x: point.x, y: point.y }));
-    if view.convert_point_from_screen(Some(&mut at)) == 0 {
-        return None;
-    }
-    let bounds = view.bounds();
-    if at.x < 0 || at.y < 0 || at.x >= bounds.width || at.y >= bounds.height {
-        return None;
-    }
+    // Chromium is per-monitor DPI aware: the window's pixels are DIPs times its DPI scale.
+    let dpi = unsafe { GetDpiForWindow(page) };
+    let scale = if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 };
     // CEF zoom levels are steps of 20% (system.rs `zoom`).
     let zoom = browser.host().map_or(0.0, |host| host.zoom_level());
-    let factor = 1.2_f64.powf(zoom);
-    Some(((f64::from(at.x) / factor).round() as i32, (f64::from(at.y) / factor).round() as i32))
+    let factor = scale * 1.2_f64.powf(zoom);
+    Some((
+        (f64::from(point.x - rect.left) / factor).round() as i32,
+        (f64::from(point.y - rect.top) / factor).round() as i32,
+    ))
 }
 
 /// Sends one `Input.dispatchDragEvent` of `kind` to the tab's page.
@@ -237,9 +262,9 @@ fn dispatch(tab: &str, kind: &str, (x, y): (i32, i32), paths: &[String]) -> bool
 
 /// Moves a files drag to `point`: dragEnter when the pointer first reaches the page, dragOver
 /// while it moves on it, dragCancel when it leaves for the toolbar. Returns the drop effect.
-fn track(drag: &mut Drag, point: POINTL) -> u32 {
+fn track(drag: &mut Drag, hwnd: HWND, point: POINTL) -> u32 {
     let Drag::Files { tab, paths, entered, last } = drag else { return DROPEFFECT_NONE };
-    let Some(at) = page_point(tab, point) else {
+    let Some(at) = page_point(tab, hwnd, point) else {
         if *entered {
             dispatch(tab, "dragCancel", last.unwrap_or_default(), paths);
             *entered = false;
@@ -270,7 +295,7 @@ unsafe extern "system" fn drag_enter(object: *mut c_void, data: *mut c_void, key
     };
     eprintln!("ferryx-engine: file drop {tab}: {} file(s) entered at ({}, {})", paths.len(), point.x, point.y);
     let mut drag = Drag::Files { tab, paths, entered: false, last: None };
-    let allowed = track(&mut drag, point);
+    let allowed = track(&mut drag, target.hwnd, point);
     target.drag.replace(drag);
     unsafe { *effect &= allowed };
     S_OK
@@ -281,7 +306,7 @@ unsafe extern "system" fn drag_over(object: *mut c_void, keys: u32, point: POINT
     // No borrow is held while Chromium's target runs: it can pump messages.
     let files = matches!(*target.drag.borrow(), Drag::Files { .. });
     if files {
-        let allowed = track(&mut target.drag.borrow_mut(), point);
+        let allowed = track(&mut target.drag.borrow_mut(), target.hwnd, point);
         unsafe { *effect &= allowed };
         return S_OK;
     }
@@ -317,7 +342,7 @@ unsafe extern "system" fn on_drop(object: *mut c_void, data: *mut c_void, keys: 
         }
         return unsafe { (vtbl::<DropTargetVtbl>(target.inner).drop)(target.inner, data, keys, point, effect) };
     }
-    let allowed = track(&mut drag, point);
+    let allowed = track(&mut drag, target.hwnd, point);
     let Drag::Files { tab, paths, entered, last } = &drag else { return S_OK };
     // A dragOver right before the drop, as a page sees from a real drag: Blink drops only on a
     // target whose last dragover accepted it.
