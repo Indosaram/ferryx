@@ -350,6 +350,40 @@ describe("NativeTerminalPane compositor ownership lifecycle", () => {
     await act(async () => { view.unmount(); });
   });
 
+  it("joins a session another window presents as a viewer without minting a newer attempt or re-attaching", async () => {
+    const binding = session("shared-window");
+    resetNativeTerminalLifecycleForTest();
+    const persisted = vi.fn(async () => {});
+    setLocalSplitPersistence(persisted);
+    const liveTuple = {
+      backendSessionId: "shared-window", incarnation: null, daemonEpoch: "",
+      frontendSessionId: binding.id, paneIdentity: binding.id,
+      bindingKey: "shared-window::0:", attemptGeneration: 7,
+    };
+    tauriInvoke.mockImplementation(async command => {
+      if (command === "cmd_native_terminal_attach_viewer") {
+        return { sessionId: "shared-window", viewer: true, attachTuple: liveTuple };
+      }
+      return command === "cmd_native_terminal_set_bounds" ? PRESENTED : undefined;
+    });
+
+    const view = render(<NativeTerminalPane session={binding} active={false} />);
+    await act(async () => {
+      await waitFor(() => expect(getDurableNativeBinding("shared-window")).toEqual(liveTuple));
+    });
+
+    expect(tauriInvoke.mock.calls.some(([command]) => command === "cmd_native_terminal_attach_viewer")).toBe(true);
+    expect(tauriInvoke.mock.calls.some(([command]) => command === "cmd_native_terminal_attach")).toBe(false);
+    expect(persisted).not.toHaveBeenCalled();
+    await act(async () => { view.unmount(); });
+    // Unmounting detaches only this window's viewer, fenced by the adopted live tuple.
+    await act(async () => {
+      await waitFor(() => expect(tauriInvoke.mock.calls).toContainEqual([
+        "cmd_native_terminal_detach", { sessionId: "shared-window", attachTuple: liveTuple },
+      ]));
+    });
+  });
+
   it.each(["rejected", "stale-owner"] as const)("does not record native QA persistence when persistence is %s", async outcome => {
     const binding = session(`qa-persistence-${outcome}`);
     resetNativeTerminalLifecycleForTest();

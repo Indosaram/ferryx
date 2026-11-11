@@ -234,6 +234,13 @@ type NativeTerminalClipboardContent =
   | { readonly kind: "image" }
   | { readonly kind: "empty" };
 
+/** Result of `cmd_native_terminal_attach_viewer`. */
+type NativeTerminalViewerReceipt = {
+  readonly sessionId: string;
+  readonly viewer: boolean;
+  readonly attachTuple: PaneAttachTuple | null;
+};
+
 type NativeTerminalIpcCommand =
   | "cmd_native_terminal_attach"
   | "cmd_native_terminal_detach"
@@ -1494,6 +1501,20 @@ export function NativeTerminalPane({
       const session = sessionRef.current;
       const completedSpawn = !session?.spawnIntent ||
         (session.spawnIntent.ready && !session.spawnIntent.cancelRequested);
+      // A session another window of this process already presents is joined as a per-window
+      // viewer: the pane adopts the live attach tuple verbatim instead of minting a newer attempt,
+      // so the other window keeps its binding and both windows render and drive the same PTY.
+      const viewerReceipt = !getDurableNativeBinding(targetId) && session?.backendSessionId === targetId && completedSpawn
+        ? await run(invoke<NativeTerminalViewerReceipt>("cmd_native_terminal_attach_viewer", {
+            sessionId: targetId,
+            ...(initialGeometry
+              ? { bounds: initialGeometry.bounds, scaleFactor: initialGeometry.scaleFactor }
+              : {}),
+          }))
+        : null;
+      if (signal?.aborted || attachmentOwnerRef.current !== owner) return false;
+      const viewerTuple = viewerReceipt?.viewer ? viewerReceipt.attachTuple ?? null : null;
+      if (viewerTuple && !registerDurableNativeBinding(viewerTuple)) throw new Error("Stale native binding");
       if (!getDurableNativeBinding(targetId) && session?.backendSessionId === targetId && completedSpawn) {
         const savedTuple = session.attachTuple ?? session.spawnIntent?.attachTuple;
         const currentTuple: PaneAttachTuple = {
@@ -1518,7 +1539,7 @@ export function NativeTerminalPane({
         previousTuple.incarnation !== (session.incarnation ?? null) ||
         previousTuple.bindingKey !== (owner.bindingKey ?? "")
       );
-      if ((force || bindingChanged || identityChanged) && previousTuple && session && completedSpawn) {
+      if (!viewerTuple && (force || bindingChanged || identityChanged) && previousTuple && session && completedSpawn) {
         const attachTuple = { ...previousTuple, incarnation: session.incarnation ?? null,
           daemonEpoch: session.daemonEpoch ?? "", bindingKey: owner.bindingKey ?? "",
           attemptGeneration: previousTuple.attemptGeneration + 1 };
@@ -1546,7 +1567,8 @@ export function NativeTerminalPane({
       // in flight; never start the next same-ID attach until that IPC settles.
       await run(nativeTerminalAttachIpcSettled(targetId));
       if (signal?.aborted || attachmentOwnerRef.current !== owner) return false;
-      const attachIpc = invoke("cmd_native_terminal_attach", {
+      // A viewer already presents through the live attachment; attaching again would fence it.
+      const attachIpc = viewerTuple ? Promise.resolve() : invoke("cmd_native_terminal_attach", {
         sessionId: targetId,
         attachTuple,
         remainingMs: Math.floor(nativeBindingRemainingMs(targetId, 4_000)),
