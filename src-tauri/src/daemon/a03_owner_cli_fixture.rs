@@ -258,6 +258,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY);
@@ -334,6 +335,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
             capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
             if crate::hub_runtime::supervisor_available() {
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_CAPABILITY);
                 capabilities.push(crate::remote::server::supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);

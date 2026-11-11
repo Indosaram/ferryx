@@ -323,9 +323,9 @@ impl AuditRecord {
         }
     }
 
-    /// Send, answer and stop change a pane; the rest only look at it.
+    /// Send, answer, stop and spawn change a pane; the rest only look at it.
     pub fn is_input(&self) -> bool {
-        matches!(self.op.as_str(), "send" | "answer" | "stop")
+        matches!(self.op.as_str(), "send" | "answer" | "stop" | "spawn")
     }
 }
 
@@ -363,7 +363,7 @@ pub fn audit_op_name(op: &AgentControlOp) -> &'static str {
         AgentControlOp::Stop { .. } => "stop",
         AgentControlOp::Wait { .. } => "wait",
         AgentControlOp::Events { .. } => "events",
-        AgentControlOp::Acknowledge { .. } => "ack",
+        AgentControlOp::Spawn { .. } => "spawn",
     }
 }
 
@@ -374,8 +374,8 @@ pub fn audit_session(op: &AgentControlOp) -> Option<String> {
         | AgentControlOp::Deliver { session_id, .. }
         | AgentControlOp::Answer { session_id, .. }
         | AgentControlOp::Stop { session_id, .. }
-        | AgentControlOp::Wait { session_id, .. }
-        | AgentControlOp::Acknowledge { session_id } => Some(session_id.clone()),
+        | AgentControlOp::Wait { session_id, .. } => Some(session_id.clone()),
+        AgentControlOp::Spawn { parent_session_id, .. } => parent_session_id.clone(),
         AgentControlOp::List | AgentControlOp::Events { .. } => None,
     }
 }
@@ -385,7 +385,9 @@ pub fn audit_request(op: &AgentControlOp) -> Option<String> {
         AgentControlOp::Send { request_id, .. }
         | AgentControlOp::Answer { request_id, .. }
         | AgentControlOp::Stop { request_id, .. } => request_id.clone(),
-        AgentControlOp::Deliver { request_id, .. } => Some(request_id.clone()),
+        AgentControlOp::Deliver { request_id, .. } | AgentControlOp::Spawn { request_id, .. } => {
+            Some(request_id.clone())
+        }
         _ => None,
     }
 }

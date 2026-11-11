@@ -35,20 +35,6 @@ pub(crate) fn note_raw_write(bus: &events::AgentEventBus, session_id: &str) {
     bus.note_input(session_id, None);
 }
 
-/// Mark `session_id`'s current attention episode read in this daemon's read store and publish
-/// the flip. False for a session whose readings this daemon does not own: an SSH or
-/// remote-helper pane (unsupported, it stays unread by episode) and a paired host's pane (its
-/// owner marks it when the acknowledgement reaches it).
-pub(crate) fn acknowledge_read(state: &RemoteGatewayState, session_id: &str) -> bool {
-    if state.terminal_service.remote().contains(session_id)
-        || crate::terminal::paired_runtime::Runtime::owns(session_id)
-    {
-        return false;
-    }
-    state.agent_events.acknowledge(session_id);
-    true
-}
-
 fn refuse_if_human_typing(session_id: &str) -> Result<(), ScopeError> {
     let Some(typed_at) = reference_chat_runtime().input.last_raw_input_ms(session_id) else {
         return Ok(());
@@ -100,11 +86,21 @@ fn provider_report(state: &RemoteGatewayState, session_id: &str) -> Option<Provi
 
 /// The wire error a refusal travels as on the daemon socket.
 pub(crate) fn error_response(error: ScopeError) -> crate::daemon::protocol::DaemonResponse {
+    let code = control_wire_code(&error).to_string();
     crate::daemon::protocol::DaemonResponse::Error {
         message: error.message,
-        code: Some(reference_chat_wire_code(error.code).to_string()),
+        code: Some(code),
         details: None,
     }
+}
+
+/// The wire code a refusal travels as: its scope code, or the agent-control code a refusal
+/// names in its details (`SPAWN_LIMIT`).
+pub(crate) fn control_wire_code(error: &ScopeError) -> &'static str {
+    if error.details.get("code").and_then(serde_json::Value::as_str) == Some(crate::agent_control::SPAWN_LIMIT_CODE) {
+        return crate::agent_control::SPAWN_LIMIT_CODE;
+    }
+    reference_chat_wire_code(error.code)
 }
 
 /// One session's status, and the screen it was read from.
@@ -163,7 +159,6 @@ async fn observe_entry(
         }
         _ => None,
     };
-    let provider_outcome = provider.as_ref().and_then(|report| report.outcome);
     let mut status = derive_status(provider.as_ref(), detection.map(|found| found.state), pending.is_some());
     // The observer's quiet timer is the only thing that can call a quiet screen idle. When it
     // has already judged this exact screen, read and list report the same state events did.
@@ -206,7 +201,7 @@ async fn observe_entry(
         "state": status.state,
         "stateSource": status.source,
         "stateSince": state_since,
-        "detail": provider.as_ref().and_then(|report| report.detail.clone()),
+        "detail": provider.and_then(|report| report.detail),
         "pending": pending,
         "screenRevision": screen_revision,
         "screenChangedAt": screen_changed_at,
@@ -214,193 +209,19 @@ async fn observe_entry(
         // When this entry was read, so a hub that caches a list can show how old it is.
         "observedAt": observed_at_ms(),
     });
-    let failed = state.machine_services.as_ref().is_some_and(|services| services.sessions.agent_control_failed(session_id));
-    if failed {
+    if with_last_line {
+        entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
+    }
+    // A pane agent control spawned as another pane's child names its parent and depth, and is
+    // delegated; every other pane is the person's own (depth 0).
+    let lineage = state.machine_services.as_ref().and_then(|services| services.sessions.lineage_for(session_id));
+    entry["parent"] = serde_json::json!(lineage.as_ref().map(|lineage| lineage.parent.clone()));
+    entry["depth"] = serde_json::json!(lineage.as_ref().map_or(0, |lineage| lineage.depth));
+    entry["ownership"] = serde_json::json!(if lineage.is_some() { "delegated" } else { "owner" });
+    if state.machine_services.as_ref().is_some_and(|services| services.sessions.agent_control_failed(session_id)) {
         entry["health"] = serde_json::json!({ "type": "failed", "reason": "the agent exited in the middle of a turn" });
     }
-    let completed = state.agent_events.completion(session_id).is_some()
-        || provider_outcome.is_some();
-    if with_last_line {
-        // A remote or non-native session has no transcript line; the screen's last line stands
-        // in for it, but only in a pane an agent runs in.
-        let screen_line = match (&agent, &screen) {
-            (Some(_), Some(snapshot)) if last_assistant_line.is_none() => last_screen_line(&snapshot.text),
-            _ => None,
-        };
-        let cause = (agent.is_some() || failed).then(|| stop_cause(status.state, failed, completed)).flatten();
-        let reason = session_reason(
-            pending.as_ref().map(|prompt| prompt.question.as_str()).filter(|question| !question.trim().is_empty())
-                .or(pending.as_ref().map(|prompt| prompt.title.as_str())),
-            last_assistant_line.as_deref().or(screen_line.as_deref()),
-            cause,
-        );
-        entry["lastAssistantLine"] = serde_json::json!(last_assistant_line);
-        entry["reason"] = serde_json::json!(reason);
-    }
-    let axes = attention_axes(
-        status.state,
-        pending.as_ref().map(|prompt| prompt.kind),
-        failed,
-        completed,
-        read_for(session_id),
-        ownership_for(session_id),
-    );
-    entry["attention"] = serde_json::json!(ferryx_hub::supervisor::panel_contract::Attention::of(axes));
     Ok(Observed { entry, screen })
-}
-
-/// Why the session stopped, in one line: the pending prompt's question, else the agent's last
-/// line, else the stop cause. Whitespace is collapsed and the line cut to
-/// [`LAST_ASSISTANT_LINE_MAX_CHARS`]; nothing to say is `None`, never an empty string.
-fn session_reason(question: Option<&str>, last_line: Option<&str>, cause: Option<&str>) -> Option<String> {
-    [question, last_line, cause].into_iter().flatten().find_map(|text| {
-        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        (!line.is_empty()).then(|| line.chars().take(LAST_ASSISTANT_LINE_MAX_CHARS).collect())
-    })
-}
-
-/// How far in from the left edge a user echo, a reply bullet or the input line sits. Anything
-/// further in is a reply's own text (a quote, a list, a tool result), never a new turn.
-const TURN_MARGIN: usize = 1;
-
-/// How far in a turn's timing line sits (`✻ Worked for 12s · done 4:04 PM`, `  4:08 PM`).
-const TIMING_MARGIN: usize = 2;
-
-/// Leading blanks that mark a right-aligned notice rather than transcript text.
-const NOTICE_INDENT: usize = 40;
-
-/// How many non-empty bottom lines can hold the input box; it sits under the transcript, with
-/// at most its frame and a footer below it.
-const INPUT_BOX_TAIL: usize = 4;
-
-fn indent(line: &str) -> usize {
-    line.chars().take_while(|c| c.is_whitespace()).count()
-}
-
-/// A line that starts a turn's input: a prompt marker at the left margin.
-fn is_prompt_line(line: &str) -> bool {
-    indent(line) <= TURN_MARGIN && line.trim_start().starts_with(['❯', '›', '>'])
-}
-
-/// A prompt line with something typed after the marker: a user turn in the transcript.
-fn is_user_echo(line: &str) -> bool {
-    is_prompt_line(line) && line.trim_start().chars().skip(1).any(char::is_alphanumeric)
-}
-
-/// The first line of an agent reply: a reply bullet at the left margin.
-fn is_reply_bullet(line: &str) -> bool {
-    indent(line) <= TURN_MARGIN && line.trim_start().starts_with(['⏺', '●', '•'])
-}
-
-/// A turn's timing line: near the left edge and ending with a clock time (`4:03 PM`).
-fn is_timing_line(line: &str) -> bool {
-    indent(line) <= TIMING_MARGIN && !line.trim().is_empty() && ends_with_clock(line)
-}
-
-/// Whether `line` ends with a clock time, with or without AM/PM after any kind of space.
-fn ends_with_clock(line: &str) -> bool {
-    let line = line.trim_end();
-    let line = ["AM", "PM", "am", "pm"]
-        .iter()
-        .find_map(|suffix| line.strip_suffix(suffix))
-        .map_or(line, str::trim_end);
-    let Some((hours, minutes)) = line.rsplit_once(':') else { return false };
-    let hours: String = hours.chars().rev().take_while(char::is_ascii_digit).collect();
-    minutes.len() == 2 && minutes.chars().all(|c| c.is_ascii_digit()) && (1..=2).contains(&hours.len())
-}
-
-/// The last line of the agent's reply in the newest finished turn on the screen, or `None`.
-///
-/// Conservative on purpose: a screen only yields a line when it shows a whole turn, which every
-/// agent draws the same way: a user echo (`❯ ...`), then a reply bullet (`⏺`, `●`, `•`) with
-/// its continuation lines, then the turn's timing line. The input box at the bottom (a prompt
-/// line among the last few) is cut off first, and a user echo after the timing line means a new
-/// turn started. Banners, tips, footers, status bars, model or path lines and token counts are
-/// never part of that shape, so a screen without it (any agent that does not draw it) yields
-/// `None` and the reason falls back to the stop cause.
-fn last_screen_line(text: &str) -> Option<String> {
-    const TOOL_MARKS: &[char] = &['⎿', '└'];
-    let mut lines: Vec<&str> = text.lines().collect();
-    let tail: Vec<usize> = (0..lines.len()).filter(|&at| !lines[at].trim().is_empty()).rev().take(INPUT_BOX_TAIL).collect();
-    // The input box is a prompt line among the last few with no reply under it; a prompt
-    // with a reply bullet below it is a user turn, not the box.
-    if let Some(&input) = tail.iter().find(|&&at| is_prompt_line(lines[at])) {
-        if !lines[input + 1..].iter().any(|line| is_reply_bullet(line)) {
-            lines.truncate(input);
-        }
-    }
-    let timing = lines.iter().rposition(|line| is_timing_line(line))?;
-    if lines[timing + 1..].iter().any(|line| is_user_echo(line)) {
-        return None;
-    }
-    let echo = lines[..timing].iter().rposition(|line| is_user_echo(line))?;
-    let bullet = echo + 1 + lines[echo + 1..timing].iter().rposition(|line| is_reply_bullet(line))?;
-    let mut last = lines[bullet].trim_start().chars().skip(1).collect::<String>();
-    for line in &lines[bullet + 1..timing] {
-        let text = line.trim_start();
-        if text.is_empty() || indent(line) >= NOTICE_INDENT || text.starts_with(TOOL_MARKS) {
-            continue;
-        }
-        if indent(line) <= indent(lines[bullet]) {
-            break;
-        }
-        last = text.to_string();
-    }
-    let last = last.trim_end_matches(|c: char| c.is_whitespace() || c == '│' || c == '█').trim();
-    (last.chars().any(char::is_alphanumeric) && !ends_with_clock(last)).then(|| last.to_string())
-}
-
-/// A label for why an agent stopped when it said nothing itself.
-fn stop_cause(state: AgentControlState, failed: bool, completed: bool) -> Option<&'static str> {
-    if failed {
-        return Some("The agent exited in the middle of a turn");
-    }
-    match state {
-        AgentControlState::Blocked => Some("Waiting for input"),
-        AgentControlState::Idle | AgentControlState::Unknown if completed => Some("Finished its turn"),
-        _ => None,
-    }
-}
-
-/// Whether the owner has looked at the session's current episode. The daemon's read store
-/// replaces this seam; until then every episode is unread.
-fn read_for(_session_id: &str) -> ferryx_hub::supervisor::panel_contract::AttentionRead {
-    ferryx_hub::supervisor::panel_contract::AttentionRead::Unread
-}
-
-/// Who acts on the session next, as this daemon knows it. Spawn lineage replaces this seam
-/// with `delegated` for a child pane; the hub alone sets `supervisor`.
-fn ownership_for(_session_id: &str) -> ferryx_hub::supervisor::panel_contract::AttentionOwnership {
-    ferryx_hub::supervisor::panel_contract::AttentionOwnership::Owner
-}
-
-/// The attention axes of one reading. A pending prompt is the demand (an approval or a plan
-/// asks for approval, anything else is a question), else an agent that died mid-turn is an
-/// error. A turn counts as completed once the agent left working (an observer edge) or
-/// reported an outcome.
-fn attention_axes(
-    state: AgentControlState,
-    pending: Option<reference_types::ReferencePromptKind>,
-    failed: bool,
-    completed: bool,
-    read: ferryx_hub::supervisor::panel_contract::AttentionRead,
-    ownership: ferryx_hub::supervisor::panel_contract::AttentionOwnership,
-) -> ferryx_hub::supervisor::panel_contract::AttentionAxes {
-    use ferryx_hub::supervisor::panel_contract::{AttentionActivity, AttentionAxes, AttentionCompletion, AttentionDemand};
-    use reference_types::ReferencePromptKind;
-    let demand = match pending {
-        Some(ReferencePromptKind::Approval | ReferencePromptKind::Plan) => AttentionDemand::Approval,
-        Some(ReferencePromptKind::Question | ReferencePromptKind::Menu) => AttentionDemand::Question,
-        None if failed => AttentionDemand::Error,
-        None => AttentionDemand::None,
-    };
-    let activity = match state {
-        AgentControlState::Working => AttentionActivity::Working,
-        AgentControlState::Blocked | AgentControlState::Idle => AttentionActivity::Stopped,
-        AgentControlState::Unknown => AttentionActivity::Unknown,
-    };
-    let completion = if completed { AttentionCompletion::Reported } else { AttentionCompletion::None };
-    AttentionAxes { demand, activity, completion, read, ownership }
 }
 
 fn observed_at_ms() -> i64 {
@@ -625,7 +446,7 @@ pub(crate) async fn handle_as(
             &op,
             match &result {
                 Ok(_) => "OK".to_string(),
-                Err(error) => reference_chat_wire_code(error.code).to_string(),
+                Err(error) => control_wire_code(error).to_string(),
             },
         ),
     );
@@ -842,30 +663,205 @@ async fn dispatch(
             }
         }
         AgentControlOp::Events { after } => Ok(replay_value(state.agent_events.replay(after))),
-        AgentControlOp::Acknowledge { session_id } => {
-            live(state, &session_id).await?;
-            if crate::terminal::paired_runtime::Runtime::owns(&session_id) {
-                // A paired pane: its owner keeps the read state and marks it on this ack.
-                state.session_backend.acknowledge_agent_outcome(&session_id).await.map_err(|error| {
-                    let code = match error {
-                        crate::remote::backend::OutcomeAckError::UnknownSession => ScopeErrorCode::NotFound,
-                        crate::remote::backend::OutcomeAckError::Uncertain(_) => ScopeErrorCode::OperationOutcomeUnknown,
-                        _ => ScopeErrorCode::Unsupported,
-                    };
-                    reference_chat_scope(code, error.to_string())
-                })?;
-                return Ok(serde_json::json!({ "session": { "sessionId": session_id, "read": true } }));
-            }
-            if !acknowledge_read(state, &session_id) {
+        AgentControlOp::Spawn {
+            agent,
+            cwd,
+            workspace_id,
+            parent_session_id,
+            name,
+            prompt,
+            command,
+            args,
+            request_id,
+        } => {
+            spawn_agent(
+                state,
+                SpawnRequest { agent, cwd, workspace_id, parent_session_id, name, prompt, command, args, request_id },
+                authorize,
+            )
+            .await
+        }
+    }
+}
+
+/// Desktop event a spawned agent pane is announced with; the desktop adopts the live session
+/// as a split beside its parent's pane (or as a tab when it has no parent here).
+pub(crate) const AGENT_SPAWNED_EVENT: &str = "agent_spawned";
+
+/// How long a spawned pane may take to first read idle before its prompt is given up.
+const SPAWN_PROMPT_IDLE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// One `Spawn` op's fields.
+struct SpawnRequest {
+    agent: String,
+    cwd: String,
+    workspace_id: Option<String>,
+    parent_session_id: Option<String>,
+    name: Option<String>,
+    prompt: Option<String>,
+    command: Option<String>,
+    args: Vec<String>,
+    request_id: String,
+}
+
+/// Serializes the limit check and the spawn so concurrent spawns cannot pass the child cap
+/// together.
+fn spawn_admission() -> &'static tokio::sync::Mutex<()> {
+    static ADMISSION: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    ADMISSION.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn spawn_agent(
+    state: &Arc<RemoteGatewayState>,
+    request: SpawnRequest,
+    authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
+) -> Result<serde_json::Value, ScopeError> {
+    let SpawnRequest { agent, cwd, workspace_id, parent_session_id, name, prompt, command, args, request_id } = request;
+    if request_id.trim().is_empty() {
+        return Err(reference_chat_scope(ScopeErrorCode::InvalidRequest, "a spawn needs its request id"));
+    }
+    if cwd.trim().is_empty() {
+        return Err(reference_chat_scope(ScopeErrorCode::InvalidRequest, "a spawn needs a cwd"));
+    }
+    if prompt.as_deref().is_some_and(|text| text.trim().is_empty() || text.contains('\0')) {
+        return Err(reference_chat_scope(ScopeErrorCode::InvalidRequest, "the prompt must not be empty or contain NUL"));
+    }
+    let Some(spec) = crate::agent_detect::registry::resolve(&agent) else {
+        return Err(reference_chat_scope(ScopeErrorCode::Unsupported, format!("no agent is named {agent}")));
+    };
+    let command = match command.filter(|command| !command.trim().is_empty()) {
+        Some(command) => command,
+        None => match spec.command_names.first() {
+            Some(name) => (*name).to_string(),
+            None => {
                 return Err(reference_chat_scope(
                     ScopeErrorCode::Unsupported,
-                    "an SSH or remote-helper pane keeps no read state; it stays unread until its next episode",
+                    format!("{} has no command to launch", spec.id),
+                ))
+            }
+        },
+    };
+    let Some(services) = state.machine_services.as_ref() else {
+        return Err(reference_chat_scope(ScopeErrorCode::Unsupported, "this host does not own sessions, so it cannot spawn one"));
+    };
+    let sessions = Arc::clone(&services.sessions);
+    if let Some(authorize) = &authorize {
+        authorize()?;
+    }
+    let admission = spawn_admission().lock().await;
+    // A retry of a spawn that already created its pane answers with that pane, not a new one.
+    if let Some(existing) = sessions.live_session_for_request(&request_id) {
+        return Ok(spawn_reply(&existing, sessions.lineage_for(&existing).as_ref(), spec.id));
+    }
+    let (workspace_id, worktree, lineage) = match parent_session_id.as_deref() {
+        Some(parent) => {
+            let Some((parent_workspace, parent_worktree)) = sessions.spawn_parent_scope(parent) else {
+                return Err(reference_chat_scope(ScopeErrorCode::NotFound, format!("no live pane {parent} runs on this host")));
+            };
+            let depth = crate::agent_control::spawn_child_depth(
+                sessions.lineage_for(parent).as_ref(),
+                sessions.live_spawned_children(parent),
+            )
+            .map_err(spawn_limit)?;
+            if workspace_id.as_deref().is_some_and(|requested| requested != parent_workspace) {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::InvalidRequest,
+                    "a child spawns in its parent's workspace",
                 ));
             }
-            Ok(serde_json::json!({
-                "session": { "sessionId": session_id, "read": state.agent_events.read_state(&session_id) }
-            }))
+            let lineage = crate::agent_control::Lineage { parent: parent.to_string(), depth, name: name.clone() };
+            (parent_workspace, parent_worktree, Some(lineage))
         }
+        None => match workspace_id.filter(|id| !id.trim().is_empty()) {
+            Some(workspace_id) => (workspace_id, None, None),
+            None => {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::InvalidRequest,
+                    "a spawn without a parent needs a workspace id",
+                ))
+            }
+        },
+    };
+    let session_id = sessions
+        .spawn_agent_pane(&request_id, &workspace_id, worktree, cwd.clone(), command, args, lineage.clone())
+        .await
+        .map_err(|(code, message)| reference_chat_scope(code, message))?;
+    drop(admission);
+    state.emit_desktop_event(
+        AGENT_SPAWNED_EVENT,
+        serde_json::json!({
+            "sessionId": session_id,
+            "parentSessionId": lineage.as_ref().map(|lineage| lineage.parent.clone()),
+            "depth": lineage.as_ref().map_or(0, |lineage| lineage.depth),
+            "workspaceId": workspace_id,
+            "cwd": cwd,
+            "agent": spec.id,
+            "name": name,
+            "daemonEpoch": state.daemon_epoch.load(std::sync::atomic::Ordering::Acquire).to_string(),
+        }),
+    );
+    if let Some(prompt) = prompt {
+        let state = Arc::clone(state);
+        let session_id = session_id.clone();
+        let request_id = format!("{request_id}:prompt");
+        tokio::spawn(async move {
+            deliver_spawn_prompt(&state, &session_id, prompt, request_id, authorize).await;
+        });
+    }
+    Ok(spawn_reply(&session_id, lineage.as_ref(), spec.id))
+}
+
+fn spawn_limit(message: String) -> ScopeError {
+    // Its own wire code, so a caller can tell a limit from any other refusal. It exits refused.
+    let mut error = reference_chat_scope(ScopeErrorCode::Forbidden, message);
+    error.details = serde_json::json!({ "code": crate::agent_control::SPAWN_LIMIT_CODE });
+    error
+}
+
+fn spawn_reply(session_id: &str, lineage: Option<&crate::agent_control::Lineage>, agent: &str) -> serde_json::Value {
+    serde_json::json!({
+        "session": {
+            "sessionId": session_id,
+            "agent": agent,
+            "parent": lineage.map(|lineage| lineage.parent.clone()),
+            "depth": lineage.map_or(0, |lineage| lineage.depth),
+            "name": lineage.and_then(|lineage| lineage.name.clone()),
+        }
+    })
+}
+
+/// Types a spawned pane's first prompt once the pane first reads idle. A pane that never gets
+/// there, or a delivery that is refused, is logged; nothing is retried.
+async fn deliver_spawn_prompt(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    prompt: String,
+    request_id: String,
+    authorize: Option<Arc<dyn Fn() -> Result<(), ScopeError> + Send + Sync>>,
+) {
+    let idle = events::wait_for(&state.agent_events, session_id, "idle", 0, None, SPAWN_PROMPT_IDLE_WAIT).await;
+    if idle.is_none() {
+        tracing::warn!(session_id, "a spawned pane never read idle; its prompt was not delivered");
+        return;
+    }
+    // Straight to the delivery, not through `handle_as`: that path dispatches spawns, and a
+    // spawn whose task re-enters it would make this future's type recursive.
+    let op = AgentControlOp::Deliver {
+        session_id: session_id.to_string(),
+        text: prompt.clone(),
+        request_id: request_id.clone(),
+        observe_ms: 0,
+    };
+    let deadline = crate::agent_control::delivery::observe_deadline(0);
+    let result =
+        crate::agent_control::delivery::deliver(state, session_id, prompt, request_id, deadline, authorize).await;
+    let outcome = match &result {
+        Ok(_) => "OK".to_string(),
+        Err(error) => control_wire_code(error).to_string(),
+    };
+    record_audit(state, AuditRecord::for_op("owner", &op, outcome));
+    if let Err(error) = result {
+        tracing::warn!(session_id, code = ?error.code, "a spawned pane's prompt was not delivered");
     }
 }
 
@@ -1144,7 +1140,7 @@ fn stamp_remote_receipt_host(value: &mut serde_json::Value, host_id: &str) {
     }
 }
 
-pub(crate) fn forward_code(code: &str) -> String {
+fn forward_code(code: &str) -> String {
     match code {
         "PAIRED_HOST_CAPABILITY_UNAVAILABLE" => "UNSUPPORTED".into(),
         "SESSION_NOT_FOUND" | "SESSION_EXPIRED" => "NOT_FOUND".into(),
@@ -1262,6 +1258,9 @@ fn control_json(value: serde_json::Value) -> Response {
 fn control_finish(result: Result<serde_json::Value, ScopeError>) -> Response {
     match result {
         Ok(value) => control_json(value),
+        Err(error) if control_wire_code(&error) == crate::agent_control::SPAWN_LIMIT_CODE => {
+            machine_error_with_details(StatusCode::CONFLICT, crate::agent_control::SPAWN_LIMIT_CODE, &error.message, serde_json::Map::new())
+        }
         Err(error) => reference_chat_refusal(&error),
     }
 }
@@ -1537,18 +1536,6 @@ pub(crate) async fn http_events(
     control_finish(handle(&state, AgentControlOp::Events { after: query.after }).await)
 }
 
-pub(crate) async fn http_ack(
-    State(state): State<Arc<RemoteGatewayState>>,
-    headers: HeaderMap,
-    AxumPath(session_id): AxumPath<String>,
-) -> Response {
-    let device = match http_device(&state, &headers, true) {
-        Ok(device) => device,
-        Err(response) => return response,
-    };
-    control_finish(handle_as(&state, AgentControlOp::Acknowledge { session_id }, &device.id, None).await)
-}
-
 pub(crate) async fn http_wait(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -1619,6 +1606,69 @@ pub(crate) async fn http_send(
     control_fenced(
         &state,
         op,
+        &device.id,
+        authorize,
+        body.supervisor_fence,
+        body.supervisor_account,
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SpawnBody {
+    agent: String,
+    cwd: String,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    parent_session_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    request_id: String,
+    #[serde(default)]
+    supervisor_fence: Option<u64>,
+    #[serde(default)]
+    supervisor_account: Option<String>,
+}
+
+/// `POST /api/v1/agent-control/spawn`: open an agent pane on this machine, optionally as the
+/// child of one of its panes.
+pub(crate) async fn http_spawn(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    body: Result<Json<SpawnBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let device = match http_device(&state, &headers, true) {
+        Ok(device) => device,
+        Err(response) => return response,
+    };
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return reference_chat_error(ScopeErrorCode::InvalidRequest, "the spawn body is not readable")
+        }
+    };
+    let authorize = http_reauthorize(&state, &headers);
+    control_fenced(
+        &state,
+        AgentControlOp::Spawn {
+            agent: body.agent,
+            cwd: body.cwd,
+            workspace_id: body.workspace_id,
+            parent_session_id: body.parent_session_id,
+            name: body.name,
+            prompt: body.prompt,
+            command: body.command,
+            args: body.args,
+            request_id: body.request_id,
+        },
         &device.id,
         authorize,
         body.supervisor_fence,
@@ -1772,7 +1822,13 @@ async fn forward_with(
             )),
             Some(hosts) => forward_once(&hosts, &host_id, op.clone(), fence)
                 .await
-                .map_err(|failure| reference_chat_scope(forward_scope_code(&failure.code), failure.message)),
+                .map_err(|failure| {
+                    if failure.code == crate::agent_control::SPAWN_LIMIT_CODE {
+                        spawn_limit(failure.message)
+                    } else {
+                        reference_chat_scope(forward_scope_code(&failure.code), failure.message)
+                    }
+                }),
         },
     };
     if let (Ok(_), Some(answer)) = (&result, owner_answer) {
@@ -1785,7 +1841,7 @@ async fn forward_with(
             &op,
             match &result {
                 Ok(_) => "OK".to_string(),
-                Err(error) => reference_chat_wire_code(error.code).to_string(),
+                Err(error) => control_wire_code(error).to_string(),
             },
         ),
     );
@@ -2198,8 +2254,6 @@ mod tests {
             updated_at_ms: 1,
             stale: false,
             health: None,
-            attention: None,
-            reason: None,
         }
     }
 
@@ -2422,459 +2476,6 @@ mod tests {
         assert!(read["session"].get("lastAssistantLine").is_some(), "{read}");
     }
 
-    fn reading(session_id: &str, state: AgentControlState, source: AgentStateSource) -> events::ObservationDraft {
-        events::ObservationDraft {
-            session_id: session_id.to_string(),
-            state,
-            state_source: source,
-            tier: AgentTier::Native,
-            prompt_id: None,
-            kind: None,
-            screen_revision: None,
-            workspace_id: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn a_provider_working_to_idle_edge_with_no_outcome_is_unread() {
-        let session_id = "agent-control-attention-edge";
-        let (_backend, state) = pane(session_id, "$ ");
-        let attention = |read: &serde_json::Value| read["session"]["attention"].clone();
-        let before = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
-        assert_eq!(attention(&before)["axes"]["completion"], "none", "{before}");
-        assert_ne!(attention(&before)["group"], "unread", "{before}");
-
-        state.agent_events.publish(reading(session_id, AgentControlState::Working, AgentStateSource::Provider));
-        state.agent_events.publish(reading(session_id, AgentControlState::Idle, AgentStateSource::Provider));
-        let after = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
-        let attention = attention(&after);
-        assert_eq!(attention["axes"]["completion"], "reported", "{after}");
-        assert_eq!(attention["axes"]["read"], "unread", "{after}");
-        assert_eq!(attention["axes"]["ownership"], "owner", "{after}");
-        assert_eq!(attention["group"], "unread", "{after}");
-
-        state.agent_events.publish(reading(session_id, AgentControlState::Working, AgentStateSource::Provider));
-        let again = state.agent_events.completion(session_id);
-        assert_eq!(again, None, "a new turn ends the completion episode");
-    }
-
-    #[tokio::test]
-    async fn attention_of_a_pane_with_an_open_approval_needs_you() {
-        let session_id = "agent-control-attention-approval";
-        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
-        let listed = handle(&state, AgentControlOp::List).await.expect("list");
-        let attention = &listed["sessions"][0]["attention"];
-        assert_eq!(attention["axes"]["demand"], "approval", "{listed}");
-        assert_eq!(attention["axes"]["activity"], "stopped", "{listed}");
-        assert_eq!(attention["group"], "needsYou", "{listed}");
-    }
-
-    #[test]
-    fn attention_axes_map_prompt_kinds_failure_and_state() {
-        use ferryx_hub::supervisor::panel_contract::{
-            AttentionActivity, AttentionCompletion, AttentionDemand, AttentionOwnership, AttentionRead,
-        };
-        use reference_types::ReferencePromptKind as K;
-        let axes = |state, pending, failed, completed| {
-            attention_axes(state, pending, failed, completed, AttentionRead::Unread, AttentionOwnership::Owner)
-        };
-        assert_eq!(axes(AgentControlState::Blocked, Some(K::Question), false, false).demand, AttentionDemand::Question);
-        assert_eq!(axes(AgentControlState::Blocked, Some(K::Menu), false, false).demand, AttentionDemand::Question);
-        assert_eq!(axes(AgentControlState::Blocked, Some(K::Approval), true, false).demand, AttentionDemand::Approval);
-        assert_eq!(axes(AgentControlState::Blocked, Some(K::Plan), false, false).demand, AttentionDemand::Approval);
-        assert_eq!(axes(AgentControlState::Idle, None, true, false).demand, AttentionDemand::Error);
-        assert_eq!(axes(AgentControlState::Idle, None, false, false).demand, AttentionDemand::None);
-        assert_eq!(axes(AgentControlState::Working, None, false, false).activity, AttentionActivity::Working);
-        assert_eq!(axes(AgentControlState::Unknown, None, false, false).activity, AttentionActivity::Unknown);
-        assert_eq!(axes(AgentControlState::Idle, None, false, true).completion, AttentionCompletion::Reported);
-    }
-
-    struct InertControl;
-
-    #[async_trait::async_trait]
-    impl ferryx_hub::supervisor::panel_contract::SessionControl for InertControl {
-        async fn stop(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef) -> ferryx_hub::error::Result<()> {
-            Ok(())
-        }
-        async fn send(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: &str) -> ferryx_hub::error::Result<()> {
-            Ok(())
-        }
-        async fn answer(
-            &self,
-            _: &ferryx_hub::supervisor::panel_contract::SessionRef,
-            _: &str,
-            _: Option<&str>,
-            _: usize,
-        ) -> ferryx_hub::error::Result<Option<String>> {
-            Err(ferryx_hub::error::HubError::message("this test never answers"))
-        }
-        async fn read_tail(&self, _: &ferryx_hub::supervisor::panel_contract::SessionRef, _: usize) -> ferryx_hub::error::Result<String> {
-            Ok(String::new())
-        }
-    }
-
-    /// Autonomy over an in-memory hub whose owner channel refreshes this computer's panes.
-    async fn refreshing_autonomy(state: &Arc<RemoteGatewayState>) -> Arc<ferryx_hub::supervisor::autonomy::Autonomy> {
-        use crate::hub_runtime::panel_autonomy::{OwnerChannel, SessionRefresh};
-        let pool = ferryx_hub::storage::memory().await.unwrap();
-        let slot: Arc<std::sync::OnceLock<Arc<ferryx_hub::supervisor::autonomy::Autonomy>>> = Arc::default();
-        let sources = {
-            let slot = Arc::clone(&slot);
-            Arc::new(move || {
-                slot.get().map_or_else(Default::default, |autonomy| ferryx_hub::fleet::PanelSources {
-                    log: Some(autonomy.action_log()),
-                    rules: Some(autonomy.rule_store()),
-                    escalations: Some(autonomy.escalation_source()),
-                })
-            })
-        };
-        let channel = OwnerChannel { sessions: Some(SessionRefresh { state: Arc::downgrade(state), sources }) };
-        let autonomy = ferryx_hub::supervisor::autonomy::Autonomy::open(pool, Arc::new(InertControl), Arc::new(channel))
-            .await
-            .unwrap();
-        let _ = slot.set(Arc::clone(&autonomy));
-        autonomy
-    }
-
-    /// The next `panel.session` frame for `session_ref` on the process-wide owner channel.
-    async fn next_panel_session(
-        frames: &mut tokio::sync::broadcast::Receiver<serde_json::Value>,
-        session_ref: &str,
-    ) -> serde_json::Value {
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            loop {
-                match frames.recv().await {
-                    Ok(frame) if frame["type"] == "panel.session" && frame["sessionRef"] == session_ref => {
-                        return frame["session"].clone()
-                    }
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => panic!("the owner channel closed"),
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("no panel.session for {session_ref}"))
-    }
-
-    fn local_ref(session_id: &str) -> ferryx_hub::supervisor::panel_contract::SessionRef {
-        ferryx_hub::supervisor::panel_contract::SessionRef::new(&reference_files::reference_host_id(), session_id)
-    }
-
-    #[tokio::test]
-    async fn a_decision_opened_or_resolved_emits_an_overlaid_panel_session() {
-        let session_id = format!("attention-decision-{}", uuid::Uuid::new_v4().simple());
-        let (_backend, state) = pane(&session_id, CLAUDE_APPROVAL);
-        let autonomy = refreshing_autonomy(&state).await;
-        let session_ref = local_ref(&session_id);
-        let mut frames = crate::hub_runtime::subscribe_panel_events();
-        let sequence = state.agent_events.head();
-
-        let mut session = crate::hub_runtime::local_fleet_session(&state, &session_id).await.expect("the pane");
-        session.session_ref = session_ref.clone();
-        autonomy.observe(&session).await;
-        assert_eq!(autonomy.escalation_source().pending().await.unwrap().len(), 1, "a decision opened");
-        let opened = next_panel_session(&mut frames, session_ref.as_str()).await;
-        assert_eq!(opened["attention"]["axes"]["ownership"], "owner", "{opened}");
-        assert_eq!(opened["attention"]["group"], "needsYou", "{opened}");
-
-        autonomy.clear(&session_ref);
-        let resolved = next_panel_session(&mut frames, session_ref.as_str()).await;
-        assert_eq!(resolved["attention"]["group"], "needsYou", "{resolved}");
-        assert_eq!(resolved["state"], opened["state"], "the agent state did not move");
-        assert_eq!(state.agent_events.head(), sequence, "no agent reading was published");
-    }
-
-    #[tokio::test]
-    async fn a_handling_entry_ending_emits_an_overlaid_panel_session() {
-        use ferryx_hub::supervisor::panel_contract::{ActionEntry, ActionKind};
-        let session_id = format!("attention-handling-{}", uuid::Uuid::new_v4().simple());
-        let (_backend, state) = pane(&session_id, CLAUDE_APPROVAL);
-        let autonomy = refreshing_autonomy(&state).await;
-        let session_ref = local_ref(&session_id);
-        let mut frames = crate::hub_runtime::subscribe_panel_events();
-        let sequence = state.agent_events.head();
-        let entry = |live| ActionEntry {
-            id: 0,
-            incident_key: format!("recovery:{session_id}"),
-            session_ref: Some(session_ref.clone()),
-            kind: ActionKind::Retried,
-            summary: "Retrying".into(),
-            basis: "default rule".into(),
-            evidence: Vec::new(),
-            undo: None,
-            live,
-            created_at_ms: 1,
-            updated_at_ms: observed_at_ms(),
-        };
-
-        autonomy.action_log().upsert_incident(entry(true)).await.unwrap();
-        let handled = next_panel_session(&mut frames, session_ref.as_str()).await;
-        assert_eq!(handled["attention"]["axes"]["ownership"], "supervisor", "{handled}");
-        assert_eq!(handled["attention"]["group"], "seen", "{handled}");
-
-        autonomy.action_log().upsert_incident(entry(false)).await.unwrap();
-        let ended = next_panel_session(&mut frames, session_ref.as_str()).await;
-        assert_eq!(ended["attention"]["axes"]["ownership"], "owner", "{ended}");
-        assert_eq!(ended["attention"]["group"], "needsYou", "{ended}");
-        assert_eq!(ended["state"], handled["state"], "the agent state did not move");
-        assert_eq!(state.agent_events.head(), sequence, "no agent reading was published");
-    }
-
-    #[test]
-    fn reason_prompt_question_wins_over_last_line_and_cause() {
-        assert_eq!(
-            session_reason(Some("Run the migration?"), Some("I wrote the plan"), Some("Waiting for input")).as_deref(),
-            Some("Run the migration?")
-        );
-    }
-
-    #[test]
-    fn reason_falls_back_to_the_last_line_then_the_stop_cause() {
-        assert_eq!(session_reason(None, Some("  All tests pass\n "), Some("Finished its turn")).as_deref(), Some("All tests pass"));
-        assert_eq!(session_reason(Some("  "), None, Some("Finished its turn")).as_deref(), Some("Finished its turn"));
-        assert_eq!(stop_cause(AgentControlState::Blocked, false, false), Some("Waiting for input"));
-        assert_eq!(stop_cause(AgentControlState::Idle, false, true), Some("Finished its turn"));
-        assert_eq!(stop_cause(AgentControlState::Working, true, false), Some("The agent exited in the middle of a turn"));
-        assert_eq!(stop_cause(AgentControlState::Working, false, false), None);
-        assert_eq!(session_reason(None, None, None), None, "nothing to say is null, never empty");
-    }
-
-    #[test]
-    fn reason_is_one_line_capped_at_200_chars() {
-        let long = format!("{}\nsecond line", "é".repeat(300));
-        let reason = session_reason(Some(&long), None, None).expect("a reason");
-        assert_eq!(reason.chars().count(), LAST_ASSISTANT_LINE_MAX_CHARS);
-        assert!(!reason.contains('\n'));
-    }
-
-    #[test]
-    fn reason_screen_line_skips_rules_glyphs_and_empty_input_boxes() {
-        let screen = "❯ build it\n⏺ Building the relay\n  Done.\n✻ Worked for 3s · done 4:04 PM\n────────\n> \n────────\n  ⏸ manual mode on\n";
-        assert_eq!(last_screen_line(screen).as_deref(), Some("Done."));
-        assert_eq!(last_screen_line("────\n\n"), None);
-    }
-
-    /// Every captured agent screen, with the line it must yield. Reviewed by hand against each
-    /// fixture: a `Some` is the last line of the agent's reply in the newest whole turn, and
-    /// every other screen (banners, tips, footers, status bars, model or path lines, token
-    /// counts, menus, spinners) is `None`, so its reason falls back to the stop cause.
-    fn golden_screens() -> Vec<(&'static str, &'static str, Option<&'static str>)> {
-        macro_rules! golden {
-            ($name:literal, $line:expr) => {
-                ($name, include_str!(concat!("../agent_detect/fixtures/screens/", $name, ".screen")), $line)
-            };
-        }
-        vec![
-            golden!("agy/idle", None),
-            golden!("agy/lc-idle", None),
-            golden!("agy/lc-working", None),
-            golden!("agy/resume", None),
-            golden!("agy/trust", None),
-            golden!("agy/working", None),
-            golden!("aider/approval-add-file", None),
-            golden!("aider/approval-gitignore-confirm", None),
-            golden!("aider/approval-run-shell", None),
-            golden!("aider/idle-after-turn", None),
-            golden!("aider/idle", None),
-            golden!("aider/login-wall", None),
-            golden!("aider/working-commit-message", None),
-            golden!("aider/working-waiting-spinner", None),
-            golden!("claude/after-turn-idle", Some("plain ls.")),
-            golden!("claude/approval", None),
-            golden!("claude/done", Some("The serena MCP server failed to connect (timed out after 30s). It doesn't affect this ls command.")),
-            golden!("claude/idle", None),
-            golden!("claude/lc-working", None),
-            golden!("claude/local1-idle", None),
-            golden!("claude/local1-working", None),
-            golden!("claude/resumed", Some("contains the current date: Thu Oct 22 16:04:12 KST 2026.")),
-            golden!("claude/working", Some("contains the current date: Thu Oct 22 16:04:12 KST 2026.")),
-            golden!("cline/after-turn-idle", None),
-            golden!("cline/approval", None),
-            golden!("cline/idle-after-turn", None),
-            golden!("cline/idle", None),
-            golden!("cline/lc-working", None),
-            golden!("cline/resumed", None),
-            golden!("cline/working", None),
-            golden!("codex/after-turn-idle", Some("b.py")),
-            golden!("codex/approval", None),
-            golden!("codex/done", Some("Command completed successfully.")),
-            golden!("codex/idle", None),
-            golden!("codex/lc-working", None),
-            golden!("codex/local1-working", None),
-            golden!("codex/resumed", Some("Command completed successfully.")),
-            golden!("codex/working", None),
-            golden!("copilot/after-turn", None),
-            golden!("copilot/approval", None),
-            golden!("copilot/idle", None),
-            golden!("copilot/local3-idle", None),
-            golden!("copilot/local3-working", None),
-            golden!("copilot/resumed", None),
-            golden!("copilot/working-modelfail", None),
-            golden!("copilot/working", None),
-            golden!("crush/after-allow", None),
-            golden!("crush/approval", None),
-            golden!("crush/idle-after-turn", None),
-            golden!("crush/idle", None),
-            golden!("crush/resumed-session", None),
-            golden!("crush/working", None),
-            golden!("cursor-agent/live-approval", None),
-            golden!("cursor-agent/live-idle", None),
-            golden!("cursor-agent/live-running", None),
-            golden!("cursor-agent/live-trust", None),
-            golden!("cursor-agent/live-working", None),
-            golden!("cursor-agent/live2-approval", None),
-            golden!("cursor-agent/live2-trust", None),
-            golden!("cursor-agent/login-required", None),
-            golden!("droid/login-device-auth", None),
-            golden!("droid/login-wall", None),
-            golden!("gjc/after-answer", None),
-            golden!("gjc/approval-ask", None),
-            golden!("gjc/idle-after-turn", None),
-            golden!("gjc/idle", None),
-            golden!("gjc/working", None),
-            golden!("grok/after-approve", None),
-            golden!("grok/approval", None),
-            golden!("grok/idle-after-turn", None),
-            golden!("grok/idle", None),
-            golden!("grok/login-wall", None),
-            golden!("grok/resumed", None),
-            golden!("grok/trust-folder", None),
-            golden!("grok/working", None),
-            golden!("kimi/idle", None),
-            golden!("kimi/resume", None),
-            golden!("kimi/working", None),
-            golden!("omp/approval", None),
-            golden!("omp/idle-after-cancel-retry", None),
-            golden!("omp/idle-after-interrupt", None),
-            golden!("omp/idle-after-turn", None),
-            golden!("omp/idle-no-model", None),
-            golden!("omp/idle-resumed", None),
-            golden!("omp/idle", None),
-            golden!("omp/question-multi", None),
-            golden!("omp/question-single", None),
-            golden!("omp/working-2", None),
-            golden!("omp/working", None),
-            golden!("opencode/approval", None),
-            golden!("opencode/done", None),
-            golden!("opencode/idle", None),
-            golden!("opencode/lc-approval", None),
-            golden!("opencode/lc-working", None),
-            golden!("opencode/local1-working", None),
-            golden!("opencode/resumed", None),
-            golden!("opencode/working", None),
-            golden!("pi/approval", None),
-            golden!("pi/done", None),
-            golden!("pi/idle", None),
-            golden!("pi/lc-idle-no-model", None),
-            golden!("pi/local1-idle", None),
-            golden!("pi/resumed", None),
-            golden!("pi/working", None),
-        ]
-    }
-
-    #[test]
-    fn reason_screen_line_matches_the_reviewed_line_of_every_agent_fixture() {
-        let golden = golden_screens();
-        let on_disk = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/agent_detect/fixtures/screens"))
-            .expect("the fixture directory")
-            .flat_map(|agent| std::fs::read_dir(agent.expect("an agent dir").path()).expect("its screens"))
-            .filter(|file| file.as_ref().is_ok_and(|file| file.path().extension().is_some_and(|ext| ext == "screen")))
-            .count();
-        assert_eq!(golden.len(), on_disk, "every fixture screen has a reviewed row");
-        const CHROME: &[&str] = &[
-            "for shortcuts", "mode on", "esc to", "ctrl+", "shift+tab", "Tip:", "warnings", "tok/s", "context:",
-            "(1x)", "128K", "Type your message", "/model", "/private/", "Changelog", "Working (", "Thinking",
-        ];
-        let mut wrong = Vec::new();
-        for (name, screen, expected) in &golden {
-            let line = last_screen_line(screen);
-            if line.as_deref() != *expected {
-                wrong.push(format!("{name}: got {line:?}, want {expected:?}"));
-            }
-            if let Some(line) = &line {
-                assert!(screen.lines().any(|row| row.contains(line.as_str())), "{name}: {line:?} is on the screen");
-                for chrome in CHROME {
-                    assert!(!line.contains(chrome), "{name}: chrome {chrome:?} was taken: {line:?}");
-                }
-            }
-        }
-        assert!(wrong.is_empty(), "{} of {} fixtures differ:\n{}", wrong.len(), golden.len(), wrong.join("\n"));
-        assert!(golden.iter().any(|(_, _, line)| line.is_some()), "the table has transcript lines");
-    }
-
-    #[test]
-    fn reason_screen_line_is_the_transcript_line_above_the_input_box_not_the_footer() {
-        let screens = golden_screens();
-        for (name, expected) in [
-            ("claude/done", "The serena MCP server failed to connect (timed out after 30s). It doesn't affect this ls command."),
-            ("claude/after-turn-idle", "plain ls."),
-            ("codex/done", "Command completed successfully."),
-            ("codex/after-turn-idle", "b.py"),
-        ] {
-            let screen = screens.iter().find(|(fixture, _, _)| *fixture == name).map(|(_, screen, _)| *screen).expect(name);
-            assert_eq!(last_screen_line(screen).as_deref(), Some(expected), "{name}");
-        }
-    }
-
-    #[test]
-    fn reason_screen_line_ignores_quotes_and_needs_the_newest_turn() {
-        let quoted = "❯ check the doc\n⏺ It says:\n  > keep the relay\n  So the relay stays.\n✻ Worked for 3s · done 4:04 PM\n";
-        assert_eq!(last_screen_line(quoted).as_deref(), Some("So the relay stays."), "an indented > is a quote, not the input");
-        let newer = "❯ first\n⏺ First reply.\n✻ Worked for 3s · done 4:04 PM\n❯ second\n⏺ Thinking about it\n";
-        assert_eq!(last_screen_line(newer), None, "a newer turn without its timing line has no finished reply");
-        assert_eq!(last_screen_line("⏺ A reply with no user turn above it\n✻ done 4:04 PM\n"), None);
-    }
-
-    #[test]
-    fn reason_with_nothing_above_the_input_box_falls_to_the_stop_cause() {
-        let screen = "\n\n────────\n❯ \n────────\n  ⏸ manual mode on · ? for shortcuts\n";
-        assert_eq!(last_screen_line(screen), None);
-        let codex = "  4:08 PM\n\n› Ask Codex to do anything\n\n  GPT-5.6-Luna medium · /tmp/x\n";
-        assert_eq!(last_screen_line(codex), None, "a timing line alone is not the agent's line");
-        let cause = stop_cause(AgentControlState::Idle, false, true);
-        assert_eq!(session_reason(None, last_screen_line(screen).as_deref(), cause).as_deref(), Some("Finished its turn"));
-    }
-
-    #[tokio::test]
-    async fn reason_of_a_pane_with_a_question_is_the_question() {
-        let session_id = "agent-control-reason-prompt";
-        let (_backend, state) = pane(session_id, CLAUDE_APPROVAL);
-        let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
-        let session = &read["session"];
-        let pending = &session["pending"];
-        let question = pending["question"].as_str().filter(|q| !q.trim().is_empty()).or(pending["title"].as_str()).expect("a prompt");
-        assert_eq!(session["reason"].as_str(), session_reason(Some(question), None, None).as_deref(), "{read}");
-        assert!(session["reason"].as_str().is_some_and(|reason| !reason.is_empty()), "{read}");
-    }
-
-    #[tokio::test]
-    async fn reason_of_a_session_without_a_transcript_uses_the_screen_line() {
-        let session_id = "agent-control-reason-screen";
-        let (_backend, state) = pane(session_id, CLAUDE_TURN);
-        let read = handle(&state, AgentControlOp::Read { session_id: session_id.to_string() }).await.expect("read");
-        let session = &read["session"];
-        assert!(session["agent"].is_string(), "an agent is detected: {read}");
-        assert!(session["pending"].is_null(), "{read}");
-        assert!(session["lastAssistantLine"].is_null(), "{read}");
-        assert_eq!(session["reason"], "It has README.md and src.", "{read}");
-    }
-
-    #[tokio::test]
-    async fn reason_of_a_plain_shell_pane_is_null_not_empty() {
-        let session_id = "agent-control-reason-shell";
-        let (_backend, state) = pane(session_id, "$ ls\nREADME.md\n$ ");
-        let listed = handle(&state, AgentControlOp::List).await.expect("list");
-        let entry = &listed["sessions"][0];
-        assert!(entry["agent"].is_null(), "{listed}");
-        assert!(entry.get("reason").is_some_and(serde_json::Value::is_null), "{listed}");
-        let fleet = ferryx_hub::fleet::merge_sessions(
-            &std::collections::HashMap::new(),
-            &[ferryx_hub::fleet::InventoryEntry { host_id: "h".into(), sessions: vec![entry.clone()], error: None, stale: false }],
-            1,
-        );
-        assert_eq!(fleet[0].reason, None);
-    }
-
     #[tokio::test]
     async fn a_mutation_path_observation_never_reads_the_history_store() {
         let session_id = "agent-control-no-line-on-mutation";
@@ -2889,9 +2490,6 @@ mod tests {
     }
 
     const CLAUDE_APPROVAL: &str = include_str!("reference_chat/fixtures/claude/prompt/approval-command.screen");
-    /// A finished Claude turn that fits the 100x30 test pane whole: user echo, reply, timing line,
-    /// input box and footer.
-    const CLAUDE_TURN: &str = "❯ list it\n\n⏺ Listed the directory.\n  It has README.md and src.\n\n✻ Baked for 4s · done 4:03 PM\n\n\n────────────────────────────────────────\n❯\n────────────────────────────────────────\n  ⏸ manual mode on · ? for shortcuts · ← for agents\n";
 
     /// One pane showing a fixed screen; every write and every signal it is handed is recorded.
     struct FixedPane {
@@ -3667,5 +3265,190 @@ mod tests {
         let wire = serde_json::to_value(&view).expect("wire");
         assert_eq!(wire["needsConfirmation"], false, "{wire}");
         assert_eq!(wire["kind"], "freeText", "{wire}");
+    }
+
+    /// A real daemon with one registered git workspace, for the spawn op.
+    async fn spawn_fixture() -> (tempfile::TempDir, crate::daemon::server::DaemonServer, String) {
+        crate::ipc::run_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            let project = root.path().join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            for args in [
+                vec!["init"],
+                vec!["config", "user.name", "Test"],
+                vec!["config", "user.email", "test@example.com"],
+            ] {
+                crate::worktree::git::run_git(&project, &args).unwrap();
+            }
+            std::fs::write(project.join("init.txt"), b"init").unwrap();
+            crate::worktree::git::run_git(&project, &["add", "init.txt"]).unwrap();
+            crate::worktree::git::run_git(&project, &["commit", "--no-gpg-sign", "-m", "init"]).unwrap();
+            let server = crate::daemon::server::DaemonServer::new_with_paths(
+                Some(root.path().join("config")),
+                Some(root.path().join("auth")),
+            );
+            server.handle_register_workspace("spawn-ws", project.to_str().unwrap()).unwrap();
+            let cwd = std::fs::canonicalize(&project).unwrap().to_string_lossy().into_owned();
+            Ok((root, server, cwd))
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A long-lived stand-in agent process, so a spawned pane stays live for the test.
+    fn sleeper() -> (String, Vec<String>) {
+        if cfg!(windows) {
+            ("cmd.exe".into(), vec!["/c".into(), "ping -n 120 127.0.0.1 >NUL".into()])
+        } else {
+            ("/bin/sh".into(), vec!["-c".into(), "sleep 120".into()])
+        }
+    }
+
+    fn spawn_op(cwd: &str, parent: Option<&str>, workspace: Option<&str>, request_id: &str) -> AgentControlOp {
+        let (command, args) = sleeper();
+        AgentControlOp::Spawn {
+            agent: "claude".into(),
+            cwd: cwd.to_string(),
+            workspace_id: workspace.map(str::to_string),
+            parent_session_id: parent.map(str::to_string),
+            name: Some(format!("worker-{request_id}")),
+            prompt: None,
+            command: Some(command),
+            args,
+            request_id: request_id.to_string(),
+        }
+    }
+
+    fn spawned_id(value: &serde_json::Value) -> String {
+        value["session"]["sessionId"].as_str().expect("a spawned session id").to_string()
+    }
+
+    /// Closes every pane the test spawned, then re-raises the body's panic. A failing test must
+    /// fail, not wait out its live stand-in agents.
+    async fn finish(server: &crate::daemon::server::DaemonServer, outcome: std::thread::Result<()>) {
+        for id in server.remote_state().session_backend.list_sessions().await {
+            let _ = server.terminal_service().close_session(&id).await;
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_an_unknown_agent_is_unsupported() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        let mut op = spawn_op(&cwd, None, Some("spawn-ws"), "unknown-agent");
+        if let AgentControlOp::Spawn { agent, .. } = &mut op {
+            *agent = "nobody".into();
+        }
+        let error = handle(server.remote_state(), op).await.expect_err("an unknown agent is refused");
+        assert_eq!(error.code, ScopeErrorCode::Unsupported);
+        assert_eq!(crate::agent_control::exit_code_for(control_wire_code(&error)), crate::agent_control::EXIT_REFUSED);
+    }
+
+    #[tokio::test]
+    async fn spawn_without_parent_or_workspace_is_invalid() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        let error = handle(server.remote_state(), spawn_op(&cwd, None, None, "no-workspace"))
+            .await
+            .expect_err("a root spawn needs a workspace");
+        assert_eq!(error.code, ScopeErrorCode::InvalidRequest);
+    }
+
+    #[tokio::test]
+    async fn spawn_takes_the_parents_workspace_stores_lineage_and_announces_the_pane() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        use futures_util::FutureExt as _;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let state = server.remote_state();
+            let announced = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = Arc::clone(&announced);
+            state.set_desktop_event_sink(Arc::new(move |event, payload| {
+                if event == AGENT_SPAWNED_EVENT {
+                    sink.lock().unwrap().push(payload);
+                }
+            }));
+            let root = spawned_id(&handle(state, spawn_op(&cwd, None, Some("spawn-ws"), "root")).await.expect("root spawn"));
+            let child_reply = handle(state, spawn_op(&cwd, Some(&root), None, "child")).await.expect("child spawn");
+            let child = spawned_id(&child_reply);
+            assert_eq!(child_reply["session"]["parent"], serde_json::json!(root));
+            assert_eq!(child_reply["session"]["depth"], 1);
+
+            let services = state.machine_services.as_ref().unwrap();
+            assert_eq!(services.sessions.lineage_for(&root), None, "a root pane has no lineage");
+            let lineage = services.sessions.lineage_for(&child).expect("the child's lineage is stored");
+            assert_eq!((lineage.parent.as_str(), lineage.depth), (root.as_str(), 1));
+
+            let read = handle(state, AgentControlOp::Read { session_id: child.clone() }).await.expect("read the child");
+            assert_eq!(read["session"]["workspaceId"], "spawn-ws", "the child inherits the parent's workspace");
+            assert_eq!(read["session"]["parent"], serde_json::json!(root));
+            assert_eq!(read["session"]["depth"], 1);
+            assert_eq!(read["session"]["ownership"], "delegated");
+            let listed = handle(state, AgentControlOp::List).await.expect("list");
+            let root_entry = listed["sessions"].as_array().unwrap().iter().find(|entry| entry["sessionId"] == root.as_str()).cloned().expect("root listed");
+            assert_eq!(root_entry["parent"], serde_json::Value::Null);
+            assert_eq!(root_entry["depth"], 0);
+            assert_eq!(root_entry["ownership"], "owner");
+
+            let events = announced.lock().unwrap().clone();
+            let child_event = events.iter().find(|event| event["sessionId"] == child.as_str()).expect("the child is announced");
+            assert_eq!(child_event["parentSessionId"], serde_json::json!(root));
+            assert_eq!(child_event["workspaceId"], "spawn-ws");
+
+            // A retry of the same request answers with the pane it already created.
+            let again = handle(state, spawn_op(&cwd, Some(&root), None, "child")).await.expect("retry");
+            assert_eq!(spawned_id(&again), child);
+        })
+        .catch_unwind()
+        .await;
+        finish(&server, outcome).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_depth_cap_refuses_a_grandchilds_child_with_spawn_limit() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        use futures_util::FutureExt as _;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let state = server.remote_state();
+            let root = spawned_id(&handle(state, spawn_op(&cwd, None, Some("spawn-ws"), "d-root")).await.unwrap());
+            let first = spawned_id(&handle(state, spawn_op(&cwd, Some(&root), None, "d-1")).await.unwrap());
+            let second_reply = handle(state, spawn_op(&cwd, Some(&first), None, "d-2")).await.expect("depth 2 is allowed");
+            assert_eq!(second_reply["session"]["depth"], 2);
+            let second = spawned_id(&second_reply);
+            let error = handle(state, spawn_op(&cwd, Some(&second), None, "d-3")).await.expect_err("depth 3 is refused");
+            assert_eq!(control_wire_code(&error), crate::agent_control::SPAWN_LIMIT_CODE);
+            assert_eq!(crate::agent_control::exit_code_for(control_wire_code(&error)), crate::agent_control::EXIT_REFUSED);
+            match error_response(error) {
+                crate::daemon::protocol::DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("SPAWN_LIMIT")),
+                other => panic!("unexpected {other:?}"),
+            }
+        })
+        .catch_unwind()
+        .await;
+        finish(&server, outcome).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_child_cap_refuses_a_ninth_live_child() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        use futures_util::FutureExt as _;
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let state = server.remote_state();
+            let root = spawned_id(&handle(state, spawn_op(&cwd, None, Some("spawn-ws"), "c-root")).await.unwrap());
+            let mut children = Vec::new();
+            for index in 0..crate::agent_control::SPAWN_MAX_CHILDREN {
+                let reply = handle(state, spawn_op(&cwd, Some(&root), None, &format!("c-{index}"))).await.expect("under the cap");
+                children.push(spawned_id(&reply));
+            }
+            let error = handle(state, spawn_op(&cwd, Some(&root), None, "c-over")).await.expect_err("the ninth is refused");
+            assert_eq!(control_wire_code(&error), crate::agent_control::SPAWN_LIMIT_CODE);
+            // A closed child frees its slot.
+            let freed = children.pop().unwrap();
+            server.terminal_service().close_session(&freed).await.unwrap();
+            handle(state, spawn_op(&cwd, Some(&root), None, "c-again")).await.expect("a freed slot admits one more");
+        })
+        .catch_unwind()
+        .await;
+        finish(&server, outcome).await;
     }
 }

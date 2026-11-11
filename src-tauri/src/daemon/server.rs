@@ -246,7 +246,6 @@ mod prompt_changed_event_tests {
             screen_revision: Some("r-1".into()),
             state_since_ms: None,
             screen_changed_at_ms: None,
-            read: false,
         };
         let frame = crate::agent_control::events::PromptChangeFilter::default()
             .frame(&observation)
@@ -313,8 +312,6 @@ mod prompt_changed_event_tests {
             updated_at_ms: 1,
             stale: false,
             health: None,
-            attention: None,
-            reason: None,
         });
         let event = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -349,7 +346,6 @@ mod prompt_changed_event_tests {
             screen_revision: Some(revision.into()),
             state_since_ms: None,
             screen_changed_at_ms: None,
-            read: false,
         };
         let mut shown = HashMap::new();
         assert!(prompt_moved(&mut shown, &observation(Some("p"), "r1")), "a first prompt is news");
@@ -460,6 +456,7 @@ mod pane_liveness_adopted_ownership_tests {
 
     fn owner_record(workspace_id: &str, worktree: Option<WorktreeIdentity>) -> StoredSessionMeta {
         StoredSessionMeta {
+            lineage: None,
             machine_session: None,
             client_request_id: format!("req-{workspace_id}"),
             workspace_id: workspace_id.to_owned(),
@@ -7306,20 +7303,10 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::AcknowledgeAgentOutcome { session_id }) => {
-                    // Desktop focus: one read state for every client, and the program's OSC 7501
-                    // outcome is still dropped. A pane without that mirror is acknowledged too.
-                    let read = self.session_router.is_local_session(&session_id)
-                        && crate::remote::server::agent_control_service::acknowledge_read(
-                            &self.remote_state,
-                            &session_id,
-                        );
                     match crate::remote::backend::RemoteSessionBackend::acknowledge_agent_outcome(
                         self.session_router.as_ref(), &session_id,
                     ).await {
                         Ok(()) => DaemonResponse::AcknowledgeAgentOutcomeOk,
-                        Err(crate::remote::backend::OutcomeAckError::NoMirror) if read => {
-                            DaemonResponse::AcknowledgeAgentOutcomeOk
-                        }
                         Err(crate::remote::backend::OutcomeAckError::UnknownSession) => {
                             daemon_session_not_found(&session_id, "daemon_acknowledge_outcome")
                         }
@@ -8046,7 +8033,7 @@ impl DaemonServer {
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY.into());
-                    capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
@@ -14853,6 +14840,7 @@ mod instance_lock_deadline_tests {
         server.session_service.session_metadata.write().insert(
             local_id.clone(),
             crate::daemon::session_service::StoredSessionMeta {
+                lineage: None,
                 machine_session: None,
                 client_request_id: "retry-local-validation".into(),
                 workspace_id: missing_project.clone(),
