@@ -9106,6 +9106,8 @@ mod tests {
             })
             .await
             .unwrap();
+        // The output publish schedules exactly one coordinator dispatch, now on ws-test; await it.
+        harness.execute_dispatched().await;
         drain_dispatched(&mut harness).await;
         assert!(presented_count(&viewer_events) > presented_before, "the clone keeps presenting");
     }
@@ -9248,6 +9250,16 @@ mod tests {
             .store(false, Ordering::SeqCst);
         let secondary = add_secondary_owner_window(&harness);
         let bounds = harness.request.bounds;
+        // The tab moved to ws-test: main no longer presents it and ws-test's surface does. Hosts
+        // are per window, so the moved surface lives under ws-test's label.
+        {
+            let mut hosts = harness.state.hosts.lock();
+            let session_id = harness.request.session_id.as_str();
+            let viewers = hosts.get_mut(session_id).expect("harness installs a host");
+            let host = viewers.hosts.remove("main").expect("harness host is main's");
+            viewers.size_driver = None;
+            insert_viewer_host(&mut hosts, session_id, "ws-test", host);
+        }
 
         let app_handle = harness._app.handle().clone();
         let command = crate::ipc::native_terminal::cmd_native_terminal_set_bounds(
