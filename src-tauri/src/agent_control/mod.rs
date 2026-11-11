@@ -33,6 +33,10 @@ pub const AGENT_CONTROL_REMOTE_CAPABILITY: &str = "agentControlRemoteV1";
 /// causal start receipt. A paired host without it is never sent a supervisor dispatch.
 pub const AGENT_CONTROL_RECEIPTS_CAPABILITY: &str = "agentControlReceiptsV1";
 
+/// Capability for [`AgentControlOp::Acknowledge`]: the daemon owns one read state per session.
+/// A peer without it is refused `UNSUPPORTED` and never sent the op.
+pub const AGENT_CONTROL_ACK_CAPABILITY: &str = "agentControlAckV1";
+
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_INVALID: i32 = 2;
 pub const EXIT_NOT_FOUND: i32 = 3;
@@ -95,6 +99,11 @@ pub enum AgentControlOp {
         #[serde(default, skip_serializing_if = "is_zero_u64")]
         after: u64,
     },
+    /// Mark the session's current attention episode read for every client. Never answers or
+    /// resolves an open prompt; a new prompt id or a new completion is unread again.
+    Acknowledge {
+        session_id: String,
+    },
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -128,6 +137,9 @@ impl AgentControlOp {
 pub fn required_capability(op: &AgentControlOp, host_id: Option<&str>) -> &'static str {
     if matches!(op, AgentControlOp::Deliver { .. }) {
         return AGENT_CONTROL_RECEIPTS_CAPABILITY;
+    }
+    if matches!(op, AgentControlOp::Acknowledge { .. }) {
+        return AGENT_CONTROL_ACK_CAPABILITY;
     }
     if host_id.is_some()
         || matches!(
@@ -250,7 +262,7 @@ pub fn exit_code_for(code: &str) -> i32 {
     }
 }
 
-pub const AGENTS_USAGE: &str = "usage: ferryx-cli agents list [--host <id>] [--json]\n       ferryx-cli agents read <session> [--host <id>] [--json]\n       ferryx-cli agents send <session> <text> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> | --options <n,m> | --text <t>) [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]\n       ferryx-cli agents events [--after <seq>] [--host <id>] [--json]";
+pub const AGENTS_USAGE: &str = "usage: ferryx-cli agents list [--host <id>] [--json]\n       ferryx-cli agents read <session> [--host <id>] [--json]\n       ferryx-cli agents send <session> <text> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> | --options <n,m> | --text <t>) [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]\n       ferryx-cli agents events [--after <seq>] [--host <id>] [--json]\n       ferryx-cli agents ack <session> [--host <id>] [--json]";
 
 /// A CLI usage error: always exit 2, never contacts the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +308,7 @@ pub fn parse_agents_cli(args: &[String]) -> Result<ParsedAgents, UsageError> {
     let op = match command.as_str() {
         "list" => AgentControlOp::List,
         "read" => AgentControlOp::Read { session_id: session_arg(&rest)? },
+        "ack" => AgentControlOp::Acknowledge { session_id: session_arg(&rest)? },
         "send" => {
             let session_id = session_arg(&rest)?;
             let text = rest.get(1..).map(|words| words.join(" ")).unwrap_or_default();
@@ -772,6 +785,22 @@ mod tests {
             &[AGENT_CONTROL_REMOTE_CAPABILITY.to_string()],
             required_capability(&AgentControlOp::Events { after: 0 }, None)
         ));
+    }
+
+    #[test]
+    fn ack_parses_and_needs_the_ack_capability_locally_and_remotely() {
+        let parsed = parse_agents_cli(&argv(&["agents", "ack", "s-1", "--host", "hub"])).unwrap();
+        assert_eq!(parsed.op, AgentControlOp::Acknowledge { session_id: "s-1".into() });
+        assert_eq!(parsed.host_id.as_deref(), Some("hub"));
+        assert!(parse_agents_cli(&argv(&["agents", "ack"])).is_err());
+        assert!(parse_agents_cli(&argv(&["agents", "ack", "s-1", "--request-id", "r"])).is_err());
+        assert!(!parsed.op.is_input_mutation(), "an ack never types into the pane");
+        assert_eq!(required_capability(&parsed.op, None), AGENT_CONTROL_ACK_CAPABILITY);
+        assert_eq!(required_capability(&parsed.op, Some("hub")), AGENT_CONTROL_ACK_CAPABILITY);
+        let older = vec![AGENT_CONTROL_CAPABILITY.to_string(), AGENT_CONTROL_REMOTE_CAPABILITY.to_string()];
+        assert!(!capability_advertised(&older, required_capability(&parsed.op, None)));
+        let json = serde_json::to_string(&parsed.op).unwrap();
+        assert_eq!(json, r#"{"op":"acknowledge","sessionId":"s-1"}"#);
     }
 
     #[test]

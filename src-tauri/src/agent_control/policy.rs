@@ -363,6 +363,7 @@ pub fn audit_op_name(op: &AgentControlOp) -> &'static str {
         AgentControlOp::Stop { .. } => "stop",
         AgentControlOp::Wait { .. } => "wait",
         AgentControlOp::Events { .. } => "events",
+        AgentControlOp::Acknowledge { .. } => "ack",
     }
 }
 
@@ -373,7 +374,8 @@ pub fn audit_session(op: &AgentControlOp) -> Option<String> {
         | AgentControlOp::Deliver { session_id, .. }
         | AgentControlOp::Answer { session_id, .. }
         | AgentControlOp::Stop { session_id, .. }
-        | AgentControlOp::Wait { session_id, .. } => Some(session_id.clone()),
+        | AgentControlOp::Wait { session_id, .. }
+        | AgentControlOp::Acknowledge { session_id } => Some(session_id.clone()),
         AgentControlOp::List | AgentControlOp::Events { .. } => None,
     }
 }

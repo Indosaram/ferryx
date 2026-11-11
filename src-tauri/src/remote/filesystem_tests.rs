@@ -642,6 +642,7 @@ async fn directory_http_fixture(inject_send_failure: bool) {
                 "agentControlV1",
                 "agentControlRemoteV1",
                 "agentControlReceiptsV1",
+                "agentControlAckV1",
                 "supervisorFenceV1"
             ])
         );

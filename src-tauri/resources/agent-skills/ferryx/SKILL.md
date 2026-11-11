@@ -36,6 +36,7 @@ ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> 
 ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]
 ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]
 ferryx-cli agents events [--after <seq>] [--host <id>] [--json]
+ferryx-cli agents ack <session> [--host <id>] [--json]
 ```
 
 - `list` returns `{"sessions":[...]}`. Each session has `sessionId`, `running`, `cwd`, `agent`,
@@ -58,6 +59,9 @@ ferryx-cli agents events [--after <seq>] [--host <id>] [--json]
 - `events` replays state changes after `--after <seq>` as `{"gap":false,"events":[...],
   "afterSequence":N}`. Keep `afterSequence` as your next cursor. `"gap":true` means your cursor
   fell out of the log: you get a `snapshot` of every session's latest reading instead.
+- `ack` marks the session's current prompt or finished turn as seen on every device. It never
+  answers the prompt. Each event carries `read`; a new prompt or a new finished turn is unread
+  again. SSH and remote-helper panes refuse it with `UNSUPPORTED`.
 
 `send`, `answer` and `stop` type into a pane. Give them a `--request-id` of your own and, on a
 timeout or `OPERATION_OUTCOME_UNKNOWN`, retry with the same id; never retry with a new id, or

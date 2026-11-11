@@ -121,10 +121,11 @@ async fn push_text(socket: &mut axum::extract::ws::WebSocket, text: String) -> b
     )
 }
 
-/// Remembers each session's last state and prompt so only a transition makes a frame.
+/// Remembers each session's last state, prompt and read flag so only a transition makes a frame.
+/// An acknowledgement on an unchanged screen flips only `read`, and still makes one.
 #[derive(Default)]
 pub(crate) struct PanelTransitions {
-    seen: std::collections::HashMap<String, (crate::agent_control::AgentControlState, Option<String>)>,
+    seen: std::collections::HashMap<String, (crate::agent_control::AgentControlState, Option<String>, bool)>,
 }
 
 /// Sessions remembered at once; past it the memory restarts and one spare frame per session is sent.
@@ -137,7 +138,7 @@ impl PanelTransitions {
     }
 
     pub(crate) fn moved(&mut self, observation: &crate::agent_control::events::AgentObservation) -> bool {
-        let reading = (observation.state, observation.prompt_id.clone());
+        let reading = (observation.state, observation.prompt_id.clone(), observation.read);
         if self.seen.get(&observation.session_id) == Some(&reading) {
             return false;
         }
@@ -595,6 +596,7 @@ mod panel_frame_tests {
             screen_revision: Some("r1".into()),
             state_since_ms: None,
             screen_changed_at_ms: None,
+            read: false,
         }
     }
 
@@ -709,5 +711,30 @@ mod panel_frame_tests {
         working.state = AgentControlState::Working;
         working.prompt_id = None;
         assert!(transitions.moved(&working));
+    }
+
+    #[test]
+    fn an_ack_on_an_unchanged_screen_emits_panel_session() {
+        let bus = crate::agent_control::events::AgentEventBus::new(8);
+        let mut transitions = PanelTransitions::default();
+        let open = bus.publish(crate::agent_control::events::ObservationDraft {
+            session_id: "s1".into(),
+            state: AgentControlState::Blocked,
+            state_source: AgentStateSource::Screen,
+            tier: AgentTier::Screen,
+            prompt_id: Some("p1".into()),
+            kind: Some("approval".into()),
+            screen_revision: Some("r1".into()),
+            workspace_id: None,
+        });
+        assert!(transitions.moved(&open));
+        let acked = bus.acknowledge("s1").expect("a reading exists");
+        assert_eq!((acked.state, acked.prompt_id.as_deref(), acked.screen_revision.as_deref()), (open.state, Some("p1"), Some("r1")));
+        assert!(transitions.moved(&acked), "only read flipped, and that is a transition");
+        let frame: Value = serde_json::from_str(&panel_session_frame("mac", &acked, None)).unwrap();
+        assert_eq!(frame["type"], PANEL_SESSION_EVENT);
+        assert_eq!(frame["sessionRef"], "mac:s1");
+        assert_eq!(frame["read"], true);
+        assert!(!transitions.moved(&acked), "the same read reading is not news twice");
     }
 }
