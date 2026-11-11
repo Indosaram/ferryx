@@ -593,7 +593,8 @@ impl Operation {
                     | crate::agent_control::AgentControlOp::Deliver { session_id, .. }
                     | crate::agent_control::AgentControlOp::Answer { session_id, .. }
                     | crate::agent_control::AgentControlOp::Stop { session_id, .. }
-                    | crate::agent_control::AgentControlOp::Wait { session_id, .. } => {
+                    | crate::agent_control::AgentControlOp::Wait { session_id, .. }
+                    | crate::agent_control::AgentControlOp::Acknowledge { session_id } => {
                         if !crate::agent_transcript::is_valid_session_id(session_id) {
                             return Err(ClientError::local("INVALID_REQUEST"));
                         }
@@ -606,6 +607,11 @@ impl Operation {
                 // A delivery rides the send route with `observeMs`, but only to a host that
                 // reports causal start receipts; any other host is never sent it. Its budget
                 // covers the host's readiness wait, its submit deadline and the start wait.
+                // An older host without the read store is never sent an acknowledgement.
+                if matches!(op, crate::agent_control::AgentControlOp::Acknowledge { .. }) {
+                    r.capability = Some(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
+                    r.method = Method::POST;
+                }
                 if let crate::agent_control::AgentControlOp::Deliver { observe_ms, .. } = op {
                     r.capability = Some(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
                     let observe = crate::agent_control::delivery::observe_deadline(*observe_ms);
@@ -654,7 +660,8 @@ impl Operation {
                 | crate::agent_control::AgentControlOp::Deliver { session_id, .. }
                 | crate::agent_control::AgentControlOp::Answer { session_id, .. }
                 | crate::agent_control::AgentControlOp::Stop { session_id, .. }
-                | crate::agent_control::AgentControlOp::Wait { session_id, .. } => {
+                | crate::agent_control::AgentControlOp::Wait { session_id, .. }
+                | crate::agent_control::AgentControlOp::Acknowledge { session_id } => {
                     r.segments.push(session_id.clone());
                     if matches!(op, crate::agent_control::AgentControlOp::Wait { .. }) {
                         r.segments.push("wait".into());
@@ -668,6 +675,8 @@ impl Operation {
                         r.segments.push("answer".into());
                     } else if matches!(op, crate::agent_control::AgentControlOp::Stop { .. }) {
                         r.segments.push("stop".into());
+                    } else if matches!(op, crate::agent_control::AgentControlOp::Acknowledge { .. }) {
+                        r.segments.push("ack".into());
                     }
                 }
                 crate::agent_control::AgentControlOp::List

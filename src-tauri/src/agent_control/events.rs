@@ -121,6 +121,10 @@ pub struct AgentObservation {
     pub state_since_ms: Option<i64>,
     /// Epoch ms when `screen_revision` last changed.
     pub screen_changed_at_ms: Option<i64>,
+    /// Whether the owner acknowledged the session's current episode (its open prompt, or the
+    /// completion it last reached). The bus stamps it from its read store; a draft never has it.
+    #[serde(default)]
+    pub read: bool,
 }
 
 impl AgentObservation {
@@ -137,6 +141,7 @@ impl AgentObservation {
             "screenRevision": self.screen_revision,
             "stateSince": self.state_since_ms,
             "screenChangedAt": self.screen_changed_at_ms,
+            "read": self.read,
         })
     }
 
@@ -197,7 +202,22 @@ struct Log {
     /// Sessions whose agent stopped working since their last turn began: the `state_since` of
     /// the reading that ended the turn (Working -> Idle/Unknown). Cleared when it works again.
     completions: HashMap<String, Option<i64>>,
+    /// The read store: per session, the current attention episode and whether it was
+    /// acknowledged. Kept apart from drafts so an observer tick never undoes an acknowledgement.
+    reads: HashMap<String, ReadMark>,
     capacity: usize,
+}
+
+/// One session's current attention episode and whether the owner acknowledged it.
+///
+/// The episode is `prompt:<promptId>` while a prompt is open, and `done:<stateSince>` from the
+/// moment a session leaves `working` for `idle` or `unknown`. A new episode starts unread; an
+/// acknowledgement marks the current one read and never answers or resolves the prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadMark {
+    pub episode: Option<String>,
+    pub read: bool,
 }
 
 /// What a session's state and screen timestamps depend on: the state and screen revision they
@@ -210,15 +230,20 @@ pub struct SessionStamps {
     pub screen_revision: Option<String>,
     pub state_since_ms: Option<i64>,
     pub screen_changed_at_ms: Option<i64>,
+    /// The session's read mark, journaled with its stamps so a restart or handover keeps an
+    /// acknowledgement. Absent in journals written before read state existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<ReadMark>,
 }
 
 impl SessionStamps {
-    fn of(observation: &AgentObservation) -> Self {
+    fn of(observation: &AgentObservation, read: Option<&ReadMark>) -> Self {
         Self {
             state: observation.state,
             screen_revision: observation.screen_revision.clone(),
             state_since_ms: observation.state_since_ms,
             screen_changed_at_ms: observation.screen_changed_at_ms,
+            read: read.cloned(),
         }
     }
 }
@@ -325,8 +350,43 @@ fn stamps(log: &Log, draft: &ObservationDraft, now: i64) -> (Option<i64>, Option
 fn effective_stamps(log: &Log, session_id: &str) -> Option<SessionStamps> {
     log.latest
         .get(session_id)
-        .map(SessionStamps::of)
+        .map(|seen| SessionStamps::of(seen, log.reads.get(session_id)))
         .or_else(|| log.seeds.get(session_id).cloned())
+}
+
+/// The episode a reading opens, if it opens one: an open prompt is its own episode, and a
+/// `working` -> `idle`/`unknown` edge is a completion keyed by when it happened. Any other
+/// reading continues the current episode.
+fn opened_episode(
+    previous: Option<AgentControlState>,
+    draft: &ObservationDraft,
+    state_since_ms: Option<i64>,
+) -> Option<String> {
+    if let Some(prompt_id) = &draft.prompt_id {
+        return Some(format!("prompt:{prompt_id}"));
+    }
+    let done = matches!(draft.state, AgentControlState::Idle | AgentControlState::Unknown);
+    if done && previous == Some(AgentControlState::Working) {
+        return Some(format!("done:{}", state_since_ms.unwrap_or_default()));
+    }
+    None
+}
+
+/// The read mark `draft` leaves: a new episode starts unread, a continued one keeps its mark.
+/// `ack` marks the resulting episode read.
+fn next_read(log: &Log, draft: &ObservationDraft, state_since_ms: Option<i64>, ack: bool) -> Option<ReadMark> {
+    let previous = effective_stamps(log, &draft.session_id).map(|seen| seen.state);
+    let current = log.reads.get(&draft.session_id);
+    let mark = match opened_episode(previous, draft, state_since_ms) {
+        Some(episode) if current.and_then(|mark| mark.episode.as_ref()) != Some(&episode) => {
+            Some(ReadMark { episode: Some(episode), read: false })
+        }
+        _ => current.cloned(),
+    };
+    if !ack {
+        return mark;
+    }
+    Some(ReadMark { episode: mark.and_then(|mark| mark.episode), read: true })
 }
 
 impl AgentEventBus {
@@ -346,6 +406,7 @@ impl AgentEventBus {
                 latest: HashMap::new(),
                 seeds: HashMap::new(),
                 completions: HashMap::new(),
+                reads: HashMap::new(),
                 capacity,
             }),
             stamp_sink: Mutex::new(None),
@@ -411,9 +472,49 @@ impl AgentEventBus {
         let mut log = self.log.lock();
         for (session_id, stamps) in seeds {
             if !log.latest.contains_key(&session_id) {
+                if let Some(read) = &stamps.read {
+                    log.reads.entry(session_id.clone()).or_insert_with(|| read.clone());
+                }
                 log.seeds.insert(session_id, stamps);
             }
         }
+    }
+
+    /// Whether the owner acknowledged the session's current episode. A session with no episode
+    /// yet, or one this bus never saw, is unread.
+    pub fn read_state(&self, session_id: &str) -> bool {
+        self.log.lock().reads.get(session_id).is_some_and(|mark| mark.read)
+    }
+
+    /// Marks the session's current episode read and republishes its latest reading under a new
+    /// sequence, so every events client sees the flip. Never answers or resolves a prompt: a new
+    /// prompt id or a new completion opens an unread episode again. `None` when the session has
+    /// no reading yet (the mark is still kept for its first one).
+    pub fn acknowledge(&self, session_id: &str) -> Option<AgentObservation> {
+        let latest = {
+            let mut log = self.log.lock();
+            let latest = log.latest.get(session_id).cloned();
+            if latest.is_none() {
+                log.reads
+                    .entry(session_id.to_string())
+                    .or_insert(ReadMark { episode: None, read: false })
+                    .read = true;
+            }
+            latest
+        }?;
+        let draft = ObservationDraft {
+            session_id: latest.session_id,
+            state: latest.state,
+            state_source: latest.state_source,
+            tier: latest.tier,
+            prompt_id: latest.prompt_id,
+            kind: latest.kind,
+            screen_revision: latest.screen_revision,
+            workspace_id: None,
+        };
+        let now = (self.now_ms)();
+        let sequence = self.allocate(&draft, now, true);
+        Some(self.record_read(sequence, draft, now, true))
     }
 
     /// Installs the receiver of stamp changes (the journal writer). It runs on the publishing
@@ -541,12 +642,19 @@ impl AgentEventBus {
 
     /// Log a reading under a sequence `allocate_sequence` already issued and wake waiters.
     fn record(&self, sequence: u64, draft: ObservationDraft, now: i64) -> AgentObservation {
+        self.record_read(sequence, draft, now, false)
+    }
+
+    /// [`Self::record`], with `ack` marking the reading's episode read before it is logged, so
+    /// the stamp sink journals the flip.
+    fn record_read(&self, sequence: u64, draft: ObservationDraft, now: i64, ack: bool) -> AgentObservation {
         let observation;
         let changed_stamps;
         {
             let mut log = self.log.lock();
             let (state_since_ms, screen_changed_at_ms) = stamps(&log, &draft, now);
             let previous = effective_stamps(&log, &draft.session_id);
+            let read = next_read(&log, &draft, state_since_ms, ack);
             observation = AgentObservation {
                 sequence,
                 session_id: draft.session_id,
@@ -558,9 +666,13 @@ impl AgentEventBus {
                 screen_revision: draft.screen_revision,
                 state_since_ms,
                 screen_changed_at_ms,
+                read: read.as_ref().is_some_and(|mark| mark.read),
             };
+            if let Some(read) = &read {
+                log.reads.insert(observation.session_id.clone(), read.clone());
+            }
             log.revision = log.revision.max(sequence);
-            let current = SessionStamps::of(&observation);
+            let current = SessionStamps::of(&observation, read.as_ref());
             changed_stamps = (previous.as_ref() != Some(&current)).then_some(current);
             log.seeds.remove(&observation.session_id);
             let was_working = log
@@ -597,8 +709,17 @@ impl AgentEventBus {
     }
 
     fn allocate_sequence(&self, draft: &ObservationDraft, now: i64) -> u64 {
+        self.allocate(draft, now, false)
+    }
+
+    fn allocate(&self, draft: &ObservationDraft, now: i64, ack: bool) -> u64 {
         if let Some(events) = self.machine_events.lock().clone() {
-            let (state_since_ms, screen_changed_at_ms) = stamps(&self.log.lock(), draft, now);
+            let (state_since_ms, screen_changed_at_ms, read) = {
+                let log = self.log.lock();
+                let (state_since_ms, screen_changed_at_ms) = stamps(&log, draft, now);
+                let read = next_read(&log, draft, state_since_ms, ack).is_some_and(|mark| mark.read);
+                (state_since_ms, screen_changed_at_ms, read)
+            };
             return events.publish_sequenced(
                 AGENT_CONTROL_EVENT,
                 draft.workspace_id.as_deref(),
@@ -614,6 +735,7 @@ impl AgentEventBus {
                     screen_revision: draft.screen_revision.clone(),
                     state_since_ms,
                     screen_changed_at_ms,
+                    read,
                 }
                 .slim(),
             );
@@ -881,6 +1003,7 @@ mod tests {
             screen_revision: Some("rev".into()),
             state_since_ms: None,
             screen_changed_at_ms: None,
+            read: false,
         };
         filter.remember_exposure("s0", true);
         for index in 0..=PROMPT_FILTER_SESSIONS {
@@ -1055,6 +1178,7 @@ mod tests {
             screen_revision: Some("rev".into()),
             state_since_ms: Some(1_000),
             screen_changed_at_ms: Some(2_000),
+            read: false,
         };
         let slim = observation.slim();
         assert_eq!(slim["stateSince"], 1_000);
@@ -1147,6 +1271,7 @@ mod tests {
             screen_revision: Some(revision.into()),
             state_since_ms: Some(since),
             screen_changed_at_ms: Some(changed),
+            read: None,
         }
     }
 
@@ -1216,16 +1341,20 @@ mod tests {
         let sink_heard = Arc::clone(&heard);
         bus.set_stamp_sink(Arc::new(move |id, stamps| sink_heard.lock().push((id.to_string(), stamps.clone()))));
         bus.publish(revised("s", AgentControlState::Working, "r1"));
-        // Same state, revision and stamps: only the prompt moved, nothing to persist.
+        // Same state, revision and stamps, and the same prompt again: nothing to persist.
         let mut prompt_only = revised("s", AgentControlState::Working, "r1");
         prompt_only.prompt_id = Some("p".into());
+        bus.publish(prompt_only.clone());
         bus.publish(prompt_only);
         clock.store(4_000, std::sync::atomic::Ordering::SeqCst);
         bus.publish(revised("s", AgentControlState::Working, "r2"));
         let heard = heard.lock();
-        assert_eq!(heard.len(), 2, "{heard:?}");
+        // The new prompt opened an unread episode, which the journal keeps with the stamps.
+        let episode = Some(ReadMark { episode: Some("prompt:p".into()), read: false });
+        assert_eq!(heard.len(), 3, "{heard:?}");
         assert_eq!(heard[0].1, seed(AgentControlState::Working, "r1", 1_000, 1_000));
-        assert_eq!(heard[1].1, seed(AgentControlState::Working, "r2", 1_000, 4_000));
+        assert_eq!(heard[1].1, SessionStamps { read: episode.clone(), ..seed(AgentControlState::Working, "r1", 1_000, 1_000) });
+        assert_eq!(heard[2].1, SessionStamps { read: episode, ..seed(AgentControlState::Working, "r2", 1_000, 4_000) });
     }
 
     #[test]
@@ -1237,6 +1366,100 @@ mod tests {
         bus.seed_stamps([("s".to_string(), seed(AgentControlState::Working, "rev", 100, 200))]);
         bus.publish(draft("s", AgentControlState::Working));
         assert_eq!(*heard.lock(), 0);
+    }
+
+    mod read_state {
+        use super::*;
+
+        fn prompt(session: &str, prompt_id: &str) -> ObservationDraft {
+            let mut reading = draft(session, AgentControlState::Blocked);
+            reading.prompt_id = Some(prompt_id.into());
+            reading.kind = Some("question".into());
+            reading
+        }
+
+        #[test]
+        fn a_new_wait_episode_is_unread() {
+            let (bus, clock) = clocked_bus();
+            bus.publish(draft("s", AgentControlState::Working));
+            assert!(!bus.read_state("s"));
+            let blocked = bus.publish(prompt("s", "p1"));
+            assert!(!blocked.read, "a new prompt is unread");
+            assert_eq!(blocked.slim()["read"], false);
+            clock.store(2_000, std::sync::atomic::Ordering::SeqCst);
+            bus.publish(draft("s", AgentControlState::Working));
+            clock.store(3_000, std::sync::atomic::Ordering::SeqCst);
+            let done = bus.publish(draft("s", AgentControlState::Idle));
+            assert!(!done.read, "a working -> idle edge is a new unread completion");
+            assert!(!bus.read_state("s"));
+        }
+
+        #[tokio::test]
+        async fn acknowledge_marks_read_and_publishes_an_observation() {
+            let bus = AgentEventBus::new(8);
+            let before = bus.publish(prompt("s", "p1"));
+            let mut events = bus.subscribe();
+            let acked = bus.acknowledge("s").expect("the session has a reading");
+            assert!(acked.read && bus.read_state("s"));
+            assert!(acked.sequence > before.sequence, "the flip is a new sequence");
+            assert_eq!(events.recv().await.unwrap(), acked, "subscribers hear the flip");
+            match bus.replay(before.sequence) {
+                AgentReplay::Events { events, .. } => {
+                    assert_eq!(events.len(), 1);
+                    assert!(events[0].read);
+                    assert_eq!(events[0].sequenced()["read"], true);
+                }
+                AgentReplay::Gap { .. } => panic!("the flip is on the events log"),
+            }
+            // The observer's next unchanged tick does not undo the acknowledgement.
+            assert!(bus.latest("s").unwrap().same_reading(&prompt("s", "p1")));
+            assert!(bus.publish(prompt("s", "p1")).read);
+            assert!(bus.acknowledge("unknown").is_none());
+        }
+
+        #[test]
+        fn a_new_prompt_after_ack_is_unread_again() {
+            let (bus, clock) = clocked_bus();
+            bus.publish(prompt("s", "p1"));
+            bus.acknowledge("s");
+            assert!(bus.read_state("s"));
+            let next = bus.publish(prompt("s", "p2"));
+            assert!(!next.read && !bus.read_state("s"), "a new prompt id reopens attention");
+            bus.acknowledge("s");
+            bus.publish(draft("s", AgentControlState::Working));
+            clock.store(9_000, std::sync::atomic::Ordering::SeqCst);
+            assert!(!bus.publish(draft("s", AgentControlState::Idle)).read, "a new completion reopens it");
+        }
+
+        #[test]
+        fn acking_an_open_demand_makes_it_seen_without_resolving_the_prompt() {
+            let bus = AgentEventBus::new(8);
+            bus.publish(prompt("s", "p1"));
+            let acked = bus.acknowledge("s").unwrap();
+            assert!(acked.read);
+            assert_eq!(acked.state, AgentControlState::Blocked, "still waiting");
+            assert_eq!(acked.prompt_id.as_deref(), Some("p1"), "the prompt stays open");
+            assert_eq!(acked.kind.as_deref(), Some("question"));
+            let repaint = bus.publish(ObservationDraft { screen_revision: Some("r2".into()), ..prompt("s", "p1") });
+            assert!(repaint.read, "the same prompt stays seen until a new prompt id");
+        }
+
+        #[test]
+        fn a_read_mark_survives_a_restart_through_the_journaled_stamps() {
+            let bus = AgentEventBus::new(8);
+            let heard = Arc::new(Mutex::new(None::<SessionStamps>));
+            let sink_heard = Arc::clone(&heard);
+            bus.set_stamp_sink(Arc::new(move |_, stamps| *sink_heard.lock() = Some(stamps.clone())));
+            bus.publish(prompt("s", "p1"));
+            bus.acknowledge("s");
+            let persisted = heard.lock().clone().expect("the ack was journaled");
+            assert_eq!(persisted.read, Some(ReadMark { episode: Some("prompt:p1".into()), read: true }));
+            let restarted = AgentEventBus::new(8);
+            restarted.seed_stamps([("s".to_string(), persisted)]);
+            assert!(restarted.read_state("s"));
+            assert!(restarted.publish(prompt("s", "p1")).read);
+            assert!(!restarted.publish(prompt("s", "p2")).read);
+        }
     }
 
     #[test]

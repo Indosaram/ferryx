@@ -148,6 +148,7 @@ pub const CATALOG: &[Command] = &[
                 &[required!("--until"), value!("--after"), value!("--revision"), value!("--timeout-ms"), HOST, JSON],
             ),
             sub!("events", &[], &[value!("--after"), HOST, JSON]),
+            sub!("ack", &[SESSION], &[HOST, JSON]),
         ],
         exit_codes: DAEMON_JSON_EXIT_CODES,
     },
