@@ -186,6 +186,39 @@ pub async fn detect_for(
     .await
 }
 
+/// Exit code 255 is ssh's own failure code, but a remote command may also exit 255.
+/// The two are indistinguishable by code alone, so the text decides: every ssh client
+/// diagnostic is recognisable, while a remote shell's output never is. Treating a remote
+/// exit 255 as a transport failure aborts detection with the remote stderr, which is what
+/// made a healthy Windows host look like a broken connection.
+fn is_ssh_transport_failure(err: &IpcError) -> bool {
+    const DIAGNOSTICS: [&str; 15] = [
+        "ssh: ",
+        "kex_exchange_identification",
+        "banner exchange",
+        "Permission denied (",
+        "Authentication failed",
+        "Too many authentication failures",
+        "Host key verification failed",
+        "REMOTE HOST IDENTIFICATION HAS CHANGED",
+        "Connection closed by ",
+        "Connection reset by peer",
+        "Connection refused",
+        "Connection timed out",
+        "Could not resolve hostname",
+        "Network is unreachable",
+        "No route to host",
+    ];
+    err.details
+        .as_ref()
+        .and_then(|value| value.get("stderr"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|text| DIAGNOSTICS.iter().any(|marker| text.contains(marker)))
+}
+
+/// Windows shells start in seconds (measured 6.7-12.0 s for `powershell.exe` on a real
+/// host) while a POSIX shell answers in under one. An even split starves the slow pair and
+/// pushes detection onto the POSIX probe, so the slow candidates get half of what is left.
 async fn detect_with<F, Fut>(
     host: &SshHost,
     platform: Option<RemotePlatform>,
@@ -196,7 +229,10 @@ where
     Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
 {
     let credential_generation = super::password::generation(host)?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    // An unknown platform has to pay for a Windows shell start (measured 6.7-12.0 s) plus a
+    // POSIX fallback, and a Windows probe pays for the same slow start.
+    let budget_secs = if platform == Some(RemotePlatform::Posix) { 12 } else { 30 };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(budget_secs);
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let marker = format!("FERRYX_ENV_V1_{nonce}");
     let probe_script = |executor: RemoteExecutor| -> String {
@@ -240,7 +276,10 @@ where
         // Divide the remaining deadline among compatible executors
         // so that a hanging/non-responsive executor does not starve subsequent executors.
         let probes_left = (executors.len() - index) as u32;
-        let step_timeout = remaining / probes_left;
+        let step_timeout = match executor {
+            RemoteExecutor::Powershell | RemoteExecutor::Pwsh => remaining / 2,
+            RemoteExecutor::Sh => remaining / probes_left,
+        };
 
         match run(executor, script, step_timeout).await {
             Ok(output) => {
@@ -339,8 +378,9 @@ where
 
                 // Exit code 255 indicates a fatal SSH transport failure (e.g. connection refused,
                 // host key verification failure, authentication failure). In that case, subsequent
-                // executor probes will also fail identically, so fail immediately.
-                if exit_code == Some(255) {
+                // executor probes will also fail identically, so fail immediately. A remote command
+                // that merely exited 255 is not a transport failure: keep probing other executors.
+                if exit_code == Some(255) && is_ssh_transport_failure(&err) {
                     let authentication_failed = host.auth_method == super::SshAuthMethod::Password
                         && err
                             .details
@@ -439,7 +479,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn windows_probe_can_finish_after_four_seconds() {
+    async fn windows_probe_can_finish_after_seven_seconds() {
         let environment = detect_with(
             &probe_host(),
             Some(RemotePlatform::Windows),
@@ -447,7 +487,7 @@ mod tests {
                 assert_eq!(executor, RemoteExecutor::Powershell);
                 let marker = script.split("FERRYX_ENV_V1_").nth(1).unwrap().split('\'').next().unwrap();
                 tokio::time::timeout(budget, async {
-                    tokio::time::sleep(Duration::from_millis(4300)).await;
+                    tokio::time::sleep(Duration::from_millis(7000)).await;
                     format!("FERRYX_ENV_V1_{marker}\0windows\05.1\0C:\\Users\\test\0C:\\Temp\01\0\0").into_bytes()
                 })
                 .await
@@ -612,7 +652,10 @@ mod tests {
                     "execution",
                     "fatal transport error",
                 )
-                .with_details(serde_json::json!({ "exitCode": 255 }))))
+                .with_details(serde_json::json!({
+                    "exitCode": 255,
+                    "stderr": "ssh: connect to host example.test port 22: Connection refused",
+                }))))
             },
         )
         .await
@@ -624,6 +667,74 @@ mod tests {
         );
         let details = failure.details.unwrap();
         assert_eq!(details["exitCode"], 255);
+        assert_eq!(details["stage"], "environment");
+    }
+
+    #[tokio::test]
+    async fn remote_exit_code_255_falls_through_instead_of_aborting_detection() {
+        // A Windows host whose DefaultShell is cmd.exe answers the POSIX probe with
+        // "'sh' is not recognized"; cmd.exe returns 255 for that line because the probe
+        // script contains `|`. That is a remote failure, not a transport failure.
+        let mut probed = Vec::new();
+        let failure = detect_with(
+            &probe_host(),
+            None,
+            |executor, _, _| {
+                probed.push(executor);
+                std::future::ready(match executor {
+                    RemoteExecutor::Powershell | RemoteExecutor::Pwsh => Err(error(
+                        IpcErrorCode::IoError,
+                        "execution",
+                        "missing executor",
+                    )
+                    .with_details(serde_json::json!({ "exitCode": 1 }))),
+                    RemoteExecutor::Sh => {
+                        // Non-UTF-8 remote stderr, as a Korean cmd.exe emits.
+                        Err(error(
+                            IpcErrorCode::IoError,
+                            "execution",
+                            "Remote stderr contained non-UTF-8 data; raw bytes are available in details",
+                        )
+                        .with_details(serde_json::json!({ "exitCode": 255, "stderr": null })))
+                    }
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            probed,
+            [
+                RemoteExecutor::Powershell,
+                RemoteExecutor::Pwsh,
+                RemoteExecutor::Sh
+            ],
+            "a remote exit 255 must not be mistaken for a dead transport"
+        );
+        let details = failure.details.unwrap();
+        assert_eq!(
+            details["attempts"].as_array().unwrap().len(),
+            3,
+            "every executor attempt must be reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn ssh_client_diagnostic_without_exit_code_is_not_transport_failure() {
+        // The diagnostic alone is not enough: ssh exits 255 for it, and the caller keys on
+        // the code, so a message-only match must not abort detection.
+        let mut probed = Vec::new();
+        let _ = detect_with(&probe_host(), None, |executor, _, _| {
+            probed.push(executor);
+            std::future::ready(Err(error(
+                IpcErrorCode::IoError,
+                "transport",
+                "Connection refused",
+            )))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(probed.len(), 3);
     }
 
     #[tokio::test]
