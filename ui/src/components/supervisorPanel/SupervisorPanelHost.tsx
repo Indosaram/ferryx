@@ -17,6 +17,9 @@ import { LeaseNotices, StandbyCard, type LeaseAdoptResult } from './LeaseStatus'
 import { PanelSurface } from './PanelSurface';
 import { desktopVoicePort } from '../../lib/voiceCallPort';
 import { useVoiceConversation } from '../../lib/useVoiceConversation';
+import { desktopProjectMemoryActions } from '../../lib/supervisorSetup';
+import type { ProjectMemoryActions } from '../../lib/projectMemory';
+import { ProjectMemorySwitches } from '../supervisor/ProjectMemorySwitches';
 
 export type SupervisorPanelHostProps = {
   onFocusSession: (sessionRef: SessionRef) => void;
@@ -30,6 +33,8 @@ export type SupervisorPanelHostProps = {
   /** The supervisor lease writes; the defaults are the daemon's move and adopt commands. */
   moveHere?: (force: boolean) => Promise<SupervisorMoveResult>;
   adoptArchived?: (goalIds: readonly string[]) => Promise<SupervisorCallResult>;
+  /** The per-project "give my project decisions to agents" switches (setup surface). */
+  projectMemory?: ProjectMemoryActions;
 };
 
 async function adoptResult(call: Promise<SupervisorCallResult>): Promise<LeaseAdoptResult> {
@@ -51,6 +56,7 @@ export function SupervisorPanelHost({
   loadTranscript = loadDesktopTranscriptPage,
   moveHere = moveSupervisorHere,
   adoptArchived = adoptArchivedGoals,
+  projectMemory = desktopProjectMemoryActions,
 }: SupervisorPanelHostProps) {
   const [snapshot, setSnapshot] = useState<PanelSnapshot | null>(null);
   const [tick, setTick] = useState(() => now());
@@ -164,6 +170,7 @@ export function SupervisorPanelHost({
             </div>
           ) : null}
           <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} voiceConversation={voiceConversation} />
+          <ProjectMemorySwitches actions={projectMemory} />
         </div>
       ) : (
         <p className="text-muted-foreground">Loading supervisor…</p>
