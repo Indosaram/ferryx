@@ -5839,7 +5839,19 @@ impl NativeTerminalSurfaceHostState {
         if fenced != Some(true) {
             return false;
         }
+        let driver_before = hosts.get(session_id).and_then(|viewers| viewers.size_driver.clone());
         remove_viewer_host(&mut hosts, session_id, label);
+        // The departing viewer drove the PTY size: the promoted driver's own bounds resize it now.
+        // Otherwise the next render presents the departed window's geometry in the survivor.
+        let promoted = hosts
+            .get(session_id)
+            .and_then(|viewers| viewers.size_driver.clone())
+            .filter(|driver| driver_before.as_deref() != Some(driver.as_str()))
+            .and_then(|driver| viewer_host(&hosts, session_id, &driver).and_then(|host| host.logical_bounds));
+        drop(hosts);
+        if let Some(bounds) = promoted {
+            self.resize_to_driver_bounds(session_id, bounds);
+        }
         true
     }
 
@@ -6072,13 +6084,18 @@ impl NativeTerminalSurfaceHostState {
             bounds
         };
         if let Some(bounds) = bounds {
-            let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
-            let request = NativeTerminalBoundsRequest { session_id: session_id.to_string(), bounds };
-            if let Err(error) = self.prepare_session_layout(request, metrics) {
-                tracing::debug!(session_id, ?error, "size driver change could not resize the session");
-            }
+            self.resize_to_driver_bounds(session_id, bounds);
         }
         true
+    }
+
+    /// Resizes the shared VT/PTY to the new size driver's own surface bounds.
+    fn resize_to_driver_bounds(&self, session_id: &str, bounds: LogicalBounds) {
+        let metrics = font_manager::derived_cell_metrics_for_scale(bounds.scale_factor);
+        let request = NativeTerminalBoundsRequest { session_id: session_id.to_string(), bounds };
+        if let Err(error) = self.prepare_session_layout(request, metrics) {
+            tracing::debug!(session_id, ?error, "size driver change could not resize the session");
+        }
     }
 
     /// Window focus: the focused window becomes the size driver of every session it presents.
@@ -9077,6 +9094,30 @@ mod tests {
         assert!(harness.state.note_viewer_focused(&session_id, "main"));
         let back = harness.state.session_layout(&session_id).unwrap();
         assert_eq!((back.cols, back.rows), (original.cols, original.rows));
+    }
+
+    #[tokio::test]
+    async fn closing_the_size_driving_window_resizes_to_the_survivor_bounds() {
+        let (mut harness, secondary) = viewer_test_harness();
+        let session_id = harness.request.session_id.clone();
+        let original = harness.state.session_layout(&session_id).unwrap();
+        let small = LogicalBounds { x: 0.0, y: 0.0, width: 400.0, height: 240.0, scale_factor: 1.0 };
+        join_as_viewer(&harness, &secondary, Some(small), Arc::new(Mutex::new(Vec::new())));
+        drain_dispatched(&mut harness).await;
+        assert_eq!(harness.state.size_driver(&session_id).as_deref(), Some("main"));
+        let survivor_bounds = {
+            let hosts = harness.state.hosts.lock();
+            viewer_host(&hosts, &session_id, "ws-test").and_then(|host| host.logical_bounds)
+        }
+        .expect("viewer keeps its own bounds");
+
+        harness.state.forget_window_viewers("main");
+
+        // The survivor now drives the PTY with its own geometry, not the closed window's.
+        assert_eq!(harness.state.size_driver(&session_id).as_deref(), Some("ws-test"));
+        assert_eq!(harness.state.session_logical_bounds(&session_id), Some(survivor_bounds));
+        let resized = harness.state.session_layout(&session_id).unwrap();
+        assert!(resized.cols < original.cols && resized.rows < original.rows, "{resized:?} vs {original:?}");
     }
 
     #[tokio::test]
