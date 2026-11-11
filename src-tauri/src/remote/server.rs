@@ -9133,6 +9133,7 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         )
         .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
         .route("/api/v1/supervisor/panel", get(supervisor_api::http_panel))
+        .route("/api/v1/supervisor/prs", get(supervisor_api::http_prs))
         .route("/api/v1/fleet/sessions", get(supervisor_api::http_fleet_sessions))
         .route("/api/v1/supervisor/start", post(supervisor_api::http_start))
         .route(

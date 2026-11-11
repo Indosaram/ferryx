@@ -1,0 +1,4 @@
+{"data":{"search":{"nodes":[
+{"url":"https://github.com/acme/lib/pull/3","title":"Shared bump","number":3,"isDraft":false,"reviewDecision":"REVIEW_REQUIRED","headRefName":"chore/bump","updatedAt":"2026-11-10T12:00:00Z","repository":{"nameWithOwner":"acme/lib"},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING"}}}]}},
+{"url":"https://github.com/other/svc/pull/77","title":"Teammate change","number":77,"isDraft":false,"reviewDecision":"REVIEW_REQUIRED","headRefName":"teammate/change","updatedAt":"2026-11-07T09:00:00Z","repository":{"nameWithOwner":"other/svc"},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE"}}}]}}
+]}}}

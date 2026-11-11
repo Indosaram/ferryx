@@ -3621,6 +3621,8 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             // the actor; the relay only admits the route shape.
             | ("POST", ["supervisor", "request"])
             | ("GET", ["supervisor", "conversation"])
+            // The pull-request lane (owner only on the machine, like the panel).
+            | ("GET", ["supervisor", "prs"])
             | ("GET" | "POST", ["supervisor", "memory"])
             // Supervisor lease daemon routes (plan tasks 5 and 8). `GET supervisor/checkpoint`
             // is deliberately absent: the checkpoint carries tokens and this proxied route
@@ -6526,6 +6528,8 @@ mod tests {
         assert!(allowed_http_route(&Method::POST, "supervisor/start"));
         assert!(allowed_http_route(&Method::POST, "supervisor/request"));
         assert!(allowed_http_route(&Method::GET, "supervisor/conversation"));
+        assert!(allowed_http_route(&Method::GET, "supervisor/prs"));
+        assert!(!allowed_http_route(&Method::POST, "supervisor/prs"));
         assert!(allowed_http_route(&Method::GET, "supervisor/memory"));
         assert!(allowed_http_route(&Method::POST, "supervisor/memory"));
         for route in ["observe", "move", "release-to", "fence"] {

@@ -3744,6 +3744,7 @@ pub mod autonomy;
 pub mod changes;
 pub mod completion;
 pub mod panel_contract;
+pub mod pr_lane;
 pub mod push_policy;
 pub mod cutover;
 pub mod delivery;

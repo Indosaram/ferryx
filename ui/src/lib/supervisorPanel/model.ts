@@ -209,6 +209,9 @@ export function applyPanelEvent(
     }
     case "panel.rules":
       return { ...snapshot, rules: event.rules };
+    case "panel.prs":
+      // The PR lane is not part of the panel snapshot; its own view reads it.
+      return snapshot;
   }
 }
 
