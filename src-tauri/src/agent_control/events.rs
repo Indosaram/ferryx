@@ -194,6 +194,9 @@ struct Log {
     /// Stamps a previous daemon run persisted, until this run's first reading of the session
     /// replaces them. Never part of `latest`, `snapshot` or a replay: a seed is not a reading.
     seeds: HashMap<String, SessionStamps>,
+    /// Sessions whose agent stopped working since their last turn began: the `state_since` of
+    /// the reading that ended the turn (Working -> Idle/Unknown). Cleared when it works again.
+    completions: HashMap<String, Option<i64>>,
     capacity: usize,
 }
 
@@ -342,6 +345,7 @@ impl AgentEventBus {
                 retained: VecDeque::new(),
                 latest: HashMap::new(),
                 seeds: HashMap::new(),
+                completions: HashMap::new(),
                 capacity,
             }),
             stamp_sink: Mutex::new(None),
@@ -392,6 +396,12 @@ impl AgentEventBus {
 
     pub fn latest(&self, session_id: &str) -> Option<AgentObservation> {
         self.log.lock().latest.get(session_id).cloned()
+    }
+
+    /// The completion episode of the session's last turn: `Some(state_since)` of the reading
+    /// that moved it from working to idle or unknown, until it works again.
+    pub fn completion(&self, session_id: &str) -> Option<Option<i64>> {
+        self.log.lock().completions.get(session_id).copied()
     }
 
     /// Loads the stamps a previous run persisted. Call before the observers start: a seed only
@@ -553,6 +563,20 @@ impl AgentEventBus {
             let current = SessionStamps::of(&observation);
             changed_stamps = (previous.as_ref() != Some(&current)).then_some(current);
             log.seeds.remove(&observation.session_id);
+            let was_working = log
+                .latest
+                .get(&observation.session_id)
+                .is_some_and(|latest| latest.state == AgentControlState::Working);
+            match observation.state {
+                AgentControlState::Working => {
+                    log.completions.remove(&observation.session_id);
+                }
+                AgentControlState::Idle | AgentControlState::Unknown if was_working => {
+                    log.completions
+                        .insert(observation.session_id.clone(), observation.state_since_ms);
+                }
+                _ => {}
+            }
             log.latest
                 .insert(observation.session_id.clone(), observation.clone());
             log.retained.push_back(observation.clone());
@@ -1056,6 +1080,7 @@ mod tests {
             state: "working".into(),
             self_reported: true,
             detail: None,
+            outcome: None,
         };
         let held = classify_screen(Some(&provider), 80, 24, "hello", true);
         assert_eq!(held.state, AgentControlState::Working);

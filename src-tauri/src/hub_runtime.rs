@@ -3888,6 +3888,16 @@ pub async fn local_fleet_session(
     state: &Arc<RemoteGatewayState>,
     session_id: &str,
 ) -> Option<ferryx_hub::supervisor::panel_contract::FleetSession> {
+    local_fleet_session_over(state, session_id, &panel_autonomy::panel_sources()).await
+}
+
+/// [`local_fleet_session`] with its attention overlaid from `sources` (handling entries and
+/// pending decisions), the same rule the panel snapshot applies.
+pub(crate) async fn local_fleet_session_over(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    sources: &ferryx_hub::fleet::PanelSources,
+) -> Option<ferryx_hub::supervisor::panel_contract::FleetSession> {
     let read = crate::remote::server::agent_control_service::handle(
         state,
         AgentControlOp::Read { session_id: session_id.to_string() },
@@ -3903,7 +3913,34 @@ pub async fn local_fleet_session(
         stale: false,
     };
     let labels = std::collections::HashMap::from([(host_id, LOCAL_FLEET_LABEL.to_string())]);
-    ferryx_hub::fleet::merge_sessions(&labels, &[one], unix_ms()).pop()
+    let session = ferryx_hub::fleet::merge_sessions(&labels, &[one], unix_ms()).pop()?;
+    Some(ferryx_hub::fleet::overlay_attention_from_sources(session, sources, unix_ms() - PANEL_LOG_WINDOW_MS).await)
+}
+
+/// Publishes a freshly overlaid `panel.session` for `session_ref` when it is a pane of this
+/// computer: its handling or decision membership changed, which moves its attention group
+/// without moving its agent state. Runs on its own task; a session that cannot be read sends
+/// nothing.
+pub(crate) fn refresh_panel_session(
+    state: std::sync::Weak<RemoteGatewayState>,
+    session_ref: &ferryx_hub::supervisor::panel_contract::SessionRef,
+    sources: ferryx_hub::fleet::PanelSources,
+) {
+    if !panel_autonomy::is_local_host(session_ref.host_id()) {
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    let session_id = session_ref.backend_session_id().to_string();
+    runtime.spawn(async move {
+        let Some(state) = state.upgrade() else { return };
+        let read = tokio::time::timeout(
+            crate::remote::machine_events::PANEL_SESSION_READ,
+            local_fleet_session_over(&state, &session_id, &sources),
+        );
+        if let Ok(Some(session)) = read.await {
+            publish_panel_session(&session);
+        }
+    });
 }
 
 /// The supervisor pause flag the panel reports. The pause route sets it.

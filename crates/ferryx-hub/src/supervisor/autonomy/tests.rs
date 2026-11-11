@@ -140,6 +140,7 @@ fn session(prompt: Option<PendingPrompt>) -> FleetSession {
         updated_at_ms: 1,
         stale: false,
         health: None,
+        attention: None,
     }
 }
 

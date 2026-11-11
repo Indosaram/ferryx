@@ -246,6 +246,7 @@ mod tests {
             updated_at_ms: NOW,
             stale: false,
             health: None,
+            attention: None,
         }
     }
 

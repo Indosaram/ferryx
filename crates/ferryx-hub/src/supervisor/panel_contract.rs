@@ -133,6 +133,115 @@ pub struct FleetSession {
     /// today: the agent process left the pane in the middle of a turn. Absent from older peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<HealthKind>,
+    /// The session's attention axes and the group [`attention_group`] judged from them. Absent
+    /// from older peers, which clients map from `state` themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Attention>,
+}
+
+/// What the session waits on the owner for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttentionDemand {
+    None,
+    Question,
+    Approval,
+    Error,
+}
+
+/// Whether the agent is running a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttentionActivity {
+    Working,
+    Stopped,
+    Unknown,
+}
+
+/// Whether the agent's last turn ended since it last worked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttentionCompletion {
+    Reported,
+    None,
+}
+
+/// Whether the owner has looked at the session's current episode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttentionRead {
+    Read,
+    Unread,
+}
+
+/// Who acts on the session next. A daemon only reports `owner` or `delegated`; the hub sets
+/// `supervisor` while it handles the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttentionOwnership {
+    Owner,
+    Delegated,
+    Supervisor,
+}
+
+/// The independent facts the attention group is judged from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttentionAxes {
+    pub demand: AttentionDemand,
+    pub activity: AttentionActivity,
+    pub completion: AttentionCompletion,
+    pub read: AttentionRead,
+    pub ownership: AttentionOwnership,
+}
+
+/// The one group every surface shows a session under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AttentionGroup {
+    NeedsYou,
+    Unread,
+    Working,
+    Seen,
+}
+
+/// A session's axes with the group judged from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attention {
+    pub axes: AttentionAxes,
+    pub group: AttentionGroup,
+}
+
+impl Attention {
+    pub fn of(axes: AttentionAxes) -> Self {
+        Self { axes, group: attention_group(&axes) }
+    }
+}
+
+/// The only judgment of a session's attention group; every surface renders its result.
+///
+/// In order: (1) a session the supervisor handles needs nobody (an escalation hands it back to
+/// the owner before this runs); (2) an open demand needs the owner until its episode is read,
+/// and is seen after that until a new episode, without being answered; (3) a running turn is
+/// working; (4) a reported completion is unread until read; (5) everything else is seen.
+pub fn attention_group(axes: &AttentionAxes) -> AttentionGroup {
+    if axes.ownership == AttentionOwnership::Supervisor {
+        return AttentionGroup::Seen;
+    }
+    if axes.demand != AttentionDemand::None {
+        return match axes.read {
+            AttentionRead::Unread => AttentionGroup::NeedsYou,
+            AttentionRead::Read => AttentionGroup::Seen,
+        };
+    }
+    if axes.activity == AttentionActivity::Working {
+        return AttentionGroup::Working;
+    }
+    if axes.completion == AttentionCompletion::Reported && axes.read == AttentionRead::Unread {
+        return AttentionGroup::Unread;
+    }
+    AttentionGroup::Seen
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,6 +513,7 @@ mod tests {
             updated_at_ms: 2_000,
             stale: false,
             health: None,
+            attention: None,
         }
     }
 
@@ -526,6 +636,70 @@ mod tests {
             json!({ "enabled": true })
         );
         assert!(rules.iter().all(|r| r.scope == RuleScope::default()));
+    }
+
+    /// Every combination of the axes, judged by a table written independently of the rules'
+    /// code shape.
+    #[test]
+    fn attention_group_matches_an_independent_expectation_for_all_144_combinations() {
+        use AttentionActivity as A;
+        use AttentionCompletion as C;
+        use AttentionDemand as D;
+        use AttentionGroup as G;
+        use AttentionOwnership as O;
+        use AttentionRead as R;
+        fn expected(d: D, a: A, c: C, r: R, o: O) -> G {
+            match (o, d, r, a, c) {
+                (O::Supervisor, ..) => G::Seen,
+                (_, D::Question | D::Approval | D::Error, R::Unread, _, _) => G::NeedsYou,
+                (_, D::Question | D::Approval | D::Error, R::Read, _, _) => G::Seen,
+                (_, D::None, _, A::Working, _) => G::Working,
+                (_, D::None, R::Unread, A::Stopped | A::Unknown, C::Reported) => G::Unread,
+                (_, D::None, _, A::Stopped | A::Unknown, _) => G::Seen,
+            }
+        }
+        let mut count = 0;
+        let mut groups = std::collections::HashSet::new();
+        for d in [D::None, D::Question, D::Approval, D::Error] {
+            for a in [A::Working, A::Stopped, A::Unknown] {
+                for c in [C::Reported, C::None] {
+                    for r in [R::Read, R::Unread] {
+                        for o in [O::Owner, O::Delegated, O::Supervisor] {
+                            let axes = AttentionAxes { demand: d, activity: a, completion: c, read: r, ownership: o };
+                            let group = attention_group(&axes);
+                            assert_eq!(group, expected(d, a, c, r, o), "{axes:?}");
+                            groups.insert(group);
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 144);
+        assert_eq!(groups.len(), 4, "every group is reachable");
+    }
+
+    #[test]
+    fn attention_travels_in_camel_case() {
+        let attention = Attention::of(AttentionAxes {
+            demand: AttentionDemand::Approval,
+            activity: AttentionActivity::Stopped,
+            completion: AttentionCompletion::None,
+            read: AttentionRead::Unread,
+            ownership: AttentionOwnership::Owner,
+        });
+        let value = serde_json::to_value(attention).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "axes": {
+                    "demand": "approval", "activity": "stopped", "completion": "none",
+                    "read": "unread", "ownership": "owner"
+                },
+                "group": "needsYou"
+            })
+        );
+        assert_eq!(serde_json::from_value::<Attention>(value).unwrap(), attention);
     }
 
     #[test]
