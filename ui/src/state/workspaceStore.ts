@@ -10,6 +10,8 @@ import {
   type TerminalActivityState,
 } from "../lib/activity";
 import { resolveAgentLogo } from "../lib/agentIcon";
+import { withAttention, type AttentionBySessionId } from "../lib/attentionGroup";
+import { usePanelAttention } from "../lib/supervisorPanel/usePanelAttention";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { browserTabIdForBrowserId, closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, onBrowserStateChanged, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
@@ -929,6 +931,10 @@ export function useWorkspaceStore({
   // for the sidebar's cross-workspace activity to recompute.
   const [parkedActivityVersion, setParkedActivityVersion] = useState(0);
   const bumpParkedActivity = useCallback(() => setParkedActivityVersion((value) => value + 1), []);
+  // The daemon's attention group per backend session (supervisor panel snapshot + panel.session
+  // frames). Tabs and sidebar rows draw it through groupOf; a pane it has no entry for keeps the
+  // old-peer mapping of its local activity.
+  const attentionBySessionId = usePanelAttention();
   // Provenance belongs to the workspace currently mounted; keeping the first
   // one would make restore pick the wrong HMR-vs-disk path after a switch. It is
   // state (not a ref) so the swap below can set it during render without mutating
@@ -2713,19 +2719,19 @@ export function useWorkspaceStore({
     [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId],
   );
   const tabActivity = useMemo(
-    () => selectTabActivitySummaries(renderedState),
-    [renderedState.layout, renderedState.activityBySessionId, renderedState.unreadTabIds],
+    () => selectTabActivitySummaries(renderedState, attentionBySessionId),
+    [renderedState.layout, renderedState.sessions, renderedState.activityBySessionId, renderedState.unreadTabIds, attentionBySessionId],
   );
   // Rows for other projects come from their snapshots and are overlaid by the live workspace, so a
   // worktree the user switched away from keeps reporting its agent instead of going blank.
   const worktreeActivity = useMemo(
     () => ({
-      ...selectWorktreeActivitySummariesAcrossWorkspaces(renderedState.workspaceId ?? workspaceId),
-      ...selectWorktreeActivitySummaries(renderedState),
+      ...selectWorktreeActivitySummariesAcrossWorkspaces(renderedState.workspaceId ?? workspaceId, attentionBySessionId),
+      ...selectWorktreeActivitySummaries(renderedState, attentionBySessionId),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is the change
     // signal for the snapshot cache, which useMemo cannot observe directly.
-    [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId, renderedState.unreadTabIds, renderedState.unreadWorktreePaths, renderedState.workspaceId, workspaceId, parkedActivityVersion],
+    [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId, renderedState.unreadTabIds, renderedState.unreadWorktreePaths, renderedState.workspaceId, workspaceId, parkedActivityVersion, attentionBySessionId],
   );
   const activityNotificationTargets = useMemo(
     () => selectActivityNotificationTargets(renderedState),
@@ -2744,6 +2750,7 @@ export function useWorkspaceStore({
     agents,
     tabActivity,
     worktreeActivity,
+    attentionBySessionId,
     unreadBadgeCount,
     activityNotificationTargets,
     openTab,
@@ -3035,16 +3042,31 @@ export function selectAgents(state: WorkspaceState): ActiveAgent[] {
   });
 }
 
-export function selectTabActivitySummaries(state: WorkspaceState): Record<string, ActivitySummary> {
+/** A pane's local activity with the daemon's judgment for its backend session laid over it. */
+export function selectSessionActivity(
+  state: WorkspaceState,
+  sessionId: string,
+  attentionBySessionId: AttentionBySessionId = {},
+): TerminalActivity | undefined {
+  const backendSessionId = state.sessions[sessionId]?.backendSessionId;
+  return withAttention(
+    state.activityBySessionId?.[sessionId],
+    backendSessionId ? attentionBySessionId[backendSessionId] : undefined,
+  );
+}
+
+export function selectTabActivitySummaries(
+  state: WorkspaceState,
+  attentionBySessionId: AttentionBySessionId = {},
+): Record<string, ActivitySummary> {
   const result: Record<string, ActivitySummary> = {};
-  const activityBySessionId = state.activityBySessionId ?? {};
   const allTabs = getAllTabs(state);
 
   for (const tab of allTabs) {
     if (!isTerminalTab(tab)) continue;
     const sessionIds = getTabSessionIds(state, tab.id);
     const activities = [...sessionIds]
-      .map((sessionId) => activityBySessionId[sessionId])
+      .map((sessionId) => selectSessionActivity(state, sessionId, attentionBySessionId))
       .filter((activity): activity is TerminalActivity => Boolean(activity));
     result[tab.id] = summarizeActivities(activities, Boolean(state.unreadTabIds[tab.id]));
   }
@@ -3052,9 +3074,11 @@ export function selectTabActivitySummaries(state: WorkspaceState): Record<string
   return result;
 }
 
-export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<string, ActivitySummary> {
+export function selectWorktreeActivitySummaries(
+  state: WorkspaceState,
+  attentionBySessionId: AttentionBySessionId = {},
+): Record<string, ActivitySummary> {
   const result: Record<string, ActivitySummary> = {};
-  const activityBySessionId = state.activityBySessionId ?? {};
   const sessionIdsByWorktree = new Map<string, Set<string>>();
   const unreadTabsByWorktree = new Set<string>();
   const allTabs = getAllTabs(state);
@@ -3080,7 +3104,7 @@ export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<s
   for (const worktree of state.worktrees) {
     const sessionIds = sessionIdsByWorktree.get(worktree.path) ?? new Set<string>();
     const activities = [...sessionIds]
-      .map((sessionId) => activityBySessionId[sessionId])
+      .map((sessionId) => selectSessionActivity(state, sessionId, attentionBySessionId))
       .filter((activity): activity is TerminalActivity => Boolean(activity));
     result[worktree.path] = summarizeActivities(
       activities,
@@ -3104,12 +3128,13 @@ export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<s
  */
 export function selectWorktreeActivitySummariesAcrossWorkspaces(
   mountedWorkspaceId: string,
+  attentionBySessionId: AttentionBySessionId = {},
 ): Record<string, ActivitySummary> {
   const merged: Record<string, ActivitySummary> = {};
 
   for (const [workspaceId, snapshot] of listWorkspaceSnapshots()) {
     if (workspaceId === mountedWorkspaceId) continue;
-    for (const [path, summary] of Object.entries(selectWorktreeActivitySummaries(snapshot))) {
+    for (const [path, summary] of Object.entries(selectWorktreeActivitySummaries(snapshot, attentionBySessionId))) {
       merged[path] = summary;
     }
   }

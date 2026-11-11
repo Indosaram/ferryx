@@ -54,6 +54,7 @@ export type PanelSurfaceProps = {
 const SESSION_GLYPH: Record<SessionGlyph, GlyphState> = {
   needsYou: 'needs',
   failed: 'failed',
+  unread: 'done',
   working: 'working',
   idle: 'idle',
 };
@@ -211,7 +212,8 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
         key={row.sessionRef}
         touch={touch}
         title={row.title}
-        detail={row.age ?? row.why}
+        // The reason is the row's second line on desktop and phone alike; the wait age follows it.
+        detail={row.reason ? (row.age ? `${row.reason} · ${row.age}` : row.reason) : (row.age ?? row.why)}
         computer={row.hostLabel}
         state={SESSION_GLYPH[row.glyph]}
         onOpen={() => actions.openSession(row.sessionRef)}

@@ -7,6 +7,7 @@ import type { SidebarLiveSignals, SidebarModel } from "../components/sidebar/sid
 import { supervisorTypingIn } from "../components/sidebar/sidebarSupervisor";
 import type { SupervisorSnapshot } from "../lib/supervisorModel";
 import { summarizeActivities, type ActivitySummary, type TerminalActivity } from "../lib/activity";
+import type { AttentionBySessionId } from "../lib/attentionGroup";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 
 /** The worktree the remote is attached to, as the inventory names it. */
@@ -20,6 +21,8 @@ export function remoteSidebarSignals(
   inventory: RemoteSessionInventory | null,
   selection: RemoteSidebarSelection | null,
   supervisor: RemoteSidebarSupervisor | null = null,
+  /** The machine's daemon attention groups (its panel snapshot), by backend session id. */
+  attentionBySessionId: AttentionBySessionId = {},
 ): SidebarLiveSignals {
   const published = model.signals?.activityByWorktreePath;
   const activityByWorktreePath: Record<string, ActivitySummary> = {};
@@ -40,6 +43,7 @@ export function remoteSidebarSignals(
               isAgent: entry.agentType !== null,
               ...(entry.agentType ? { agentType: entry.agentType } : {}),
               ...(entry.activityOutcome ? { outcome: entry.activityOutcome } : {}),
+              ...(attentionBySessionId[entry.sessionId] ? { attention: attentionBySessionId[entry.sessionId] } : {}),
             }]
           : []);
       if (activities.length > 0) activityByWorktreePath[node.path] = summarizeActivities(activities);
