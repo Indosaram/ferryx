@@ -4,6 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { refreshSupervisor } from "./supervisor";
+import { parseProjectMemory, type ProjectMemoryActions } from "./projectMemory";
 import {
   parseAdoptAll,
   setupStatusResult,
@@ -52,3 +53,10 @@ export function adoptAll(): Promise<AdoptAllResult> {
 
 /** The desktop's setup actions, as the banner and the onboarding step take them. */
 export const desktopSetupActions: SetupActions = { run: runSetup, adopt: adoptAll };
+
+/** The desktop's per-project "give my project decisions to agents" switches. */
+export const desktopProjectMemoryActions: ProjectMemoryActions = {
+  list: async () => parseProjectMemory(await invoke<unknown>("cmd_supervisor_project_memory")),
+  set: async (repoIdentity, enabled) =>
+    parseProjectMemory(await invoke<unknown>("cmd_supervisor_set_project_memory", { repoIdentity, enabled })),
+};

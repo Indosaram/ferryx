@@ -23,6 +23,8 @@ pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
 pub const AGENT_PROMPT_CAPABILITY: &str = "agentPromptV1";
 /// Advertised in `GetCapabilities` by a daemon that spawns `TerminalStartup::AgentLaunch`.
 pub const AGENT_LAUNCH_CAPABILITY: &str = "agentLaunchV1";
+/// Advertised in `GetCapabilities` by a daemon that serves `AgentMemoryBlock`.
+pub const AGENT_MEMORY_BLOCK_CAPABILITY: &str = "agentMemoryBlockV1";
 /// Advertised by a host that accepts `agentContinue` and builds the continuation argv itself.
 pub const TERMINAL_CONTINUE_CAPABILITY: &str = "terminalContinueV1";
 /// Advertised in `GetCapabilities` by a daemon built with the `remote-desktop` feature, which
@@ -668,6 +670,14 @@ pub enum SupervisorSetupAction {
         projects: Vec<crate::hub_runtime::SetupProject>,
     },
     AdoptAll,
+    /// Every supervised project with its "give my project decisions to agents" switch.
+    ProjectMemory,
+    /// Turns that switch on or off for one project's repository identity.
+    #[serde(rename_all = "camelCase")]
+    SetProjectMemory {
+        repo_identity: String,
+        enabled: bool,
+    },
 }
 
 /// A read of the unified supervisor the desktop view needs besides the snapshot: one project's
@@ -1016,6 +1026,12 @@ pub enum DaemonRequest {
     },
     /// Host load and per-session process cost, sampled by the daemon on demand.
     ResourceUsage,
+    /// The owner's project decisions for a new agent session working in `cwd` (the local hook
+    /// reporter asks on SessionStart). Empty when the project's switch is off, nothing applies,
+    /// or the hub is not open here. Gated by `agentMemoryBlockV1`.
+    AgentMemoryBlock {
+        cwd: String,
+    },
     /// The prompt an agent pane is asking right now, read from its reconstructed screen.
     /// `registry_id` names the pane's agent when the caller knows it; otherwise the daemon
     /// identifies it the way agent control does. Gated by `agentPromptV1`.
@@ -1881,6 +1897,11 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     RemoteDesktopHostState {
         state: RdHostState,
+    },
+    #[serde(rename_all = "camelCase")]
+    AgentMemoryBlockOk {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     ReferenceChatIdentityOk {

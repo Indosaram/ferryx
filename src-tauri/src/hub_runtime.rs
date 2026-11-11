@@ -23,7 +23,7 @@ use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer,
 mod setup;
 mod seed;
 pub use setup::{
-    supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
+    agent_memory_block, supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
     SetupRunRequest, SLACK_TEAM_UNRESOLVED,
 };
 

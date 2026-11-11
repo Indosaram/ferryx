@@ -6708,7 +6708,11 @@ impl DaemonServer {
                         || matches!(
                             req.as_ref(),
                             Ok(DaemonRequest::SupervisorSetup { request })
-                                if !matches!(request, super::protocol::SupervisorSetupAction::Status)
+                                if !matches!(
+                                    request,
+                                    super::protocol::SupervisorSetupAction::Status
+                                        | super::protocol::SupervisorSetupAction::ProjectMemory
+                                )
                         )
                         || matches!(req.as_ref(), Ok(request) if request.is_owner_supervisor_control());
                     let peer_refusal = if owner_decision {
@@ -6819,6 +6823,9 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::ReferenceChatIdentity) => DaemonResponse::ReferenceChatIdentityOk {
                     identity: crate::remote::server::desktop_reference_chat_identity(&self.remote_state),
+                },
+                Ok(DaemonRequest::AgentMemoryBlock { cwd }) => DaemonResponse::AgentMemoryBlockOk {
+                    block: crate::hub_runtime::agent_memory_block(&self.remote_state, cwd).await,
                 },
                 Ok(DaemonRequest::ReferenceChat { request }) => DaemonResponse::ReferenceChatOk {
                     reply: crate::remote::server::desktop_reference_chat(&self.remote_state, request).await,
@@ -8043,6 +8050,7 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::AGENT_MEMORY_BLOCK_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY.into());
                     capabilities.push(crate::remote::reference_chat::REFERENCE_HISTORY_DELTA_V1.into());
                     capabilities.push(crate::remote::reference_chat::REFERENCE_PAYLOAD_V1.into());
