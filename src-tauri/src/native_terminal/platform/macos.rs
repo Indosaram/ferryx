@@ -313,14 +313,18 @@ unsafe fn configure_terminal_layers(view: &AnyObject, scale_factor: f64) {
             // remains the GPU thread's configure call.
             let view_bounds: NSRect = msg_send![view, bounds];
             let _: () = msg_send![sublayer, setFrame: view_bounds];
-            // The drawable is sized from the rounded physical surface while this frame is the
-            // logical view bounds times `contentsScale`, and the GPU thread republishes the
-            // drawable on its own cadence, so the two routinely disagree by a whole frame
-            // after an attach or resize (measured: a 448pt pane holding a 900pt-wide
-            // drawable). `contentsGravity` is `topLeft` and an unmasked layer draws its
-            // oversized contents past its own bounds, so that surplus painted over the pane
-            // edge and the divider between panes as glyph slivers. Masking crops it to this
-            // pane, which is the cropping behaviour the gravity comment above already promises.
+            // Keeps the layer's rendering inside this pane's bounds. This is a guard, not the
+            // fix for the border sliver: CoreAnimation already clips layer contents to the
+            // layer's own bounds, and window captures measured zero pixels outside the pane
+            // with masking off, on both plain CALayer and CAMetalLayer at
+            // `contentsGravity = topLeft` with an oversized drawable. In every recorded
+            // resize trace the drawable also matched the frame exactly (frameW 448 -> drawW
+            // 896, overX/overY 0.0), so the surplus that this mask would crop was not
+            // actually observed. The visible seam at load time came from the pane rect being
+            // snapped inward before attach, leaving the transparent DOM hole uncovered above
+            // the native surface; `snapBoundsToDevicePixels` now snaps outward instead. Keep
+            // the mask as cheap insurance for a genuinely oversized drawable, and keep this
+            // note honest about which mechanism it does and does not address.
             let _: () = msg_send![sublayer, setMasksToBounds: true];
             let _: () = msg_send![sublayer, setContentsScale: scale];
             let _: () = msg_send![sublayer, setContentsGravity: &*gravity];
