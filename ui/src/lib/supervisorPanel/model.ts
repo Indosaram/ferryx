@@ -2,13 +2,13 @@
 // `applyPanelEvent` folds owner event frames into a PanelSnapshot and
 // `buildPanelView` derives the sections the panel renders. No I/O, no clocks:
 // callers pass `nowMs`.
+import { groupOf, type AttentionGroup } from "../attentionGroup";
 import type {
   ActionEntry,
   ActionKind,
   Escalation,
   EvidenceRef,
   FleetSession,
-  FleetSessionState,
   PanelEvent,
   PanelSnapshot,
   PendingPrompt,
@@ -23,10 +23,11 @@ const DEFAULT_STALL_THRESHOLD_SECS = 300;
 const LOG_COLLAPSED_COUNT = 2;
 
 /**
- * D12 glyphs a session row can carry. `failed` only ever comes from a fresh `failed` health
- * observation passed in `PanelViewOptions.health`; the wire snapshot itself carries none.
+ * D12 glyphs a session row can carry, drawn from the session's attention group (`groupOf`).
+ * `failed` is a needs-you row whose health says the agent died: a fresh `failed` health
+ * observation passed in `PanelViewOptions.health`, or the session's own `health`.
  */
-export type SessionGlyph = "needsYou" | "failed" | "working" | "idle";
+export type SessionGlyph = "needsYou" | "failed" | "unread" | "working" | "idle";
 
 export interface DecisionOptionView {
   /** Index into the prompt's original `options` (what the answer route takes). */
@@ -77,6 +78,8 @@ export interface SessionRowView {
   stalled: boolean;
   /** "screen unchanged for 7 min" (stalled) / "waiting 23 min" (blocked) / null. */
   age: string | null;
+  /** Why the session stopped, in one line (daemon `reason`); null when it has nothing to say. */
+  reason: string | null;
   /** One-line why: last assistant line, or "status unknown". */
   why: string;
   stale: boolean;
@@ -366,20 +369,14 @@ export function formatRulesLine(rules: StandingRule[]): string {
   return `${body.charAt(0).toUpperCase()}${body.slice(1)}${extra}.`;
 }
 
-function glyphFor(state: FleetSessionState): SessionGlyph {
-  switch (state) {
-    case "working":
-      return "working";
-    case "blocked":
-      return "needsYou";
-    // D12: unknown never claims Working.
-    case "idle":
-    case "unknown":
-      return "idle";
-  }
-}
+const GROUP_GLYPH: Record<AttentionGroup, SessionGlyph> = {
+  needsYou: "needsYou",
+  unread: "unread",
+  working: "working",
+  seen: "idle",
+};
 
-const GLYPH_RANK: Record<SessionGlyph, number> = { needsYou: 0, failed: 1, working: 2, idle: 3 };
+const GLYPH_RANK: Record<SessionGlyph, number> = { needsYou: 0, failed: 1, unread: 2, working: 3, idle: 4 };
 
 /** A failed health report counts only while the session has not changed state since it. */
 function hasFailed(session: FleetSession, health: SessionHealth | undefined): boolean {
@@ -399,7 +396,9 @@ function sessionRow(
   stallMs: number,
   health: SessionHealth | undefined,
 ): SessionRowView {
-  const glyph = hasFailed(session, health) ? "failed" : glyphFor(session.state);
+  const failed = hasFailed(session, health);
+  const group = groupOf({ attention: session.attention, state: session.state, failed });
+  const glyph = group === "needsYou" && failed ? "failed" : GROUP_GLYPH[group];
   // A prompt the hub holds but has not escalated: the supervisor is judging this lane.
   const judging = session.pendingPrompt !== null && !session.stale;
   const stalled =
@@ -423,6 +422,7 @@ function sessionRow(
     glyph,
     stalled,
     age,
+    reason: session.reason?.trim() ? session.reason : null,
     why: session.state === "unknown" ? "status unknown" : (session.lastAssistantLine ?? ""),
     stale: session.stale,
     judging,
@@ -535,7 +535,7 @@ export function buildPanelView(
     (entry) => entry.createdAtMs >= startOfDayMs,
   ).length;
   const runningCount = [...fleet.values()].filter(
-    (session) => session.state === "working",
+    (session) => groupOf({ attention: session.attention, state: session.state }) === "working",
   ).length;
 
   const waitingCount = sessions.filter(

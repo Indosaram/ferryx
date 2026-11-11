@@ -1,3 +1,4 @@
+import { groupOf, type Attention } from "./attentionGroup";
 import type { AgentBlockedKind, AgentOutcome, AgentState } from "./types";
 
 export type TerminalActivityState = "working" | "waiting" | "done";
@@ -32,6 +33,12 @@ export type TerminalActivity = {
   outcome?: AgentOutcome;
   /** What a `waiting` entry needs from the user, when the program said so. */
   kind?: AgentBlockedKind;
+  /**
+   * The daemon's attention judgment for this pane's session, overlaid by the store from the
+   * supervisor panel feed. When present it decides the pane's group; `state`/`seen` are then only
+   * the old-peer fallback inside `groupOf`.
+   */
+  attention?: Pick<Attention, "group">;
 };
 
 export type ActivitySummary = {
@@ -73,13 +80,12 @@ export function summarizeActivities(
   let outcome: AgentOutcome | undefined = undefined;
 
   for (const activity of activities) {
-    if (activity.state === "working") workingCount += 1;
-    else if (!activity.seen) {
-      if (activity.state === "waiting") waitingCount += 1;
-      else {
-        doneCount += 1;
-        outcome = mergeOutcome(outcome, activity.outcome);
-      }
+    const group = groupOf(activity);
+    if (group === "working") workingCount += 1;
+    else if (group === "needsYou") waitingCount += 1;
+    else if (group === "unread") {
+      doneCount += 1;
+      outcome = mergeOutcome(outcome, activity.outcome);
     }
 
     if (activity.agentType !== undefined) {

@@ -28,6 +28,7 @@ import {
   type RemoteWorkspaceModel,
 } from "./RemoteSessionList";
 import { BUILD_STAMP } from "../lib/buildStamp";
+import { attentionBySessionIdOf } from "../lib/attentionGroup";
 import { isMobileCompanion } from "../lib/clientRuntime";
 import { MobileTopBar, type MobileTopBarActivityState } from "./chat/MobileTopBar";
 import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
@@ -3638,7 +3639,15 @@ export const RemoteHostConnection: React.FC<{
   const sidebarSupervisors = useMemo(() => Object.fromEntries(phoneSupervisor.machines.flatMap((machine) =>
     machine.snapshot ? [[machine.machineId, { snapshot: machine.snapshot, now: phoneSupervisor.now }]] : [])),
   [phoneSupervisor.machines, phoneSupervisor.now]);
-  const sidebarSections = useRemoteSidebarModel({ machines: sidebarMachines, supervisors: sidebarSupervisors });
+  // The pinned hub's panel snapshot carries the daemon's attention group per session; the
+  // sidebar rows of that machine draw it, exactly as the desktop does.
+  const sidebarAttention = useMemo(
+    () => panelHostId && panelState.kind === "ready"
+      ? { [panelHostId]: attentionBySessionIdOf(panelState.snapshot.sessions ?? []) }
+      : undefined,
+    [panelHostId, panelState],
+  );
+  const sidebarSections = useRemoteSidebarModel({ machines: sidebarMachines, supervisors: sidebarSupervisors, attention: sidebarAttention });
   // The wide remote's Supervisor tab is the same panel the phone home shows: the pinned host's
   // PanelSurface, setup card included when no hub is running. No lanes list, no second surface.
   const sidebarSupervisor = isAccountMode && desktopSidebar
