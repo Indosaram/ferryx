@@ -1433,6 +1433,112 @@ describe("retained local recovery owner", () => {
     unsubscribe();
     hook.unmount();
   });
+  it("arms disconnected sessions once and backs off until ready without a pane or wake", async () => {
+    const snapshot = await load();
+    setWorkspaceSnapshot("local", { ...snapshot, sessions: { ...snapshot.sessions,
+      "sess-1": { ...snapshot.sessions["sess-1"], remoteConnectionState: "disconnected" } } });
+    const first = deferred<ReturnType<typeof running> | null>();
+    tauriMocks.describeTerminal.mockReturnValueOnce(first.promise).mockResolvedValue(null);
+    const persist = vi.fn(async () => {});
+    setLocalRecoveryPersistence(persist);
+    for (let index = 0; index < 3; index++) {
+      const current = getWorkspaceSnapshot("local")!;
+      setWorkspaceSnapshot("local", { ...current });
+      setLocalRecoveryPersistence(persist);
+    }
+    expect(tauriMocks.describeTerminal).toHaveBeenCalledTimes(1);
+    first.resolve(null);
+    await vi.advanceTimersByTimeAsync(0);
+    let calls = 1;
+    for (const delay of [250, 500, 1000, 2000, 4000, 4000, 4000]) {
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(tauriMocks.describeTerminal).toHaveBeenCalledTimes(calls);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(tauriMocks.describeTerminal).toHaveBeenCalledTimes(++calls);
+    }
+    tauriMocks.describeTerminal.mockResolvedValue(running());
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(tauriMocks.describeTerminal).toHaveBeenCalledTimes(++calls);
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(getWorkspaceSnapshot("local")!.sessions["sess-1"]).toMatchObject({ lifecycle: "running", daemonEpoch: "new" });
+    expect(getWorkspaceSnapshot("local")!.sessions["sess-1"].remoteConnectionState).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+    // A stopped ready owner must not prevent the same retained identity recovering a later drop.
+    const admitted = getWorkspaceSnapshot("local")!;
+    setWorkspaceSnapshot("local", { ...admitted, sessions: { ...admitted.sessions,
+      "sess-1": { ...admitted.sessions["sess-1"], remoteConnectionState: "disconnected" } } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tauriMocks.describeTerminal).toHaveBeenCalledTimes(++calls);
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  // Safety net, not a red-green case: these sessions were excluded before the widening too.
+  it.each(["identity_conflict", "IDENTITY_CONFLICT", "exited"])("never arms disconnected %s sessions", async stop => {
+    const snapshot = await load();
+    setWorkspaceSnapshot("local", { ...snapshot, sessions: { ...snapshot.sessions, "sess-1": {
+      ...snapshot.sessions["sess-1"], remoteConnectionState: "disconnected",
+      ...(stop === "identity_conflict" ? { backendUnavailableReason: "identity_conflict" } : {}),
+      ...(stop === "IDENTITY_CONFLICT" ? { reconnectError: { code: "IDENTITY_CONFLICT", message: "conflict" } } : {}),
+      ...(stop === "exited" ? { lifecycle: "exited" as const } : {}),
+    } } });
+    setLocalRecoveryPersistence(async () => {});
+    wakeLocalSessionRecovery("local", "sess-1");
+    expect(tauriMocks.describeTerminal).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each(["remove", "exited"])("stops disconnected retry timers on %s", async stop => {
+    const snapshot = await load();
+    setWorkspaceSnapshot("local", { ...snapshot, sessions: { ...snapshot.sessions,
+      "sess-1": { ...snapshot.sessions["sess-1"], remoteConnectionState: "disconnected" } } });
+    tauriMocks.describeTerminal.mockResolvedValue(null);
+    setLocalRecoveryPersistence(async () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tauriMocks.describeTerminal).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+    const current = getWorkspaceSnapshot("local")!;
+    setWorkspaceSnapshot("local", { ...current, sessions: stop === "remove" ? {} : { ...current.sessions,
+      "sess-1": { ...current.sessions["sess-1"], lifecycle: "exited" } } });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(tauriMocks.describeTerminal).toHaveBeenCalledTimes(1);
+  });
+  it("hard-stops disconnected recovery on blocked identity despite later wakes", async () => {
+    const snapshot = await load();
+    setWorkspaceSnapshot("local", { ...snapshot, sessions: { ...snapshot.sessions,
+      "sess-1": { ...snapshot.sessions["sess-1"], remoteConnectionState: "disconnected" } } });
+    tauriMocks.describeTerminal.mockResolvedValue({ ...running(), incarnation: "different-process" });
+    const persist = vi.fn(async () => {});
+    setLocalRecoveryPersistence(persist);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getWorkspaceSnapshot("local")!.sessions["sess-1"].backendUnavailableReason).toBe("identity_conflict");
+    wakeLocalSessionRecovery("local", "sess-1");
+    wakeLocalSessionRecovery("local");
+    setLocalRecoveryPersistence(persist);
+    expect(tauriMocks.describeTerminal).toHaveBeenCalledTimes(1);
+    expect(persist).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("publishes reconnecting from a wake on a disconnected session", async () => {
+    const snapshot = await load();
+    setWorkspaceSnapshot("local", { ...snapshot, sessions: { ...snapshot.sessions,
+      "sess-1": { ...snapshot.sessions["sess-1"], remoteConnectionState: "disconnected" } } });
+    setLocalRecoveryPersistence(async () => {});
+    tauriMocks.describeTerminal.mockResolvedValue(null);
+    // The pane leaves "Disconnected" for "Reconnecting…" only because wake accepts the state
+    // the reducer publishes for an unproven drop.
+    wakeLocalSessionRecovery("local", "sess-1");
+    expect(getWorkspaceSnapshot("local")!.sessions["sess-1"].remoteConnectionState).toBe("reconnecting");
+  });
+  it("does not arm a reconnecting session whose last attempt proved an identity conflict", async () => {
+    const snapshot = await load();
+    setWorkspaceSnapshot("local", { ...snapshot, sessions: { ...snapshot.sessions, "sess-1": {
+      ...snapshot.sessions["sess-1"], remoteConnectionState: "reconnecting",
+      reconnectError: { code: "IDENTITY_CONFLICT", message: "conflict" },
+    } } });
+    setLocalRecoveryPersistence(async () => {});
+    wakeLocalSessionRecovery("local", "sess-1");
+    expect(tauriMocks.describeTerminal).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("coalesces manual Retry during an in-flight probe", async () => {
     await load();
     const reply = deferred<ReturnType<typeof running>>();
