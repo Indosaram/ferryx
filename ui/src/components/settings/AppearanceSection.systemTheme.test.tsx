@@ -89,10 +89,7 @@ describe("AppearanceSection system theme", () => {
     const media = stubColorScheme(true);
     render(<Harness />);
 
-    const trigger = screen.getByRole("combobox", { name: "Theme mode" });
-    fireEvent.pointerDown(trigger, { pointerId: 1, button: 0 });
-    fireEvent.click(trigger);
-    fireEvent.click(await screen.findByRole("option", { name: "System (follow OS)" }));
+    fireEvent.click(screen.getByRole("radio", { name: "System" }));
 
     await waitFor(() => expect(loadAppearanceSettings().theme).toBe("system"));
     expect(document.documentElement.dataset.theme).toBe("light");

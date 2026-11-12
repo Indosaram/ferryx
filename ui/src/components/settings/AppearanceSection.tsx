@@ -3,34 +3,34 @@ import { Palette, RotateCcw } from "lucide-react";
 import {
   useAppearanceSettings,
   useResolvedTheme,
-  type AppearanceSettingsState,
+  type AppearanceDensity,
 } from "../../lib/appearanceSettings";
 import { Button } from "../ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
-import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
+import { SegmentedControl } from "../ui/SegmentedControl";
+import { SettingBlock, SettingsGroup, SettingsHeading } from "./primitives";
+import { AccentSwatchRow, ThemePreviewStrip } from "./ThemePreviewCard";
+
+const DENSITY_OPTIONS: ReadonlyArray<{ value: AppearanceDensity; label: string }> = [
+  { value: "compact", label: "Compact" },
+  { value: "comfortable", label: "Comfortable" },
+];
 
 export function AppearanceSection() {
   const { settings, updateSettings, resetSettings } = useAppearanceSettings();
   const resolvedTheme = useResolvedTheme(settings.theme);
 
   return (
-    <section aria-labelledby="settings-appearance-heading">
+    <section aria-labelledby="settings-appearance-heading" aria-label="Appearance">
       <SettingsHeading
         icon={<Palette />}
         title="Appearance"
-        description="Customize the desktop theme palette, accent colors, and interface scale density."
+        description="Pick a theme and accent for the desktop interface. Changes apply immediately and follow you into the terminal."
       />
       <h2 id="settings-appearance-heading" className="sr-only">
         Appearance
       </h2>
       <SettingsGroup
-        title="Display & Styling"
+        title="Theme"
         action={
           <Button
             type="button"
@@ -44,95 +44,39 @@ export function AppearanceSection() {
           </Button>
         }
       >
-        <div className="border-b border-border">
-          <SettingRow
-            label="Theme mode"
-            description={
-              settings.theme === "system"
-                ? `Follows your OS appearance, terminal included. Currently ${resolvedTheme === "light" ? "Light" : "Dark"}.`
-                : "Select the base color theme for the desktop interface."
-            }
-          >
-            <Select
-              value={settings.theme}
-              onValueChange={(val) =>
-                updateSettings({
-                  theme: val as AppearanceSettingsState["theme"],
-                })
-              }
-            >
-              <SelectTrigger
-                id="appearance-theme-mode"
-                aria-label="Theme mode"
-                className="h-8 w-[180px] text-[11px]"
-              >
-                <SelectValue placeholder="Theme mode" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="charcoal">Charcoal (Default)</SelectItem>
-                <SelectItem value="dark">Dark</SelectItem>
-                <SelectItem value="light">Light</SelectItem>
-                <SelectItem value="system">System (follow OS)</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingRow>
+        <SettingBlock
+          label="Theme mode"
+          description={
+            settings.theme === "system"
+              ? `Follows your OS appearance, terminal included. Currently ${resolvedTheme === "light" ? "Light" : "Dark"}.`
+              : "The base palette for the whole app, settings included."
+          }
+        >
+          <ThemePreviewStrip value={settings.theme} onChange={(theme) => updateSettings({ theme })} />
+        </SettingBlock>
 
-          <SettingRow
-            label="Accent color"
-            description="Accent highlight color used for active badges, selection rings, and indicators."
-          >
-            <Select
-              value={settings.accentColor}
-              onValueChange={(val) =>
-                updateSettings({
-                  accentColor: val as AppearanceSettingsState["accentColor"],
-                })
-              }
-            >
-              <SelectTrigger
-                id="appearance-accent-color"
-                aria-label="Accent color"
-                className="h-8 w-[180px] text-[11px]"
-              >
-                <SelectValue placeholder="Accent color" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default">Slate (Default)</SelectItem>
-                <SelectItem value="blue">Ocean Blue</SelectItem>
-                <SelectItem value="emerald">Emerald</SelectItem>
-                <SelectItem value="purple">Violet</SelectItem>
-                <SelectItem value="amber">Amber</SelectItem>
-                <SelectItem value="rose">Rose</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingRow>
+        <SettingBlock
+          label="Accent color"
+          description="Active badges, selection rings, and indicators draw from this colour."
+        >
+          <AccentSwatchRow
+            value={settings.accentColor}
+            onChange={(accentColor) => updateSettings({ accentColor })}
+          />
+        </SettingBlock>
 
-          <SettingRow
+        <SettingBlock
+          label="Interface density"
+          description="Spacing and padding across tabs, sidebars, and dialog chrome."
+        >
+          <SegmentedControl
             label="Interface density"
-            description="Adjust spacing and padding across tabs, sidebars, and dialog chrome."
-          >
-            <Select
-              value={settings.density}
-              onValueChange={(val) =>
-                updateSettings({
-                  density: val as AppearanceSettingsState["density"],
-                })
-              }
-            >
-              <SelectTrigger
-                id="appearance-density"
-                aria-label="Interface density"
-                className="h-8 w-[180px] text-[11px]"
-              >
-                <SelectValue placeholder="Interface density" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="compact">Compact (Default)</SelectItem>
-                <SelectItem value="comfortable">Comfortable</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingRow>
-        </div>
+            value={settings.density}
+            options={DENSITY_OPTIONS}
+            onChange={(density) => updateSettings({ density })}
+            className="w-[240px] max-w-full bg-background"
+          />
+        </SettingBlock>
       </SettingsGroup>
     </section>
   );

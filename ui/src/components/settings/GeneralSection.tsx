@@ -416,7 +416,7 @@ export function GeneralSection() {
       />
       <h2 id="settings-general-heading" className="sr-only">General</h2>
       <div data-testid="settings-general-overview" className="space-y-6">
-        <div className="border-y border-border">
+        <div className="settings-card-group">
           <SettingRow
             label="Confirm before closing a tab"
             description="Ask before closing a terminal or browser tab from the tab bar, menu, or keyboard shortcut."

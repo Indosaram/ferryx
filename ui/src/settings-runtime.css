@@ -3,6 +3,8 @@
   --background-rgb: 10 10 10;
   --card: #141414;
   --card-rgb: 20 20 20;
+  --panel: #141414;
+  --panel-rgb: 20 20 20;
   /* Floating layer: #141414 against the 45% scrim over a dark terminal was
      1.12:1. #333333 measures 1.41:1 (charcoal's equivalent is 1.38:1) while
      keeping foreground 12.10 and muted 4.89. */
@@ -57,6 +59,8 @@
   --foreground-rgb: 23 23 23;
   --card: #ffffff;
   --card-rgb: 255 255 255;
+  --panel: #ffffff;
+  --panel-rgb: 255 255 255;
   --card-foreground: #171717;
   --card-foreground-rgb: 23 23 23;
   --popover: #ffffff;

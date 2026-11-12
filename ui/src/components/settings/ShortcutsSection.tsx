@@ -240,7 +240,7 @@ export function ShortcutsSection({
         </div>
       </div>
 
-      <div className="border-y border-border">
+      <div className="settings-card-group">
         {filteredShortcuts.length > 0 ? (
           filteredShortcuts.map((shortcut) => {
             const label = shortcutLabel(shortcut.id, isMac, overrides, preset);

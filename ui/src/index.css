@@ -44,6 +44,10 @@
   --foreground-rgb: 250 250 250;
   --card: #171717;
   --card-rgb: 23 23 23;
+  /* Raised settings/panel surface: one step above the charcoal canvas so a grouped
+     settings card reads as a card, not as a hole. Its shape comes from --border. */
+  --panel: #262a32;
+  --panel-rgb: 38 42 50;
   --card-foreground: #fafafa;
   --card-foreground-rgb: 250 250 250;
   /* Floating layer: one step above the terminal surface (#282c34) and clearly
@@ -292,6 +296,15 @@ body {
 }
 
 @layer utilities {
+  /* A group of setting rows drawn as one raised card. Section modules use this instead of a
+     bare `border-y` pair so every group has the same radius, fill, and hairline boundary. */
+  .settings-card-group {
+    overflow: hidden;
+    border-radius: var(--radius);
+    border: 1px solid rgb(var(--border-rgb) / var(--border-alpha));
+    background: rgb(var(--panel-rgb));
+  }
+
   /* Re-enable text selection inside read-only content regions while the
      app shell keeps `user-select: none` (see body above). Apply the
      `selectable` class to containers whose text users may want to copy
@@ -594,5 +607,184 @@ html.platform-macos [data-testid="native-terminal-pane"][data-native-terminal-pr
 @media (prefers-reduced-motion: no-preference) {
   .work-shimmer-text {
     animation: work-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+/* Appearance theme strip. A preset card paints its own palette whatever theme is active, so the
+   choice is a comparison instead of four words. Values are the shipped palettes of each theme
+   (index.css charcoal, settings-runtime.css dark/light); they are preview art, never live
+   surface colors, which is why they are fixed here instead of read from tokens. */
+.theme-preview-card {
+  border: 1px solid transparent;
+}
+
+.theme-preview-card:hover {
+  background: rgb(var(--foreground-rgb) / 0.04);
+}
+
+.theme-preview-card[aria-checked="true"] {
+  background: rgb(var(--foreground-rgb) / 0.06);
+  border-color: rgb(var(--foreground-rgb) / 0.28);
+}
+
+.theme-preview-art {
+  --tp-canvas: #23262d;
+  --tp-side: #171717;
+  --tp-line: rgb(255 255 255 / 0.16);
+  display: flex;
+  gap: 2px;
+  aspect-ratio: 16 / 10;
+  padding: 3px;
+  border-radius: 5px;
+  border: 1px solid rgb(0 0 0 / 0.3);
+  background: var(--tp-side);
+}
+
+[data-theme-card="dark"] .theme-preview-art {
+  --tp-canvas: #0a0a0a;
+  --tp-side: #141414;
+}
+
+[data-theme-card="light"] .theme-preview-art {
+  --tp-canvas: #f6f7f9;
+  --tp-side: #ffffff;
+  --tp-line: rgb(0 0 0 / 0.14);
+  border-color: rgb(0 0 0 / 0.14);
+}
+
+[data-theme-card="system"] .theme-preview-art {
+  --tp-canvas: linear-gradient(90deg, #f6f7f9 0 49.9%, #0a0a0a 50% 100%);
+  --tp-side: linear-gradient(90deg, #ffffff 0 49.9%, #141414 50% 100%);
+}
+
+.theme-preview-side {
+  flex: 0 0 28%;
+  border-radius: 3px;
+  background: var(--tp-side);
+}
+
+.theme-preview-pane {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px;
+  border-radius: 3px;
+  background: var(--tp-canvas);
+}
+
+.theme-preview-bar {
+  display: block;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--tp-line);
+}
+
+.theme-preview-bar + .theme-preview-bar {
+  width: 62%;
+}
+
+.theme-preview-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  margin-top: auto;
+  margin-left: auto;
+  border-radius: 999px;
+  background: rgb(var(--primary-rgb));
+}
+
+/* Accent swatches: the colour is the control. The checked swatch takes a hairline ring in the
+   active foreground tone so selection survives both themes. */
+.accent-swatch {
+  border: 1px solid transparent;
+}
+
+.accent-swatch[aria-checked="true"] {
+  border-color: rgb(var(--foreground-rgb) / 0.5);
+}
+
+.accent-swatch-dot {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.22);
+  background: #71717a;
+}
+
+[data-accent-color="blue"] .accent-swatch-dot {
+  background: #3b82f6;
+}
+
+[data-accent-color="emerald"] .accent-swatch-dot {
+  background: #10b981;
+}
+
+[data-accent-color="purple"] .accent-swatch-dot {
+  background: #8b5cf6;
+}
+
+[data-accent-color="amber"] .accent-swatch-dot {
+  background: #f59e0b;
+}
+
+[data-accent-color="rose"] .accent-swatch-dot {
+  background: #f43f5e;
+}
+
+/* Narrow windows: the 280px rail would leave a sliver of content, so the dialog stacks and the
+   rail becomes a horizontal scroll strip. Scoped by the dialog's own role/label so no component
+   has to branch on viewport width. */
+@media (max-width: 760px) {
+  div[role="dialog"][aria-label="Settings"] {
+    flex-direction: column;
+  }
+
+  div[role="dialog"][aria-label="Settings"] [data-testid="settings-nav"] {
+    width: 100%;
+    border-right: 0;
+    border-bottom: 1px solid rgb(var(--border-rgb) / var(--border-alpha));
+  }
+
+  div[role="dialog"][aria-label="Settings"] [data-testid="settings-nav"] .h-titlebar {
+    display: none;
+  }
+
+  div[role="dialog"][aria-label="Settings"] [data-testid="settings-nav"] > div {
+    padding-bottom: 0.5rem;
+  }
+
+  div[role="dialog"][aria-label="Settings"] [data-testid="settings-nav"] > div > button {
+    margin-bottom: 0.5rem;
+  }
+
+  div[role="dialog"][aria-label="Settings"] nav[aria-label="Settings sections"] {
+    display: flex;
+    gap: 0.125rem;
+    overflow-x: auto;
+    padding-bottom: 0.5rem;
+    scrollbar-width: none;
+  }
+
+  div[role="dialog"][aria-label="Settings"] nav[aria-label="Settings sections"]::-webkit-scrollbar {
+    display: none;
+  }
+
+  div[role="dialog"][aria-label="Settings"] nav[aria-label="Settings sections"] > button {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  div[role="dialog"][aria-label="Settings"] main .h-titlebar {
+    display: none;
+  }
+
+  div[role="dialog"][aria-label="Settings"] [data-testid="settings-content"] {
+    padding-left: 1rem;
+    padding-right: 1rem;
+    padding-top: 1.25rem;
   }
 }

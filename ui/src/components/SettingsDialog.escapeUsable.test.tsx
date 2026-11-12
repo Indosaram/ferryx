@@ -12,7 +12,7 @@ describe("SettingsDialog Escape remains usable", () => {
     const onClose = vi.fn();
     render(<SettingsDialog open onClose={onClose} />);
 
-    fireEvent.click(within(screen.getByTestId("settings-nav")).getByRole("button", { name: "Appearance" }));
+    fireEvent.click(within(screen.getByTestId("settings-nav")).getByRole("button", { name: "General" }));
 
     const trigger = screen
       .getAllByRole("combobox")

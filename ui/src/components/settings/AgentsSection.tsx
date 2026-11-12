@@ -402,7 +402,7 @@ export function AgentsSection() {
         Agents
       </h2>
 
-      <div className="border-y border-border">
+      <div className="settings-card-group">
         <SettingRow
           label="Default Agent"
           description="When this agent is enabled and available, it appears first in the New Tab agent list with a Default label. Clicking a listed agent still launches that agent. Ferryx does not auto-launch it. Auto stores no preference. None stores none. Unavailable, disabled, or missing selections keep the natural agent order."
@@ -525,7 +525,7 @@ export function AgentsSection() {
           </Alert>
         ) : null}
 
-        <div className="divide-y divide-border border-y border-border">
+        <div className="settings-card-group divide-y divide-border">
           {resolvedAgents.map((agent) => {
             const isExpanded = Boolean(expandedAgents[agent.name]);
             const displayName = agent.name.charAt(0).toUpperCase() + agent.name.slice(1);

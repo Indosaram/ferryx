@@ -1,5 +1,13 @@
 import type { ReactNode } from "react";
 
+import { cn } from "../../lib/cn";
+
+/**
+ * The settings surface is a page of groups, and a group is a card whose rows are parted by
+ * hairlines: a title and a sentence, then label-left / control-right rows with no box of
+ * their own. These primitives own that rhythm so every section reads the same.
+ */
+
 export function SettingsHeading({
   icon,
   title,
@@ -10,13 +18,31 @@ export function SettingsHeading({
   description: string;
 }) {
   return (
-    <header className="mb-8 border-b border-border pb-5">
-      <div className="mb-2 flex items-center gap-2 text-[15px] font-semibold">
-        <span className="text-muted-foreground [&>svg]:size-4">{icon}</span>
-        {title}
+    <header className="mb-9">
+      <div className="flex items-center gap-2.5">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-panel text-muted-foreground [&>svg]:size-4">
+          {icon}
+        </span>
+        <div className="text-[17px] font-semibold leading-6 tracking-[-0.01em] text-foreground">{title}</div>
       </div>
-      <p className="max-w-2xl text-[12px] leading-5 text-muted-foreground">{description}</p>
+      <p className="mt-2.5 max-w-[62ch] text-[12px] leading-5 text-muted-foreground">{description}</p>
     </header>
+  );
+}
+
+export function SettingsCard({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn("overflow-hidden rounded-lg border border-border bg-panel", className)}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -26,24 +52,30 @@ export function SettingsGroup({
   description,
   children,
 }: {
-  title: string;
+  title?: string;
   action?: ReactNode;
   description?: string;
   children: ReactNode;
 }) {
   return (
-    <div className="mb-6">
-      <div className="mb-4 flex items-center justify-between border-b border-border pb-3">
-        <div>
-          <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
-          {description ? (
-            <p className="mt-0.5 text-[11px] text-muted-foreground">{description}</p>
-          ) : null}
+    <section className="mb-8">
+      {title || action || description ? (
+        <div className="mb-2 flex items-end justify-between gap-3 px-0.5">
+          <div className="min-w-0">
+            {title ? (
+              <h3 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-muted-foreground/75">
+                {title}
+              </h3>
+            ) : null}
+            {description ? (
+              <p className="mt-1 text-[11px] leading-4 text-muted-foreground">{description}</p>
+            ) : null}
+          </div>
+          {action ? <div className="flex shrink-0 items-center gap-2 pb-0.5">{action}</div> : null}
         </div>
-        {action ? <div className="flex items-center gap-2">{action}</div> : null}
-      </div>
-      {children}
-    </div>
+      ) : null}
+      <SettingsCard>{children}</SettingsCard>
+    </section>
   );
 }
 
@@ -60,12 +92,38 @@ export function SettingRow({
 }) {
   const heading = label ?? title ?? "";
   return (
-    <div className="flex items-start justify-between gap-4 py-3 border-b border-border/40 last:border-0">
-      <div className="space-y-0.5 max-w-[480px]">
-        <div className="text-[13px] font-medium text-foreground">{heading}</div>
-        {description ? <p className="text-[11px] text-muted-foreground">{description}</p> : null}
+    <div className="flex min-h-[54px] items-center justify-between gap-4 border-b border-border/60 px-4 py-3 last:border-b-0">
+      <div className="min-w-0 max-w-[54ch] space-y-1">
+        <div className="text-[13px] font-medium leading-5 text-foreground">{heading}</div>
+        {description ? (
+          <p className="text-[11px] leading-[1.5] text-muted-foreground">{description}</p>
+        ) : null}
       </div>
-      <div className="shrink-0">{children}</div>
+      <div className="flex shrink-0 items-center gap-2">{children}</div>
+    </div>
+  );
+}
+
+/**
+ * A card row whose control needs the full width under its label (a theme strip, a URL field,
+ * a list). Same padding and hairline as SettingRow so the two mix inside one card.
+ */
+export function SettingBlock({
+  label,
+  description,
+  children,
+}: {
+  label: string;
+  description?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className="border-b border-border/60 px-4 py-3.5 last:border-b-0">
+      <div className="text-[13px] font-medium leading-5 text-foreground">{label}</div>
+      {description ? (
+        <p className="mt-1 max-w-[62ch] text-[11px] leading-[1.5] text-muted-foreground">{description}</p>
+      ) : null}
+      <div className="mt-3">{children}</div>
     </div>
   );
 }

@@ -440,13 +440,13 @@ describe("SettingsDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
 
     expect(screen.getByRole("region", { name: "Appearance" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Theme mode" })).toHaveTextContent(/charcoal/i);
-    expect(screen.getByRole("combobox", { name: "Accent color" })).toHaveTextContent(/slate/i);
-    expect(screen.getByRole("combobox", { name: "Interface density" })).toHaveTextContent(/compact/i);
+    expect(screen.getByRole("radio", { name: "Charcoal" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Slate" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("tab", { name: "Compact" })).toHaveAttribute("aria-selected", "true");
 
-    await selectRadixOption("Theme mode", /dark/i);
-    await selectRadixOption("Accent color", /emerald/i);
-    await selectRadixOption("Interface density", /comfortable/i);
+    fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Emerald" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Comfortable" }));
 
     const stored = JSON.parse(localStorage.getItem("ferryx.settings.appearance")!);
     expect(stored).toEqual({
@@ -458,14 +458,14 @@ describe("SettingsDialog", () => {
     unmount();
     render(<SettingsDialog open onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
-    expect(screen.getByRole("combobox", { name: "Theme mode" })).toHaveTextContent(/dark/i);
-    expect(screen.getByRole("combobox", { name: "Accent color" })).toHaveTextContent(/emerald/i);
-    expect(screen.getByRole("combobox", { name: "Interface density" })).toHaveTextContent(/comfortable/i);
+    expect(screen.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Emerald" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("tab", { name: "Comfortable" })).toHaveAttribute("aria-selected", "true");
 
     fireEvent.click(screen.getByRole("button", { name: "Reset to defaults" }));
-    expect(screen.getByRole("combobox", { name: "Theme mode" })).toHaveTextContent(/charcoal/i);
-    expect(screen.getByRole("combobox", { name: "Accent color" })).toHaveTextContent(/slate/i);
-    expect(screen.getByRole("combobox", { name: "Interface density" })).toHaveTextContent(/compact/i);
+    expect(screen.getByRole("radio", { name: "Charcoal" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Slate" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("tab", { name: "Compact" })).toHaveAttribute("aria-selected", "true");
     expect(localStorage.getItem("ferryx.settings.appearance")).toBeNull();
   });
 
@@ -599,9 +599,9 @@ describe("SettingsDialog", () => {
       const { unmount } = render(<SettingsDialog open onClose={vi.fn()} />);
       fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
 
-      await selectRadixOption("Theme mode", /light/i);
-      await selectRadixOption("Accent color", /ocean blue/i);
-      await selectRadixOption("Interface density", /comfortable/i);
+      fireEvent.click(screen.getByRole("radio", { name: "Light" }));
+      fireEvent.click(screen.getByRole("radio", { name: "Ocean Blue" }));
+      fireEvent.click(screen.getByRole("tab", { name: "Comfortable" }));
 
       expect(loadAppearanceSettings()).toEqual({
         theme: "light",
@@ -617,9 +617,9 @@ describe("SettingsDialog", () => {
       unmount();
       render(<SettingsDialog open onClose={vi.fn()} />);
       fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
-      expect(screen.getByRole("combobox", { name: "Theme mode" })).toHaveTextContent(/light/i);
-      expect(screen.getByRole("combobox", { name: "Accent color" })).toHaveTextContent(/ocean blue/i);
-      expect(screen.getByRole("combobox", { name: "Interface density" })).toHaveTextContent(/comfortable/i);
+      expect(screen.getByRole("radio", { name: "Light" })).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByRole("radio", { name: "Ocean Blue" })).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByRole("tab", { name: "Comfortable" })).toHaveAttribute("aria-selected", "true");
     } finally {
       window.removeEventListener(APPEARANCE_SETTINGS_EVENT, listener);
     }

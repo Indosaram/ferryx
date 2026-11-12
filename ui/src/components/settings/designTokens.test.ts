@@ -15,6 +15,7 @@ const SECTION_FILES = [
   "ShortcutsSection.tsx",
   "TerminalSection.tsx",
   "AgentsSection.tsx",
+  "ThemePreviewCard.tsx",
   "primitives.tsx",
   "RemoteSection.tsx",
   "remote/AccountBar.tsx",

@@ -107,9 +107,7 @@ describe("SettingsDialog Escape key scoping & accessibility", () => {
     const onClose = vi.fn();
     render(<SettingsDialog open onClose={onClose} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
-
-    const combobox = screen.getByRole("combobox", { name: "Theme mode" });
+    const combobox = screen.getByRole("combobox", { name: "Update channel" });
     combobox.setAttribute("data-state", "open");
     fireEvent.keyDown(combobox, { key: "Escape", code: "Escape" });
     expect(onClose).not.toHaveBeenCalled();

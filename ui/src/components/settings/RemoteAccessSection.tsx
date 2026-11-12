@@ -474,7 +474,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
         </Badge>
       ) : null}
       <AccessFactsCard status={status} statusError={statusError} onPairingExpired={refreshAfterPairingChange} />
-      <div className="border-y border-border">
+      <div className="settings-card-group">
         <SettingRow
           label="Allow remote access"
           description="Serve live terminal sessions to paired devices. Authorized browsers reconnect automatically while this stays on."

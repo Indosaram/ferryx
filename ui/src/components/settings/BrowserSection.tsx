@@ -252,7 +252,7 @@ export function BrowserSection() {
           </Button>
         }
       >
-        <div className="border-b border-border">
+        <div className="settings-card-group">
           <SettingRow label="Default Home Page" description="New browser tabs open this URL. Leave it blank to open a blank tab.">
             <div className="w-[330px]">
               <div className="flex gap-1.5">
@@ -378,7 +378,7 @@ export function BrowserSection() {
       <BrowserPasswordsGroup />
 
       <SettingsGroup title="Link Routing">
-        <div className="border-b border-border">
+        <div className="settings-card-group">
           <SettingRow label="Click a link" description="Plain click in the embedded browser opens the chosen browser.">
             <Select
               value={settings.linkClickTarget}
@@ -449,7 +449,7 @@ export function BrowserSection() {
       </SettingsGroup>
 
       <SettingsGroup title="File Links">
-        <div className="border-b border-border">
+        <div className="settings-card-group">
           <SettingRow label="Markdown" description="Where Command/Ctrl-click on a terminal file path opens.">
             <Select
               value={fileOpenTargets.markdown}

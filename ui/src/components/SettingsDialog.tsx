@@ -178,17 +178,17 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
     >
       <aside data-testid="settings-nav" className="flex w-[280px] shrink-0 flex-col border-r border-border bg-background">
         <div data-tauri-drag-region className="h-titlebar shrink-0" />
-        <div className="px-3 pb-3 pt-2">
+        <div className="px-2.5 pb-3 pt-2">
           <button
             ref={backButtonRef}
             type="button"
             onClick={onClose}
-            className="no-drag mb-5 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            className="no-drag mb-5 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[12px] text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
           >
             <ArrowLeft className="size-3.5" />
             Back to app
           </button>
-          <div className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/55">Settings</div>
+          <div className="mb-2 px-2 text-[11px] font-semibold uppercase tracking-[0.09em] text-muted-foreground/60">Settings</div>
           <nav aria-label="Settings sections" className="space-y-0.5">
             <NavButton active={section === "general"} icon={<Settings2 />} label="General" onClick={() => setSection("general")} />
             <NavButton active={section === "appearance"} icon={<Palette />} label="Appearance" onClick={() => setSection("appearance")} />
@@ -215,7 +215,7 @@ function SettingsDialogBody({ onClose, initialSection, onOpenSshProject, onOpenM
         <div data-tauri-drag-region className="h-titlebar shrink-0 border-b border-border/70" />
         {/* Labels and descriptions are app chrome: Ctrl/Cmd+A must not select them. Inputs stay
             editable, and values worth copying (paths, commands) opt in with `selectable`. */}
-        <div data-testid="settings-content" className="mx-auto w-full max-w-[896px] px-8 pb-16 pt-10">
+        <div data-testid="settings-content" className="mx-auto w-full max-w-[820px] px-8 pb-20 pt-10">
           {section === "general" ? <GeneralSection /> : null}
           {section === "appearance" ? <AppearanceSection /> : null}
           {section === "terminal" ? (
@@ -302,11 +302,11 @@ function NavButton({
       type="button"
       onClick={onClick}
       aria-current={active ? "page" : undefined}
-      className={`no-drag flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors ${
+      className={`no-drag flex h-[30px] w-full items-center gap-2.5 rounded-md px-2 text-left text-[12.5px] transition-colors ${
         active ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
       }`}
     >
-      <span className="[&>svg]:size-3.5">{icon}</span>
+      <span className={active ? "[&>svg]:size-3.5 text-foreground" : "[&>svg]:size-3.5 text-muted-foreground/80"}>{icon}</span>
       {label}
     </button>
   );

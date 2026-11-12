@@ -556,7 +556,7 @@ export function PlanSection({
           <div className="mt-8 space-y-3">
             <h3 className="text-[12px] font-semibold">Change Plan</h3>
             {canManagePlan(entitlement) ? (
-              <div className="border-y border-border">
+              <div className="settings-card-group">
                 <SettingRow
                   label="Pro"
                   description="10 machines included, plus 5 for each additional pack."
