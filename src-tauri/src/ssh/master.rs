@@ -429,9 +429,55 @@ pub fn live_count() -> usize {
         .len()
 }
 
+#[cfg(not(windows))]
+static REUSED_TOTAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(windows))]
+static COLD_TOTAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Records which path a one-shot operation actually took, so the reuse win is measured
+/// rather than assumed, the way the plan requires.
+#[cfg(not(windows))]
+pub fn note_path(operation: &str, reused: bool) {
+    use std::sync::atomic::Ordering;
+    let (counter, path) = if reused {
+        (&REUSED_TOTAL, "master_reused")
+    } else {
+        (&COLD_TOTAL, "cold_spawn")
+    };
+    let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::debug!(operation, path, count, "ssh one-shot transport");
+}
+
+/// `(reused, cold)` totals since the daemon started, so a later run reads the win instead of
+/// trusting that reuse happened.
+#[cfg(not(windows))]
+pub fn path_totals() -> (usize, usize) {
+    use std::sync::atomic::Ordering;
+    (
+        REUSED_TOTAL.load(Ordering::Relaxed),
+        COLD_TOTAL.load(Ordering::Relaxed),
+    )
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// The plan requires the reuse win to be measured rather than assumed, so the counters must
+    /// actually move: a path that never increments would make every later reading a lie.
+    #[test]
+    fn path_counters_move_independently() {
+        let (reused_before, cold_before) = path_totals();
+        note_path("test_reused", true);
+        let (reused_after, cold_after) = path_totals();
+        assert_eq!(reused_after, reused_before + 1);
+        assert_eq!(cold_after, cold_before);
+
+        note_path("test_cold", false);
+        let (reused_final, cold_final) = path_totals();
+        assert_eq!(reused_final, reused_after);
+        assert_eq!(cold_final, cold_after + 1);
+    }
 
     fn host(hostname: &str) -> SshHost {
         SshHost {

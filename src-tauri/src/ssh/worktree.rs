@@ -398,6 +398,7 @@ pub async fn list_remote(
     if let Some(lease) = master.as_ref() {
         direct::use_master(&mut plan, lease.socket());
     }
+    super::master::note_path("worktree_list", master.is_some());
     list_output(&plan, &marker).await
 }
 

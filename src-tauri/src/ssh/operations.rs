@@ -37,6 +37,7 @@ pub async fn probe(
     if let Some(lease) = master.as_ref() {
         direct::use_master(&mut plan, lease.socket());
     }
+    super::master::note_path("project_probe", master.is_some());
     let output = direct::bounded_output(&plan, Duration::from_secs(12))
         .await
         .map_err(|mut err| {
