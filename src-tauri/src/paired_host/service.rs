@@ -549,7 +549,13 @@ impl PairedHostService {
                     };
                     #[cfg(not(test))]
                     let loaded = Inventory::open(&owner.directory);
-                    owner.inventory = Some(loaded);
+                    // A failed load is not cached: the file can be repaired out-of-band
+                    // (a stale row, a hand-fix after a crash), and keeping the error for
+                    // the daemon's lifetime would make that repair invisible.
+                    match loaded {
+                        Ok(inventory) => owner.inventory = Some(Ok(inventory)),
+                        Err(error) => return Err(error),
+                    }
                 }
                 operation(
                     owner
@@ -1275,3 +1281,50 @@ fn sanitize_error_text(text: &str) -> String {
 #[cfg(test)]
 #[path = "service_direct_lifecycle_tests.rs"]
 mod direct_lifecycle_tests;
+
+#[cfg(test)]
+mod inventory_retry_tests {
+    use super::*;
+
+    /// A failed inventory load must not be cached: repairing the file out-of-band has to be
+    /// visible to the next call, otherwise one stale row disables pairing until a daemon restart.
+    #[tokio::test]
+    async fn a_repaired_inventory_file_is_read_again() {
+        let root = std::env::temp_dir().join(format!(
+            "ferryx-inventory-retry-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let file = root.join("paired-hosts.v1.json");
+
+        // A row claiming a machine grant with no token is rejected by the loader.
+        std::fs::write(
+            &file,
+            br#"{"version":1,"hosts":{"https://relay.example/host/m":{"relayOrigin":"https://relay.example","machineId":"m","displayLabel":"M","grantScope":"machine","deviceToken":null,"generation":"1","authStatus":"paired"}},"generations":{"https://relay.example/host/m":"1"}}"#,
+        )
+        .expect("seed corrupt inventory");
+
+        let service = PairedHostService::open(root.clone());
+        assert!(
+            service.run(|_| Ok(())).await.is_err(),
+            "a corrupt inventory must fail"
+        );
+
+        // Repair it the way an operator would, then read again without restarting anything.
+        std::fs::write(
+            &file,
+            br#"{"version":1,"hosts":{},"generations":{}}"#,
+        )
+        .expect("repair inventory");
+        assert!(
+            service.run(|store| Ok(store.list().len())).await.is_ok(),
+            "a repaired inventory must load on the next call"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
