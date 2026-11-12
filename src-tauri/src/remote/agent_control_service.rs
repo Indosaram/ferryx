@@ -322,10 +322,16 @@ const WORKTREE_BRANCH_CACHE_MAX: usize = 512;
 
 static WORKTREE_BRANCHES: WorktreeBranchCache = WorktreeBranchCache::new();
 
+/// A resolved branch and when it was read, so the TTL can expire it.
+type CachedBranch = (std::time::Instant, Option<String>);
+
+/// Branch per worktree path, or `None` before the first resolution.
+type BranchEntries = std::collections::HashMap<std::path::PathBuf, CachedBranch>;
+
 /// The branch checked out in each worktree path, resolved off the async runtime and reused for
 /// [`WORKTREE_BRANCH_TTL`].
 struct WorktreeBranchCache {
-    entries: std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, (std::time::Instant, Option<String>)>>>,
+    entries: std::sync::Mutex<Option<BranchEntries>>,
 }
 
 impl WorktreeBranchCache {

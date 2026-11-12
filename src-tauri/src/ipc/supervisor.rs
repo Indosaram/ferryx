@@ -355,30 +355,38 @@ pub async fn cmd_supervisor_prs(
     )
 }
 
+/// What the desktop asks a spawn for. The fields stay flat on the wire: the desktop passes them
+/// as one object, so the command takes one argument and every caller's shape is unchanged.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnRequestArgs {
+    pub agent: String,
+    pub cwd: String,
+    pub workspace_id: Option<String>,
+    pub parent_session_id: Option<String>,
+    pub name: Option<String>,
+    pub prompt: Option<String>,
+    pub request_id: String,
+}
+
 /// Open an agent pane (agent control `Spawn`), optionally as a child of a session and with a
 /// prompt delivered once it first reads idle. `request_id` makes a retry deduplicate.
 #[tauri::command]
 pub async fn cmd_agent_spawn(
     daemon_client: tauri::State<'_, Arc<DaemonClient>>,
-    agent: String,
-    cwd: String,
-    workspace_id: Option<String>,
-    parent_session_id: Option<String>,
-    name: Option<String>,
-    prompt: Option<String>,
-    request_id: String,
+    args: SpawnRequestArgs,
 ) -> Result<serde_json::Value, IpcError> {
     let request = DaemonRequest::AgentControl {
         request: AgentControlOp::Spawn {
-            agent,
-            cwd,
-            workspace_id,
-            parent_session_id,
-            name,
-            prompt,
+            agent: args.agent,
+            cwd: args.cwd,
+            workspace_id: args.workspace_id,
+            parent_session_id: args.parent_session_id,
+            name: args.name,
+            prompt: args.prompt,
             command: None,
             args: Vec::new(),
-            request_id,
+            request_id: args.request_id,
         },
         host_id: None,
         // The owner's own hand-off: never a supervisor request, so it carries no lease fence.
