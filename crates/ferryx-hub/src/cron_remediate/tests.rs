@@ -359,9 +359,12 @@ async fn repeated_cron_failure_reuses_the_existing_active_lane() {
         .unwrap();
 
     assert!(fake.lanes.lock().unwrap().is_empty(), "must not create a second lane");
-    let updates = fake.lane_updates.lock().unwrap();
-    assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0].key, lane_key);
+    {
+        let updates = fake.lane_updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].key, lane_key);
+        assert_eq!(updates[0].title, "Cron fix: daily-report");
+    }
     assert_eq!(problem(&pool, 2).await.unwrap().unwrap().lane_key.as_deref(), Some(lane_key));
 }
 
