@@ -97,10 +97,36 @@ pub(crate) fn error_response(error: ScopeError) -> crate::daemon::protocol::Daem
 /// The wire code a refusal travels as: its scope code, or the agent-control code a refusal
 /// names in its details (`SPAWN_LIMIT`).
 pub(crate) fn control_wire_code(error: &ScopeError) -> &'static str {
-    if error.details.get("code").and_then(serde_json::Value::as_str) == Some(crate::agent_control::SPAWN_LIMIT_CODE) {
-        return crate::agent_control::SPAWN_LIMIT_CODE;
+    error
+        .details
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .and_then(detail_wire_code)
+        .unwrap_or_else(|| reference_chat_wire_code(error.code))
+}
+
+/// The agent-control codes a refusal may name in its details, beyond its scope code.
+fn detail_wire_code(code: &str) -> Option<&'static str> {
+    [
+        crate::agent_control::SPAWN_LIMIT_CODE,
+        crate::agent_control::AGENT_NOT_INSTALLED_CODE,
+        "DAEMON_DRAINING",
+        "DAEMON_RETIRING",
+        "HANDOVER_BUSY",
+        "SPAWN_FAILED",
+        "MACHINE_SERVICE_UNAVAILABLE",
+    ]
+    .into_iter()
+    .find(|known| *known == code)
+}
+
+/// A refusal with its scope code and the agent-control code it travels as.
+fn coded(code: ScopeErrorCode, wire: &str, message: impl Into<String>) -> ScopeError {
+    let mut error = reference_chat_scope(code, message);
+    if detail_wire_code(wire).is_some() {
+        error.details = serde_json::json!({ "code": wire });
     }
-    reference_chat_wire_code(error.code)
+    error
 }
 
 /// One session's status, and the screen it was read from.
@@ -750,8 +776,32 @@ async fn spawn_agent(
     }
     let admission = spawn_admission().lock().await;
     // A retry of a spawn that already created its pane answers with that pane, not a new one.
-    if let Some(existing) = sessions.live_session_for_request(&request_id) {
-        return Ok(spawn_reply(&existing, sessions.lineage_for(&existing).as_ref(), spec.id));
+    // The same request id naming a different spawn is refused: it never answers with a pane
+    // that runs something else.
+    let startup = crate::daemon::protocol::TerminalStartup::AgentLaunch { command: command.clone(), args: args.clone() };
+    if let Some(existing) = sessions.live_spawn_for_request(&request_id) {
+        if !same_spawn(&existing, spec.id, parent_session_id.as_deref(), workspace_id.as_deref(), &cwd, &startup) {
+            return Err(reference_chat_scope(
+                ScopeErrorCode::RequestConflict,
+                format!("request id {request_id} already spawned a different pane"),
+            ));
+        }
+        let lineage = sessions.lineage_for(&existing.session_id);
+        return Ok(spawn_reply(&existing.session_id, lineage.as_ref(), spec.id));
+    }
+    // An agent that is not installed is refused before any pane exists.
+    let probe = command.clone();
+    let installed = crate::ipc::run_blocking(move || {
+        Ok(launch_command_resolves(&probe, &crate::terminal::shell::legacy_search_paths()))
+    })
+    .await
+    .unwrap_or(false);
+    if !installed {
+        return Err(coded(
+            ScopeErrorCode::Unsupported,
+            crate::agent_control::AGENT_NOT_INSTALLED_CODE,
+            format!("{command} is not installed on this host, so {} cannot be spawned", spec.id),
+        ));
     }
     let (workspace_id, worktree, lineage) = match parent_session_id.as_deref() {
         Some(parent) => {
@@ -783,9 +833,9 @@ async fn spawn_agent(
         },
     };
     let session_id = sessions
-        .spawn_agent_pane(&request_id, &workspace_id, worktree, cwd.clone(), command, args, lineage.clone())
+        .spawn_agent_pane(&request_id, spec.id, &workspace_id, worktree, cwd.clone(), command, args, lineage.clone())
         .await
-        .map_err(|(code, message)| reference_chat_scope(code, message))?;
+        .map_err(|failure| coded(failure.code, failure.wire, failure.message))?;
     drop(admission);
     state.emit_desktop_event(
         AGENT_SPAWNED_EVENT,
@@ -813,9 +863,33 @@ async fn spawn_agent(
 
 fn spawn_limit(message: String) -> ScopeError {
     // Its own wire code, so a caller can tell a limit from any other refusal. It exits refused.
-    let mut error = reference_chat_scope(ScopeErrorCode::Forbidden, message);
-    error.details = serde_json::json!({ "code": crate::agent_control::SPAWN_LIMIT_CODE });
-    error
+    coded(ScopeErrorCode::Forbidden, crate::agent_control::SPAWN_LIMIT_CODE, message)
+}
+
+/// Whether `command` names a program this host can start: an existing file when it is a path,
+/// else a name found on the agent search path (Windows tries the PATHEXT extensions).
+pub(crate) fn launch_command_resolves(command: &str, search_paths: &[std::path::PathBuf]) -> bool {
+    let command = command.trim();
+    if command.contains('/') || command.contains('\\') {
+        return std::path::Path::new(command).is_file();
+    }
+    crate::ipc::agents::resolve_binary(command, search_paths).is_some()
+}
+
+/// Whether the earlier spawn behind a reused request id asked for this same pane.
+fn same_spawn(
+    record: &crate::daemon::session_service::AgentSpawnRecord,
+    agent: &str,
+    parent: Option<&str>,
+    workspace_id: Option<&str>,
+    cwd: &str,
+    startup: &crate::daemon::protocol::TerminalStartup,
+) -> bool {
+    record.agent.as_deref() == Some(agent)
+        && record.parent.as_deref() == parent
+        && workspace_id.is_none_or(|workspace| workspace == record.workspace_id)
+        && record.cwd.as_deref() == Some(cwd)
+        && record.startup.as_ref() == Some(startup)
 }
 
 fn spawn_reply(session_id: &str, lineage: Option<&crate::agent_control::Lineage>, agent: &str) -> serde_json::Value {
@@ -1260,6 +1334,10 @@ fn control_finish(result: Result<serde_json::Value, ScopeError>) -> Response {
         Ok(value) => control_json(value),
         Err(error) if control_wire_code(&error) == crate::agent_control::SPAWN_LIMIT_CODE => {
             machine_error_with_details(StatusCode::CONFLICT, crate::agent_control::SPAWN_LIMIT_CODE, &error.message, serde_json::Map::new())
+        }
+        // Any other agent-control code keeps its scope code's status and names itself.
+        Err(error) if control_wire_code(&error) != reference_chat_wire_code(error.code) => {
+            machine_error_with_details(reference_chat_status(error.code), control_wire_code(&error), &error.message, serde_json::Map::new())
         }
         Err(error) => reference_chat_refusal(&error),
     }
@@ -1825,6 +1903,8 @@ async fn forward_with(
                 .map_err(|failure| {
                     if failure.code == crate::agent_control::SPAWN_LIMIT_CODE {
                         spawn_limit(failure.message)
+                    } else if let Some(wire) = detail_wire_code(&failure.code) {
+                        coded(forward_scope_code(&failure.code), wire, failure.message)
                     } else {
                         reference_chat_scope(forward_scope_code(&failure.code), failure.message)
                     }
@@ -1860,7 +1940,9 @@ fn forward_scope_code(code: &str) -> ScopeErrorCode {
         "CONTROL_CONFLICT" => ScopeErrorCode::ControlConflict,
         "REQUEST_CONFLICT" => ScopeErrorCode::RequestConflict,
         "PROVIDER_OWNED" => ScopeErrorCode::ProviderOwned,
-        "UNSUPPORTED" | "PAIRED_HOST_CAPABILITY_UNAVAILABLE" => ScopeErrorCode::Unsupported,
+        "UNSUPPORTED" | "PAIRED_HOST_CAPABILITY_UNAVAILABLE" | "AGENT_NOT_INSTALLED" => ScopeErrorCode::Unsupported,
+        // The paired host refused before it opened a pane: nothing ran there.
+        "DAEMON_DRAINING" | "DAEMON_RETIRING" | "HANDOVER_BUSY" | "SPAWN_FAILED" => ScopeErrorCode::InventoryIncomplete,
         "PAYLOAD_TOO_LARGE" => ScopeErrorCode::PayloadTooLarge,
         "CAPTURE_UNSUPPORTED" => ScopeErrorCode::CaptureUnsupported,
         "INVENTORY_INCOMPLETE"
@@ -3442,6 +3524,21 @@ mod tests {
             }
             let error = handle(state, spawn_op(&cwd, Some(&root), None, "c-over")).await.expect_err("the ninth is refused");
             assert_eq!(control_wire_code(&error), crate::agent_control::SPAWN_LIMIT_CODE);
+            // A retry of a request that already spawned answers with its pane even at the cap.
+            let retried = handle(state, spawn_op(&cwd, Some(&root), None, "c-0")).await.expect("a retry is not a new child");
+            assert_eq!(spawned_id(&retried), children[0]);
+            // The same request id asking for another agent or another parent is refused.
+            let mut other_agent = spawn_op(&cwd, Some(&root), None, "c-1");
+            if let AgentControlOp::Spawn { agent, .. } = &mut other_agent {
+                *agent = "codex".into();
+            }
+            let conflict = handle(state, other_agent).await.expect_err("another agent under a used request id");
+            assert_eq!(control_wire_code(&conflict), "REQUEST_CONFLICT");
+            let conflict = handle(state, spawn_op(&cwd, Some(&children[0]), None, "c-1"))
+                .await
+                .expect_err("another parent under a used request id");
+            assert_eq!(control_wire_code(&conflict), "REQUEST_CONFLICT");
+            assert_eq!(crate::agent_control::exit_code_for("REQUEST_CONFLICT"), crate::agent_control::EXIT_REFUSED);
             // A closed child frees its slot.
             let freed = children.pop().unwrap();
             server.terminal_service().close_session(&freed).await.unwrap();
@@ -3450,5 +3547,55 @@ mod tests {
         .catch_unwind()
         .await;
         finish(&server, outcome).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_on_a_draining_daemon_is_refused_as_draining_not_invalid() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        server.handover_manager.force_draining_for_test();
+        let error = handle(server.remote_state(), spawn_op(&cwd, None, Some("spawn-ws"), "draining"))
+            .await
+            .expect_err("a draining daemon opens no pane");
+        assert_eq!(control_wire_code(&error), "DAEMON_DRAINING");
+        assert_ne!(error.code, ScopeErrorCode::InvalidRequest);
+        assert_eq!(crate::agent_control::exit_code_for(control_wire_code(&error)), crate::agent_control::EXIT_REFUSED);
+        match error_response(error) {
+            crate::daemon::protocol::DaemonResponse::Error { code, .. } => assert_eq!(code.as_deref(), Some("DAEMON_DRAINING")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(server.remote_state().session_backend.list_sessions().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spawn_of_an_agent_that_is_not_installed_is_refused_before_any_pane() {
+        let (_root, server, cwd) = spawn_fixture().await;
+        let mut op = spawn_op(&cwd, None, Some("spawn-ws"), "missing-agent");
+        if let AgentControlOp::Spawn { command, args, .. } = &mut op {
+            *command = Some("ferryx-no-such-agent-binary".into());
+            args.clear();
+        }
+        let error = handle(server.remote_state(), op).await.expect_err("a missing command is refused");
+        assert_eq!(control_wire_code(&error), crate::agent_control::AGENT_NOT_INSTALLED_CODE);
+        assert_eq!(error.code, ScopeErrorCode::Unsupported);
+        assert_eq!(crate::agent_control::exit_code_for(control_wire_code(&error)), crate::agent_control::EXIT_REFUSED);
+        assert!(server.remote_state().session_backend.list_sessions().await.is_empty(), "no pane was created");
+    }
+
+    #[test]
+    fn a_launch_command_resolves_on_the_search_path_with_the_platforms_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = if cfg!(windows) { "fake-agent.exe" } else { "fake-agent" };
+        let path = dir.path().join(file);
+        std::fs::write(&path, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let search = vec![dir.path().to_path_buf()];
+        assert!(launch_command_resolves("fake-agent", &search), "the bare name resolves");
+        assert!(!launch_command_resolves("other-agent", &search));
+        assert!(launch_command_resolves(path.to_str().unwrap(), &[]), "an existing path resolves");
+        assert!(!launch_command_resolves(dir.path().join("gone").to_str().unwrap(), &search));
     }
 }
