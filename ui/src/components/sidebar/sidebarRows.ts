@@ -78,12 +78,20 @@ export function applyWorktreeOrder(grouped: Map<string, Worktree[]>, order: Work
       seen.add(rowKey(row));
       next.push(row);
     }
-    for (const row of rows) {
-      const key = rowKey(row);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      next.push(row);
-    }
+    // Rows the user never dragged follow in a stable order of their own. Git, the inactive-project
+    // cache and each refresh return them in different orders, so appending them in arrival order
+    // made every select-triggered refresh look like the list had re-sorted itself.
+    const rest = rows.filter((row) => !seen.has(rowKey(row)));
+    rest.sort((left, right) => {
+      const leftId = left.workspaceId ?? "";
+      const rightId = right.workspaceId ?? "";
+      if (leftId !== rightId) return leftId < rightId ? -1 : 1;
+      const leftPath = left.path.toLowerCase();
+      const rightPath = right.path.toLowerCase();
+      if (leftPath === rightPath) return 0;
+      return leftPath < rightPath ? -1 : 1;
+    });
+    next.push(...rest);
     ordered.set(workspaceId, next);
   }
   return ordered;

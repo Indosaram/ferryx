@@ -2519,6 +2519,14 @@ function WorkspaceApp({
       persistProjects(next);
       return next;
     });
+    // An import is meant to make the checkout usable right away, so adopt the first one exactly
+    // as Add Project does; otherwise the rows appear but nothing opens.
+    const adopted = imported[0];
+    if (adopted) {
+      setActiveProjectId(adopted.workspaceId);
+      persistActiveProjectId(adopted.workspaceId);
+      setWorktreeStatuses({});
+    }
   }, []);
 
   const handleConfirmRemoveProject = useCallback(async () => {

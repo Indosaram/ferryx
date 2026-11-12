@@ -37,7 +37,9 @@ function branchLabel(worktree: ExternalWorktree): string {
  * such as ones Orca created. Nothing is imported without an explicit choice.
  */
 export function ExternalWorktreeImportDialog({ workspaceId, worktrees, projects, onImported, onLater, onClose }: ExternalWorktreeImportDialogProps) {
-  const [selected, setSelected] = useState(() => new Set(worktrees.map((worktree) => worktree.path)));
+  // Nothing is preselected: a repository can list dozens of live worktrees (other agents'
+  // checkouts), and importing them all as projects must stay an explicit choice.
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [dontAskAgain, setDontAskAgain] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failures, setFailures] = useState<Record<string, string>>({});
