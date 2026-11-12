@@ -1068,18 +1068,18 @@ mod tests {
         assert_eq!(cut_overs.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    /// An engine stand-in that applies every teach, as mhc answers an accepted one.
-    struct ApplyingMemory;
+    /// An engine stand-in that answers a teach as the pinned mhc 2026.11.x does: `persisted`.
+    struct PersistingMemory;
 
     #[async_trait::async_trait]
-    impl ferryx_hub::meta::mhc_supervisor::OwnerMemory for ApplyingMemory {
+    impl ferryx_hub::meta::mhc_supervisor::OwnerMemory for PersistingMemory {
         async fn memory_request(
             &self,
             _name: &str,
             data: Value,
         ) -> Result<Value, ferryx_hub::meta::mhc_supervisor::MemoryRequestError> {
             let receipt = format!("rcpt-{}", data["sourceId"].as_str().unwrap_or_default());
-            Ok(json!({"changed": true, "receipt": {"receiptId": receipt, "state": "applied"}}))
+            Ok(json!({"changed": true, "receipt": {"receiptId": receipt, "state": "persisted", "applied": []}}))
         }
 
         async fn ingest_owner_text(
@@ -1132,7 +1132,7 @@ mod tests {
             adapter: ferryx_hub::supervisor::ChannelProvider::Desktop,
             channel_binding_id: None,
             control: None,
-            memory: Some(std::sync::Arc::new(ApplyingMemory) as std::sync::Arc<dyn ferryx_hub::meta::mhc_supervisor::OwnerMemory>),
+            memory: Some(std::sync::Arc::new(PersistingMemory) as std::sync::Arc<dyn ferryx_hub::meta::mhc_supervisor::OwnerMemory>),
         };
         handle(
             &pool,
