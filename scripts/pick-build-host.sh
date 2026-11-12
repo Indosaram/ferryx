@@ -74,9 +74,15 @@ if [ ! -f "$HOSTS_FILE" ]; then
   exit 4
 fi
 
-while read -r h transport target _rest; do
+while read -r h transport target disk_gb ram_gb _rest; do
   case "$h" in ''|'#'*) continue ;; esac
   [ -n "${target:-}" ] || { echo "$h: malformed line in $HOSTS_FILE" >&2; continue; }
+
+  # A roster line may end with its own free-disk and free-RAM floors. instabox
+  # has a 20 GB /data and 7 GB of RAM in total, so the fleet defaults would
+  # exclude it forever however much was cleaned: the floor belongs to the host.
+  md=${disk_gb:-$MIN_DISK_GB}
+  mr=${ram_gb:-$MIN_FREE_GB}
 
   lock="$LOCKDIR/$h"; if claimed "$lock"; then echo "$h: claimed ($(cat "$lock"))" >&2; continue; fi
   read -r cores load ram disk busy extra < <(probe "$transport" "$target") || true
@@ -86,8 +92,8 @@ while read -r h transport target _rest; do
     unset cores load ram disk busy extra
     continue
   fi
-  ok=$(awk -v c="$cores" -v l="$load" -v r="$ram" -v d="$disk" -v b="$busy" -v mr="$MIN_FREE_GB" -v md="$MIN_DISK_GB" -v ml="$MAX_LOAD_PER_CORE" 'BEGIN{print (c>0 && l/c<ml && r>=mr && d>=md && b==0)?1:0}')
-  echo "$h: cores=$cores load=$load freeRAM=${ram}G freeDisk=${disk}G builds=$busy idle=$ok" >&2
+  ok=$(awk -v c="$cores" -v l="$load" -v r="$ram" -v d="$disk" -v b="$busy" -v mr="$mr" -v md="$md" -v ml="$MAX_LOAD_PER_CORE" 'BEGIN{print (c>0 && l/c<ml && r>=mr && d>=md && b==0)?1:0}')
+  echo "$h: cores=$cores load=$load freeRAM=${ram}G/min=${mr}G freeDisk=${disk}G/min=${md}G builds=$busy idle=$ok" >&2
   if [ "$ok" = 1 ]; then
     s=$(awk -v c="$cores" -v l="$load" 'BEGIN{printf "%d", l/c*1000}')
 
