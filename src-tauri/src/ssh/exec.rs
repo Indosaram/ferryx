@@ -85,7 +85,12 @@ pub fn probe_argv(host: &SshHost) -> Vec<String> {
         "-o".to_string(),
         "BatchMode=yes".to_string(),
         "-o".to_string(),
-        "ConnectTimeout=2.5".to_string(),
+        // A jump host pays two handshakes; 2.5 s is a single-hop bound.
+        if host.jump_host.is_some() {
+            "ConnectTimeout=10".to_string()
+        } else {
+            "ConnectTimeout=2.5".to_string()
+        },
     ];
     append_options(&mut argv, host);
     append_target(&mut argv, host);

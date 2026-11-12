@@ -179,14 +179,23 @@ fn ssh_reconnect_safety_plan_does_not_update_host_keys() {
 }
 
 #[test]
-fn ssh_plan_configures_connect_timeout_bounded_for_detection_step() {
+fn ssh_plan_bounds_connect_timeout_per_hop() {
+    let mut direct = host();
+    direct.jump_host = None;
     for interactive in [false, true] {
-        let plan = ssh_plan(&host(), "true".into(), interactive).unwrap();
+        let plan = ssh_plan(&direct, "true".into(), interactive).unwrap();
         assert!(
             plan.args
                 .windows(2)
                 .any(|args| args == ["-o", "ConnectTimeout=3"]),
             "ConnectTimeout must be 3 to allow OpenSSH to exit 255 before probe step deadline"
+        );
+        let plan = ssh_plan(&host(), "true".into(), interactive).unwrap();
+        assert!(
+            plan.args
+                .windows(2)
+                .any(|args| args == ["-o", "ConnectTimeout=10"]),
+            "a jump host pays two handshakes, so a single hop's 3 s expires mid banner exchange"
         );
     }
 }
