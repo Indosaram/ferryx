@@ -28,6 +28,15 @@ pub const BROWSER_FORBIDDEN: &str = "BROWSER_FORBIDDEN";
 /// Same code the local CLI already uses for malformed requests.
 pub const BROWSER_CLI_REQUEST_INVALID: &str = "BROWSER_CLI_REQUEST_INVALID";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VaultAction {
+    ListForPage,
+    RequestUse,
+    Fill,
+    Totp,
+}
+
 /// Exact command named by pairing errors and help text.
 pub const PAIRING_COMMAND: &str = "ferryx browser controllers pair --name <label>";
 /// Pending pairing/grant requests expire after this long.
@@ -244,6 +253,8 @@ pub enum AuthorityError {
     },
     #[error("unknown browser capability `{name}`")]
     UnknownCapability { name: String },
+    #[error("password fields require `ferryx browser vault`; raw credential access is blocked")]
+    CredentialBlocked,
     #[error("{reason}")]
     Forbidden {
         tool: Option<ToolId>,
@@ -261,6 +272,7 @@ impl AuthorityError {
             Self::StaleSession { .. } => BROWSER_CONTROLLER_SESSION_STALE,
             Self::UnknownCapability { .. } => BROWSER_UNKNOWN_CAPABILITY,
             Self::Forbidden { .. } => BROWSER_FORBIDDEN,
+            Self::CredentialBlocked => "BROWSER_CREDENTIAL_BLOCKED",
             // Matches the existing screenshot refusal (`IpcErrorCode::Unsupported`).
             Self::Unsupported(_) => "UNSUPPORTED",
         }
@@ -268,6 +280,7 @@ impl AuthorityError {
 
     pub fn details(&self) -> serde_json::Value {
         match self {
+            Self::CredentialBlocked => json!({ "command": "ferryx browser vault" }),
             Self::PairingRequired => json!({ "pairingCommand": PAIRING_COMMAND }),
             Self::Revoked { controller } => json!({
                 "controllerId": controller,

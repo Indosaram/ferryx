@@ -39,7 +39,7 @@ pub use policy::{
 };
 pub use protocol::{
     ApprovalId, ApprovalKind, ApprovalResolution, AuthorityError, ControllerDirectory,
-    ControllerId, ControllerStanding, Principal, PrincipalKind, SessionEpoch,
+    ControllerId, ControllerStanding, Principal, PrincipalKind, SessionEpoch, VaultAction,
     APP_CHROME_WEBVIEW_LABEL, BROWSER_CLI_REQUEST_INVALID, BROWSER_CONTROLLER_PAIRING_REQUIRED,
     BROWSER_CONTROLLER_REVOKED, BROWSER_CONTROLLER_SESSION_STALE, BROWSER_FORBIDDEN,
     BROWSER_UNKNOWN_CAPABILITY, MAX_PENDING_APPROVALS_PER_CONTROLLER, PAIRING_APPROVAL_TTL,
