@@ -36,6 +36,7 @@ pub struct OpenFileCliCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserCliCommand {
+    Vault { browser_id: String, action: crate::ipc::browser_cli::BrowserVaultCliAction },
     List,
     Open {
         url: String,
@@ -407,6 +408,18 @@ where
         return Err(BROWSER_ADAPTER_ROUTE.into());
     }
     match args.get(2).map(String::as_str) {
+        Some("vault") => {
+            use crate::ipc::browser_cli::BrowserVaultCliAction as A;
+            let browser_id = required_option(&args, "--browser-id")?;
+            let action = match args.get(3).map(String::as_str) {
+                Some("list-for-page") => A::ListForPage,
+                Some("request-use") => A::RequestUse { handle: required_option(&args, "--handle")? },
+                Some("fill") => A::Fill { handle: required_option(&args, "--handle")?, grant: required_option(&args, "--grant")? },
+                Some("totp") => A::Totp { handle: required_option(&args, "--handle")?, grant: required_option(&args, "--grant")? },
+                _ => return Err("usage: ferryx browser vault <list-for-page|request-use|fill|totp> --browser-id <id> [--handle <handle>] [--grant <grant>]".into()),
+            };
+            Ok(BrowserCliCommand::Vault { browser_id, action })
+        }
         Some("list") => Ok(BrowserCliCommand::List),
         Some("open") => {
             let url = required_option(&args, "--url")?;
@@ -1295,6 +1308,7 @@ pub fn build_dom_get_script(subselector: &BrowserGetSubselector) -> String {
                 r#"(() => {{
   const el = document.querySelector({sel});
   if (!el) return JSON.stringify({{ error: "BROWSER_NOT_FOUND", message: "element not found" }});
+  if (el.matches('input[type="password"]')) return JSON.stringify({{ error: "BROWSER_CREDENTIAL_BLOCKED", message: "password values are not readable through this command; use `ferryx browser vault`" }});
   return JSON.stringify(el.innerText || el.textContent || "");
 }})()"#
             )
@@ -1305,6 +1319,13 @@ pub fn build_dom_get_script(subselector: &BrowserGetSubselector) -> String {
                 r#"(() => {{
   const el = document.querySelector({sel});
   if (!el) return JSON.stringify({{ error: "BROWSER_NOT_FOUND", message: "element not found" }});
+  // A password field exposes its default value through the value attribute, and an
+  // ancestor's outerHTML carries that attribute with it. Check the IDL property as well
+  // as the selector so a type set from script is still caught, and refuse if any
+  // password input is nested inside the requested subtree.
+  const isPassword = (n) => !!n && n.tagName === "INPUT" && n.type === "password";
+  if (isPassword(el) || el.querySelector('input[type="password"]'))
+    return JSON.stringify({{ error: "BROWSER_CREDENTIAL_BLOCKED", message: "password values are not readable through this command; use \`ferryx browser vault\`" }});
   return JSON.stringify(el.outerHTML);
 }})()"#
             )
@@ -1315,6 +1336,7 @@ pub fn build_dom_get_script(subselector: &BrowserGetSubselector) -> String {
                 r#"(() => {{
   const el = document.querySelector({sel});
   if (!el) return JSON.stringify({{ error: "BROWSER_NOT_FOUND", message: "element not found" }});
+  if (el.matches('input[type="password"]')) return JSON.stringify({{ error: "BROWSER_CREDENTIAL_BLOCKED", message: "password values are not readable through this command; use `ferryx browser vault`" }});
   return JSON.stringify(el.value !== undefined ? el.value : null);
 }})()"#
             )
@@ -1329,6 +1351,13 @@ pub fn build_dom_get_script(subselector: &BrowserGetSubselector) -> String {
                 r#"(() => {{
   const el = document.querySelector({sel});
   if (!el) return JSON.stringify({{ error: "BROWSER_NOT_FOUND", message: "element not found" }});
+  // getAttribute("value") returns the default value of a password field, which is a
+  // credential read even though the live property is what a fill writes. Refuse the
+  // value-bearing attributes on a password input; unrelated attributes stay readable.
+  const isPassword = (n) => !!n && n.tagName === "INPUT" && n.type === "password";
+  const name = ({attr} || "").toLowerCase();
+  if (isPassword(el) && (name === "value" || name === "defaultvalue"))
+    return JSON.stringify({{ error: "BROWSER_CREDENTIAL_BLOCKED", message: "password values are not readable through this command; use \`ferryx browser vault\`" }});
   return JSON.stringify(el.getAttribute({attr}));
 }})()"#
             )
@@ -1750,6 +1779,7 @@ pub fn build_dom_find_script(subselector: &BrowserFindSubselector) -> String {
 
 fn browser_cli_request(command: BrowserCliCommand) -> BrowserCliRequest {
     match command {
+        BrowserCliCommand::Vault { browser_id, action } => BrowserCliRequest::Vault { browser_id, action },
         BrowserCliCommand::List => BrowserCliRequest::List,
         BrowserCliCommand::Open {
             url,
@@ -3818,6 +3848,7 @@ fn format_browser_cli_response(
     response: BrowserCliResponse,
 ) -> Result<String, String> {
     match response {
+        BrowserCliResponse::Vault(reply) => serde_json::to_string(&reply).map_err(|error| error.to_string()),
         BrowserCliResponse::List { sessions } => {
             serde_json::to_string(&sessions).map_err(|error| error.to_string())
         }
@@ -4578,6 +4609,47 @@ pub fn run_daemon_headless(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dom_get_refuses_password_value_vectors() {
+        let vectors = [
+            build_dom_get_script(&BrowserGetSubselector::Value { selector: "input#pw".into() }),
+            build_dom_get_script(&BrowserGetSubselector::Html { selector: "input#pw".into() }),
+            build_dom_get_script(&BrowserGetSubselector::Html { selector: "form#login".into() }),
+            build_dom_get_script(&BrowserGetSubselector::Attr {
+                selector: "input#pw".into(),
+                attribute: "value".into(),
+            }),
+            build_dom_get_script(&BrowserGetSubselector::Attr {
+                selector: "input#pw".into(),
+                attribute: "defaultValue".into(),
+            }),
+        ];
+        for script in vectors {
+            assert!(script.contains("BROWSER_CREDENTIAL_BLOCKED"), "password read must refuse");
+        }
+        let nested = build_dom_get_script(&BrowserGetSubselector::Html { selector: "form".into() });
+        assert!(nested.contains("input[type=\"password\"]"));
+    }
+
+    #[test]
+    fn vault_cli_routes_secret_free_actions() {
+        use crate::ipc::browser_cli::BrowserVaultCliAction as A;
+        let cases = [
+            (vec!["list-for-page"], A::ListForPage),
+            (vec!["request-use", "--handle", "h"], A::RequestUse { handle: "h".into() }),
+            (vec!["fill", "--handle", "h", "--grant", "g"], A::Fill { handle: "h".into(), grant: "g".into() }),
+            (vec!["totp", "--handle", "h", "--grant", "g"], A::Totp { handle: "h".into(), grant: "g".into() }),
+        ];
+        for (tail, action) in cases {
+            let mut args = vec!["ferryx", "browser", "vault"];
+            args.extend(tail);
+            args.extend(["--browser-id", "b1"]);
+            let parsed = parse_browser_cli(args).unwrap();
+            assert_eq!(browser_cli_request(parsed), BrowserCliRequest::Vault { browser_id: "b1".into(), action });
+        }
+        assert!(parse_browser_cli(["ferryx", "browser", "vault", "fill", "--browser-id", "b1", "--handle", "h"]).is_err());
+    }
 
     fn adapter_args(extra: &[&str]) -> Vec<String> {
         ["ferryx", "browser"].iter().chain(extra.iter()).map(|arg| arg.to_string()).collect()

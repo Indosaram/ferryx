@@ -146,7 +146,8 @@ export function wakeLocalSessionRecovery(workspaceId: string, sessionId?: string
     const snapshot = getWorkspaceSnapshot(workspaceId);
     const session = snapshot?.sessions[sessionId];
     if (!session || session.lifecycle === "exited" || session.backendUnavailableReason === "identity_conflict" ||
-      session.reconnectError?.code === "IDENTITY_CONFLICT" || session.remoteConnectionState !== "reconnecting") return;
+      session.reconnectError?.code === "IDENTITY_CONFLICT" ||
+      (session.remoteConnectionState !== "reconnecting" && session.remoteConnectionState !== "disconnected")) return;
     if (snapshot && session && !isPairedWorkspaceId(workspaceId) && !isRemoteWorkspaceId(workspaceId) && session.backendSessionId) {
       setWorkspaceSnapshot(workspaceId, { ...snapshot, sessions: { ...snapshot.sessions,
         [sessionId]: { ...session, remoteConnectionState: "reconnecting" },
@@ -459,8 +460,8 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
       if (isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)) continue;
       for (const session of Object.values(state.sessions)) {
         if (!session.backendSessionId || hasPendingLocalSplit(session) || session.lifecycle === "exited" ||
-            session.backendUnavailableReason === "identity_conflict" ||
-            session.remoteConnectionState !== "reconnecting") continue;
+            session.backendUnavailableReason === "identity_conflict" || session.reconnectError?.code === "IDENTITY_CONFLICT" ||
+            (session.remoteConnectionState !== "reconnecting" && session.remoteConnectionState !== "disconnected")) continue;
         const identity = { kind: "local" as const, frontendSessionId: session.id,
           backendSessionId: session.backendSessionId, expectedIncarnation: session.incarnation };
         const key = JSON.stringify([workspaceId, formatRecoveryKey(identity)]);
@@ -472,6 +473,8 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
         // (an unreachable predecessor answers `owner_unavailable` instead), so this is positive
         // absence, not a transport outage. Two answers in a row absorb a handover-adoption race.
         let absentStreak = 0;
+        // Both transport-loss states use this single owner and its bounded exponential backoff.
+        // Only retryable outcomes loop; blocked must not retry with stale authority or identity.
         owner.scheduler = new RecoveryScheduler({ identity, clock: localRecoveryClock, attemptAction: async (attempt) => {
           const before = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
           if (!before || before.backendSessionId !== owner.captured.backendSessionId ||

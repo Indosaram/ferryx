@@ -16,6 +16,7 @@ pub enum Scope {
     Eval,
     Native,
     File,
+    Vault,
 }
 
 /// Per-origin grant scope held by a local controller.
@@ -104,6 +105,10 @@ macro_rules! tool_ids {
 }
 
 tool_ids! {
+    VaultList => "vault.credentials.list_for_page",
+    VaultRequestUse => "vault.credential.request_use",
+    VaultFill => "vault.credential.fill",
+    VaultTotp => "vault.totp.fill",
     List => "browser.list",
     Identify => "browser.identify",
     Snapshot => "browser.snapshot",
@@ -217,6 +222,10 @@ impl ToolId {
         use GrantScope as G;
         use Scope as S;
         match self {
+            Self::VaultList => spec(self, S::Vault, true, Some(G::Interact), true),
+            Self::VaultRequestUse => spec(self, S::Vault, true, Some(G::Interact), true),
+            Self::VaultFill => spec(self, S::Vault, true, Some(G::Interact), true),
+            Self::VaultTotp => spec(self, S::Vault, true, Some(G::Interact), true),
             Self::List => spec(self, S::Read, false, None, false),
             Self::Identify => spec(self, S::Read, false, None, false),
             Self::Snapshot => spec(self, S::Read, true, Some(G::Read), false),

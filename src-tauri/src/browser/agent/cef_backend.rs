@@ -124,9 +124,11 @@ pub async fn act_element(
         }
     }
     if let BrowserAutomationAction::Type { reference: Some(reference), text } = action {
-        let focus = BrowserAutomationAction::Focus { reference: reference.clone() };
-        let script = observe::act_script(&focus, expect, true)
-            .ok_or_else(|| BrowserError::AutomationFailed("focus addresses no element".into()))?;
+        recheck_act(browser_id)?;
+        observe::parse_act(&eval_isolated(browser_id, &observe::credential_check_script(reference, expect)).await?)?;
+        // Focus the resolved element and verify the focus landed on it, so a focus handler
+        // cannot redirect the trusted insertText below into a different element.
+        let script = observe::focus_bind_script(reference, expect);
         recheck_act(browser_id)?;
         observe::parse_act(&eval_isolated(browser_id, &script).await?)?;
         recheck_act(browser_id)?;
@@ -152,6 +154,10 @@ pub async fn act(browser_id: &str, action: &BrowserAutomationAction) -> Result<b
             Ok(true)
         }
         BrowserAutomationAction::Type { reference: None, text } => {
+            // Typing at the current focus is only safe for a non-credential field; the check
+            // below refuses a password field, and it runs before anything is inserted.
+            recheck_act(browser_id)?;
+            observe::parse_act(&eval_isolated(browser_id, observe::focused_credential_check_script()).await?)?;
             recheck_act(browser_id)?;
             call(browser_id, "Input.insertText", json!({ "text": text })).await?;
             Ok(true)
@@ -400,6 +406,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn password_type_refusal_dispatches_no_trusted_input() {
+        let cdp = FakeCdp::start("password-blocked", |method, _| {
+            world(method, 9).unwrap_or_else(|| evaluated(json!({
+                "ok": false, "code": "BROWSER_CREDENTIAL_BLOCKED"
+            })))
+        });
+        let action = BrowserAutomationAction::Type { reference: Some("d1.2".into()), text: "secret".into() };
+        let error = act_element(&cdp.tab, &action, "input\ntextbox\n").await.unwrap_err();
+        assert_eq!(crate::ipc::error::IpcError::from(error).code.to_string(), "BROWSER_CREDENTIAL_BLOCKED");
+        assert!(!cdp.methods().iter().any(|method| method.starts_with("Input.")));
+        let action = BrowserAutomationAction::Type { reference: None, text: "secret".into() };
+        assert!(act(&cdp.tab, &action).await.is_err());
+        assert!(!cdp.methods().iter().any(|method| method.starts_with("Input.")));
+    }
+
+    #[tokio::test]
     async fn typing_into_a_ref_focuses_it_then_inserts_trusted_text() {
         let cdp = FakeCdp::start("type-ref", |method, _| {
             world(method, 6).unwrap_or_else(|| match method {
@@ -410,8 +432,9 @@ mod tests {
         let action = BrowserAutomationAction::Type { reference: Some("d1.2".into()), text: "hello".into() };
         act_element(&cdp.tab, &action, "input\ntextbox\n").await.unwrap();
         let expressions = cdp.expressions();
-        assert_eq!(expressions.len(), 1);
-        assert!(expressions[0].contains(r#""action":{"type":"focus"}"#));
+        assert_eq!(expressions.len(), 2);
+        assert!(expressions[0].contains(r#""action":{"type":"credentialCheck"}"#));
+        assert!(expressions[1].contains(r#""action":{"type":"focus"}"#));
         assert_eq!(cdp.calls().last().unwrap(), &("Input.insertText".to_string(), json!({ "text": "hello" })));
     }
 
@@ -437,14 +460,19 @@ mod tests {
 
     #[tokio::test]
     async fn untargeted_actions_become_trusted_key_and_text_input() {
-        let cdp = FakeCdp::start("untargeted", |_, _| Reply::Ok(json!({})));
+        let cdp = FakeCdp::start("untargeted", |method, _| {
+            world(method, 8).unwrap_or_else(|| match method {
+                "Runtime.evaluate" => evaluated(json!({ "ok": true })),
+                _ => Reply::Ok(json!({})),
+            })
+        });
         assert!(act(&cdp.tab, &BrowserAutomationAction::Keypress { key: "Shift+Tab".into() }).await.unwrap());
         assert!(act(&cdp.tab, &BrowserAutomationAction::Type { reference: None, text: "typed".into() }).await.unwrap());
         assert!(!act(&cdp.tab, &BrowserAutomationAction::Scroll { reference: None, x: None, y: Some(200) }).await.unwrap());
         assert!(!act(&cdp.tab, &click("d1.1")).await.unwrap());
         let keys = cdp::key_events(&crate::ipc::browser::parse_keypress("Shift+Tab").unwrap());
         assert_eq!(
-            cdp.calls(),
+            cdp.calls().into_iter().filter(|(method, _)| method.starts_with("Input.")).collect::<Vec<_>>(),
             [
                 ("Input.dispatchKeyEvent".to_string(), keys[0].clone()),
                 ("Input.dispatchKeyEvent".to_string(), keys[1].clone()),
@@ -456,7 +484,7 @@ mod tests {
             act(&cdp.tab, &BrowserAutomationAction::Keypress { key: "Hyper+x".into() }).await,
             Err(BrowserError::AutomationFailed(_))
         ));
-        assert_eq!(cdp.calls().len(), 3);
+        assert_eq!(cdp.calls().iter().filter(|(method, _)| method.starts_with("Input.")).count(), 3);
     }
 
     #[tokio::test]

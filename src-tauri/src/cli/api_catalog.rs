@@ -292,7 +292,7 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         name: "browser",
-        summary: "Drive Ferryx browser panes: navigation, DOM actions, queries, tabs and state",
+        summary: "Drive Ferryx browser panes: navigation, DOM actions, queries, tabs, state and human-approved vault fills",
         output: "json",
         subcommands: &[
             sub!("list", &[], &[]),
@@ -307,6 +307,10 @@ pub const CATALOG: &[Command] = &[
             sub!("url", &[], &[BROWSER_ID]),
             sub!("title", &[], &[BROWSER_ID]),
             sub!("snapshot", &[], &[BROWSER_ID]),
+            sub!("vault list-for-page", &[], &[BROWSER_ID, value!("--controller")]),
+            sub!("vault request-use", &[], &[BROWSER_ID, required!("--handle"), value!("--controller")]),
+            sub!("vault fill", &[], &[BROWSER_ID, required!("--handle"), required!("--grant"), value!("--controller")]),
+            sub!("vault totp", &[], &[BROWSER_ID, required!("--handle"), required!("--grant"), value!("--controller")]),
             sub!("click", &[], &[BROWSER_ID, GENERATION, REF]),
             sub!("dblclick", &[], &[BROWSER_ID, GENERATION, REF]),
             sub!("hover", &[], &[BROWSER_ID, GENERATION, REF]),

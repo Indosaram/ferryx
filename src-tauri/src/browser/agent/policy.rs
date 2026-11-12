@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use super::catalog::{GrantScope, Platform, Scope, ToolId};
 use super::protocol::{
-    AuthorityError, ControllerDirectory, ControllerStanding, Principal, PrincipalKind,
+    AuthorityError, ControllerDirectory, ControllerStanding, Principal, PrincipalKind, VaultAction,
 };
 use crate::browser::model::BrowserWaitCondition;
 use crate::ipc::browser_cli::{BrowserCliRequest, RemoteBrowserOperation};
@@ -100,6 +100,7 @@ impl Classification {
 pub enum Obligation {
     /// Controller holds this exact-origin grant for the tab's current document.
     OriginGrant { scope: GrantScope },
+    VaultGrant { action: VaultAction },
     /// Controller holds an interact grant for the destination origin; about:blank exempt.
     DestinationOriginGrant { url: String },
     /// Controller holds the per-tab local lease.
@@ -189,6 +190,16 @@ fn execute_wait_tool(params: Option<&serde_json::Value>) -> ToolId {
 pub fn classify_cli(request: &BrowserCliRequest) -> Result<Classification, AuthorityError> {
     use BrowserCliRequest as R;
     let classification = match request {
+        R::Vault { browser_id, action } => {
+            use crate::ipc::browser_cli::BrowserVaultCliAction as V;
+            let tool = match action {
+                V::ListForPage => ToolId::VaultList,
+                V::RequestUse { .. } => ToolId::VaultRequestUse,
+                V::Fill { .. } => ToolId::VaultFill,
+                V::Totp { .. } => ToolId::VaultTotp,
+            };
+            Classification::new(tool, browser(browser_id))
+        }
         R::List | R::TabList => Classification::new(ToolId::List, Target::Global),
         R::Identify => Classification::new(ToolId::Identify, Target::Global),
         R::Snapshot { browser_id } => Classification::new(ToolId::Snapshot, browser(browser_id)),
@@ -524,6 +535,13 @@ pub fn authorize(
                     path: classification.file_path.clone(),
                 }),
                 Scope::Native => obligations.push(Obligation::NativeCapability),
+                Scope::Vault => obligations.push(Obligation::VaultGrant { action: match tool {
+                    ToolId::VaultList => VaultAction::ListForPage,
+                    ToolId::VaultRequestUse => VaultAction::RequestUse,
+                    ToolId::VaultFill => VaultAction::Fill,
+                    ToolId::VaultTotp => VaultAction::Totp,
+                    _ => return Err(forbidden(tool, "invalid vault capability")),
+                } }),
                 Scope::Read | Scope::Interact | Scope::Eval => {}
             }
             if matches!(
@@ -573,6 +591,9 @@ pub fn authorize(
                 | ToolId::DriverClaim
                 | ToolId::DriverRelease
                 | ToolId::DriverHeartbeat => Some(DevicePermission::Control),
+                ToolId::VaultList | ToolId::VaultRequestUse | ToolId::VaultFill | ToolId::VaultTotp => {
+                    return Err(forbidden(tool, "credential use is a local, human-approved action"))
+                }
                 ToolId::Eval | ToolId::WaitFunction => {
                     return Err(forbidden(
                         tool,
@@ -703,6 +724,34 @@ mod tests {
 
     fn op(value: serde_json::Value) -> RemoteBrowserOperation {
         serde_json::from_value(value).expect("valid remote operation")
+    }
+
+    #[test]
+    fn vault_tools_require_local_origin_lease_and_vault_obligations() {
+        use crate::ipc::browser_cli::BrowserVaultCliAction as A;
+        let mut directory = FakeDirectory::default();
+        let local = Caller::Principal(active_controller(&mut directory, 1));
+        let ctx = context(&directory, Platform::Linux);
+        for (action, tool, expected) in [
+            (A::ListForPage, ToolId::VaultList, VaultAction::ListForPage),
+            (A::RequestUse { handle: "h".into() }, ToolId::VaultRequestUse, VaultAction::RequestUse),
+            (A::Fill { handle: "h".into(), grant: "g".into() }, ToolId::VaultFill, VaultAction::Fill),
+            (A::Totp { handle: "h".into(), grant: "g".into() }, ToolId::VaultTotp, VaultAction::Totp),
+        ] {
+            let request = BrowserCliRequest::Vault { browser_id: "b1".into(), action };
+            assert_eq!(classify_cli(&request).unwrap().tool, tool);
+            let allowed = authorize_cli(&local, &request, &ctx).unwrap();
+            assert_eq!(allowed.obligations, vec![
+                Obligation::OriginGrant { scope: GrantScope::Interact },
+                Obligation::TabLease,
+                Obligation::VaultGrant { action: expected },
+            ]);
+            for permission in [DevicePermission::View, DevicePermission::Control] {
+                let remote = Caller::Principal(remote(permission));
+                assert_eq!(authorize_cli(&remote, &request, &ctx).unwrap_err().code(), BROWSER_FORBIDDEN);
+            }
+            assert_eq!(authorize_cli(&Caller::TransportOnly, &request, &ctx).unwrap_err().code(), BROWSER_CONTROLLER_PAIRING_REQUIRED);
+        }
     }
 
     fn every_cli_request() -> Vec<(BrowserCliRequest, ToolId)> {

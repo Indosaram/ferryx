@@ -406,7 +406,21 @@
     var tag = tagOf(el);
     var action = op.action;
     function arg(name) { return own(action, name); }
+    if ((arg('type') === 'fill' || arg('type') === 'type' || arg('type') === 'credentialCheck') &&
+        tag === 'input' && call(M.inputType, el) === 'password') {
+      return fail('BROWSER_CREDENTIAL_BLOCKED', 'password fields require `ferryx browser vault`; raw credential access is blocked');
+    }
     switch (arg('type')) {
+      case 'credentialCheck': return { ok: true };
+      // Focus the resolved element and prove the focus stayed on it. Trusted text insertion
+      // writes wherever the focus is, so a page that moves focus in a handler must not be
+      // able to redirect a write meant for the authorised element.
+      case 'focusBind':
+        focus(el);
+        if (document.activeElement !== el) {
+          return fail('BROWSER_FOCUS_REDIRECTED', 'the page moved focus away from the addressed element');
+        }
+        return { ok: true };
       case 'point': return { ok: true, point: point(el) };
       case 'click': reveal(el); activate(el); break;
       case 'dblclick': reveal(el); fire(el, 'dblclick', 'MouseEvent', { detail: 2 }); break;
