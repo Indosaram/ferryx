@@ -176,7 +176,7 @@ mod live {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn cmd_voice_call_status() -> VoiceCallStatus {
     let settings = settings();
     let codex = codex_dictation_available();
@@ -226,7 +226,7 @@ pub struct SpeechKeyState {
     pub source: Option<&'static str>,
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn cmd_voice_call_key_state() -> SpeechKeyState {
     let file = ferryx_hub::hub_env::read_file_env();
     if file.get(SPEECH_KEY_VAR).is_some_and(|value| !value.trim().is_empty()) {
@@ -239,7 +239,7 @@ pub fn cmd_voice_call_key_state() -> SpeechKeyState {
 }
 
 /// Saves the owner's speech key for the next call. An empty key removes it.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub fn cmd_voice_call_set_key(api_key: String) -> Result<SpeechKeyState, IpcError> {
     let trimmed = api_key.trim();
     let mut entries = std::collections::BTreeMap::new();
@@ -250,7 +250,7 @@ pub fn cmd_voice_call_set_key(api_key: String) -> Result<SpeechKeyState, IpcErro
 }
 
 /// One utterance as text. The caller records at `VoiceCallStatus::sample_rate`.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn cmd_voice_call_transcribe(wav_base64: String) -> Result<serde_json::Value, IpcError> {
     let settings = settings();
     if let Some(reason) = unavailability(
@@ -273,8 +273,14 @@ pub async fn cmd_voice_call_transcribe(wav_base64: String) -> Result<serde_json:
 }
 
 /// Whether this machine's Codex sign-in can dictate, without reading the token out.
+#[cfg(feature = "hub-voice")]
 fn codex_dictation_available() -> bool {
-    cfg!(feature = "hub-voice") && ferryx_hub::codex_speech::available()
+    ferryx_hub::codex_speech::available()
+}
+
+#[cfg(not(feature = "hub-voice"))]
+fn codex_dictation_available() -> bool {
+    false
 }
 
 /// Enabled when a key is configured, or when a Codex sign-in can dictate instead. The hub
@@ -331,7 +337,7 @@ async fn transcribe_wav(
 }
 
 /// The reply to speak, as a WAV the surface plays from a blob URL.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn cmd_voice_call_speak(text: String) -> Result<SpokenAudio, IpcError> {
     let settings = settings();
     if let Some(reason) = speak_unavailability(
