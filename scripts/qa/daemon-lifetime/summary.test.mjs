@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SCENARIO_IDS, newSummary, selectScenarios, assertion, settle, block, applyQ00Gate, computeExitCode, validateSummary } from './lib/summary.mjs';
 import { readFileSync } from 'node:fs';
-import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, selfTestExitCode, SELF_TEST_PATCH, teardownRun, runWithTeardown, prepareSelfTestWorktree, teardownExtras, releaseOwnerFile, releaseContinuity, prepareBaselineDist, recoverAfterScenarioException } from './run.mjs';
+import { RUNNERS, assertRunnersComplete, parseArgs, artifactPaths, windowsArtifactCopyCommand, selfTestExitCode, SELF_TEST_PATCH, teardownRun, runWithTeardown, prepareSelfTestWorktree, teardownExtras, releaseOwnerFile, releaseContinuity, prepareBaselineDist, recoverAfterScenarioException } from './run.mjs';
 import { hostFor } from './lib/hosts.mjs';
 import { confirmOwner, ownerStartMatches, ownerIdentity, parseStarting, awaitPendingStart, retireOwner, freshOwner, invalidateOwnerState, setAsideHeadCatalog, workspaceCatalogFile, recoverOwnerAfterException, STARTING_WINDOW_MS, seedLocalSession, seedShell, counterCommand, SHELL_READY_TIMEOUT_MS, COUNTER_TIMEOUT_MS, SEED_TEXT_TAIL } from './scenarios/common.mjs';
 import { outputMatches, createOutputRoute } from './lib/agent.mjs';
@@ -249,6 +249,10 @@ test('artifact paths per platform layout', () => {
   const win = artifactPaths({ platform: 'windows', targetDir: 'C:\\t', productName: 'p', name: 'A' });
   assert.equal(win.guiExecutable, 'C:\\t\\debug\\ferryx.exe');
   assert.equal(win.cliExecutable, 'C:\\t\\debug\\ferryx-cli.exe');
+  assert.deepEqual(windowsArtifactCopyCommand(win.guiExecutable, win.cliExecutable, 'C:\\run\\artifacts\\A'), {
+    command: 'powershell.exe',
+    args: ['-NoProfile', '-Command', "Copy-Item -LiteralPath 'C:\\t\\debug\\ferryx.exe','C:\\t\\debug\\ferryx-cli.exe' -Destination 'C:\\run\\artifacts\\A'; Copy-Item -Path 'C:\\t\\debug\\*.dll' -Destination 'C:\\run\\artifacts\\A'"],
+  });
 });
 
 /**
@@ -1061,10 +1065,10 @@ test('Q11 types the marker through a GUI tab restored onto the SSH session and q
   assert.deepEqual(w.quits, [8, 10], 'the old GUI quits before the seeded restore, the restored GUI quits while held');
   assert.deepEqual(w.typedBy, [10], 'the marker is typed into the GUI that attached the restored tab');
   assert.equal(w.quitWhileHeld, true);
-  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.match(w.log, /^uncertain[0-9a-f]{12}\n$/);
   assert.equal(w.escapes, 0, 'no Escape when the tab attached without a setup wizard');
   // No data connection writes the marker: only the cat command and the closing interrupt.
-  for (const writes of Object.values(w.writesByHandle)) for (const text of writes) assert.ok(!text.includes('UNCERTAIN'), text);
+  for (const writes of Object.values(w.writesByHandle)) for (const text of writes) assert.ok(!text.includes('uncertain'), text);
 });
 
 test('Q11 fails when the uncertain write is replayed after the relaunch', async () => {
@@ -1093,7 +1097,7 @@ test('Q11 closes a first-run setup wizard with one Escape, then the restored tab
   const { w, result, failed } = await runQ11({ setupWizard: true });
   assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
   assert.equal(w.escapes, 1);
-  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.match(w.log, /^uncertain[0-9a-f]{12}\n$/);
   assert.equal(result.assertions.find((a) => a.name.startsWith('a GUI tab is attached')).detail.attached.escapeSent, true);
 });
 
@@ -1101,14 +1105,14 @@ test('Q11 focuses the GUI before its Escape and before typing when it opened beh
   const { w, result, failed } = await runQ11({ setupWizard: true, behindConsole: true });
   assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
   assert.deepEqual([w.escapes, w.lostKeys], [1, 0]);
-  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.match(w.log, /^uncertain[0-9a-f]{12}\n$/);
 });
 
 test('Q11 focuses a GUI that attached behind another window before typing the marker, without an Escape', async () => {
   const { w, result, failed } = await runQ11({ behindConsole: true });
   assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
   assert.deepEqual([w.escapes, w.lostKeys], [0, 0]);
-  assert.match(w.log, /^UNCERTAIN[0-9A-F]{12}\n$/);
+  assert.match(w.log, /^uncertain[0-9a-f]{12}\n$/);
 });
 
 test('Q11 on Windows appends through a PowerShell line loop (cmd.exe has no cat) and reads the CRLF file (run-q11 r4)', async () => {

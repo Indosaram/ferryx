@@ -294,6 +294,20 @@ export function artifactPaths({ platform, targetDir, productName, name }) {
 }
 
 /**
+ * Windows debug executables load the staged FFmpeg DLLs from their own directory at runtime, so the
+ * artifact copy must carry every DLL of the build output too. Copying `*.dll` (not a name list) keeps
+ * the staging correct across an FFmpeg major bump: a hardcoded avcodec-63.dll fails the whole run
+ * with 0xC0000135 (STATUS_DLL_NOT_FOUND) the moment the pinned SDK moves to 64.
+ */
+export function windowsArtifactCopyCommand(guiExecutable, cliExecutable, destRoot) {
+  const dir = path.win32.dirname(guiExecutable);
+  return {
+    command: 'powershell.exe',
+    args: ['-NoProfile', '-Command', `Copy-Item -LiteralPath '${guiExecutable}','${cliExecutable}' -Destination '${destRoot}'; Copy-Item -Path '${dir}\\*.dll' -Destination '${destRoot}'`],
+  };
+}
+
+/**
  * The owner record a release daemon writes: server.rs get_runtime_dir() of a release build
  * (/tmp/ferryx-<uid>, or %LOCALAPPDATA%\Ferryx\runtime with the product's TEMP fallback) + owner.json.
  */
@@ -614,7 +628,7 @@ async function main() {
       const src = fresh.appPath ?? hostPath.dirname(fresh.guiExecutable);
       if (host.platform === 'mac') await agent.call('exec', { command: 'ditto', args: [src, joinFor(host.platform, destRoot, path.basename(src))] });
       else await agent.call('exec', host.platform === 'windows'
-        ? { command: 'powershell.exe', args: ['-NoProfile', '-Command', `Copy-Item -LiteralPath '${fresh.guiExecutable}','${fresh.cliExecutable}' -Destination '${destRoot}'`] }
+        ? windowsArtifactCopyCommand(fresh.guiExecutable, fresh.cliExecutable, destRoot)
         : { command: 'cp', args: [fresh.guiExecutable, fresh.cliExecutable, destRoot] });
       const art = host.platform === 'mac'
         ? { name, appPath: joinFor(host.platform, destRoot, path.basename(src)), guiExecutable: macGuiExecutable(joinFor(host.platform, destRoot, path.basename(src))), cliExecutable: fresh.cliExecutable }
