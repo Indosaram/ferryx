@@ -10,6 +10,7 @@ MIN_DISK_GB=${MIN_DISK_GB:-15}
 MAX_LOAD_PER_CORE=${MAX_LOAD_PER_CORE:-0.5}
 tmo() { local t=$1; shift; perl -e 'alarm shift; exec @ARGV' "$t" "$@"; }
 LOCKDIR=/tmp/ferryx-build-host-locks; mkdir -p "$LOCKDIR"
+HOSTS_FILE=${FERRYX_BUILD_HOSTS_FILE:-$HOME/.config/ferryx/build-hosts}
 
 if [ "${1:-}" = "--release" ]; then
   [ -n "${2:-}" ] || { echo "usage: $0 --release <host>" >&2; exit 2; }
@@ -31,12 +32,13 @@ if [ "$(uname)" = Darwin ]; then m=$(vm_stat | awk "/page size/{p=\$8} /Pages fr
 d=$(df -k ~ | awk "NR==2{printf \"%d\", \$4/1048576}"); b=$(pgrep -x -c "cargo|rustc|zig" 2>/dev/null || pgrep -x "cargo|rustc|zig" | wc -l); echo "$c $l $m $d $b"'
 
 probe() {
+  # <transport> <target>. The roster lives in HOSTS_FILE, outside the repo:
+  # it is one person's infrastructure, not part of the product.
   case "$1" in
-    omarchy)  tmo 12 ssh -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes omarchy "$PROBE_UNIX" 2>/dev/null ;;
-    noye) tmo 12 ssh -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes box@100.110.229.115 "$PROBE_UNIX" 2>/dev/null ;;
-    maho-mac) tmo 12 ssh -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes i552267@100.65.239.35 "zsh -lc '$PROBE_UNIX'" 2>/dev/null ;;
-    maho-win) tmo 15 ssh -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes maho-win 'powershell -NoProfile -Command "$o=Get-CimInstance Win32_OperatingSystem; $c=(Get-CimInstance Win32_Processor|Measure-Object NumberOfLogicalProcessors -Sum).Sum; $l=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average/100*$c; $d=(Get-PSDrive C).Free/1GB; $b=@(Get-Process cargo,rustc,zig -ErrorAction SilentlyContinue).Count; \"$c $l $([int]($o.FreePhysicalMemory/1MB)) $([int]$d) $b\""' 2>/dev/null | tr -d '\r' ;;
-    instabox) tmo 40 instabox exec bong-i-1 -- 'echo "$(nproc) $(cut -d" " -f1 /proc/loadavg) $(awk "/MemAvailable/{printf \"%d\",\$2/1048576}" /proc/meminfo) $(df -k /data | awk "NR==2{printf \"%d\",\$4/1048576}") $(pgrep -x -c "cargo|rustc|zig")"' 2>/dev/null | tail -1 ;;
+    ssh-unix)   tmo 12 ssh -n -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes "$2" "$PROBE_UNIX" 2>/dev/null ;;
+    ssh-darwin) tmo 12 ssh -n -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes "$2" "zsh -lc '$PROBE_UNIX'" 2>/dev/null ;;
+    instabox)   tmo 40 instabox exec "$2" -- 'echo "$(nproc) $(cut -d" " -f1 /proc/loadavg) $(awk "/MemAvailable/{printf \"%d\",\$2/1048576}" /proc/meminfo) $(df -k /data | awk "NR==2{printf \"%d\",\$4/1048576}") $(pgrep -x -c "cargo|rustc|zig")"' 2>/dev/null | tail -1 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -44,18 +46,18 @@ best=""; best_score=999999
 for h in omarchy noye maho-mac maho-win instabox; do
 
   lock="$LOCKDIR/$h"; if claimed "$lock"; then echo "$h: claimed ($(cat "$lock"))" >&2; continue; fi
-  read -r cores load ram disk busy < <(probe "$h") || true
+  read -r cores load ram disk busy < <(probe "$transport" "$target") || true
   if [ -z "${cores:-}" ]; then echo "$h: unreachable" >&2; continue; fi
   ok=$(awk -v c="$cores" -v l="$load" -v r="$ram" -v d="$disk" -v b="$busy" -v mr="$MIN_FREE_GB" -v md="$MIN_DISK_GB" -v ml="$MAX_LOAD_PER_CORE" 'BEGIN{print (l/c<ml && r>=mr && d>=md && b==0)?1:0}')
   echo "$h: cores=$cores load=$load freeRAM=${ram}G freeDisk=${disk}G builds=$busy idle=$ok" >&2
   if [ "$ok" = 1 ]; then
     s=$(awk -v c="$cores" -v l="$load" 'BEGIN{printf "%d", l/c*1000}')
 
-    [ "$h" = instabox ] && s=$((s+10000))
+    [ "$transport" = instabox ] && s=$((s+10000))
     [ "$s" -lt "$best_score" ] && { best=$h; best_score=$s; }
   fi
   unset cores load ram disk busy
-done
+done < "$HOSTS_FILE"
 
 if [ -z "$best" ]; then echo "no idle free host: ask the user before using XenoCI (paid)" >&2; exit 3; fi
 if [ -n "$OWNER" ]; then echo "pid $OWNER" > "$LOCKDIR/$best"; else echo "until $(( $(date +%s) + CLAIM_TTL ))" > "$LOCKDIR/$best"; fi
