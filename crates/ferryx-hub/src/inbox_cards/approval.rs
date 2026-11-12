@@ -8,6 +8,7 @@
 //! `proposal:{id}` outcome row, retried by the action loop like any handed-off item).
 //! "Always" records an exact allow precedent and is refused for an effect that must be asked
 //! every time (a tainted outward send).
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
@@ -239,9 +240,72 @@ pub async fn handle_click(
     }))
 }
 
+/// An inbox proposal still pending this many days after `created_at` (inclusive) expires.
+pub const AGE_EXPIRY_DAYS: i64 = 30;
+/// Cadence of [`run_age_sweep`]: an aged proposal stays pending at most this long unswept.
+pub const AGE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// The one age-expiry write, shared by the click path and the sweep so both land identically.
+const EXPIRE_AGED_SQL: &str = "UPDATE action_proposals SET state = 'expired', decided_at = ?
+  WHERE id = ? AND origin = 'inbox' AND state = 'pending'";
+
+/// `created_at` is RFC 3339 (hub writes) or SQLite's `CURRENT_TIMESTAMP` (UTC, column default).
+fn parse_created(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|at| at.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|at| at.and_utc())
+        })
+}
+
+/// True when `created_at <= now - 30 days`; an unreadable stamp never ages out.
+pub fn is_aged(created_at: &str, now: DateTime<Utc>) -> bool {
+    parse_created(created_at)
+        .is_some_and(|at| at <= now - chrono::Duration::days(AGE_EXPIRY_DAYS))
+}
+
+/// Expires every pending inbox proposal that has aged out at `now`. Idempotent: a second pass
+/// (or a click that already expired the row) changes nothing. Creates no approval, precedent
+/// or action-loop event; the item becomes eligible for a fresh proposal in `present_ready`.
+pub async fn sweep_aged_proposals(pool: &SqlitePool, now: DateTime<Utc>) -> Result<u64> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, created_at FROM action_proposals WHERE origin = 'inbox' AND state = 'pending'",
+    )
+    .fetch_all(pool)
+    .await?;
+    let stamp = now.to_rfc3339();
+    let mut expired = 0;
+    for (id, created_at) in rows {
+        if !is_aged(&created_at, now) {
+            continue;
+        }
+        expired += sqlx::query(EXPIRE_AGED_SQL)
+            .bind(&stamp)
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    }
+    Ok(expired)
+}
+
+/// Runs [`sweep_aged_proposals`] every [`AGE_SWEEP_INTERVAL`]; spawn once at hub start.
+pub async fn run_age_sweep(pool: SqlitePool) {
+    let mut tick = tokio::time::interval(AGE_SWEEP_INTERVAL);
+    loop {
+        tick.tick().await;
+        if let Err(error) = sweep_aged_proposals(&pool, Utc::now()).await {
+            tracing::warn!(%error, "inbox proposal age sweep failed");
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct ProposalRow {
     state: String,
+    created_at: String,
     effect: String,
     signature: String,
     target: String,
@@ -252,9 +316,20 @@ struct ProposalRow {
 
 /// The owner's answer to inbox proposal `id`, applied in one write transaction.
 pub async fn resolve(pool: &SqlitePool, id: i64, choice: Choice, user: &str) -> Result<Resolution> {
+    resolve_at(pool, id, choice, user, Utc::now()).await
+}
+
+/// [`resolve`] at a given clock, so the age cutoff is testable.
+pub async fn resolve_at(
+    pool: &SqlitePool,
+    id: i64,
+    choice: Choice,
+    user: &str,
+    now: DateTime<Utc>,
+) -> Result<Resolution> {
     let mut tx = pool.begin_write().await?;
     let row: Option<ProposalRow> = sqlx::query_as(
-        "SELECT state, effect, signature, target, tainted, summary, payload_json
+        "SELECT state, created_at, effect, signature, target, tainted, summary, payload_json
            FROM action_proposals WHERE id = ? AND origin = 'inbox'",
     )
     .bind(id)
@@ -265,6 +340,17 @@ pub async fn resolve(pool: &SqlitePool, id: i64, choice: Choice, user: &str) -> 
     };
     if row.state != "pending" {
         return Ok(Resolution::AlreadyAnswered(row.state));
+    }
+    // An aged proposal expires exactly as the sweep would (same write, same stamp), whatever
+    // was clicked; this records nothing, so it precedes the Always refusal without weakening it.
+    if is_aged(&row.created_at, now) {
+        sqlx::query(EXPIRE_AGED_SQL)
+            .bind(now.to_rfc3339())
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(Resolution::Expired);
     }
     let effect: Effect = row.effect.parse().unwrap_or(Effect::Unknown);
     let tainted = row.tainted != 0;
@@ -537,6 +623,112 @@ mod tests {
         assert_eq!(state(&pool, closed).await, "expired");
         assert_eq!(resolve(&pool, 9999, Choice::Once, "UOWNER").await.unwrap(), Resolution::Unknown);
         assert_eq!(count(&pool, "SELECT COUNT(*) FROM lane_events").await, 0);
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-12T00:00:00Z").unwrap().with_timezone(&Utc)
+    }
+
+    async fn age(pool: &SqlitePool, id: i64, by: chrono::Duration) {
+        sqlx::query("UPDATE action_proposals SET created_at = ? WHERE id = ?")
+            .bind((fixed_now() - by).to_rfc3339()).bind(id).execute(pool).await.unwrap();
+    }
+
+    async fn snapshot(pool: &SqlitePool, id: i64) -> (String, Option<String>, i64, i64, i64) {
+        let (state, decided): (String, Option<String>) =
+            sqlx::query_as("SELECT state, decided_at FROM action_proposals WHERE id = ?")
+                .bind(id).fetch_one(pool).await.unwrap();
+        (state, decided,
+            count(pool, "SELECT COUNT(*) FROM action_precedents").await,
+            count(pool, "SELECT COUNT(*) FROM lane_events").await,
+            count(pool, "SELECT COUNT(*) FROM action_loop_outcomes").await)
+    }
+
+    #[tokio::test]
+    async fn age_expiry_cutoff_is_thirty_days_inclusive() {
+        let pool = crate::storage::memory().await.unwrap();
+        let day = chrono::Duration::days(1);
+        let young = seed(&pool, "age-29", "proposed", "draft", "draft:inbox_draft:a@example.com").await;
+        let exact = seed(&pool, "age-30", "proposed", "draft", "draft:inbox_draft:b@example.com").await;
+        let older = seed(&pool, "age-30s", "proposed", "draft", "draft:inbox_draft:c@example.com").await;
+        age(&pool, young, day * 29).await;
+        age(&pool, exact, day * 30).await;
+        age(&pool, older, day * 30 + chrono::Duration::seconds(1)).await;
+        assert_eq!(sweep_aged_proposals(&pool, fixed_now()).await.unwrap(), 2);
+        assert_eq!(state(&pool, young).await, "pending");
+        assert_eq!(state(&pool, exact).await, "expired");
+        assert_eq!(state(&pool, older).await, "expired");
+        assert_eq!(AGE_SWEEP_INTERVAL, std::time::Duration::from_secs(3600));
+    }
+
+    #[tokio::test]
+    async fn a_young_closed_item_still_expires_through_the_click_path() {
+        let pool = crate::storage::memory().await.unwrap();
+        let closed = seed(&pool, "age-closed", "done", "draft", "draft:inbox_draft:bob@example.com").await;
+        age(&pool, closed, chrono::Duration::days(1)).await;
+        assert_eq!(sweep_aged_proposals(&pool, fixed_now()).await.unwrap(), 0);
+        assert_eq!(state(&pool, closed).await, "pending");
+        assert_eq!(resolve_at(&pool, closed, Choice::Once, "UOWNER", fixed_now()).await.unwrap(), Resolution::Expired);
+        assert_eq!(state(&pool, closed).await, "expired");
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM lane_events").await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_age_sweep_skips_other_origins_and_settled_rows_and_is_idempotent() {
+        let pool = crate::storage::memory().await.unwrap();
+        let old = chrono::Duration::days(40);
+        let aged = seed(&pool, "age-a", "proposed", "draft", "draft:inbox_draft:a@example.com").await;
+        let approved = seed(&pool, "age-b", "proposed", "draft", "draft:inbox_draft:b@example.com").await;
+        let declined = seed(&pool, "age-c", "proposed", "draft", "draft:inbox_draft:c@example.com").await;
+        let github = seed(&pool, "age-d", "proposed", "draft", "draft:inbox_draft:d@example.com").await;
+        sqlx::query("UPDATE action_proposals SET origin = 'github' WHERE id = ?")
+            .bind(github).execute(&pool).await.unwrap();
+        assert!(matches!(resolve_at(&pool, approved, Choice::Once, "UOWNER", fixed_now()).await.unwrap(), Resolution::Approved { .. }));
+        assert_eq!(resolve_at(&pool, declined, Choice::Deny, "UOWNER", fixed_now()).await.unwrap(), Resolution::Declined);
+        for id in [aged, approved, declined, github] {
+            age(&pool, id, old).await;
+        }
+        let before = |pool: SqlitePool| async move {
+            sqlx::query_as::<_, (i64, String, Option<String>)>(
+                "SELECT id, state, decided_at FROM action_proposals WHERE id <> ? ORDER BY id")
+                .bind(aged).fetch_all(&pool).await.unwrap()
+        };
+        let untouched = before(pool.clone()).await;
+        assert_eq!(sweep_aged_proposals(&pool, fixed_now()).await.unwrap(), 1);
+        assert_eq!(before(pool.clone()).await, untouched);
+        assert_eq!(state(&pool, github).await, "pending");
+        let first = snapshot(&pool, aged).await;
+        assert_eq!(first.0, "expired");
+        let later = fixed_now() + chrono::Duration::hours(1);
+        assert_eq!(sweep_aged_proposals(&pool, later).await.unwrap(), 0);
+        assert_eq!(snapshot(&pool, aged).await, first);
+    }
+
+    #[tokio::test]
+    async fn a_click_and_the_sweep_at_the_cutoff_agree_in_either_order() {
+        let cutoff = chrono::Duration::days(AGE_EXPIRY_DAYS);
+        for choice in [Choice::Once, Choice::Always, Choice::Deny] {
+            let click_first = crate::storage::memory().await.unwrap();
+            let a = seed(&click_first, "age-x", "proposed", "draft", "draft:inbox_draft:bob@example.com").await;
+            age(&click_first, a, cutoff).await;
+            assert_eq!(resolve_at(&click_first, a, choice, "UOWNER", fixed_now()).await.unwrap(), Resolution::Expired);
+            assert_eq!(sweep_aged_proposals(&click_first, fixed_now()).await.unwrap(), 0);
+
+            let sweep_first = crate::storage::memory().await.unwrap();
+            let b = seed(&sweep_first, "age-x", "proposed", "draft", "draft:inbox_draft:bob@example.com").await;
+            age(&sweep_first, b, cutoff).await;
+            assert_eq!(sweep_aged_proposals(&sweep_first, fixed_now()).await.unwrap(), 1);
+            assert_eq!(resolve_at(&sweep_first, b, choice, "UOWNER", fixed_now()).await.unwrap(),
+                Resolution::AlreadyAnswered("expired".into()));
+
+            let left = snapshot(&click_first, a).await;
+            assert_eq!(left, snapshot(&sweep_first, b).await);
+            assert_eq!(left.0, "expired");
+            assert_eq!((left.2, left.3, left.4), (0, 0, 0), "expiry records no approval, precedent or event");
+            let decision: String = sqlx::query_scalar("SELECT status FROM inbox_decisions WHERE item_id = 'age-x'")
+                .fetch_one(&click_first).await.unwrap();
+            assert_eq!(decision, "proposed");
+        }
     }
 
     #[tokio::test]

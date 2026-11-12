@@ -55,6 +55,31 @@ const activity = (state: "working" | "waiting"): ActivitySummary => ({
 });
 
 describe("buildSidebarModel", () => {
+  it("keeps undragged rows in a stable order however the listing arrives", () => {
+    const paths = ["/code/ferryx/.orca-worktrees/charlie", "/code/ferryx/.orca-worktrees/alpha", "/code/ferryx/.orca-worktrees/bravo"];
+    const listing = (order: string[]) => fixture({
+      projects: [local],
+      worktrees: [row("/code/ferryx", "main"), ...order.map((path) => row(path, `orca/ferryx/${path.split("/").pop()}`))],
+    });
+    const labels = (order: string[]) =>
+      buildSidebarModel(listing(order)).projects.find((node) => node.groupId === "ferryx")?.worktrees.map((node) => node.label);
+
+    expect(labels([paths[2], paths[0], paths[1]])).toEqual(labels([paths[0], paths[1], paths[2]]));
+    expect(labels([paths[1], paths[2], paths[0]])).toEqual(["main", "alpha", "bravo", "charlie"]);
+  });
+
+  it("still puts a dragged row first", () => {
+    const charlie = "/code/ferryx/.orca-worktrees/charlie";
+    const model = buildSidebarModel(fixture({
+      projects: [local],
+      worktrees: [row("/code/ferryx", "main"), row(charlie, "orca/ferryx/charlie"), row("/code/ferryx/.orca-worktrees/alpha", "orca/ferryx/alpha")],
+      worktreeOrder: { ferryx: [`sidebar-worktree:ferryx:${charlie}`] },
+    }));
+
+    expect(model.projects.find((node) => node.groupId === "ferryx")?.worktrees.map((node) => node.label))
+      .toEqual(["charlie", "main", "alpha"]);
+  });
+
   it("merges an SSH checkout of the same repository into the local project's group", () => {
     const model = buildSidebarModel(fixture());
 

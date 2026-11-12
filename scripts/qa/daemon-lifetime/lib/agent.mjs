@@ -8,7 +8,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, watch, writeFileSync, appendFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import os from 'node:os';
@@ -247,6 +247,9 @@ export function createAgent({ platform, runId, runDir, allowRoots = [], home = o
     writeFile: async ({ file, content, mode }) => { inRun(file); mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, content, mode ? { mode } : undefined); return true; },
     readFile: async ({ file }) => (existsSync(file) ? readFileSync(file, 'utf8') : null),
     exists: async ({ file }) => existsSync(file),
+    // Names in one directory, sorted. The harness needs the daemon's pending pairing requests by
+    // glob; `ls`/`test -f` over `sh` cannot run on the Windows target, where no shell is shipped.
+    listDir: async ({ dir }) => (existsSync(dir) ? readdirSync(dir).sort() : []),
     mkdir: async ({ dir, mode }) => { inRun(dir); mkdirSync(dir, { recursive: true, mode }); return true; },
     remove: async ({ target }) => { inRun(target); rmSync(target, { recursive: true, force: true }); return !existsSync(target); },
     sha256: async ({ file }) => createHash('sha256').update(readFileSync(file)).digest('hex'),

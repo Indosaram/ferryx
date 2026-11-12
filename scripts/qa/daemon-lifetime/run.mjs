@@ -187,6 +187,52 @@ export function selfTestExitCode(summary) {
 }
 
 /**
+ * Runs on a fresh worktree: the ghostty submodule and ui/node_modules. Build steps assume both
+ * (tauri's beforeBuildCommand is `bun run --cwd ui build`), and neither exists in a new worktree -
+ * a gate failed on maho-win because the worktree was created by hand and deps were missing.
+ */
+async function prepareWorktreeDeps({ host, agent, worktree }) {
+  const git = async (args) => {
+    const r = await agent.call('exec', { command: 'git', args, deadlineMs: 900_000 });
+    if (r.status !== 0) throw new GuardError('WORKTREE_SETUP_FAILED', `git ${args.join(' ')} exited ${r.status}: ${r.stderr}`);
+  };
+  // The ghostty submodule is cloned from the canonical clone's local module dir (file transport).
+  await git(['-C', worktree, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive']);
+  const deps = await agent.call('exec', { command: 'bun', args: ['install', '--cwd', joinFor(host.platform, worktree, 'ui'), '--frozen-lockfile'], deadlineMs: 900_000 });
+  if (deps.status !== 0) throw new GuardError('WORKTREE_SETUP_FAILED', `bun install exited ${deps.status}: ${deps.stderr}`);
+  return true;
+}
+
+/**
+ * The gate's build tree. A remote worktree must exist and carry its deps before build A; creating it
+ * here (and removing it at teardown) is what lets a gate run on a host that has no checkout yet -
+ * run 20261112t072829z only built after ui/node_modules and the ghostty submodule were added by hand,
+ * and a fresh host failed build A in tauri's beforeBuildCommand.
+ */
+async function prepareGateWorktree({ host, agent, worktree, live, summary, writeSummary = () => {} }) {
+  const exists = await agent.call('exists', { file: worktree });
+  if (!exists) {
+    const head = (await agent.call('exec', { command: 'git', args: ['-C', host.canonical, 'rev-parse', 'HEAD'] })).stdout.trim();
+    const added = await agent.call('exec', { command: 'git', args: ['-C', host.canonical, 'worktree', 'add', '--detach', worktree, head], deadlineMs: 900_000 });
+    if (added.status !== 0) throw new GuardError('WORKTREE_SETUP_FAILED', `git worktree add exited ${added.status}: ${added.stderr}`);
+    const handle = {
+      worktree,
+      head,
+      remove: async () => {
+        for (const args of [['-C', host.canonical, 'worktree', 'remove', '--force', worktree], ['-C', host.canonical, 'worktree', 'prune']]) {
+          const r = await agent.call('exec', { command: 'git', args, deadlineMs: 900_000 });
+          if (r.status !== 0) throw new Error(`git ${args.join(' ')} exited ${r.status}: ${r.stderr}`);
+        }
+      },
+    };
+    live.createdWorktree = handle;
+    summary.createdWorktree = { worktree, head, removed: false };
+    writeSummary();
+  }
+  return prepareWorktreeDeps({ host, agent, worktree });
+}
+
+/**
  * Throwaway worktree for the self-test: `git worktree add` of this checkout's HEAD under the
  * host's worktree root, then `git apply` of the patch. Returns the worktree path and a remover.
  * The handle goes to `register` as soon as the worktree exists, so a later setup failure (submodule,
@@ -215,9 +261,7 @@ export async function prepareSelfTestWorktree({ host, agent, runId, source, regi
   // The ghostty submodule is cloned from the canonical clone's local module dir (file transport).
   await git(['-C', worktree, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive']);
   await git(['-C', worktree, 'apply', joinFor(host.platform, worktree, 'scripts', 'qa', 'daemon-lifetime', SELF_TEST_PATCH)]);
-  // A fresh worktree has no ui/node_modules; tauri's beforeBuildCommand (bun run --cwd ui build) needs them.
-  const deps = await agent.call('exec', { command: 'bun', args: ['install', '--cwd', joinFor(host.platform, worktree, 'ui'), '--frozen-lockfile'], deadlineMs: 900_000 });
-  if (deps.status !== 0) throw new GuardError('SELF_TEST_SETUP_FAILED', `bun install exited ${deps.status}: ${deps.stderr}`);
+  await prepareWorktreeDeps({ host, agent, worktree });
   return handle;
 }
 
@@ -334,6 +378,11 @@ export function teardownExtras(live, summary) {
       if (!live.selfTest) return;
       await live.selfTest.remove();
       if (summary.selfTestReload) summary.selfTestReload.removed = true;
+    }],
+    ['created-worktree', async () => {
+      if (!live.createdWorktree) return;
+      await live.createdWorktree.remove();
+      summary.createdWorktree.removed = true;
     }],
     ['mahord', async () => { if (live.mahord) await live.mahord.close(); }],
   ];
@@ -585,7 +634,7 @@ async function main() {
   // original error is kept in summary.error and rethrown after teardown (exit 2), never masked.
   const qaRoots = [...runDirs, host.cargoTarget, `${host.cargoTarget}-baseline`];
   const jobs = createJobs({ host, agent, runId, layout, uid });
-  const live = { selfTest: null, mahord: null };
+  const live = { selfTest: null, mahord: null, createdWorktree: null };
   const work = async () => {
     for (const dir of Object.values(layout)) await agent.call('mkdir', { dir, mode: 0o700 });
     await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId, host.platform), null, 2) });
@@ -601,6 +650,9 @@ async function main() {
       summary.selfTestReload = { worktree: h.worktree, head: h.head, patch: SELF_TEST_PATCH, expect: 'Q04 FAIL', removed: false };
     } }) : null;
     const buildFrom = selfTest ? selfTest.worktree : worktree;
+    // A remote worktree the harness did not prepare itself (deps: ghostty submodule, ui/node_modules)
+    // fails build A in tauri's beforeBuildCommand. Preparing here is idempotent when it is already done.
+    if (host.transport.kind !== 'local' && !selfTest) await prepareGateWorktree({ host, agent, worktree: buildFrom, live, summary, writeSummary });
     const plan = buildPlan({ host, runDir, worktree: buildFrom, v1Worktree: opts.v1Worktree, baselineWorktree: opts.baselineWorktree });
     const productName = tauriQaConfig(runId, host.platform).productName;
     const artifacts = {};

@@ -9,6 +9,90 @@ fn shell_program_and_args() -> (Option<String>, Vec<String>) {
     }
 }
 
+/// The default shell of a remote Windows pane is resolved from COMSPEC plus a PATH
+/// probe. These cases pin every branch without spawning: an explicit non-cmd COMSPEC
+/// must survive untouched (a user who installed Git Bash keeps it), and only the
+/// implicit cmd.exe default gets upgraded to PowerShell.
+#[test]
+fn windows_default_shell_prefers_pwsh_over_implicit_cmd() {
+    let resolved =
+        resolve_windows_default_shell(Some(r"C:\Windows\system32\cmd.exe"), |name| {
+            name == "pwsh.exe"
+        });
+    assert_eq!(resolved.0, "pwsh.exe");
+    assert!(resolved.1.is_empty());
+}
+
+#[test]
+fn windows_default_shell_falls_back_to_windows_powershell() {
+    let resolved = resolve_windows_default_shell(Some("cmd.exe"), |name| name == "powershell.exe");
+    assert_eq!(resolved.0, "powershell.exe");
+    assert!(resolved.1.is_empty());
+}
+
+#[test]
+fn windows_default_shell_accepts_extensionless_pwsh() {
+    // terminal::shell accepts either spelling of PowerShell 7; a helper that only looked
+    // for pwsh.exe would diverge from the local pane on a host carrying bare pwsh.
+    let resolved = resolve_windows_default_shell(Some("cmd.exe"), |name| name == "pwsh");
+    assert_eq!(resolved.0, "pwsh.exe");
+}
+
+#[test]
+fn windows_default_shell_keeps_explicit_non_cmd_comspec() {
+    let explicit = r"C:\Program Files\Git\bin\bash.exe";
+    let resolved = resolve_windows_default_shell(Some(explicit), |_| true);
+    assert_eq!(resolved.0, explicit);
+    assert!(resolved.1.is_empty());
+}
+
+#[test]
+fn windows_default_shell_keeps_explicit_powershell_comspec() {
+    // An admin who set OpenSSH's DefaultShell already chose the interpreter; the PATH
+    // probe must not silently swap it for pwsh.
+    let resolved = resolve_windows_default_shell(Some("powershell.exe"), |_| true);
+    assert_eq!(resolved.0, "powershell.exe");
+}
+
+#[test]
+fn windows_default_shell_treats_bare_cmd_as_the_implicit_default() {
+    for comspec in ["cmd", "cmd.exe", "CMD.EXE"] {
+        let resolved = resolve_windows_default_shell(Some(comspec), |name| name == "pwsh.exe");
+        assert_eq!(resolved.0, "pwsh.exe", "comspec {comspec} must not veto the upgrade");
+    }
+}
+
+#[test]
+fn windows_default_shell_uses_cmd_when_no_powershell_is_on_path() {
+    let resolved = resolve_windows_default_shell(Some(r"C:\Windows\system32\cmd.exe"), |_| false);
+    assert_eq!(resolved.0, r"C:\Windows\system32\cmd.exe");
+    assert!(resolved.1.is_empty());
+}
+
+#[test]
+fn windows_default_shell_without_comspec_or_powershell_stays_spawnable() {
+    for comspec in [None, Some(""), Some("   ")] {
+        let resolved = resolve_windows_default_shell(comspec, |_| false);
+        assert_eq!(resolved.0, "cmd.exe");
+        assert!(resolved.1.is_empty());
+    }
+}
+
+/// A remote Windows pane must open the same interpreter a local pane on that host
+/// would. The default path (no program in pty.spawn) is exactly what the daemon sends
+/// for a plain shell pane, so this asserts the spawn request resolves to pwsh there.
+#[cfg(windows)]
+#[test]
+fn default_login_shell_matches_a_local_pane_on_windows() {
+    let (program, args) = default_platform_login_shell();
+    assert!(args.is_empty(), "windows logins take no arguments");
+    assert!(
+        program.to_ascii_lowercase().ends_with("pwsh.exe")
+            || program.to_ascii_lowercase().ends_with("powershell.exe"),
+        "expected a PowerShell login shell on a host that has one, got {program}"
+    );
+}
+
 fn env_set(var: &str, val: &str) -> String {
     if cfg!(windows) {
         format!("set {var}={val}\r\n")

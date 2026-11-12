@@ -29,6 +29,12 @@ impl HostConfig {
         {
             return Err("INVALID_REQUEST: hostname, user, port or trust file is invalid".into());
         }
+        // ConnectTimeout covers the whole handshake, so a proxy jump needs two hops' worth.
+        let connect_timeout = if self.proxy_jump.is_some() {
+            "ConnectTimeout=10"
+        } else {
+            "ConnectTimeout=3"
+        };
         let mut args: Vec<String> = [
             "-T",
             "-o",
@@ -36,7 +42,7 @@ impl HostConfig {
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
-            "ConnectTimeout=3",
+            connect_timeout,
             "-o",
             "ConnectionAttempts=1",
             "-o",
@@ -109,5 +115,31 @@ impl HostStore {
             std::fs::remove_file(tmp).map_err(|e| e.to_string())?;
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host(proxy_jump: Option<&str>) -> HostConfig {
+        HostConfig {
+            id: "h".into(),
+            name: "h".into(),
+            hostname: "box".into(),
+            user: "user".into(),
+            port: 22,
+            identity_file: None,
+            proxy_jump: proxy_jump.map(Into::into),
+            known_hosts_file: "/tmp/known_hosts".into(),
+        }
+    }
+
+    #[test]
+    fn a_proxy_jump_gets_two_hops_of_connect_timeout() {
+        let direct = host(None).argv().unwrap();
+        assert!(direct.windows(2).any(|args| args == ["-o", "ConnectTimeout=3"]));
+        let jumped = host(Some("jump")).argv().unwrap();
+        assert!(jumped.windows(2).any(|args| args == ["-o", "ConnectTimeout=10"]));
     }
 }

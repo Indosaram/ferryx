@@ -15,7 +15,8 @@ type Services = { listExternalWorktrees: typeof listExternalWorktrees };
  * Once the active local project is registered, asks Git for its worktrees outside the project
  * folder and surfaces the unanswered ones as a prompt. Each project is checked once per session;
  * "Later" hides the current set until the next launch; a workspace muted with "Don't ask again"
- * is never checked.
+ * is never checked. A prompt still open for a project the user has already left is replaced, so
+ * one project's unanswered prompt never suppresses another project's discovery for the session.
  */
 export function useExternalWorktreePrompt(
   activeProject: RegisteredProject,
@@ -50,7 +51,13 @@ export function useExternalWorktreePrompt(
           loadPromptedExternalWorktrees(),
           hiddenRef.current,
         );
-        if (pending.length > 0) setPrompt((current) => current ?? { workspaceId, worktrees: pending });
+        if (pending.length > 0) {
+          setPrompt((current) =>
+            current && current.workspaceId === workspaceId
+              ? current
+              : { workspaceId, worktrees: pending },
+          );
+        }
       })
       .catch((error: unknown) => {
         // Discovery is advisory: a failure only means no prompt, and the next launch retries.

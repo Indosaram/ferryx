@@ -16,6 +16,7 @@ pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf, SshHost) {
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Agent,
         disabled: None,
+        shell: None,
     };
     write_hosts(&path, vec![host.clone()]);
     (dir, path, host)

@@ -117,6 +117,15 @@ pub fn ssh_plan(
         args[0] = "-T".into();
     }
     // These precede user config and prevent prompts, forwarding, or connection reuse.
+    // ConnectTimeout bounds the whole pre-session handshake (TCP connect, banner and kex),
+    // so one hop gets 3 s. A `-J` host pays two handshakes - the proxy hop and then the
+    // target through it - measured at 2.3-4.3 s median and up to 11 s under load, which made
+    // 3 s expire mid banner exchange and surface as a fatal exit 255 with no retry.
+    let connect_timeout = if host.jump_host.is_some() {
+        "ConnectTimeout=10"
+    } else {
+        "ConnectTimeout=3"
+    };
     let mut options = vec![
         if host.auth_method == SshAuthMethod::Password {
             "BatchMode=no"
@@ -125,7 +134,7 @@ pub fn ssh_plan(
         },
         "StrictHostKeyChecking=yes",
         "UpdateHostKeys=no",
-        "ConnectTimeout=3",
+        connect_timeout,
         "ConnectionAttempts=1",
         "ServerAliveInterval=15",
         "ServerAliveCountMax=2",

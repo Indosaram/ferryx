@@ -161,7 +161,7 @@ pub fn card_is_stale(status: &str) -> bool {
 }
 
 /// The gate report for one approval card: a `decision` the owner must answer, one topic per
-/// item and command, so the same card is never asked twice.
+/// item, command and proposal id (carried in the state), so the same card is never asked twice.
 pub fn card_report(card: &InboxCard, ask: &Ask) -> crate::report_gate::Report {
     crate::report_gate::Report::new(
         format!("inbox-card:{}", card.item_id),
@@ -173,7 +173,7 @@ pub fn card_report(card: &InboxCard, ask: &Ask) -> crate::report_gate::Report {
             "A task for a message you received needs your approval.",
         ),
     )
-    .with_state(&ask.command)
+    .with_state(&format!("{}#{}", ask.command, ask.proposal_id))
     .with_quote(ask.reason.clone())
     .with_sender(card.author.clone())
     .with_origin(card.item_id.clone())
@@ -194,7 +194,11 @@ pub async fn present_ready(pool: &SqlitePool, action: &Action, lead: &str) -> Re
                 SELECT 1 FROM action_proposals p
                  WHERE p.origin = 'inbox'
                    AND json_extract(p.payload_json, '$.item_id') = i.id
-                   AND (p.state <> 'pending' OR p.platform_message_id IS NOT NULL)
+                   AND (
+                        (p.state NOT IN ('pending', 'expired'))
+                     OR (p.state = 'pending' AND p.platform_message_id IS NOT NULL)
+                     OR (p.state = 'expired' AND d.status IN ('done', 'dismissed'))
+                   )
             )",
     )
     .fetch_all(pool)
@@ -298,15 +302,16 @@ async fn ensure_proposal(
     target: &str,
     signature: &str,
 ) -> Result<i64> {
-    let existing: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM action_proposals
+    // An expired proposal is dead: the item gets a fresh one instead of the expired row.
+    let existing: Option<(i64, String)> = sqlx::query_as(
+        "SELECT id, state FROM action_proposals
           WHERE origin = 'inbox' AND json_extract(payload_json, '$.item_id') = ?
           ORDER BY id DESC LIMIT 1",
     )
     .bind(&card.item_id)
     .fetch_optional(pool)
     .await?;
-    if let Some(id) = existing {
+    if let Some((id, _)) = existing.filter(|(_, state)| state != "expired") {
         // A row written before the lead was recorded gets it, so its approval can be handed over.
         sqlx::query(
             "UPDATE action_proposals SET payload_json = json_set(payload_json, '$.lead', ?)
@@ -717,6 +722,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_age_expired_proposal_is_reissued_as_a_fresh_actionable_one() {
+        use crate::report_gate::{submit_checked, Decision};
+        let pool = crate::storage::memory().await.unwrap();
+        seed_bot_decision(&pool, "w6-reissue", "bob@example.com", "prepare summary note").await;
+        let draft = card("w6-reissue", "bob@example.com", "prepare summary note", Action::Draft);
+        let mut asked: Vec<Ask> = Vec::new();
+        evaluate_with_ledger(&pool, &draft, || async { Ok(()) }, |ask| asked.push(ask), true)
+            .await.unwrap();
+        let first = asked[0].proposal_id;
+        let first_report = card_report(&draft, &asked[0]);
+        assert_eq!(submit_checked(&pool, &first_report, false).await.unwrap(), Decision::Sent);
+        assert_eq!(
+            submit_checked(&pool, &first_report, false).await.unwrap(),
+            Decision::Duplicate,
+            "a repeat post of the same proposal is still deduplicated"
+        );
+        sqlx::query("UPDATE action_proposals SET platform_message_id = 'outbox:1', created_at = ? WHERE id = ?")
+            .bind("2026-10-13T00:00:00+00:00").bind(first).execute(&pool).await.unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-12T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(approval::sweep_aged_proposals(&pool, now).await.unwrap(), 1);
+        evaluate_with_ledger(&pool, &draft, || async { Ok(()) }, |ask| asked.push(ask), true)
+            .await.unwrap();
+        let second = asked[1].proposal_id;
+        assert_ne!(second, first, "the dead proposal is never handed back as live");
+        assert_eq!(asked[1].command, asked[0].command, "same item, same action: only the proposal differs");
+        let second_report = card_report(&draft, &asked[1]);
+        assert_eq!(second_report.topic_key, first_report.topic_key);
+        let reissued = submit_checked(&pool, &second_report, false).await.unwrap();
+        assert_ne!(reissued, Decision::Duplicate, "the reissued card must reach the owner");
+        assert_eq!(reissued, Decision::Sent);
+        assert_eq!(submit_checked(&pool, &second_report, false).await.unwrap(), Decision::Duplicate);
+        assert!(matches!(
+            approval::resolve_at(&pool, second, approval::Choice::Once, "UOWNER", now).await.unwrap(),
+            approval::Resolution::Approved { .. }
+        ));
+        assert_eq!(
+            approval::resolve_at(&pool, first, approval::Choice::Once, "UOWNER", now).await.unwrap(),
+            approval::Resolution::AlreadyAnswered("expired".into())
+        );
+    }
+
+    #[tokio::test]
     async fn a_card_for_a_closed_item_is_dropped_as_stale() {
         let pool = crate::storage::memory().await.unwrap();
         let card = card("item-stale", "bob@example.com", "prepare summary note", Action::Draft);
@@ -766,7 +813,6 @@ mod tests {
         assert_eq!(posts[1].1["blocks"][2]["elements"][0]["value"], "omon:inbox:1:once");
     }
 
-    #[cfg(feature = "hub-slack")]
     async fn seed_bot_decision(pool: &SqlitePool, id: &str, author: &str, action_text: &str) {
         seed(pool, id, author).await;
         sqlx::query(

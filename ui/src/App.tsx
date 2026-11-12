@@ -2519,6 +2519,14 @@ function WorkspaceApp({
       persistProjects(next);
       return next;
     });
+    // An import is meant to make the checkout usable right away, so adopt the first one exactly
+    // as Add Project does; otherwise the rows appear but nothing opens.
+    const adopted = imported[0];
+    if (adopted) {
+      setActiveProjectId(adopted.workspaceId);
+      persistActiveProjectId(adopted.workspaceId);
+      setWorktreeStatuses({});
+    }
   }, []);
 
   const handleConfirmRemoveProject = useCallback(async () => {
@@ -3112,7 +3120,8 @@ function WorkspaceApp({
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     void onNewTerminalTabMenu(() => {
-      if (activeRemoteHostRef.current) return;
+      // Delegate even while a remote host is active: handleAddTerminalTab() refuses with a visible
+      // reason, where returning here left the native "New Tab" menu item doing nothing at all.
       handleAddTerminalTab();
     }).then((dispose) => {
       if (cancelled) dispose();
@@ -4510,6 +4519,9 @@ function WorkspaceApp({
     () => {
       if (activeRemoteHost) {
         return {
+          // Keep the binding live so the refusal is visible: without a handler the shortcut is
+          // dropped before dispatch and Mod+T appears to do nothing at all.
+          "tab.newTerminal": handleAddTerminalTab,
           "sidebar.left.toggle": toggleSidebar,
           "settings.toggle": handleToggleSettings,
           "notifications.toggle": handleRevealSupervisor,
@@ -5082,12 +5094,19 @@ function WorkspaceApp({
                 },
               });
               const label = agentHistoryProviderLabel(entry.provider);
-              if (targetWorktree) {
-                await openTab(targetWorktree, label, {
-                  sessionId: spawned.sessionId,
-                  daemonEpoch: spawned.daemonEpoch ?? null,
-                  incarnation: spawned.session?.incarnation ?? null,
-                });
+              const tabId = targetWorktree
+                ? await openTab(targetWorktree, label, {
+                    sessionId: spawned.sessionId,
+                    daemonEpoch: spawned.daemonEpoch ?? null,
+                    incarnation: spawned.session?.incarnation ?? null,
+                  })
+                : null;
+              // openTab does not own a pre-spawned backend, so a discarded tab would orphan the
+              // PTY; a missing worktree would leave the resumed agent running with nothing on screen.
+              if (tabId === null) {
+                await closeTerminal(spawned.sessionId);
+                toast.warning("The agent could not be resumed into a tab, so its session was closed.");
+                return;
               }
               setHistoryProject(null);
             } catch (error) {

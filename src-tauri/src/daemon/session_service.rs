@@ -2192,6 +2192,9 @@ impl DaemonSessionService {
             .await
             .map_err(SpawnError::Structured)?;
         let resume = resume.map(|plan| crate::terminal::shell::remote_agent_resume_plan(plan, &environment));
+        // The remote platform decides what the host's shell preset means; the helper then
+        // resolves that program on its own PATH, so nothing is probed from this side.
+        let configured_shell = host.shell_program(Some(environment.platform));
         if project
             .platform
             .unwrap_or(crate::ssh::runtime::RemotePlatform::Posix)
@@ -2281,7 +2284,14 @@ impl DaemonSessionService {
                 crate::ssh::bridge::SpawnParams {
                     cols: Some(cols),
                     rows: Some(rows),
-                    program: resume.as_ref().map(|plan| plan.program.clone()),
+                    // An agent resume names its own program and must win; otherwise the host's
+                    // configured shell replaces the helper's environment-derived default, so the
+                    // pane opens the shell the user picked in the client instead of the remote
+                    // machine's COMSPEC (cmd.exe on Windows).
+                    program: resume
+                        .as_ref()
+                        .map(|plan| plan.program.clone())
+                        .or_else(|| configured_shell.clone()),
                     args: resume.map(|plan| plan.args),
                     // The user's opt-out must stop forwarding on real remote panes too.
                     agent_integration: Some(
@@ -2448,7 +2458,7 @@ impl DaemonSessionService {
             (true, Some(TerminalStartup::RemoteSsh { .. } | TerminalStartup::AgentResume { .. } | TerminalStartup::AgentContinue { .. })) => {
                 if shell.is_some() {
                     return Err(SpawnError::Other(
-                        "Local shell overrides are unsupported for SSH sessions".into(),
+                        "Per-spawn shell overrides are unsupported for SSH sessions; set the shell on the SSH machine instead".into(),
                     ));
                 }
                 if matches!(startup.as_ref(), Some(TerminalStartup::RemoteSsh { host_store_path }) if host_store_path != &self.ssh_store_path) {

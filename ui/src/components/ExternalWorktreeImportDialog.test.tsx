@@ -64,7 +64,9 @@ describe("ExternalWorktreeImportDialog", () => {
       onImported={onImported} onLater={vi.fn()} onClose={onClose} />);
 
     expect(screen.getByRole("dialog", { name: "Orca worktrees found" })).toBeTruthy();
-    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    expect((screen.getAllByRole("checkbox")[0] as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("button", { name: "Import selected" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getAllByRole("checkbox")[0]);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Import selected" })); });
 
     expect(native.registerProject).toHaveBeenCalledExactlyOnceWith({ workspaceId: "feat", repoPath: orcaWorktree.path });
@@ -102,6 +104,7 @@ describe("ExternalWorktreeImportDialog", () => {
     const onImported = vi.fn();
     render(<ExternalWorktreeImportDialog workspaceId="lectures" worktrees={[orcaWorktree]} projects={[project]}
       onImported={onImported} onLater={vi.fn()} onClose={onClose} />);
+    fireEvent.click(screen.getAllByRole("checkbox")[0]);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Import selected" })); });
     expect(screen.getByRole("alert").textContent).toBe("gone");
     expect(onClose).not.toHaveBeenCalled();
@@ -140,6 +143,22 @@ describe("useExternalWorktreePrompt", () => {
     setExternalWorktreePromptMuted("lectures", true);
     renderHook(() => useExternalWorktreePrompt(project, "lectures", [project], { listExternalWorktrees: native.listExternalWorktrees }));
     expect(native.listExternalWorktrees).not.toHaveBeenCalled();
+  });
+
+  it("replaces an unanswered prompt when another project finds worktrees", async () => {
+    const other: RegisteredProject = { workspaceId: "other", repoRoot: "/Users/me/other", gitRoot: "/Users/me/other" };
+    native.listExternalWorktrees.mockImplementation(async (workspaceId: string) =>
+      workspaceId === "lectures" ? [orcaWorktree] : [{ ...orcaWorktree, path: "/Users/me/other-wt", branch: "refs/heads/other-wt" }]);
+    const services = { listExternalWorktrees: native.listExternalWorktrees };
+    const { result, rerender } = renderHook(
+      ({ active }: { active: RegisteredProject }) => useExternalWorktreePrompt(active, active.workspaceId, [project, other], services),
+      { initialProps: { active: project } },
+    );
+    await waitFor(() => expect(result.current.prompt?.workspaceId).toBe("lectures"));
+
+    rerender({ active: other });
+    await waitFor(() => expect(result.current.prompt?.workspaceId).toBe("other"));
+    expect(result.current.prompt?.worktrees.map((worktree) => worktree.path)).toEqual(["/Users/me/other-wt"]);
   });
 
   it("unmuting a workspace restores the prompt", () => {
