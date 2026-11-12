@@ -38,17 +38,38 @@ probe() {
     ssh-unix)   tmo 12 ssh -n -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes "$2" "$PROBE_UNIX" 2>/dev/null ;;
     ssh-darwin) tmo 12 ssh -n -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes "$2" "zsh -lc '$PROBE_UNIX'" 2>/dev/null ;;
     instabox)   tmo 40 instabox exec "$2" -- 'echo "$(nproc) $(cut -d" " -f1 /proc/loadavg) $(awk "/MemAvailable/{printf \"%d\",\$2/1048576}" /proc/meminfo) $(df -k /data | awk "NR==2{printf \"%d\",\$4/1048576}") $(pgrep -x -c "cargo|rustc|zig")"' 2>/dev/null | tail -1 ;;
+    salad)
+      # SaladCloud organization, not a shell host: <target> is the org name and the API
+      # key lives outside the repo in ~/.config/salad/credentials.json. Only replica
+      # headroom is knowable over the API, so a salad entry always reports busy=1 and
+      # the picker never hands it a build it cannot actually run.
+      k=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["api_key"])' "$HOME/.config/salad/credentials.json" 2>/dev/null) || return 1
+      [ -n "$k" ] || return 1
+      r=$(tmo 15 curl -s -H "Salad-Api-Key: $k" -H 'Accept: application/json' "https://api.salad.com/api/public/organizations/$2/quotas" 2>/dev/null) || return 1
+      q=$(printf '%s' "$r" | sed -n 's/.*"container_replicas_quota":\([0-9]*\).*/\1/p')
+      u=$(printf '%s' "$r" | sed -n 's/.*"container_replicas_used":\([0-9]*\).*/\1/p')
+      [ -n "$q" ] && [ -n "$u" ] || return 1
+      echo "0 0 0 $((q - u)) 1"
+      ;;
     *) return 1 ;;
   esac
 }
 
 best=""; best_score=999999
-for h in omarchy noye maho-mac maho-win instabox; do
+if [ ! -f "$HOSTS_FILE" ]; then
+  echo "no build-host config at $HOSTS_FILE" >&2
+  echo "create it with one host per line: <name> <transport> <target>" >&2
+  exit 4
+fi
+
+while read -r h transport target _rest; do
+  case "$h" in ''|'#'*) continue ;; esac
+  [ -n "${target:-}" ] || { echo "$h: malformed line in $HOSTS_FILE" >&2; continue; }
 
   lock="$LOCKDIR/$h"; if claimed "$lock"; then echo "$h: claimed ($(cat "$lock"))" >&2; continue; fi
   read -r cores load ram disk busy < <(probe "$transport" "$target") || true
   if [ -z "${cores:-}" ]; then echo "$h: unreachable" >&2; continue; fi
-  ok=$(awk -v c="$cores" -v l="$load" -v r="$ram" -v d="$disk" -v b="$busy" -v mr="$MIN_FREE_GB" -v md="$MIN_DISK_GB" -v ml="$MAX_LOAD_PER_CORE" 'BEGIN{print (l/c<ml && r>=mr && d>=md && b==0)?1:0}')
+  ok=$(awk -v c="$cores" -v l="$load" -v r="$ram" -v d="$disk" -v b="$busy" -v mr="$MIN_FREE_GB" -v md="$MIN_DISK_GB" -v ml="$MAX_LOAD_PER_CORE" 'BEGIN{print (c>0 && l/c<ml && r>=mr && d>=md && b==0)?1:0}')
   echo "$h: cores=$cores load=$load freeRAM=${ram}G freeDisk=${disk}G builds=$busy idle=$ok" >&2
   if [ "$ok" = 1 ]; then
     s=$(awk -v c="$cores" -v l="$load" 'BEGIN{printf "%d", l/c*1000}')
@@ -59,6 +80,20 @@ for h in omarchy noye maho-mac maho-win instabox; do
   unset cores load ram disk busy
 done < "$HOSTS_FILE"
 
-if [ -z "$best" ]; then echo "no idle free host: ask the user before using XenoCI (paid)" >&2; exit 3; fi
+# Paid fallbacks, in order. Both cost money for a real build; neither is a probe target.
+#   1. Docker Cloud Sandboxes ($250 credit, Medium 4 vCPU/8 GiB $0.280/h, expires 2027-05-06)
+#   2. XenoCI macOS runners (prepaid credits)
+if [ -z "$best" ]; then
+  cat >&2 <<'MSG'
+no idle free host. Paid fallbacks, in this order:
+  1. Docker Cloud Sandboxes  -> scripts/build-on-sbx.sh <slug> -- <command...>
+     $250 credit, Medium (4 vCPU / 8 GiB) at $0.280/h, expires 2027-05-06.
+     Requires: sbx daemon start, then sbx login (check: sbx --cloud diagnose).
+  2. XenoCI macOS runners    -> mcp_xenoci_build
+     Prepaid credits; the only paid path that can produce macOS app bundles.
+Ask the user before spending on either.
+MSG
+  exit 3
+fi
 if [ -n "$OWNER" ]; then echo "pid $OWNER" > "$LOCKDIR/$best"; else echo "until $(( $(date +%s) + CLAIM_TTL ))" > "$LOCKDIR/$best"; fi
 echo "$best"
