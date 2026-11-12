@@ -22,6 +22,20 @@ export interface AccountSignInProps {
 const LOGIN_POLL_INTERVAL_MS = 2000;
 const LOGIN_POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (TTL 600s)
 
+/**
+ * The emailed link is `{origin}/login?code=<code>`; accept the whole link or the bare code,
+ * since the email only ever shows the link.
+ */
+export function loginCodeFromInput(input: string): string {
+  const trimmed = input.trim();
+  try {
+    const url = new URL(trimmed);
+    return (url.searchParams.get("code") ?? url.searchParams.get("login") ?? "").trim();
+  } catch {
+    return trimmed;
+  }
+}
+
 export function AccountSignIn({
   origin = DEFAULT_RELAY_ORIGIN,
   onSignIn,
@@ -193,7 +207,7 @@ export function AccountSignIn({
       const res = await requestLogin(origin, cleanEmail);
       setCodeRequested(true);
       setInfoMessage(
-        `Magic sign-in link sent to ${cleanEmail}. This window will sign in automatically once the link is opened, or you can enter the code below.`,
+        `Magic sign-in link sent to ${cleanEmail}. Open the link in the email; this window will sign in automatically. If it does not, paste the whole link below.`,
       );
       startPolling(res.loginHandle);
     } catch (err: unknown) {
@@ -221,7 +235,7 @@ export function AccountSignIn({
 
   const handleConsumeCode = async (e: FormEvent) => {
     e.preventDefault();
-    const cleanCode = code.trim();
+    const cleanCode = loginCodeFromInput(code);
     if (!cleanCode || loading) return;
 
     setLoading(true);
@@ -323,13 +337,13 @@ export function AccountSignIn({
         <form onSubmit={handleConsumeCode} className="space-y-3">
           <div className="space-y-1.5">
             <Label htmlFor="account-code" className="text-xs font-medium">
-              Verification Code
+              Sign-in Link
             </Label>
             <Input
               id="account-code"
-              aria-label="Verification Code"
+              aria-label="Sign-in Link"
               type="text"
-              placeholder="Paste code from magic link"
+              placeholder="Paste the link from the email"
               value={code}
               onChange={(e) => setCode(e.target.value)}
               disabled={loading}
