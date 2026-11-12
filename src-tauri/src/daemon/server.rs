@@ -6440,6 +6440,8 @@ impl DaemonServer {
         // that pane with no endpoint for its whole lifetime.
         let agent_state_ingress = self.spawn_agent_state_listener();
         self.spawn_foreground_observer();
+        // A pane spawned as another pane's child reports its block or stall to that parent.
+        crate::daemon::parent_notice::spawn(&self.remote_state);
         self.spawn_paired_host_probe(crate::paired_host::client::PROBE_INTERVAL);
         self.spawn_paired_host_route_forwarder();
         // Restart the remote desktop host the owner left enabled. Capture setup may block, so it

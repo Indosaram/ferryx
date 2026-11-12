@@ -21,7 +21,7 @@ use super::panel_contract::{FleetSession, HealthClassifier, HealthKind, RuleKind
 /// How many trailing lines of the terminal tail are inspected.
 const TAIL_LINES: usize = 40;
 /// `stallRestart` threshold when no rule sets one (D2 default, seconds).
-const DEFAULT_STALL_SECS: i64 = 300;
+pub const DEFAULT_STALL_SECS: i64 = 300;
 const DAY_MS: i64 = 86_400_000;
 
 const QUOTA_MARKERS: [&str; 6] = [

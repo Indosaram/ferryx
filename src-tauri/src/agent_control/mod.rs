@@ -18,6 +18,7 @@ use crate::remote::reference_chat::types::ReferencePromptAnswer;
 pub mod delivery;
 pub mod events;
 pub mod fence;
+pub mod parent_watch;
 pub mod policy;
 
 /// Capability string the daemon advertises in `GetCapabilities` for local agent control.
