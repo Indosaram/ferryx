@@ -429,14 +429,15 @@ pub fn live_count() -> usize {
         .len()
 }
 
-#[cfg(not(windows))]
 static REUSED_TOTAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-#[cfg(not(windows))]
 static COLD_TOTAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Records which path a one-shot operation actually took, so the reuse win is measured
 /// rather than assumed, the way the plan requires.
-#[cfg(not(windows))]
+///
+/// Compiled on every platform because the call sites are shared: Windows never has a master
+/// (acquire yields none there), so its counters honestly record cold spawns instead of the
+/// symbol going missing and breaking that build.
 pub fn note_path(operation: &str, reused: bool) {
     use std::sync::atomic::Ordering;
     let (counter, path) = if reused {
@@ -450,7 +451,6 @@ pub fn note_path(operation: &str, reused: bool) {
 
 /// `(reused, cold)` totals since the daemon started, so a later run reads the win instead of
 /// trusting that reuse happened.
-#[cfg(not(windows))]
 pub fn path_totals() -> (usize, usize) {
     use std::sync::atomic::Ordering;
     (
