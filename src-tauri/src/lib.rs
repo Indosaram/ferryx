@@ -1283,7 +1283,22 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                                                 }
                                             });
                                         }
-                                        _ => {}
+                                        Ok(crate::native_terminal::TerminalWheelOutcome::None) => {}
+                                        Ok(crate::native_terminal::TerminalWheelOutcome::ScrollViewport(_)) => {
+                                            // The guard above already accepted every applied scroll,
+                                            // so this is a surface that detached mid-gesture.
+                                            tracing::debug!(
+                                                session_id = %session_id,
+                                                "Native wheel scroll dropped: surface detached"
+                                            );
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                session_id = %session_id,
+                                                %error,
+                                                "Native wheel outcome failed"
+                                            );
+                                        }
                                     }
                                 }
                                 return ptr::null_mut();

@@ -4270,11 +4270,11 @@ impl NativeTerminalSurfaceHostState {
             }
             dimensions_changed
         } else {
-            if is_at_bottom {
-                let _ = session
-                    .terminal
-                    .scroll_viewport(crate::native_terminal::ScrollViewport::Bottom);
-            }
+            // No re-lock here. A bounds update with unchanged dimensions still runs on every
+            // wheel-triggered render, and the tolerance above cannot tell "one notch above the
+            // tail" from "at the tail": snapping here consumed the scroll the user had just
+            // requested, so the pane looked unresponsive. Keeping the bottom is the resize
+            // path's job, where the grid actually changes underneath the viewport.
             false
         };
         session.layout = Some(layout);
@@ -7798,6 +7798,71 @@ mod tests {
         lock_replay_to_bottom(&state.sessions, id, (current, &slot));
         let after = handle.lock().terminal.scrollbar().unwrap();
         assert_eq!(after.offset, after.total.saturating_sub(after.len));
+    }
+
+    #[test]
+    fn wheel_sized_scroll_survives_the_render_it_triggers() {
+        // One wheel notch is one row (`scroll::macos_wheel_scroll_rows`), and the wheel path
+        // renders immediately after scrolling. A layout pass must not read that one-row move
+        // as "still at the bottom" and snap it back, or the pane looks deaf to the wheel.
+        let state = NativeTerminalSurfaceHostState::default();
+        let session_id = "wheel-scroll-survives-render";
+        let cell_metrics = font_manager::derived_cell_metrics();
+        let request = NativeTerminalBoundsRequest {
+            session_id: session_id.to_string(),
+            bounds: LogicalBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 240.0,
+                scale_factor: 1.0,
+            },
+        };
+        state
+            .prepare_session_layout(request.clone(), cell_metrics)
+            .expect("create initial grid");
+        let history = "history\r\n".repeat(100);
+        state
+            .with_session_terminal(session_id, |term| term.feed_str(&history))
+            .expect("fill scrollback");
+        state
+            .with_session_terminal(session_id, |term| {
+                term.scroll_viewport(crate::native_terminal::ScrollViewport::Bottom)
+            })
+            .expect("start at the tail");
+
+        // Land exactly one row above the tail: that is the band the tolerance covered.
+        let tail = state
+            .with_session_terminal(session_id, |term| term.scrollbar())
+            .expect("read scrollbar");
+        let max_offset = tail.total.saturating_sub(tail.len);
+        assert!(max_offset > 2, "the fixture needs scrollback to scroll within");
+        state
+            .scroll_attached_terminal(
+                session_id,
+                crate::native_terminal::ScrollViewport::Row((max_offset - 1) as usize),
+            )
+            .expect("one row above the tail");
+        let scrolled = state
+            .with_session_terminal(session_id, |term| term.scrollbar())
+            .expect("read scrollbar");
+        assert_eq!(
+            scrolled.offset,
+            max_offset - 1,
+            "the fixture must sit one row above the tail"
+        );
+
+        state
+            .prepare_session_layout(request, cell_metrics)
+            .expect("render after the wheel");
+        let after = state
+            .with_session_terminal(session_id, |term| term.scrollbar())
+            .expect("read scrollbar");
+        assert_eq!(
+            after.offset, scrolled.offset,
+            "a same-size render must not move the viewport the user scrolled to"
+        );
+        state.teardown();
     }
 
     #[test]
