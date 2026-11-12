@@ -1130,7 +1130,16 @@ async fn spawn_agent(
         },
     };
     let session_id = sessions
-        .spawn_agent_pane(&request_id, spec.id, &workspace_id, worktree, cwd.clone(), command, args, lineage.clone())
+        .spawn_agent_pane(crate::daemon::session_service::AgentPaneRequest {
+            client_request_id: &request_id,
+            agent: spec.id,
+            workspace_id: &workspace_id,
+            worktree,
+            cwd: cwd.clone(),
+            command,
+            args,
+            lineage: lineage.clone(),
+        })
         .await
         .map_err(|failure| coded(failure.code, failure.wire, failure.message))?;
     drop(admission);

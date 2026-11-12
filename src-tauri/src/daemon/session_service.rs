@@ -251,6 +251,19 @@ pub(crate) struct SpawnPaneFailure {
     pub message: String,
 }
 
+/// One agent-control pane spawn: the request that makes a retry idempotent, the agent and the
+/// workspace it belongs to, the pane's cwd/startup, and the lineage it inherits.
+pub(crate) struct AgentPaneRequest<'a> {
+    pub client_request_id: &'a str,
+    pub agent: &'a str,
+    pub workspace_id: &'a str,
+    pub worktree: Option<WorktreeIdentity>,
+    pub cwd: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub lineage: Option<crate::agent_control::Lineage>,
+}
+
 /// What an earlier agent-control spawn with one request id asked for, read back for a retry.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AgentSpawnRecord {
@@ -976,18 +989,20 @@ impl DaemonSessionService {
     /// Spawn one agent pane for agent control, exactly as `DaemonRequest::Spawn` does with an
     /// `AgentLaunch` startup, and record its agent and lineage. Never creates a worktree:
     /// `worktree` names an existing one (the parent's) or none.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn spawn_agent_pane(
         &self,
-        client_request_id: &str,
-        agent: &str,
-        workspace_id: &str,
-        worktree: Option<WorktreeIdentity>,
-        cwd: String,
-        command: String,
-        args: Vec<String>,
-        lineage: Option<crate::agent_control::Lineage>,
+        request: AgentPaneRequest<'_>,
     ) -> Result<String, SpawnPaneFailure> {
+        let AgentPaneRequest {
+            client_request_id,
+            agent,
+            workspace_id,
+            worktree,
+            cwd,
+            command,
+            args,
+            lineage,
+        } = request;
         let session_id = self
             .handle_spawn_requested(
                 client_request_id,

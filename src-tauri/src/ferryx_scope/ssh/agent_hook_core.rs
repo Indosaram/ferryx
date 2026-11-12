@@ -376,8 +376,6 @@ pub fn context_output(agent: &str, event: &str, context: &str) -> Option<String>
 
 /// The directory a hook payload says the agent works in: `cwd`, else cursor's first workspace
 /// root.
-// The remote helper never looks up session context; only the desktop reporter reads this.
-#[allow(dead_code)]
 pub fn payload_cwd(payload: &Value) -> Option<String> {
     text(payload, "cwd", "cwd")
         .map(str::to_owned)
