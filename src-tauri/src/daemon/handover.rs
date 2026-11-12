@@ -1550,6 +1550,13 @@ impl HandoverManager {
         *self.status.write() = HandoverStatus::Prepared;
     }
 
+    /// Test fixture: a manager whose handover committed, so it drains and refuses new spawns.
+    #[cfg(test)]
+    pub(crate) fn force_draining_for_test(&self) {
+        *self.status.write() = HandoverStatus::Draining;
+        self.is_draining.store(true, Ordering::SeqCst);
+    }
+
     /// Test hook: signalled once the Committing gate is closed.
     #[cfg(test)]
     pub(crate) fn notify_when_committing(&self, hook: std::sync::mpsc::Sender<()>) {

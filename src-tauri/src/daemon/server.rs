@@ -462,6 +462,7 @@ mod pane_liveness_adopted_ownership_tests {
     fn owner_record(workspace_id: &str, worktree: Option<WorktreeIdentity>) -> StoredSessionMeta {
         StoredSessionMeta {
             lineage: None,
+            spawned_agent: None,
             machine_session: None,
             client_request_id: format!("req-{workspace_id}"),
             workspace_id: workspace_id.to_owned(),
@@ -14867,6 +14868,7 @@ mod instance_lock_deadline_tests {
             local_id.clone(),
             crate::daemon::session_service::StoredSessionMeta {
                 lineage: None,
+                spawned_agent: None,
                 machine_session: None,
                 client_request_id: "retry-local-validation".into(),
                 workspace_id: missing_project.clone(),

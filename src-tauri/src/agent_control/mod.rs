@@ -51,6 +51,9 @@ pub const SPAWN_MAX_CHILDREN: usize = 8;
 /// The error code of a spawn refused by the depth or child limit.
 pub const SPAWN_LIMIT_CODE: &str = "SPAWN_LIMIT";
 
+/// The error code of a spawn whose agent command is not installed on the host.
+pub const AGENT_NOT_INSTALLED_CODE: &str = "AGENT_NOT_INSTALLED";
+
 /// Where a spawned pane came from: its parent pane and how deep below an unspawned pane it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -331,7 +334,8 @@ pub fn exit_code_for(code: &str) -> i32 {
         "INVALID_REQUEST" | "PAYLOAD_TOO_LARGE" => EXIT_INVALID,
         "NOT_FOUND" | "TARGET_EXPIRED" => EXIT_NOT_FOUND,
         "UNAUTHORIZED" | "FORBIDDEN" | "CONTROL_CONFLICT" | "REQUEST_CONFLICT" | "PROVIDER_OWNED"
-        | "UNSUPPORTED" | "CAPTURE_UNSUPPORTED" | "SPAWN_LIMIT" => EXIT_REFUSED,
+        | "UNSUPPORTED" | "CAPTURE_UNSUPPORTED" | "SPAWN_LIMIT" | "AGENT_NOT_INSTALLED"
+        | "DAEMON_DRAINING" | "DAEMON_RETIRING" | "HANDOVER_BUSY" => EXIT_REFUSED,
         _ => EXIT_OTHER,
     }
 }

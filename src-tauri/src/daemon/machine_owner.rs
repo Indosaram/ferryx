@@ -171,6 +171,7 @@ impl DaemonSessionService {
             // means every session the desktop shows is describable and attachable here.
             let meta = crate::daemon::session_service::StoredSessionMeta {
                 lineage: None,
+                spawned_agent: None,
                 client_request_id: format!("adopted:{session_id}"),
                 machine_session: None,
                 workspace_id: workspace_id.clone(),

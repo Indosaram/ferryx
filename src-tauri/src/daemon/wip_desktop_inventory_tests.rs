@@ -120,6 +120,7 @@ async fn desktop_gui_session_inventory_and_attach_validation() {
         ssh_session_id.clone(),
         StoredSessionMeta {
             lineage: None,
+            spawned_agent: None,
             client_request_id: "ssh-req".into(),
             machine_session: None,
             workspace_id: "ssh:host::project".into(),
@@ -209,6 +210,7 @@ async fn desktop_gui_session_managed_worktree_projection() {
         session_id.clone(),
         StoredSessionMeta {
             lineage: None,
+            spawned_agent: None,
             client_request_id: "wt-req".into(),
             machine_session: None,
             workspace_id: request.workspace_id.clone(),
@@ -277,6 +279,7 @@ async fn desktop_gui_session_jail_and_missing_path_rejections() {
         jail_escape_id.clone(),
         StoredSessionMeta {
             lineage: None,
+            spawned_agent: None,
             client_request_id: "escape-req".into(),
             machine_session: None,
             workspace_id: request.workspace_id.clone(),
@@ -312,6 +315,7 @@ async fn desktop_gui_session_jail_and_missing_path_rejections() {
         missing_path_id.clone(),
         StoredSessionMeta {
             lineage: None,
+            spawned_agent: None,
             client_request_id: "missing-req".into(),
             machine_session: None,
             workspace_id: request.workspace_id.clone(),
