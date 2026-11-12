@@ -34,7 +34,6 @@ probe() {
   case "$1" in
     omarchy)  tmo 12 ssh -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes omarchy "$PROBE_UNIX" 2>/dev/null ;;
     noye) tmo 12 ssh -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes box@100.110.229.115 "$PROBE_UNIX" 2>/dev/null ;;
-    hark) tmo 12 ssh -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes -p 2222 sandbox@100.114.27.35 "$PROBE_UNIX" 2>/dev/null ;;
     maho-mac) tmo 12 ssh -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes i552267@100.65.239.35 "zsh -lc '$PROBE_UNIX'" 2>/dev/null ;;
     maho-win) tmo 15 ssh -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes maho-win 'powershell -NoProfile -Command "$o=Get-CimInstance Win32_OperatingSystem; $c=(Get-CimInstance Win32_Processor|Measure-Object NumberOfLogicalProcessors -Sum).Sum; $l=(Get-CimInstance Win32_Processor|Measure-Object LoadPercentage -Average).Average/100*$c; $d=(Get-PSDrive C).Free/1GB; $b=@(Get-Process cargo,rustc,zig -ErrorAction SilentlyContinue).Count; \"$c $l $([int]($o.FreePhysicalMemory/1MB)) $([int]$d) $b\""' 2>/dev/null | tr -d '\r' ;;
     instabox) tmo 40 instabox exec bong-i-1 -- 'echo "$(nproc) $(cut -d" " -f1 /proc/loadavg) $(awk "/MemAvailable/{printf \"%d\",\$2/1048576}" /proc/meminfo) $(df -k /data | awk "NR==2{printf \"%d\",\$4/1048576}") $(pgrep -x -c "cargo|rustc|zig")"' 2>/dev/null | tail -1 ;;
@@ -42,7 +41,7 @@ probe() {
 }
 
 best=""; best_score=999999
-for h in omarchy noye hark maho-mac maho-win instabox; do
+for h in omarchy noye maho-mac maho-win instabox; do
 
   lock="$LOCKDIR/$h"; if claimed "$lock"; then echo "$h: claimed ($(cat "$lock"))" >&2; continue; fi
   read -r cores load ram disk busy < <(probe "$h") || true
