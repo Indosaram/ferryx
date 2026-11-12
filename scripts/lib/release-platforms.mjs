@@ -685,6 +685,13 @@ ${tauriBuild}
 cargo build --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --no-default-features --bin ferryx-cli
 cp "$CARGO_TARGET_DIR/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64" || cp "$source_dir/src-tauri/target/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64"
 test -s "$out_dir/ferryx-cli-linux-amd64"
+# The remote-desktop client is a separate headless binary (crates/ferryx-rd/ferryx-rd-app,
+# required-features "cli"). Without it every remote host answered "no RD client on PATH" and the
+# daemon-lifetime Q00/Q11 lanes could not drive the GUI at all, so ship it next to ferryx-cli.
+# crates/ferryx-rd is its own workspace, so it needs its own target dir for the copy below.
+cargo build --manifest-path "$source_dir/crates/ferryx-rd/Cargo.toml" --release -p ferryx-rd-app --features cli --bin ferryx-rd-client
+cp "$CARGO_TARGET_DIR/release/ferryx-rd-client" "$out_dir/ferryx-rd-client-linux-amd64" || cp "$source_dir/crates/ferryx-rd/target/release/ferryx-rd-client" "$out_dir/ferryx-rd-client-linux-amd64"
+test -s "$out_dir/ferryx-rd-client-linux-amd64"
 appimages=()
 while IFS= read -r f; do
   [ -n "$f" ] && appimages+=("$f")
@@ -798,6 +805,17 @@ Push-Location $sourceDir
 bun tauri build --no-bundle; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $executables = @(Get-ChildItem -Path (Join-Path $cargoTarget 'release') -Filter 'ferryx.exe' -File)
 if ($executables.Count -ne 1) { throw "Expected exactly one Ferryx executable, found $($executables.Count)" }
+# The remote-desktop client is its own workspace (crates/ferryx-rd) and needs the "cli" feature.
+# It links FFmpeg dynamically, so the client ships next to the same DLLs the daemon stages.
+cargo build --manifest-path (Join-Path $sourceDir 'crates/ferryx-rd/Cargo.toml') --release -p ferryx-rd-app --features cli --bin ferryx-rd-client; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$rdClient = @(Get-ChildItem -Path (Join-Path $cargoTarget 'release') -Filter 'ferryx-rd-client.exe' -File)
+if ($rdClient.Count -ne 1) { throw "Expected exactly one ferryx-rd-client.exe, found $($rdClient.Count)" }
+Copy-Item -LiteralPath $rdClient[0].FullName -Destination (Join-Path $outDir 'ferryx-rd-client-windows-amd64.exe')
+foreach ($pattern in @('avcodec-*.dll', 'avutil-*.dll', 'swscale-*.dll', 'swresample-*.dll')) {
+  foreach ($dll in @(Get-ChildItem -Path $ffmpegPayload -Filter $pattern -File -ErrorAction SilentlyContinue)) {
+    Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $outDir $dll.Name) -Force
+  }
+}
 & (Join-Path $sourceDir 'scripts/build-msix.ps1') -ExePath $executables[0].FullName -Version ${quotePowerShell(plan.msixVersion)} -OutputDir $outDir -SkipSigning -FfmpegPayloadDir $ffmpegPayload
 if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ${nsisBuild}Pop-Location
@@ -938,6 +956,31 @@ export function recreateDmgFromApp({ appPath, dmgPath, stagingDir, exec = macExe
  * both bundle signatures carry it, and after signing the outer app's
  * entitlements must equal it exactly. An empty file means the app has none.
  */
+/**
+ * Rewrites one artifact entry in the bundled helper manifest so it describes the bytes that are
+ * actually inside the signed app. Entries whose file is absent keep their staged values.
+ */
+export function refreshBundledHelperManifest(appPath) {
+  const helpersDir = join(appPath, "Contents", "Resources", "helpers");
+  const manifestPath = join(helpersDir, "manifest.json");
+  if (!existsSync(manifestPath)) return null;
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  let changed = 0;
+  for (const artifact of manifest.artifacts ?? []) {
+    const artifactPath = join(helpersDir, artifact.target, artifact.filename ?? "ferryx-remote-helper");
+    if (!existsSync(artifactPath)) continue;
+    const bytes = readFileSync(artifactPath);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    if (sha256 !== artifact.sha256 || bytes.length !== artifact.byteLength) {
+      artifact.sha256 = sha256;
+      artifact.byteLength = bytes.length;
+      changed += 1;
+    }
+  }
+  if (changed > 0) writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return changed;
+}
+
 export function finalizeMacosBundle({
   appPath,
   dmgPath = null,
@@ -987,6 +1030,12 @@ export function finalizeMacosBundle({
       throw new Error(`App bundle is not signed with expected identity '${signingIdentity}'`);
     }
   }
+
+  // Signing rewrites each helper's code-signature blob, which changes its file length (measured:
+  // aarch64 1590640 -> 1599648) and its sha256. helper_assets::resolve_helper_asset compares the
+  // bundled bytes against manifest.json byteLength/sha256, so a stale manifest makes every SSH
+  // spawn fail with helper_asset_length_mismatch. Re-derive the manifest from the signed bytes.
+  refreshBundledHelperManifest(appPath);
 
   const notarizations = [];
   if (approveNotarization && notaryProfile) {
@@ -1381,11 +1430,22 @@ export async function buildHost({
           ],
           { cwd: isolatedSource, env: buildEnv, stdio: "pipe", timeout: timeoutMs },
         );
+        // The remote-desktop client lives in its own workspace (crates/ferryx-rd) and needs the
+        // "cli" feature. Remote hosts cannot drive the daemon-lifetime GUI lanes without it.
+        execFileSync(
+          "cargo",
+          [
+            "build", "--manifest-path", join(isolatedSource, "crates", "ferryx-rd", "Cargo.toml"),
+            "--release", "-p", "ferryx-rd-app", "--features", "cli", "--target", triple,
+            "--bin", "ferryx-rd-client",
+          ],
+          { cwd: isolatedSource, env: buildEnv, stdio: "pipe", timeout: timeoutMs },
+        );
       }
 
       // Ensure all workspace binaries used by the app bundle are universal lipo'd.
       mkdirSync(universalRel, { recursive: true });
-      for (const binName of ["ferryx-cli", "ferryx-account", "ferryx-relay"]) {
+      for (const binName of ["ferryx-cli", "ferryx-account", "ferryx-relay", "ferryx-rd-client"]) {
         const aarch64Bin = join(aarch64Rel, binName);
         const x86Bin = join(x86Rel, binName);
         const universalBin = join(universalRel, binName);
@@ -1505,6 +1565,10 @@ export async function buildHost({
       const universalCli = join(universalRel, "ferryx-cli");
       if (existsSync(universalCli)) {
         execFileSync("cp", [universalCli, join(artifactsOutDir, "ferryx-cli-darwin-universal")]);
+      }
+      const universalRdClient = join(universalRel, "ferryx-rd-client");
+      if (existsSync(universalRdClient)) {
+        execFileSync("cp", [universalRdClient, join(artifactsOutDir, "ferryx-rd-client-darwin-universal")]);
       }
     } else {
       const scpCommand = process.env.FERRYX_SCP_COMMAND || "scp";
