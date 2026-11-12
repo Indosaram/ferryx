@@ -50,7 +50,7 @@ function idleInventory(): RemoteSessionInventory {
 
 /** worktreeActivity as useWorkspaceStore builds it: parked snapshots, overlaid by the mounted workspace. */
 function desktopActivity(mounted: WorkspaceState, parked: readonly WorkspaceState[] = []) {
-  return Object.assign({}, ...parked.map(selectWorktreeActivitySummaries), selectWorktreeActivitySummaries(mounted));
+  return Object.assign({}, ...parked.map((state) => selectWorktreeActivitySummaries(state)), selectWorktreeActivitySummaries(mounted));
 }
 
 /** What the desktop Sidebar draws: the raw activity plus the reduced signals it also publishes. */

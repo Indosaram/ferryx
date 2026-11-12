@@ -82,6 +82,7 @@ import {
 import { TerminalPane } from "./TerminalPane";
 import { actingSessionIds, useSupervisor } from "../lib/supervisor";
 import { IconButton } from "./ui/IconButton";
+import { groupOf } from "../lib/attentionGroup";
 
 const MIN_PANE_SIZE_PX = 80;
 
@@ -1281,9 +1282,8 @@ const PaneLeafView = React.memo(function PaneLeafView({
   // policy keeps macOS surfaces below the DOM feedback and yields on other platforms.
   const showsDropFeedback = dropFeedbackLeafId === leafId;
   const attentionFrameEnabled = useAttentionFrameEnabled();
-  const needsAttention = attentionFrameEnabled && Boolean(
-    activity && !activity.seen && (activity.state === "waiting" || activity.state === "done"),
-  );
+  const group = activity ? groupOf(activity) : null;
+  const needsAttention = attentionFrameEnabled && (group === "needsYou" || group === "unread");
   const flashSessionId = content.kind === "terminal" ? session.id : null;
   const flashToken = usePaneFlashToken(flashSessionId);
   // A browser pane draws its own toolbar (address bar) at the top of its content, so the pane

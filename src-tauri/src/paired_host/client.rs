@@ -593,7 +593,8 @@ impl Operation {
                     | crate::agent_control::AgentControlOp::Deliver { session_id, .. }
                     | crate::agent_control::AgentControlOp::Answer { session_id, .. }
                     | crate::agent_control::AgentControlOp::Stop { session_id, .. }
-                    | crate::agent_control::AgentControlOp::Wait { session_id, .. } => {
+                    | crate::agent_control::AgentControlOp::Wait { session_id, .. }
+                    | crate::agent_control::AgentControlOp::Acknowledge { session_id } => {
                         if !crate::agent_transcript::is_valid_session_id(session_id) {
                             return Err(ClientError::local("INVALID_REQUEST"));
                         }
@@ -602,10 +603,26 @@ impl Operation {
                         path = "agent-control/events";
                         r.query.push(("after".into(), after.to_string()));
                     }
+                    crate::agent_control::AgentControlOp::Spawn { parent_session_id, .. } => {
+                        if parent_session_id
+                            .as_deref()
+                            .is_some_and(|parent| !crate::agent_transcript::is_valid_session_id(parent))
+                        {
+                            return Err(ClientError::local("INVALID_REQUEST"));
+                        }
+                        path = "agent-control/spawn";
+                        // A host that cannot spawn is never sent one.
+                        r.capability = Some(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
+                    }
                 }
                 // A delivery rides the send route with `observeMs`, but only to a host that
                 // reports causal start receipts; any other host is never sent it. Its budget
                 // covers the host's readiness wait, its submit deadline and the start wait.
+                // An older host without the read store is never sent an acknowledgement.
+                if matches!(op, crate::agent_control::AgentControlOp::Acknowledge { .. }) {
+                    r.capability = Some(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
+                    r.method = Method::POST;
+                }
                 if let crate::agent_control::AgentControlOp::Deliver { observe_ms, .. } = op {
                     r.capability = Some(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
                     let observe = crate::agent_control::delivery::observe_deadline(*observe_ms);
@@ -654,7 +671,8 @@ impl Operation {
                 | crate::agent_control::AgentControlOp::Deliver { session_id, .. }
                 | crate::agent_control::AgentControlOp::Answer { session_id, .. }
                 | crate::agent_control::AgentControlOp::Stop { session_id, .. }
-                | crate::agent_control::AgentControlOp::Wait { session_id, .. } => {
+                | crate::agent_control::AgentControlOp::Wait { session_id, .. }
+                | crate::agent_control::AgentControlOp::Acknowledge { session_id } => {
                     r.segments.push(session_id.clone());
                     if matches!(op, crate::agent_control::AgentControlOp::Wait { .. }) {
                         r.segments.push("wait".into());
@@ -668,10 +686,13 @@ impl Operation {
                         r.segments.push("answer".into());
                     } else if matches!(op, crate::agent_control::AgentControlOp::Stop { .. }) {
                         r.segments.push("stop".into());
+                    } else if matches!(op, crate::agent_control::AgentControlOp::Acknowledge { .. }) {
+                        r.segments.push("ack".into());
                     }
                 }
                 crate::agent_control::AgentControlOp::List
-                | crate::agent_control::AgentControlOp::Events { .. } => {}
+                | crate::agent_control::AgentControlOp::Events { .. }
+                | crate::agent_control::AgentControlOp::Spawn { .. } => {}
             },
             Self::Operation { request_id } => {
                 if uuid::Uuid::parse_str(request_id).is_err() {
@@ -2238,6 +2259,14 @@ fn agent_control_body(
         }),
         crate::agent_control::AgentControlOp::Stop { request_id, .. } => {
             serde_json::json!({ "requestId": request_id })
+        }
+        crate::agent_control::AgentControlOp::Spawn { .. } => {
+            // The op's own camelCase fields, minus its tag.
+            let mut body = serde_json::to_value(op).unwrap_or(serde_json::Value::Null);
+            if let Some(fields) = body.as_object_mut() {
+                fields.remove("op");
+            }
+            body
         }
         _ => serde_json::Value::Null,
     };

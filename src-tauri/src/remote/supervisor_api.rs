@@ -89,6 +89,25 @@ pub(crate) async fn http_panel(
     no_store(serde_json::json!(crate::hub_runtime::supervisor_panel(&state).await))
 }
 
+/// `GET /api/v1/supervisor/prs`: the pull-request lane, ordered by who acts next. Owner only,
+/// like the panel. Before the hub's first refresh (or without a hub generation in this daemon)
+/// it is an empty lane with `outage: null` and `refreshedAtMs: 0`; a signed-out or missing `gh`
+/// is an empty lane naming the outage, never an error status.
+pub(crate) async fn http_prs(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = agent_control_service::http_device(&state, &headers, true) {
+        return response;
+    }
+    let lane = crate::hub_runtime::supervisor_prs().unwrap_or(ferryx_hub::supervisor::pr_lane::PrLane {
+        prs: Vec::new(),
+        outage: None,
+        refreshed_at_ms: 0,
+    });
+    no_store(serde_json::json!(lane))
+}
+
 /// `GET /api/v1/fleet/sessions`: `{sessions}` in the fleet shape. Owner only. This gateway has
 /// no path to the hub's paired-host fleet, so the list is this computer's sessions mapped the
 /// same way the hub maps each machine.

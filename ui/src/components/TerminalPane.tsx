@@ -33,6 +33,7 @@ import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 import { DagPaneBadge } from "./dag/DagPaneBadge";
 import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { remoteHostStore } from "../state/remoteHostStore";
+import { groupOf } from "../lib/attentionGroup";
 
 type TerminalPaneProps = {
   session: TerminalSession;
@@ -448,7 +449,7 @@ export function TerminalPane({
           providerSessionId={session.providerSession?.id ?? null}
           sessions={sessions}
           agentPresent={activity?.isAgent === true}
-          agentWorking={activity?.isAgent === true && activity.state === "working"}
+          agentWorking={activity?.isAgent === true && groupOf(activity) === "working"}
         />
       ) : null}
       <div

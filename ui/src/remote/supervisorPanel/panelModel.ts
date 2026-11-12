@@ -1,5 +1,6 @@
 // What the phone panel renders, derived from one PanelSnapshot: each session appears in exactly
 // one section (decisions, handling, sessions), and `panel.*` owner frames fold into the snapshot.
+import { groupOf } from "../../lib/attentionGroup";
 import type {
   ActionEntry,
   Escalation,
@@ -44,15 +45,13 @@ export type SessionStatus = { readonly kind: "working" | "waiting" | "idle"; rea
 /** Unknown state is Idle, said plainly; never a guess of Working. */
 export function sessionStatus(session: FleetSession): SessionStatus {
   if (session.stale) return { kind: "idle", label: "Offline" };
-  switch (session.state) {
+  switch (groupOf({ attention: session.attention, state: session.state })) {
     case "working":
       return { kind: "working", label: "Working" };
-    case "blocked":
+    case "needsYou":
       return { kind: "waiting", label: "Waiting" };
-    case "idle":
-      return { kind: "idle", label: "Idle" };
     default:
-      return { kind: "idle", label: "Idle · status unknown" };
+      return { kind: "idle", label: session.state === "unknown" && !session.attention ? "Idle · status unknown" : "Idle" };
   }
 }
 
@@ -63,7 +62,8 @@ export function statusLine(snapshot: PanelSnapshot): string {
   if (decisions > 0) return decisions === 1 ? "1 decision needs you" : `${decisions} decisions need you`;
   // A blocked session no card covers is still the owner's work: never report all-clear for it.
   const waiting = snapshot.sessions.filter(
-    (session) => !decided.has(session.sessionRef) && !session.stale && (session.state === "blocked" || session.health?.type === "failed"),
+    (session) => !decided.has(session.sessionRef) && !session.stale &&
+      groupOf({ attention: session.attention, state: session.state, failed: session.health?.type === "failed" }) === "needsYou",
   ).length;
   if (waiting > 0) {
     // A prompt the hub holds but has not escalated means the supervisor is still deciding, not
@@ -76,7 +76,7 @@ export function statusLine(snapshot: PanelSnapshot): string {
   }
   const handling = snapshot.handling.length;
   if (handling > 0) return handling === 1 ? "Handling 1 problem" : `Handling ${handling} problems`;
-  const working = snapshot.sessions.filter((session) => session.state === "working" && !session.stale).length;
+  const working = snapshot.sessions.filter((session) => !session.stale && groupOf({ attention: session.attention, state: session.state }) === "working").length;
   if (working > 0) return `All good · ${working} working`;
   return "All quiet";
 }

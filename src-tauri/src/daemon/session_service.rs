@@ -125,6 +125,9 @@ pub(super) struct StoredSessionMeta {
     pub(super) cwd: PathBuf,
     pub(super) provider_claim: Option<ProviderSessionClaimKey>,
     pub(super) spawn_fingerprint: SpawnRequestFingerprint,
+    /// Set when agent control spawned this pane as another pane's child. Older records have none.
+    #[serde(default)]
+    pub(super) lineage: Option<crate::agent_control::Lineage>,
 }
 
 /// Serves a stored session cwd only when it can be a real local absolute path. A probe that captured
@@ -847,6 +850,86 @@ impl DaemonSessionService {
         })
     }
 
+    /// Where a spawned pane came from: its parent pane and depth. `None` for a pane agent
+    /// control did not spawn as a child (depth 0, owned by the person).
+    pub fn lineage_for(&self, session_id: &str) -> Option<crate::agent_control::Lineage> {
+        self.session_metadata.read().get(session_id)?.lineage.clone()
+    }
+
+    /// How many live panes name `parent` as their spawn parent.
+    pub(crate) fn live_spawned_children(&self, parent: &str) -> usize {
+        let children: Vec<String> = self
+            .session_metadata
+            .read()
+            .iter()
+            .filter(|(_, meta)| meta.lineage.as_ref().is_some_and(|lineage| lineage.parent == parent))
+            .map(|(id, _)| id.clone())
+            .collect();
+        children.iter().filter(|id| self.session_is_live(id)).count()
+    }
+
+    /// The workspace and worktree a live local pane runs in, for a child spawned beside it.
+    pub(crate) fn spawn_parent_scope(&self, parent: &str) -> Option<(String, Option<WorktreeIdentity>)> {
+        if !self.session_is_live(parent) {
+            return None;
+        }
+        let metadata = self.session_metadata.read();
+        let meta = metadata.get(parent)?;
+        Some((meta.workspace_id.clone(), meta.worktree.clone()))
+    }
+
+    /// The live pane an earlier spawn with this request id created, if any.
+    pub(crate) fn live_session_for_request(&self, client_request_id: &str) -> Option<String> {
+        let candidates: Vec<String> = self
+            .session_metadata
+            .read()
+            .iter()
+            .filter(|(_, meta)| meta.client_request_id == client_request_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        candidates.into_iter().find(|id| self.session_is_live(id))
+    }
+
+    /// Spawn one agent pane for agent control, exactly as `DaemonRequest::Spawn` does with an
+    /// `AgentLaunch` startup, and record its lineage. Never creates a worktree: `worktree` names
+    /// an existing one (the parent's) or none. The error is `(code, message)`.
+    pub(crate) async fn spawn_agent_pane(
+        &self,
+        client_request_id: &str,
+        workspace_id: &str,
+        worktree: Option<WorktreeIdentity>,
+        cwd: String,
+        command: String,
+        args: Vec<String>,
+        lineage: Option<crate::agent_control::Lineage>,
+    ) -> Result<String, (crate::scoped_contracts::ScopeErrorCode, String)> {
+        use crate::scoped_contracts::ScopeErrorCode;
+        let session_id = self
+            .handle_spawn_requested(
+                client_request_id,
+                workspace_id,
+                SpawnOptions { worktree, cwd: Some(cwd), cols: 120, rows: 32, shell: None },
+                Some(TerminalStartup::AgentLaunch { command, args }),
+                None,
+                #[cfg(test)]
+                None,
+            )
+            .await
+            .map_err(|error| match error {
+                SpawnError::Structured(error) => {
+                    (ScopeErrorCode::InvalidRequest, error.message)
+                }
+                SpawnError::Other(message) if message == "TIMEOUT" => (ScopeErrorCode::Timeout, message),
+                other => (ScopeErrorCode::InvalidRequest, other.to_string()),
+            })?;
+        if let Some(lineage) = lineage {
+            if let Some(meta) = self.session_metadata.write().get_mut(&session_id) {
+                meta.lineage.get_or_insert(lineage);
+            }
+        }
+        Ok(session_id)
+    }
+
     /// The agent extension's last report for this PTY, for the agent-control surface.
     pub fn agent_control_report(&self, session_id: &str) -> Option<crate::agent_control::ProviderReport> {
         let current = self.agent_states.current(session_id)?;
@@ -855,6 +938,7 @@ impl DaemonSessionService {
             state: current.state,
             self_reported: current.origin.is_provider_report(),
             detail: current.detail,
+            outcome: current.outcome,
         })
     }
 
@@ -2297,6 +2381,7 @@ impl DaemonSessionService {
         self.session_metadata.write().insert(
             id.clone(),
             StoredSessionMeta {
+                lineage: None,
                 client_request_id: request.into(),
                 machine_session: None,
                 workspace_id: project.workspace_id.clone(),
@@ -3116,6 +3201,7 @@ impl DaemonSessionService {
                 session_metadata.write().insert(
                     session_id.clone(),
                     StoredSessionMeta {
+                        lineage: None,
                         client_request_id: client_request_id.to_string(),
                         machine_session: durable.as_ref().map(|r| r.session.clone()),
                         workspace_id: workspace_id_owned.clone(),
@@ -3526,6 +3612,7 @@ impl DaemonSessionService {
         self.session_metadata.write().insert(
             session_id.to_string(),
             StoredSessionMeta {
+                lineage: None,
                 client_request_id: client_request_id.to_string(),
                 machine_session: None,
                 workspace_id: "test".to_string(),

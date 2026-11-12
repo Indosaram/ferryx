@@ -55,6 +55,7 @@ Owner-scoped frames on `/api/v1/events`, `type` one of:
 - `panel.action`: an `ActionEntry` was created or updated.
 - `panel.session`: a `FleetSession` changed.
 - `panel.rules`: the rules list changed.
+- `panel.prs`: the pull-request lane (`PrLane`, also `GET /api/v1/supervisor/prs`) changed; refreshed every 60 s, never a push.
 
 Non-owner subscribers never receive prompt bodies.
 

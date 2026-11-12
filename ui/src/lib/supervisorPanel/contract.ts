@@ -31,6 +31,23 @@ export interface PendingPrompt {
 
 export type FleetSessionState = 'working' | 'blocked' | 'idle' | 'unknown';
 
+/** The independent facts the daemon judges a session's attention group from. */
+export interface AttentionAxes {
+  demand: 'none' | 'question' | 'approval' | 'error';
+  activity: 'working' | 'stopped' | 'unknown';
+  completion: 'reported' | 'none';
+  read: 'read' | 'unread';
+  ownership: 'owner' | 'delegated' | 'supervisor';
+}
+
+/** The one group every surface shows a session under (Rust `attention_group`). */
+export type AttentionGroup = 'needsYou' | 'unread' | 'working' | 'seen';
+
+export interface Attention {
+  axes: AttentionAxes;
+  group: AttentionGroup;
+}
+
 export interface FleetSession {
   sessionRef: SessionRef;
   hostId: string;
@@ -50,6 +67,10 @@ export interface FleetSession {
   stale: boolean;
   /** Telemetry-derived health; only `failed` is produced (agent died mid-turn). Absent otherwise. */
   health?: HealthKind;
+  /** The daemon's attention axes and group. Absent from older peers (`groupOf` maps `state`). */
+  attention?: Attention;
+  /** Why the session stopped, in one line. Absent from older peers and for a pane with nothing to say. */
+  reason?: string | null;
 }
 
 export type ActionKind =
@@ -137,6 +158,34 @@ export interface PanelSnapshot {
 }
 
 // Route payloads.
+/** Who acts next on a PR; the declaration order is the lane order. */
+export type PrLaneKind = 'waits_on_owner' | 'agent_working' | 'failing' | 'pending';
+
+export type PrCheckState = 'success' | 'failure' | 'pending' | 'none';
+
+export interface PullRequest {
+  url: string;
+  title: string;
+  number: number;
+  repo: string;
+  headRefName: string;
+  isDraft: boolean;
+  reviewDecision: string | null;
+  checks: PrCheckState;
+  reviewRequested: boolean;
+  updatedAt: string;
+  lane: PrLaneKind;
+}
+
+/** `GET /api/v1/supervisor/prs` and the `panel.prs` frame. */
+export interface PrLane {
+  /** Ordered: waits_on_owner first. */
+  prs: PullRequest[];
+  /** `gh_missing` | `gh_unauthenticated` | `gh_failed` when the fetch failed; null otherwise. */
+  outage: string | null;
+  refreshedAtMs: number;
+}
+
 export interface FleetSessionsResponse {
   sessions: FleetSession[];
 }
@@ -163,7 +212,8 @@ export type PanelEvent =
   | { type: 'panel.decision'; sessionRef: SessionRef; decision: Escalation | null }
   | { type: 'panel.action'; action: ActionEntry }
   | { type: 'panel.session'; session: FleetSession }
-  | { type: 'panel.rules'; rules: StandingRule[] };
+  | { type: 'panel.rules'; rules: StandingRule[] }
+  | { type: 'panel.prs'; lane: PrLane };
 
 /** Text sent to resume a session; null means unknown agent, escalate instead. */
 export function resumeText(agent: string): string | null {

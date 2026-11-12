@@ -209,16 +209,39 @@ fn retry_outcome_of(outcome: Option<&ferryx_hub::goals::loop_driver::LoopOutcome
     }
 }
 
-/// Publishes through the daemon's owner event channel (`panel.decision|action|rules`).
-pub struct OwnerChannel;
+/// Publishes through the daemon's owner event channel (`panel.decision|action|rules`). With
+/// `sessions` set, a decision or action for a pane of this computer also publishes that pane's
+/// freshly overlaid `panel.session`, since handling and decisions move its attention group.
+#[derive(Default)]
+pub struct OwnerChannel {
+    pub(crate) sessions: Option<SessionRefresh>,
+}
+
+/// Where [`OwnerChannel`] reads a pane from, and the stores its attention is overlaid with.
+pub(crate) struct SessionRefresh {
+    pub(crate) state: std::sync::Weak<RemoteGatewayState>,
+    pub(crate) sources: Arc<dyn Fn() -> ferryx_hub::fleet::PanelSources + Send + Sync>,
+}
+
+impl OwnerChannel {
+    fn refresh(&self, session_ref: &SessionRef) {
+        if let Some(sessions) = &self.sessions {
+            super::refresh_panel_session(sessions.state.clone(), session_ref, (sessions.sources)());
+        }
+    }
+}
 
 impl PanelPublisher for OwnerChannel {
     fn decision(&self, session_ref: &SessionRef, decision: Option<&Escalation>) {
         super::publish_panel_decision(session_ref, decision);
+        self.refresh(session_ref);
     }
 
     fn action(&self, action: &ActionEntry) {
         super::publish_panel_action(action);
+        if let Some(session_ref) = &action.session_ref {
+            self.refresh(session_ref);
+        }
     }
 
     fn rules(&self, rules: &[StandingRule]) {
@@ -252,6 +275,11 @@ impl HostDirectory for PairedDirectory {
     }
 }
 
+/// Whether `host_id` names this computer in a session ref.
+pub(super) fn is_local_host(host_id: &str) -> bool {
+    local_host_ids().iter().any(|local| local == host_id)
+}
+
 /// Host ids that mean this computer in a session ref.
 fn local_host_ids() -> Vec<String> {
     vec![
@@ -272,7 +300,14 @@ pub async fn fleet_sessions(state: &Arc<RemoteGatewayState>) -> Vec<FleetSession
             Err(error) => tracing::warn!(%error, "the paired-host fleet was not read"),
         }
     }
-    sessions
+    // The hub's handling entries and decisions decide who acts next on every session.
+    let sources = panel_sources();
+    let since_ms = super::unix_ms() - super::PANEL_LOG_WINDOW_MS;
+    let mut overlaid = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        overlaid.push(ferryx_hub::fleet::overlay_attention_from_sources(session, &sources, since_ms).await);
+    }
+    overlaid
 }
 
 /// The engine's `FleetSource`: this computer plus the paired hosts.
@@ -303,7 +338,10 @@ pub(super) async fn install(launch: &HubLaunch) {
     let control: Arc<dyn ferryx_hub::agent_control::AgentControl> =
         Arc::new(SupervisorAgentControl::new(bridge, local_host_ids(), pool.clone()));
     let session_control: Arc<dyn SessionControl> = Arc::new(AgentSessionControl::new(control.clone()));
-    let autonomy = match Autonomy::open(pool.clone(), session_control.clone(), Arc::new(OwnerChannel)).await {
+    let channel = OwnerChannel {
+        sessions: Some(SessionRefresh { state: Arc::downgrade(&state), sources: Arc::new(panel_sources) }),
+    };
+    let autonomy = match Autonomy::open(pool.clone(), session_control.clone(), Arc::new(channel)).await {
         Ok(autonomy) => autonomy,
         Err(error) => {
             tracing::warn!(%error, "supervisor autonomy was not opened; the panel stays empty");
@@ -485,6 +523,9 @@ pub(crate) mod tests {
             updated_at_ms: 1,
             stale: false,
             health: None,
+            attention: None,
+            reason: None,
+            branch: None,
         }
     }
 
@@ -524,7 +565,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn real_mutations_reach_the_owner_channel_and_owner_answers_are_learned() {
         let pool = ferryx_hub::storage::memory().await.unwrap();
-        let autonomy = Autonomy::open(pool.clone(), Arc::new(NoControl), Arc::new(OwnerChannel))
+        let autonomy = Autonomy::open(pool.clone(), Arc::new(NoControl), Arc::new(OwnerChannel::default()))
             .await
             .unwrap();
         let mut frames = super::super::subscribe_panel_events();
@@ -767,6 +808,9 @@ pub(crate) mod tests {
             updated_at_ms: START_MS,
             stale: false,
             health: None,
+            attention: None,
+            reason: None,
+            branch: None,
         }
     }
 

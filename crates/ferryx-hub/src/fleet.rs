@@ -9,8 +9,8 @@ use tokio::sync::Mutex;
 use crate::agent_control::{AgentControl, AgentOp};
 use crate::error::{HubError, Result};
 use crate::supervisor::panel_contract::{
-    ActionEntry, ActionLog, Escalation, FleetSession, HealthKind, PanelSnapshot, PendingPrompt,
-    RuleStore, SessionRef, StandingRule,
+    attention_group, ActionEntry, ActionLog, Attention, AttentionOwnership, Escalation,
+    FleetSession, HealthKind, PanelSnapshot, PendingPrompt, RuleStore, SessionRef, StandingRule,
 };
 
 /// One host in a fleet list. A failure is an entry, not an error for the whole list.
@@ -213,7 +213,51 @@ fn fleet_session(
             .get("health")
             .and_then(|health| serde_json::from_value::<HealthKind>(health.clone()).ok())
             .filter(|health| matches!(health, HealthKind::Failed { .. })),
+        attention: value
+            .get("attention")
+            .and_then(|attention| serde_json::from_value::<Attention>(attention.clone()).ok()),
+        reason: text("reason").map(str::to_owned),
+        branch: text("branch").map(str::to_owned),
     })
+}
+
+/// Sets who handles `session` from the hub's own state and judges its group again. A live
+/// handling entry for the session with no pending decision for it makes the supervisor the
+/// owner of the next step; a pending decision hands it back to the owner. A session with no
+/// attention (an older peer) is left as it is.
+pub fn overlay_attention(session: &mut FleetSession, handling: &[ActionEntry], decisions: &[Escalation]) {
+    let Some(attention) = session.attention.as_mut() else { return };
+    let ours = |session_ref: &SessionRef| session_ref.as_str() == session.session_ref.as_str();
+    let decided = decisions.iter().any(|decision| ours(&decision.session_ref));
+    let handled = handling
+        .iter()
+        .filter(|entry| entry.live)
+        .any(|entry| entry.session_ref.as_ref().is_some_and(ours));
+    if handled && !decided {
+        attention.axes.ownership = AttentionOwnership::Supervisor;
+    } else if attention.axes.ownership == AttentionOwnership::Supervisor {
+        attention.axes.ownership = AttentionOwnership::Owner;
+    }
+    attention.group = attention_group(&attention.axes);
+}
+
+/// [`overlay_attention`] for one live session frame, over the stores in `sources`: the action
+/// log since `since_ms` and the pending decisions. A store that fails counts as empty.
+pub async fn overlay_attention_from_sources(
+    mut session: FleetSession,
+    sources: &PanelSources,
+    since_ms: i64,
+) -> FleetSession {
+    let log = match &sources.log {
+        Some(store) => store.list_today(since_ms).await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let decisions = match &sources.escalations {
+        Some(source) => source.pending().await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    overlay_attention(&mut session, &log, &decisions);
+    session
 }
 
 /// The daemon's `pending` card (a reference prompt) as the panel's prompt.
@@ -297,6 +341,10 @@ pub async fn assemble_panel(
         }),
         None => Vec::new(),
     };
+    let mut sessions = sessions;
+    for session in &mut sessions {
+        overlay_attention(session, &log, &decisions);
+    }
     PanelSnapshot {
         decisions,
         handling: log.iter().filter(|entry| entry.live).cloned().collect(),
@@ -549,5 +597,108 @@ mod tests {
         assert!(unconfigured.log.is_empty());
         assert!(unconfigured.rules.is_empty());
         assert_eq!(unconfigured.sessions.len(), 1);
+    }
+
+    fn attended(session_id: &str, demand: &str) -> Value {
+        json!({
+            "sessionId": session_id, "state": "blocked",
+            "attention": {
+                "axes": {"demand": demand, "activity": "stopped", "completion": "none",
+                    "read": "unread", "ownership": "owner"},
+                "group": "needsYou"
+            }
+        })
+    }
+
+    #[test]
+    fn an_old_peer_without_attention_still_parses_and_a_new_one_carries_it() {
+        use crate::supervisor::panel_contract::{AttentionDemand, AttentionGroup};
+        let entries = vec![host_entry(
+            "mac",
+            vec![json!({"sessionId": "old", "state": "idle"}), attended("new", "question")],
+            None,
+            false,
+        )];
+        let merged = merge_sessions(&HashMap::new(), &entries, 1);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].attention, None, "an old peer has no attention");
+        assert_eq!(merged[0].state, "idle");
+        let attention = merged[1].attention.expect("a new peer's attention");
+        assert_eq!(attention.axes.demand, AttentionDemand::Question);
+        assert_eq!(attention.group, AttentionGroup::NeedsYou);
+    }
+
+    #[test]
+    fn an_old_peer_without_branch_still_parses_and_a_new_one_carries_it() {
+        let entries = vec![host_entry(
+            "mac",
+            vec![
+                json!({"sessionId": "old", "state": "working"}),
+                json!({"sessionId": "new", "state": "working", "branch": "ferryx/ws1/refactor"}),
+                json!({"sessionId": "blank", "state": "working", "branch": ""}),
+            ],
+            None,
+            false,
+        )];
+        let merged = merge_sessions(&HashMap::new(), &entries, 1);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].branch, None, "an old peer has no branch");
+        assert_eq!(merged[0].state, "working");
+        assert_eq!(merged[1].branch.as_deref(), Some("ferryx/ws1/refactor"));
+        assert_eq!(merged[2].branch, None, "an empty branch is no branch");
+        let wire = serde_json::to_value(&merged[0]).unwrap();
+        assert!(wire.get("branch").is_none(), "an absent branch stays off the wire: {wire}");
+    }
+
+    fn handled(session: &str, live: bool) -> ActionEntry {
+        ActionEntry { session_ref: Some(SessionRef::new("mac", session)), ..action(9, live) }
+    }
+
+    #[tokio::test]
+    async fn a_handled_session_is_seen_until_it_is_escalated_back_to_the_owner() {
+        use crate::supervisor::panel_contract::{AttentionGroup, AttentionOwnership};
+        let sessions = || {
+            merge_sessions(
+                &HashMap::new(),
+                &[host_entry("mac", vec![attended("s1", "error"), attended("s2", "error")], None, false)],
+                1,
+            )
+        };
+        let handling = vec![handled("s1", true), handled("s2", false)];
+        let sources = PanelSources {
+            log: Some(Arc::new(FakeLog(handling.clone()))),
+            ..PanelSources::default()
+        };
+        let panel = assemble_panel(&sources, sessions(), false, true, 0).await;
+        let s1 = panel.sessions[0].attention.unwrap();
+        assert_eq!(s1.axes.ownership, AttentionOwnership::Supervisor);
+        assert_eq!(s1.group, AttentionGroup::Seen);
+        let s2 = panel.sessions[1].attention.unwrap();
+        assert_eq!(s2.group, AttentionGroup::NeedsYou, "a finished handling entry hands nothing over");
+
+        let escalation = Escalation {
+            session_ref: SessionRef::new("mac", "s1"),
+            prompt: PendingPrompt {
+                prompt_id: "p".into(),
+                kind: "question".into(),
+                question: "?".into(),
+                command: None,
+                options: Vec::new(),
+                screen_revision: None,
+            },
+            recommended_index: 0,
+            reason: "r".into(),
+            created_at_ms: 1,
+        };
+        let escalated = PanelSources {
+            escalations: Some(Arc::new(FakeEscalations(vec![escalation]))),
+            ..sources.clone()
+        };
+        let frame = overlay_attention_from_sources(sessions().remove(0), &escalated, 0).await;
+        let s1 = frame.attention.unwrap();
+        assert_eq!(s1.axes.ownership, AttentionOwnership::Owner, "an escalation returns it to the owner");
+        assert_eq!(s1.group, AttentionGroup::NeedsYou);
+        let frame = overlay_attention_from_sources(sessions().remove(0), &sources, 0).await;
+        assert_eq!(frame.attention.unwrap().group, AttentionGroup::Seen, "a live frame uses the same rule");
     }
 }
