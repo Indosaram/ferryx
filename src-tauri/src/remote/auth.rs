@@ -95,7 +95,8 @@ pub fn load_or_generate_machine_identity(base_dir: &Path) -> Result<MachineIdent
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
+        // Linux `hostname` prints "(none)" when no hostname was ever set (containers, bare VMs).
+        .filter(|name| !name.is_empty() && name != "(none)")
         .unwrap_or_else(|| "Ferryx machine".to_string());
     let identity = MachineIdentity {
         machine_id: uuid::Uuid::new_v4().to_string(),
