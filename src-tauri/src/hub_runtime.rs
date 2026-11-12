@@ -3836,6 +3836,13 @@ pub async fn supervisor_read(
         SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
         SupervisorReadAction::Transcript { cursor } => supervisor_transcript(state, cursor.unwrap_or(0)).await,
         SupervisorReadAction::Panel => Ok(json!(supervisor_panel(state).await)),
+        SupervisorReadAction::Prs => Ok(json!(supervisor_prs().unwrap_or(
+            ferryx_hub::supervisor::pr_lane::PrLane {
+                prs: Vec::new(),
+                outage: None,
+                refreshed_at_ms: 0,
+            }
+        ))),
         SupervisorReadAction::Fleet => Ok(json!({ "sessions": panel_autonomy::fleet_sessions(state).await })),
         SupervisorReadAction::Role => Ok(supervisor_role()),
     }

@@ -699,6 +699,8 @@ pub enum SupervisorReadAction {
     },
     /// The panel snapshot (`PanelSnapshot`): sessions, handling, log, rules, decisions.
     Panel,
+    /// The pull-request lane (`PrLane`): PRs ordered by who acts next, plus the `gh` outage.
+    Prs,
     /// This computer's sessions as the fleet read maps them (`FleetSession[]`).
     Fleet,
     /// Whether this daemon serves the supervisor or stands by for a holder:

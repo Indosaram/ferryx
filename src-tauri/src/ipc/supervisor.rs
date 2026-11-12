@@ -342,6 +342,52 @@ pub async fn cmd_supervisor_panel(
     )
 }
 
+/// The pull-request lane (`PrLane`, camelCase): PRs ordered by who acts next, and the outage
+/// cause when `gh` failed. Read the same way the panel reads it, from the daemon's hub.
+#[tauri::command]
+pub async fn cmd_supervisor_prs(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+) -> Result<serde_json::Value, IpcError> {
+    read_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorReadV1 { request: SupervisorReadAction::Prs })
+            .await?,
+    )
+}
+
+/// Open an agent pane (agent control `Spawn`), optionally as a child of a session and with a
+/// prompt delivered once it first reads idle. `request_id` makes a retry deduplicate.
+#[tauri::command]
+pub async fn cmd_agent_spawn(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    agent: String,
+    cwd: String,
+    workspace_id: Option<String>,
+    parent_session_id: Option<String>,
+    name: Option<String>,
+    prompt: Option<String>,
+    request_id: String,
+) -> Result<serde_json::Value, IpcError> {
+    let request = DaemonRequest::AgentControl {
+        request: AgentControlOp::Spawn {
+            agent,
+            cwd,
+            workspace_id,
+            parent_session_id,
+            name,
+            prompt,
+            command: None,
+            args: Vec::new(),
+            request_id,
+        },
+        host_id: None,
+        // The owner's own hand-off: never a supervisor request, so it carries no lease fence.
+        supervisor_fence: None,
+        supervisor_account: None,
+    };
+    control_result(daemon_client.send_request(request).await?)
+}
+
 /// Runs automatic supervisor setup in the daemon-hosted hub; returns the fresh SetupStatus.
 #[tauri::command]
 pub async fn cmd_supervisor_setup_run(
