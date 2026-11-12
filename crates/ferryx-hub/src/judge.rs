@@ -154,6 +154,25 @@ impl Choice {
 
 /// Replaces a home directory and obvious token shapes before text leaves the machine.
 pub fn scrub_for_external(input: &str) -> String {
+    scrub_text(input).chars().take(4000).collect()
+}
+
+/// State chars a judge call may send for `purpose`: the owner-directive delivery question gets
+/// the full delivery envelope its caller already budgeted; every other purpose keeps 4000.
+pub fn state_char_cap(purpose: Purpose) -> usize {
+    match purpose {
+        Purpose::ReportDirective => crate::owner_directives::DELIVERY_PROMPT_ENVELOPE_CHARS,
+        _ => 4000,
+    }
+}
+
+/// Scrubs `state` and caps it at [`state_char_cap`] for `purpose`.
+pub fn scrub_state_for(purpose: Purpose, state: &str) -> String {
+    scrub_text(state).chars().take(state_char_cap(purpose)).collect()
+}
+
+/// [`scrub_for_external`] without its 4000-char cap, for callers that budget the result themselves.
+pub fn scrub_text(input: &str) -> String {
     let mut scrubbed = input.to_owned();
     if let Ok(home) = crate::hub_env::var("HOME") {
         if !home.is_empty() {
@@ -163,7 +182,7 @@ pub fn scrub_for_external(input: &str) -> String {
     if let Ok(pattern) = regex::Regex::new(r"(?i)\b(sk-|ghp_|xox[baprs]-)[A-Za-z0-9_\-]{8,}") {
         scrubbed = pattern.replace_all(&scrubbed, "[redacted]").into_owned();
     }
-    scrubbed.chars().take(4000).collect()
+    scrubbed
 }
 
 pub fn typesafe_env(config: &BTreeMap<String, String>) -> Vec<(String, String)> {
@@ -716,7 +735,7 @@ impl Judge {
                 .await;
                 return Ok(Choice::capped(capped));
             }
-            let result = self.run_typesafe(state, instructions, options).await;
+            let result = self.run_typesafe_for(purpose, state, instructions, options).await;
             self.record(&result).await;
             match result {
                 Ok(choice) => {
@@ -909,7 +928,7 @@ impl Judge {
         let question = serde_json::json!({
             "instruction": "Select one option from options. Return ONLY a single JSON object in the format: {\"selected\": \"<choice>\"}",
             "purpose": purpose,
-            "state": scrub_for_external(state),
+            "state": scrub_state_for(purpose, state),
             "instructions": scrub_for_external(instructions),
             "options": options,
             "contract": {"selected": "one supplied option"}
@@ -1113,8 +1132,19 @@ impl Judge {
         }
     }
 
+    #[cfg(test)]
     async fn run_typesafe(
         &self,
+        state: &str,
+        instructions: &str,
+        options: &[&str],
+    ) -> Result<Choice> {
+        self.run_typesafe_for(Purpose::InboxClass, state, instructions, options).await
+    }
+
+    async fn run_typesafe_for(
+        &self,
+        purpose: Purpose,
         state: &str,
         instructions: &str,
         options: &[&str],
@@ -1124,7 +1154,7 @@ impl Judge {
         // typesafe-judge refuses to decide without a state ("No state provided. Supply
         // --state, --file, or pipe content through stdin."), and `output()` gives the child no
         // stdin, so every call used to fail with empty stdout ("typesafe-judge declined: ").
-        let state = scrub_for_external(state);
+        let state = scrub_state_for(purpose, state);
         let state = if state.trim().is_empty() {
             "(no state)".to_owned()
         } else {
@@ -1172,6 +1202,19 @@ impl Judge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directive_state_keeps_delivery_envelope_while_other_purposes_cap_at_4000() {
+        let state = "a".repeat(10_000);
+        assert_eq!(scrub_state_for(Purpose::ReportDirective, &state).chars().count(), 10_000);
+        assert_eq!(scrub_state_for(Purpose::InboxClass, &state).chars().count(), 4000);
+        assert_eq!(scrub_state_for(Purpose::InboxClass, &state), scrub_for_external(&state));
+        let huge = "b".repeat(30_000);
+        assert_eq!(
+            scrub_state_for(Purpose::ReportDirective, &huge).chars().count(),
+            crate::owner_directives::DELIVERY_PROMPT_ENVELOPE_CHARS
+        );
+    }
 
     #[test]
     fn typesafe_env_comes_from_config_and_does_not_read_a_shell_file() {

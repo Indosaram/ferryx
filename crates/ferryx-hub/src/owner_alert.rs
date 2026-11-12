@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::storage::WriteTx;
 
 pub const OBLIGATION_PREFIX: &str = "obl:owner-alert:";
+/// Retry window: older undelivered owner alerts are cancelled and explicitly suppressed.
 pub const MAX_ALERT_AGE_HOURS: i64 = 24;
 pub const MAX_ALERTS_PER_SWEEP: i64 = 10;
 /// While the alert of a conversation was queued less than this long ago and the owner has not
@@ -176,6 +177,31 @@ pub async fn pending_alerts(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec
     )
     .bind(since)
     .bind(OBLIGATION_PREFIX)
+    .bind(MAX_ALERTS_PER_SWEEP)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// The owner items [`pending_alerts`] would surface, but whose notice is already queued and not
+/// yet delivered: the candidates of [`reissue`] when their body or verdict changed.
+async fn reissuable_alerts(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Vec<PendingAlert>> {
+    let since = (now - Duration::hours(MAX_ALERT_AGE_HOURS)).to_rfc3339();
+    let rows = sqlx::query_as::<_, PendingAlert>(
+        "SELECT i.id AS item_id, i.source, i.author, i.title, i.snippet, i.link
+           FROM inbox_decisions d
+           JOIN inbox_items i ON i.id = d.item_id
+           JOIN delivery_obligations o ON o.id = ? || i.id AND o.state = 'pending'
+          WHERE d.class = 'owner'
+            AND d.status = 'open'
+            AND i.source IN ('mail','kakao','imessage','slack','discord','github','cron')
+            AND julianday(d.decided_at) >= julianday(?)
+            AND NOT EXISTS (SELECT 1 FROM action_loop_outcomes a WHERE a.item_key = 'inbox:' || i.id)
+          ORDER BY d.decided_at ASC
+          LIMIT ?",
+    )
+    .bind(OBLIGATION_PREFIX)
+    .bind(since)
     .bind(MAX_ALERTS_PER_SWEEP)
     .fetch_all(pool)
     .await?;
@@ -539,6 +565,133 @@ pub async fn reconcile(pool: &SqlitePool) -> Result<u64> {
     Ok(updated.rows_affected())
 }
 
+/// Settles missing deliveries and expires owner alerts in one atomic, repeatable pass.
+/// The summary is queued in the same transaction as cancellation: a retry or another hub
+/// sees no newly cancelled rows and cannot queue a second summary for that batch.
+pub async fn repair_orphaned_obligations(
+    pool: &SqlitePool,
+    owner_session: &str,
+    now: DateTime<Utc>,
+) -> Result<u64> {
+    let mut tx = pool.begin_write().await?;
+    let stamp = now.to_rfc3339();
+    let cutoff = (now - Duration::hours(MAX_ALERT_AGE_HOURS)).to_rfc3339();
+    let terminated = sqlx::query(
+        "UPDATE chat_outbox SET cancelled_at = ?
+          WHERE delivered_at IS NULL AND cancelled_at IS NULL
+            AND julianday(created_at) < julianday(?)
+            AND EXISTS (SELECT 1 FROM delivery_obligations d
+                WHERE d.id LIKE ? || '%'
+                  AND ((d.report_id IS NOT NULL AND EXISTS (
+                      SELECT 1 FROM report_delivery_parts p
+                      WHERE p.outbox_id = chat_outbox.id AND p.report_id = d.report_id))
+                    OR (d.report_id IS NULL AND d.body = chat_outbox.text)))",
+    )
+    .bind(&stamp).bind(&cutoff).bind(OBLIGATION_PREFIX)
+    .execute(&mut *tx).await?.rows_affected();
+    let settled = sqlx::query(
+        "UPDATE delivery_obligations SET state = 'suppressed', updated_at = ?
+          WHERE state = 'pending' AND id LIKE ? || '%'
+            AND NOT EXISTS (SELECT 1 FROM chat_outbox o
+                WHERE ((delivery_obligations.report_id IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM report_delivery_parts p
+                    WHERE p.outbox_id = o.id AND p.report_id = delivery_obligations.report_id))
+                  OR (delivery_obligations.report_id IS NULL AND o.text = delivery_obligations.body))
+                  AND (o.delivered_at IS NOT NULL OR o.cancelled_at IS NULL))",
+    )
+    .bind(&stamp).bind(OBLIGATION_PREFIX)
+    .execute(&mut *tx).await?.rows_affected();
+    if terminated > 0 {
+        let platform = crate::chat::session::SessionKey::from_storage_key(owner_session)
+            .map_or_else(|_| "slack".to_owned(), |key| key.platform);
+        let text = crate::locale::current().pick(
+            &format!("재시도 기한이 지난 소유자 알림 {terminated}건을 취소했습니다."),
+            &format!("Cancelled {terminated} owner alerts after their retry window expired."),
+        ).to_owned();
+        sqlx::query("INSERT INTO chat_outbox(session_key, platform, text, created_at) VALUES(?, ?, ?, ?)")
+            .bind(owner_session).bind(platform).bind(text).bind(&stamp)
+            .execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(settled)
+}
+
+/// Re-issues the owner notice of `obligation` as `report` rendered as `text`, keyed by version
+/// ([`crate::report_gate::report_version`]: gate verdict and body, never evidence). The same
+/// version, or a past row with no version (NULL, never backfilled: its mapping is ambiguous),
+/// keeps the notice: same report id, no outbox row; a NULL row only records the version.
+/// A changed version mints a new report id, cancels the old unsent line, and swaps the
+/// obligation's link to the new report. Returns the report id the obligation now stands for.
+/// A coalesced notice (its line is shared with other reports via [`coalesce`], or it has no
+/// outbox line of its own) is left alone on a version change: no new line, no cancel, no
+/// version stamp, so another item's alert in the shared line can never be lost.
+pub async fn reissue(
+    pool: &SqlitePool,
+    owner_session: &str,
+    obligation: &str,
+    report: &crate::report_gate::Report,
+    text: &str,
+) -> Result<Option<String>> {
+    let version = crate::report_gate::report_version(report);
+    let mut tx = pool.begin_write().await?;
+    let row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT report_id, version FROM delivery_obligations WHERE id = ?")
+            .bind(obligation).fetch_optional(&mut *tx).await?;
+    let Some((current, stored)) = row else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    if stored.as_deref() == Some(version.as_str()) {
+        tx.rollback().await?;
+        return Ok(current);
+    }
+    // Dedicated means: the current report owns at least one outbox line, and none of its lines
+    // carries another report. Anything else is coalesced and must not cancel the shared row.
+    let (owned, shared): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(SUM((SELECT COUNT(DISTINCT q.report_id) FROM report_delivery_parts q
+                                         WHERE q.outbox_id = p.outbox_id) > 1), 0)
+           FROM report_delivery_parts p WHERE p.report_id = ?",
+    ).bind(current.as_deref()).fetch_one(&mut *tx).await?;
+    if current.is_none() || owned == 0 || shared > 0 {
+        tracing::debug!(%obligation, owned, shared, "coalesced owner notice left alone on reissue");
+        tx.rollback().await?;
+        return Ok(current);
+    }
+    if stored.is_none() {
+        // Only a dedicated notice is adopted; a coalesced NULL row was left alone above.
+        sqlx::query("UPDATE delivery_obligations SET version = ? WHERE id = ? AND version IS NULL")
+            .bind(&version).bind(obligation).execute(&mut *tx).await?;
+        tx.commit().await?;
+        return Ok(current);
+    }
+    let mut fresh = report.clone();
+    fresh.id = uuid::Uuid::new_v4().to_string();
+    // The production state is fixed per item (`open:<item_id>`), so the gate would drop the
+    // changed notice as a duplicate. Only a version mismatch reaches here, so folding the
+    // version into the state never lets an unchanged notice through.
+    fresh = fresh.with_state(&format!("open:{}#v{}", obligation.trim_start_matches(OBLIGATION_PREFIX), &version[..12]));
+    let (_, outbox_id) =
+        crate::report_gate::queue_delivery_in(&mut tx, owner_session, &fresh, false, text, None).await?;
+    if outbox_id.is_none() {
+        // The gate held the new version back; the obligation keeps its link.
+        tx.rollback().await?;
+        return Ok(current);
+    }
+    let now = crate::storage::now_rfc3339();
+    if let Some(old) = &current {
+        sqlx::query(
+            "UPDATE chat_outbox SET cancelled_at = ? WHERE delivered_at IS NULL AND cancelled_at IS NULL
+               AND id IN (SELECT outbox_id FROM report_delivery_parts WHERE report_id = ?)",
+        ).bind(&now).bind(old).execute(&mut *tx).await?;
+    }
+    sqlx::query(
+        "UPDATE delivery_obligations SET report_id = ?, version = ?, body = ?, state = 'pending', updated_at = ?
+          WHERE id = ?",
+    ).bind(&fresh.id).bind(&version).bind(text).bind(&now).bind(obligation).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(Some(fresh.id))
+}
+
 /// Earlier builds queued owner alerts under the lead lane name ("meta"), which no transport
 /// delivers, and marked them delivered anyway. Recent such lines are re-addressed to the
 /// owner session and their obligations reopened, so the outbox retry sends them.
@@ -596,6 +749,10 @@ pub async fn serve_delivery(pool: SqlitePool, owner_session: String) {
 }
 
 pub(crate) async fn delivery_tick(pool: &SqlitePool, owner_session: &str) {
+    if let Err(error) = repair_orphaned_obligations(pool, owner_session, Utc::now()).await {
+        tracing::warn!(%error, "orphaned owner alert repair failed");
+        return;
+    }
     let digest_session = match crate::import::imported_slack_home(pool).await {
         Ok(Some(channel)) => crate::chat::session::SessionKey::new(
             "slack", None::<String>, channel, None::<String>, "owner",
@@ -623,6 +780,27 @@ pub(crate) async fn delivery_tick(pool: &SqlitePool, owner_session: &str) {
     if let Err(error) = reconcile(pool).await {
         tracing::warn!(%error, "owner alert reconcile failed");
     }
+    // After the flush and reconcile: only notices still pending once delivery settled are
+    // re-issued, so a line that was just sent is never replaced behind the owner's back.
+    match reissuable_alerts(pool, Utc::now()).await {
+        Ok(alerts) => {
+            for alert in &alerts {
+                let obligation = format!("{OBLIGATION_PREFIX}{}", alert.item_id);
+                let brief = if alert.source == "mail" {
+                    crate::mail_brief::for_item(&alert.item_id).await
+                } else {
+                    None
+                };
+                let text = alert_text(alert, brief.as_ref());
+                if let Err(error) =
+                    reissue(pool, owner_session, &obligation, &alert_report(alert), &text).await
+                {
+                    tracing::warn!(%error, %obligation, "owner alert reissue failed");
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "owner alerts to reissue unavailable"),
+    }
     if let Err(error) = crate::report_mutation::drain_deferred(pool).await {
         tracing::warn!(%error, "deferred attachments could not be drained");
     }
@@ -643,6 +821,255 @@ pub async fn delivered(pool: &SqlitePool, item_id: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_evidence_only_rewrite_keeps_the_report_id_and_queues_nothing() {
+        // Given a queued owner notice.
+        let pool = crate::storage::memory().await.unwrap();
+        let obligation = format!("{OBLIGATION_PREFIX}ev");
+        let report = crate::report_gate::Report::new(
+            "r-ev", "mail", "inbox:ev", crate::report_gate::Salience::Action, "확인이 필요합니다.",
+        ).with_quote("subject v1");
+        crate::report_gate::queue_delivery(&pool, "owner", &report, false, "line v1", Some(&obligation)).await.unwrap();
+        let before = live_outbox(&pool).await;
+
+        // When the same episode is rewritten with only its evidence changed.
+        let rewritten = report.clone().with_quote("subject v2").with_sender("other@example.com");
+        let id = reissue(&pool, "owner", &obligation, &rewritten, "line v2").await.unwrap();
+
+        // Then it is the same notice: same report id, no new outbox row.
+        assert_eq!(id.as_deref(), Some("r-ev"));
+        assert_eq!(live_outbox(&pool).await, before);
+    }
+
+    #[tokio::test]
+    async fn a_changed_body_under_the_fixed_production_state_mints_a_new_report_and_line() {
+        // Given a queued owner notice under the production state `open:<item_id>`.
+        let pool = crate::storage::memory().await.unwrap();
+        let obligation = format!("{OBLIGATION_PREFIX}body");
+        let report = crate::report_gate::Report::new(
+            "r-body", "mail", "inbox:body", crate::report_gate::Salience::Action, "첫 번째 요청입니다.",
+        ).with_state("open:body");
+        crate::report_gate::queue_delivery(&pool, "owner", &report, false, "line v1", Some(&obligation)).await.unwrap();
+
+        // When the same episode is re-issued with a changed body but the same fixed state.
+        let changed = crate::report_gate::Report::new(
+            "r-body", "mail", "inbox:body", crate::report_gate::Salience::Action, "요청이 바뀌었습니다.",
+        ).with_state("open:body");
+        let id = reissue(&pool, "owner", &obligation, &changed, "line v2").await.unwrap().unwrap();
+
+        // Then a new report id is linked, a new outbox row exists, and only the new line is live.
+        assert_ne!(id, "r-body");
+        let linked: String = sqlx::query_scalar("SELECT report_id FROM delivery_obligations WHERE id = ?")
+            .bind(&obligation).fetch_one(&pool).await.unwrap();
+        assert_eq!(linked, id);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox").fetch_one(&pool).await.unwrap();
+        assert_eq!(rows, 2);
+        let parts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_delivery_parts WHERE report_id = ?")
+            .bind(&id).fetch_one(&pool).await.unwrap();
+        assert_eq!(parts, 1);
+        assert_eq!(live_outbox(&pool).await, vec!["line v2".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_notice_does_nothing() {
+        // Given a queued owner notice under the production state.
+        let pool = crate::storage::memory().await.unwrap();
+        let obligation = format!("{OBLIGATION_PREFIX}same");
+        let report = crate::report_gate::Report::new(
+            "r-same", "mail", "inbox:same", crate::report_gate::Salience::Action, "그대로입니다.",
+        ).with_state("open:same");
+        crate::report_gate::queue_delivery(&pool, "owner", &report, false, "line v1", Some(&obligation)).await.unwrap();
+        let before = live_outbox(&pool).await;
+
+        // When it is re-issued unchanged.
+        let id = reissue(&pool, "owner", &obligation, &report, "line v1").await.unwrap();
+
+        // Then nothing moves.
+        assert_eq!(id.as_deref(), Some("r-same"));
+        assert_eq!(live_outbox(&pool).await, before);
+        let linked: String = sqlx::query_scalar("SELECT report_id FROM delivery_obligations WHERE id = ?")
+            .bind(&obligation).fetch_one(&pool).await.unwrap();
+        assert_eq!(linked, "r-same");
+    }
+
+    #[tokio::test]
+    async fn a_coalesced_notice_never_cancels_its_shared_line() {
+        // Given an anchor notice with its own line, and a second item coalesced into that line.
+        let pool = crate::storage::memory().await.unwrap();
+        let anchor = format!("{OBLIGATION_PREFIX}anchor");
+        let joined = format!("{OBLIGATION_PREFIX}joined");
+        let first = crate::report_gate::Report::new(
+            "r-anchor", "kakao", "inbox:anchor", crate::report_gate::Salience::Action, "첫 메시지입니다.",
+        );
+        crate::report_gate::queue_delivery(&pool, "owner", &first, false, "line a", Some(&anchor)).await.unwrap();
+        let outbox_id: i64 = sqlx::query_scalar("SELECT outbox_id FROM report_delivery_parts WHERE report_id = 'r-anchor'")
+            .fetch_one(&pool).await.unwrap();
+        let second = crate::report_gate::Report::new(
+            "r-joined", "kakao", "inbox:joined", crate::report_gate::Salience::Action, "두 번째 메시지입니다.",
+        );
+        sqlx::query("UPDATE chat_outbox SET text = 'line a\nline b' WHERE id = ?")
+            .bind(outbox_id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO report_delivery_parts(outbox_id, report_id, report_json) VALUES(?, ?, ?)")
+            .bind(outbox_id).bind("r-joined").bind(serde_json::to_string(&second).unwrap())
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO delivery_obligations(id, state, body, updated_at, report_id, version)
+            VALUES(?, 'pending', 'line a\nline b', '2026-11-12T00:00:00Z', 'r-joined', ?)")
+            .bind(&joined).bind(crate::report_gate::report_version(&second))
+            .execute(&pool).await.unwrap();
+
+        // When either item is re-issued with a changed body.
+        let joined_v2 = crate::report_gate::Report::new(
+            "r-joined", "kakao", "inbox:joined", crate::report_gate::Salience::Action, "바뀐 두 번째입니다.",
+        );
+        let anchor_v2 = crate::report_gate::Report::new(
+            "r-anchor", "kakao", "inbox:anchor", crate::report_gate::Salience::Action, "바뀐 첫 번째입니다.",
+        );
+        let joined_id = reissue(&pool, "owner", &joined, &joined_v2, "line b2").await.unwrap();
+        let anchor_id = reissue(&pool, "owner", &anchor, &anchor_v2, "line a2").await.unwrap();
+
+        // Then the shared line stays live with both alerts, and both links are unchanged.
+        assert_eq!(joined_id.as_deref(), Some("r-joined"));
+        assert_eq!(anchor_id.as_deref(), Some("r-anchor"));
+        assert_eq!(live_outbox(&pool).await, vec!["line a\nline b".to_owned()]);
+        let cancelled: Option<String> = sqlx::query_scalar("SELECT cancelled_at FROM chat_outbox WHERE id = ?")
+            .bind(outbox_id).fetch_one(&pool).await.unwrap();
+        assert!(cancelled.is_none());
+        let links: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, report_id FROM delivery_obligations ORDER BY id",
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(links, vec![(anchor.clone(), "r-anchor".to_owned()), (joined.clone(), "r-joined".to_owned())]);
+    }
+
+    #[tokio::test]
+    async fn a_coalesced_null_version_row_is_never_stamped_or_cancelled() {
+        // Given an anchor line shared with a coalesced item whose obligation has no version.
+        let pool = crate::storage::memory().await.unwrap();
+        let anchor = format!("{OBLIGATION_PREFIX}nanchor");
+        let joined = format!("{OBLIGATION_PREFIX}njoined");
+        let first = crate::report_gate::Report::new(
+            "r-nanchor", "kakao", "inbox:nanchor", crate::report_gate::Salience::Action, "첫 메시지입니다.",
+        ).with_state("open:nanchor");
+        crate::report_gate::queue_delivery(&pool, "owner", &first, false, "line a", Some(&anchor)).await.unwrap();
+        let outbox_id: i64 = sqlx::query_scalar("SELECT outbox_id FROM report_delivery_parts WHERE report_id = 'r-nanchor'")
+            .fetch_one(&pool).await.unwrap();
+        let second = crate::report_gate::Report::new(
+            "r-njoined", "kakao", "inbox:njoined", crate::report_gate::Salience::Action, "두 번째 메시지입니다.",
+        ).with_state("open:njoined");
+        sqlx::query("UPDATE chat_outbox SET text = 'line a\nline b' WHERE id = ?")
+            .bind(outbox_id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO report_delivery_parts(outbox_id, report_id, report_json) VALUES(?, ?, ?)")
+            .bind(outbox_id).bind("r-njoined").bind(serde_json::to_string(&second).unwrap())
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO delivery_obligations(id, state, body, updated_at, report_id, version)
+            VALUES(?, 'pending', 'line a\nline b', '2026-11-12T00:00:00Z', 'r-njoined', NULL)")
+            .bind(&joined).execute(&pool).await.unwrap();
+
+        // When the coalesced item is re-issued, unchanged and then changed.
+        let changed = crate::report_gate::Report::new(
+            "r-njoined", "kakao", "inbox:njoined", crate::report_gate::Salience::Action, "바뀐 두 번째입니다.",
+        ).with_state("open:njoined");
+        let same_id = reissue(&pool, "owner", &joined, &second, "line b").await.unwrap();
+        let changed_id = reissue(&pool, "owner", &joined, &changed, "line b2").await.unwrap();
+
+        // Then the row keeps no version, its link is unchanged, and the shared line stays live.
+        assert_eq!(same_id.as_deref(), Some("r-njoined"));
+        assert_eq!(changed_id.as_deref(), Some("r-njoined"));
+        let version: Option<String> = sqlx::query_scalar("SELECT version FROM delivery_obligations WHERE id = ?")
+            .bind(&joined).fetch_one(&pool).await.unwrap();
+        assert!(version.is_none());
+        let cancelled: Option<String> = sqlx::query_scalar("SELECT cancelled_at FROM chat_outbox WHERE id = ?")
+            .bind(outbox_id).fetch_one(&pool).await.unwrap();
+        assert!(cancelled.is_none());
+        assert_eq!(live_outbox(&pool).await, vec!["line a\nline b".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn a_null_version_row_is_adopted_not_reissued() {
+        // Given a past obligation written before versions were stored.
+        let pool = crate::storage::memory().await.unwrap();
+        let obligation = format!("{OBLIGATION_PREFIX}old");
+        let report = crate::report_gate::Report::new(
+            "r-old", "mail", "inbox:old", crate::report_gate::Salience::Action, "예전 알림입니다.",
+        );
+        crate::report_gate::queue_delivery(&pool, "owner", &report, false, "line old", Some(&obligation)).await.unwrap();
+        sqlx::query("UPDATE delivery_obligations SET version = NULL WHERE id = ?")
+            .bind(&obligation).execute(&pool).await.unwrap();
+        let before = live_outbox(&pool).await;
+
+        // When it is re-issued, even with a different body.
+        let changed = crate::report_gate::Report::new(
+            "r-old", "mail", "inbox:old", crate::report_gate::Salience::Action, "다른 문구입니다.",
+        );
+        let id = reissue(&pool, "owner", &obligation, &changed, "line new").await.unwrap();
+
+        // Then NULL is not read as a change: same id, no new line, the version is recorded.
+        assert_eq!(id.as_deref(), Some("r-old"));
+        assert_eq!(live_outbox(&pool).await, before);
+        let version: Option<String> = sqlx::query_scalar("SELECT version FROM delivery_obligations WHERE id = ?")
+            .bind(&obligation).fetch_one(&pool).await.unwrap();
+        assert_eq!(version, Some(crate::report_gate::report_version(&changed)));
+    }
+
+    #[tokio::test]
+    async fn orphan_repair_settles_only_terminal_rows_and_queues_one_summary() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-11-12T12:00:00Z").unwrap().with_timezone(&Utc);
+        let session = crate::chat::session::SessionKey::new(
+            "slack", None::<String>, "C-owner", None::<String>, "U-owner",
+        ).storage_key();
+        for (name, age) in [("orphan", None), ("recent", Some(1)),
+            ("boundary", Some(24)), ("old-a", Some(25)), ("old-b", Some(48))] {
+            let report_id = format!("report-{name}");
+            sqlx::query("INSERT INTO delivery_obligations(id, state, body, updated_at, report_id)
+                VALUES(?, 'pending', ?, ?, ?)")
+                .bind(format!("{OBLIGATION_PREFIX}{name}")).bind(name)
+                .bind(now.to_rfc3339()).bind(&report_id).execute(&pool).await.unwrap();
+            if let Some(hours) = age {
+                let id = sqlx::query("INSERT INTO chat_outbox(session_key, platform, text, created_at)
+                    VALUES(?, 'slack', ?, ?)")
+                    .bind(&session).bind(name).bind((now - Duration::hours(hours)).to_rfc3339())
+                    .execute(&pool).await.unwrap().last_insert_rowid();
+                let report = crate::report_gate::Report::new(
+                    &report_id, "mail", format!("inbox:{name}"),
+                    crate::report_gate::Salience::Action, name,
+                );
+                sqlx::query("INSERT INTO report_delivery_parts(outbox_id, report_id, report_json) VALUES(?, ?, ?)")
+                    .bind(id).bind(report_id).bind(serde_json::to_string(&report).unwrap())
+                    .execute(&pool).await.unwrap();
+            }
+        }
+        assert_eq!(repair_orphaned_obligations(&pool, &session, now).await.unwrap(), 3);
+        let states: Vec<(String, String)> = sqlx::query_as(
+            "SELECT body, state FROM delivery_obligations ORDER BY body",
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(states, vec![
+            ("boundary".to_owned(), "pending".to_owned()),
+            ("old-a".to_owned(), "suppressed".to_owned()),
+            ("old-b".to_owned(), "suppressed".to_owned()),
+            ("orphan".to_owned(), "suppressed".to_owned()),
+            ("recent".to_owned(), "pending".to_owned()),
+        ]);
+        let rows: Vec<(i64, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, text, cancelled_at, delivered_at FROM chat_outbox ORDER BY id",
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(rows.len(), 5); // Four original deliveries and exactly one summary.
+        assert!(rows[..2].iter().all(|row| row.2.is_none() && row.3.is_none()));
+        assert!(rows[2..4].iter().all(|row| row.2.as_deref() == Some(now.to_rfc3339().as_str()) && row.3.is_none()));
+        assert!(rows[4].2.is_none() && rows[4].3.is_none());
+        let obligations: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, state, updated_at FROM delivery_obligations ORDER BY id",
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(repair_orphaned_obligations(&pool, &session, now).await.unwrap(), 0);
+        let after: Vec<(i64, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, text, cancelled_at, delivered_at FROM chat_outbox ORDER BY id",
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(after, rows);
+        let after: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, state, updated_at FROM delivery_obligations ORDER BY id",
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(after, obligations);
+    }
 
     #[tokio::test]
     async fn identical_text_does_not_complete_another_reports_obligation() {

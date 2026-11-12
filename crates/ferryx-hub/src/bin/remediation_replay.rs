@@ -1,10 +1,10 @@
 //! Replays stored rerun output through the real remediator and real Jev in an isolated DB.
 use std::sync::Arc;
 use async_trait::async_trait;
-use ferryx_hub::{cron_remediate::{LaneRequest, Problem, Remediator, Runtime}, error::{HubError, Result}, judge::Judge, schedule::RunReceipt};
+use ferryx_hub::{cron_remediate::{HubRuntime, LaneRequest, Problem, Remediator, Runtime}, error::{HubError, Result}, judge::Judge, schedule::RunReceipt};
 use serde_json::{json, Value};
 
-struct ReplayRuntime { output: &'static str }
+struct ReplayRuntime { output: &'static str, hub: HubRuntime }
 
 #[async_trait]
 impl Runtime for ReplayRuntime {
@@ -17,6 +17,11 @@ impl Runtime for ReplayRuntime {
     }
     async fn quota_check(&self) -> Result<Value> { Err(HubError::message("unexpected quota check")) }
     async fn log_excerpt(&self, _: &str) -> Result<String> { Err(HubError::message("unexpected log read")) }
+    fn records_obligations(&self) -> bool { true }
+    async fn owner_notice_obligated(&self, problem: &Problem, message: &str, obligation: &str) -> Result<()> {
+        self.hub.owner_notice_obligated(problem, message, obligation).await?;
+        self.outcome(problem, message).await
+    }
     async fn outcome(&self, _: &Problem, message: &str) -> Result<()> {
         println!("{}", json!({"notice":message}));
         Ok(())
@@ -38,9 +43,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .bind(json!({"command":"collect-projects","description":"Collect new project listings and persist them"}).to_string()).execute(&pool).await?;
         sqlx::query("INSERT INTO cron_problems(id,job_id,summary,created_at,status,kind,signature,detail) VALUES(1,'collect','collection failed','2026-10-30T00:00:00Z','remediating','failed','fixture','connection reset')")
             .execute(&pool).await?;
+        let mut hub = HubRuntime::new(pool.clone(), Some("replay-owner".into()));
+        hub.transport = false;
         let remediator = Remediator { pool: pool.clone(),
             judge: Judge::from_config(ferryx_hub::judge::typesafe_from_env()).with_pool(pool.clone()),
-            runtime: Arc::new(ReplayRuntime { output }) };
+            runtime: Arc::new(ReplayRuntime { output, hub }) };
         if let Some((detail, expected_cause)) = cause {
             sqlx::query("UPDATE cron_problems SET status='open',detail=? WHERE id=1").bind(detail).execute(&pool).await?;
             remediator.on_problem(1, "meta").await?;
@@ -53,6 +60,15 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let status: String = sqlx::query_scalar("SELECT status FROM cron_problems WHERE id=1").fetch_one(&pool).await?;
         let calls: Vec<(String, bool)> = sqlx::query_as("SELECT outcome,used_fallback FROM judge_calls WHERE purpose='cron_outcome'").fetch_all(&pool).await?;
         println!("{}", json!({"case":case,"status":status,"expected":expected,"calls":calls}));
+        if expected == "needs_owner" {
+            let recorded: (String, bool) = sqlx::query_as(
+                "SELECT o.state, EXISTS(SELECT 1 FROM report_delivery_parts p WHERE p.report_id = o.report_id) FROM delivery_obligations o WHERE o.id = ?",
+            ).bind(format!("{}cron:job:collect", ferryx_hub::owner_alert::OBLIGATION_PREFIX))
+                .fetch_one(&pool).await?;
+            if recorded != ("pending".to_owned(), true) {
+                return Err(format!("{case}: owner obligation lacks its gated outbox row").into());
+            }
+        }
         if status != expected { return Err(format!("{case}: incorrect recovery state").into()); }
         if !output.is_empty() && (calls.len() != 1 || calls.iter().any(|(_, fallback)| *fallback)) {
             return Err(format!("{case}: actual nonfallback Jev decision missing").into());

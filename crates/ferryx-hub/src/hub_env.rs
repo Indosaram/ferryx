@@ -54,6 +54,16 @@ pub fn home() -> Option<PathBuf> {
     home_dir()
 }
 
+/// The hub workspace root: an explicit `OMON_WORKSPACE_ROOT` value if set (a blank value counts
+/// as unset), else `<home>/.ferryx/hub/workspace`. Lives here, not in the Slack client, so a
+/// build without `hub-slack` still resolves the workspace every hub session runs in.
+pub fn workspace_root_from(configured: Option<String>, home: Option<&std::path::Path>) -> Option<PathBuf> {
+    configured
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(".ferryx").join("hub").join("workspace")))
+}
+
 /// `~/.ferryx/hub/env`, or `FERRYX_HUB_ENV_FILE`. The home is [`home_dir`].
 pub fn env_file_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FERRYX_HUB_ENV_FILE").filter(|path| !path.is_empty()) {

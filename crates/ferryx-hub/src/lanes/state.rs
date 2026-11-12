@@ -3,7 +3,7 @@ use std::str::FromStr;
 use sqlx::SqlitePool;
 use thiserror::Error;
 
-use crate::storage::now_rfc3339;
+use crate::storage::{now_rfc3339, WriteTx};
 
 /// Lane lifecycle. `verified_done` is reachable only from `done_claimed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -58,6 +58,7 @@ impl LaneStatus {
             LaneStatus::DoneClaimed => &[
                 LaneStatus::Working,
                 LaneStatus::Blocked,
+                // A rejected claim can be settled again when new evidence arrives.
                 LaneStatus::NotDone,
             ],
             LaneStatus::NotDone => &[LaneStatus::DoneClaimed],
@@ -203,9 +204,10 @@ async fn apply_transition(
         ""
     };
     let sql = format!(
-        "UPDATE lanes SET status = ?, updated_at = ? WHERE key = ? AND status IN ({placeholders}){fence}"
+        "UPDATE lanes SET claim_retries = CASE WHEN status = 'not_done' AND ? = 'done_claimed' THEN 0 ELSE claim_retries END, status = ?, updated_at = ? WHERE key = ? AND status IN ({placeholders}){fence}"
     );
     let mut query = sqlx::query(&sql)
+        .bind(to.as_str())
         .bind(to.as_str())
         .bind(now_rfc3339())
         .bind(key);
@@ -305,6 +307,60 @@ pub fn valid_key(key: &str) -> bool {
         && key
             .chars()
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+}
+
+/// Inserts a lane only when no other lane whose key starts with `prefix` is still live. The
+/// predicate and the insert share one write transaction, so two concurrent callers (a racing
+/// tick, an MCP call, a restart) can never both reserve the slot. False means the slot is taken.
+pub async fn insert_lane_sole_live(
+    pool: &SqlitePool,
+    key: &str,
+    prefix: &str,
+    title: &str,
+    lead: &str,
+    cwd: &str,
+    done_signals: &str,
+) -> Result<bool, LaneTransitionError> {
+    if !valid_key(key) {
+        return Err(LaneTransitionError::Storage(format!(
+            "invalid lane key {key}"
+        )));
+    }
+    let mut tx = pool
+        .begin_write()
+        .await
+        .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM lanes WHERE key LIKE ? || '%' AND key <> ? AND status NOT IN ('verified_done','closed','failed'))",
+    )
+    .bind(prefix)
+    .bind(key)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    if taken {
+        tx.rollback()
+            .await
+            .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+        return Ok(false);
+    }
+    sqlx::query(
+        "INSERT INTO lanes(key,title,lead_session_key,cwd,session_key,status,done_signals,last_activity_at) VALUES(?,?,?,?,?,'queued',?,?)",
+    )
+    .bind(key)
+    .bind(title)
+    .bind(lead)
+    .bind(cwd)
+    .bind(lead)
+    .bind(done_signals)
+    .bind(now_rfc3339())
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|error| LaneTransitionError::Storage(error.to_string()))?;
+    Ok(true)
 }
 
 pub async fn status_of(
@@ -419,8 +475,34 @@ mod tests {
                 let expected_forced =
                     matches!((from, to), (LaneStatus::Working, LaneStatus::Closed)) || expected;
                 assert_eq!(forced, expected_forced, "forced {from:?} -> {to:?}");
+                let expected_converged = expected
+                    || (to == LaneStatus::VerifiedDone
+                        && matches!(from, LaneStatus::Working | LaneStatus::Blocked | LaneStatus::NotDone));
+                assert_eq!(
+                    from.can_transition_to(to, Some(GOAL_CONVERGED_REASON)),
+                    expected_converged,
+                    "converged {from:?} -> {to:?}"
+                );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn not_done_can_claim_again_but_cannot_block() {
+        let pool = crate::storage::memory().await.unwrap();
+        insert_lane(&pool, "retry", "retry", "lead", "/tmp", "file marker")
+            .await.unwrap();
+        for status in [LaneStatus::Working, LaneStatus::DoneClaimed, LaneStatus::NotDone] {
+            transition(&pool, "retry", status, None).await.unwrap();
+        }
+        assert!(matches!(
+            transition(&pool, "retry", LaneStatus::Blocked, None).await,
+            Err(LaneTransitionError::IllegalTransition { .. })
+        ));
+        assert_eq!(status_of(&pool, "retry").await.unwrap(), Some(LaneStatus::NotDone));
+        transition(&pool, "retry", LaneStatus::DoneClaimed, Some("new evidence"))
+            .await.unwrap();
+        assert_eq!(status_of(&pool, "retry").await.unwrap(), Some(LaneStatus::DoneClaimed));
     }
 
     #[test]
@@ -455,5 +537,41 @@ mod tests {
             status_of(&pool, "lane-a").await.unwrap(),
             Some(LaneStatus::VerifiedDone)
         );
+    }
+
+    #[tokio::test]
+    async fn only_one_remediation_lane_can_be_live_at_a_time() {
+        let pool = crate::storage::memory().await.unwrap();
+        assert!(insert_lane_sole_live(&pool, "cron-fix-a-0001", "cron-fix-", "t", "lead", "/tmp", "done")
+            .await
+            .unwrap());
+        assert!(
+            !insert_lane_sole_live(&pool, "cron-fix-b-0002", "cron-fix-", "t", "lead", "/tmp", "done")
+                .await
+                .unwrap(),
+            "a second problem cannot open a pane while the first lane is live"
+        );
+        // A lane of another kind neither takes nor frees the remediation slot.
+        insert_lane(&pool, "other-0003", "t", "lead", "/tmp", "done").await.unwrap();
+        assert!(
+            !insert_lane_sole_live(&pool, "cron-fix-d-0005", "cron-fix-", "t", "lead", "/tmp", "done")
+                .await
+                .unwrap(),
+            "an unrelated lane does not free the remediation slot"
+        );
+        // Settling the live lane frees the slot for the next problem. `closed` is reachable only
+        // from `verified_done`, so the lane settles the way a real one does.
+        for next in [
+            LaneStatus::Working,
+            LaneStatus::DoneClaimed,
+            LaneStatus::VerifiedDone,
+            LaneStatus::Closed,
+        ] {
+            transition(&pool, "cron-fix-a-0001", next, None).await.unwrap();
+        }
+        assert!(insert_lane_sole_live(&pool, "cron-fix-c-0004", "cron-fix-", "t", "lead", "/tmp", "done")
+            .await
+            .unwrap());
+        assert_eq!(status_of(&pool, "cron-fix-a-0001").await.unwrap(), Some(LaneStatus::Closed));
     }
 }

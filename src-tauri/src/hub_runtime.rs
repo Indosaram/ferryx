@@ -5208,6 +5208,9 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         launch.hub.owner_session().storage_key(),
     )));
     tasks.push(tokio::spawn(ferryx_hub::retention::serve(launch.hub.pool.clone())));
+    tasks.push(tokio::spawn(ferryx_hub::inbox_cards::approval::run_age_sweep(
+        launch.hub.pool.clone(),
+    )));
     // `/api/agent/sessions` lists and drives panes through the hub's control.
     ferryx_hub::sessions::live::install(launch.bridge.clone());
     // omo's judge breaker alert reaches the owner through the owner alert sweep.

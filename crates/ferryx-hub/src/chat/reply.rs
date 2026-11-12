@@ -177,13 +177,14 @@ pub async fn deliver_stored_posted(
     let posted = post_claimed(pool, id, &session, &claim).await;
     match &posted {
         Ok(Some(receipt)) => {
-            // Recorded even if this claim expired and was taken over: the post happened.
+            // Slack chunk delivery already finalized its fenced receipt.
             sqlx::query(
                 "UPDATE chat_outbox SET delivered_at = ?, posted_channel = ?, posted_ts = ?,
                     send_claim = NULL, send_claim_until = NULL
-                  WHERE id = ? AND delivered_at IS NULL",
+                  WHERE id = ? AND delivered_at IS NULL AND send_claim = ?
+                    AND send_uncertain_at IS NULL AND send_inflight IS NULL",
             )
-            .bind(now_rfc3339()).bind(&receipt.channel).bind(&receipt.ts).bind(id)
+            .bind(now_rfc3339()).bind(&receipt.channel).bind(&receipt.ts).bind(id).bind(&claim)
             .execute(pool).await?;
         }
         // Nothing (more) was posted, or Slack refused it: the row goes back to the retry. An
@@ -202,6 +203,13 @@ pub const OUTBOX_SEND_LEASE: chrono::Duration = chrono::Duration::minutes(5);
 /// expired. `None` when another sender holds it or it is finished.
 async fn claim_send(pool: &SqlitePool, id: i64) -> Result<Option<String>> {
     let now = chrono::Utc::now();
+    // The durable (claim UUID, inflight chunk index) identifies an unresolved attempt.
+    // An expired lease is not proof that the previous sender failed to post.
+    sqlx::query("UPDATE chat_outbox SET send_uncertain_at = COALESCE(send_uncertain_at, ?),
+        send_uncertain_error = COALESCE(send_uncertain_error, 'chunk attempt has no durable outcome')
+        WHERE id = ? AND delivered_at IS NULL AND send_inflight IS NOT NULL
+          AND (send_claim IS NULL OR julianday(send_claim_until) <= julianday(?))")
+        .bind(now.to_rfc3339()).bind(id).bind(now.to_rfc3339()).execute(pool).await?;
     let claim = uuid::Uuid::new_v4().to_string();
     let claimed = sqlx::query(
         "UPDATE chat_outbox SET send_claim = ?, send_claim_until = ?
@@ -223,7 +231,7 @@ async fn claim_send(pool: &SqlitePool, id: i64) -> Result<Option<String>> {
 async fn release_send(pool: &SqlitePool, id: i64, claim: &str) -> Result<()> {
     sqlx::query(
         "UPDATE chat_outbox SET send_claim = NULL, send_claim_until = NULL
-          WHERE id = ? AND send_claim = ?",
+          WHERE id = ? AND send_claim = ? AND send_inflight IS NULL",
     )
     .bind(id)
     .bind(claim)
@@ -307,38 +315,35 @@ async fn post_slack_chunks(
         }
         let marked = sqlx::query(
             "UPDATE chat_outbox SET send_inflight = ?, send_claim_until = ?
-              WHERE id = ? AND send_claim = ? AND send_inflight IS NULL AND send_uncertain_at IS NULL",
+              WHERE id = ? AND send_claim = ? AND send_inflight IS NULL AND send_uncertain_at IS NULL
+                AND delivered_at IS NULL AND send_chunks_done = ?",
         )
         .bind(index as i64)
         .bind((chrono::Utc::now() + OUTBOX_SEND_LEASE).to_rfc3339())
-        .bind(id).bind(claim)
+        .bind(id).bind(claim).bind(index as i64)
         .execute(pool).await?.rows_affected();
         if marked != 1 {
+            uncertain_chunk(pool, id, "chunk claim fence lost before posting").await?;
             return Err(crate::HubError::message("outbox send claim was lost before posting"));
         }
         let card = if index == 0 { blocks.clone() } else { None };
         match super::slack::post_chunk(session, chunk, card).await {
             SlackSend::Posted(receipt) => {
-                // Recorded whatever happened to the claim: the chunk is in Slack.
+                record_chunk(pool, id, claim, index as i64, &receipt).await?;
                 if index == 0 {
-                    sqlx::query("UPDATE chat_outbox SET posted_channel = ?, posted_ts = ? WHERE id = ?")
-                        .bind(&receipt.channel).bind(&receipt.ts).bind(id).execute(pool).await?;
                     first = Some(receipt);
                 }
-                sqlx::query("UPDATE chat_outbox SET send_chunks_done = ?, send_inflight = NULL WHERE id = ?")
-                    .bind(index as i64 + 1).bind(id).execute(pool).await?;
             }
             SlackSend::NotConfigured => {
-                clear_inflight(pool, id).await?;
+                clear_inflight(pool, id, claim).await?;
                 return Ok(None);
             }
             SlackSend::Rejected(error) => {
-                clear_inflight(pool, id).await?;
+                clear_inflight(pool, id, claim).await?;
                 return Err(error);
             }
             SlackSend::Uncertain(error) => {
-                sqlx::query("UPDATE chat_outbox SET send_uncertain_at = ?, send_uncertain_error = ? WHERE id = ?")
-                    .bind(now_rfc3339()).bind(error.to_string()).bind(id).execute(pool).await?;
+                uncertain_chunk(pool, id, &error.to_string()).await?;
                 return Err(error);
             }
         }
@@ -347,10 +352,16 @@ async fn post_slack_chunks(
     let recorded = sqlx::query(
         "UPDATE chat_outbox SET delivered_at = ?, posted_channel = ?, posted_ts = ?,
             send_claim = NULL, send_claim_until = NULL
-          WHERE id = ? AND delivered_at IS NULL",
+          WHERE id = ? AND delivered_at IS NULL AND send_claim = ?
+            AND send_uncertain_at IS NULL AND send_inflight IS NULL AND send_chunks_done = ?",
     )
     .bind(now_rfc3339()).bind(&posted.channel).bind(&posted.ts).bind(id)
+    .bind(claim).bind(chunks.len() as i64)
     .execute(pool).await?.rows_affected();
+    if recorded != 1 {
+        uncertain_chunk(pool, id, "completion fence lost").await?;
+        return Err(crate::HubError::message("outbox completion fence lost"));
+    }
     if recorded == 1 {
         let text: String = sqlx::query_scalar("SELECT text FROM chat_outbox WHERE id = ?")
             .bind(id).fetch_one(pool).await?;
@@ -359,9 +370,47 @@ async fn post_slack_chunks(
     Ok(Some(posted))
 }
 
-async fn clear_inflight(pool: &SqlitePool, id: i64) -> Result<()> {
-    sqlx::query("UPDATE chat_outbox SET send_inflight = NULL WHERE id = ?")
-        .bind(id).execute(pool).await?;
+async fn uncertain_chunk(pool: &SqlitePool, id: i64, error: &str) -> Result<()> {
+    // Only add uncertainty, never overwrite a newer attempt's receipt or progress.
+    sqlx::query("UPDATE chat_outbox SET send_uncertain_at = COALESCE(send_uncertain_at, ?),
+        send_uncertain_error = COALESCE(send_uncertain_error, ?) WHERE id = ? AND delivered_at IS NULL")
+        .bind(now_rfc3339()).bind(error).bind(id).execute(pool).await?;
+    Ok(())
+}
+
+async fn record_chunk(
+    pool: &SqlitePool, id: i64, claim: &str, index: i64, receipt: &PostedMessage,
+) -> Result<()> {
+    // Receipt and progress share one atomic fence: neither survives without the other.
+    let recorded = sqlx::query("UPDATE chat_outbox SET
+        posted_channel = CASE WHEN ? = 0 THEN ? ELSE posted_channel END,
+        posted_ts = CASE WHEN ? = 0 THEN ? ELSE posted_ts END,
+        send_chunks_done = ?, send_inflight = NULL
+        WHERE id = ? AND send_claim = ? AND send_inflight = ? AND send_chunks_done = ?
+          AND send_uncertain_at IS NULL AND delivered_at IS NULL")
+        .bind(index).bind(&receipt.channel).bind(index).bind(&receipt.ts).bind(index + 1)
+        .bind(id).bind(claim).bind(index).bind(index).execute(pool).await;
+    match recorded {
+        Ok(result) if result.rows_affected() == 1 => Ok(()),
+        Ok(_) => {
+            uncertain_chunk(pool, id, "chunk attempt fence lost after posting").await?;
+            Err(crate::HubError::message("outbox chunk attempt fence lost"))
+        }
+        Err(error) => {
+            uncertain_chunk(pool, id, &error.to_string()).await?;
+            Err(error.into())
+        }
+    }
+}
+
+async fn clear_inflight(pool: &SqlitePool, id: i64, claim: &str) -> Result<()> {
+    let cleared = sqlx::query("UPDATE chat_outbox SET send_inflight = NULL
+        WHERE id = ? AND send_claim = ? AND send_uncertain_at IS NULL")
+        .bind(id).bind(claim).execute(pool).await?.rows_affected();
+    if cleared != 1 {
+        uncertain_chunk(pool, id, "chunk rejection fence lost").await?;
+        return Err(crate::HubError::message("outbox chunk rejection fence lost"));
+    }
     Ok(())
 }
 
@@ -371,6 +420,8 @@ pub const OUTBOX_SETTLE: chrono::Duration = chrono::Duration::minutes(2);
 /// The periodic retry of the outbox. Only rows older than `settle` are tried, and only rows younger than
 /// `max_age` for ordinary chat. Reports admitted by the owner gate stay retryable until
 /// delivered or explicitly cancelled; their age alone must not silently lose an obligation.
+/// The owner delivery tick first calls `owner_alert::repair_orphaned_obligations` to cancel
+/// expired owner alerts, suppress their obligations, and queue one summary per expired batch.
 /// One failure does not stop the pass.
 pub async fn flush_stale(
     pool: &SqlitePool,
@@ -800,6 +851,76 @@ mod tests {
             "SELECT send_claim, send_inflight FROM chat_outbox WHERE id = ?")
             .bind(id).fetch_one(&pool).await.unwrap();
         assert_eq!((claimed, inflight), (None, None));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "hub-slack")]
+    async fn posted_chunk_with_lost_bookkeeping_is_not_reposted() {
+        let pool = crate::storage::memory().await.unwrap();
+        let key = SessionKey::new("slack", None::<String>, "C1", None::<String>, "owner").storage_key();
+        let (id, body) = queued_answer(&pool, &key).await;
+        // Fail only the post's bookkeeping, not the uncertainty write.
+        sqlx::query("CREATE TRIGGER lose_chunk_bookkeeping BEFORE UPDATE OF send_chunks_done ON chat_outbox
+            WHEN NEW.send_chunks_done > OLD.send_chunks_done BEGIN SELECT RAISE(FAIL, 'lost bookkeeping'); END")
+            .execute(&pool).await.unwrap();
+        let (base, calls) = super::super::slack_web::mock::serve("B1").await;
+        super::super::slack::with_test_api(base, "xoxb-test".into(), async {
+            assert!(deliver_stored_posted(&pool, id, &key, &body).await.is_err());
+            let state: (Option<String>, Option<i64>, i64, Option<String>, Option<String>) = sqlx::query_as(
+                "SELECT send_claim, send_inflight, send_chunks_done, posted_ts, send_uncertain_at FROM chat_outbox WHERE id = ?")
+                .bind(id).fetch_one(&pool).await.unwrap();
+            assert!(state.0.is_some());
+            assert_eq!(state.1, Some(0));
+            assert_eq!(state.2, 0);
+            assert_eq!(state.3, None); // Receipt and progress rolled back together.
+            assert!(state.4.is_some());
+            assert!(deliver_stored_posted(&pool, id, &key, &body).await.unwrap().is_none());
+        }).await;
+        assert_eq!(chunk_posts(&calls).len(), 1);
+        let unfinished: bool = sqlx::query_scalar("SELECT delivered_at IS NULL FROM chat_outbox WHERE id = ?")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert!(unfinished);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "hub-slack")]
+    async fn stale_chunk_attempt_cannot_overwrite_newer_state() {
+        let pool = crate::storage::memory().await.unwrap();
+        let key = SessionKey::new("slack", None::<String>, "C1", None::<String>, "owner").storage_key();
+        let id = stored_row(&pool, &key).await;
+        let old = claim_send(&pool, id).await.unwrap().unwrap();
+        sqlx::query("UPDATE chat_outbox SET send_claim_until = '2000-01-01T00:00:00Z' WHERE id = ?")
+            .bind(id).execute(&pool).await.unwrap();
+        let new = claim_send(&pool, id).await.unwrap().unwrap();
+        assert_ne!(old, new);
+        sqlx::query("UPDATE chat_outbox SET send_inflight = 1, send_chunks_done = 1,
+            posted_channel = 'new-channel', posted_ts = 'new-ts' WHERE id = ?")
+            .bind(id).execute(&pool).await.unwrap();
+        let stale = PostedMessage { channel: "old-channel".into(), ts: Some("old-ts".into()) };
+        assert!(record_chunk(&pool, id, &old, 0, &stale).await.is_err());
+        let state: (String, i64, i64, String, String, bool, bool) = sqlx::query_as(
+            "SELECT send_claim, send_inflight, send_chunks_done, posted_channel, posted_ts,
+             send_uncertain_at IS NOT NULL, delivered_at IS NULL FROM chat_outbox WHERE id = ?")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(state, (new, 1, 1, "new-channel".into(), "new-ts".into(), true, true));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "hub-slack")]
+    async fn unresolved_chunk_outcome_cannot_finalize() {
+        let pool = crate::storage::memory().await.unwrap();
+        let session = SessionKey::new("slack", None::<String>, "C1", None::<String>, "owner");
+        let id = stored_row(&pool, &session.storage_key()).await;
+        let claim = claim_send(&pool, id).await.unwrap().unwrap();
+        sqlx::query("UPDATE chat_outbox SET send_chunks_json = '[\"notice\"]', send_chunks_done = 1,
+            send_uncertain_at = '2000-01-01T00:00:00Z' WHERE id = ?")
+            .bind(id).execute(&pool).await.unwrap();
+        assert!(post_slack_chunks(&pool, id, &session, &claim).await.is_err());
+        let state: (bool, bool, i64) = sqlx::query_as(
+            "SELECT send_uncertain_at IS NOT NULL, delivered_at IS NULL, send_chunks_done FROM chat_outbox WHERE id = ?")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(state, (true, true, 1));
+        assert!(claim_send(&pool, id).await.unwrap().is_none());
     }
 
     #[tokio::test]

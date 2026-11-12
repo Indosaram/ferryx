@@ -93,6 +93,62 @@ pub struct Detail {
     /// environment fault episode (`env:<path>@<opened>`) every job it fails shares.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incident: Option<String>,
+    /// The verification attempt that owns this problem's next decision: a fresh uuid claimed when
+    /// the rerun budget is spent. The outcome write is fenced on it, so an older attempt that
+    /// finishes late cannot overwrite the newer attempt's status and detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<String>,
+}
+
+/// Spends a rerun and claims the attempt with one compare-and-swap on the detail the verifier
+/// decided from (`prior`, which carries the previous attempt token). False when another verifier
+/// changed the row first: this verifier lost and must run nothing.
+async fn spend_attempt(pool: &SqlitePool, id: i64, status: &str, prior: &str, next: &str) -> Result<bool> {
+    let mut tx = pool.begin_write().await?;
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT detail FROM cron_problems WHERE CAST(id AS INTEGER) = ? AND status = ?",
+    )
+    .bind(id)
+    .bind(status)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let mut spent = 0;
+    if stored.as_deref() == Some(prior) {
+        spent = sqlx::query("UPDATE cron_problems SET detail = ?, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status = ? AND detail IS ?")
+            .bind(next)
+            .bind(update_stamp())
+            .bind(id)
+            .bind(status)
+            .bind(prior)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(spent > 0)
+}
+
+/// Records a verification attempt's decision once, only while `attempt` still owns the unfinished
+/// problem. The write clears the token, so a second call with the same token matches no row.
+/// False when a newer attempt has claimed it or the decision is already recorded.
+async fn record_attempt_outcome(
+    pool: &SqlitePool,
+    id: i64,
+    attempt: &str,
+    detail: &str,
+    status: &str,
+) -> Result<bool> {
+    let written = sqlx::query(
+        "UPDATE cron_problems SET detail = json_remove(?, '$.attempt'), status = ?, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status NOT IN ('needs_owner', 'ignored') AND json_valid(detail) AND json_extract(detail, '$.attempt') = ?",
+    )
+    .bind(detail)
+    .bind(status)
+    .bind(update_stamp())
+    .bind(id)
+    .bind(attempt)
+    .execute(pool)
+    .await?;
+    Ok(written.rows_affected() > 0)
 }
 
 impl Detail {
@@ -691,6 +747,17 @@ pub trait Runtime: Send + Sync {
     async fn owner_notice(&self, problem: &Problem, message: &str) -> Result<()> {
         self.outcome(problem, message).await
     }
+    /// Whether [`Runtime::owner_notice_obligated`] records the delivery obligation itself, in the
+    /// same transaction as the report gate's decision and outbox row. A runtime without a gate
+    /// cannot create owner-alert obligations; escalation returns an error before committing.
+    fn records_obligations(&self) -> bool {
+        false
+    }
+    /// The owner notice that settles the owner-alert `obligation`.
+    async fn owner_notice_obligated(&self, problem: &Problem, message: &str, obligation: &str) -> Result<()> {
+        let _ = obligation;
+        self.owner_notice(problem, message).await
+    }
 }
 
 pub struct Remediator {
@@ -858,6 +925,9 @@ async fn job_payload(pool: &SqlitePool, job: &str) -> Result<Value> {
     Ok(job_row(pool, job).await?.1)
 }
 
+/// Every remediation lane key starts with this, so the one-live-lane reservation can find them.
+pub const LANE_KEY_PREFIX: &str = "cron-fix-";
+
 /// omo's lane key: `cron-fix-<slug>-<4 hex>`, within the 48-character lane key limit.
 pub fn lane_key(job: &str) -> String {
     let slug: String = job
@@ -877,11 +947,63 @@ pub fn lane_key(job: &str) -> String {
         .chars()
         .take(4)
         .collect();
-    format!("cron-fix-{slug}-{suffix}")
+    format!("{LANE_KEY_PREFIX}{slug}-{suffix}")
 }
 
 fn update_stamp() -> String {
     now_rfc3339()
+}
+
+/// Claim and persist the remediation state under the same per-job write lock.
+async fn claim_problem(pool: &SqlitePool, id: i64, detail: &str, lane: Option<&str>) -> Result<u64> {
+    let mut tx = pool.begin_write().await?;
+    // A claim that opens or joins a lane may sit beside a sibling of the same job: the lane is
+    // shared, so a repeated failure updates it instead of waiting for it to settle. A claim that
+    // reruns straight away has no lane to share, so only one sibling may run at a time.
+    let guarded = lane.is_none();
+    let sql = if guarded {
+        "UPDATE cron_problems SET status = 'remediating', detail = ?, lane_key = ?, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status = 'open' AND NOT EXISTS (SELECT 1 FROM cron_problems AS other WHERE other.job_id = cron_problems.job_id AND other.id != cron_problems.id AND other.status = 'remediating')"
+    } else {
+        "UPDATE cron_problems SET status = 'remediating', detail = ?, lane_key = ?, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status = 'open'"
+    };
+    let claimed = sqlx::query(sql)
+        .bind(detail)
+        .bind(lane)
+        .bind(update_stamp())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    if guarded && claimed.rows_affected() == 0 {
+        let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cron_problems AS p JOIN cron_problems AS sibling ON sibling.job_id = p.job_id AND sibling.id != p.id WHERE CAST(p.id AS INTEGER) = ? AND p.status = 'open' AND sibling.status = 'remediating')")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if blocked {
+            tx.rollback().await?;
+            return Err(HubError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "a sibling cron problem is still remediating",
+            )));
+        }
+    }
+    tx.commit().await?;
+    Ok(claimed.rows_affected())
+}
+
+fn sibling_claim_busy(error: &HubError) -> bool {
+    matches!(error, HubError::Io(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+}
+
+/// Hands a claimed problem back so a later tick retries it, fenced on the detail this attempt
+/// wrote: a problem another verifier already moved on is left alone.
+async fn release_claim(pool: &SqlitePool, id: i64, detail: &str) -> Result<()> {
+    sqlx::query("UPDATE cron_problems SET status = 'open', lane_key = NULL, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status = 'remediating' AND detail IS ?")
+        .bind(update_stamp())
+        .bind(id)
+        .bind(detail)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 impl Remediator {
@@ -902,51 +1024,61 @@ impl Remediator {
     pub async fn on_problem(&self, id: i64, lead: &str) -> Result<()> {
         let result = self.on_problem_inner(id, lead).await;
         if let Err(error) = &result {
-            self.record_failure(id, "diagnosis", error).await?;
+            if !sibling_claim_busy(error) {
+                self.record_failure(id, "diagnosis", error, None).await?;
+            }
         }
         result
     }
 
-    async fn record_failure(&self, id: i64, stage: &str, error: &HubError) -> Result<()> {
-        let Some(mut problem) = problem(&self.pool, id).await? else {
-            return Ok(());
+    /// Escalates a failed stage to the owner. With `attempt`, the write is fenced on that token
+    /// still owning the problem: false (and no row, status or notice touched) when it was superseded.
+    async fn record_failure(
+        &self,
+        id: i64,
+        stage: &str,
+        error: &HubError,
+        attempt: Option<&str>,
+    ) -> Result<bool> {
+        let Some(problem) = problem(&self.pool, id).await? else {
+            return Ok(true);
         };
-        if matches!(problem.status.as_str(), "fixed" | "needs_owner") {
-            return Ok(());
-        }
         let mut detail = Detail::parse(&problem.detail);
+        if attempt.is_some() && detail.attempt.as_deref() != attempt {
+            return Ok(false);
+        }
+        if matches!(problem.status.as_str(), "fixed" | "needs_owner") {
+            return Ok(true);
+        }
         detail.evidence = Some(
             json!({"status": "failed", "stage": stage, "error": error.to_string()}).to_string(),
         );
-        problem.detail = detail.encode()?;
-        sqlx::query("UPDATE cron_problems SET detail = ?, status = 'needs_owner', lane_key = CASE WHEN EXISTS(SELECT 1 FROM lanes WHERE key = cron_problems.lane_key) THEN lane_key ELSE NULL END, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status != 'fixed'")
-            .bind(&problem.detail)
-            .bind(update_stamp())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        problem.lane_key =
-            sqlx::query_scalar("SELECT lane_key FROM cron_problems WHERE CAST(id AS INTEGER) = ?")
-                .bind(id)
-                .fetch_one(&self.pool)
-                .await?;
+        if attempt.is_some() {
+            detail.attempt = None;
+        }
+        let detail = detail.encode()?;
         let stage = if stage == "diagnosis" {
             text("진단", "diagnosis")
         } else {
             text("검증", "verification")
         };
-        self.needs_owner(
-            &problem,
-            &Outcome::NeedsOwner(text(
-                "기록된 오류를 확인하고 재시도를 승인",
-                "check the recorded error and approve a retry",
-            )),
-            Some(&text(
-                &format!("자동 복구가 {stage} 단계에서 멈췄습니다: {error}"),
-                &format!("automatic repair stopped during {stage}: {error}"),
-            )),
-        )
-        .await
+        // The failure detail, the token release and the terminal status are one fenced write
+        // inside the escalation's transaction: no second, unfenced status decision follows it.
+        let escalated = self
+            .escalate(
+                &problem,
+                &Outcome::NeedsOwner(text(
+                    "기록된 오류를 확인하고 재시도를 승인",
+                    "check the recorded error and approve a retry",
+                )),
+                Some(&text(
+                    &format!("자동 복구가 {stage} 단계에서 멈췄습니다: {error}"),
+                    &format!("automatic repair stopped during {stage}: {error}"),
+                )),
+                Some((&detail, attempt)),
+            )
+            .await?;
+        Ok(escalated || attempt.is_none())
     }
 
     async fn on_problem_inner(&self, id: i64, lead: &str) -> Result<()> {
@@ -972,12 +1104,8 @@ impl Remediator {
             }
             // The path is back: one verified rerun settles it like a transient failure (a
             // publishing job waits for the owner's approval there).
-            let claimed = sqlx::query("UPDATE cron_problems SET status = 'remediating', updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status = 'open'")
-                .bind(update_stamp())
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
-            if claimed.rows_affected() > 0 {
+            let claimed = claim_problem(&self.pool, id, &problem.detail, None).await?;
+            if claimed > 0 {
                 self.verify_once(id).await?;
             }
             return Ok(());
@@ -997,14 +1125,8 @@ impl Remediator {
         let reuse_active_lane = active_lane.is_some();
         let key = active_lane.unwrap_or_else(|| lane_key(&problem.job_id));
         let lane = (choice.selected == "script_bug_needs_fix" || publishes).then_some(&key);
-        let claimed = sqlx::query("UPDATE cron_problems SET status = 'remediating', detail = ?, lane_key = ?, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status = 'open'")
-            .bind(detail.encode()?)
-            .bind(lane)
-            .bind(update_stamp())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        if claimed.rows_affected() == 0 {
+        let claimed = claim_problem(&self.pool, id, &detail.encode()?, lane.map(String::as_str)).await?;
+        if claimed == 0 {
             return Ok(());
         }
         problem.detail = detail.encode()?;
@@ -1073,8 +1195,11 @@ impl Remediator {
                 )?;
                 if reuse_active_lane {
                     self.runtime.update_lane(request).await?;
-                } else {
-                    self.runtime.open_lane(request).await?;
+                } else if let Err(error) = self.runtime.open_lane(request).await {
+                    // A live remediation lane holds the one pane: hand the problem back rather
+                    // than leaving it 'remediating' with no lane that could ever settle it.
+                    release_claim(&self.pool, id, &problem.detail).await?;
+                    return Err(error);
                 }
                 if publishes {
                     problem.lane_key = Some(key);
@@ -1119,20 +1244,15 @@ impl Remediator {
         detail.incident = Some(item.incident.clone());
         problem.detail = detail.encode()?;
         problem.status = "needs_owner".into();
-        if item.opened {
-            sqlx::query(
-                "INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES(?, 'pending', ?, ?)
-                 ON CONFLICT(id) DO UPDATE SET state = 'pending', body = excluded.body, updated_at = excluded.updated_at",
-            )
-            .bind(format!("{}{}", crate::owner_alert::OBLIGATION_PREFIX, environment_item_id(fault)))
-            .bind(&item.notice)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
+        let obligation = format!("{}{}", crate::owner_alert::OBLIGATION_PREFIX, environment_item_id(fault));
+        // A gated runtime writes the obligation with its gate decision and outbox row, so a
+        // 'pending' obligation never commits without the notice it waits on.
+        if item.opened && !self.runtime.records_obligations() {
+            write_pending_obligation(&mut tx, &obligation, &item.notice, &now).await?;
         }
         tx.commit().await?;
         if item.opened {
-            self.runtime.owner_notice(&problem, &item.notice).await?;
+            self.runtime.owner_notice_obligated(&problem, &item.notice, &obligation).await?;
         }
         Ok(())
     }
@@ -1147,6 +1267,21 @@ impl Remediator {
         outcome: &Outcome,
         evidence: Option<&str>,
     ) -> Result<()> {
+        self.escalate(problem, outcome, evidence, None).await.map(|_| ())
+    }
+
+    /// `needs_owner` with an optional failure write `(detail, attempt)`: the detail, the
+    /// attempt-token fence and the status change are one UPDATE. False when nothing was written
+    /// (fixed concurrently, or the token no longer owns the row): no inbox item, no notice.
+    async fn escalate(
+        &self,
+        problem: &Problem,
+        outcome: &Outcome,
+        evidence: Option<&str>,
+        failure: Option<(&str, Option<&str>)>,
+    ) -> Result<bool> {
+        let mut problem = problem.clone();
+        let problem = &mut problem;
         let now = update_stamp();
         let title = scrub(&outcome.owner_text(&problem.job_id));
         let action = match evidence.filter(|evidence| !evidence.trim().is_empty()) {
@@ -1158,15 +1293,33 @@ impl Remediator {
             None => title.clone(),
         };
         let mut tx = self.pool.begin_write().await?;
-        let escalated = sqlx::query("UPDATE cron_problems SET status = 'needs_owner', updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status != 'fixed'")
-            .bind(&now)
-            .bind(problem.id)
-            .execute(&mut *tx)
-            .await?;
+        let escalated = match failure {
+            None => sqlx::query("UPDATE cron_problems SET status = 'needs_owner', updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status != 'fixed'")
+                .bind(&now)
+                .bind(problem.id)
+                .execute(&mut *tx)
+                .await?,
+            Some((detail, attempt)) => sqlx::query("UPDATE cron_problems SET detail = ?, status = 'needs_owner', lane_key = CASE WHEN EXISTS(SELECT 1 FROM lanes WHERE key = cron_problems.lane_key) THEN lane_key ELSE NULL END, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status != 'fixed' AND (? IS NULL OR (json_valid(detail) AND json_extract(detail, '$.attempt') = ?))")
+                .bind(detail)
+                .bind(&now)
+                .bind(problem.id)
+                .bind(attempt)
+                .bind(attempt)
+                .execute(&mut *tx)
+                .await?,
+        };
         if escalated.rows_affected() == 0 {
-            // Fixed concurrently: no inbox row, no outcome, no token that can match nothing.
+            // Fixed concurrently or superseded: no inbox row, no outcome, no notice.
             tx.rollback().await?;
-            return Ok(());
+            return Ok(false);
+        }
+        if failure.is_some() {
+            problem.lane_key = sqlx::query_scalar(
+                "SELECT lane_key FROM cron_problems WHERE CAST(id AS INTEGER) = ?",
+            )
+            .bind(problem.id)
+            .fetch_one(&mut *tx)
+            .await?;
         }
         let stored: String =
             sqlx::query_scalar("SELECT detail FROM cron_problems WHERE CAST(id AS INTEGER) = ?")
@@ -1201,21 +1354,19 @@ impl Remediator {
         let notice = redact_token(&format!("{action}\n{next}\n{}", approval_instruction(problem.id)));
         // The owner item's alert is this notice: the alert sweep sees the obligation and does
         // not post the item a second time, and reconcile marks it delivered once it is posted.
-        sqlx::query(
-            "INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES(?, 'pending', ?, ?)
-             ON CONFLICT(id) DO UPDATE SET state = 'pending', body = excluded.body, updated_at = excluded.updated_at",
-        )
-        .bind(format!(
+        // A gated runtime records the obligation in the gate's own transaction (pending with an
+        // outbox row when sent, suppressed when the gate drops it), never as a bare 'pending'.
+        let obligation = format!(
             "{}{}",
             crate::owner_alert::OBLIGATION_PREFIX,
             crate::schedule::cron_owner_item_id(&problem.job_id)
-        ))
-        .bind(&notice)
-        .bind(&now)
-        .execute(&mut *tx)
-        .await?;
+        );
+        if !self.runtime.records_obligations() {
+            write_pending_obligation(&mut tx, &obligation, &notice, &now).await?;
+        }
         tx.commit().await?;
-        self.runtime.owner_notice(problem, &notice).await
+        self.runtime.owner_notice_obligated(problem, &notice, &obligation).await?;
+        Ok(true)
     }
 
     /// Escalates `remediating` rows no live lane or rerun can still settle.
@@ -1251,14 +1402,24 @@ impl Remediator {
     }
 
     pub async fn verify_once(&self, id: i64) -> Result<Option<RunReceipt>> {
-        let result = self.verify_once_inner(id).await;
+        // Holds the attempt token while this verifier owns an unrecorded attempt, so an error
+        // after the spend is fenced: a superseded attempt's failure touches nothing.
+        let mut attempt = None;
+        let result = self.verify_once_inner(id, &mut attempt).await;
         if let Err(error) = &result {
-            self.record_failure(id, "verification", error).await?;
+            if !self.record_failure(id, "verification", error, attempt.as_deref()).await? {
+                tracing::warn!(problem = id, %error, "superseded cron verification attempt failed; error discarded");
+                return Ok(None);
+            }
         }
         result
     }
 
-    async fn verify_once_inner(&self, id: i64) -> Result<Option<RunReceipt>> {
+    async fn verify_once_inner(
+        &self,
+        id: i64,
+        claim: &mut Option<String>,
+    ) -> Result<Option<RunReceipt>> {
         let Some(problem) = problem(&self.pool, id).await? else {
             return Ok(None);
         };
@@ -1291,15 +1452,17 @@ impl Remediator {
             return Ok(None);
         }
         detail.reruns = detail.reruns.saturating_add(1);
+        // Claim the attempt with the spend: a compare-and-swap on the exact detail this verifier
+        // read (which carries the previous token) lets only one verifier take it, and a stale
+        // verifier cannot replace a newer attempt's detail. The new token fences the outcome.
+        let attempt = uuid::Uuid::new_v4().to_string();
+        detail.attempt = Some(attempt.clone());
         // The budget is spent before the rerun, so a crash mid-run cannot rerun forever.
-        let spent = sqlx::query("UPDATE cron_problems SET detail = ?, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status = ?")
-            .bind(detail.encode()?)
-            .bind(update_stamp())
-            .bind(id)
-            .bind(&problem.status)
-            .execute(&self.pool)
-            .await?;
-        if spent.rows_affected() == 0 {
+        let spent = spend_attempt(&self.pool, id, &problem.status, &problem.detail, &detail.encode()?).await?;
+        if spent {
+            *claim = Some(attempt.clone());
+        } else {
+            tracing::warn!(job = %problem.job_id, problem = id, "cron verification attempt lost its claim before the rerun; another attempt owns it");
             return Ok(None);
         }
         // The rerun belongs to the failing run's incident: a script that reports its own failure
@@ -1324,13 +1487,29 @@ impl Remediator {
             outcome = outcome.label(),
             "cron rerun assessed from its own output"
         );
-        sqlx::query("UPDATE cron_problems SET detail = ?, status = ?, updated_at = ? WHERE CAST(id AS INTEGER) = ?")
-            .bind(detail.encode()?)
-            .bind(if ok { "fixed" } else { "needs_owner" })
-            .bind(update_stamp())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let owned = record_attempt_outcome(
+            &self.pool,
+            id,
+            &attempt,
+            &detail.encode()?,
+            if ok { "fixed" } else { "needs_owner" },
+        )
+        .await?;
+        if owned {
+            // Recorded once: later errors (notices) no longer belong to an open attempt.
+            *claim = None;
+        } else {
+            // A newer attempt claimed the problem while this rerun ran: its decision stands, and
+            // this stale outcome closes, escalates and announces nothing.
+            tracing::warn!(
+                job = %problem.job_id,
+                problem = id,
+                run = %receipt.run_id,
+                outcome = outcome.label(),
+                "cron verification superseded by a newer attempt; outcome discarded"
+            );
+            return Ok(None);
+        }
         if ok {
             sqlx::query(
                 "UPDATE inbox_decisions SET status = 'done' WHERE item_id = ? AND status = 'open'",
@@ -1579,15 +1758,25 @@ impl Runtime for HubRuntime {
         tokio::fs::create_dir_all(&self.briefs).await?;
         let brief = self.briefs.join(format!("{}.md", request.key));
         tokio::fs::write(&brief, &request.brief).await?;
-        crate::lanes::state::insert_lane(
+        // One remediation pane at a time across every producer (a racing tick, an MCP call, a
+        // restart): the slot is reserved in the same transaction that inserts the lane, so two
+        // callers never both launch. A second problem waits for the live lane to settle.
+        let reserved = crate::lanes::state::insert_lane_sole_live(
             &self.pool,
             &request.key,
-            &request.title,
+            LANE_KEY_PREFIX,
+            "Cron root-cause remediation",
             &request.lead,
             &request.cwd.to_string_lossy(),
             &request.done,
         )
         .await?;
+        if !reserved {
+            return Err(HubError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "a remediation lane is already live; this problem waits for it to settle",
+            )));
+        }
         sqlx::query("UPDATE lanes SET brief_path = ? WHERE key = ?")
             .bind(brief.to_string_lossy().as_ref())
             .bind(&request.key)
@@ -1695,13 +1884,32 @@ impl Runtime for HubRuntime {
             .home_session
             .as_deref()
             .or(self.owner_session.as_deref());
-        self.post(problem, message, target, true).await
+        self.post(problem, message, target, true, None).await
     }
 
     async fn owner_notice(&self, problem: &Problem, message: &str) -> Result<()> {
-        self.post(problem, message, self.owner_session.as_deref(), false)
+        self.post(problem, message, self.owner_session.as_deref(), false, None)
             .await
     }
+
+    fn records_obligations(&self) -> bool {
+        true
+    }
+
+    async fn owner_notice_obligated(&self, problem: &Problem, message: &str, obligation: &str) -> Result<()> {
+        self.post(problem, message, self.owner_session.as_deref(), false, Some(obligation))
+            .await
+    }
+}
+
+/// Reject gate-less escalation before its transaction can commit a bare obligation.
+async fn write_pending_obligation(
+    _conn: &mut sqlx::SqliteConnection,
+    _obligation: &str,
+    _notice: &str,
+    _now: &str,
+) -> Result<()> {
+    Err(HubError::message("owner-alert obligations require a report-gated runtime"))
 }
 
 pub fn remediation_report(problem: &Problem, message: &str, recovered: bool) -> crate::report_gate::Report {
@@ -1758,14 +1966,17 @@ async fn forget_owner_ask(pool: &SqlitePool, job: &str) -> Result<()> {
 }
 
 impl HubRuntime {
-    async fn post(&self, problem: &Problem, message: &str, target: Option<&str>, recovered: bool) -> Result<()> {
+    /// Queues `message` through the report gate. `obligation` is written in the gate's transaction:
+    /// 'pending' with the report bound when sent, 'suppressed' when the gate drops it. With no
+    /// owner session nothing is written, so the owner-alert sweep still owns the item.
+    async fn post(&self, problem: &Problem, message: &str, target: Option<&str>, recovered: bool, obligation: Option<&str>) -> Result<()> {
         queue_outcome(&self.pool, problem.id, &problem.job_id, message).await?;
         let Some(owner) = target else {
             return Ok(());
         };
         let message = redact_token(&scrub(message));
         let report = remediation_report(problem, &message, recovered);
-        let (_, queued) = crate::report_gate::queue_delivery(&self.pool, owner, &report, false, &message, None).await?;
+        let (_, queued) = crate::report_gate::queue_delivery(&self.pool, owner, &report, false, &message, obligation).await?;
         let Some(outbox_id) = queued.filter(|_| self.transport) else { return Ok(()); };
         let posted = crate::chat::reply::deliver_stored_posted(
             &self.pool,
@@ -1875,12 +2086,16 @@ pub async fn reconcile_fixed(pool: &SqlitePool, job: &str) -> Result<()> {
         if let Some(from) = from {
             let now = now_rfc3339();
             let mut tx = pool.begin_write().await?;
-            sqlx::query("UPDATE lanes SET status = 'verified_done', updated_at = ? WHERE key = ? AND status = ?")
+            let closed = sqlx::query("UPDATE lanes SET status = 'verified_done', updated_at = ? WHERE key = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM cron_problems WHERE lane_key = lanes.key AND status NOT IN ('fixed','ignored'))")
                 .bind(&now)
                 .bind(&key)
                 .bind(&from)
                 .execute(&mut *tx)
                 .await?;
+            if closed.rows_affected() == 0 {
+                tx.rollback().await?;
+                continue;
+            }
             sqlx::query("INSERT INTO lane_history(lane_key, at, from_status, to_status, reason) VALUES(?,?,?,'verified_done','cron natural clean success')")
                 .bind(&key)
                 .bind(&now)
@@ -1914,6 +2129,15 @@ pub async fn dispatch_once(pool: &SqlitePool, remediator: &Remediator) -> Result
                 handled += 1;
             }
             Err(error) => {
+                if sibling_claim_busy(&error) {
+                    let release_at = (chrono::Utc::now() + chrono::TimeDelta::seconds(30))
+                        .to_rfc3339();
+                    sqlx::query("UPDATE lane_events SET release_at = ? WHERE id = ? AND delivered_at IS NULL")
+                        .bind(release_at)
+                        .bind(id)
+                        .execute(pool)
+                        .await?;
+                }
                 tracing::warn!(event_id = id, %error, "cron problem handling failed; event remains queued");
             }
         }
@@ -1970,4 +2194,23 @@ pub async fn serve(pool: SqlitePool, owner_session: Option<String>, home_session
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    include!("cron_remediate/tests.rs");
+
+    #[tokio::test]
+    async fn a_nonrecording_runtime_cannot_commit_a_bare_pending_obligation() {
+        let (pool, id) = seeded("collect", json!({"command":"collect-projects"}), "LOGIN_FAILED").await;
+        let runtime = Arc::new(Fake::default());
+        assert!(!runtime.records_obligations());
+        let r = Remediator { pool: pool.clone(), judge: Judge::forced("unused"), runtime: runtime.clone() };
+        let problem = problem(&pool, id).await.unwrap().unwrap();
+        assert!(matches!(
+            r.needs_owner(&problem, &Outcome::Unverified("no collection result".into()), None).await,
+            Err(HubError::Message(_))
+        ));
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM delivery_obligations WHERE state = 'pending'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(pending, 0);
+        assert!(runtime.outcomes.lock().unwrap().is_empty());
+    }
+}
