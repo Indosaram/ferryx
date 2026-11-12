@@ -23,7 +23,7 @@ export const STANDBY_PREFIX = 'standby:'; // ui/src/lib/sessionLifecycle.ts STAN
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** Paths of the daemon's pending SSH pairing requests (`sessions/remote-request-*.json`). */
-async function listRemoteRequests(agent, sessionsDir) {
+export async function listRemoteRequests(agent, sessionsDir) {
   const entries = await agent.call('listDir', { dir: sessionsDir }).catch(() => null);
   if (Array.isArray(entries)) return entries.filter((n) => /^remote-request-.*\.json$/.test(n)).map((n) => hjoin(sessionsDir, n));
   return [];

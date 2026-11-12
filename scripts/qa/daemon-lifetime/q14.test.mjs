@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { rebootTarget, preBootSession, classifyPreBootPanes, absentPattern, STANDBY_PREFIX, QA_HOST_BOOT_TIME_ENV, BOOT_OVERRIDE_RECEIPT } from './scenarios/q14.mjs';
-import { seededProjectBootstrap } from './scenarios/q14.mjs';
+import { seededProjectBootstrap, listRemoteRequests } from './scenarios/q14.mjs';
 import { RUNNERS, assertRunnersComplete } from './run.mjs';
 import { SCENARIO_IDS, applicable } from './lib/summary.mjs';
 import { probeHooks, missingHooksFor } from './lib/hooks.mjs';
@@ -108,3 +108,27 @@ test('seededProjectBootstrap leaves only the reboot target so an earlier scenari
   assert.deepEqual(seededProjectBootstrap(target).projects.map((p) => p.workspaceId), ['qa-daemon-lifetime']);
 });
 
+
+// Run 20261112t072829z on maho-win: Q14 died with `spawn sh ENOENT` because the reset scanned
+// sessions/ with `ls remote-request-*.json`. A Windows host ships no sh, so the scan goes through
+// the agent's own file methods and must still find the pairing requests on every platform.
+test('the remote-request reset lists pairing requests without a shell (Windows has none)', async () => {
+  const calls = [];
+  const agent = {
+    call: async (method, args) => {
+      calls.push({ method, args });
+      if (method === 'listDir') return ['remote-request-9aee.json', 'session_state.json', 'remote-request-7c1.json', 'remote-projects.json'];
+      return null;
+    },
+  };
+  const found = await listRemoteRequests(agent, 'C:\\Users\\sook\\AppData\\Roaming\\ferryx\\sessions');
+  assert.deepEqual(found, [
+    'C:\\Users\\sook\\AppData\\Roaming\\ferryx\\sessions\\remote-request-9aee.json',
+    'C:\\Users\\sook\\AppData\\Roaming\\ferryx\\sessions\\remote-request-7c1.json',
+  ]);
+  assert.deepEqual(calls.map((c) => c.method), ['listDir'], 'no exec: a shell cannot be assumed');
+  assert.equal(calls.some((c) => c.args?.command === 'sh'), false);
+  // A missing or unreadable sessions dir is no pending request, not a thrown scenario.
+  assert.deepEqual(await listRemoteRequests({ call: async () => { throw new Error('ENOENT'); } }, '/nope'), []);
+  assert.deepEqual(await listRemoteRequests({ call: async () => null }, '/nope'), []);
+});
