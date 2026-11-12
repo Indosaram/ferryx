@@ -388,7 +388,16 @@ pub async fn list_remote(
     environment.platform.validate_path(repo_root)?;
     let marker = format!("FERRYX_WT_LIST_V1_{}", uuid::Uuid::new_v4().simple());
     let script = worktree_list_script(environment.platform, repo_root, &marker);
-    let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    let mut plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    // Read-only inventory: a reused master removes one cold handshake per call and cannot
+    // change the result, so a shared connection is safe here in a way it is not for a
+    // mutation. The master is an optimisation, never a requirement - any failure to
+    // establish one keeps the cold plan - and the lease is held for the whole call so idle
+    // expiry sees this operation as active rather than guessing from elapsed time.
+    let master = super::master::acquire(host).await.ok().flatten();
+    if let Some(lease) = master.as_ref() {
+        direct::use_master(&mut plan, lease.socket());
+    }
     list_output(&plan, &marker).await
 }
 
