@@ -308,6 +308,7 @@ async fn a_script_bug_opens_a_lane_that_settles_on_the_hubs_rerun() {
         lane.key
     );
     assert!(crate::lanes::state::valid_key(&lane.key));
+    assert_eq!(lane.title, "Cron fix: Daily Report");
     assert_eq!(lane.cwd, PathBuf::from(script).parent().unwrap());
     assert_eq!(lane.lead, "lead-1");
     assert!(lane.brief.contains("Job: Daily Report / daily"));

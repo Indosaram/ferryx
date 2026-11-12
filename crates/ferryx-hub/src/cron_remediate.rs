@@ -1857,7 +1857,10 @@ pub async fn acknowledge_digest(pool: &SqlitePool) -> Result<()> {
 /// A clean success closes the job's remediation lanes (omo `reconcile_fixed`).
 pub async fn reconcile_fixed(pool: &SqlitePool, job: &str) -> Result<()> {
     let lanes: Vec<String> = sqlx::query_scalar(
-        "SELECT lane_key FROM cron_problems WHERE job_id = ? AND status = 'fixed' AND lane_key IS NOT NULL",
+        "SELECT DISTINCT p.lane_key FROM cron_problems p WHERE p.job_id = ? AND p.status = 'fixed'
+           AND p.lane_key IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM cron_problems o
+                            WHERE o.lane_key = p.lane_key AND o.status IN ('open','remediating'))",
     )
     .bind(job)
     .fetch_all(pool)
