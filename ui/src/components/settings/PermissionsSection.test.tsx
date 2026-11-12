@@ -351,6 +351,8 @@ describe("PermissionsSection", () => {
 
   it("resets onboarding storage key and dispatches ferryx:open-onboarding event on Show Welcome Setup", async () => {
     window.localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify({ version: 1, completedSteps: ["intro"], dismissed: true }));
+    // A dismissed setup panel must come back with the wizard, or the dismissal is permanent.
+    window.localStorage.setItem("ferryx.hints.setupProgress", "dismissed");
     const onEvent = vi.fn();
     window.addEventListener(OPEN_ONBOARDING_EVENT, onEvent, { once: true });
 
@@ -361,6 +363,7 @@ describe("PermissionsSection", () => {
     fireEvent.click(button);
 
     expect(window.localStorage.getItem(ONBOARDING_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem("ferryx.hints.setupProgress")).toBeNull();
     expect(onEvent).toHaveBeenCalledTimes(1);
   });
 });

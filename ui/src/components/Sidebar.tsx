@@ -105,6 +105,8 @@ type SidebarProps = {
    * whenever this is set (App always sets it); a host without a focus target has no panel.
    */
   onFocusSupervisorSession?: (sessionRef: string) => void;
+  /** Sidebar-embedded slot below the tree, used for persistent setup progress. */
+  footerSlot?: React.ReactNode;
 };
 
 /**
@@ -140,6 +142,7 @@ export function Sidebar({
   onToggle,
   onHide,
   onFocusSupervisorSession,
+  footerSlot,
 }: SidebarProps) {
   // The autonomy panel is the sidebar's Supervisor view: it opens by default and is not behind
   // advanced features. The project tree is the other view; there is no Inbox view.
@@ -509,6 +512,8 @@ export function Sidebar({
           renderRow={renderRow}
           reorder={reorder}
         />
+
+        {footerSlot}
 
         <div
           role="separator"

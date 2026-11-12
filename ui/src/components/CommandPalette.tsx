@@ -1,4 +1,4 @@
-import { AppWindow, GitBranch, GitCompare, Search, TerminalSquare, X, type LucideIcon } from "lucide-react";
+import { AppWindow, GitBranch, GitCompare, Keyboard, Search, TerminalSquare, X, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { isMacShortcutPlatform, resolvedShortcuts, shortcutLabel } from "../lib/shortcuts";
@@ -16,12 +16,14 @@ export type CommandPaletteProps = {
   onShowChanges?: () => void;
   /** Present only in the desktop shell, where a second window can be opened. */
   onNewWindow?: () => void;
+  /** Present when the keyboard shortcut cheat sheet can be opened. */
+  onOpenShortcutSheet?: () => void;
   onClose: () => void;
 };
 
 type PaletteCommand = { id: string; title: string; run: () => void; icon: LucideIcon };
 
-export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onShowChanges, onNewWindow, onClose }: CommandPaletteProps) {
+export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onShowChanges, onNewWindow, onOpenShortcutSheet, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const isMac = isMacShortcutPlatform();
@@ -36,8 +38,11 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
     const commands: PaletteCommand[] = [];
     if (onShowChanges) commands.push({ id: "show-changes", title: "Show changes", run: onShowChanges, icon: GitCompare });
     if (onNewWindow) commands.push({ id: "window.new", title: "New Window", run: onNewWindow, icon: AppWindow });
+    if (onOpenShortcutSheet) {
+      commands.push({ id: "help.shortcuts", title: "Keyboard shortcuts", run: onOpenShortcutSheet, icon: Keyboard });
+    }
     return commands.filter((command) => command.title.toLowerCase().includes(normalizedQuery));
-  }, [normalizedQuery, onNewWindow, onShowChanges]);
+  }, [normalizedQuery, onNewWindow, onOpenShortcutSheet, onShowChanges]);
   const filteredTabs = useMemo(
     () => tabs.filter((tab) => staticTabLabel(tab).toLowerCase().includes(normalizedQuery)),
     [normalizedQuery, tabs],
