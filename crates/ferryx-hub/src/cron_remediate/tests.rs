@@ -8,6 +8,7 @@ struct Fake {
     receipts: Mutex<Vec<RunReceipt>>,
     reruns: Mutex<Vec<(String, bool)>>,
     lanes: Mutex<Vec<LaneRequest>>,
+    lane_updates: Mutex<Vec<LaneRequest>>,
     outcomes: Mutex<Vec<String>>,
 }
 
@@ -68,6 +69,10 @@ fn receipt(status: &str, output: &str) -> RunReceipt {
 impl Runtime for Fake {
     async fn open_lane(&self, request: LaneRequest) -> Result<()> {
         self.lanes.lock().unwrap().push(request);
+        Ok(())
+    }
+    async fn update_lane(&self, request: LaneRequest) -> Result<()> {
+        self.lane_updates.lock().unwrap().push(request);
         Ok(())
     }
     async fn rerun(&self, job: &str, approved: bool) -> Result<RunReceipt> {
@@ -319,6 +324,44 @@ async fn a_script_bug_opens_a_lane_that_settles_on_the_hubs_rerun() {
         fake.reruns.lock().unwrap().is_empty(),
         "the lane fixes first; nothing reruns yet"
     );
+}
+
+#[tokio::test]
+async fn repeated_cron_failure_reuses_the_existing_active_lane() {
+    let (pool, first_id) = seeded(
+        "daily-report",
+        json!({"script": "/opt/jobs/report.py"}),
+        "first failure",
+    )
+    .await;
+    let lane_key = "cron-fix-daily-report-live";
+    crate::lanes::state::insert_lane(&pool, lane_key, "Cron root-cause remediation", "lead-1", "/opt/jobs", "command true")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cron_problems SET status = 'remediating', lane_key = ? WHERE CAST(id AS INTEGER) = ?")
+        .bind(lane_key)
+        .bind(first_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, status, kind, signature, detail, run_id, updated_at) VALUES('2', 'daily-report', 'second failure', ?, 'open', 'failed', 'sig-2', 'second failure', 'r2', ?)")
+        .bind(now_rfc3339())
+        .bind(now_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let fake = Arc::new(Fake::default());
+    remediator(&pool, "script_bug_needs_fix", fake.clone())
+        .on_problem(2, "lead-2")
+        .await
+        .unwrap();
+
+    assert!(fake.lanes.lock().unwrap().is_empty(), "must not create a second lane");
+    let updates = fake.lane_updates.lock().unwrap();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].key, lane_key);
+    assert_eq!(problem(&pool, 2).await.unwrap().unwrap().lane_key.as_deref(), Some(lane_key));
 }
 
 #[tokio::test]

@@ -668,6 +668,8 @@ pub async fn redact_stored_owner_tokens(pool: &SqlitePool) -> Result<u64> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneRequest {
     pub key: String,
+    /// The issue title the lane shows: the job it repairs, not a generic label.
+    pub title: String,
     pub cwd: PathBuf,
     pub brief: String,
     pub done: String,
@@ -677,6 +679,9 @@ pub struct LaneRequest {
 #[async_trait]
 pub trait Runtime: Send + Sync {
     async fn open_lane(&self, request: LaneRequest) -> Result<()>;
+    async fn update_lane(&self, _request: LaneRequest) -> Result<()> {
+        Ok(())
+    }
     async fn rerun(&self, job: &str, approved: bool) -> Result<RunReceipt>;
     async fn quota_check(&self) -> Result<Value>;
     async fn log_excerpt(&self, job: &str) -> Result<String>;
@@ -814,12 +819,25 @@ pub async fn problem(pool: &SqlitePool, id: i64) -> Result<Option<Problem>> {
 
 async fn problem_by_lane(pool: &SqlitePool, key: &str) -> Result<Option<Problem>> {
     let row: Option<ProblemRow> = sqlx::query_as(&format!(
-        "SELECT {PROBLEM_COLUMNS} WHERE lane_key = ? ORDER BY CAST(id AS INTEGER) DESC LIMIT 1"
+        "SELECT {PROBLEM_COLUMNS} WHERE lane_key = ? ORDER BY (status = 'remediating') DESC, CAST(id AS INTEGER) DESC LIMIT 1"
     ))
     .bind(key)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(problem_from))
+}
+
+async fn active_lane_for_job(pool: &SqlitePool, job: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT p.lane_key FROM cron_problems p JOIN lanes l ON l.key = p.lane_key
+         WHERE p.job_id = ? AND p.lane_key IS NOT NULL
+           AND p.status IN ('remediating','needs_owner')
+           AND l.status NOT IN ('verified_done','closed','failed')
+         ORDER BY p.updated_at DESC LIMIT 1",
+    )
+    .bind(job)
+    .fetch_optional(pool)
+    .await?)
 }
 
 async fn job_row(pool: &SqlitePool, job: &str) -> Result<(String, Value)> {
@@ -975,7 +993,9 @@ impl Remediator {
             )
             .await?;
         let publishes = publishing(&problem.job_id, &payload);
-        let key = lane_key(&problem.job_id);
+        let active_lane = active_lane_for_job(&self.pool, &problem.job_id).await?;
+        let reuse_active_lane = active_lane.is_some();
+        let key = active_lane.unwrap_or_else(|| lane_key(&problem.job_id));
         let lane = (choice.selected == "script_bug_needs_fix" || publishes).then_some(&key);
         let claimed = sqlx::query("UPDATE cron_problems SET status = 'remediating', detail = ?, lane_key = ?, updated_at = ? WHERE CAST(id AS INTEGER) = ? AND status = 'open'")
             .bind(detail.encode()?)
@@ -1051,7 +1071,11 @@ impl Remediator {
                     output.as_deref(),
                     &logs,
                 )?;
-                self.runtime.open_lane(request).await?;
+                if reuse_active_lane {
+                    self.runtime.update_lane(request).await?;
+                } else {
+                    self.runtime.open_lane(request).await?;
+                }
                 if publishes {
                     problem.lane_key = Some(key);
                     self.needs_owner(
@@ -1486,6 +1510,7 @@ pub fn make_lane(
     );
     Ok(LaneRequest {
         key: key.into(),
+        title: format!("Cron fix: {job}"),
         cwd,
         brief,
         done,
@@ -1557,7 +1582,7 @@ impl Runtime for HubRuntime {
         crate::lanes::state::insert_lane(
             &self.pool,
             &request.key,
-            "Cron root-cause remediation",
+            &request.title,
             &request.lead,
             &request.cwd.to_string_lossy(),
             &request.done,
@@ -1575,6 +1600,18 @@ impl Runtime for HubRuntime {
             &request.lead,
             "question",
             &json!({"lane": request.key, "brief": brief, "action": "cron remediation lane queued; drive it with lane.drive"}).to_string(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn update_lane(&self, request: LaneRequest) -> Result<()> {
+        crate::lanes::dispatch::enqueue(
+            &self.pool,
+            &request.key,
+            &request.lead,
+            "question",
+            &json!({"lane": request.key, "brief": request.brief, "action": "another cron failure needs attention; update the existing remediation lane"}).to_string(),
         )
         .await?;
         Ok(())
