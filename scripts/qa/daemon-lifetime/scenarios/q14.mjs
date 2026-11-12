@@ -22,6 +22,13 @@ export const STANDBY_PREFIX = 'standby:'; // ui/src/lib/sessionLifecycle.ts STAN
 
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/** Paths of the daemon's pending SSH pairing requests (`sessions/remote-request-*.json`). */
+async function listRemoteRequests(agent, sessionsDir) {
+  const entries = await agent.call('listDir', { dir: sessionsDir }).catch(() => null);
+  if (Array.isArray(entries)) return entries.filter((n) => /^remote-request-.*\.json$/.test(n)).map((n) => hjoin(sessionsDir, n));
+  return [];
+}
+
 const isLocalWorkspace = (id, ws) => Boolean(ws) && !String(id).startsWith('ssh:') && !String(id).startsWith('daemon:')
   && ws.target?.kind !== 'ssh' && ws.target?.kind !== 'pairedDaemon';
 
@@ -239,8 +246,9 @@ export async function Q14(ctx, result) {
   // and offers it to the boot window, whose pairing screen is long expired ("The verification time
   // has expired") and sits over the workspace (restore-window screenshot, run 20261111t045256z -
   // Escape does not dismiss it). A fresh host has no pending request.
-  const requestList = await ctx.agent.call('exec', { command: 'sh', args: ['-c', 'ls "$1"/remote-request-*.json 2>/dev/null', 'sh', ctx.layout.sessions] });
-  const requests = String(requestList.stdout ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+  // No shell here: `ls` globbing is a POSIX assumption the Windows target cannot meet, and the
+  // agent's own file methods answer the same question on every platform.
+  const requests = await listRemoteRequests(ctx.agent, ctx.layout.sessions);
   for (const file of requests) await ctx.agent.call('remove', { target: file });
   await evidence(ctx, result, 'remote-requests-reset.json', { removed: requests });
   await evidence(ctx, result, 'remote-projects-reset.json', { file: remoteProjects, before: prevRemote ? prevRemote.slice(0, 400) : null });
@@ -274,8 +282,7 @@ export async function Q14(ctx, result) {
   let bootKey = bootCandidates[0];
   for (const k of bootCandidates) {
     const plist = `${ctx.layout.launchAgents}/${ctx.jobs.label(ctx.keys[k])}.plist`;
-    const probe = await ctx.agent.call('exec', { command: 'sh', args: ['-c', 'test -f "$1" && printf yes', 'sh', plist] });
-    if (String(probe.stdout ?? '').includes('yes')) { bootKey = k; break; }
+    if (await ctx.agent.call('exists', { file: plist })) { bootKey = k; break; }
   }
   const started = await ctx.jobs.start(ctx.keys[bootKey]);
   const changed = await ctx.agent.call('waitOwnerChange', { runtimeDir: ctx.layout.runtime, fromPid: retired.pid, deadlineMs: DAEMON_READY_TIMEOUT_MS });
