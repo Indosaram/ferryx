@@ -164,6 +164,7 @@ fn host() -> SshHost {
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Key,
         disabled: None,
+        shell: None,
     }
 }
 

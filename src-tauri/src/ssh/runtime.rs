@@ -514,6 +514,7 @@ mod tests {
             source: super::super::SshHostSource::Manual,
             auth_method: super::super::SshAuthMethod::Agent,
             disabled: None,
+            shell: None,
         }
     }
 

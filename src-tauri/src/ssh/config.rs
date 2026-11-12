@@ -469,6 +469,7 @@ fn config_host_to_ssh_host(entry: &ConfigHost) -> Option<SshHost> {
             SshAuthMethod::Agent
         },
         disabled: None,
+        shell: None,
     })
 }
 

@@ -147,6 +147,7 @@ mod tests {
             source: SshHostSource::Config,
             auth_method: SshAuthMethod::Agent,
             disabled: None,
+            shell: None,
         }
     }
 

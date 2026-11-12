@@ -809,6 +809,7 @@ mod forwarding_tests {
             source: crate::ssh::SshHostSource::Manual,
             auth_method: crate::ssh::SshAuthMethod::Key,
             disabled: None,
+            shell: None,
         }
     }
 

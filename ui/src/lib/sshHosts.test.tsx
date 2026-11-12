@@ -172,6 +172,20 @@ describe("sshHosts library and useSshHosts hook", () => {
       expect("port" in payload.host).toBe(false);
     });
 
+    it("forwards a pinned remote shell and drops a blank one", async () => {
+      invokeMock.mockResolvedValue([mockHost1]);
+
+      await updateSshHost({ ...mockHost1, shell: "  pwsh  " });
+      const pinned = invokeMock.mock.calls[0][1] as { host: Record<string, unknown> };
+      expect(pinned.host.shell).toBe("pwsh");
+
+      // Blank means "keep whatever the remote machine defaults to", so it must not
+      // travel as an empty string the backend would have to interpret.
+      await updateSshHost({ ...mockHost1, shell: "   " });
+      const blank = invokeMock.mock.calls[1][1] as { host: Record<string, unknown> };
+      expect("shell" in blank.host).toBe(false);
+    });
+
     it("updateSshHost invokes cmd_ssh_update_host with cleaned payload and returns updated inventory", async () => {
       invokeMock.mockResolvedValueOnce([mockHost1, mockHost2]);
 
