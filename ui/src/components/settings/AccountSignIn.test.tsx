@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { AccountSignIn } from "./AccountSignIn";
+import { AccountSignIn, loginCodeFromInput } from "./AccountSignIn";
 import * as accountSessionModule from "../../remote/accountSession";
 import { AccountSessionError } from "../../remote/accountSession";
 
@@ -156,5 +156,39 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
     expect(pollSpy).toHaveBeenCalledTimes(1);
     expect(storeSpy).not.toHaveBeenCalled();
     expect(onSignIn).not.toHaveBeenCalled();
+  });
+
+  it("pasting the emailed link signs in with the code it carries", async () => {
+    vi.spyOn(accountSessionModule, "requestLogin").mockResolvedValue({ loginHandle: "b".repeat(64) });
+    vi.spyOn(accountSessionModule, "pollLogin").mockResolvedValue({ status: "pending" });
+    const consumeSpy = vi
+      .spyOn(accountSessionModule, "consumeLogin")
+      .mockResolvedValue({ token: "tok-2", accountId: "usr_1", email: "user@example.com" });
+    vi.spyOn(accountSessionModule, "storeAccountSessionToken").mockImplementation(() => {});
+    const onSignIn = vi.fn();
+
+    render(<AccountSignIn onSignIn={onSignIn} />);
+    fireEvent.change(screen.getByLabelText("Email Address"), { target: { value: "user@example.com" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send Magic Link" }));
+    });
+
+    fireEvent.change(screen.getByLabelText("Sign-in Link"), {
+      target: { value: " https://relay.ferryx.dev/login?code=abc123 " },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign In" }));
+    });
+
+    expect(consumeSpy).toHaveBeenCalledWith("https://relay.ferryx.dev", "abc123");
+    expect(onSignIn).toHaveBeenCalledWith("tok-2", "user@example.com");
+  });
+});
+
+describe("loginCodeFromInput", () => {
+  it("takes the code from an emailed link and keeps a bare code as is", () => {
+    expect(loginCodeFromInput("https://relay.ferryx.dev/login?code=abc123")).toBe("abc123");
+    expect(loginCodeFromInput("  abc123  ")).toBe("abc123");
+    expect(loginCodeFromInput("https://relay.ferryx.dev/login")).toBe("");
   });
 });
