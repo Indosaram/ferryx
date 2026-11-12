@@ -12,7 +12,9 @@ import { adoptArchivedGoals, desktopUnifiedClient, getLastUnifiedSupervisor, mov
 import { SupervisorCallButton } from '../supervisor/SupervisorCallButton';
 import { isStandbyRole } from '../../lib/supervisorModel';
 import type { SupervisorCallResult, SupervisorMoveResult } from '../../lib/unifiedSupervisor';
-import { getSupervisorPanel, onSupervisorPanelEvent } from '../../lib/tauri';
+import { getSupervisorPanel, getSupervisorPrs, listWorktrees, onSupervisorPanelEvent } from '../../lib/tauri';
+import type { PrLane } from '../../lib/supervisorPanel/contract';
+import type { WorktreeOnBranch } from '../../lib/supervisorPanel/prLane';
 import { LeaseNotices, StandbyCard, type LeaseAdoptResult } from './LeaseStatus';
 import { PanelSurface } from './PanelSurface';
 import { desktopVoicePort } from '../../lib/voiceCallPort';
@@ -30,6 +32,12 @@ export type SupervisorPanelHostProps = {
   /** The supervisor lease writes; the defaults are the daemon's move and adopt commands. */
   moveHere?: (force: boolean) => Promise<SupervisorMoveResult>;
   adoptArchived?: (goalIds: readonly string[]) => Promise<SupervisorCallResult>;
+  /** The hub's PR lane; the default reads it from this daemon. */
+  loadPrs?: () => Promise<PrLane>;
+  /** The worktrees a hand-off may use; the default lists the active project's. */
+  loadWorktrees?: () => Promise<readonly WorktreeOnBranch[]>;
+  /** The project whose worktrees a hand-off may use; absent, no worktree is listed. */
+  workspaceId?: string | null;
 };
 
 async function adoptResult(call: Promise<SupervisorCallResult>): Promise<LeaseAdoptResult> {
@@ -51,8 +59,13 @@ export function SupervisorPanelHost({
   loadTranscript = loadDesktopTranscriptPage,
   moveHere = moveSupervisorHere,
   adoptArchived = adoptArchivedGoals,
+  loadPrs = getSupervisorPrs,
+  loadWorktrees,
+  workspaceId = null,
 }: SupervisorPanelHostProps) {
   const [snapshot, setSnapshot] = useState<PanelSnapshot | null>(null);
+  const [prLane, setPrLane] = useState<PrLane | null>(null);
+  const [worktrees, setWorktrees] = useState<readonly WorktreeOnBranch[]>([]);
   const [tick, setTick] = useState(() => now());
   const loadRef = useRef(load);
   loadRef.current = load;
@@ -67,6 +80,11 @@ export function SupervisorPanelHost({
     // Subscribe before the first load so an event racing it is replayed, not lost.
     void subscribe((event) => {
       if (disposed) return;
+      // The PR lane is not part of the snapshot: its own frame replaces it whole.
+      if (event.type === 'panel.prs') {
+        setPrLane(event.lane);
+        return;
+      }
       if (!loaded) early.push(event);
       else setSnapshot((current) => (current ? applyPanelEvent(current, event) : current));
     })
@@ -97,6 +115,39 @@ export function SupervisorPanelHost({
     return () => window.clearInterval(timer);
   }, [now]);
 
+  // The PR lane is its own read and its own frame (`panel.prs`); a build without the route keeps
+  // the section hidden instead of showing an empty lane that claims nothing waits on the owner.
+  const loadPrsRef = useRef(loadPrs);
+  loadPrsRef.current = loadPrs;
+  const refreshPrs = useCallback(() => {
+    loadPrsRef.current().then(
+      (lane) => setPrLane(lane),
+      () => setPrLane(null),
+    );
+  }, []);
+  useEffect(() => {
+    refreshPrs();
+  }, [refreshPrs]);
+
+  // A hand-off needs the checkout on the PR's head branch; it is read when the lane arrives and
+  // after a hand-off, never created here.
+  const loadWorktreesRef = useRef(loadWorktrees);
+  loadWorktreesRef.current = loadWorktrees;
+  useEffect(() => {
+    const read = loadWorktreesRef.current ?? (workspaceId ? () => listWorktrees(workspaceId) : null);
+    if (!read) return;
+    let disposed = false;
+    read().then(
+      (list) => {
+        if (!disposed) setWorktrees(list);
+      },
+      () => undefined,
+    );
+    return () => {
+      disposed = true;
+    };
+  }, [prLane, workspaceId]);
+
   // After an accepted write the hub is read again; only the newest read lands, and a failed
   // read keeps what is on screen.
   const reload = useCallback(() => {
@@ -107,7 +158,8 @@ export function SupervisorPanelHost({
       },
       () => undefined,
     );
-  }, []);
+    refreshPrs();
+  }, [refreshPrs]);
 
   const actions = useMemo(
     () => actionsFor({ openSession: onFocusSession, onChanged: reload }),
@@ -163,7 +215,7 @@ export function SupervisorPanelHost({
               />
             </div>
           ) : null}
-          <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} voiceConversation={voiceConversation} />
+          <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} voiceConversation={voiceConversation} prLane={prLane} worktrees={worktrees} />
         </div>
       ) : (
         <p className="text-muted-foreground">Loading supervisor…</p>

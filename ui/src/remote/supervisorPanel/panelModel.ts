@@ -111,6 +111,8 @@ export function parsePanelFrame(frame: unknown): PanelEvent | null {
       return objectOf(object?.session) ? (object as unknown as PanelEvent) : null;
     case "panel.rules":
       return Array.isArray(object?.rules) ? (object as unknown as PanelEvent) : null;
+    case "panel.prs":
+      return objectOf(object?.lane) ? (object as unknown as PanelEvent) : null;
     default:
       return null;
   }

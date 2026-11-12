@@ -7,6 +7,8 @@ import {
   type PanelActions,
 } from '../../lib/supervisorPanel/actions';
 import type { PanelSnapshot, SessionHealth, SessionRef } from '../../lib/supervisorPanel/contract';
+import { buildPrLaneView, type WorktreeOnBranch } from '../../lib/supervisorPanel/prLane';
+import type { PrLane } from '../../lib/supervisorPanel/contract';
 import type { LegacyGoal } from '../../lib/supervisorPanel/legacyGoals';
 import {
   buildPanelView,
@@ -20,6 +22,7 @@ import type { VoiceConversationProps } from '../supervisor/VoiceConversationButt
 import { DecisionCard } from './DecisionCard';
 import { RulesLine } from './RulesLine';
 import { HandlingRow, SessionRow } from './Rows';
+import { PrSection } from './PrSection';
 import { SetupCard } from './SetupCard';
 import { StatusLine } from './StatusLine';
 import { TranscriptSection } from './TranscriptSection';
@@ -49,6 +52,13 @@ export type PanelSurfaceProps = {
   voiceConversation?: VoiceConversationProps;
   /** The stored owner/supervisor conversation; omitted, the panel shows no conversation. */
   transcript?: Pick<TranscriptSource, 'messages' | 'exportFile'>;
+  /** The hub's pull-request lane; omitted, the panel shows no Pull requests section. */
+  prLane?: PrLane | null;
+  /**
+   * The worktrees the panel can hand a PR to, already read by the host. A PR whose head branch
+   * no worktree holds shows its refusal instead of spawning into a checkout that lacks it.
+   */
+  worktrees?: readonly WorktreeOnBranch[];
 };
 
 const SESSION_GLYPH: Record<SessionGlyph, GlyphState> = {
@@ -163,8 +173,12 @@ function SetupSection({ actions, touch, computerLabel }: Pick<PanelSurfaceProps,
  * and the phone renders it with `touch`. All content comes from `buildPanelView`; all writes go
  * through `actions`, and a refused write shows its message where the user acted.
  */
-export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, computerLabel, hideComposer, onComposerText, voiceConversation, transcript }: PanelSurfaceProps) {
+export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, computerLabel, hideComposer, onComposerText, voiceConversation, transcript, prLane, worktrees }: PanelSurfaceProps) {
   const view = useMemo(() => buildPanelView(snapshot, { nowMs, health }), [snapshot, nowMs, health]);
+  const prView = useMemo(
+    () => (prLane ? buildPrLaneView(prLane, worktrees ?? []) : null),
+    [prLane, worktrees],
+  );
   const [actionError, setActionError] = useState<string | null>(null);
   const [pausing, setPausing] = useState(false);
   const [pausingLanes, setPausingLanes] = useState<ReadonlySet<string>>(() => new Set());
@@ -285,6 +299,7 @@ export function PanelSurface({ snapshot, actions, touch, nowMs, health, goals, c
           {otherRows.map(sessionRow)}
         </section>
       ) : null}
+      {prView ? <PrSection view={prView} actions={actions} touch={touch} /> : null}
       {view.log.total > 0 ? (
         <ActionLog
           touch={touch}

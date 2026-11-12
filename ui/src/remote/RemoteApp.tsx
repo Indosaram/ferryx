@@ -6218,6 +6218,7 @@ export const RemoteHostConnection: React.FC<{
             now: phoneSupervisor.now,
             actions: { ...phonePanel.actions, turnOn: panelTurnOn, openSession: openPanelSession },
             transcript: phonePanel.transcript,
+            prLane: phonePanel.prLane,
             onStartSession: () => phoneNav.selectTab("worktrees"),
             computerLabel: panelComputerLabel,
             onRefresh: () =>

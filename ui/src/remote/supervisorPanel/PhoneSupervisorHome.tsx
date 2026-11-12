@@ -19,6 +19,7 @@ import { PhoneHomeHeader } from "../home/PhoneHomeHeader";
 import { PullToRefreshIndicator } from "../home/PullToRefreshIndicator";
 import { pullContentProps, usePullToRefresh } from "../home/usePullToRefresh";
 import type { PanelState } from "./usePhonePanel";
+import type { PrLane } from "../../lib/supervisorPanel/contract";
 import { SupervisorCallButton } from "../../components/supervisor/SupervisorCallButton";
 import { useVoiceConversation } from "../../lib/useVoiceConversation";
 import type { VoiceCallPort } from "../../lib/voiceCall";
@@ -40,6 +41,8 @@ export type PhoneSupervisorHomeProps = {
   readonly resume?: { readonly title: string; readonly subtitle: string; readonly onOpen: () => void } | null;
   /** Supervisor lease cards (standby computers, lease warnings), shown above the panel. */
   readonly lease?: ReactNode;
+  /** The hub's pull-request lane, when the phone read one. */
+  readonly prLane?: PrLane | null;
   /**
    * The supervisor voice call: how this phone reaches the host's speech commands, and the host
    * connection the call turns a transcript into. Absent: this build offers no call entry.
@@ -119,6 +122,7 @@ export function PhoneSupervisorHome(props: PhoneSupervisorHomeProps) {
                 computerLabel={props.computerLabel}
                 hideComposer
                 transcript={props.transcript}
+                prLane={props.prLane ?? null}
                 onComposerText={(text) => setSeed((current) => ({ text, nonce: (current?.nonce ?? 0) + 1 }))}
               />
             ) : (
