@@ -207,7 +207,11 @@ async fn negotiate(
     http: &reqwest::Client,
     attempt: &DirectAttempt,
 ) -> Result<(String, quinn::Connection, DirectGuard), DirectConnectError> {
-    let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.map_err(transport)?;
+    let socket = crate::paired_host::direct::bind_direct_socket(
+        crate::paired_host::direct::preferred_local_port(),
+    )
+    .await
+    .map_err(transport)?;
     let public_endpoint = discover_public_endpoint(&socket, &stun_servers().await)
         .await
         .map_err(transport)?;
