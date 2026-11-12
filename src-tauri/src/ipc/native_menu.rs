@@ -254,10 +254,15 @@ pub fn register_menu_event_forwarder<R: Runtime>(app: &AppHandle<R>) {
             id: event.id().0.clone(),
         };
         // The popup belonged to the focused window; the other windows must not act on its choice.
-        let _ = match crate::window_registry::focused_window(app_handle) {
+        let delivered = match crate::window_registry::focused_window(app_handle) {
             Some(window) => app_handle.emit_to(window.label(), MENU_ACTION_EVENT, payload),
             None => app_handle.emit(MENU_ACTION_EVENT, payload),
         };
+        if let Err(error) = delivered {
+            // The popup request already returned, so a lost selection has no other trace: the
+            // chosen entry silently does nothing without this line.
+            eprintln!("[native_menu] failed to forward menu action: {error}");
+        }
     });
 }
 
