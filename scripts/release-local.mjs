@@ -1002,7 +1002,14 @@ Subcommands:
         process.exit(1);
     }
   } catch (err) {
+    // A remote build failure is only diagnosable through the child's own output:
+    // err.message is the bare wrapper ("Command failed with exit code 1: ssh")
+    // while the compiler or host script error lives in stdout/stderr.
     console.error(`Error in ${subcommand}: ${err.message}`);
+    for (const field of ["stderr", "stdout"]) {
+      const text = typeof err?.[field] === "string" ? err[field].trim() : "";
+      if (text !== "") console.error(`--- ${field} ---\n${text}`);
+    }
     process.exit(1);
   }
 }
