@@ -15,6 +15,7 @@ async fn posix_environment_directory_and_real_pty() {
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Agent,
         disabled: None,
+        shell: None,
     };
     let environment = runtime::detect(&host).await.unwrap();
     assert_eq!(environment.platform, runtime::RemotePlatform::Posix);
