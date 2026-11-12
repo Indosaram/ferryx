@@ -3754,6 +3754,7 @@ pub mod health;
 pub mod lessons;
 pub mod memory;
 pub mod memory_import;
+pub mod project_memory;
 pub mod receipts;
 pub mod recovery;
 pub mod request;

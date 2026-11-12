@@ -2068,6 +2068,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::supervisor::cmd_supervisor_setup_status,
         ipc::supervisor::cmd_supervisor_setup_run,
         ipc::supervisor::cmd_supervisor_adopt_all,
+        ipc::supervisor::cmd_supervisor_project_memory,
+        ipc::supervisor::cmd_supervisor_set_project_memory,
         ipc::supervisor::cmd_session_stop,
         ipc::supervisor::cmd_supervisor_answer,
         ipc::supervisor::cmd_supervisor_pause,

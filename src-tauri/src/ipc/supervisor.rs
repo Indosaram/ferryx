@@ -358,6 +358,35 @@ pub async fn cmd_supervisor_setup_run(
     )
 }
 
+/// Every supervised project with its "give my project decisions to agents" switch:
+/// `{projects: [{projectId, name, repoIdentity, enabled, items}]}`.
+#[tauri::command]
+pub async fn cmd_supervisor_project_memory(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+) -> Result<serde_json::Value, IpcError> {
+    setup_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorSetup { request: SupervisorSetupAction::ProjectMemory })
+            .await?,
+    )
+}
+
+/// Turns one project's switch on or off; answers the fresh list.
+#[tauri::command]
+pub async fn cmd_supervisor_set_project_memory(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    repo_identity: String,
+    enabled: bool,
+) -> Result<serde_json::Value, IpcError> {
+    setup_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorSetup {
+                request: SupervisorSetupAction::SetProjectMemory { repo_identity, enabled },
+            })
+            .await?,
+    )
+}
+
 /// Adopts every adoptable legacy lane as the owner: {adopted: [lane], refused: [{lane, code, message}]}.
 #[tauri::command]
 pub async fn cmd_supervisor_adopt_all(

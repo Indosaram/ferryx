@@ -676,7 +676,9 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::SupervisorReadV1 { .. }
             | DaemonRequest::SupervisorSetup {
                 request: crate::daemon::protocol::SupervisorSetupAction::Status
+                    | crate::daemon::protocol::SupervisorSetupAction::ProjectMemory
             }
+            | DaemonRequest::AgentMemoryBlock { .. }
             | DaemonRequest::AgentControlSettingsGet
             | DaemonRequest::SupervisorSettings { enabled: None }
             | DaemonRequest::ReferenceChatIdentity
@@ -828,6 +830,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteDesktopHostSet { .. } => "remoteDesktopHostSet",
         DaemonRequest::RemoteDesktopHostRespond { .. } => "remoteDesktopHostRespond",
         DaemonRequest::ReferenceChatIdentity => "referenceChatIdentity",
+        DaemonRequest::AgentMemoryBlock { .. } => "agentMemoryBlock",
         DaemonRequest::ReferenceChat { .. } => "referenceChat",
     }
 }
