@@ -95,6 +95,11 @@ export const HOSTS = Object.freeze({
       CARGO_BUILD_JOBS: '1',
     },
     evidenceRoot: 'C:\\Users\\sook\\ferryx-wt\\.evidence\\daemon-independent-lifetime-20261017',
+    // The handover_v1 tree predates the ghostty Zig upgrade and pins Zig 0.16.0, while master
+    // requires 0.17.0, so v1bump cannot reuse buildEnv's ZIG. Without this the v1bump build fails in
+    // the ghostty build script and Q08b blocks with ARTIFACT_MISSING on every Windows run
+    // (run 20261112t072829z). Both toolchains already live under the worktree root on maho-win.
+    v1BuildEnv: { ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.16.0\\zig.exe' },
     // No '-' or '_' in the 8.3 form: the GUI launch types a short path through MahoRD, which drops
     // both on maho-win. Measured: C:\Users\sook\ferryx-wt\qaruns\<runId>\l1.cmd ->
     // C:\Users\sook\FERRYX~1\qaruns\202610~1\l1.cmd. The old .qa-daemon-lifetime was QA-DAE~1.
