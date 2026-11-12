@@ -16,6 +16,7 @@ fn fixture() -> (tempfile::TempDir, Arc<RemoteGatewayState>, String) {
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Agent,
         disabled: None,
+        shell: None,
     };
     std::fs::write(
         &store,

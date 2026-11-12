@@ -17,6 +17,13 @@ export interface SshHost {
   source: SshHostSource;
   authMethod: SshAuthMethod;
   disabled?: boolean | null;
+  /**
+   * Shell a remote pane starts instead of the remote machine's own default.
+   *
+   * Without this a Windows host opens cmd.exe (its COMSPEC) while a local pane on the same
+   * machine opens PowerShell. Presets match the local picker; any other value is a path.
+   */
+  shell?: string | null;
 }
 
 export interface SshRemoteEnvironment {
@@ -155,6 +162,9 @@ function cleanHostForIpc(host: SshHost): SshHost {
   }
   if (typeof host.disabled === "boolean") {
     cleaned.disabled = host.disabled;
+  }
+  if (host.shell && host.shell.trim() !== "") {
+    cleaned.shell = host.shell.trim();
   }
   return cleaned;
 }

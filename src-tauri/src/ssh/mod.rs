@@ -40,6 +40,14 @@ pub struct SshHost {
     pub auth_method: SshAuthMethod,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+    /// Program a remote pane starts instead of the helper's own default login shell.
+    ///
+    /// Without it a remote pane is at the mercy of the remote machine's environment (on
+    /// Windows that is COMSPEC, i.e. cmd.exe), while a local pane on the same host follows
+    /// the user's own preference. Keeping the choice on the host record means the daemon
+    /// reads it from validated inventory instead of trusting a client-supplied argv.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
 }
 
 fn deserialize_optional_string_lenient<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -106,6 +114,8 @@ impl<'de> Deserialize<'de> for SshHost {
             source: Option<SshHostSource>,
             auth_method: Option<SshAuthMethod>,
             disabled: Option<bool>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
+            shell: Option<String>,
         }
 
         let raw = RawSshHost::deserialize(deserializer)?;
@@ -165,6 +175,7 @@ impl<'de> Deserialize<'de> for SshHost {
         });
 
         let source = raw.source.unwrap_or(SshHostSource::Manual);
+        let shell = raw.shell.filter(|s| !s.trim().is_empty());
 
         Ok(SshHost {
             id,
@@ -177,6 +188,7 @@ impl<'de> Deserialize<'de> for SshHost {
             source,
             auth_method,
             disabled: raw.disabled,
+            shell,
         })
     }
 }
@@ -221,6 +233,28 @@ impl SshHost {
             _ => format!("{}:{port}", self.hostname),
         }
     }
+
+    /// Program a remote pane starts on this host, if the user pinned one.
+    ///
+    /// Presets (`pwsh`, `cmd`, `wsl`, `zsh`, ...) mean whatever the remote platform says
+    /// they mean; anything else is passed through as a path. `None` leaves the helper's own
+    /// login-shell resolution in charge, which is the historical behaviour.
+    pub fn shell_program(&self, platform: Option<crate::ssh::runtime::RemotePlatform>) -> Option<String> {
+        let preference = self.shell.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+        let target = match platform {
+            Some(crate::ssh::runtime::RemotePlatform::Windows) => {
+                crate::terminal::shell::TargetPlatform::Windows
+            }
+            Some(crate::ssh::runtime::RemotePlatform::Posix) => {
+                crate::terminal::shell::TargetPlatform::Linux
+            }
+            None => crate::terminal::shell::TargetPlatform::Linux,
+        };
+        Some(
+            crate::terminal::shell::resolve_shell_command_pure(Some(preference), target, |_| false, |_| None)
+                .program,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +273,7 @@ mod tests {
             source: SshHostSource::Manual,
             auth_method: SshAuthMethod::Agent,
             disabled: None,
+            shell: None,
         }
     }
 
@@ -456,5 +491,34 @@ mod tests {
         assert_eq!(host.hostname, "example.com");
         assert_eq!(host.source, SshHostSource::Manual);
         assert_eq!(host.auth_method, SshAuthMethod::Agent);
+    }
+
+    #[test]
+    fn shell_program_maps_presets_per_remote_platform() {
+        use crate::ssh::runtime::RemotePlatform;
+
+        let mut probe = host(None, "maho-win", None);
+        assert_eq!(probe.shell_program(Some(RemotePlatform::Windows)), None);
+
+        // Presets mean what the *remote* platform says they mean: one record must open
+        // PowerShell on Windows and pwsh on POSIX instead of leaking one OS's names.
+        probe.shell = Some("pwsh".into());
+        assert_eq!(
+            probe.shell_program(Some(RemotePlatform::Windows)).as_deref(),
+            Some("pwsh.exe")
+        );
+        assert_eq!(
+            probe.shell_program(Some(RemotePlatform::Posix)).as_deref(),
+            Some("pwsh")
+        );
+
+        // An explicit path is never rewritten, and blank means "remote default".
+        probe.shell = Some(r"C:\Windows\System32\cmd.exe".into());
+        assert_eq!(
+            probe.shell_program(Some(RemotePlatform::Windows)).as_deref(),
+            Some(r"C:\Windows\System32\cmd.exe")
+        );
+        probe.shell = Some("   ".into());
+        assert_eq!(probe.shell_program(Some(RemotePlatform::Windows)), None);
     }
 }

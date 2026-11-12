@@ -158,8 +158,9 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
       identityFile: host.identityFile ?? "",
       jumpHost: host.jumpHost ?? "",
       authMethod: host.authMethod,
+      shell: host.shell ?? "",
     });
-    setShowAdvancedEditSsh(Boolean(host.identityFile || host.jumpHost || host.authMethod !== "agent"));
+    setShowAdvancedEditSsh(Boolean(host.identityFile || host.jumpHost || host.shell || host.authMethod !== "agent"));
   };
 
   const handleSaveEditSsh = async (e: FormEvent) => {
@@ -191,6 +192,7 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
       port: portNum,
       identityFile: editFormData.identityFile.trim() || undefined,
       jumpHost: editFormData.jumpHost.trim() || undefined,
+      shell: editFormData.shell.trim() || undefined,
       authMethod: editFormData.authMethod,
     };
 

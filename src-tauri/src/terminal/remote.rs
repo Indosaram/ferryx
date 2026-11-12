@@ -5,7 +5,7 @@ use crate::ssh::{bridge::*, helper_setup::HelperLocation, runtime::RemoteEnviron
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     future::Future,
     pin::Pin,
     sync::{Arc, Weak},
@@ -323,6 +323,7 @@ impl Entry {
 }
 pub struct RemoteRuntime {
     sessions: Mutex<HashMap<String, Arc<Entry>>>,
+    settled: Mutex<SettledDetails>,
     hub: Arc<TerminalOutputHub>,
     connector: Arc<dyn Connector>,
     agent_sink: Arc<parking_lot::RwLock<Option<Arc<dyn AgentStateSink>>>>,
@@ -346,6 +347,40 @@ pub(crate) struct TransportQaOwnerEvent {
 /// non-transport failure pauses recovery. Transport failures never prove process death, so
 /// even a long outage retains the target and continues dialing at the capped interval.
 const MAX_BACKOFF_SHIFT: u32 = 7;
+
+/// Terminal observations are kept after the live entry is settled away. A pane keeps its
+/// backend session id while it waits to resume, and the daemon must be able to answer what
+/// happened to that id. Without this record the only evidence of the remote process exit
+/// disappears with the entry, so the pane is told "unknown" forever instead of "expired".
+const MAX_SETTLED_DETAILS: usize = 256;
+
+#[derive(Default)]
+struct SettledDetails {
+    entries: HashMap<String, RemoteSessionDetails>,
+    order: VecDeque<String>,
+}
+
+impl SettledDetails {
+    fn record(&mut self, id: &str, details: RemoteSessionDetails) {
+        if self.entries.insert(id.to_string(), details).is_none() {
+            self.order.push_back(id.to_string());
+        }
+        while self.order.len() > MAX_SETTLED_DETAILS {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+    fn get(&self, id: &str) -> Option<RemoteSessionDetails> {
+        self.entries.get(id).cloned()
+    }
+    fn forget(&mut self, id: &str) {
+        if self.entries.remove(id).is_some() {
+            self.order.retain(|candidate| candidate != id);
+        }
+    }
+}
+
 impl RemoteRuntime {
     pub fn new(hub: Arc<TerminalOutputHub>) -> Self {
         Self::with_connector(hub, Arc::new(SshConnector))
@@ -365,6 +400,7 @@ impl RemoteRuntime {
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            settled: Mutex::new(SettledDetails::default()),
             hub,
             connector,
             agent_sink: Arc::new(parking_lot::RwLock::new(None)),
@@ -380,6 +416,7 @@ impl RemoteRuntime {
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            settled: Mutex::new(SettledDetails::default()),
             hub,
             connector,
             agent_sink: Arc::new(parking_lot::RwLock::new(Some(sink))),
@@ -696,6 +733,17 @@ impl RemoteRuntime {
     pub fn details(&self, id: &str) -> Option<RemoteSessionDetails> {
         self.entry(id).ok().map(|e| e.state.lock().details.clone())
     }
+    /// Live details first, then the final observation of a session that has already been
+    /// settled out of the runtime. Only terminal expiry is recorded; a session this daemon
+    /// never owned (or one closed on purpose) stays absent.
+    pub fn settled_details(&self, id: &str) -> Option<RemoteSessionDetails> {
+        self.details(id).or_else(|| self.settled.lock().get(id))
+    }
+    /// Records a durable terminal observation restored from disk. A daemon restart must not
+    /// turn a known exit back into "this daemon never heard of that id".
+    pub(crate) fn record_settled(&self, id: &str, details: RemoteSessionDetails) {
+        self.settled.lock().record(id, details);
+    }
     /// Forgets a session whose target has ended (`Expired`: the remote process exited, its
     /// helper no longer owns it, or redials were exhausted). The entry leaves the runtime, so it
     /// is neither listed nor counted live, and its output hub entry is released. Nothing is sent
@@ -713,7 +761,10 @@ impl RemoteRuntime {
             map.remove(id)
         };
         if let Some(entry) = entry {
-            if let Some(task) = entry.state.lock().task.take() {
+            let mut state = entry.state.lock();
+            // Publish the exit before dropping the entry: the pane still holds this id.
+            self.settled.lock().record(id, state.details.clone());
+            if let Some(task) = state.task.take() {
                 task.abort();
             }
         }
@@ -979,7 +1030,15 @@ impl RemoteRuntime {
     }
     /// User intent only. Outage close establishes a connection solely to stop the explicit target.
     pub async fn close(&self, id: &str) -> Result<(), RemoteFailure> {
-        let e = self.entry(id)?;
+        let e = match self.entry(id) {
+            Ok(entry) => entry,
+            Err(error) => {
+                // Closing a pane is deliberate even when its target already ended, so an
+                // already-settled id must not answer for itself afterwards.
+                self.settled.lock().forget(id);
+                return Err(error);
+            }
+        };
         let _gate = e.control.lock().await;
         let (d, client) = {
             let mut s = e.state.lock();
@@ -1018,10 +1077,12 @@ impl RemoteRuntime {
             // forget it locally so it is neither listed nor restored (and redialed) after a
             // daemon restart. An unreachable target is still reported to the caller.
             self.sessions.lock().remove(id);
+            self.settled.lock().forget(id);
             self.hub.remove_session(id);
             return if target_gone { Ok(()) } else { Err(f) };
         }
         self.sessions.lock().remove(id);
+        self.settled.lock().forget(id);
         self.hub.remove_session(id);
         Ok(())
     }
@@ -2042,6 +2103,7 @@ mod tests {
                     source: crate::ssh::SshHostSource::Config,
                     auth_method: crate::ssh::SshAuthMethod::Agent,
                     disabled: None,
+                    shell: None,
                 },
                 environment: RemoteEnvironment {
                     platform: crate::ssh::runtime::RemotePlatform::Posix,

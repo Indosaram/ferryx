@@ -17,6 +17,7 @@ fn sample_host(id: &str) -> SshHost {
         source: SshHostSource::Config,
         auth_method: SshAuthMethod::Agent,
         disabled: None,
+        shell: None,
     }
 }
 
