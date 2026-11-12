@@ -158,6 +158,34 @@ export interface PanelSnapshot {
 }
 
 // Route payloads.
+/** Who acts next on a PR; the declaration order is the lane order. */
+export type PrLaneKind = 'waits_on_owner' | 'agent_working' | 'failing' | 'pending';
+
+export type PrCheckState = 'success' | 'failure' | 'pending' | 'none';
+
+export interface PullRequest {
+  url: string;
+  title: string;
+  number: number;
+  repo: string;
+  headRefName: string;
+  isDraft: boolean;
+  reviewDecision: string | null;
+  checks: PrCheckState;
+  reviewRequested: boolean;
+  updatedAt: string;
+  lane: PrLaneKind;
+}
+
+/** `GET /api/v1/supervisor/prs` and the `panel.prs` frame. */
+export interface PrLane {
+  /** Ordered: waits_on_owner first. */
+  prs: PullRequest[];
+  /** `gh_missing` | `gh_unauthenticated` | `gh_failed` when the fetch failed; null otherwise. */
+  outage: string | null;
+  refreshedAtMs: number;
+}
+
 export interface FleetSessionsResponse {
   sessions: FleetSession[];
 }
@@ -184,7 +212,8 @@ export type PanelEvent =
   | { type: 'panel.decision'; sessionRef: SessionRef; decision: Escalation | null }
   | { type: 'panel.action'; action: ActionEntry }
   | { type: 'panel.session'; session: FleetSession }
-  | { type: 'panel.rules'; rules: StandingRule[] };
+  | { type: 'panel.rules'; rules: StandingRule[] }
+  | { type: 'panel.prs'; lane: PrLane };
 
 /** Text sent to resume a session; null means unknown agent, escalate instead. */
 export function resumeText(agent: string): string | null {

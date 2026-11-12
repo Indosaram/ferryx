@@ -194,6 +194,15 @@ async fn observe_entry(
         }
         _ => None,
     };
+    // Only a local PTY's worktree is on this machine; an SSH or legacy pane's path is not.
+    let local_pty = state
+        .machine_services
+        .as_ref()
+        .is_some_and(|services| services.sessions.machine_pty(session_id).is_some());
+    let branch = match (&details.worktree_path, with_last_line && local_pty) {
+        (Some(path), true) => WORKTREE_BRANCHES.branch(path, worktree_branch).await,
+        _ => None,
+    };
     let mut entry = serde_json::json!({
         "sessionId": session_id,
         "running": details.running,
@@ -214,6 +223,9 @@ async fn observe_entry(
         // When this entry was read, so a hub that caches a list can show how old it is.
         "observedAt": observed_at_ms(),
     });
+    if let Some(branch) = branch {
+        entry["branch"] = serde_json::json!(branch);
+    }
     let failed = state.machine_services.as_ref().is_some_and(|services| services.sessions.agent_control_failed(session_id));
     if failed {
         entry["health"] = serde_json::json!({ "type": "failed", "reason": "the agent exited in the middle of a turn" });
@@ -257,6 +269,62 @@ fn session_reason(question: Option<&str>, last_line: Option<&str>, cause: Option
         let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
         (!line.is_empty()).then(|| line.chars().take(LAST_ASSISTANT_LINE_MAX_CHARS).collect())
     })
+}
+
+/// How long a resolved worktree branch is reused before git is asked again, so the observer
+/// tick and list reads do not shell out on every frame while a branch switch still shows up.
+const WORKTREE_BRANCH_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Entries kept at most; past it the cache starts over rather than growing with every path.
+const WORKTREE_BRANCH_CACHE_MAX: usize = 512;
+
+static WORKTREE_BRANCHES: WorktreeBranchCache = WorktreeBranchCache::new();
+
+/// The branch checked out in each worktree path, resolved off the async runtime and reused for
+/// [`WORKTREE_BRANCH_TTL`].
+struct WorktreeBranchCache {
+    entries: std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, (std::time::Instant, Option<String>)>>>,
+}
+
+impl WorktreeBranchCache {
+    const fn new() -> Self {
+        Self { entries: std::sync::Mutex::new(None) }
+    }
+
+    /// The cached branch of `path`, or `resolve(path)` run through `run_blocking` when the
+    /// entry is missing or older than the TTL. A failed resolution is cached as `None` too.
+    async fn branch(&self, path: &std::path::Path, resolve: fn(&std::path::Path) -> Option<String>) -> Option<String> {
+        let now = std::time::Instant::now();
+        if let Some((at, branch)) = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|entries| entries.get(path))
+        {
+            if now.duration_since(*at) < WORKTREE_BRANCH_TTL {
+                return branch.clone();
+            }
+        }
+        let owned = path.to_path_buf();
+        let branch = crate::ipc::run_blocking(move || Ok(resolve(&owned))).await.ok().flatten();
+        let mut entries = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entries = entries.get_or_insert_with(std::collections::HashMap::new);
+        if entries.len() >= WORKTREE_BRANCH_CACHE_MAX {
+            entries.clear();
+        }
+        entries.insert(path.to_path_buf(), (now, branch.clone()));
+        branch
+    }
+}
+
+/// The short name of the branch checked out at `path`; `None` for a detached HEAD, a path that
+/// is not a git worktree, or a missing git. Blocking: callers go through `run_blocking`.
+fn worktree_branch(path: &std::path::Path) -> Option<String> {
+    crate::worktree::git::run_git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .ok()
+        .map(|output| output.trim().to_string())
+        .filter(|branch| !branch.is_empty())
 }
 
 /// The screen's last line that says something: bullet and input-box glyphs are trimmed off
@@ -2120,6 +2188,7 @@ mod tests {
             health: None,
             attention: None,
             reason: None,
+            branch: None,
         }
     }
 
@@ -3404,5 +3473,33 @@ mod tests {
         let wire = serde_json::to_value(&view).expect("wire");
         assert_eq!(wire["needsConfirmation"], false, "{wire}");
         assert_eq!(wire["kind"], "freeText", "{wire}");
+    }
+
+    #[test]
+    fn agent_control_service_worktree_branch_reads_the_checked_out_branch() {
+        let root = tempfile::tempdir().unwrap();
+        crate::worktree::git::run_git(root.path(), &["init", "--quiet", "-b", "feat/pr-lane"]).unwrap();
+        assert_eq!(worktree_branch(root.path()).as_deref(), Some("feat/pr-lane"));
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(worktree_branch(&plain.path().join("missing")), None, "not a worktree");
+    }
+
+    static RESOLVES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_resolve(_: &std::path::Path) -> Option<String> {
+        RESOLVES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some("feat/cached".to_string())
+    }
+
+    #[tokio::test]
+    async fn agent_control_service_worktree_branch_is_cached_per_path() {
+        let cache = WorktreeBranchCache::new();
+        let path = std::path::Path::new("/repo/one");
+        for _ in 0..5 {
+            assert_eq!(cache.branch(path, counting_resolve).await.as_deref(), Some("feat/cached"));
+        }
+        assert_eq!(RESOLVES.load(std::sync::atomic::Ordering::SeqCst), 1, "one git call per path within the TTL");
+        cache.branch(std::path::Path::new("/repo/two"), counting_resolve).await;
+        assert_eq!(RESOLVES.load(std::sync::atomic::Ordering::SeqCst), 2, "another path resolves on its own");
     }
 }

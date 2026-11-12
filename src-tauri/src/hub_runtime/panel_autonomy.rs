@@ -525,6 +525,7 @@ pub(crate) mod tests {
             health: None,
             attention: None,
             reason: None,
+            branch: None,
         }
     }
 
@@ -809,6 +810,7 @@ pub(crate) mod tests {
             health: None,
             attention: None,
             reason: None,
+            branch: None,
         }
     }
 

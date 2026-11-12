@@ -217,6 +217,7 @@ fn fleet_session(
             .get("attention")
             .and_then(|attention| serde_json::from_value::<Attention>(attention.clone()).ok()),
         reason: text("reason").map(str::to_owned),
+        branch: text("branch").map(str::to_owned),
     })
 }
 
@@ -625,6 +626,28 @@ mod tests {
         let attention = merged[1].attention.expect("a new peer's attention");
         assert_eq!(attention.axes.demand, AttentionDemand::Question);
         assert_eq!(attention.group, AttentionGroup::NeedsYou);
+    }
+
+    #[test]
+    fn an_old_peer_without_branch_still_parses_and_a_new_one_carries_it() {
+        let entries = vec![host_entry(
+            "mac",
+            vec![
+                json!({"sessionId": "old", "state": "working"}),
+                json!({"sessionId": "new", "state": "working", "branch": "ferryx/ws1/refactor"}),
+                json!({"sessionId": "blank", "state": "working", "branch": ""}),
+            ],
+            None,
+            false,
+        )];
+        let merged = merge_sessions(&HashMap::new(), &entries, 1);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].branch, None, "an old peer has no branch");
+        assert_eq!(merged[0].state, "working");
+        assert_eq!(merged[1].branch.as_deref(), Some("ferryx/ws1/refactor"));
+        assert_eq!(merged[2].branch, None, "an empty branch is no branch");
+        let wire = serde_json::to_value(&merged[0]).unwrap();
+        assert!(wire.get("branch").is_none(), "an absent branch stays off the wire: {wire}");
     }
 
     fn handled(session: &str, live: bool) -> ActionEntry {

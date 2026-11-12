@@ -142,6 +142,7 @@ fn session(prompt: Option<PendingPrompt>) -> FleetSession {
         health: None,
         attention: None,
         reason: None,
+        branch: None,
     }
 }
 

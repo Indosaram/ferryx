@@ -221,6 +221,7 @@ fn session(host: &str, id: &str, agent: &str, state: &str, source: &str, changed
         health: None,
         attention: None,
         reason: None,
+        branch: None,
     }
 }
 
