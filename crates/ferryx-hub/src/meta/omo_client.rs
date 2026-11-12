@@ -1010,7 +1010,7 @@ pub async fn run_turn(
         };
         // Keep the engagement marker: an exit after the prompt write is an unknown outcome.
         result = Err(transport_failure(
-            rpc.engaged,
+            engine.rpc.engaged,
             format!("mhc RPC process exited before completing the turn ({status})"),
         ));
     }
