@@ -37,6 +37,22 @@ probe() {
   case "$1" in
     ssh-unix)   tmo 12 ssh -n -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes "$2" "$PROBE_UNIX" 2>/dev/null ;;
     ssh-darwin) tmo 12 ssh -n -o ConnectTimeout=5 -o BatchMode=yes -o ClearAllForwardings=yes "$2" "zsh -lc '$PROBE_UNIX'" 2>/dev/null ;;
+    ssh-win32)
+      # Windows has no /proc and no uptime load field, so the numbers come from
+      # PowerShell. It is fed on stdin: the remote COMSPEC may be pwsh (so a
+      # one-line -Command string is re-parsed and mangled) and -EncodedCommand
+      # would bury a base64 blob in this script. stdin needs neither.
+      tmo 40 ssh -o ConnectTimeout=8 -o BatchMode=yes -T "$2" "powershell -NoProfile -NonInteractive -Command -" 2>/dev/null <<'PWSH' | tr -d '\r' | tail -1
+$ProgressPreference='SilentlyContinue'
+$c=[int](Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+$cpu=(Get-CimInstance Win32_Processor|Measure-Object -Property LoadPercentage -Average).Average
+$l=[math]::Round($c*[double]$cpu/100,2)
+$m=[int]((Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes/1024)
+$d=[int]((Get-PSDrive C).Free/1GB)
+$b=@(Get-Process -Name cargo,rustc,zig -ErrorAction SilentlyContinue).Count
+Write-Output "$c $l $m $d $b"
+PWSH
+      ;;
     instabox)   tmo 40 instabox exec "$2" -- 'echo "$(nproc) $(cut -d" " -f1 /proc/loadavg) $(awk "/MemAvailable/{printf \"%d\",\$2/1048576}" /proc/meminfo) $(df -k /data | awk "NR==2{printf \"%d\",\$4/1048576}") $(pgrep -x -c "cargo|rustc|zig")"' 2>/dev/null | tail -1 ;;
     salad)
       # SaladCloud organization, not a shell host: <target> is the org name and the API
