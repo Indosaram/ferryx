@@ -121,7 +121,7 @@ const OK_OR_FAILURE: &[(&str, &str)] = &[("0", "ok"), ("1", "failure, including 
 pub const CATALOG: &[Command] = &[
     Command {
         name: "agents",
-        summary: "List, read, drive and wait on agent panes on this machine or a paired host",
+        summary: "List, read, drive, wait on and spawn agent panes on this machine or a paired host",
         output: "json",
         subcommands: &[
             sub!("list", &[], &[HOST, JSON]),
@@ -149,6 +149,23 @@ pub const CATALOG: &[Command] = &[
             ),
             sub!("events", &[], &[value!("--after"), HOST, JSON]),
             sub!("ack", &[SESSION], &[HOST, JSON]),
+            sub!(
+                "spawn",
+                &[],
+                &[
+                    required!("--agent"),
+                    required!("--cwd"),
+                    value!("--parent"),
+                    value!("--workspace"),
+                    value!("--name"),
+                    value!("--prompt"),
+                    value!("--command"),
+                    value!("--arg"),
+                    REQUEST_ID,
+                    HOST,
+                    JSON,
+                ],
+            ),
         ],
         exit_codes: DAEMON_JSON_EXIT_CODES,
     },
