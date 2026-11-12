@@ -44,7 +44,22 @@ echo "build-remote: $host ($transport) <- $cmd" >&2
 
 case "$transport" in
   ssh-unix|ssh-darwin)
-    ssh -o BatchMode=yes -o ClearAllForwardings=yes -T "$target" "$cmd"
+    # Tailscale SSH (maho-mac) never sends the channel exit-status request, so ssh
+    # exits 0 even when the remote command failed. The remote side reports its own
+    # status on a marker line instead, which is stripped from the output. The command
+    # goes over stdin so no shell has to re-quote it. This branch must not touch the
+    # EXIT trap, which releases the host claim.
+    out=$(mktemp) || exit 1
+    {
+      printf '%s\n' '(' "$cmd" ')'
+      printf '%s\n' 's=$?'
+      printf '%s\n' 'echo "__FERRYX_EXIT__$s"'
+    } | ssh -o BatchMode=yes -o ClearAllForwardings=yes -T "$target" >"$out" 2>&1
+    status=$(sed -n 's/^__FERRYX_EXIT__\([0-9][0-9]*\)$/\1/p' "$out" | tail -1)
+    sed '/^__FERRYX_EXIT__[0-9][0-9]*$/d' "$out"
+    rm -f "$out"
+    [ -n "$status" ] || status=1
+    exit "$status"
     ;;
   ssh-win32)
     # Git Bash keeps one recipe source across platforms: PowerShell and cmd read
