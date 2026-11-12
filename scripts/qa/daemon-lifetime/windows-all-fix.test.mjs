@@ -172,7 +172,8 @@ test('Q11 a lowercase marker typed through ConPTY repaints converges; Windows us
   assert.match(src, /const marker = q11Marker\(ctx\.platform\)/);
   const win = q11Marker('windows');
   assert.match(win, /^uncertain[0-9a-f]{12}$/, 'Windows marker has no Shift key');
-  assert.match(q11Marker('linux'), /^UNCERTAIN[0-9A-F]{12}$/, 'other platforms unchanged');
+  // omarchy's synthetic keyboard loses Shift chords, so every platform types a lowercase marker.
+  assert.match(q11Marker('linux'), /^uncertain[0-9a-f]{12}$/, 'Linux marker has no Shift key');
 });
 
 // ---- Q13: the Windows legacy task has the definition record the product migrates by ----

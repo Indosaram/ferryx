@@ -282,13 +282,13 @@ test("parsePlan validates sourceDateEpoch and createdAt", () => {
 
 // ------------------- requiredKinds tests -------------------
 
-test("requiredKinds returns standard 7 kinds without NSIS migration", () => {
+test("requiredKinds returns the standard ten kinds without NSIS migration", () => {
   const plan = makeValidPlan();
   const kinds = requiredKinds(plan);
-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal"]);
+  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "rd-client-linux-amd64", "rd-client-darwin-universal", "rd-client-windows-amd64"]);
 });
 
-test("requiredKinds returns 8 kinds when nsisMigration is true", () => {
+test("requiredKinds returns eleven kinds when nsisMigration is true", () => {
   const plan = makeValidPlan({
     channels: { store: true, nsisMigration: true },
     requiredTargets: [
@@ -299,7 +299,7 @@ test("requiredKinds returns 8 kinds when nsisMigration is true", () => {
     ],
   });
   const kinds = requiredKinds(plan);
-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "nsis"]);
+  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "rd-client-linux-amd64", "rd-client-darwin-universal", "rd-client-windows-amd64", "nsis"]);
 });
 
 // ------------------- parseReceipt tests -------------------

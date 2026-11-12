@@ -59,7 +59,7 @@ export async function windowsShortPath(agent, file) {
  * Bounded wait per Windows launch stage (ms). observerReady covers schtasks /Run plus PowerShell's
  * Add-Type compile in the interactive session; observerLifetime bounds the observer process itself.
  */
-export const WINDOWS_LAUNCH_DEADLINES = Object.freeze({ observerReady: 60_000, observerArmed: 10_000, runDialog: 10_000, latched: 10_000, typed: 10_000, observerExit: 10_000, observerLifetime: 180_000, cmdStarted: 20_000, launcherStarted: 30_000, published: 60_000 });
+export const WINDOWS_LAUNCH_DEADLINES = Object.freeze({ observerReady: 60_000, observerArmed: 10_000, runDialog: 10_000, latched: 10_000, typed: 10_000, observerExit: 10_000, observerLifetime: 180_000, cmdStarted: 60_000, launcherStarted: 30_000, published: 60_000 });
 
 /**
  * Files of one Windows launch. The receipts live in logs\, which teardown copies into the evidence
@@ -206,8 +206,27 @@ export class WindowsLaunchError extends Error {
 
 /** The observer fixture, read from this checkout so the run uses exactly the reviewed source. */
 const OBSERVER_SCRIPT = () => readFileSync(new URL('../fixtures/windows-focus-observer.ps1', import.meta.url), 'utf8');
+
+/** How long a linux GUI may take to map its first window before the window is called absent. */
+const LINUX_MAP_DEADLINE_MS = 90_000;
+/** How long a mapped linux window may take to reach focusHistoryID 0 after the focus dispatch. */
+const LINUX_FOCUS_DEADLINE_MS = 20_000;
 /** The dialog-sweep fixture (preflight before the first Win+R of a run). */
 const SWEEP_SCRIPT = () => readFileSync(new URL('../fixtures/windows-dialog-sweep.ps1', import.meta.url), 'utf8');
+/** One-shot foreground reader: process name and window class of the current foreground window. */
+const FOREGROUND_PROBE = () => readFileSync(new URL('../fixtures/windows-foreground-probe.ps1', import.meta.url), 'utf8');
+
+/**
+ * Pixel size of a PNG buffer, or null when it is not a PNG. MahoRD clicks absolute pixels
+ * (normalized: false), so callers that aim at a screen edge must ask the live desktop how big
+ * it is instead of assuming a resolution (maho-win is 1024x768, not the 3840x1600 it advertises).
+ */
+function pngSize(buf) {
+  if (!buf || buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) return null;
+  const width = buf.readUInt32BE(16);
+  const height = buf.readUInt32BE(20);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
 
 /**
  * Titles of the explorer dialogs a launch can leave behind, as measured on maho-win (ko-KR) with
@@ -543,43 +562,32 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
       if (ready.hooks !== 3) await fail('observer-not-ready', `observer registered ${ready.hooks} WinEvent hooks, expected 3`);
       mark('observer-ready', { task, pid: ready.pid, sessionId: ready.sessionId });
 
-      await mahord.click(3000, 1580); // blank taskbar: focus the shell so Win+R reaches it
-      // Armed after the click, so only focus changes from Win+R onwards are reported.
-      await agent.call('writeFile', { file: f.observerArm, content: nonce });
-      const armed = await agent.call('waitLog', { file: f.observerEvents, pattern: '^\\{"kind":"armed",', flags: 'm', deadlineMs: D.observerArmed });
-      if (!armed.matched) await fail('observer-not-armed', `no armed record within ${D.observerArmed}ms`);
-      armedObserver = true;
-      mark('observer-armed', {});
-
-      await mahord.hotkey(['Meta', 'r']);
-      const focus = await agent.call('waitLog', { file: f.observerEvents, pattern: RUN_DIALOG_FOCUS_PATTERN, flags: 'm', deadlineMs: D.runDialog });
-      const record = focus.matched ? readRecord(focus.matched) : null;
-      if (!isRunDialogFocus(record)) await fail('run-dialog-not-identified', `no foreground explorer #32770 dialog with an Edit focused within ${D.runDialog}ms after Win+R (records in ${f.observerEvents})`);
-      mark('run-dialog-focus', record);
-
-      await agent.call('writeFile', { file: f.observerTarget(record.focusHwnd), content: nonce });
-      const latched = await agent.call('waitLog', { file: f.observerEvents, pattern: `^\\{"kind":"latched","focusHwnd":${record.focusHwnd},`, flags: 'm', deadlineMs: D.latched });
-      if (!latched.matched) await fail('observer-not-latched', `the observer did not latch hwnd ${record.focusHwnd} within ${D.latched}ms`);
-      mark('latched', { focusHwnd: record.focusHwnd });
-
-      // The Run dialog pre-fills its last entry and typed text is appended to it: select it first.
-      await mahord.hotkey(['Control', 'a']);
-      await mahord.type(short);
-      const typed = await agent.call('waitLog', { file: f.observerEvents, pattern: TYPED_OUTCOME_PATTERN, flags: 'm', deadlineMs: D.typed });
-      const outcome = typed.matched ? readRecord(typed.matched) : null;
-      if (outcome?.kind !== 'text' || outcome.match !== true) {
-        await fail('typed-text-not-confirmed', outcome?.kind === 'lost'
-          ? `focus left the Run dialog before the text was confirmed: ${JSON.stringify(outcome)}`
-          : `the latched Edit did not read back ${short} within ${D.typed}ms; Enter was not sent`);
-      }
-      mark('typed', { text: short, length: outcome.length });
-      await mahord.key('Enter');
+      // The interactive desktop is a shared resource: another session's build console can hold
+      // the foreground for minutes (runs 20261111t001702z..20261111t073048z: an "npm list"
+      // cmd.exe console swallowed Win+R on every retry, and 20 quiet probes never saw it yield).
+      // The launch therefore does not touch the desktop at all: a per-launch scheduled task runs
+      // the same launch .cmd in the active console session, the mechanism the focus observer
+      // already proves works there. /RL LIMITED keeps the GUI unelevated.
+      const launchTask = `Ferryx\\${qaSupervisorName(runId)}-launch-${tag}`;
+      mark('launch-task-create', { task: launchTask });
+      const taskOut = layout.logs + "\\launch-task-" + tag + ".out";
+      // cmd /c strips the first and last quote of a line that holds more than two, so the whole
+      // command is wrapped in one more pair (bare form stored by Node spawn ran with result 0x1).
+      const madeLaunch = await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', launchTask, '/SC', 'ONLOGON', '/RL', 'LIMITED', '/TR', 'cmd.exe /c ""' + f.launchCmd + '" > "' + taskOut + '" 2>&1"', '/F'] });
+      if (madeLaunch.status !== 0) await fail('launch-task-not-created', 'schtasks /Create ' + launchTask + ' exited ' + madeLaunch.status + ': ' + (madeLaunch.stderr || madeLaunch.stdout));
+      const run = await agent.call('exec', { command: 'schtasks', args: ['/Run', '/TN', launchTask] });
+      if (run.status !== 0) await fail('launch-task-not-run', 'schtasks /Run ' + launchTask + ' exited ' + run.status + ': ' + (run.stderr || run.stdout));
+      mark('launch-task-run', { task: launchTask });
     } finally {
       await cleanup();
     }
     mark('observer-stopped', observer.cleanup);
     if (!await agent.call('waitPath', { file: f.cmdStarted, deadlineMs: D.cmdStarted })) {
-      await fail('cmd-not-executed', `the Run dialog did not execute ${short}: no ${f.cmdStarted} within ${D.cmdStarted}ms`);
+        const taskOutFile = layout.logs + '\\launch-task-' + tag + '.out';
+        const taskOut = await agent.call('readFile', { file: taskOutFile }).catch(() => null);
+        const query = await agent.call('exec', { command: 'schtasks', args: ['/Query', '/TN', 'Ferryx' + '\\' + qaSupervisorName(runId) + '-launch-' + tag, '/V', '/FO', 'LIST'] });
+        const taskState = String(query.stdout ?? '').split(/\r?\n/).filter((l) => /As Task To Run|Last Result|Status:/i.test(l)).join(' ; ');
+        await fail('cmd-not-executed', 'the launch task did not execute ' + f.launchCmd + ' within ' + D.cmdStarted + 'ms; task output: ' + String(taskOut ?? '(none)').slice(0, 300) + ' | ' + taskState);
     }
     mark('cmd-executed', { file: f.cmdStarted });
     return { finish: () => finishWindows({ exe, tag, f, receipt, mark, fail, writeReceipt, goFile }) };
@@ -611,6 +619,56 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
   }
 
   /**
+   * Linux: Hyprland binds SUPER+Q to close the focused window (bindings.lua:52) and Ferryx has no
+   * Ctrl+Q quit on Linux, so the GUI's window must be mapped and focused before MahoRD sends it.
+   * A GUI started under systemd-run maps its first window only after WebKit paints (run
+   * dlq-lin17: the first window appeared ~40s after launch), so poll the compositor for the pid.
+   */
+  async function focusLinux(gui) {
+    const sh = async (command) => (await agent.call('exec', { command: 'bash', args: ['-lc', command] })).stdout;
+    const listed = await sh('hyprctl instances 2>/dev/null');
+    const inst = listed.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('instance ')).map((l) => l.slice('instance '.length).replace(/:$/, '')).pop();
+    if (!inst) return { focused: false, reason: 'no live Hyprland instance' };
+    const clients = async () => {
+      const raw = await sh(`HYPRLAND_INSTANCE_SIGNATURE=${inst} hyprctl -j clients 2>/dev/null`);
+      try { return JSON.parse(raw); } catch { return []; }
+    };
+    const mine = (cs) => cs.some((c) => Number(c.pid) === Number(gui.pid) && c.mapped === true);
+    let cs = await clients();
+    for (let waited = 0; !mine(cs) && waited < LINUX_MAP_DEADLINE_MS; waited += 1000) {
+      await new Promise((r) => setTimeout(r, 1000));
+      cs = await clients();
+    }
+    if (!mine(cs)) return { focused: false, reason: 'window never mapped', instance: inst, waitedMs: LINUX_MAP_DEADLINE_MS };
+    // omarchy runs the Lua-config Hyprland build (Hyprland 0.56). Verified there 2026-11-09:
+    // `hyprctl dispatch focuswindow pid:<n>` is a Lua parse error, and every `hl.dsp.focus({window=…})`
+    // spelling (pid:, address:, class:, title:) answers 'ok' yet never moves focusHistoryID; the
+    // same is true of hl.dsp.window.bring_to_top and hl.dsp.send_shortcut. A real pointer click is
+    // the one path that does move focus (measured: ff1 1 -> 0 after one MahoRD click on its title
+    // bar). So focus is delivered as a click, and it is verified through focusHistoryID === 0,
+    // which is the only truthful focus signal in this build — `hyprctl -j activewindow` can answer
+    // {} while a window is genuinely focused. The click lands on the window's own title bar, far
+    // from any interactive control the GUI may draw.
+    const target = cs.find((c) => Number(c.pid) === Number(gui.pid) && c.mapped === true);
+    const at = Array.isArray(target?.at) ? target.at : null;
+    const size = Array.isArray(target?.size) ? target.size : null;
+    if (!at || !size) return { focused: false, reason: 'mapped window has no geometry', instance: inst };
+    const point = { x: Math.round(at[0] + size[0] / 2), y: Math.round(at[1] + 12) };
+    const focusedNow = (list) => list.some((c) => Number(c.pid) === Number(gui.pid) && Number(c.focusHistoryID) === 0);
+    if (focusedNow(cs)) return { focused: true, pid: gui.pid, instance: inst, clicked: null, waitedMs: 0 };
+    if (!mahord) throw new Error('Linux GUI focus needs MahoRD to click the title bar');
+    await mahord.click(point.x, point.y);
+    for (let waited = 0; waited <= LINUX_FOCUS_DEADLINE_MS; waited += 500) {
+      const now = await clients();
+      if (focusedNow(now)) {
+        return { focused: true, pid: gui.pid, instance: inst, clicked: point, waitedMs: waited };
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return { focused: false, reason: 'focusHistoryID never reached 0 after a title-bar click', pid: gui.pid, instance: inst, clicked: point };
+  }
+
+  /**
    * Windows: make the recorded GUI's main window the foreground before MahoRD keys go to it. A GUI
    * started from the Run dialog's .cmd can open behind the console that started it (run-q11
    * only-q11-q13-r2: Escape went to that console, the setup wizard stayed open). The launcher
@@ -618,6 +676,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
    * and the query repeated. Other platforms need no focus step.
    */
   async function focus(gui) {
+    if (platform === 'linux') return focusLinux(gui);
     if (platform !== 'windows') return { skipped: platform };
     if (!mahord) throw new Error('Windows GUI focus needs MahoRD');
     const f = windowsRectFiles(layout, gui.tag);
@@ -655,7 +714,13 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
       // MahoRD remote_key_press takes one key; chords go through remote_hotkey. omarchy's Hyprland
       // binds SUPER+Q to close window
       // (~/.config/hypr/bindings.lua:52) and Ferryx has no Ctrl+Q quit on Linux (shortcuts.ts:453 is macOS only).
+      // SUPER+Q closes the FOCUSED window, so the GUI's own window has to be mapped and focused
+      // first: a systemd-run GUI maps only after WebKit paints (run dlq-lin17), and without this
+      // step the chord closed nothing and Q01/Q03b timed out with gui.scopeReady=false.
+      const focus = await focusLinux(gui);
       await mahord.hotkey(['Meta', 'q']);
+      const out = await exited;
+      return { ...out, focus };
     }
     const out = await exited;
     if (platform !== 'windows') return out;
