@@ -81,12 +81,20 @@ mod tests {
 
     #[tokio::test]
     async fn binds_the_preferred_port_when_it_is_free() {
-        let probe = UdpSocket::bind("0.0.0.0:0").await.expect("probe bind");
-        let port = probe.local_addr().expect("probe addr").port();
-        drop(probe);
+        // A probe port is released before we ask for it, so another process could in
+        // principle steal it in between; retry with a fresh port instead of asserting on
+        // one racy attempt.
+        for _ in 0..5 {
+            let probe = UdpSocket::bind("0.0.0.0:0").await.expect("probe bind");
+            let port = probe.local_addr().expect("probe addr").port();
+            drop(probe);
 
-        let socket = bind_direct_socket(Some(port)).await.expect("bind preferred");
-        assert_eq!(socket.local_addr().expect("addr").port(), port);
+            let socket = bind_direct_socket(Some(port)).await.expect("bind preferred");
+            if socket.local_addr().expect("addr").port() == port {
+                return;
+            }
+        }
+        panic!("preferred port was never claimable across 5 attempts");
     }
 
     #[tokio::test]
