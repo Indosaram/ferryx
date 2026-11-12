@@ -125,6 +125,13 @@ pub(super) struct StoredSessionMeta {
     pub(super) cwd: PathBuf,
     pub(super) provider_claim: Option<ProviderSessionClaimKey>,
     pub(super) spawn_fingerprint: SpawnRequestFingerprint,
+    /// Set when agent control spawned this pane as another pane's child. Older records have none.
+    #[serde(default)]
+    pub(super) lineage: Option<crate::agent_control::Lineage>,
+    /// The registry agent agent control spawned in this pane, so a retried request id can be
+    /// checked against what it first asked for. Older records and other panes have none.
+    #[serde(default)]
+    pub(super) spawned_agent: Option<String>,
 }
 
 /// Serves a stored session cwd only when it can be a real local absolute path. A probe that captured
@@ -225,6 +232,91 @@ pub(super) fn published_create_provider_session_for_startup(
             mode,
             ..
         } => published_create_provider_session(Some(*mode), provider_session),
+    }
+}
+
+/// A spawn refused because this daemon is draining after a handover.
+const SPAWN_REFUSED_DRAINING: &str = "Daemon is in draining mode and does not accept new sessions";
+/// A spawn refused because a handover is prepared or committing.
+const SPAWN_REFUSED_HANDOVER: &str = "Daemon handover is in progress and does not accept new sessions";
+/// The tail of a spawn refused because its client request id already names a different spawn.
+const SPAWN_REQUEST_REUSED: &str = "was reused with a different spawn request";
+
+/// Why agent control could not open a pane: the scope code, the wire code the caller sees
+/// (`DAEMON_DRAINING`, `REQUEST_CONFLICT`, ...) and the daemon's message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpawnPaneFailure {
+    pub code: crate::scoped_contracts::ScopeErrorCode,
+    pub wire: &'static str,
+    pub message: String,
+}
+
+/// One agent-control pane spawn: the request that makes a retry idempotent, the agent and the
+/// workspace it belongs to, the pane's cwd/startup, and the lineage it inherits.
+pub(crate) struct AgentPaneRequest<'a> {
+    pub client_request_id: &'a str,
+    pub agent: &'a str,
+    pub workspace_id: &'a str,
+    pub worktree: Option<WorktreeIdentity>,
+    pub cwd: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub lineage: Option<crate::agent_control::Lineage>,
+}
+
+/// What an earlier agent-control spawn with one request id asked for, read back for a retry.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AgentSpawnRecord {
+    pub session_id: String,
+    pub agent: Option<String>,
+    pub parent: Option<String>,
+    pub workspace_id: String,
+    pub cwd: Option<String>,
+    pub startup: Option<TerminalStartup>,
+}
+
+/// The typed refusal for one spawn failure, classified like `spawn_machine` classifies them,
+/// so a draining daemon, a handover or a reused request id is never an invalid request.
+fn classify_spawn_failure(error: SpawnError) -> SpawnPaneFailure {
+    use crate::scoped_contracts::ScopeErrorCode;
+    let failure = |code, wire, message: String| SpawnPaneFailure { code, wire, message };
+    match error {
+        SpawnError::Structured(error) => match error.code {
+            crate::ipc::IpcErrorCode::DaemonRetiring => {
+                failure(ScopeErrorCode::InventoryIncomplete, "DAEMON_RETIRING", error.message)
+            }
+            crate::ipc::IpcErrorCode::SessionIdConflict => {
+                failure(ScopeErrorCode::RequestConflict, "REQUEST_CONFLICT", error.message)
+            }
+            _ => failure(ScopeErrorCode::InvalidRequest, "INVALID_REQUEST", error.message),
+        },
+        SpawnError::AgentSessionConflict { .. } | SpawnError::ContinueConflict { .. } => {
+            failure(ScopeErrorCode::RequestConflict, "REQUEST_CONFLICT", error.to_string())
+        }
+        SpawnError::ContinueUnsupported | SpawnError::InvalidAgentResume(_) => {
+            failure(ScopeErrorCode::InvalidRequest, "INVALID_REQUEST", error.to_string())
+        }
+        SpawnError::Other(message) => match message.as_str() {
+            "TIMEOUT" => failure(ScopeErrorCode::Timeout, "TIMEOUT", message),
+            "MACHINE_SERVICE_UNAVAILABLE" => {
+                failure(ScopeErrorCode::InventoryIncomplete, "MACHINE_SERVICE_UNAVAILABLE", message)
+            }
+            "WORKTREE_NOT_FOUND" | "PROJECT_NOT_FOUND" => failure(ScopeErrorCode::NotFound, "NOT_FOUND", message),
+            "REQUEST_CONFLICT" => failure(ScopeErrorCode::RequestConflict, "REQUEST_CONFLICT", message),
+            SPAWN_REFUSED_DRAINING => failure(ScopeErrorCode::InventoryIncomplete, "DAEMON_DRAINING", message),
+            SPAWN_REFUSED_HANDOVER => failure(ScopeErrorCode::InventoryIncomplete, "HANDOVER_BUSY", message),
+            _ if message.contains(SPAWN_REQUEST_REUSED) => {
+                failure(ScopeErrorCode::RequestConflict, "REQUEST_CONFLICT", message)
+            }
+            // A cwd the request named that does not exist, is not a directory or leaves the
+            // workspace is the caller's mistake.
+            _ if message.starts_with("CWD ") || message.starts_with("clientRequestId cannot be empty") => {
+                failure(ScopeErrorCode::InvalidRequest, "INVALID_REQUEST", message)
+            }
+            // Anything else failed on this daemon (the PTY did not start, the registry could
+            // not be read): not the caller's request, and no pane was created.
+            _ => failure(ScopeErrorCode::InventoryIncomplete, "SPAWN_FAILED", message),
+        },
     }
 }
 
@@ -847,6 +939,91 @@ impl DaemonSessionService {
         })
     }
 
+    /// Where a spawned pane came from: its parent pane and depth. `None` for a pane agent
+    /// control did not spawn as a child (depth 0, owned by the person).
+    pub fn lineage_for(&self, session_id: &str) -> Option<crate::agent_control::Lineage> {
+        self.session_metadata.read().get(session_id)?.lineage.clone()
+    }
+
+    /// How many live panes name `parent` as their spawn parent.
+    pub(crate) fn live_spawned_children(&self, parent: &str) -> usize {
+        let children: Vec<String> = self
+            .session_metadata
+            .read()
+            .iter()
+            .filter(|(_, meta)| meta.lineage.as_ref().is_some_and(|lineage| lineage.parent == parent))
+            .map(|(id, _)| id.clone())
+            .collect();
+        children.iter().filter(|id| self.session_is_live(id)).count()
+    }
+
+    /// The workspace and worktree a live local pane runs in, for a child spawned beside it.
+    pub(crate) fn spawn_parent_scope(&self, parent: &str) -> Option<(String, Option<WorktreeIdentity>)> {
+        if !self.session_is_live(parent) {
+            return None;
+        }
+        let metadata = self.session_metadata.read();
+        let meta = metadata.get(parent)?;
+        Some((meta.workspace_id.clone(), meta.worktree.clone()))
+    }
+
+    /// What the live pane an earlier spawn with this request id created was asked for, if any.
+    pub(crate) fn live_spawn_for_request(&self, client_request_id: &str) -> Option<AgentSpawnRecord> {
+        let candidates: Vec<AgentSpawnRecord> = self
+            .session_metadata
+            .read()
+            .iter()
+            .filter(|(_, meta)| meta.client_request_id == client_request_id)
+            .map(|(id, meta)| AgentSpawnRecord {
+                session_id: id.clone(),
+                agent: meta.spawned_agent.clone(),
+                parent: meta.lineage.as_ref().map(|lineage| lineage.parent.clone()),
+                workspace_id: meta.workspace_id.clone(),
+                cwd: meta.spawn_fingerprint.cwd.clone(),
+                startup: meta.spawn_fingerprint.startup.clone(),
+            })
+            .collect();
+        candidates.into_iter().find(|record| self.session_is_live(&record.session_id))
+    }
+
+    /// Spawn one agent pane for agent control, exactly as `DaemonRequest::Spawn` does with an
+    /// `AgentLaunch` startup, and record its agent and lineage. Never creates a worktree:
+    /// `worktree` names an existing one (the parent's) or none.
+    pub(crate) async fn spawn_agent_pane(
+        &self,
+        request: AgentPaneRequest<'_>,
+    ) -> Result<String, SpawnPaneFailure> {
+        let AgentPaneRequest {
+            client_request_id,
+            agent,
+            workspace_id,
+            worktree,
+            cwd,
+            command,
+            args,
+            lineage,
+        } = request;
+        let session_id = self
+            .handle_spawn_requested(
+                client_request_id,
+                workspace_id,
+                SpawnOptions { worktree, cwd: Some(cwd), cols: 120, rows: 32, shell: None },
+                Some(TerminalStartup::AgentLaunch { command, args }),
+                None,
+                #[cfg(test)]
+                None,
+            )
+            .await
+            .map_err(classify_spawn_failure)?;
+        if let Some(meta) = self.session_metadata.write().get_mut(&session_id) {
+            meta.spawned_agent.get_or_insert_with(|| agent.to_string());
+            if let Some(lineage) = lineage {
+                meta.lineage.get_or_insert(lineage);
+            }
+        }
+        Ok(session_id)
+    }
+
     /// The agent extension's last report for this PTY, for the agent-control surface.
     pub fn agent_control_report(&self, session_id: &str) -> Option<crate::agent_control::ProviderReport> {
         let current = self.agent_states.current(session_id)?;
@@ -855,6 +1032,7 @@ impl DaemonSessionService {
             state: current.state,
             self_reported: current.origin.is_provider_report(),
             detail: current.detail,
+            outcome: current.outcome,
         })
     }
 
@@ -2307,6 +2485,8 @@ impl DaemonSessionService {
         self.session_metadata.write().insert(
             id.clone(),
             StoredSessionMeta {
+                lineage: None,
+                spawned_agent: None,
                 client_request_id: request.into(),
                 machine_session: None,
                 workspace_id: project.workspace_id.clone(),
@@ -2441,9 +2621,7 @@ impl DaemonSessionService {
             .upgrade()
             .is_none_or(|manager| manager.is_draining())
         {
-            return Err(SpawnError::Other(
-                "Daemon is in draining mode and does not accept new sessions".into(),
-            ));
+            return Err(SpawnError::Other(SPAWN_REFUSED_DRAINING.into()));
         }
 
         if client_request_id.trim().is_empty() {
@@ -2556,7 +2734,7 @@ impl DaemonSessionService {
             if let Some(entry) = cache.get_mut(client_request_id) {
                 if entry.fingerprint != spawn_fingerprint {
                     return Err(SpawnError::Other(format!(
-                        "clientRequestId '{client_request_id}' was reused with a different spawn request"
+                        "clientRequestId '{client_request_id}' {SPAWN_REQUEST_REUSED}"
                     )));
                 }
                 entry.created_at = now;
@@ -2575,7 +2753,7 @@ impl DaemonSessionService {
         if let Some((live_session_id, existing_fingerprint)) = existing_request {
             if existing_fingerprint != spawn_fingerprint {
                 return Err(SpawnError::Other(format!(
-                    "clientRequestId '{client_request_id}' was reused with a different spawn request"
+                    "clientRequestId '{client_request_id}' {SPAWN_REQUEST_REUSED}"
                 )));
             }
             self.spawn_idempotency_cache.lock().insert(
@@ -2627,9 +2805,7 @@ impl DaemonSessionService {
                         "Daemon is retiring and does not accept new sessions",
                     ))
                 } else {
-                    SpawnError::Other(
-                        "Daemon handover is in progress and does not accept new sessions".into(),
-                    )
+                    SpawnError::Other(SPAWN_REFUSED_HANDOVER.into())
                 }
             })?;
 
@@ -3126,6 +3302,8 @@ impl DaemonSessionService {
                 session_metadata.write().insert(
                     session_id.clone(),
                     StoredSessionMeta {
+                        lineage: None,
+                        spawned_agent: None,
                         client_request_id: client_request_id.to_string(),
                         machine_session: durable.as_ref().map(|r| r.session.clone()),
                         workspace_id: workspace_id_owned.clone(),
@@ -3536,6 +3714,8 @@ impl DaemonSessionService {
         self.session_metadata.write().insert(
             session_id.to_string(),
             StoredSessionMeta {
+                lineage: None,
+                spawned_agent: None,
                 client_request_id: client_request_id.to_string(),
                 machine_session: None,
                 workspace_id: "test".to_string(),
@@ -3773,6 +3953,27 @@ impl DaemonSessionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_failures_are_classified_not_all_invalid() {
+        use crate::scoped_contracts::ScopeErrorCode;
+        let wire = |error| classify_spawn_failure(error);
+        let draining = wire(SpawnError::Other(SPAWN_REFUSED_DRAINING.into()));
+        assert_eq!((draining.code, draining.wire), (ScopeErrorCode::InventoryIncomplete, "DAEMON_DRAINING"));
+        let handover = wire(SpawnError::Other(SPAWN_REFUSED_HANDOVER.into()));
+        assert_eq!(handover.wire, "HANDOVER_BUSY");
+        let reused = wire(SpawnError::Other(format!("clientRequestId 'r' {SPAWN_REQUEST_REUSED}")));
+        assert_eq!((reused.code, reused.wire), (ScopeErrorCode::RequestConflict, "REQUEST_CONFLICT"));
+        assert_eq!(wire(SpawnError::Other("REQUEST_CONFLICT".into())).wire, "REQUEST_CONFLICT");
+        let retiring = wire(SpawnError::Structured(crate::ipc::IpcError::new(
+            crate::ipc::IpcErrorCode::DaemonRetiring,
+            "retiring",
+        )));
+        assert_eq!(retiring.wire, "DAEMON_RETIRING");
+        assert_eq!(wire(SpawnError::Other("TIMEOUT".into())).code, ScopeErrorCode::Timeout);
+        assert_eq!(wire(SpawnError::Other("CWD does not exist: /x".into())).wire, "INVALID_REQUEST");
+        assert_eq!(wire(SpawnError::Other("the pty would not open".into())).wire, "SPAWN_FAILED");
+    }
     use crate::daemon::server::DaemonServer;
     use crate::remote::machine_protocol::RemoteTerminalTarget;
     use crate::scoped_contracts::Epoch;

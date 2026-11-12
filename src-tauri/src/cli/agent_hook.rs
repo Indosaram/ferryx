@@ -7,6 +7,36 @@
 
 pub use crate::ssh::helper_runtime::agent_hook_core::*;
 
+/// How long a SessionStart hook waits for the daemon's owner-notes block before the agent
+/// starts without it.
+const MEMORY_BLOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Runs the desktop reporter: the shared report, plus on a context-taking SessionStart the
+/// owner's project decisions from this machine's daemon (`agentMemoryBlock`). Nothing is printed
+/// when the daemon is absent, older, slow, on standby, or the project's switch is off. SSH and
+/// remote-helper panes run the helper's reporter, which asks for no context. Always returns 0.
+pub fn run(args: impl IntoIterator<Item = std::ffi::OsString>) -> i32 {
+    run_with(args, |_, _, payload| {
+        let cwd = payload_cwd(payload).or_else(|| {
+            std::env::current_dir().ok().and_then(|dir| dir.to_str().map(str::to_owned))
+        })?;
+        daemon_memory_block(cwd)
+    })
+}
+
+fn daemon_memory_block(cwd: String) -> Option<String> {
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, AGENT_MEMORY_BLOCK_CAPABILITY};
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+    runtime.block_on(async {
+        let request = DaemonRequest::AgentMemoryBlock { cwd };
+        let exchange = crate::cli::supervisor_goal::exchange_once(AGENT_MEMORY_BLOCK_CAPABILITY, request, false);
+        match tokio::time::timeout(MEMORY_BLOCK_TIMEOUT, exchange).await {
+            Ok(Ok(DaemonResponse::AgentMemoryBlockOk { block })) => block,
+            _ => None,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +444,79 @@ mod tests {
         let mut received = String::new();
         stream.read_to_string(&mut received).unwrap();
         assert_eq!(received, line);
+    }
+
+    #[test]
+    fn agent_hook_context_output_has_each_agents_shape() {
+        let note = "Owner notes\n<owner-notes>\n- use bun not npm\n</owner-notes>";
+        // claude, codex and grok: hookSpecificOutput.additionalContext on SessionStart, the
+        // only members codex's SessionStart wire accepts.
+        for agent in ["claude", "codex", "grok"] {
+            let output: Value =
+                serde_json::from_str(&context_output(agent, "SessionStart", note).unwrap()).unwrap();
+            assert_eq!(
+                output,
+                serde_json::json!({"hookSpecificOutput": {
+                    "hookEventName": "SessionStart", "additionalContext": note}}),
+                "{agent}"
+            );
+        }
+        // cursor: a top-level additional_context on sessionStart.
+        let output: Value =
+            serde_json::from_str(&context_output("cursor", "sessionStart", note).unwrap()).unwrap();
+        assert_eq!(output, serde_json::json!({"additional_context": note}));
+        // agy, cline and crush document no context output; other events never print one.
+        for (agent, event) in [
+            ("antigravity", "SessionStart"),
+            ("cline", "TaskStart"),
+            ("crush", "PreToolUse"),
+            ("claude", "Stop"),
+            ("claude", "UserPromptSubmit"),
+            ("codex", "Stop"),
+            ("cursor", "stop"),
+        ] {
+            assert_eq!(context_output(agent, event, note), None, "{agent} {event}");
+        }
+        // Every context-taking event is an installed, reporting one.
+        for (agent, events) in HOOK_AGENTS {
+            for event in events {
+                if takes_session_context(agent, event) {
+                    assert_eq!(state_for(agent, event), Some(HookState::Idle), "{agent} {event}");
+                }
+            }
+        }
+        // An empty block prints nothing.
+        assert_eq!(context_output("claude", "SessionStart", "  "), None);
+    }
+
+    #[test]
+    fn agent_hook_session_start_payloads_name_the_working_directory() {
+        for (name, cwd) in [
+            ("claude-SessionStart", "/private/tmp/parity-claude.59r7"),
+            ("codex-SessionStart", "/private/tmp/parity-codex.l1gL"),
+            ("grok-SessionStart", "/home/indo/agent-parity-facts/grok/proj"),
+            ("cursor-sessionStart", "/private/tmp/fx-crepo.mMi8"),
+        ] {
+            let payload: Value = serde_json::from_str(fixture(name)).unwrap();
+            assert_eq!(payload_cwd(&payload).as_deref(), Some(cwd), "{name}");
+        }
+        assert_eq!(payload_cwd(&Value::Null), None);
+        assert_eq!(payload_cwd(&serde_json::json!({"cwd": " "})), None);
+    }
+
+    #[test]
+    fn agent_hook_memory_block_wire_is_additive() {
+        use crate::daemon::protocol::{DaemonRequest, DaemonResponse};
+        let request = DaemonRequest::AgentMemoryBlock { cwd: "/repo".into() };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire, serde_json::json!({"type": "agentMemoryBlock", "cwd": "/repo"}));
+        // An empty answer carries no block member, and decodes back to none.
+        let empty = serde_json::to_value(DaemonResponse::AgentMemoryBlockOk { block: None }).unwrap();
+        assert_eq!(empty, serde_json::json!({"type": "agentMemoryBlockOk"}));
+        assert!(matches!(
+            serde_json::from_value::<DaemonResponse>(empty).unwrap(),
+            DaemonResponse::AgentMemoryBlockOk { block: None }
+        ));
     }
 
     #[test]

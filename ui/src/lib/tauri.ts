@@ -2,7 +2,7 @@ import { isDesktopShell } from "./clientRuntime";
 import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import type { DagRunSnapshot } from "./dagTypes";
 import type { DeliveryReceipt, RunTarget } from "./scopedContracts";
-import type { PanelEvent, PanelSnapshot } from "./supervisorPanel/contract";
+import type { PanelEvent, PanelSnapshot, PrLane } from "./supervisorPanel/contract";
 import { emptyPanelSnapshot } from "./supervisorPanel/emptySnapshot";
 export const DEFAULT_TERMINAL_FONT_STACK = 'MesloLGS NF, "Noto Sans KR", monospace';
 import { defaultRemoteClient, getRemoteAuthToken, RemoteClient, type RemotePreferenceTarget } from "./remoteClient";
@@ -579,6 +579,29 @@ export async function getWorktreeDiskScanResult(workspaceId: string): Promise<Di
 export async function getSupervisorPanel(): Promise<PanelSnapshot> {
   if (!isTauri()) return emptyPanelSnapshot();
   return invokeCommand<PanelSnapshot>("cmd_supervisor_panel");
+}
+
+/**
+ * The pull-request lane (`GET supervisor/prs`). The hub orders it; this only carries it. A build
+ * without the command rejects and the panel shows no PR section, rather than an empty one.
+ */
+export async function getSupervisorPrs(): Promise<PrLane> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  return invokeCommand<PrLane>("cmd_supervisor_prs");
+}
+
+/**
+ * Open an agent pane (todo 6's `Spawn`). `requestId` makes the daemon deduplicate a retry, so a
+ * hand-off is never applied twice.
+ */
+export async function spawnAgent(request: {
+  agent: string;
+  cwd: string;
+  prompt?: string;
+  requestId: string;
+}): Promise<unknown> {
+  if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));
+  return invokeCommand<unknown>("cmd_agent_spawn", request);
 }
 
 /**

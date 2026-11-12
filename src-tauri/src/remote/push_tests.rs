@@ -225,6 +225,32 @@ async fn retries_progress_finished_sessions_and_resolved_cards_send_nothing() {
 }
 
 #[tokio::test]
+async fn a_held_push_is_withdrawn_when_its_session_leaves_needs_you() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockPush::start(StatusCode::CREATED).await;
+    subscribed_phone(&state, &mock);
+
+    let t0 = Instant::now();
+    assert_eq!(state.push_decision("mac:s1", "p1", t0).await, 1);
+    assert_eq!(state.push_decision("mac:s2", "p1", t0 + Duration::from_secs(1)).await, 0, "held");
+    assert_eq!(state.push_decision("mac:s3", "p1", t0 + Duration::from_secs(2)).await, 0, "held");
+
+    // The owner acknowledged s2 on another device: its panel.session frame is no longer needsYou.
+    let left = serde_json::json!({"type": "panel.session", "sessionRef": "mac:s2", "session": {
+        "sessionRef": "mac:s2", "state": "blocked",
+        "attention": {"axes": {"demand": "question", "activity": "stopped", "completion": "none",
+                               "read": "read", "ownership": "owner"}, "group": "seen"}}});
+    assert_eq!(state.handle_panel_frame(&left).await, 0);
+
+    assert_eq!(state.flush_decision_batch(t0 + DECISION_BATCH_WINDOW).await, 1);
+    let received = mock.received();
+    assert_eq!(received.len(), 2);
+    let payload = mock.decrypt(&received[1]);
+    assert_eq!(payload["url"], "/?panel=decision&session=mac%3As3", "only the session still waiting pushes");
+}
+
+#[tokio::test]
 async fn a_muted_session_sends_no_push_and_the_mute_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let state = gateway(dir.path());

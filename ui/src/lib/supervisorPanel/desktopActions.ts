@@ -5,6 +5,7 @@ import {
   enableAgentControlOwner,
   isStructuredIpcError,
   setSupervisorPanelPaused,
+  spawnAgent,
   startSupervisor,
   stopSupervisedSession,
   supervisorAnswer,
@@ -13,7 +14,7 @@ import {
 import { setSupervisorLanePaused } from "../supervisor";
 import { extractIpcErrorMessage } from "../sshHosts";
 import { parseConverseReply, STALE_DECISION_MESSAGE, type PanelActionResult, type PanelActions } from "./actions";
-
+import { HAND_OFF_AGENT } from "./prLane";
 /** Tauri rejects an unregistered command with a string naming it. */
 function missingCommand(error: unknown): string | null {
   const text = typeof error === "string" ? error : error instanceof Error ? error.message : "";
@@ -84,6 +85,21 @@ export function desktopPanelActions(input: {
         ),
       ),
     stop: async (sessionRef) => changed(await run(() => stopSupervisedSession(sessionRef), "Couldn't stop that session.")),
+    // A hand-off spawns in the worktree the caller matched; the prompt names the PR. The daemon
+    // refuses an unknown agent or a lineage past its cap, and that refusal is shown as is.
+    handOffPr: async (target) =>
+      changed(
+        await run(
+          () =>
+            spawnAgent({
+              agent: HAND_OFF_AGENT,
+              cwd: target.worktreePath,
+              prompt: target.prompt,
+              requestId: globalThis.crypto.randomUUID(),
+            }),
+          "That pull request didn't reach an agent.",
+        ),
+      ),
     undo: async (actionId) => changed(await run(() => undoSupervisorAction(actionId), "Couldn't undo that.")),
     // Agent control and the hub start share the daemon's owner gate: a connection it cannot
     // tell from a terminal pane is refused FORBIDDEN with the reason, and nothing is started.

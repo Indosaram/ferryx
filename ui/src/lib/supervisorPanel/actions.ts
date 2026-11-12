@@ -45,6 +45,21 @@ export interface PanelActions {
   readonly turnOn: () => Promise<PanelActionResult>;
   /** Focus (desktop) or open (phone) the session's terminal. */
   readonly openSession: (sessionRef: SessionRef) => void;
+  /**
+   * Hand one pull request to an agent in the worktree already on its head branch. Absent when the
+   * surface cannot spawn: the PR row then offers no action rather than a dead one.
+   */
+  readonly handOffPr?: (pr: HandOffTarget) => Promise<PanelActionResult>;
+}
+
+/** What a hand-off names: the PR, and the checkout the agent starts in. */
+export interface HandOffTarget {
+  readonly number: number;
+  readonly headRefName: string;
+  /** The worktree on `headRefName`; without it nothing is spawned. */
+  readonly worktreePath: string;
+  /** The exact text delivered to the new agent. */
+  readonly prompt: string;
 }
 
 export const STALE_DECISION_MESSAGE = "This question changed. Look again.";

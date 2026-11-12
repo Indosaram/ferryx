@@ -77,6 +77,9 @@ export interface AgentStateChangeEventParams extends SessionOwnershipParams {
   previousState?: string;
   nextState?: string;
   newState?: string;
+  /** The daemon's attention group. When present it alone decides the edge. */
+  group?: 'needsYou' | 'unread' | 'working' | 'seen';
+  previousGroup?: 'needsYou' | 'unread' | 'working' | 'seen';
   settings?: NotificationSettings;
 }
 
@@ -314,10 +317,13 @@ export class NotificationCoordinator {
     // same way: fresh unseen attention with highlight + unread. Only same-state repeats dedupe.
     const isAttentionState = next === 'waiting' || next === 'done';
     const wasAttentionState = effectivePrev === 'waiting' || effectivePrev === 'done';
-    const isCompletionEdge =
-      isAttentionState &&
-      effectivePrev !== undefined &&
-      (!wasAttentionState || effectivePrev !== next);
+    // The daemon's group, when known, is the only judge: entering needsYou or unread (or moving
+    // between them) is the edge; the same group again (a reason or screen change) never is.
+    const isCompletionEdge = params.group !== undefined
+      ? (params.group === 'needsYou' || params.group === 'unread') && params.previousGroup !== params.group
+      : isAttentionState &&
+        effectivePrev !== undefined &&
+        (!wasAttentionState || effectivePrev !== next);
 
     if (!isCompletionEdge || params.notificationSuppressed) {
       return params.notificationSuppressed

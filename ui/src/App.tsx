@@ -45,6 +45,7 @@ import { registerBuiltInBrowserLinkOpener, registerWorktreePathOpener } from "./
 import { useGeneralSettings } from "./lib/generalSettings";
 import { NotificationCoordinator, isWindowForegroundFocused } from "./lib/notificationCoordinator";
 import { startSupervisorFeed } from "./lib/supervisor";
+import { startDaemonAttentionFeed } from "./lib/attentionFeed";
 import { usePanelDecisionCount } from "./lib/supervisorPanel/usePanelDecisionCount";
 import { getSetupStatus, setupFinished, setupProjectsFrom } from "./lib/supervisorSetup";
 import { DesktopSupervisorSetupBanner } from "./components/supervisor/DesktopSupervisorSetupBanner";
@@ -220,7 +221,8 @@ import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { describeLadderRow, listShortcutWorktrees } from "./state/shortcutLadder";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
-import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { activityStateOfGroup, groupOf, type AttentionBySessionId } from "./lib/attentionGroup";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
 const DEFAULT_PROJECT: RegisteredProject = { workspaceId: DEFAULT_WORKSPACE_ID, repoRoot: ".", gitRoot: null };
@@ -617,10 +619,11 @@ export function deriveFocusedTerminal(
   workspaceId: string,
   state: WorkspaceState,
   snapshots: ReadonlyArray<readonly [string, WorkspaceState]> = [],
+  attentionBySessionId: AttentionBySessionId = {},
 ): FocusedTerminalPayload | null {
   const attentionInventory = [[workspaceId, state] as const, ...snapshots.filter(([id]) => id !== workspaceId)]
     .flatMap(([id, snapshot]) => {
-      const summaries = selectWorktreeActivitySummaries(snapshot);
+      const summaries = selectWorktreeActivitySummaries(snapshot, attentionBySessionId);
       return snapshot.worktrees.map((worktree) => {
         const activity = summaries[worktree.path];
         const attention: "waiting" | "done" | "working" | null = activity?.hasWaiting ? "waiting"
@@ -634,17 +637,18 @@ export function deriveFocusedTerminal(
     .flatMap(([id, snapshot]) =>
       [snapshot.layout, ...Object.values(snapshot.worktreeLayouts ?? {})].flatMap((ownerLayout) =>
         ownerLayout.tabs.filter(isTerminalTab).flatMap((tab) => [...getTabSessionIds(snapshot, tab.id)].flatMap((sessionId) => {
-          const activity = snapshot.activityBySessionId?.[sessionId];
+          const activity = selectSessionActivity(snapshot, sessionId, attentionBySessionId);
+          const drawn = activity ? activityStateOfGroup(groupOf(activity)) : null;
           const paneSession = snapshot.sessions[sessionId];
           const backendSessionId = publishableBackendSessionId(paneSession?.backendSessionId);
-          if (!backendSessionId || !activity || activity.seen || (activity.state !== "waiting" && activity.state !== "done")) return [];
+          if (!backendSessionId || !activity || (drawn !== "waiting" && drawn !== "done")) return [];
           const panePath = paneSession.worktreePath ?? paneSession.cwd;
           const paneWorktree = panePath ? snapshot.worktrees.find((wt) => wt.path === panePath) : undefined;
           return [{
             backendSessionId,
             workspaceId: id,
             worktreeSlug: (paneWorktree ? worktreeIdentity(paneWorktree) : null)?.slug ?? null,
-            state: activity.state,
+            state: drawn,
             ...(activity.agentType ? { agentType: activity.agentType } : {}),
           }];
         })),
@@ -704,7 +708,9 @@ export function deriveFocusedTerminal(
         ? paneWorktree.branch.replace(/^refs\/heads\//, "")
         : null;
 
-      const activity = sessionId ? state.activityBySessionId?.[sessionId] : undefined;
+      const activity = sessionId ? selectSessionActivity(state, sessionId, attentionBySessionId) : undefined;
+      // The phone draws what the desktop draws: the pane's group, as the state that group shows.
+      const drawnState = activity ? activityStateOfGroup(groupOf(activity)) : null;
       const baseLabel = remoteTabLabel(staticTabLabel(tab));
       const exited = paneSession ? isExitedContinuationSource(paneSession) : false;
       const providerSession = paneSession && exited ? extractNormalizedProviderSession(paneSession) : null;
@@ -713,7 +719,7 @@ export function deriveFocusedTerminal(
       return {
         id: remotePaneId(tab.id, multiPane ? leafId : null),
         label: multiPane ? `${baseLabel} (${index + 1})` : baseLabel,
-        ...(activity && (activity.state === "working" || !activity.seen) ? { activityState: activity.state } : {}),
+        ...(drawnState ? { activityState: drawnState } : {}),
         ...(agentType ? { agentType } : {}),
         ...(paneSlug ? { worktreeSlug: paneSlug } : {}),
         ...(paneLabel ? { worktreeLabel: paneLabel } : {}),
@@ -745,6 +751,9 @@ export function deriveFocusedTerminal(
     terminalTabs,
   };
 }
+
+/** No daemon judgment yet (or a store double without one): every pane uses groupOf's state mapping. */
+const NO_ATTENTION: AttentionBySessionId = {};
 
 function publishableBackendSessionId(id: string | null | undefined): string | undefined {
   if (!id || isStandbyBackendSessionId(id)) return undefined;
@@ -946,6 +955,7 @@ function WorkspaceApp({
     agents,
     tabActivity,
     worktreeActivity,
+    attentionBySessionId = NO_ATTENTION,
     unreadBadgeCount: unreadBadgeCountFromStore,
     activityNotificationTargets,
     markTabUnread,
@@ -1062,6 +1072,8 @@ function WorkspaceApp({
 
   // The supervisor snapshot feeds the setup banner and the panes' supervision; start it once.
   useEffect(() => { void startSupervisorFeed(); }, []);
+  // The daemon's attention groups drive the badge and the agent notifications.
+  useEffect(() => { void startDaemonAttentionFeed(); }, []);
 
   const handleTerminalBell = useCallback((sessionId: string, tabId: string, eventTarget: import("./state/workspaceStore").ActivityNotificationTarget | undefined) => {
     const targets = activityNotificationTargetsRef.current ?? [];
@@ -2366,8 +2378,19 @@ function WorkspaceApp({
   const [pendingNotificationTarget, setPendingNotificationTarget] = useState<NotificationTarget | null>(null);
 
   const focusedTerminalPayload = useMemo(
-    () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots()),
-    [activeProject.workspaceId, state, parkedActivityVersion],
+    () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots(), attentionBySessionId),
+    [activeProject.workspaceId, state, parkedActivityVersion, attentionBySessionId],
+  );
+  // Pane frames and tab dots draw the daemon's group for each pane's session (groupOf).
+  const paneActivityBySessionId = useMemo(
+    () => Object.keys(attentionBySessionId).length === 0
+      ? state.activityBySessionId
+      : Object.fromEntries(Object.keys(state.sessions).flatMap((sessionId) => {
+          const activity = selectSessionActivity(state, sessionId, attentionBySessionId);
+          return activity ? [[sessionId, activity] as const] : [];
+        })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reads only sessions and activity.
+    [state.sessions, state.activityBySessionId, attentionBySessionId],
   );
   const publishedTerminalPayloadKey = useRef<string | null>(null);
   const [focusedTerminalRetry, setFocusedTerminalRetry] = useState(0);
@@ -4803,7 +4826,7 @@ function WorkspaceApp({
             sessions={state.sessions}
             unreadTabIds={state.unreadTabIds}
             activityByTabId={tabActivity}
-            activityBySessionId={state.activityBySessionId}
+            activityBySessionId={paneActivityBySessionId}
             onActivateTab={handleSelectTerminalTab}
             onCloseTab={handleCloseTab}
             onCloseOtherTabs={handleCloseOtherTabs}

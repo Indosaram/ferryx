@@ -36,6 +36,8 @@ ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> 
 ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]
 ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]
 ferryx-cli agents events [--after <seq>] [--host <id>] [--json]
+ferryx-cli agents ack <session> [--host <id>] [--json]
+ferryx-cli agents spawn --agent <id> --cwd <dir> [--parent <session>] [--workspace <id>] [--name <n>] [--prompt <text>] [--command <cmd> [--arg <a>]...] [--request-id <id>] [--host <id>] [--json]
 ```
 
 - `list` returns `{"sessions":[...]}`. Each session has `sessionId`, `running`, `cwd`, `agent`,
@@ -58,6 +60,21 @@ ferryx-cli agents events [--after <seq>] [--host <id>] [--json]
 - `events` replays state changes after `--after <seq>` as `{"gap":false,"events":[...],
   "afterSequence":N}`. Keep `afterSequence` as your next cursor. `"gap":true` means your cursor
   fell out of the log: you get a `snapshot` of every session's latest reading instead.
+- `ack` marks the session's current prompt or finished turn as seen on every device. It never
+  answers the prompt. Each event carries `read`; a new prompt or a new finished turn is unread
+  again. SSH and remote-helper panes refuse it with `UNSUPPORTED`.
+- `spawn` opens a new agent pane running `--agent` (a registry id such as `claude` or `codex`)
+  in `--cwd`. With `--parent <session>` (usually your own pane's session id) the new pane is
+  that pane's child: it takes the parent's workspace and worktree and opens beside it on the
+  desktop. Without `--parent`, `--workspace` is required. `--prompt` is typed into the new pane
+  once it first reads idle. `--command`/`--arg` override the launch; otherwise the agent's own
+  command runs with no arguments. No worktree is ever created. Children nest at most 2 levels
+  deep and a pane may have at most 8 live children; past either limit the spawn is refused with
+  `SPAWN_LIMIT` (exit 4). An unknown agent is `UNSUPPORTED` (exit 4). The reply is
+  `{"session":{"sessionId","agent","parent","depth","name"}}`; reuse `--request-id` to retry
+  without opening a second pane.
+- `list` and `read` entries also carry `parent` (the spawning pane, or null), `depth` (0 for a
+  pane you opened yourself) and `ownership` (`owner` or `delegated`).
 
 `send`, `answer` and `stop` type into a pane. Give them a `--request-id` of your own and, on a
 timeout or `OPERATION_OUTCOME_UNKNOWN`, retry with the same id; never retry with a new id, or
@@ -70,7 +87,7 @@ the input may be typed twice.
 | 0 | ok |
 | 2 | invalid request: bad arguments (`INVALID_REQUEST`, `PAYLOAD_TOO_LARGE`) |
 | 3 | not found: no such session, an expired target, or no Ferryx daemon running (`NOT_FOUND`, `TARGET_EXPIRED`) |
-| 4 | refused (`UNAUTHORIZED`, `FORBIDDEN`, `CONTROL_CONFLICT`, `REQUEST_CONFLICT`, `PROVIDER_OWNED`, `UNSUPPORTED`, `CAPTURE_UNSUPPORTED`) |
+| 4 | refused (`UNAUTHORIZED`, `FORBIDDEN`, `CONTROL_CONFLICT`, `REQUEST_CONFLICT`, `PROVIDER_OWNED`, `UNSUPPORTED`, `CAPTURE_UNSUPPORTED`, `SPAWN_LIMIT`) |
 | 5 | anything else, including an unknown outcome (`OPERATION_OUTCOME_UNKNOWN`, `TIMEOUT`, `INTERNAL`) |
 
 ## Report your own status: OSC 7501
