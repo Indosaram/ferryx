@@ -18,7 +18,7 @@
 // daemon. Teardown kills only pids it recorded (re-checked by executable path and start time),
 // removes only jobs named ferryx-qa-<runId>*, and only its own run dir.
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -47,6 +47,13 @@ import { recoverOwnerAfterException, invalidateOwnerState } from './scenarios/co
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '../../..');
+/**
+ * Where evidence lands. Kept separate from HOSTS.mac so the mac lane can target a remote Mac.
+ * When the lane runs inside its target host (transport: local), the controller path does not exist
+ * there, so FERRYX_QA_EVIDENCE_ROOT overrides it with a host-local directory to copy back from.
+ */
+const CONTROLLER_EVIDENCE_ROOT = process.env.FERRYX_QA_EVIDENCE_ROOT
+  ?? '/Volumes/T9-Mac/project/ferryx-wt/.evidence/daemon-independent-lifetime-20261017';
 export const RUNNERS = Object.freeze({ ...g1, Q03b, ...g2, ...g3, ...g4, Q14: g5.Q14 });
 
 const syncExec = (cmd, args) => {
@@ -57,9 +64,78 @@ const syncExec = (cmd, args) => {
 };
 
 /** todo 13 on a QA bundle: nested signed helper, then inside-out ad-hoc re-seal, no notarization. */
+/**
+ * Entitlements for the ad-hoc QA bundle. A QA build signs with identity '-' and therefore has no Team ID,
+ * while Contents/Frameworks carries the FFmpeg dylibs. Under the hardened runtime the library-validation
+ * check then rejects them at dyld time ("mapping process and mapped file have different Team IDs").
+ * A release signs every Mach-O with one Developer ID, so it never needs this; the QA bundle does.
+ */
+function writeMacQaEntitlements(entitlements, workspaceDir) {
+  const text = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
+`;
+  const target = entitlements ?? joinFor('mac', workspaceDir, 'qa-entitlements.plist');
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, text);
+  return target;
+}
+
 export function signMacQaBundle({ appPath, entitlements, workspaceDir, exec = syncExec }) {
-  const helper = assembleDaemonHelper({ appPath, identity: '-', entitlements, exec });
-  const sealed = finalizeMacosBundle({ appPath, workspaceDir, signingIdentity: '-', approveNotarization: false, entitlements, exec });
+  // bundle.macOS.frameworks copies the FFmpeg dylibs into Contents/Frameworks, but the ad-hoc QA build
+  // does not sign them. Sealing the app while they are unsigned fails with
+  // "code object is not signed at all / In subcomponent: .../Frameworks/libavutil.61.dylib",
+  // so sign the frameworks before any nested bundle is sealed (inside-out order).
+  const qaEntitlements = writeMacQaEntitlements(entitlements, workspaceDir);
+  const frameworksDir = joinFor('mac', appPath, 'Contents', 'Frameworks');
+  if (existsSync(frameworksDir)) {
+    for (const name of readdirSync(frameworksDir).sort()) {
+      const dylib = joinFor('mac', frameworksDir, name);
+      exec('codesign', ['--force', '--options', 'runtime', '--sign', '-', '--entitlements', qaEntitlements, dylib]);
+    }
+  }
+  const helper = assembleDaemonHelper({ appPath, identity: '-', entitlements: qaEntitlements, exec });
+  const sealed = finalizeMacosBundle({ appPath, workspaceDir, signingIdentity: '-', approveNotarization: false, entitlements: qaEntitlements, exec });
+  // finalizeMacosBundle signs with '--options runtime'. This bundle is ad-hoc signed (identity '-', no Team ID)
+  // and is never distributed, so hardened runtime only buys a dyld rejection:
+  // "mapping process and mapped file have different Team IDs" for the copied FFmpeg dylibs.
+  // Re-seal inside-out without the hardened-runtime flag; library validation is not applied then.
+  const stripRuntime = (target) => exec('codesign', ['--force', '--sign', '-', target]);
+  if (existsSync(frameworksDir)) {
+    for (const name of readdirSync(frameworksDir).sort()) stripRuntime(joinFor('mac', frameworksDir, name));
+  }
+  // Contents/Helpers holds the daemon helper .app and MUST stay signed, or launchd refuses to exec it.
+  // The SSH remote-helper that IS integrity-checked (sha256 + byte_length against
+  // resources/helpers/manifest.json) lives in Contents/Resources/helpers/<triple>/ and is left untouched
+  // by this function: re-signing it changed its length (measured 1590640 -> 1581520) and broke Q08.
+  const helpersDir = joinFor('mac', appPath, 'Contents', 'Helpers');
+  if (existsSync(helpersDir)) {
+    for (const name of readdirSync(helpersDir).sort()) {
+      if (!name.endsWith('.app')) continue;
+      const nested = joinFor('mac', helpersDir, name);
+      const nestedMacos = joinFor('mac', nested, 'Contents', 'MacOS');
+      if (existsSync(nestedMacos)) {
+        for (const exe of readdirSync(nestedMacos).sort()) stripRuntime(joinFor('mac', nestedMacos, exe));
+      }
+      stripRuntime(nested);
+    }
+  }
+  // The main executable name comes from Info.plist (CFBundleExecutable), not from the .app directory name.
+  const macosDir = joinFor('mac', appPath, 'Contents', 'MacOS');
+  if (existsSync(macosDir)) {
+    const plist = exec('plutil', ['-extract', 'CFBundleExecutable', 'raw', joinFor('mac', appPath, 'Contents', 'Info.plist')]);
+    const exeName = String(plist.stdout ?? '').trim();
+    if (exeName) {
+      const mainExe = joinFor('mac', macosDir, exeName);
+      if (existsSync(mainExe)) stripRuntime(mainExe);
+    }
+  }
+  stripRuntime(appPath);
   return { helper, sealed };
 }
 
@@ -81,6 +157,7 @@ export function parseArgs(argv) {
     else if (a === '--baseline-worktree') out.baselineWorktree = argv[++i];
     else if (a === '--worktree-slug') out.worktreeSlug = argv[++i];
     else if (a === '--fault') out.fault = argv[++i];
+    else if (a === '--keep-run-dir') out.keepRunDir = true;
     else throw new Error(`unknown argument ${a}`);
   }
   if (!['mac', 'linux', 'windows'].includes(out.platform)) throw new Error('--platform mac|linux|windows is required');
@@ -340,7 +417,7 @@ export function daemonLogFile(platform, layout) {
  * teardown.errors (and as a leftover, so the run is never clean) and does not stop later steps;
  * the run dirs are removed only when nothing is left behind and no step failed.
  */
-export async function teardownRun({ summary, agent, jobs, host, layout, runDirs, qaRoots, localEvidence, prodSnapshot, extra = [] }) {
+export async function teardownRun({ summary, agent, jobs, host, layout, runDirs, qaRoots, localEvidence, prodSnapshot, extra = [], keepRunDir = false }) {
   const errors = [];
   const step = async (name, fn) => {
     try { await fn(); } catch (error) { errors.push({ step: name, error: String(error?.message ?? error) }); }
@@ -408,7 +485,9 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
       ...(await agent.call('table')).filter((r) => r.executable && qaRoots.some((root) => r.executable.toLowerCase().startsWith(root.toLowerCase()))).map((r) => ({ kind: 'process', pid: r.pid, executable: r.executable })),
     ];
   });
-  if (summary.teardown.leftovers.length === 0 && errors.length === 0) {
+  // A run kept for inspection (--keep-run-dir) leaves its directory: the failing GUI's data dir,
+  // its logs and its seeded session files are the only record of what the product did.
+  if (!keepRunDir && summary.teardown.leftovers.length === 0 && errors.length === 0) {
     await step('remove-run-dirs', async () => {
       for (const dir of runDirs) {
         await agent.call('remove', { target: dir });
@@ -441,7 +520,7 @@ async function main() {
   const runDirs = [...new Set([runDir, runtimeRunDir])];
   const layout = isolationLayout(runDir, host.platform, runDir === runtimeRunDir ? {} : { runtimeDir: joinFor(host.platform, runtimeRunDir, 'run') });
   // Evidence always lands on this Mac: <evidenceRoot>/q12-<platform>/<runId>.
-  const localEvidence = opts.evidenceDir ?? path.join(hostFor('mac').evidenceRoot, `q12-${host.platform}`, runId);
+  const localEvidence = opts.evidenceDir ?? path.join(CONTROLLER_EVIDENCE_ROOT, `q12-${host.platform}`, runId);
   mkdirSync(localEvidence, { recursive: true });
   const summary = newSummary({ runId, platform: host.platform, host: host.name });
   const summaryPath = path.join(localEvidence, 'summary.json');
@@ -495,7 +574,7 @@ async function main() {
   const live = { selfTest: null, mahord: null };
   const work = async () => {
     for (const dir of Object.values(layout)) await agent.call('mkdir', { dir, mode: 0o700 });
-    await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId), null, 2) });
+    await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId, host.platform), null, 2) });
     const worktree = host.transport.kind === 'local' ? REPO : worktreePaths(host, opts.worktreeSlug).worktree;
     const remoteGit = async (dir) => ({ dir, head: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'rev-parse', 'HEAD'] })).stdout.trim(), dirty: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'status', '--porcelain', '--untracked-files=no'] })).stdout.trim().split('\n').filter(Boolean) });
     summary.revisions.buildTree = await remoteGit(worktree);
@@ -509,7 +588,7 @@ async function main() {
     } }) : null;
     const buildFrom = selfTest ? selfTest.worktree : worktree;
     const plan = buildPlan({ host, runDir, worktree: buildFrom, v1Worktree: opts.v1Worktree, baselineWorktree: opts.baselineWorktree });
-    const productName = tauriQaConfig(runId).productName;
+    const productName = tauriQaConfig(runId, host.platform).productName;
     const artifacts = {};
     const keys = {};
     const version = (await agent.call('exec', { command: 'git', args: ['-C', buildFrom, 'show', 'HEAD:src-tauri/Cargo.toml'] })).stdout.match(/^version = "([^"]+)"/m)?.[1];
@@ -630,7 +709,7 @@ async function main() {
 
   await runWithTeardown({
     summary, work, writeSummary, log, stop: () => agent.stop(),
-    teardown: () => teardownRun({ summary, agent, jobs, host, layout, runDirs, qaRoots, localEvidence, prodSnapshot, extra: teardownExtras(live, summary) }),
+    teardown: () => teardownRun({ summary, agent, jobs, host, layout, runDirs, qaRoots, localEvidence, prodSnapshot, keepRunDir: opts.keepRunDir, extra: teardownExtras(live, summary) }),
   });
   summary.finishedAt = new Date().toISOString();
   summary.exitCode = computeExitCode(summary, selected);

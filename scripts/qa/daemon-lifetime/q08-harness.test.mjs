@@ -206,6 +206,33 @@ test('rerun2 abort-after-adopt: a fault variant targets a generation that is nei
   assert.equal((await faultTarget(ctx, { hello: { generation_key: 'KB' } }, ctx.artifacts.B)).name, 'A');
 });
 
+test('rerun2i abort-after-adopt: a generation whose staged executable is not on disk is skipped', async () => {
+  // validate_staged_executable (handover_request.rs) refuses RequestUpgrade with BAD_REQUEST when
+  // the staged executable does not exist, so the fault variant saw "candidate never admitted" and
+  // two assertions failed although the product kept the predecessor as owner (run 20261108t222622z).
+  const onDisk = new Set(['KB']);
+  const ctx = {
+    platform: 'mac', stagedRoot: '/staged', keys: { A: 'KA', B: 'KB', C: 'KC' },
+    artifacts: { A: { name: 'A' }, B: { name: 'B' }, C: { name: 'C' } },
+    // stagedExecutable is /staged/<KEY>/<...>: split('/') yields the leading empty segment, so the
+    // key sits at index 2 (index 1 is the literal "staged").
+    agent: { call: async (method, params) => { assert.equal(method, 'exists'); return onDisk.has(params.file.split('/')[2]); } },
+    jobs: { inspect: async () => ({ state: 'inactive' }) },
+  };
+  // A's directory may exist before its executable lands. The owner generation is C, so the loop
+  // must walk past the owner, skip the unstaged A, and settle on the staged B.
+  assert.equal((await faultTarget(ctx, { hello: { generation_key: 'KC' } }, ctx.artifacts.C)).name, 'B');
+  // The artifact this call was asked for is staged by upgradeStep itself before RequestUpgrade, so
+  // it is accepted without a file already on disk (run 20261109t090549z: Q03b only ever upgrades
+  // to B, and demanding a pre-staged B rejected the first use of the generation).
+  assert.equal((await faultTarget(ctx, { hello: { generation_key: 'KB' } }, ctx.artifacts.A, { attempts: 1, intervalMs: 1 })).name, 'A');
+  // Nothing staged at all is still a loud failure, not a silent wrong target: every candidate is
+  // unstaged and a Running job would be refused, so the loop must exhaust and throw.
+  onDisk.clear();
+  const busy = { ...ctx, jobs: { inspect: async () => ({ state: 'Running' }) } };
+  await assert.rejects(() => faultTarget(busy, { hello: { generation_key: 'KC' } }, busy.artifacts.C, { attempts: 2, intervalMs: 1 }), /faultTarget: no generation/);
+});
+
 test('rerun2c Q08b (Unix): the old owner is probed and seeded before any HEAD GUI launches', async () => {
   // A HEAD GUI upgrades a protocol-6 owner on its own (update_pending::resolve_mismatch), so in
   // rerun2c the mismatch probe and control Hello ran after the upgrade and met the HEAD owner.
@@ -312,10 +339,19 @@ test('rerun2h Q08b: a recovered owner must show commit-sent before authority-rec
   assert.equal(commitEvidence({ stages: noCommit, predPid: 1, succPid: 2, guiDriven: true, ownedLine: recoveredLine }).ok, false);
   // commit-sent by another process does not count.
   assert.equal(commitEvidence({ stages: [stage(9, 'commit-sent'), stage(2, 'authority-recovered')], predPid: 1, succPid: 2, guiDriven: true, ownedLine: recoveredLine }).ok, false);
-  // Adopted from a received reply: the v1 predecessor's predecessor-committed is required.
   const adoptedLine = '{"producerPid":2,"stage":"authority-adopted"}';
   assert.equal(commitEvidence({ stages: full, predPid: 1, succPid: 2, guiDriven: true, ownedLine: adoptedLine }).ok, false);
   assert.equal(commitEvidence({ stages: [...full, stage(1, 'predecessor-committed')], predPid: 1, succPid: 2, guiDriven: true, ownedLine: adoptedLine }).ok, true);
+  // Adopted from a received reply, with a predecessor that cannot emit stages at all. The v1 build
+  // 24cbfd25 returns from note_authority_stage as soon as channel.operation_id() is None instead of
+  // scanning the runner's handover-authority arm, so it produced zero stages in run
+  // 20261110t153204z while the candidate produced all five. A HEAD fix for exactly that is already
+  // in place, so a v1 predecessor is never a product failure: the successor's own
+  // commit-sent -> authority-adopted pair is the whole receipt for that step.
+  const adoptedReply = [stage(2, 'candidate-admitted'), stage(2, 'commit-sent'), stage(2, 'authority-adopted')];
+  assert.equal(commitEvidence({ stages: adoptedReply, predPid: 1, succPid: 2, guiDriven: true, ownedLine: adoptedLine }).ok, true);
+  // Still not evidence without the successor's own commit-sent.
+  assert.equal(commitEvidence({ stages: [stage(2, 'authority-adopted')], predPid: 1, succPid: 2, guiDriven: true, ownedLine: adoptedLine }).ok, false);
   // HEAD-to-HEAD: both predecessor receipts, and a recovered line never relaxes that.
   const head = [stage(1, 'predecessor-prepared'), stage(1, 'predecessor-committed')];
   assert.equal(commitEvidence({ stages: head, predPid: 1, succPid: 2, guiDriven: false, ownedLine: adoptedLine }).ok, true);

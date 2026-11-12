@@ -87,7 +87,37 @@ export function createJobs({ host, agent, runId, layout, uid = null }) {
 
   /** Explicit QA job start (Q04b, Q10b). Plain kickstart; never -k. */
   async function start(key) {
-    if (platform === 'mac') return agent.call('exec', { command: 'launchctl', args: ['kickstart', `gui/${uid}/${label(key)}`] });
+    if (platform === 'mac') {
+      const target = `gui/${uid}/${label(key)}`;
+      const before = await inspect(key);
+      // A simulated boot (Q14) is a real launchd session restart: no job of the previous session is
+      // in the domain. `kickstart` of an unregistered label answers 0 and starts nothing, so the
+      // job is bootstrapped from a plist first — what login does — and only then started. A
+      // registered job keeps the plain kickstart path (never -k).
+      if (before.raw?.status !== 0) {
+        // The product's supervisor registers generations under `<base>.<version>-<hash>.plist`, and
+        // the harness keys are exactly those generation keys (run.mjs: keys[name] = generationKey(
+        // version, sha256)), so `label(key)` IS the generation label. A scenario that restarts the
+        // job after a later artifact was built (Q14 runs after Q08 built B and C) must start the
+        // artifact it names, not the newest plist on disk: run 20261109t172617z bootstrapped C's
+        // plist while Q14 expects A, and the owner it waited for never appeared. Prefer the keyed
+        // plist, and only fall back to the newest generation/legacy plist when that file is absent.
+        const candidates = [
+          `${layout.launchAgents}/${label(key)}.plist`,
+          `${layout.launchAgents}/${base}.plist`,
+        ];
+        const listed = await agent.call('exec', { command: 'sh', args: ['-c', 'for f in "$@"; do [ -f "$f" ] && { printf "%s\n" "$f"; exit 0; }; done; ls -t "$1"/*.plist 2>/dev/null | head -1', 'sh', layout.launchAgents, ...candidates] });
+        const plist = String(listed.stdout ?? '').trim().split('\n')[0] || `${layout.launchAgents}/${label(key)}.plist`;
+        const boot = await agent.call('exec', { command: 'launchctl', args: ['bootstrap', `gui/${uid}`, plist] });
+        if (boot.status !== 0) return boot;
+        // The product's generation jobs set RunAtLoad=false, so bootstrap loads without starting
+        // them, and the label to kickstart is the plist's own <version>-<hash> label — not
+        // `<base>.<key>`, which no plist ever declares. Derive it from the file just bootstrapped.
+        const booted = plist.split('/').pop().replace(/\.plist$/, '');
+        return agent.call('exec', { command: 'launchctl', args: ['kickstart', `gui/${uid}/${booted}`] });
+      }
+      return agent.call('exec', { command: 'launchctl', args: ['kickstart', target] });
+    }
     if (platform === 'linux') return agent.call('exec', { command: 'systemctl', args: ['--user', 'start', '--no-block', `${unit(key)}.service`] });
     return agent.call('exec', { command: 'schtasks', args: ['/Run', '/TN', task(key)] });
   }

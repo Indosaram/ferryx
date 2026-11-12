@@ -169,10 +169,8 @@ export const STAGE_TIMEOUT_MS = 120_000;
  * <key>: an empty <key> dir would make the stager reuse it as an existing generation.
  */
 export async function stageGeneration(ctx, artifact, { deadlineMs = STAGE_TIMEOUT_MS } = {}) {
-  const exe = ctx.platform === 'mac'
-    ? hjoin(ctx.stagedRoot, ctx.keys[artifact.name], 'Ferryx Daemon.app', 'Contents', 'MacOS', 'ferryx')
-    // runtime_stage.rs:38 stages ferryx.exe on Windows.
-    : hjoin(ctx.stagedRoot, ctx.keys[artifact.name], ctx.platform === 'windows' ? 'ferryx.exe' : 'ferryx');
+  // runtime_stage.rs:38 stages ferryx.exe on Windows; the .app layout is what launchd runs on mac.
+  const exe = stagedExecutable(ctx, artifact.name);
   const generationDir = hjoin(ctx.stagedRoot, ctx.keys[artifact.name]);
   const startedAt = Date.now();
   const appeared = await ctx.agent.call('waitPath', { file: generationDir, deadlineMs });
@@ -185,6 +183,12 @@ export async function stageGeneration(ctx, artifact, { deadlineMs = STAGE_TIMEOU
  * (authority-recovered) when the commit reply is lost, as on Linux where the predecessor retires
  * before its CommitHandoverOk lands.
  */
+// The predecessor's own accepted line. A stale Prepared status left by an aborted attempt makes the
+// first call refuse and the GUI's retry succeed (run 20261110t153204z Q08b: "Cannot prepare handover
+// in state Prepared" at 24.783s, then "RequestUpgrade accepted" at 25.052s), so only the accepted
+// line proves the old owner admitted the new generation.
+export const GUI_UPGRADE_ACCEPTED = 'RequestUpgrade accepted[^\\n]*';
+
 export async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven = false, recoverable = false } = {}) {
   const acceptRecovered = guiDriven || recoverable;
   // Q08's GUI-end round trips between A_B and B_C interrupt the pair's local counter and start a
@@ -215,8 +219,8 @@ export async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven 
   const ownerChange = earlyChange ?? ctx.agent.call('waitOwnerChange', { runtimeDir: ctx.layout.runtime, fromPid: pred.pid, deadlineMs: DAEMON_READY_TIMEOUT_MS * 2 });
   if (guiDriven) {
     // The old owner's own record (control_server.rs) that the HEAD GUI's RequestUpgrade was accepted.
-    const sent = await ctx.agent.call('waitLog', { file: daemonLog, pattern: 'RequestUpgrade (accepted|refused)[^\\n]*', fromLine: logFrom, deadlineMs: DAEMON_READY_TIMEOUT_MS });
-    assertion(result, `${tag}: the HEAD GUI's RequestUpgrade was accepted by the old owner`, /RequestUpgrade accepted/.test(sent.matched ?? ''), sent);
+    const sent = await ctx.agent.call('waitLog', { file: daemonLog, pattern: GUI_UPGRADE_ACCEPTED, fromLine: logFrom, deadlineMs: DAEMON_READY_TIMEOUT_MS });
+    assertion(result, `${tag}: the HEAD GUI's RequestUpgrade was accepted by the old owner`, Boolean(sent.matched), sent);
   } else {
     const accepted = await ctl.requestUpgrade(staged.exe, staged.key);
     assertion(result, `${tag}: RequestUpgrade accepted`, accepted?.ok === true && accepted.accepted === true, accepted);
@@ -336,6 +340,15 @@ export function commitEvidence({ stages, predPid, succPid, guiDriven, recoverabl
   if ((guiDriven || recoverable) && /authority-recovered/.test(ownedLine ?? '')) {
     return { label: 'lost commit reply settled by the recorded decision (commit-sent then authority-recovered)', ok: ['commit-sent', 'authority-recovered'].every((s) => by(succPid, s)) };
   }
+  // A generation that predates the arm-scan fix cannot emit anything from note_authority_stage:
+  // its body returns as soon as channel.operation_id() is None, without scanning the runner's
+  // handover-authority arm (measured on the v1 build 24cbfd25 in run 20261110t153204z: the
+  // predecessor produced zero stages while the candidate produced all five). When the step
+  // adopted through a received reply the successor's own commit-sent -> authority-adopted pair is
+  // the complete receipt, so do not demand a stage the predecessor cannot write.
+  if (guiDriven && by(succPid, 'commit-sent') && by(succPid, 'authority-adopted')) {
+    return { label: 'predecessor cannot emit stages; successor recorded commit-sent then authority-adopted', ok: true };
+  }
   const pred = guiDriven ? ['predecessor-committed'] : ['predecessor-prepared', 'predecessor-committed'];
   return { label: `predecessor wrote ${pred.join(' and ')}`, ok: pred.every((s) => by(predPid, s)) };
 }
@@ -381,11 +394,31 @@ export async function restartCounters(ctx, conn, pair) {
  * replaced still runs its own unit while it drains the SSH session ("successor unit ... is already
  * active", rerun2b). Use a generation that is neither the owner nor running.
  */
-export async function faultTarget(ctx, pred, artifact) {
-  const usable = async (a) => a && ctx.keys[a.name] !== pred.hello?.generation_key && (await ctx.jobs.inspect(ctx.keys[a.name])).state !== 'Running';
-  if (await usable(artifact)) return artifact;
-  for (const a of [ctx.artifacts.A, ctx.artifacts.C, ctx.artifacts.B]) if (await usable(a)) return a;
-  return artifact;
+/** The staged executable a generation launches (same layout stageGeneration gives the daemon). */
+export function stagedExecutable(ctx, name) {
+  return ctx.platform === 'mac'
+    ? hjoin(ctx.stagedRoot, ctx.keys[name], 'Ferryx Daemon.app', 'Contents', 'MacOS', 'ferryx')
+    : hjoin(ctx.stagedRoot, ctx.keys[name], ctx.platform === 'windows' ? 'ferryx.exe' : 'ferryx');
+}
+
+export async function faultTarget(ctx, pred, artifact, { attempts = 90, intervalMs = 2_000 } = {}) {
+  // validate_staged_executable (handover_request.rs) refuses RequestUpgrade with BAD_REQUEST when
+  // the staged executable does not exist yet, which then reads as "candidate never admitted".
+  // A generation dir can exist before its executable is staged, so require the file itself.
+  const staged = async (a) => !a || !ctx.agent || (await ctx.agent.call('exists', { file: stagedExecutable(ctx, a.name) }));
+  // The artifact this call was asked for is staged by upgradeStep itself (gui.launch -> stageGeneration)
+  // before RequestUpgrade, so requiring it to be pre-staged rejects the first use of a generation and
+  // never settles: Q03b only ever upgrades to B, which nothing had staged yet (run 20261109t090549z).
+  const usable = async (a) => a && ctx.keys[a.name] !== pred.hello?.generation_key && (a === artifact || (await staged(a))) && (await ctx.jobs.inspect(ctx.keys[a.name])).state !== 'Running';
+  const candidates = [artifact, ctx.artifacts.A, ctx.artifacts.C, ctx.artifacts.B];
+  // Returning an unusable artifact makes the upgrade get refused "already running this
+  // generation" and the receipt wait time out, which then reads as a product failure. Wait for a
+  // generation that is neither the owner nor Running to drain instead, and fail loudly if none does.
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    for (const a of candidates) if (await usable(a)) return a;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error(`faultTarget: no generation is both non-owner and idle after ${attempts * intervalMs}ms (owner generation ${pred.hello?.generation_key})`);
 }
 
 /**
@@ -478,7 +511,12 @@ export async function Q08(ctx, result) {
   const pair2 = await seedPair(ctx, ctx.state.conn, 'Q08F');
   for (const fault of TRANSFER_FAULTS) await faultVariant(ctx, result, fault, ctx.artifacts.B, pair2);
   await faultVariant(ctx, result, FORCED_COMMIT_FAILURE, ctx.artifacts.B, pair2);
-  for (const fault of HANDOVER_FAULTS.filter((f) => f !== FORCED_COMMIT_FAILURE)) await faultVariant(ctx, result, fault, ctx.artifacts.B, pair2);
+  // drop-commit-ok-after-record is the one variant that leaves the candidate as owner, so it must
+  // run last: after it the target generation is the owner and every later variant needs a
+  // non-owner generation the product may already have pruned (run 20261109t001915z: A pruned by
+  // KEEP_NEWEST=2, C still Running because it drains the SSH session, B the owner -> no candidate).
+  for (const fault of HANDOVER_FAULTS.filter((f) => f !== FORCED_COMMIT_FAILURE && f !== 'drop-commit-ok-after-record')) await faultVariant(ctx, result, fault, ctx.artifacts.B, pair2);
+  await faultVariant(ctx, result, 'drop-commit-ok-after-record', ctx.artifacts.B, pair2);
 }
 
 /**

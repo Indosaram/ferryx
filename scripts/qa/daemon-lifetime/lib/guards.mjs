@@ -7,8 +7,9 @@
 // where the OS reports it) still match. Nothing here resolves a process by name or pattern.
 
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const QA_PREFIX = 'ferryx-qa-';
 
@@ -45,11 +46,33 @@ export function qaProductName(runId) {
 }
 
 /** The --config overlay Tauri v2 merges over tauri.conf.json for the QA debug bundle. */
-export function tauriQaConfig(runId) {
+/** src-tauri/resources/ffmpeg — the same staged payload a release bundles (see scripts/stage-ffmpeg.mjs). */
+const FFMPEG_RESOURCE_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)), '../../../../src-tauri/resources/ffmpeg',
+);
+
+function macosQaFfmpegFrameworks() {
+  const runtimeDir = path.join(FFMPEG_RESOURCE_DIR, 'runtime');
+  if (!existsSync(runtimeDir)) return [];
+  return readdirSync(runtimeDir)
+    .filter((name) => name.endsWith('.dylib'))
+    .sort()
+    .map((name) => path.join(runtimeDir, name));
+}
+
+export function tauriQaConfig(runId, platform) {
   return {
     identifier: qaBundleIdentifier(runId),
     productName: qaProductName(runId),
     plugins: { updater: { active: false } },
+    // A QA bundle is never distributed, so it must not build updater artifacts: with
+    // createUpdaterArtifacts inherited from the release config, `tauri build` demands
+    // TAURI_SIGNING_PRIVATE_KEY and the QA build dies before any scenario can run.
+    bundle: { createUpdaterArtifacts: false, ...(platform === 'mac' ? { targets: ['app'], macOS: { frameworks: macosQaFfmpegFrameworks() } } : {}) },
+    // QA drives the .app bundle; the DMG step needs a Finder session and is not an artifact this harness consumes.
+    // mac also needs the FFmpeg runtime in Contents/Frameworks (the binary links @executable_path/../Frameworks):
+    // Tauri copies those only from bundle.macOS.frameworks, exactly as scripts/stage-ffmpeg.mjs stages them for
+    // a release. Without it the QA app dies in dyld before the daemon can publish owner.json.
   };
 }
 
@@ -103,9 +126,30 @@ export function forbiddenRoots({ platform, home, uid = null, localAppData = null
   return roots;
 }
 
+function resolveSymlinks(p, platform) {
+  // /tmp is a symlink to /private/tmp on macOS: a process reports the real path while the harness
+  // holds the requested one. Resolve through the deepest existing ancestor so a not-yet-created
+  // child (a run directory about to be made) still lands on the same side as its existing parent.
+  const mod = platform === 'windows' ? path.win32 : path.posix;
+  let head = String(p);
+  const tail = [];
+  for (let depth = 0; depth < 64; depth += 1) {
+    try {
+      const real = realpathSync.native ? realpathSync.native(head) : realpathSync(head);
+      return tail.length ? mod.join(real, ...tail.reverse()) : real;
+    } catch {
+      const parent = mod.dirname(head);
+      if (parent === head) return String(p);
+      tail.push(mod.basename(head));
+      head = parent;
+    }
+  }
+  return String(p);
+}
+
 function norm(p, platform) {
   const mod = platform === 'windows' ? path.win32 : path.posix;
-  const resolved = mod.resolve(String(p));
+  const resolved = mod.resolve(resolveSymlinks(String(p), platform));
   return platform === 'windows' ? resolved.toLowerCase() : resolved;
 }
 
