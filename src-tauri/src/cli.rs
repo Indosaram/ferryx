@@ -6,6 +6,7 @@ pub mod api_catalog;
 pub mod file_cp;
 pub mod billing;
 pub mod direct_trust;
+pub mod join_link;
 pub mod supervisor_engine;
 pub mod supervisor_goal;
 pub mod supervisor_dispatch;
@@ -3199,7 +3200,27 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
     // The process is still single-threaded at this point.
     std::env::remove_var(INSTALL_KEY_ENV);
 
-    let origin = account_cli_origin(command.origin.clone())
+    enroll_and_start_service(key, command.origin, command.email, command.name, command.no_service)
+}
+
+/// `ferryx join` already holds the key, so it never reads stdin or the environment for one:
+/// the link is the credential and the key must stay in memory only.
+pub fn run_up_cli_with_key(
+    key: &str,
+    origin: Option<String>,
+    name: Option<String>,
+) -> Result<UpSummary, UpCliError> {
+    enroll_and_start_service(Some(key.to_string()), origin, None, name, false)
+}
+
+fn enroll_and_start_service(
+    key: Option<String>,
+    origin: Option<String>,
+    email: Option<String>,
+    name: Option<String>,
+    no_service: bool,
+) -> Result<UpSummary, UpCliError> {
+    let origin = account_cli_origin(origin)
         .map_err(|error| UpCliError::usage("ACCOUNT_ORIGIN_INVALID", error.message))?;
 
     // 1. Identity first, so the approval request and the enrollment present the same machine.
@@ -3227,8 +3248,8 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
                 None => {
                     wait_for_machine_approval(
                         &origin,
-                        command.email.as_deref(),
-                        command.name.as_deref(),
+                        email.as_deref(),
+                        name.as_deref(),
                     )
                     .await?
                 }
@@ -3236,7 +3257,7 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
             let record = crate::account::enroll_client::enroll_machine_named(
                 &origin,
                 &enrollment_code,
-                command.name.as_deref(),
+                name.as_deref(),
             )
             .await
             .map_err(|error| up_error_from_enroll(&origin, &error))?;
@@ -3253,7 +3274,7 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
     };
 
     // 5. Keep the daemon running.
-    let service = if command.no_service {
+    let service = if no_service {
         let mut status = service_status(&runtime);
         if status.reason.is_none() {
             status.reason = Some("service install skipped (--no-service)".to_string());
@@ -3265,7 +3286,7 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
 
     // 6. Turn the relay on so the machine is reachable without a desktop. An unsupervised or
     // skipped service gets one endpoint attempt; Relay is then saved for the daemon's boot.
-    let daemon_wait = if service.installed && !command.no_service {
+    let daemon_wait = if service.installed && !no_service {
         RELAY_DAEMON_WAIT
     } else {
         std::time::Duration::ZERO

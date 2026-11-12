@@ -23,6 +23,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "browser",
     "pair",
     "direct-trust",
+    "join",
     "remote",
     "file",
     "api",
@@ -427,6 +428,30 @@ pub const CATALOG: &[Command] = &[
             sub!("revoke", &[arg!("machineId", "string")], &[]),
         ],
         exit_codes: OK_OR_FAILURE,
+    },
+    Command {
+        name: "join",
+        summary: "Join this machine to an account from one link, or mint that link as the owner",
+        output: "text or json (--json)",
+        subcommands: &[
+            sub!(
+                "",
+                &[arg!("link", "string")],
+                &[value!("--name"), JSON],
+            ),
+            sub!(
+                "--create",
+                &[],
+                &[value!("--label"), value!("--ttl"), value!("--origin"), JSON],
+            ),
+        ],
+        exit_codes: &[
+            ("0", "ok"),
+            ("1", "failure (link rejected, account unreachable, or service not installed)"),
+            ("4", "machine request denied"),
+            ("5", "approval request expired"),
+            ("6", "plan limit reached or remote suspended"),
+        ],
     },
     Command {
         name: "remote",

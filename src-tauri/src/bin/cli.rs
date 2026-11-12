@@ -1,5 +1,6 @@
 use ferryx_lib::cli::{
     api_catalog::{run_api_cli, CLI_GROUPS},
+    join_link::{parse_join_cli, run_join_cli},
     parse_account_cli, parse_browser_cli, parse_direct_trust_cli, parse_handover_from,
     parse_launch_mode, parse_open_cli, parse_pair_cli, parse_remote_cli, print_browser_cli_error,
     run_account_cli, run_browser_cli, run_daemon_headless, run_daemon_supervisor,
@@ -110,6 +111,24 @@ fn main() {
     }
     if group == Some("direct-trust") {
         match parse_direct_trust_cli(&args).and_then(run_direct_trust_cli) {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if group == Some("join") {
+        let json = args.iter().any(|arg| arg == "--json");
+        // Keep argv[0] and the group in place; only drop `--json` after them.
+        let mut rest = args[..2.min(args.len())].to_vec();
+        rest.extend(
+            args[2.min(args.len())..]
+                .iter()
+                .filter(|arg| arg.as_str() != "--json")
+                .cloned(),
+        );
+        match parse_join_cli(rest).and_then(|command| run_join_cli(command, json)) {
             Ok(()) => return,
             Err(error) => {
                 eprintln!("{error}");
