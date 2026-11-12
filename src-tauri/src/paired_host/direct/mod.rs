@@ -1,3 +1,4 @@
+pub mod bind;
 pub mod bridge;
 pub mod cert;
 pub mod offer;
@@ -5,6 +6,7 @@ pub mod punch;
 pub mod quic;
 pub mod stun;
 
+pub use bind::*;
 pub use bridge::*;
 pub use cert::*;
 pub use offer::*;
