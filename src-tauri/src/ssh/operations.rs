@@ -28,7 +28,15 @@ pub async fn probe(
     environment.platform.validate_path(path)?;
     let marker = format!("FERRYX_DIR_V2_{}", uuid::Uuid::new_v4().simple());
     let script = project_probe_script(environment.platform, path, &marker);
-    let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    let mut plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    // A master is an optimisation, never a requirement: any failure to establish one keeps the
+    // cold path, and an operation that may already have been dispatched is never replayed.
+    // Held for the whole call: the lease is what keeps this master counted as active, and its
+    // drop is what arms idle expiry once the command has finished.
+    let master = super::master::acquire(host).await.ok().flatten();
+    if let Some(lease) = master.as_ref() {
+        direct::use_master(&mut plan, lease.socket());
+    }
     let output = direct::bounded_output(&plan, Duration::from_secs(12))
         .await
         .map_err(|mut err| {

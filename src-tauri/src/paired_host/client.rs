@@ -1370,6 +1370,7 @@ impl MachineClient {
             machine_id: &host.machine_id,
             attach,
             bearer: &bearer,
+            published_origins: &host.published_origins,
             session_kind: relay_session_kind(ticket_target),
         };
         let mut cancelled = lease.cancellation();
@@ -1617,6 +1618,7 @@ impl MachineClient {
             machine_id: &host.machine_id,
             attach,
             bearer: &bearer,
+            published_origins: &host.published_origins,
             session_kind: crate::remote::relay_server::SessionKind::Http,
         };
         let mut cancellation = lease.cancellation();
@@ -2297,6 +2299,7 @@ pub async fn supervisor_secure_request(
         machine_id: &host.machine_id,
         attach,
         bearer: &bearer,
+        published_origins: &host.published_origins,
         session_kind: crate::remote::relay_server::SessionKind::Http,
     };
     let mut cancellation = lease.cancellation();

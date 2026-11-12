@@ -212,6 +212,66 @@ pub fn direct_candidate(
     })
 }
 
+/// Candidates for one attach attempt: every origin the host published for itself, then the
+/// relay as the guaranteed last resort.
+///
+/// Publication is a routing hint, never an identity credential. Each candidate carries the
+/// machine it is expected to answer for, so a wrong origin is rejected inside its own attempt
+/// while trust itself still comes from the Noise handshake. An origin that is blank after
+/// trimming is dropped rather than raced: it could only cost a failed connect.
+pub fn candidates_for_published(
+    origins: &[super::inventory::PublishedOrigin],
+    relay_origin: &str,
+    machine_id: &str,
+) -> Vec<CandidatePath> {
+    use super::inventory::PublishedOriginKind;
+    let expected = || Some(machine_id.to_string());
+    let now_ms = super::direct_wire::unix_now_ms();
+    let mut candidates: Vec<CandidatePath> = origins
+        .iter()
+        .filter_map(|published| {
+            let origin = published.origin.trim();
+            if origin.is_empty() {
+                return None;
+            }
+            // Freshness and withdrawal are enforced here, before an origin can become a
+            // candidate: a record the host stopped refreshing, or one observed in the future
+            // beyond any plausible clock skew, is dropped rather than raced. The relay still
+            // covers the host, so dropping a stale origin costs reachability, never an attach.
+            if !origin_is_fresh(published.observed_at, now_ms) {
+                return None;
+            }
+            let path = match published.kind {
+                PublishedOriginKind::Lan => AttachPath::Lan,
+                PublishedOriginKind::Tailscale => AttachPath::Tailscale,
+                PublishedOriginKind::Direct => AttachPath::Direct,
+                PublishedOriginKind::SshForward => AttachPath::SshForward,
+            };
+            Some(CandidatePath::with_expected_machine_id(path, origin, None, expected()))
+        })
+        .collect();
+    candidates.push(CandidatePath::with_expected_machine_id(
+        AttachPath::Relay,
+        relay_origin,
+        None,
+        expected(),
+    ));
+    candidates
+}
+
+/// How long a published origin stays usable without being refreshed by the host.
+pub const PUBLISHED_ORIGIN_MAX_AGE_MS: u64 = 10 * 60 * 1000;
+/// Tolerated forward clock skew before an origin is treated as untrustworthy rather than new.
+const PUBLISHED_ORIGIN_CLOCK_SKEW_MS: u64 = 60 * 1000;
+
+/// Whether an origin observed at `observed_at` (epoch milliseconds) may still be dialled.
+fn origin_is_fresh(observed_at: u64, now_ms: u64) -> bool {
+    if observed_at > now_ms.saturating_add(PUBLISHED_ORIGIN_CLOCK_SKEW_MS) {
+        return false;
+    }
+    now_ms.saturating_sub(observed_at) <= PUBLISHED_ORIGIN_MAX_AGE_MS
+}
+
 pub fn resolve_attach_base_origin(
     session_id: &str,
     candidates: &[CandidatePath],
@@ -230,6 +290,67 @@ pub fn resolve_attach_base_origin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_candidate_naming_another_machine_is_rejected_before_it_connects() {
+        let candidate = CandidatePath::with_expected_machine_id(
+            AttachPath::Direct,
+            "http://127.0.0.1:1",
+            None,
+            Some("machine-a".into()),
+        );
+        assert!(super::super::attach::candidate_names_expected_machine_for_test(
+            &candidate,
+            "machine-a"
+        ));
+        assert!(!super::super::attach::candidate_names_expected_machine_for_test(
+            &candidate,
+            "machine-b"
+        ));
+    }
+
+    #[test]
+    fn a_candidate_without_an_identity_claim_is_still_eligible() {
+        let candidate = CandidatePath::new(AttachPath::Relay, "https://relay.test", None);
+        assert!(super::super::attach::candidate_names_expected_machine_for_test(
+            &candidate,
+            "any-machine"
+        ));
+    }
+
+    #[test]
+    fn published_origins_race_before_a_relay_that_is_always_present() {
+        use super::super::inventory::{PublishedOrigin, PublishedOriginKind};
+        let now = super::super::direct_wire::unix_now_ms();
+        let origins = vec![
+            PublishedOrigin {
+                kind: PublishedOriginKind::Lan,
+                origin: "http://192.168.1.9:43821".into(),
+                observed_at: now,
+            },
+            PublishedOrigin {
+                kind: PublishedOriginKind::Tailscale,
+                origin: "   ".into(),
+                observed_at: now,
+            },
+        ];
+        let candidates = candidates_for_published(&origins, "https://relay.test", "machine-a");
+        assert_eq!(candidates.len(), 2, "blank origins must not become candidates");
+        assert_eq!(candidates[0].path, AttachPath::Lan);
+        assert_eq!(candidates[0].base_origin, "http://192.168.1.9:43821");
+        assert_eq!(candidates[1].path, AttachPath::Relay);
+        assert_eq!(candidates[1].base_origin, "https://relay.test");
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.expected_machine_id.as_deref() == Some("machine-a")));
+    }
+
+    #[test]
+    fn a_host_that_publishes_nothing_yields_the_single_relay_candidate() {
+        let candidates = candidates_for_published(&[], "https://relay.test", "machine-a");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, AttachPath::Relay);
+    }
 
     #[test]
     fn path_select_picks_fastest_authenticated() {
@@ -545,5 +666,34 @@ mod tests {
 
         drop(winner);
         assert!(ssh_closed.load(std::sync::atomic::Ordering::SeqCst), "Winning channel closes on drop");
+    }
+
+    /// A withdrawn or stale origin must never be dialled: the host stopped refreshing it, so
+    /// whatever answers there now is not necessarily that host.
+    #[test]
+    fn a_stale_or_future_origin_is_never_turned_into_a_candidate() {
+        use super::super::inventory::{PublishedOrigin, PublishedOriginKind};
+        let now = super::super::direct_wire::unix_now_ms();
+        let origins = vec![
+            PublishedOrigin {
+                kind: PublishedOriginKind::Lan,
+                origin: "http://192.168.1.9:43821".into(),
+                observed_at: now - PUBLISHED_ORIGIN_MAX_AGE_MS - 1,
+            },
+            PublishedOrigin {
+                kind: PublishedOriginKind::Direct,
+                origin: "http://10.0.0.5:43821".into(),
+                observed_at: now + PUBLISHED_ORIGIN_CLOCK_SKEW_MS + 1,
+            },
+            PublishedOrigin {
+                kind: PublishedOriginKind::Tailscale,
+                origin: "http://100.64.0.7:43821".into(),
+                observed_at: now - 1_000,
+            },
+        ];
+        let candidates = candidates_for_published(&origins, "https://relay.test", "machine-a");
+        assert_eq!(candidates.len(), 2, "only the fresh origin and the relay may survive");
+        assert_eq!(candidates[0].path, AttachPath::Tailscale);
+        assert_eq!(candidates[1].path, AttachPath::Relay);
     }
 }

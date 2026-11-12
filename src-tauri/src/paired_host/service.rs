@@ -946,6 +946,8 @@ impl PairedHostService {
             &request.account_session_token.0,
             &request.machine_id,
             &attach,
+            // Pairing runs before this machine has published any origin for the new device.
+            &[],
         )
         .await
         .map_err(client_error)?;
@@ -996,6 +998,7 @@ impl PairedHostService {
                 &exchanged.token.0,
                 &request.machine_id,
                 &attach,
+                &[],
             )
             .await
             .map_err(client_error)?;

@@ -6,9 +6,10 @@
 //! and speaks plain HTTP/1.1 to the machine's loopback gateway inside the encrypted frames.
 //! The relay only ever carries ciphertext. Nothing here touches the direct (LAN) path.
 use super::{
-    attach::{attach_relay_session, RelayAttachedStream},
+    attach::{attach_paired_session_with_candidates, AttachCandidates, RelayAttachedStream},
     client::ClientError,
-    inventory::HostAttach,
+    inventory::{HostAttach, PublishedOrigin},
+    path_select::CandidatePath,
 };
 use crate::remote::attach_crypto::MAX_ATTACH_FRAME;
 use crate::remote::relay_server::SessionKind;
@@ -400,19 +401,28 @@ async fn establish_stream(
     machine_id: &str,
     attach: &HostAttach,
     kind: SessionKind,
+    published_origins: &[PublishedOrigin],
 ) -> Result<RelayAttachedStream, ClientError> {
     let relay_origin = crate::remote::relay_client::live_relay_url(relay_origin).into_owned();
     let dir = client_attach_dir()?;
     tokio::time::timeout(ESTABLISH_TIMEOUT, async {
         let session_id =
             allocate_e2e_session(http, &relay_origin, allocation_bearer, machine_id, kind).await?;
-        let attached = attach_relay_session(
+        // A host that has published nothing keeps today's behaviour exactly: one relay
+        // connection and no single-candidate race. Published origins race against the relay,
+        // which is always appended, so an attach is never stranded without a path.
+        let candidates = (!published_origins.is_empty()).then(|| {
+            super::path_select::candidates_for_published(published_origins, &relay_origin, machine_id)
+        });
+        let paths: &[CandidatePath] = candidates.as_deref().unwrap_or(&[]);
+        let attached = attach_paired_session_with_candidates(
             &relay_origin,
             &session_id,
             machine_id,
             &attach.machine_attach_public_key,
             &attach.enrollment_epoch,
             &dir,
+            AttachCandidates { paths, http_client: Some(http) },
         )
         .await;
         // The origin record only matters while a session is being dialled.
@@ -433,6 +443,7 @@ impl SecureHttpSession {
         allocation_bearer: &str,
         machine_id: &str,
         attach: &HostAttach,
+        published_origins: &[PublishedOrigin],
     ) -> Result<Self, ClientError> {
         establish_stream(
             http,
@@ -441,6 +452,7 @@ impl SecureHttpSession {
             machine_id,
             attach,
             SessionKind::Http,
+            published_origins,
         )
         .await
         .map(|stream| Self { stream })
@@ -495,6 +507,9 @@ pub struct SecureTarget<'a> {
     pub machine_id: &'a str,
     pub attach: &'a HostAttach,
     pub bearer: &'a str,
+    /// Origins the host advertised for itself, raced before the relay is preferred. Empty
+    /// keeps the historical relay-only behaviour.
+    pub published_origins: &'a [PublishedOrigin],
     /// Lifetime class the relay applies to a socket opened on this target.
     pub session_kind: SessionKind,
 }
@@ -536,6 +551,7 @@ pub async fn shared_request(
             target.bearer,
             target.machine_id,
             target.attach,
+            target.published_origins,
         )
     };
     let (mut session, reused) = match guard.take() {
@@ -585,6 +601,7 @@ pub async fn open_secure_websocket(
         target.machine_id,
         target.attach,
         target.session_kind,
+        target.published_origins,
     )
     .await?;
     let (local, gateway) = tokio::io::duplex(256 * 1024);
