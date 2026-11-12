@@ -199,9 +199,6 @@ struct Log {
     /// Stamps a previous daemon run persisted, until this run's first reading of the session
     /// replaces them. Never part of `latest`, `snapshot` or a replay: a seed is not a reading.
     seeds: HashMap<String, SessionStamps>,
-    /// Sessions whose agent stopped working since their last turn began: the `state_since` of
-    /// the reading that ended the turn (Working -> Idle/Unknown). Cleared when it works again.
-    completions: HashMap<String, Option<i64>>,
     /// The read store: per session, the current attention episode and whether it was
     /// acknowledged. Kept apart from drafts so an observer tick never undoes an acknowledgement.
     reads: HashMap<String, ReadMark>,
@@ -354,6 +351,9 @@ fn effective_stamps(log: &Log, session_id: &str) -> Option<SessionStamps> {
         .or_else(|| log.seeds.get(session_id).cloned())
 }
 
+/// The episode-key prefix of a completion, followed by the edge's `state_since`.
+const DONE_EPISODE: &str = "done:";
+
 /// The episode a reading opens, if it opens one: an open prompt is its own episode, and a
 /// `working` -> `idle`/`unknown` edge is a completion keyed by when it happened. Any other
 /// reading continues the current episode.
@@ -367,26 +367,52 @@ fn opened_episode(
     }
     let done = matches!(draft.state, AgentControlState::Idle | AgentControlState::Unknown);
     if done && previous == Some(AgentControlState::Working) {
-        return Some(format!("done:{}", state_since_ms.unwrap_or_default()));
+        return Some(format!("{DONE_EPISODE}{}", state_since_ms.unwrap_or_default()));
     }
     None
 }
 
 /// The read mark `draft` leaves: a new episode starts unread, a continued one keeps its mark.
-/// `ack` marks the resulting episode read.
-fn next_read(log: &Log, draft: &ObservationDraft, state_since_ms: Option<i64>, ack: bool) -> Option<ReadMark> {
+/// `ack` names the episode an acknowledgement saw; it marks the resulting episode read only when
+/// that is still the one, so a prompt that opened in between stays unread.
+fn next_read(
+    log: &Log,
+    draft: &ObservationDraft,
+    state_since_ms: Option<i64>,
+    ack: Option<&Option<String>>,
+) -> Option<ReadMark> {
     let previous = effective_stamps(log, &draft.session_id).map(|seen| seen.state);
     let current = log.reads.get(&draft.session_id);
     let mark = match opened_episode(previous, draft, state_since_ms) {
-        Some(episode) if current.and_then(|mark| mark.episode.as_ref()) != Some(&episode) => {
+        // A done edge always leaves `working`, so it is a new completion even when its time
+        // repeats the last one's; a prompt is new only under a new id.
+        Some(episode)
+            if episode.starts_with(DONE_EPISODE)
+                || current.and_then(|mark| mark.episode.as_ref()) != Some(&episode) =>
+        {
             Some(ReadMark { episode: Some(episode), read: false })
         }
         _ => current.cloned(),
     };
-    if !ack {
-        return mark;
+    let episode = mark.as_ref().and_then(|mark| mark.episode.clone());
+    match ack {
+        Some(acked) if *acked == episode => Some(ReadMark { episode, read: true }),
+        _ => mark,
     }
-    Some(ReadMark { episode: mark.and_then(|mark| mark.episode), read: true })
+}
+
+/// The draft that reproduces `observation`, for re-recording it.
+fn draft_of(observation: &AgentObservation) -> ObservationDraft {
+    ObservationDraft {
+        session_id: observation.session_id.clone(),
+        state: observation.state,
+        state_source: observation.state_source,
+        tier: observation.tier,
+        prompt_id: observation.prompt_id.clone(),
+        kind: observation.kind.clone(),
+        screen_revision: observation.screen_revision.clone(),
+        workspace_id: None,
+    }
 }
 
 impl AgentEventBus {
@@ -405,7 +431,6 @@ impl AgentEventBus {
                 retained: VecDeque::new(),
                 latest: HashMap::new(),
                 seeds: HashMap::new(),
-                completions: HashMap::new(),
                 reads: HashMap::new(),
                 capacity,
             }),
@@ -460,9 +485,15 @@ impl AgentEventBus {
     }
 
     /// The completion episode of the session's last turn: `Some(state_since)` of the reading
-    /// that moved it from working to idle or unknown, until it works again.
+    /// that moved it from working to idle or unknown, until it works again or a prompt opens a
+    /// new episode. Read from the read store, so a completion and its read mark are one episode.
     pub fn completion(&self, session_id: &str) -> Option<Option<i64>> {
-        self.log.lock().completions.get(session_id).copied()
+        let log = self.log.lock();
+        if effective_stamps(&log, session_id).is_some_and(|seen| seen.state == AgentControlState::Working) {
+            return None;
+        }
+        let since = log.reads.get(session_id)?.episode.as_deref()?.strip_prefix(DONE_EPISODE)?;
+        Some(since.parse().ok())
     }
 
     /// Loads the stamps a previous run persisted. Call before the observers start: a seed only
@@ -491,7 +522,7 @@ impl AgentEventBus {
     /// prompt id or a new completion opens an unread episode again. `None` when the session has
     /// no reading yet (the mark is still kept for its first one).
     pub fn acknowledge(&self, session_id: &str) -> Option<AgentObservation> {
-        let latest = {
+        let (latest, episode) = {
             let mut log = self.log.lock();
             let latest = log.latest.get(session_id).cloned();
             if latest.is_none() {
@@ -500,21 +531,12 @@ impl AgentEventBus {
                     .or_insert(ReadMark { episode: None, read: false })
                     .read = true;
             }
-            latest
-        }?;
-        let draft = ObservationDraft {
-            session_id: latest.session_id,
-            state: latest.state,
-            state_source: latest.state_source,
-            tier: latest.tier,
-            prompt_id: latest.prompt_id,
-            kind: latest.kind,
-            screen_revision: latest.screen_revision,
-            workspace_id: None,
+            (latest?, log.reads.get(session_id).and_then(|mark| mark.episode.clone()))
         };
+        let draft = draft_of(&latest);
         let now = (self.now_ms)();
-        let sequence = self.allocate(&draft, now, true);
-        Some(self.record_read(sequence, draft, now, true))
+        let sequence = self.allocate(&draft, now, Some(&episode));
+        Some(self.record_read(sequence, draft, now, Some(&episode)))
     }
 
     /// Installs the receiver of stamp changes (the journal writer). It runs on the publishing
@@ -642,16 +664,28 @@ impl AgentEventBus {
 
     /// Log a reading under a sequence `allocate_sequence` already issued and wake waiters.
     fn record(&self, sequence: u64, draft: ObservationDraft, now: i64) -> AgentObservation {
-        self.record_read(sequence, draft, now, false)
+        self.record_read(sequence, draft, now, None)
     }
 
-    /// [`Self::record`], with `ack` marking the reading's episode read before it is logged, so
-    /// the stamp sink journals the flip.
-    fn record_read(&self, sequence: u64, draft: ObservationDraft, now: i64, ack: bool) -> AgentObservation {
+    /// [`Self::record`], with `ack` (the episode an acknowledgement saw) marking the reading's
+    /// episode read before it is logged, so the stamp sink journals the flip. An acknowledgement
+    /// re-records the session's latest reading as of this lock, never an older copy of it.
+    fn record_read(
+        &self,
+        sequence: u64,
+        mut draft: ObservationDraft,
+        now: i64,
+        ack: Option<&Option<String>>,
+    ) -> AgentObservation {
         let observation;
         let changed_stamps;
         {
             let mut log = self.log.lock();
+            if ack.is_some() {
+                if let Some(latest) = log.latest.get(&draft.session_id) {
+                    draft = draft_of(latest);
+                }
+            }
             let (state_since_ms, screen_changed_at_ms) = stamps(&log, &draft, now);
             let previous = effective_stamps(&log, &draft.session_id);
             let read = next_read(&log, &draft, state_since_ms, ack);
@@ -675,20 +709,6 @@ impl AgentEventBus {
             let current = SessionStamps::of(&observation, read.as_ref());
             changed_stamps = (previous.as_ref() != Some(&current)).then_some(current);
             log.seeds.remove(&observation.session_id);
-            let was_working = log
-                .latest
-                .get(&observation.session_id)
-                .is_some_and(|latest| latest.state == AgentControlState::Working);
-            match observation.state {
-                AgentControlState::Working => {
-                    log.completions.remove(&observation.session_id);
-                }
-                AgentControlState::Idle | AgentControlState::Unknown if was_working => {
-                    log.completions
-                        .insert(observation.session_id.clone(), observation.state_since_ms);
-                }
-                _ => {}
-            }
             log.latest
                 .insert(observation.session_id.clone(), observation.clone());
             log.retained.push_back(observation.clone());
@@ -709,16 +729,20 @@ impl AgentEventBus {
     }
 
     fn allocate_sequence(&self, draft: &ObservationDraft, now: i64) -> u64 {
-        self.allocate(draft, now, false)
+        self.allocate(draft, now, None)
     }
 
-    fn allocate(&self, draft: &ObservationDraft, now: i64, ack: bool) -> u64 {
+    fn allocate(&self, draft: &ObservationDraft, now: i64, ack: Option<&Option<String>>) -> u64 {
         if let Some(events) = self.machine_events.lock().clone() {
-            let (state_since_ms, screen_changed_at_ms, read) = {
+            let (draft, state_since_ms, screen_changed_at_ms, read) = {
                 let log = self.log.lock();
-                let (state_since_ms, screen_changed_at_ms) = stamps(&log, draft, now);
-                let read = next_read(&log, draft, state_since_ms, ack).is_some_and(|mark| mark.read);
-                (state_since_ms, screen_changed_at_ms, read)
+                let draft = match (ack, log.latest.get(&draft.session_id)) {
+                    (Some(_), Some(latest)) => draft_of(latest),
+                    _ => draft.clone(),
+                };
+                let (state_since_ms, screen_changed_at_ms) = stamps(&log, &draft, now);
+                let read = next_read(&log, &draft, state_since_ms, ack).is_some_and(|mark| mark.read);
+                (draft, state_since_ms, screen_changed_at_ms, read)
             };
             return events.publish_sequenced(
                 AGENT_CONTROL_EVENT,
@@ -1445,6 +1469,35 @@ mod tests {
         }
 
         #[test]
+        fn a_prompt_published_while_an_ack_is_in_flight_stays_unread() {
+            // The clock is read after acknowledge's snapshot and before its record, with no lock
+            // held: publishing there is a prompt landing exactly in that gap.
+            let hook: Arc<std::sync::OnceLock<std::sync::Weak<AgentEventBus>>> = Arc::default();
+            let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let clock = {
+                let (hook, armed) = (Arc::clone(&hook), Arc::clone(&armed));
+                move || {
+                    if armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        if let Some(bus) = hook.get().and_then(std::sync::Weak::upgrade) {
+                            bus.publish(prompt("s", "p2"));
+                        }
+                    }
+                    1_000
+                }
+            };
+            let bus = Arc::new(AgentEventBus::with_clock(8, Box::new(clock)));
+            hook.set(Arc::downgrade(&bus)).unwrap();
+            bus.publish(prompt("s", "p1"));
+            armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let acked = bus.acknowledge("s").expect("the session has a reading");
+            assert_eq!(acked.prompt_id.as_deref(), Some("p2"), "the ack re-records the newest reading");
+            assert!(!acked.read, "the prompt that opened during the ack is unread");
+            assert!(!bus.read_state("s"));
+            assert_eq!(bus.latest("s").unwrap().prompt_id.as_deref(), Some("p2"), "no stale copy replaced it");
+            assert!(bus.acknowledge("s").unwrap().read, "a later ack marks it");
+        }
+
+        #[test]
         fn a_read_mark_survives_a_restart_through_the_journaled_stamps() {
             let bus = AgentEventBus::new(8);
             let heard = Arc::new(Mutex::new(None::<SessionStamps>));
@@ -1459,6 +1512,25 @@ mod tests {
             assert!(restarted.read_state("s"));
             assert!(restarted.publish(prompt("s", "p1")).read);
             assert!(!restarted.publish(prompt("s", "p2")).read);
+        }
+
+        #[test]
+        fn an_unread_completion_survives_a_restart_and_a_new_turn_ends_it() {
+            let (bus, clock) = clocked_bus();
+            let heard = Arc::new(Mutex::new(None::<SessionStamps>));
+            let sink_heard = Arc::clone(&heard);
+            bus.set_stamp_sink(Arc::new(move |_, stamps| *sink_heard.lock() = Some(stamps.clone())));
+            bus.publish(draft("s", AgentControlState::Working));
+            clock.store(5_000, std::sync::atomic::Ordering::SeqCst);
+            bus.publish(draft("s", AgentControlState::Idle));
+            assert_eq!(bus.completion("s"), Some(Some(5_000)));
+            let persisted = heard.lock().clone().expect("the completion was journaled");
+            let restarted = AgentEventBus::new(8);
+            restarted.seed_stamps([("s".to_string(), persisted)]);
+            assert_eq!(restarted.completion("s"), Some(Some(5_000)), "a restart keeps the completion");
+            assert!(!restarted.read_state("s"), "and keeps it unread");
+            restarted.publish(draft("s", AgentControlState::Working));
+            assert_eq!(restarted.completion("s"), None, "a new turn ends it");
         }
     }
 
