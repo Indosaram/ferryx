@@ -1482,11 +1482,19 @@ export async function buildHost({
         }
       }
 
-      // Run Tauri bundling now that all universal binaries exist
+      // Run Tauri bundling now that all universal binaries exist.
+      //
+      // Only the .app is requested. finalizeMacosBundle rebuilds the DMG from the
+      // app after signing, notarizing and stapling it (recreateDmgFromApp), so the
+      // bundler's own DMG would be discarded anyway. Asking for it means running
+      // bundle_dmg.sh, which drives Finder over AppleScript to draw the disk-image
+      // window and fails outright over SSH with no GUI session:
+      //   Error failed to bundle project error running bundle_dmg.sh
+      // That killed the whole Darwin build after a 20-minute universal compile.
       execFileSync(
         "bun",
         [
-          "tauri", "build", "--target", "universal-apple-darwin", "--bundles", "app,dmg",
+          "tauri", "build", "--target", "universal-apple-darwin", "--bundles", "app",
           "-c", ffmpeg.overlay,
         ],
         {
@@ -1545,7 +1553,10 @@ export async function buildHost({
       const outerEntitlements = join(workspaceDir, "outer-entitlements.plist");
       assembleDaemonHelper({ appPath, identity: macSigningIdentity, entitlements: outerEntitlements });
       const dmgDir = join(bundleDir, "dmg");
-      let dmgPath = null;
+      // The bundler no longer produces a DMG (see the --bundles app note above), so the
+      // destination is named here and filled in by recreateDmgFromApp inside
+      // finalizeMacosBundle, after the app is signed, notarized and stapled.
+      let dmgPath = join(dmgDir, "Ferryx_universal.dmg");
       if (existsSync(dmgDir)) {
         for (const file of readdirSync(dmgDir)) {
           if (file.endsWith(".dmg")) {
@@ -1554,6 +1565,7 @@ export async function buildHost({
           }
         }
       }
+      mkdirSync(dmgDir, { recursive: true });
 
       finalizeMacosBundle({
         appPath,
