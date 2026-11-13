@@ -745,24 +745,28 @@ $ffmpegPrefix = Join-Path $ffmpegCache "lgpl-$ffmpegKey-win64"
   $vcvars = Join-Path $vsInstall 'VC/Auxiliary/Build/vcvars64.bat'
   # Import the MSVC x64 developer environment into this process so MSYS2 inherits cl.exe/link.exe.
   #
-  # vcvars64.bat re-enters a subshell through %COMSPEC%, and on this host COMSPEC is pwsh.exe,
-  # which cannot run .bat syntax: the call returned exit code 0 having set nothing, leaving
-  # VCINSTALLDIR and WindowsSdkDir empty. ffmpeg-sys-next then died with STATUS_STACK_OVERFLOW
-  # and openssl-src failed under nmake. Force COMSPEC to the real cmd.exe for the import, and
-  # run vcvars through a temporary .bat so no quoting survives the ssh hop.
-  $comspecBackup = $env:COMSPEC
-  $env:COMSPEC = Join-Path $env:SystemRoot 'System32\\cmd.exe'
+  # COMSPEC is pwsh.exe on this host. vcvars64.bat re-enters a subshell through COMSPEC, and
+  # PowerShell cannot run .bat syntax, so the call returned exit code 0 having set nothing:
+  # VCINSTALLDIR, WindowsSdkDir and the MSVC PATH entries all stayed empty. ffmpeg-sys-next
+  # died with STATUS_STACK_OVERFLOW, and openssl-src ran 'nmake depend' against a PATH with no
+  # nmake, failing with exit code 2.
+  #
+  # Setting $env:COMSPEC from PowerShell is not enough: the child cmd.exe comes up with the
+  # machine COMSPEC again, so vcvars still misbehaves. COMSPEC has to be assigned inside the
+  # generated .bat before the call. Measured on maho-win, this form yields
+  # VCINSTALLDIR=...\BuildTools\VC\, WindowsSdkDir=...\Windows Kits\10\, and nmake on PATH.
+  $realCmd = Join-Path $env:SystemRoot 'System32\\cmd.exe'
   $vcImportBat = Join-Path $env:TEMP 'ferryx-vcvars-import.bat'
   Set-Content -LiteralPath $vcImportBat -Encoding ASCII -Value @(
     '@echo off',
-    ('call "' + $vcvars + '"'),
+    ('set "COMSPEC=' + $realCmd + '"'),
+    ('call "' + $vcvars + '" >nul 2>&1'),
     'set'
   )
-  foreach ($line in (& $env:COMSPEC /d /c $vcImportBat)) {
+  foreach ($line in (& $realCmd /d /c $vcImportBat)) {
     if ($line -match '^([^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) }
   }
   Remove-Item -LiteralPath $vcImportBat -Force -ErrorAction SilentlyContinue
-  $env:COMSPEC = $comspecBackup
 
 if (-not (Test-Path -LiteralPath (Join-Path $ffmpegPrefix 'build-receipt.txt'))) {
   Remove-Item -LiteralPath $ffmpegPrefix, "$ffmpegPrefix.build" -Recurse -Force -ErrorAction SilentlyContinue
