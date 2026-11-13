@@ -1181,6 +1181,17 @@ struct NativeTerminalAttachParams {
     deadline: tokio::time::Instant,
 }
 
+/// Whether a pane binding's epoch could honestly have been minted for this attach.
+///
+/// `served` is the epoch of the daemon that served the attach, which owns the sequence space the
+/// resident grid is about to join. `paired` is the paired machine's daemon epoch, `None` for a
+/// local session. Both domains are legitimate and neither can be derived from the other, so a
+/// binding is accepted when it matches either one. Anything else came from an unrelated daemon or
+/// PTY lifetime and is still refused.
+fn binding_epoch_is_honest(bound: &str, served: &str, paired: Option<&str>) -> bool {
+    bound == served || paired == Some(bound)
+}
+
 async fn native_terminal_attach<R: Runtime>(
     app: AppHandle<R>,
     daemon_client: State<'_, Arc<DaemonClient>>,
@@ -1260,9 +1271,46 @@ async fn native_terminal_attach<R: Runtime>(
                 attachment = daemon_client.attach(&session_id, None).await?;
             }
         }
-        if attach_tuple.as_ref().is_some_and(|tuple| tuple.daemon_epoch != attachment.epoch.to_string()) {
-            attachment.stream_task.abort();
-            return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id.clone())));
+        // A pane binding and the attach answer can carry epochs from two different domains, and
+        // both are legitimate: `attachment.epoch` is the epoch of the daemon that served this
+        // attach (the sequence space the resident grid will live in), while a paired proxy binding
+        // carries the paired machine's daemon epoch, which is the value `retry_owned`, the remote
+        // status payload and the host's own target validation all speak. Comparing the binding
+        // against the served epoch alone rejected every paired pane, because its binding can never
+        // hold the local value. The guard stays a guard: a binding must match one of the two epochs
+        // it could honestly have been minted with, so a binding from an unrelated daemon or PTY
+        // lifetime is still refused.
+        if let Some(tuple) = attach_tuple.as_ref() {
+            let served_epoch = attachment.epoch.to_string();
+            let paired_epoch = if session_id.starts_with("daemon-session:") {
+                daemon_client
+                    .paired_terminal_descriptor(session_id.clone())
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|descriptor| descriptor.target.daemon_epoch.0.to_string())
+            } else {
+                None
+            };
+            if !binding_epoch_is_honest(&tuple.daemon_epoch, &served_epoch, paired_epoch.as_deref()) {
+                attachment.stream_task.abort();
+                tracing::warn!(
+                    session_id,
+                    bound_epoch = %tuple.daemon_epoch,
+                    served_epoch = %served_epoch,
+                    paired_epoch = ?paired_epoch,
+                    "native terminal attach rejected: bound epoch matches neither the serving daemon nor the paired target"
+                );
+                return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id.clone())));
+            }
+            if tuple.daemon_epoch != served_epoch {
+                tracing::debug!(
+                    session_id,
+                    bound_epoch = %tuple.daemon_epoch,
+                    served_epoch = %served_epoch,
+                    "paired pane binding keeps its target epoch; the resident grid adopts the served one"
+                );
+            }
         }
         if let Err(err) = state.attach_daemon_attachment_with_bounds_client_and_token(
             &session_id,
@@ -4038,6 +4086,22 @@ fn into_bound_ipc_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_epoch_is_honest_accepts_either_domain_and_refuses_a_foreign_one() {
+        // A local session: the binding must hold the serving daemon's epoch, and there is no
+        // paired domain to fall back on.
+        assert!(binding_epoch_is_honest("1794525374973", "1794525374973", None));
+        assert!(!binding_epoch_is_honest("4", "1794525374973", None));
+
+        // A paired session: the binding holds the paired machine's daemon epoch, which can never
+        // equal the local served epoch. This is the case that rejected every paired pane.
+        assert!(binding_epoch_is_honest("1794525374973", "1794525370001", Some("1794525374973")));
+        // The fence stays a fence: the host's credential generation is not a daemon epoch.
+        assert!(!binding_epoch_is_honest("4", "1794525370001", Some("1794525374973")));
+        // A truly local attach into a paired session is still honoured by its served epoch.
+        assert!(binding_epoch_is_honest("1794525370001", "1794525370001", Some("1794525374973")));
+    }
 
     #[tokio::test]
     async fn native_attach_reports_renderer_unavailable_when_no_gpu_adapter_exists() {

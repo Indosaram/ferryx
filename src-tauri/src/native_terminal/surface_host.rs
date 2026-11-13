@@ -3562,6 +3562,39 @@ mod pane_liveness_native_binding_tests {
     }
 
     #[tokio::test]
+    async fn warm_reattach_accepts_a_paired_binding_whose_epoch_is_the_target_machine_epoch() {
+        // A paired binding holds its target machine's daemon epoch, which never equals the epoch
+        // of the daemon that serves the attach. The warm path must still be warm: falling through
+        // to a full attach on every visibility toggle would re-attach the daemon and rebuild the
+        // grid for a pane that never changed.
+        let state = super::NativeTerminalSurfaceHostState::default();
+        let mut active = tuple();
+        active.daemon_epoch = "1794525374973".into();
+        let id = &active.backend_session_id;
+        state.attach_test_session_for_liveness(id, 7, None).unwrap();
+        let token = state.begin_replay_request_with_tuple(id, Some(active.clone())).unwrap();
+        let (offer, _output) = resident_offer(id, 7, 1, 2, b"warm\r\n");
+        state
+            .attach_daemon_attachment_with_client_and_token::<tauri::test::MockRuntime>(
+                id, offer, None, None, Some(token),
+            )
+            .unwrap();
+        let handle = state.test_session(id);
+        {
+            // The served epoch is what the resident grid lives in.
+            let session = handle.lock();
+            assert_eq!(session.daemon_epoch, 7);
+        }
+
+        // Re-offering the very same binding takes the warm path instead of re-attaching.
+        let reattached = state
+            .reattach_existing_session_with_bounds_and_tuple(id, None, Some(&active))
+            .expect("warm reattach must not be refused");
+        assert!(reattached, "a live session with its own binding must reattach warm");
+        state.teardown();
+    }
+
+    #[tokio::test]
     async fn reattach_with_gap_preserves_pre_gap_scrollback() {
         let state = super::NativeTerminalSurfaceHostState::default();
         let active = tuple();
@@ -4447,7 +4480,14 @@ impl NativeTerminalSurfaceHostState {
                 emit_stale_registration_rejected_qa(session_id, None, tuple);
                 return Err(NativeTerminalError::SessionDetached(session_id.to_string()));
             }
-            if tuple.daemon_epoch != session.daemon_epoch.to_string() {
+            // A paired binding carries its target machine's epoch, which is never this daemon's
+            // served epoch, so an equality test alone would drop every paired pane out of the
+            // warm reattach fast path and re-attach the daemon on each visibility toggle. The
+            // binding already installed is proof enough: it is the same tuple, so the grid it
+            // describes is the grid this session already holds.
+            if tuple.daemon_epoch != session.daemon_epoch.to_string()
+                && session.active_attach_tuple.as_ref() != Some(tuple)
+            {
                 return Ok(false);
             }
             if session.active_attach_tuple.as_ref() != Some(tuple) {

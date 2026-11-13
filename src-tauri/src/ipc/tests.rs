@@ -1390,6 +1390,40 @@ async fn remote_terminal_spawn_admits_only_agent_resume_as_explicit_startup() {
 }
 
 #[test]
+fn paired_spawn_reports_the_remote_daemon_epoch_not_the_credential_generation() {
+    use crate::remote::machine_protocol as m;
+    use crate::scoped_contracts::Epoch;
+
+    let remote_session = m::Session {
+        title: None,
+        agent_type: None,
+        target: m::RemoteTerminalTarget {
+            machine_id: "4fa4ca2f-c9d9-47a2-a0f5-9b4f14ce162b".into(),
+            // The paired machine's daemon epoch: a millisecond timestamp.
+            daemon_epoch: Epoch(1794525374973),
+            session_id: "7c1099ca-remote".into(),
+        },
+        workspace_id: "ws".into(),
+        worktree: None,
+        cwd: "/srv/repo".into(),
+        cols: 80,
+        rows: 24,
+        running: true,
+        provider_session: None,
+        start_sequence: Epoch(0),
+        end_sequence: Epoch(0),
+        pid: None,
+    };
+
+    // The credential generation (what `host.generation.0` held, e.g. 4) is not a daemon epoch.
+    assert_eq!(
+        crate::ipc::terminal::paired_spawn_epoch(&remote_session),
+        1794525374973,
+        "a paired spawn must report the remote target's daemon epoch"
+    );
+}
+
+#[test]
 fn paired_machine_worktree_spawn_target_resolution() {
     use crate::ipc::terminal::{
         effective_paired_repo_root, infer_worktree_slug, resolve_paired_spawn_target,
@@ -3586,6 +3620,119 @@ async fn test_p13_attach_routes_through_descriptor_and_reinstalls_proxy() {
         proxy_attached.load(Ordering::SeqCst),
         "proxy session must be attached"
     );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_p13_paired_attach_keeps_the_target_epoch_on_the_binding_and_reports_the_served_one() {
+    use crate::daemon::protocol::{DaemonRequest, DaemonResponse, DAEMON_PROTOCOL_VERSION};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    // The two epochs are different values on purpose: a paired binding carries the paired
+    // machine's daemon epoch, while the attach is served by this daemon under its own epoch.
+    const TARGET_EPOCH: u64 = 1794525374973;
+    const SERVED_EPOCH: u64 = 7;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("p13_paired_epoch.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let req: DaemonRequest = match serde_json::from_str(line.trim()) {
+                        Ok(r) => r,
+                        Err(_) => { line.clear(); continue; }
+                    };
+                    line.clear();
+                    let resp = match req {
+                        DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                            version: DAEMON_PROTOCOL_VERSION,
+                            pid: std::process::id(),
+                            epoch: SERVED_EPOCH,
+                            binary_path: None,
+                            binary_mtime_ms: None,
+                            daemon_version: None,
+                            capabilities: Vec::new(),
+                            admission_time_unix_ms: None,
+                        },
+                        DaemonRequest::DescribeSession { session_id } => {
+                            let mut session = crate::daemon::protocol::DaemonSessionDetails::new(
+                                crate::daemon::protocol::DaemonSessionDetailsParams {
+                                    session_id: session_id.clone(),
+                                    workspace_id: None, worktree: None, cwd: None,
+                                    cols: 80, rows: 24, running: true,
+                                    start_sequence: Some(0), end_sequence: Some(1),
+                                    last_output_age_ms: None, suspended: false,
+                                });
+                            session.incarnation = Some(P13_PROXY_INCARNATION.into());
+                            DaemonResponse::DescribeSessionOk { session, daemon_epoch: None }
+                        }
+                        DaemonRequest::Attach { session_id, .. } => DaemonResponse::AttachOk {
+                            epoch: SERVED_EPOCH,
+                            session_id,
+                            start_sequence: Some(0),
+                            end_sequence: Some(1),
+                            gap: None,
+                            history: bytes::Bytes::from(b"paired history\n".to_vec()),
+                            pty_cols: Some(80),
+                            pty_rows: Some(24),
+                            history_segments: vec![],
+                            remote_generation: None,
+                        },
+                        _ => DaemonResponse::Error {
+                            message: "unexpected req".into(), code: None, details: None,
+                        },
+                    };
+                    let bytes = serde_json::to_vec(&resp).unwrap();
+                    let _ = write.write_all(&bytes).await;
+                    let _ = write.write_all(b"\n").await;
+                    let _ = write.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = Arc::new(DaemonClient::new_with_socket(socket));
+    let app = tauri::test::mock_builder()
+        .manage(client.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    let client_state = app.state::<Arc<DaemonClient>>();
+
+    let binding = crate::daemon::protocol::PaneAttachTuple {
+        backend_session_id: P13_PROXY_SESSION_ID.into(),
+        incarnation: Some(P13_PROXY_INCARNATION.into()),
+        daemon_epoch: TARGET_EPOCH.to_string(),
+        frontend_session_id: "p13-paired-frontend".into(),
+        pane_identity: "p13-paired-pane".into(),
+        binding_key: "p13-paired-binding".into(),
+        attempt_generation: 1,
+    };
+
+    let res = cmd_terminal_attach(
+        app.handle().clone(), client_state, P13_PROXY_SESSION_ID.into(),
+        None, None, Some(binding),
+    ).await.expect("paired attach must succeed");
+
+    // The binding keeps the target machine's epoch, which is what retry_owned, the remote status
+    // payload and the host's target validation all compare against.
+    assert_eq!(
+        res.attach_tuple.expect("attach reports the binding").daemon_epoch,
+        TARGET_EPOCH.to_string(),
+        "a paired binding must keep the paired machine's daemon epoch"
+    );
+    // The response still reports the epoch that actually served this attach.
+    assert_eq!(res.daemon_epoch.as_deref(), Some(SERVED_EPOCH.to_string().as_str()));
 
     server.abort();
 }
