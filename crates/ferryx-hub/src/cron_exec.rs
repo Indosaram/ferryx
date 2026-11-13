@@ -728,13 +728,16 @@ async fn run_script(
         }
         command.current_dir(cwd);
     }
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        command.output(),
-    )
-    .await
-    .map_err(|_| HubError::message("cron script timed out"))?
-    .map_err(|error| {
+    // The script runs in its own process group so abandoning it can kill its whole tree; the
+    // guard below does that. `kill_on_drop` covers systems without process groups.
+    #[cfg(unix)]
+    command.process_group(0);
+    command.kill_on_drop(true);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = command.spawn().map_err(|error| {
         if error.kind() != std::io::ErrorKind::NotFound {
             return HubError::message(error.to_string());
         }
@@ -743,6 +746,16 @@ async fn run_script(
             None => EnvironmentFault { missing: MissingKind::Program, path: "sh".into() }.error(),
         }
     })?;
+    let mut tree = ScriptTree::arm(&child);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| HubError::message("cron script timed out"))?
+    .map_err(|error| HubError::message(error.to_string()))?;
+    // The script finished on its own terms; work it deliberately backgrounded keeps running.
+    tree.disarm();
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if let Some(fault) = failed_run_fault(script, &stderr, cwd) {
@@ -766,6 +779,47 @@ async fn run_script(
         )));
     }
     Ok(stdout)
+}
+
+/// Kills a cron script's whole process tree when the run is abandoned.
+///
+/// `run_script` starts `sh -c <script>`, and `sh` starts the real program as a child. Killing
+/// only `sh` leaves that child running after the hub has already recorded the run as failed, so
+/// a retry runs two copies of the same job at once. The script is therefore spawned in its own
+/// process group, and abandoning the future — timeout, batch abort, handover — kills the group.
+/// A script that exits normally disarms the guard, so a job that deliberately backgrounds work
+/// keeps it.
+struct ScriptTree {
+    #[cfg(unix)]
+    pgid: libc::pid_t,
+    armed: bool,
+}
+
+impl ScriptTree {
+    fn arm(child: &tokio::process::Child) -> Self {
+        Self {
+            // `process_group(0)` made the child a group leader, so its pid is the group id.
+            #[cfg(unix)]
+            pgid: child.id().map(|pid| pid as libc::pid_t).unwrap_or(0),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ScriptTree {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if self.armed && self.pgid > 0 {
+            // Kill the group, not just the shell: `sh -c` runs the job as its child.
+            unsafe {
+                libc::killpg(self.pgid, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 /// First line that reports a program the shell could not find, as sh, bash, zsh and bun print it.
@@ -1156,6 +1210,43 @@ mod tests {
             .unwrap();
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].text, "from-model");
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_script_leaves_no_child_process_behind() {
+        let dir = std::env::temp_dir().join(format!(
+            "fx-cron-tree-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("grandchild.pid");
+        // `sh` starts the real program as its child, and that child sleeps. Only the leaf writes
+        // its pid, so the file proves whether the grandchild outlived the timeout.
+        let script = format!("sleep 60 & echo $! > {} ; wait", marker.display());
+        let started = std::time::Instant::now();
+        let error = run_script(&script, 1, None, None).await.unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        let pid: i32 = std::fs::read_to_string(&marker)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // The group kill is what ends the sleeper; without it the child kept running for its
+        // full 60s after the run was already recorded as failed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the script's child {pid} outlived the abandoned run"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     struct Capture(std::sync::Mutex<String>);

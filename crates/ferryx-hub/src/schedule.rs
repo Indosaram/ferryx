@@ -5,7 +5,9 @@
 //! come from the job payload (`slack:CHANNEL:THREAD`, `discord:ID`, `origin`).
 //! The scheduler sleeps until the next `next_run_at`; it does not poll.
 use crate::storage::WriteTx;
+use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -946,6 +948,143 @@ pub const LEASE_EXPIRED_ERROR: &str = "lease expired before completion";
 /// How often a running batch pushes its leases forward.
 pub const LEASE_RENEW_EVERY: Duration = Duration::from_secs(60);
 
+/// The runs this process is driving right now, so a batch that is dropped (handover, setup
+/// restart, panic) can be told apart from one that is still alive. Ownership of a `cron_runs`
+/// row is only a pid, and a daemon that retired its hub outlives the runs it abandoned, so a
+/// pid cannot answer this question: `is_alive` says true for a generation that is already
+/// gone. Membership in this set can.
+static IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn in_flight(run_id: &str) -> bool {
+    IN_FLIGHT
+        .lock()
+        .map(|set| set.contains(run_id))
+        .unwrap_or(false)
+}
+
+/// The settle tasks an abandoned batch spawned, so a test can await them instead of sleeping.
+/// `SETTLE_GATE` serializes every test that can spawn or await one: a test must never await a
+/// task another test spawned, or its own assertion could run before its row was settled.
+#[cfg(test)]
+static SETTLE_TASKS: Mutex<Vec<tokio::task::JoinHandle<()>>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+static SETTLE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Awaits every settle task spawned so far and reports how many there were.
+#[cfg(test)]
+async fn settle_spawned() -> usize {
+    let handles: Vec<_> = SETTLE_TASKS
+        .lock()
+        .map(|mut handles| handles.drain(..).collect())
+        .unwrap_or_default();
+    let count = handles.len();
+    for handle in handles {
+        let _ = handle.await;
+    }
+    count
+}
+
+/// Starts the settle task for an abandoned batch. In a test the handle is kept so the row can
+/// be asserted as soon as it is settled, without waiting on a timer.
+fn launch_settle(pool: SqlitePool, run_ids: Vec<String>) {
+    // A drop can land while the runtime is already tearing down; there is nothing left to
+    // settle then, and the row's dead pid lets a later scheduler reclaim it at once.
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    let task = tokio::spawn(async move {
+        if let Err(error) = settle_abandoned_runs(&pool, &run_ids).await {
+            tracing::warn!(%error, "could not settle abandoned cron runs");
+        }
+    });
+    #[cfg(test)]
+    {
+        let _ = SETTLE_TASKS.lock().map(|mut handles| handles.push(task));
+    }
+    #[cfg(not(test))]
+    drop(task);
+}
+
+/// Called the moment a run's row is settled, so the batch guard leaves it alone.
+fn leave_in_flight(run_id: &str) {
+    if let Ok(mut set) = IN_FLIGHT.lock() {
+        set.remove(run_id);
+    }
+}
+
+/// Removes a batch's runs from `IN_FLIGHT` when the batch ends, however it ends. A batch that
+/// is aborted or dropped never reaches its `finish_run`, so its rows would stay `running` with
+/// this process's pid until the stale-lease net gave up on them.
+struct InFlight {
+    pool: SqlitePool,
+    run_ids: Vec<String>,
+}
+
+impl InFlight {
+    fn new(pool: SqlitePool, run_ids: &[String]) -> Self {
+        if let Ok(mut set) = IN_FLIGHT.lock() {
+            set.extend(run_ids.iter().cloned());
+        }
+        Self {
+            pool,
+            run_ids: run_ids.to_vec(),
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let unsettled = match IN_FLIGHT.lock() {
+            Ok(mut set) => self
+                .run_ids
+                .iter()
+                .filter(|run_id| set.remove(*run_id))
+                .cloned()
+                .collect::<Vec<String>>(),
+            Err(_) => return,
+        };
+        if unsettled.is_empty() {
+            return;
+        }
+        // Dropped while still in flight means the batch was abandoned, not finished.
+        // `finish_run` leaves the set only when it settled the row itself.
+        launch_settle(self.pool.clone(), unsettled);
+    }
+}
+
+/// Fails the runs of a dropped batch and reschedules their jobs. Each row is settled only
+/// while it is still running under this process's pid, so a row another owner already
+/// recovered is left alone.
+///
+/// The occurrence is not replayed even when the interrupt was clean: the job gets its next
+/// future occurrence, exactly as a lease that ran out does. A drop means the batch stopped
+/// mid-run, and `cron_exec` does not kill a script's child on abort, so a script may still be
+/// running; running it again now could double its side effect.
+async fn settle_abandoned_runs(pool: &SqlitePool, run_ids: &[String]) -> Result<()> {
+    let mut tx = pool.begin_write().await?;
+    let now = Utc::now();
+    for run_id in run_ids {
+        let row: Option<(String, Option<i64>)> =
+            sqlx::query_as("SELECT job_id, owner_pid FROM cron_runs WHERE id = ? AND status = 'running'")
+                .bind(run_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((job_id, owner_pid)) = row else {
+            continue;
+        };
+        let owner = owner_pid.and_then(|pid| u32::try_from(pid).ok());
+        if owner != Some(std::process::id()) {
+            continue;
+        }
+        if fail_run_and_reschedule(&mut tx, run_id, &job_id, None, now).await? {
+            tracing::warn!(%job_id, %run_id, "cron batch was abandoned mid-run; marked failed and rescheduled");
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Whether a process with this pid currently exists. A direct, non-blocking OS query (no
 /// child process, no shell), safe to call on the async runtime. pid 0 is never live.
 /// An answer the OS cannot give errs toward live: a lease holder is never abandoned on a guess.
@@ -1022,9 +1161,10 @@ fn parse_instant(text: &str) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-/// Fails every `running` row whose lease expired and whose owner `should_reclaim` gives up
-/// on (dead owner, or past `STALE_LEASE`). A daemon that died or handed over mid-batch left
-/// those rows behind with the job's `next_run_at` cleared, so the job never ran again.
+/// Fails every `running` row whose lease expired and whose owner is gone (dead pid, or past
+/// `STALE_LEASE`), plus every expired row this process owns but is no longer driving. A daemon
+/// that died or handed over mid-batch left those rows behind with the job's `next_run_at`
+/// cleared, so the job never ran again.
 /// The job gets its next FUTURE occurrence: the missed one is never replayed, because a
 /// script may already have had external effects. A disabled job stays disabled and a job
 /// someone rescheduled keeps its newer `next_run_at`. Returns the number of recovered runs.
@@ -1043,67 +1183,108 @@ where
     .await?;
     let stale: Vec<_> = rows
         .into_iter()
-        .filter(|(_, _, owner_pid, lease_until)| {
+        .filter(|(run_id, _, owner_pid, lease_until)| {
             let Some(lease) = parse_instant(lease_until) else {
                 return false;
             };
+            if lease > now {
+                return false;
+            }
             let owner = owner_pid.and_then(|pid| u32::try_from(pid).ok());
-            should_reclaim(owner, lease <= now, now - lease, &is_alive)
+            // Our own pid but not in flight: this process dropped the batch (handover, setup
+            // restart, panic). The expired lease is proof enough. Holding these for
+            // `STALE_LEASE` is what kept interrupted runs unscheduled for two hours.
+            if owner == Some(std::process::id()) && !in_flight(run_id) {
+                return true;
+            }
+            should_reclaim(owner, true, now - lease, &is_alive)
         })
         .collect();
     if stale.is_empty() {
         return Ok(0);
     }
-    let now_text = now.to_rfc3339();
     let mut recovered = 0;
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_write().await?;
     for (run_id, job_id, _, lease_until) in stale {
-        // Only a row still running on the lease we judged moves; a renewal or a finish that
-        // landed in between wins.
-        let changed = sqlx::query(
+        if fail_run_and_reschedule(
+            &mut tx,
+            &run_id,
+            &job_id,
+            Some(lease_until.as_str()),
+            now,
+        )
+        .await?
+        {
+            recovered += 1;
+            tracing::warn!(%job_id, %run_id, "cron run lease expired; marked failed and rescheduled");
+        }
+    }
+    tx.commit().await?;
+    Ok(recovered)
+}
+
+/// Fails one running row and gives its job its next occurrence. `lease_until` pins the exact
+/// lease that was judged, so a renewal or a finish that landed in between wins. Returns false
+/// when the row had already moved.
+async fn fail_run_and_reschedule(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    run_id: &str,
+    job_id: &str,
+    lease_until: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let now_text = now.to_rfc3339();
+    let changed = match lease_until {
+        Some(lease) => sqlx::query(
             "UPDATE cron_runs SET status = 'failed', finished_at = ?, error = ? WHERE id = ? AND status = 'running' AND lease_until = ?",
         )
         .bind(&now_text)
         .bind(LEASE_EXPIRED_ERROR)
-        .bind(&run_id)
-        .bind(&lease_until)
-        .execute(&mut *tx)
+        .bind(run_id)
+        .bind(lease)
+        .execute(&mut **tx)
         .await?
-        .rows_affected();
-        if changed == 0 {
-            continue;
-        }
-        recovered += 1;
-        tracing::warn!(%job_id, %run_id, "cron run lease expired; marked failed and rescheduled");
-        let job: Option<(String, String)> = sqlx::query_as(
-            "SELECT expression, payload_json FROM scheduled_jobs WHERE id = ? AND enabled = 1 AND next_run_at IS NULL",
+        .rows_affected(),
+        None => sqlx::query(
+            "UPDATE cron_runs SET status = 'failed', finished_at = ?, error = ? WHERE id = ? AND status = 'running'",
         )
-        .bind(&job_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let Some((expression, payload_json)) = job else {
-            continue;
-        };
-        let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
-        let expression = job_expression(&expression, &payload);
-        let next = match next_run_tz(&expression, now, payload_timezone(&payload)) {
-            Ok(next) if next > now => next,
-            Ok(_) | Err(_) => {
-                tracing::warn!(%job_id, "recovered cron job has no future occurrence; left unscheduled");
-                continue;
-            }
-        };
-        sqlx::query(
-            "UPDATE scheduled_jobs SET next_run_at = ?, updated_at = ? WHERE id = ? AND enabled = 1 AND next_run_at IS NULL",
-        )
-        .bind(next.to_rfc3339())
         .bind(&now_text)
-        .bind(&job_id)
-        .execute(&mut *tx)
-        .await?;
+        .bind(LEASE_EXPIRED_ERROR)
+        .bind(run_id)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected(),
+    };
+    if changed == 0 {
+        return Ok(false);
     }
-    tx.commit().await?;
-    Ok(recovered)
+    let job: Option<(String, String)> = sqlx::query_as(
+        "SELECT expression, payload_json FROM scheduled_jobs WHERE id = ? AND enabled = 1 AND next_run_at IS NULL",
+    )
+    .bind(job_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((expression, payload_json)) = job else {
+        return Ok(true);
+    };
+    let payload: Value = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+    let expression = job_expression(&expression, &payload);
+    let next = match next_run_tz(&expression, now, payload_timezone(&payload)) {
+        Ok(next) if next > now => next,
+        Ok(_) | Err(_) => {
+            tracing::warn!(%job_id, "recovered cron job has no future occurrence; left unscheduled");
+            return Ok(true);
+        }
+    };
+    sqlx::query(
+        "UPDATE scheduled_jobs SET next_run_at = ?, updated_at = ? WHERE id = ? AND enabled = 1 AND next_run_at IS NULL",
+    )
+    .bind(next.to_rfc3339())
+    .bind(&now_text)
+    .bind(job_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(true)
 }
 
 /// Pushes the lease of every still-running run in `run_ids` to `now + LEASE`.
@@ -1269,6 +1450,8 @@ pub async fn finish_run(
     .execute(pool)
     .await?
     .rows_affected();
+    // The row has a verdict now, either from this call or from an earlier recovery.
+    leave_in_flight(run_id);
     if changed == 0 {
         tracing::warn!(%job_id, %run_id, "cron run was already settled; late finish ignored");
         return Ok(false);
@@ -1441,9 +1624,22 @@ pub async fn next_wait(pool: &SqlitePool, now: DateTime<Utc>) -> Result<Duration
     )
     .fetch_one(pool)
     .await?;
-    // A running row becomes reclaimable when its lease expires (dead owner) and, at the
-    // latest, `STALE_LEASE` after that (live owner). The scheduler wakes for that instant so
-    // a database whose only jobs are stuck behind orphan runs is repaired in minutes.
+    // A running row becomes reclaimable when its lease expires (dead owner, or an expired
+    // lease of our own that we are no longer driving) and, at the latest, `STALE_LEASE` after
+    // that (a live owner still renewing). The scheduler wakes for that instant so a database
+    // whose only jobs are stuck behind orphan runs is repaired in minutes.
+    // An expired lease this process already abandoned is reclaimable this instant: sleeping
+    // on it would re-create the two-hour delay the settle path exists to remove.
+    let abandoned = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM cron_runs WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= ? AND owner_pid = ?",
+    )
+    .bind(now.to_rfc3339())
+    .bind(i64::from(std::process::id()))
+    .fetch_all(pool)
+    .await?;
+    if abandoned.iter().any(|run_id| !in_flight(run_id)) {
+        return Ok(Duration::ZERO);
+    }
     let leases: Vec<String> = sqlx::query_scalar(
         "SELECT lease_until FROM cron_runs WHERE status = 'running' AND lease_until IS NOT NULL",
     )
@@ -1536,6 +1732,7 @@ pub async fn drive_due_with(
     // The batch runs its jobs one after another; meanwhile every still-running run of the
     // batch has its lease pushed forward, so a long batch never looks stale while alive.
     let run_ids: Vec<String> = claimed.iter().map(|job| job.run_id.clone()).collect();
+    let _in_flight = InFlight::new(pool.clone(), &run_ids);
     let batch = run_claimed(pool, claimed, model, skills_root);
     tokio::pin!(batch);
     let mut renew = tokio::time::interval_at(
@@ -3105,6 +3302,150 @@ mod tests {
         assert_eq!(runs, 1);
     }
 
+    /// A model turn that parks forever, so the batch can be aborted while the run is genuinely
+    /// in flight. `entered` is armed once the turn is reached; nothing releases it.
+    struct ParkedTurn {
+        entered: std::sync::Arc<tokio::sync::Semaphore>,
+        release: std::sync::Arc<tokio::sync::Semaphore>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::lanes::kibitzer::ModelTurn for ParkedTurn {
+        async fn complete(&self, _prompt: &str) -> Result<String> {
+            self.entered.add_permits(1);
+            let _ = self.release.acquire().await;
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_aborted_batch_settles_its_own_rows_without_advancing_time() {
+        let _gate = SETTLE_GATE.lock().await;
+        let pool = crate::storage::memory().await.unwrap();
+        let now = Utc::now();
+        sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled, next_run_at, delivery_json) VALUES('agent','every 10m','{\"prompt\":\"what shipped\"}',1,?,'[]')")
+            .bind((now - TimeDelta::minutes(1)).to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let model = ParkedTurn {
+            entered: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+            release: std::sync::Arc::new(tokio::sync::Semaphore::new(0)),
+        };
+        let entered = model.entered.clone();
+        let driving = tokio::spawn({
+            let pool = pool.clone();
+            async move { drive_due_with(&pool, now, &model, None).await }
+        });
+        // Armed by the turn itself: the batch is mid-run, not merely spawned.
+        entered.acquire().await.unwrap().forget();
+        let run_id: String = sqlx::query_scalar("SELECT id FROM cron_runs WHERE status = 'running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(in_flight(&run_id), "a live batch must hold its runs");
+        // The abort paths (handover retire, setup restart, panic) drop the batch future.
+        driving.abort();
+        let _ = driving.await;
+        assert_eq!(settle_spawned().await, 1, "the drop settles the batch itself");
+        assert!(!in_flight(&run_id));
+        let (status, _, error) = run_row(&pool, &run_id).await;
+        assert_eq!(status, "failed");
+        assert_eq!(error.as_deref(), Some(LEASE_EXPIRED_ERROR));
+        let (_, next) = job_row(&pool, "agent").await;
+        assert!(
+            at(&next.expect("the job is rescheduled")) > now,
+            "an interrupted occurrence is not replayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_run_of_this_process_that_is_not_in_flight_is_reclaimed_at_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        insert_job(&pool, "handed-over", 1, None).await;
+        // One minute past the lease: the old rule held this for STALE_LEASE (another 119
+        // minutes) because the daemon that abandoned it is still a live pid.
+        insert_running(
+            &pool,
+            "abandoned",
+            "handed-over",
+            std::process::id() as i64,
+            now - TimeDelta::minutes(1),
+        )
+        .await;
+        assert_eq!(recover_stale_runs(&pool, now, |_| true).await.unwrap(), 1);
+        let (status, _, error) = run_row(&pool, "abandoned").await;
+        assert_eq!(status, "failed");
+        assert_eq!(error.as_deref(), Some(LEASE_EXPIRED_ERROR));
+        let (_, next) = job_row(&pool, "handed-over").await;
+        assert!(at(&next.expect("the job is rescheduled")) > now);
+    }
+
+    #[tokio::test]
+    async fn a_run_of_this_process_still_in_flight_keeps_its_lease() {
+        let _gate = SETTLE_GATE.lock().await;
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        insert_job(&pool, "busy", 1, None).await;
+        insert_running(
+            &pool,
+            "driving",
+            "busy",
+            std::process::id() as i64,
+            now - TimeDelta::minutes(1),
+        )
+        .await;
+        let guard = InFlight::new(pool.clone(), &["driving".to_owned()]);
+        assert_eq!(recover_stale_runs(&pool, now, |_| true).await.unwrap(), 0);
+        assert_eq!(run_row(&pool, "driving").await.0, "running");
+        // The batch finishes normally: `finish_run` settles the row and clears the claim.
+        assert!(
+            finish_run(&pool, "busy", "driving", true, None, "ok", None)
+                .await
+                .unwrap()
+        );
+        assert!(!in_flight("driving"));
+        drop(guard);
+        assert_eq!(
+            settle_spawned().await,
+            0,
+            "a settled run must not be re-reported as abandoned"
+        );
+        assert_eq!(run_row(&pool, "driving").await.0, "succeeded");
+    }
+
+    #[tokio::test]
+    async fn a_batch_dropped_mid_run_settles_its_own_rows() {
+        let _gate = SETTLE_GATE.lock().await;
+        let pool = crate::storage::memory().await.unwrap();
+        let now = at("2026-10-26T01:00:00Z");
+        insert_job(&pool, "digest", 1, None).await;
+        insert_running(
+            &pool,
+            "interrupted",
+            "digest",
+            std::process::id() as i64,
+            now + LEASE,
+        )
+        .await;
+        {
+            let _guard = InFlight::new(pool.clone(), &["interrupted".to_owned()]);
+            assert!(in_flight("interrupted"));
+        }
+        assert_eq!(settle_spawned().await, 1, "the drop settles the batch itself");
+        let (status, finished, error) = run_row(&pool, "interrupted").await;
+        assert_eq!(status, "failed");
+        assert!(
+            finished.is_some(),
+            "the interruption is settled, not left running"
+        );
+        assert_eq!(error.as_deref(), Some(LEASE_EXPIRED_ERROR));
+        // The missed occurrence is not replayed: the job is scheduled for its next future run.
+        let (_, next) = job_row(&pool, "digest").await;
+        assert!(at(&next.expect("the job is rescheduled")) > now);
+    }
+
     #[tokio::test]
     async fn a_fresh_lease_of_a_live_owner_is_not_reclaimed() {
         let pool = crate::storage::memory().await.unwrap();
@@ -3235,6 +3576,32 @@ mod tests {
         insert_running(&pool, "fresh", "other", 1, now + TimeDelta::minutes(7)).await;
         let wait = next_wait(&pool, now).await.unwrap();
         assert_eq!(wait, Duration::from_secs(7 * 60));
+    }
+
+    #[tokio::test]
+    async fn next_wait_does_not_sleep_through_a_row_of_this_process_it_abandoned() {
+        let _gate = SETTLE_GATE.lock().await;
+        let pool = crate::storage::memory().await.unwrap();
+        let now = Utc::now();
+        insert_job(&pool, "job", 1, None).await;
+        insert_running(
+            &pool,
+            "dropped",
+            "job",
+            std::process::id() as i64,
+            now - TimeDelta::minutes(1),
+        )
+        .await;
+        // The settle of the drop is what repairs the row; the sleep must not skip over it and
+        // wait out STALE_LEASE (that was the two-hour delay in another costume).
+        assert_eq!(next_wait(&pool, now).await.unwrap(), Duration::ZERO);
+        // A row this process is still driving keeps the ordinary `lease + STALE_LEASE` wake,
+        // so a starved renewal cannot turn the loop into a spin.
+        let driving = InFlight::new(pool.clone(), &["dropped".to_owned()]);
+        let wait = next_wait(&pool, now).await.unwrap();
+        assert!(wait > Duration::from_secs(100 * 60), "{wait:?}");
+        drop(driving);
+        assert_eq!(settle_spawned().await, 1);
     }
 
     #[tokio::test]
