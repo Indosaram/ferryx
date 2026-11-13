@@ -551,6 +551,7 @@ mod agent_stamp_tests {
             screen_revision: Some(revision.into()),
             state_since_ms: Some(since),
             screen_changed_at_ms: Some(changed),
+            read: None,
         }
     }
 

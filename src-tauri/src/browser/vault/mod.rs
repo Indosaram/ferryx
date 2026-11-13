@@ -4,10 +4,19 @@
 //! Provenance: ported from Maho (Project-Maho/maho-browser@c2830251,
 //! maho/crates/maho-core vault_crypto, vault_manager/origin.rs, vault_generator and
 //! maho/crates/maho-types vault types) under the owner's grant to reuse Maho code.
+//!
+//! Confidentiality boundary: the agent-facing surface never returns a stored secret. It writes
+//! the secret into a page field the user already approved for that exact origin and reports only
+//! a closed status token. This guarantee covers agents that do NOT hold an eval grant on that
+//! origin: an eval-capable controller runs script in the page world, where a filled value is
+//! readable, so the vault refuses such a controller outright (see
+//! `AuthorityState::eval_blocks_vault`) instead of claiming general non-exfiltration.
 
 pub mod autofill;
 pub mod crypto;
 pub mod generator;
+pub mod grants;
+pub mod provider;
 pub mod keystore;
 pub mod origin;
 pub mod reauth;

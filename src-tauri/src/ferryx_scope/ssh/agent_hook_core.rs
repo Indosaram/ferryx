@@ -345,15 +345,72 @@ pub fn send(endpoint: &Endpoint, line: &str) -> std::io::Result<()> {
     }
 }
 
+/// Whether `event` is the session-start hook through which `agent` can hand the model extra
+/// context. claude, codex and grok take `hookSpecificOutput.additionalContext` on SessionStart;
+/// cursor takes a top-level `additional_context` on sessionStart. agy, cline and crush document
+/// no context output, so they get nothing.
+pub fn takes_session_context(agent: &str, event: &str) -> bool {
+    matches!(
+        (agent, event),
+        ("claude" | "codex" | "grok", "SessionStart") | ("cursor", "sessionStart")
+    )
+}
+
+/// The stdout one session-start hook prints to give the agent `context`, in that agent's hook
+/// output shape, or `None` when the agent/event takes no context.
+pub fn context_output(agent: &str, event: &str, context: &str) -> Option<String> {
+    if !takes_session_context(agent, event) || context.trim().is_empty() {
+        return None;
+    }
+    let mut output = Map::new();
+    if agent == "cursor" {
+        output.insert("additional_context".into(), Value::from(context));
+    } else {
+        let mut specific = Map::new();
+        specific.insert("hookEventName".into(), Value::from("SessionStart"));
+        specific.insert("additionalContext".into(), Value::from(context));
+        output.insert("hookSpecificOutput".into(), Value::Object(specific));
+    }
+    serde_json::to_string(&Value::Object(output)).ok()
+}
+
+/// The directory a hook payload says the agent works in: `cwd`, else cursor's first workspace
+/// root.
+pub fn payload_cwd(payload: &Value) -> Option<String> {
+    text(payload, "cwd", "cwd")
+        .map(str::to_owned)
+        .or_else(|| {
+            field(payload, "workspaceRoots", "workspace_roots")
+                .and_then(Value::as_array)
+                .and_then(|roots| roots.iter().find_map(Value::as_str))
+                .map(str::to_owned)
+        })
+        .filter(|dir| !dir.trim().is_empty())
+}
+
 /// Runs the reporter for the arguments after `agent-hook`. Always returns 0.
 pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
+    run_with(args, |_, _, _| None)
+}
+
+/// [`run`], plus session context: for an event that [`takes_session_context`], `context(agent,
+/// event, payload)` may return text that is printed in the agent's hook output shape. The SSH
+/// remote helper passes none; the desktop reporter asks its daemon (`cli/agent_hook.rs`).
+pub fn run_with(
+    args: impl IntoIterator<Item = OsString>,
+    context: impl FnOnce(&str, &str, &Value) -> Option<String>,
+) -> i32 {
     let args: Vec<String> = args.into_iter().filter_map(|arg| arg.into_string().ok()).collect();
     let [agent, event] = args.as_slice() else {
         return 0;
     };
     let env = |key: &str| std::env::var(key).ok();
-    if pane_session_id(&env).is_none() || endpoint(&env).is_none() || state_for(agent, event).is_none()
-    {
+    if pane_session_id(&env).is_none() || state_for(agent, event).is_none() {
+        return 0;
+    }
+    let reports = endpoint(&env).is_some();
+    let wants_context = takes_session_context(agent, event) && !runs_under_another_agent(agent, &env);
+    if !reports && !wants_context {
         return 0;
     }
     let mut stdin = Vec::new();
@@ -363,6 +420,15 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> i32 {
         .read_to_end(&mut stdin);
     if let Some((endpoint, line)) = prepare(agent, event, &stdin, &env) {
         let _ = send(&endpoint, &line);
+    }
+    if wants_context {
+        let payload = serde_json::from_slice::<Value>(&stdin).unwrap_or(Value::Null);
+        if let Some(output) = context(agent, event, &payload).and_then(|text| context_output(agent, event, &text)) {
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(output.as_bytes());
+            let _ = stdout.write_all(b"\n");
+            let _ = stdout.flush();
+        }
     }
     0
 }

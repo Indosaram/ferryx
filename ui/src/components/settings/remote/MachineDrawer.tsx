@@ -190,6 +190,7 @@ function SshEditForm({ edit, busy }: { edit: SshEditState; busy: boolean }) {
             {input("Identity File", "identityFile", "~/.ssh/id_ed25519")}
           </div>
           {input("Jump Host", "jumpHost", "bastion.corp.net")}
+          {input("Shell", "shell", "pwsh, cmd, wsl, zsh — or an absolute path")}
         </div>
       ) : null}
       <div className="flex justify-end gap-2 pt-1">

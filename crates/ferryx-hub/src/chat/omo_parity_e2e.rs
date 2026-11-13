@@ -915,3 +915,30 @@ async fn e2e_a_supervised_owner_dm_posts_no_status_line_and_never_reaches_omo() 
     assert_eq!(answers[0]["channel"], "D1");
     assert_no_status_line(&calls);
 }
+
+/// Drives the real turn surface (`run_session_turn` -> mhc RPC -> retry -> notice path) with a
+/// short ACK window. The JSONL peer acknowledges the prompt within the window, so the final
+/// result is the answer and no ACK-timeout notice row or outbox notice may exist.
+/// Limitation: `rpc_mock` cannot withhold the first attempt's ACK, so this does not exercise
+/// a missed first ACK followed by a recovering retry.
+#[tokio::test]
+async fn e2e_an_acknowledged_turn_queues_no_ack_failure_notice() {
+    let (omo_url, _log) = serve(script(&["done"], false)).await;
+    let mut config = config(omo_url);
+    config.omo.ack_window = std::time::Duration::from_secs(5);
+    let pool = crate::storage::memory().await.unwrap();
+    let (base, _calls) = serve_scripted("UBOT", Vec::new()).await;
+    let reply = with_test_api(base, "xoxb-test".into(), async {
+        FULL_ACCESS_TEST
+            .scope(true, run_session_turn(&config, &pool, slack_turn("deploy it")))
+            .await
+    })
+    .await;
+    assert_eq!(reply.as_deref(), Some("done"));
+    let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turn_failure_notices")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(notices, 0);
+    let resumes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE kind='owner_reply_failed'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(resumes, 0);
+}

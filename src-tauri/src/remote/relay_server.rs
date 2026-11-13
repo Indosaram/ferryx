@@ -3608,7 +3608,8 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("GET", ["agent-control", "sessions" | "events"])
             | ("GET", ["agent-control", "sessions", _])
             | ("GET", ["agent-control", "sessions", _, "wait"])
-            | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop"])
+            | ("POST", ["agent-control", "sessions", _, "send" | "answer" | "stop" | "ack"])
+            | ("POST", ["agent-control", "spawn"])
             // Direct session stop by `<hostId>:<backendSessionId>` and an owner's decision tap;
             // the machine authorizes the device and fences the stale screen revision.
             | ("POST", ["sessions", _, "stop"])
@@ -3621,6 +3622,8 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             // the actor; the relay only admits the route shape.
             | ("POST", ["supervisor", "request"])
             | ("GET", ["supervisor", "conversation"])
+            // The pull-request lane (owner only on the machine, like the panel).
+            | ("GET", ["supervisor", "prs"])
             | ("GET" | "POST", ["supervisor", "memory"])
             // Supervisor lease daemon routes (plan tasks 5 and 8). `GET supervisor/checkpoint`
             // is deliberately absent: the checkpoint carries tokens and this proxied route
@@ -6486,6 +6489,8 @@ mod tests {
     fn agent_control_and_supervisor_routes_join_the_allowlist_without_loosening_it() {
         assert!(allowed_http_route(&Method::GET, "agent-control/sessions"));
         assert!(allowed_http_route(&Method::GET, "agent-control/events"));
+        assert!(allowed_http_route(&Method::POST, "agent-control/spawn"));
+        assert!(!allowed_http_route(&Method::GET, "agent-control/spawn"));
         assert!(allowed_http_route(
             &Method::GET,
             "agent-control/sessions/s-1"
@@ -6506,6 +6511,8 @@ mod tests {
             &Method::POST,
             "agent-control/sessions/s-1/stop"
         ));
+        assert!(allowed_http_route(&Method::POST, "agent-control/sessions/s-1/ack"));
+        assert!(!allowed_http_route(&Method::GET, "agent-control/sessions/s-1/ack"));
         assert!(allowed_http_route(&Method::GET, "supervisor"));
         assert!(allowed_http_route(&Method::POST, "supervisor/pause"));
         // T9: direct stop, decision tap and undo are admitted, and only as POST.
@@ -6526,6 +6533,8 @@ mod tests {
         assert!(allowed_http_route(&Method::POST, "supervisor/start"));
         assert!(allowed_http_route(&Method::POST, "supervisor/request"));
         assert!(allowed_http_route(&Method::GET, "supervisor/conversation"));
+        assert!(allowed_http_route(&Method::GET, "supervisor/prs"));
+        assert!(!allowed_http_route(&Method::POST, "supervisor/prs"));
         assert!(allowed_http_route(&Method::GET, "supervisor/memory"));
         assert!(allowed_http_route(&Method::POST, "supervisor/memory"));
         for route in ["observe", "move", "release-to", "fence"] {

@@ -271,7 +271,8 @@ unsafe fn apply_viewport(
 /// them there is inert, which left the drawable stretched into the layer box and
 /// every glyph resampled whenever the two disagreed -- the split-pane softness.
 /// Walking the sublayers keeps a transient mismatch cropping one edge rather than
-/// blurring the whole frame.
+/// blurring the whole frame, and the mask below is what makes that crop real: without
+/// it the oversized contents were drawn past the layer box instead.
 ///
 /// `setDrawableSize:` is deliberately never sent: the backing layer does not
 /// implement it and that call is the `199761a` SIGABRT.
@@ -312,6 +313,19 @@ unsafe fn configure_terminal_layers(view: &AnyObject, scale_factor: f64) {
             // remains the GPU thread's configure call.
             let view_bounds: NSRect = msg_send![view, bounds];
             let _: () = msg_send![sublayer, setFrame: view_bounds];
+            // Keeps the layer's rendering inside this pane's bounds. This is a guard, not the
+            // fix for the border sliver: CoreAnimation already clips layer contents to the
+            // layer's own bounds, and window captures measured zero pixels outside the pane
+            // with masking off, on both plain CALayer and CAMetalLayer at
+            // `contentsGravity = topLeft` with an oversized drawable. In every recorded
+            // resize trace the drawable also matched the frame exactly (frameW 448 -> drawW
+            // 896, overX/overY 0.0), so the surplus that this mask would crop was not
+            // actually observed. The visible seam at load time came from the pane rect being
+            // snapped inward before attach, leaving the transparent DOM hole uncovered above
+            // the native surface; `snapBoundsToDevicePixels` now snaps outward instead. Keep
+            // the mask as cheap insurance for a genuinely oversized drawable, and keep this
+            // note honest about which mechanism it does and does not address.
+            let _: () = msg_send![sublayer, setMasksToBounds: true];
             let _: () = msg_send![sublayer, setContentsScale: scale];
             let _: () = msg_send![sublayer, setContentsGravity: &*gravity];
             let _: () = msg_send![sublayer, setMagnificationFilter: &*nearest];

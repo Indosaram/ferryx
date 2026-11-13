@@ -70,6 +70,8 @@ export interface HostFormData {
   identityFile: string;
   jumpHost: string;
   authMethod: SshAuthMethod;
+  /** Shell a remote pane should start on this host; empty keeps the remote default. */
+  shell: string;
 }
 
 export const DEFAULT_SSH_FORM: HostFormData = {
@@ -80,6 +82,7 @@ export const DEFAULT_SSH_FORM: HostFormData = {
   identityFile: "",
   jumpHost: "",
   authMethod: "agent",
+  shell: "",
 };
 
 const explanations: Record<string, string> = {
@@ -491,6 +494,7 @@ function AddMachineWizard({
       port: portNumber,
       identityFile: sshForm.identityFile.trim() || undefined,
       jumpHost: sshForm.jumpHost.trim() || undefined,
+      shell: sshForm.shell.trim() || undefined,
       source: "manual",
       authMethod: sshForm.authMethod,
       disabled: false,
@@ -931,6 +935,18 @@ function AddMachineWizard({
                     value={sshForm.jumpHost}
                     placeholder="bastion.corp.net"
                     onChange={e => setSshForm(f => ({ ...f, jumpHost: e.target.value }))}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <Label htmlFor="ssh-shell" className="text-[11px] font-medium">Shell</Label>
+                  <Input
+                    id="ssh-shell"
+                    aria-label="Remote shell"
+                    disabled={busy}
+                    value={sshForm.shell}
+                    placeholder="pwsh, cmd, wsl, zsh — leave empty for the machine default"
+                    onChange={e => setSshForm(f => ({ ...f, shell: e.target.value }))}
                   />
                 </div>
               </div>

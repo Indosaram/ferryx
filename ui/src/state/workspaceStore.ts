@@ -10,12 +10,15 @@ import {
   type TerminalActivityState,
 } from "../lib/activity";
 import { resolveAgentLogo } from "../lib/agentIcon";
+import { withAttention, type AttentionBySessionId } from "../lib/attentionGroup";
+import { usePanelAttention } from "../lib/supervisorPanel/usePanelAttention";
 import { agentDisplayNameForType, classifyTerminalTitleActivity, formatTabLabelFromTitle, isBareAgentTitle, normalizeTerminalTitle, parseAgentTitle } from "../lib/agentTitle";
 import { workspaceName } from "../lib/branchFilter";
 import { browserTabIdForBrowserId, closeBrowser, createBrowser, createPopupBrowser, navigateBrowser, onBrowserStateChanged, reloadBrowser, type BrowserReloadOptions, type BrowserSessionCreatedPayload } from "../lib/browserTauri";
 import { browserTabNavigation } from "../lib/browserTabNavigation";
 import { closeTerminal, describeTerminal, DEFAULT_WORKSPACE_ID, discoverAgentProviderSession, getTerminalCwd, onNativeTerminalAgentState, onNativeTerminalBell, onNativeTerminalFocus, onNativeTerminalTitle, spawnTerminal, toIpcError, waitForTerminalExit, type SpawnTerminalRequest } from "../lib/tauri";
 import * as tauriIpc from "../lib/tauri";
+import { onAgentSpawned, type AgentSpawnedEvent } from "../lib/agentSpawned";
 import { ensureTerminalEvents, terminalEventBus } from "../lib/terminalEvents";
 import { isAbsoluteTerminalCwd } from "../lib/terminalCwd";
 import { switchDebug } from "../lib/switchDebug";
@@ -31,6 +34,9 @@ import { canCaptureAuthoritativeProviderSession, continuationOutcomeUnknown, con
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
+import { getDaemonAttention, subscribeDaemonAttention } from "../lib/attentionFeed";
+import { groupOf } from "../lib/attentionGroup";
+import type { AttentionGroup } from "../lib/supervisorPanel/contract";
 import { listFilePreviewIds, releaseFilePreview, retainFilePreview } from "../lib/filePreviewTabRegistry";
 import type { FilePreviewOpenRequest, FilePreviewSource } from "../lib/filePreviewTypes";
 import {
@@ -140,7 +146,8 @@ export function wakeLocalSessionRecovery(workspaceId: string, sessionId?: string
     const snapshot = getWorkspaceSnapshot(workspaceId);
     const session = snapshot?.sessions[sessionId];
     if (!session || session.lifecycle === "exited" || session.backendUnavailableReason === "identity_conflict" ||
-      session.reconnectError?.code === "IDENTITY_CONFLICT" || session.remoteConnectionState !== "reconnecting") return;
+      session.reconnectError?.code === "IDENTITY_CONFLICT" ||
+      (session.remoteConnectionState !== "reconnecting" && session.remoteConnectionState !== "disconnected")) return;
     if (snapshot && session && !isPairedWorkspaceId(workspaceId) && !isRemoteWorkspaceId(workspaceId) && session.backendSessionId) {
       setWorkspaceSnapshot(workspaceId, { ...snapshot, sessions: { ...snapshot.sessions,
         [sessionId]: { ...session, remoteConnectionState: "reconnecting" },
@@ -453,8 +460,8 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
       if (isRemoteWorkspaceId(workspaceId) || isPairedWorkspaceId(workspaceId)) continue;
       for (const session of Object.values(state.sessions)) {
         if (!session.backendSessionId || hasPendingLocalSplit(session) || session.lifecycle === "exited" ||
-            session.backendUnavailableReason === "identity_conflict" ||
-            session.remoteConnectionState !== "reconnecting") continue;
+            session.backendUnavailableReason === "identity_conflict" || session.reconnectError?.code === "IDENTITY_CONFLICT" ||
+            (session.remoteConnectionState !== "reconnecting" && session.remoteConnectionState !== "disconnected")) continue;
         const identity = { kind: "local" as const, frontendSessionId: session.id,
           backendSessionId: session.backendSessionId, expectedIncarnation: session.incarnation };
         const key = JSON.stringify([workspaceId, formatRecoveryKey(identity)]);
@@ -466,6 +473,8 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
         // (an unreachable predecessor answers `owner_unavailable` instead), so this is positive
         // absence, not a transport outage. Two answers in a row absorb a handover-adoption race.
         let absentStreak = 0;
+        // Both transport-loss states use this single owner and its bounded exponential backoff.
+        // Only retryable outcomes loop; blocked must not retry with stale authority or identity.
         owner.scheduler = new RecoveryScheduler({ identity, clock: localRecoveryClock, attemptAction: async (attempt) => {
           const before = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
           if (!before || before.backendSessionId !== owner.captured.backendSessionId ||
@@ -929,6 +938,10 @@ export function useWorkspaceStore({
   // for the sidebar's cross-workspace activity to recompute.
   const [parkedActivityVersion, setParkedActivityVersion] = useState(0);
   const bumpParkedActivity = useCallback(() => setParkedActivityVersion((value) => value + 1), []);
+  // The daemon's attention group per backend session (supervisor panel snapshot + panel.session
+  // frames). Tabs and sidebar rows draw it through groupOf; a pane it has no entry for keeps the
+  // old-peer mapping of its local activity.
+  const attentionBySessionId = usePanelAttention();
   // Provenance belongs to the workspace currently mounted; keeping the first
   // one would make restore pick the wrong HMR-vs-disk path after a switch. It is
   // state (not a ref) so the swap below can set it during render without mutating
@@ -985,9 +998,48 @@ export function useWorkspaceStore({
     for (const target of selectActivityNotificationTargets(next)) {
       const previousState = previous.activityBySessionId?.[target.sessionId]?.state;
       if (previousState === target.state) continue;
-      for (const listener of activityListenersRef.current) listener({ ...target, previousState });
+      // A session the daemon judges is notified by its group frames only; this local edge
+      // carries the unchanged group so it can never notify a second time.
+      const daemon = getDaemonAttention(next.sessions[target.sessionId]?.backendSessionId);
+      const groups = daemon ? { group: daemon.group, previousGroup: daemon.group } : {};
+      for (const listener of activityListenersRef.current) listener({ ...target, previousState, ...groups });
     }
   }, []);
+
+  // The daemon's group is the badge's and the notifications' source: a group change re-counts the
+  // badge, and entering a group is announced once. A reason change alone announces nothing.
+  const [daemonAttentionVersion, setDaemonAttentionVersion] = useState(0);
+  useEffect(() => subscribeDaemonAttention((changes, baseline) => {
+    setDaemonAttentionVersion((value) => value + 1);
+    if (baseline) return;
+    const mounted = stateRef.current;
+    const mountedWorkspaceId = mounted.workspaceId ?? mountedWorkspaceIdRef.current;
+    const states = [mounted, ...listWorkspaceSnapshots()
+      .filter(([id]) => id !== mountedWorkspaceId)
+      .map(([, snapshot]) => snapshot)];
+    for (const change of changes) {
+      const group = change.next?.group;
+      const previousGroup = change.previous?.group;
+      if (!group || group === previousGroup) continue;
+      for (const owner of states) {
+        const session = Object.values(owner.sessions).find((candidate) => candidate.backendSessionId === change.backendSessionId);
+        const tabId = session ? findTabIdForSession(owner, session.id) : null;
+        if (!session || !tabId) continue;
+        const target = notificationTarget(owner, session.id, tabId);
+        const event: ActivityNotificationEvent = {
+          ...target,
+          state: activityStateForGroup(group, target.state),
+          previousState: previousGroup ? activityStateForGroup(previousGroup, target.state) : undefined,
+          // The daemon's own episodes decide; a restore's quiet flag belongs to local edges.
+          notificationSuppressed: false,
+          group,
+          previousGroup,
+        };
+        for (const listener of activityListenersRef.current) listener(event);
+        break;
+      }
+    }
+  }), []);
 
   const dispatch = useCallback(
     (action: WorkspaceAction) => {
@@ -1464,6 +1516,46 @@ export function useWorkspaceStore({
     },
     [createSpawnedTab, dispatch, workspaceId],
   );
+
+  // A pane agent control spawned as a child of a pane in this window opens beside its parent,
+  // attached to the live backend session. Nothing is spawned or closed here.
+  const adoptBackendSessionForSpawnRef = useRef(adoptBackendSession);
+  adoptBackendSessionForSpawnRef.current = adoptBackendSession;
+  useEffect(() => {
+    if (!tauriIpc.isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onAgentSpawned(async (event) => {
+      if (event.workspaceId !== workspaceId) return;
+      const described = await tauriIpc.describeTerminal(event.sessionId).catch(() => null);
+      if (disposed || mountedWorkspaceIdRef.current !== workspaceId) return;
+      const plan = planSpawnedAgentAdoption(stateRef.current, event, {
+        incarnation: described?.incarnation ?? null,
+        frontendSessionId: createId("session"),
+        newLeafId: createId("pane"),
+      });
+      switchDebug("agent.spawned.adopt", {
+        backendSessionId: event.sessionId,
+        reason: plan?.kind ?? "not-here",
+      });
+      if (!plan) return;
+      if (plan.kind === "split") {
+        dispatch(plan.action);
+        return;
+      }
+      const worktree = stateRef.current.worktrees.find((candidate) => candidate.path === plan.worktreePath);
+      if (worktree) await adoptBackendSessionForSpawnRef.current(worktree, plan.backend, event.name ?? undefined);
+    })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [dispatch, workspaceId]);
 
   const sshRearmsRef = useRef(new Map<string, number>());
   const sshRecoveryKey = useMemo(
@@ -2713,19 +2805,19 @@ export function useWorkspaceStore({
     [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId],
   );
   const tabActivity = useMemo(
-    () => selectTabActivitySummaries(renderedState),
-    [renderedState.layout, renderedState.activityBySessionId, renderedState.unreadTabIds],
+    () => selectTabActivitySummaries(renderedState, attentionBySessionId),
+    [renderedState.layout, renderedState.sessions, renderedState.activityBySessionId, renderedState.unreadTabIds, attentionBySessionId],
   );
   // Rows for other projects come from their snapshots and are overlaid by the live workspace, so a
   // worktree the user switched away from keeps reporting its agent instead of going blank.
   const worktreeActivity = useMemo(
     () => ({
-      ...selectWorktreeActivitySummariesAcrossWorkspaces(renderedState.workspaceId ?? workspaceId),
-      ...selectWorktreeActivitySummaries(renderedState),
+      ...selectWorktreeActivitySummariesAcrossWorkspaces(renderedState.workspaceId ?? workspaceId, attentionBySessionId),
+      ...selectWorktreeActivitySummaries(renderedState, attentionBySessionId),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is the change
     // signal for the snapshot cache, which useMemo cannot observe directly.
-    [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId, renderedState.unreadTabIds, renderedState.unreadWorktreePaths, renderedState.workspaceId, workspaceId, parkedActivityVersion],
+    [renderedState.layout, renderedState.worktreeLayouts, renderedState.sessions, renderedState.worktrees, renderedState.activityBySessionId, renderedState.unreadTabIds, renderedState.unreadWorktreePaths, renderedState.workspaceId, workspaceId, parkedActivityVersion, attentionBySessionId],
   );
   const activityNotificationTargets = useMemo(
     () => selectActivityNotificationTargets(renderedState),
@@ -2733,9 +2825,9 @@ export function useWorkspaceStore({
   );
   const unreadBadgeCount = useMemo(
     () => selectGlobalUnreadBadgeCount(renderedState, workspaceId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion is an external
-    // change signal that useMemo cannot observe directly from renderedState.
-    [renderedState, workspaceId, parkedActivityVersion],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- parkedActivityVersion and
+    // daemonAttentionVersion are external change signals useMemo cannot observe from renderedState.
+    [renderedState, workspaceId, parkedActivityVersion, daemonAttentionVersion],
   );
 
   return {
@@ -2744,6 +2836,7 @@ export function useWorkspaceStore({
     agents,
     tabActivity,
     worktreeActivity,
+    attentionBySessionId,
     unreadBadgeCount,
     activityNotificationTargets,
     openTab,
@@ -3035,16 +3128,31 @@ export function selectAgents(state: WorkspaceState): ActiveAgent[] {
   });
 }
 
-export function selectTabActivitySummaries(state: WorkspaceState): Record<string, ActivitySummary> {
+/** A pane's local activity with the daemon's judgment for its backend session laid over it. */
+export function selectSessionActivity(
+  state: WorkspaceState,
+  sessionId: string,
+  attentionBySessionId: AttentionBySessionId = {},
+): TerminalActivity | undefined {
+  const backendSessionId = state.sessions[sessionId]?.backendSessionId;
+  return withAttention(
+    state.activityBySessionId?.[sessionId],
+    backendSessionId ? attentionBySessionId[backendSessionId] : undefined,
+  );
+}
+
+export function selectTabActivitySummaries(
+  state: WorkspaceState,
+  attentionBySessionId: AttentionBySessionId = {},
+): Record<string, ActivitySummary> {
   const result: Record<string, ActivitySummary> = {};
-  const activityBySessionId = state.activityBySessionId ?? {};
   const allTabs = getAllTabs(state);
 
   for (const tab of allTabs) {
     if (!isTerminalTab(tab)) continue;
     const sessionIds = getTabSessionIds(state, tab.id);
     const activities = [...sessionIds]
-      .map((sessionId) => activityBySessionId[sessionId])
+      .map((sessionId) => selectSessionActivity(state, sessionId, attentionBySessionId))
       .filter((activity): activity is TerminalActivity => Boolean(activity));
     result[tab.id] = summarizeActivities(activities, Boolean(state.unreadTabIds[tab.id]));
   }
@@ -3052,9 +3160,11 @@ export function selectTabActivitySummaries(state: WorkspaceState): Record<string
   return result;
 }
 
-export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<string, ActivitySummary> {
+export function selectWorktreeActivitySummaries(
+  state: WorkspaceState,
+  attentionBySessionId: AttentionBySessionId = {},
+): Record<string, ActivitySummary> {
   const result: Record<string, ActivitySummary> = {};
-  const activityBySessionId = state.activityBySessionId ?? {};
   const sessionIdsByWorktree = new Map<string, Set<string>>();
   const unreadTabsByWorktree = new Set<string>();
   const allTabs = getAllTabs(state);
@@ -3080,7 +3190,7 @@ export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<s
   for (const worktree of state.worktrees) {
     const sessionIds = sessionIdsByWorktree.get(worktree.path) ?? new Set<string>();
     const activities = [...sessionIds]
-      .map((sessionId) => activityBySessionId[sessionId])
+      .map((sessionId) => selectSessionActivity(state, sessionId, attentionBySessionId))
       .filter((activity): activity is TerminalActivity => Boolean(activity));
     result[worktree.path] = summarizeActivities(
       activities,
@@ -3104,12 +3214,13 @@ export function selectWorktreeActivitySummaries(state: WorkspaceState): Record<s
  */
 export function selectWorktreeActivitySummariesAcrossWorkspaces(
   mountedWorkspaceId: string,
+  attentionBySessionId: AttentionBySessionId = {},
 ): Record<string, ActivitySummary> {
   const merged: Record<string, ActivitySummary> = {};
 
   for (const [workspaceId, snapshot] of listWorkspaceSnapshots()) {
     if (workspaceId === mountedWorkspaceId) continue;
-    for (const [path, summary] of Object.entries(selectWorktreeActivitySummaries(snapshot))) {
+    for (const [path, summary] of Object.entries(selectWorktreeActivitySummaries(snapshot, attentionBySessionId))) {
       merged[path] = summary;
     }
   }
@@ -3118,11 +3229,10 @@ export function selectWorktreeActivitySummariesAcrossWorkspaces(
 }
 
 /**
- * Global Dock badge count, aligned with the pane-attention signal:
- * each workspace contributes the larger of (unseen attention sessions — the
- * same `done`/`waiting && !seen` state that lights pane highlight frames) and
- * (bell-only unread tabs), summed across the live workspace and every parked
- * workspace snapshot, so an agent finishing anywhere still lights the badge.
+ * Global Dock badge count: each workspace contributes the larger of (sessions whose attention
+ * group is `needsYou` or `unread`, the daemon's group when it reports one, else `groupOf`'s
+ * mapping of the pane's own state) and (bell-only unread tabs), summed across the live workspace
+ * and every parked workspace snapshot, so an agent finishing anywhere still lights the badge.
  */
 export function selectGlobalUnreadBadgeCount(
   currentState?: WorkspaceState,
@@ -3130,13 +3240,15 @@ export function selectGlobalUnreadBadgeCount(
 ): number {
   if (!currentState) return 0;
 
-  const countAttention = (state: WorkspaceState): number =>
-    Object.values(state.activityBySessionId ?? {}).filter(
-      (activity) =>
-        activity &&
-        !activity.seen &&
-        (activity.state === "done" || activity.state === "waiting"),
-    ).length;
+  const countAttention = (state: WorkspaceState): number => {
+    const sessionIds = new Set([...Object.keys(state.activityBySessionId ?? {}), ...Object.keys(state.sessions ?? {})]);
+    let count = 0;
+    for (const sessionId of sessionIds) {
+      const group = sessionAttentionGroup(state, sessionId);
+      if (group === "needsYou" || group === "unread") count += 1;
+    }
+    return count;
+  };
   const countUnreadTabs = (state: WorkspaceState): number =>
     Object.values(state.unreadTabIds ?? {}).filter(Boolean).length;
   const badgeFor = (state: WorkspaceState): number =>
@@ -3149,6 +3261,22 @@ export function selectGlobalUnreadBadgeCount(
     count += badgeFor(snapshot);
   }
   return count;
+}
+
+/** The group a pane shows: the daemon's for its backend session, else its own state mapped. */
+function sessionAttentionGroup(state: WorkspaceState, sessionId: string): AttentionGroup | null {
+  const activity = state.activityBySessionId?.[sessionId];
+  const attention = getDaemonAttention(state.sessions?.[sessionId]?.backendSessionId);
+  if (!activity && !attention) return null;
+  return groupOf({ attention, state: activity?.state, seen: activity?.seen });
+}
+
+/** The activity word a notification names for a daemon group. */
+function activityStateForGroup(group: AttentionGroup, fallback: TerminalActivityState): TerminalActivityState {
+  if (group === "needsYou") return "waiting";
+  if (group === "unread") return "done";
+  if (group === "working") return "working";
+  return fallback;
 }
 
 export type ActivityNotificationTarget = {
@@ -3164,7 +3292,12 @@ export type ActivityNotificationTarget = {
   state: TerminalActivityState;
 };
 
-export type ActivityNotificationEvent = ActivityNotificationTarget & { previousState?: TerminalActivityState };
+export type ActivityNotificationEvent = ActivityNotificationTarget & {
+  previousState?: TerminalActivityState;
+  /** The daemon's attention group; when present it, not the state words, decides the edge. */
+  group?: AttentionGroup;
+  previousGroup?: AttentionGroup;
+};
 
 /** Match ProjectHeader labels without tying parked-workspace events to the active project. */
 export function selectNotificationWorkspaceLabel(state: WorkspaceState): string | undefined {
@@ -5006,6 +5139,65 @@ function locateSessionAcrossLayouts(
  * only in the map without a root leaf, or a closed session, is not navigable. This mirrors
  * exactly what the FOCUS_EXISTING_SESSION reducer will accept.
  */
+/**
+ * Where a pane spawned by agent control lands in this window. A child whose parent pane is in
+ * the visible layout becomes a split beside the parent's leaf, adopting the live backend session
+ * (nothing is spawned or closed). A parent held elsewhere in this window (a parked worktree)
+ * gets the child as a tab in the parent's worktree. A pane this window already shows, a parent
+ * this window does not hold, or another project's pane is left alone (`null`).
+ */
+export type SpawnedAgentAdoption =
+  | { kind: "split"; action: Extract<WorkspaceAction, { type: "SPLIT_PANE" }> }
+  | { kind: "tab"; worktreePath: string; backend: PreSpawnedBackend };
+
+export function planSpawnedAgentAdoption(
+  state: WorkspaceState,
+  event: AgentSpawnedEvent,
+  identity: { incarnation: string | null; frontendSessionId: string; newLeafId: string },
+): SpawnedAgentAdoption | null {
+  if (!event.parentSessionId) return null;
+  if (state.workspaceId !== undefined && state.workspaceId !== event.workspaceId) return null;
+  const sessions = Object.values(state.sessions);
+  if (sessions.some((session) => session.backendSessionId === event.sessionId)) return null;
+  const parent = sessions.find((session) => session.backendSessionId === event.parentSessionId);
+  if (!parent) return null;
+  const backend: PreSpawnedBackend = {
+    sessionId: event.sessionId,
+    ...(event.agent ? { agentType: event.agent } : {}),
+    daemonEpoch: event.daemonEpoch,
+    incarnation: identity.incarnation,
+  };
+  const placed = locateSessionLeaf(state.layout, parent.id);
+  if (!placed) {
+    const worktreePath = sessionWorktreePath(parent);
+    return worktreePath ? { kind: "tab", worktreePath, backend } : null;
+  }
+  const session: TerminalSession = {
+    id: identity.frontendSessionId,
+    cwd: event.cwd ?? parent.cwd,
+    worktreePath: sessionWorktreePath(parent),
+    workspaceId: parent.workspaceId,
+    worktree: parent.worktree,
+    backendSessionId: event.sessionId,
+    ...(event.agent ? { agentType: event.agent } : {}),
+    ...(event.daemonEpoch !== null ? { daemonEpoch: event.daemonEpoch } : {}),
+    ...(identity.incarnation !== null ? { incarnation: identity.incarnation } : {}),
+    lifecycle: "working",
+  };
+  return {
+    kind: "split",
+    action: {
+      type: "SPLIT_PANE",
+      tabId: placed.tabId,
+      ...(placed.leafId ? { targetLeafId: placed.leafId } : {}),
+      direction: "horizontal",
+      position: "second",
+      newLeafId: identity.newLeafId,
+      session,
+    },
+  };
+}
+
 export function hasNavigableSession(state: WorkspaceState, sessionId: string): boolean {
   return Boolean(state.sessions[sessionId]) && locateSessionAcrossLayouts(state, sessionId) !== null;
 }

@@ -1,0 +1,1 @@
+ALTER TABLE lanes ADD COLUMN claim_retries INTEGER DEFAULT 0;

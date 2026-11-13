@@ -17,6 +17,7 @@ import {
   resolveTargets,
   verifyBunArchive,
   verifyMhcArchive,
+  verifyMhcManifest,
 } from "./fetch-mhc.mjs";
 
 const TRIPLES = [
@@ -264,6 +265,27 @@ test("a failed verification leaves no partial install behind", async () => {
     assert.equal(existsSync(layout(fx.dest, fx.triple).root), false);
   } finally {
     rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test("manifest layout.binary follows the release naming of the triple (mhc.exe on Windows)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "fetch-mhc-manifest-"));
+  try {
+    const write = (triple, layout) => {
+      const mhcDir = join(dir, triple);
+      mkdirSync(mhcDir, { recursive: true });
+      const exe = exeName(triple, "mhc");
+      writeFileSync(join(mhcDir, exe), "bin");
+      writeFileSync(join(mhcDir, "manifest.json"), JSON.stringify({ layout, executables: [{ path: exe, sha256: sha256(Buffer.from("bin")) }] }));
+      return mhcDir;
+    };
+    // The pinned Windows release ships layout.binary "mhc.exe"; requiring "mhc" failed every
+    // Windows build at the tauri beforeBuildCommand hook (maho-win run 20261112t071418z).
+    assert.equal(verifyMhcManifest(write("x86_64-pc-windows-msvc", { binary: "mhc.exe" }), "x86_64-pc-windows-msvc").layout.binary, "mhc.exe");
+    assert.equal(verifyMhcManifest(write("x86_64-unknown-linux-gnu", { binary: "mhc" }), "x86_64-unknown-linux-gnu").layout.binary, "mhc");
+    assert.throws(() => verifyMhcManifest(join(dir, "x86_64-pc-windows-msvc"), "aarch64-apple-darwin"), /layout\.binary/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

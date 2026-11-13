@@ -115,7 +115,7 @@ fn vault_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, IpcError>
 }
 
 /// Runs `f` on the open store (opening it first) on a blocking thread.
-async fn with_store<R, T, F>(app: &AppHandle<R>, f: F) -> Result<T, IpcError>
+pub(crate) async fn with_store<R, T, F>(app: &AppHandle<R>, f: F) -> Result<T, IpcError>
 where
     R: tauri::Runtime,
     T: Send + 'static,
@@ -310,12 +310,12 @@ pub async fn cmd_browser_vault_fill<R: tauri::Runtime>(
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-fn fill_chromium(browser_id: &str, script: String) -> Result<(), IpcError> {
+pub(crate) fn fill_chromium(browser_id: &str, script: String) -> Result<(), IpcError> {
     Ok(crate::browser::cef_engine::fill(browser_id, script)?)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn fill_chromium(_browser_id: &str, _script: String) -> Result<(), IpcError> {
+pub(crate) fn fill_chromium(_browser_id: &str, _script: String) -> Result<(), IpcError> {
     Err(IpcError::new(IpcErrorCode::UnsupportedCapability, "the Chromium engine is not available here"))
 }
 

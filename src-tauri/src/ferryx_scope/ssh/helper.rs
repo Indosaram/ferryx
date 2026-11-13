@@ -1092,14 +1092,55 @@ fn resolve_program_and_args(p: &Value) -> Result<(String, Vec<String>), String> 
     }
 }
 
+/// Picks the default login shell for a remote Windows pane.
+///
+/// COMSPEC only names the legacy command interpreter, so taking it verbatim made every
+/// remote Windows pane open cmd.exe while a local pane on the same host opened pwsh.exe
+/// (see terminal::shell::resolve_shell_command_pure). A COMSPEC that names anything other
+/// than cmd.exe is an explicit user choice (Git Bash, a custom interpreter) and is kept;
+/// when it is absent or still points at cmd.exe, PowerShell 7 wins, then Windows
+/// PowerShell, and cmd.exe stays last because it always exists.
+#[cfg(any(windows, test))]
+fn resolve_windows_default_shell<F>(comspec: Option<&str>, on_path: F) -> (String, Vec<String>)
+where
+    F: Fn(&str) -> bool,
+{
+    let comspec = comspec.map(str::trim).filter(|s| !s.is_empty());
+    let comspec_is_cmd = comspec.is_some_and(|shell| {
+        let name = shell.rsplit(['\\', '/']).next().unwrap_or(shell);
+        name.eq_ignore_ascii_case("cmd.exe") || name.eq_ignore_ascii_case("cmd")
+    });
+    if let Some(shell) = comspec.filter(|_| !comspec_is_cmd) {
+        return (shell.to_string(), Vec::new());
+    }
+    // Mirrors terminal::shell::resolve_shell_command_pure: a host that carries pwsh under
+    // either spelling gets PowerShell 7, and only its absence falls back.
+    if on_path("pwsh.exe") || on_path("pwsh") {
+        return ("pwsh.exe".to_string(), Vec::new());
+    }
+    if on_path("powershell.exe") {
+        return ("powershell.exe".to_string(), Vec::new());
+    }
+    (comspec.unwrap_or("cmd.exe").to_string(), Vec::new())
+}
+
+/// Presence probe for one executable name along PATH. The PTY child inherits this same
+/// PATH, so a name found here is the name CreateProcess resolves when the pane spawns.
+#[cfg(windows)]
+fn windows_exe_on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .any(|dir| !dir.as_os_str().is_empty() && dir.join(name).is_file())
+        })
+        .unwrap_or(false)
+}
+
 fn default_platform_login_shell() -> (String, Vec<String>) {
     #[cfg(windows)]
     {
-        let shell = std::env::var("COMSPEC")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "cmd.exe".to_string());
-        (shell, Vec::new())
+        let comspec = std::env::var("COMSPEC").ok();
+        resolve_windows_default_shell(comspec.as_deref(), windows_exe_on_path)
     }
     #[cfg(target_os = "macos")]
     {
@@ -1212,15 +1253,17 @@ fn prepare_spawn_cwd(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-// Rejects UNC working directories before spawning: the default Windows login
-// shell (cmd.exe) cannot use a UNC cwd and silently falls back to the Windows
-// directory, so a UNC project would launch outside the requested path. Fail
-// explicitly instead. POSIX canonical paths always start with '/', so this
-// check never fires there.
+// Rejects UNC working directories before spawning. cmd.exe (still the fallback
+// login shell) cannot hold a UNC cwd and silently falls back to the Windows
+// directory, so a UNC project would launch outside the requested path. The
+// refusal stays shell-independent: PowerShell does tolerate a UNC cwd, but no
+// remote pane has been measured there, so a mapped drive letter remains the
+// supported route. POSIX canonical paths always start with '/', so this check
+// never fires on unix hosts.
 fn ensure_cwd_spawnable(cwd: &Path) -> Result<(), String> {
     if cwd.as_os_str().to_string_lossy().starts_with(r"\\") {
         return Err(
-            r"UNSUPPORTED: UNC cwd cannot be used by the default cmd.exe shell; map a drive letter (net use X: \\server\share) or launch a UNC-capable shell"
+            r"UNSUPPORTED: UNC cwd is unsupported for remote panes; map a drive letter (net use X: \\server\share) instead"
                 .to_string(),
         );
     }

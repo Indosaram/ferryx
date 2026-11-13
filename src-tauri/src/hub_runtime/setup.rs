@@ -506,6 +506,75 @@ pub async fn supervisor_setup(
             supervisor_setup_run(state, SetupRunRequest { import_memory, projects }).await
         }
         SupervisorSetupAction::AdoptAll => supervisor_adopt_all(state, super::SupervisorCaller::Desktop).await,
+        SupervisorSetupAction::ProjectMemory => project_memory_switches(state).await,
+        SupervisorSetupAction::SetProjectMemory { repo_identity, enabled } => {
+            let (pool, _) = hub_pool(state)?;
+            let known = ferryx_hub::supervisor::project_memory::project_switches(&pool)
+                .await
+                .map_err(SupervisorError::from)?
+                .iter()
+                .any(|switch| switch.repo_identity == repo_identity);
+            if !known {
+                return Err(SetupError::Supervisor(SupervisorError::NotFound {
+                    kind: "project",
+                    id: repo_identity,
+                }));
+            }
+            ferryx_hub::supervisor::project_memory::set_injection(&pool, &repo_identity, enabled)
+                .await
+                .map_err(SupervisorError::from)?;
+            tracing::info!(enabled, "project memory injection changed");
+            project_memory_switches(state).await
+        }
+    }
+}
+
+/// `{projects: [{projectId, name, repoIdentity, enabled, items}]}`: every supervised project
+/// with its "give my project decisions to agents" switch (off until the owner turns it on).
+async fn project_memory_switches(state: &RemoteGatewayState) -> Result<Value, SetupError> {
+    let (pool, _) = hub_pool(state)?;
+    let switches = ferryx_hub::supervisor::project_memory::project_switches(&pool)
+        .await
+        .map_err(SupervisorError::from)?;
+    Ok(json!({ "projects": switches }))
+}
+
+/// The repository identity of the checkout that contains `cwd`, the way setup maps a project
+/// (`local_project_mapping` of its top level). Runs git; call it off the async runtime.
+fn repo_identity_of_dir(cwd: &str) -> Option<String> {
+    let output = crate::util::no_window_command("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let top = String::from_utf8(output.stdout).ok()?;
+    let top = top.trim_end_matches(['\r', '\n']);
+    crate::cli::supervisor_goal::local_project_mapping(top).ok().map(|(identity, _)| identity)
+}
+
+/// The owner-notes block for a new agent session in `cwd`, or None: no hub open here (standby
+/// or none), not a git checkout, the project's switch off, nothing taught, or any failure.
+pub async fn agent_memory_block(state: &RemoteGatewayState, cwd: String) -> Option<String> {
+    let (pool, _) = hub_pool(state).ok()?;
+    // Nothing is switched on (the default): no git call per session start.
+    if !ferryx_hub::supervisor::project_memory::any_injection_enabled(&pool).await.unwrap_or(false) {
+        return None;
+    }
+    let identity = crate::ipc::run_blocking(move || Ok(repo_identity_of_dir(&cwd))).await.ok()??;
+    match ferryx_hub::supervisor::project_memory::agent_memory_block(&pool, &identity).await {
+        Ok(block) => block,
+        Err(error) => {
+            tracing::warn!(%error, "project memory block was not read");
+            None
+        }
     }
 }
 
@@ -997,5 +1066,123 @@ mod tests {
             .expect("loop ends with its channel")
             .unwrap();
         assert_eq!(cut_overs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// An engine stand-in that answers a teach as the pinned mhc 2026.11.x does: `persisted`.
+    struct PersistingMemory;
+
+    #[async_trait::async_trait]
+    impl ferryx_hub::meta::mhc_supervisor::OwnerMemory for PersistingMemory {
+        async fn memory_request(
+            &self,
+            _name: &str,
+            data: Value,
+        ) -> Result<Value, ferryx_hub::meta::mhc_supervisor::MemoryRequestError> {
+            let receipt = format!("rcpt-{}", data["sourceId"].as_str().unwrap_or_default());
+            Ok(json!({"changed": true, "receipt": {"receiptId": receipt, "state": "persisted", "applied": []}}))
+        }
+
+        async fn ingest_owner_text(
+            &self,
+            _source_message_id: &str,
+            _text: &str,
+        ) -> Result<ferryx_hub::meta::mhc_supervisor::IngestOutcome, ferryx_hub::meta::mhc_fault::SupervisorFault> {
+            Ok(ferryx_hub::meta::mhc_supervisor::IngestOutcome::Duplicate)
+        }
+    }
+
+    fn git_repo_with_origin(root: &Path, name: &str, origin: &str) -> PathBuf {
+        let repo = root.join(name);
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [vec!["init", "-q"], vec!["remote", "add", "origin", origin]] {
+            let status = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&repo)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        repo
+    }
+
+    /// The daemon's `agentMemoryBlock` answer for a session in repo X: nothing while X's switch
+    /// is off, the owner's taught X decision once it is on, never in repo Y, a subdirectory of X
+    /// counts as X, and a directory outside any checkout gets nothing.
+    #[tokio::test]
+    async fn agent_hook_memory_block_serves_only_the_switched_on_project() {
+        use ferryx_hub::supervisor::request::{handle, RequestContext};
+        let temp = tempfile::tempdir().unwrap();
+        let repo_x = git_repo_with_origin(temp.path(), "x", "https://github.com/Example/X.git");
+        let repo_y = git_repo_with_origin(temp.path(), "y", "https://github.com/example/y.git");
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let (_, project_x, _) = ferryx_hub::supervisor::provision_owner(
+            &pool, "desktop:owner", "x", "https://github.com/example/x", "local", "/x/.git",
+        )
+        .await
+        .unwrap();
+        ferryx_hub::supervisor::provision_owner(
+            &pool, "desktop:owner", "y", "https://github.com/example/y", "local", "/y/.git",
+        )
+        .await
+        .unwrap();
+        let context = RequestContext {
+            principal: "desktop:owner".into(),
+            adapter: ferryx_hub::supervisor::ChannelProvider::Desktop,
+            channel_binding_id: None,
+            control: None,
+            memory: Some(std::sync::Arc::new(PersistingMemory) as std::sync::Arc<dyn ferryx_hub::meta::mhc_supervisor::OwnerMemory>),
+        };
+        handle(
+            &pool,
+            &context,
+            json!({"requestId": "t1", "projectId": project_x.project_id, "action": "teach",
+                "payload": {"text": "use bun not npm"}}),
+        )
+        .await
+        .unwrap();
+
+        let state = std::sync::Arc::new(RemoteGatewayState::new(
+            std::sync::Arc::new(crate::terminal::TerminalService::default()),
+            crate::WorkspaceRegistry::new(),
+        ));
+        let switch = |repo: &'static str, enabled: bool| {
+            let state = std::sync::Arc::clone(&state);
+            async move {
+                supervisor_setup(
+                    &state,
+                    crate::daemon::protocol::SupervisorSetupAction::SetProjectMemory {
+                        repo_identity: repo.into(),
+                        enabled,
+                    },
+                )
+                .await
+            }
+        };
+        *state.supervisor_test_hub.write() = Some((pool.clone(), "desktop:owner".into()));
+        let dir = |path: &Path| path.to_string_lossy().into_owned();
+        assert_eq!(agent_memory_block(&state, dir(&repo_x)).await, None, "switch is off by default");
+
+        let switches = switch("https://github.com/example/x", true).await.unwrap();
+        let listed = switches["projects"].as_array().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|p| p["repoIdentity"] == "https://github.com/example/x" && p["enabled"] == true && p["items"] == 1));
+
+        let block = agent_memory_block(&state, dir(&repo_x)).await.expect("switch on in X");
+        assert!(block.contains("- In project https://github.com/example/x: use bun not npm"), "{block}");
+        let nested = repo_x.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(agent_memory_block(&state, dir(&nested)).await, Some(block));
+        assert_eq!(agent_memory_block(&state, dir(&repo_y)).await, None, "absent in repo Y");
+        let outside = temp.path().join("plain");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(agent_memory_block(&state, dir(&outside)).await, None);
+
+        switch("https://github.com/example/x", false).await.unwrap();
+        assert_eq!(agent_memory_block(&state, dir(&repo_x)).await, None, "switch off again");
+        // An unknown repository is refused, never switched on.
+        let refused = switch("https://github.com/example/z", true).await.unwrap_err();
+        assert_eq!(refused.code(), "NOT_FOUND");
     }
 }

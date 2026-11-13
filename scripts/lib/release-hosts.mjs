@@ -503,7 +503,15 @@ export function runProcess(command, args = [], options = {}) {
  * Executes a script on a configured host via the appropriate transport:
  * - macbook (darwin): local bash -s
  * - omaki (linux): SSH BatchMode + bash -s
- * - maho-win (win32): SSH BatchMode + PowerShell UTF-16LE Base64 -EncodedCommand
+ * - maho-win (win32): SSH BatchMode + PowerShell script piped on stdin
+ *
+ * The Windows transport deliberately pipes the script instead of passing it as
+ * `-EncodedCommand <base64>`. A cold release build's PowerShell script encodes to
+ * roughly 19 KB, and Windows rejects any command line over 8191 characters with
+ * "The command line is too long", which surfaces as a bare exit code 1 from ssh
+ * with no compiler output at all. `-Command -` reads the script from stdin, so
+ * the command line stays short no matter how large the script grows, and exit
+ * codes still propagate (a script ending in `exit 7` makes ssh exit 7).
  */
 export function runHostScript(host, scripts = {}, options = {}) {
   if (!host || typeof host !== "object") {
@@ -567,22 +575,44 @@ export function runHostScript(host, scripts = {}, options = {}) {
       "}",
     ].join("\r\n");
 
-    const encoded = Buffer.from(wrappedScript, "utf16le").toString("base64");
-
-    const args = [
+    const sshPrefix = [
       "-o", "BatchMode=yes",
       "-o", "ConnectTimeout=10",
       "-o", "ServerAliveInterval=30",
       "-o", "ServerAliveCountMax=20",
       host.ssh,
-      "powershell",
-      "-NoProfile",
-      "-NonInteractive",
-      "-EncodedCommand",
-      encoded,
     ];
 
-    return runProcess(sshCommand, args, { input, timeoutMs });
+    // Write the script to a temp file on the host, then run it with -File.
+    //
+    // The script cannot ride on the command line: `-EncodedCommand` takes it as
+    // base64 UTF-16LE, and a release build script encodes to roughly 19 KB, well
+    // past the 8191-character Windows command-line limit ("The command line is
+    // too long", surfacing as a bare ssh exit 1 with no compiler output).
+    // Piping it to `-Command -` avoids the length limit but is not equivalent:
+    // PowerShell 5.1 parses stdin line by line and silently drops multi-line
+    // braces, so a wrapped `try { ... }` produces no output and no error.
+    // A temp file gets full script semantics and keeps the command line short.
+    const remoteScript = `${(host.root ?? "C:/Windows/Temp").replace(/\\/g, "/")}`
+      + `/ferryx-host-script-${process.pid}.ps1`;
+
+    return runProcess(
+      sshCommand,
+      [...sshPrefix, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+        `$in = [Console]::In.ReadToEnd(); Set-Content -LiteralPath '${remoteScript}' -Value $in -Encoding UTF8`],
+      { input: `${wrappedScript}\r\n`, timeoutMs: 120000 },
+    ).then((written) => {
+      if (written.exitCode !== 0) {
+        throw new Error(
+          `Failed to stage the host script on '${host.ssh}': ${(written.stderr || written.stdout).trim()}`,
+        );
+      }
+      return runProcess(
+        sshCommand,
+        [...sshPrefix, "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", remoteScript],
+        { timeoutMs },
+      );
+    });
   }
 
   throw new Error(`Unsupported host platform: '${host.platform}'`);

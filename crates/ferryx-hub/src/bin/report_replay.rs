@@ -101,6 +101,12 @@ impl ferryx_hub::cron_remediate::Runtime for RecordedRuntime {
     async fn owner_notice(&self, problem: &ferryx_hub::cron_remediate::Problem, message: &str) -> ferryx_hub::Result<()> {
         self.hub.owner_notice(problem, message).await
     }
+    fn records_obligations(&self) -> bool {
+        true
+    }
+    async fn owner_notice_obligated(&self, problem: &ferryx_hub::cron_remediate::Problem, message: &str, obligation: &str) -> ferryx_hub::Result<()> {
+        self.hub.owner_notice_obligated(problem, message, obligation).await
+    }
 }
 
 /// Runs one recorded cron failure through today's remediation and reports the gate decision of
@@ -148,6 +154,56 @@ async fn remediate(pool: &sqlx::SqlitePool, judge: &Judge, recorded: RecordedPro
             Ok((decision.clone(), outbox))
         }
         many => Err(format!("remediation produced {} owner notices", many.len()).into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recorded_problem() -> RecordedProblem {
+        let owner = SessionKey::new("slack", None::<String>, "owner-dm", None::<String>, "owner");
+        RecordedProblem {
+            home: owner.clone(), owner, problem_id: 1, job_id: "collect".into(),
+            run_id: "r0".into(), cause: "HTTP 401 invalid_grant".into(),
+            payload: json!({"command":"collect-projects"}), rerun: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn recorded_runtime_sent_links_its_pending_obligation_to_a_report() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let judge = Judge::forced("needs_owner_login_or_quota");
+        let (decision, outbox) = remediate(&pool, &judge, recorded_problem()).await.unwrap();
+        assert_eq!(decision, "sent");
+        let outbox = outbox.unwrap();
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM delivery_obligations o JOIN report_delivery_parts p ON p.report_id = o.report_id
+             WHERE o.state = 'pending' AND p.outbox_id = ?")
+            .bind(outbox).fetch_one(&pool).await.unwrap();
+        assert_eq!(linked, 1);
+    }
+
+    #[tokio::test]
+    async fn recorded_runtime_duplicate_suppresses_a_legacy_bare_pending_obligation() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let judge = Judge::forced("needs_owner_login_or_quota");
+        let (decision, outbox) = remediate(&pool, &judge, recorded_problem()).await.unwrap();
+        assert_eq!(decision, "sent");
+        assert!(outbox.is_some());
+        // Recreate the original sequence: the gate knows the notice, but the obligation
+        // was committed without its report link before the duplicate was attempted.
+        sqlx::query("UPDATE delivery_obligations SET report_id = NULL, state = 'pending'")
+            .execute(&pool).await.unwrap();
+        let (decision, outbox) = remediate(&pool, &judge, recorded_problem()).await.unwrap();
+        assert_eq!(decision, "duplicate");
+        assert!(outbox.is_none());
+        let states: Vec<String> = sqlx::query_scalar("SELECT state FROM delivery_obligations")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(states, vec!["suppressed".to_owned()]);
+        let parts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_delivery_parts")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(parts, 1);
     }
 }
 

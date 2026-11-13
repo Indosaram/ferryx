@@ -80,7 +80,7 @@ mod tailscale_sync_tests {
     }
 
     fn host(id: &str, name: &str, source: crate::ssh::SshHostSource) -> SshHost {
-        SshHost { id: id.into(), label: name.into(), hostname: name.into(), username: Some("alice".into()), port: Some(2222), identity_file: Some("~/.ssh/id_test".into()), jump_host: Some("bastion".into()), source, auth_method: crate::ssh::SshAuthMethod::Key, disabled: None }
+        SshHost { id: id.into(), label: name.into(), hostname: name.into(), username: Some("alice".into()), port: Some(2222), identity_file: Some("~/.ssh/id_test".into()), jump_host: Some("bastion".into()), source, auth_method: crate::ssh::SshAuthMethod::Key, disabled: None, shell: None }
     }
 
     #[test]
@@ -1139,7 +1139,7 @@ fn merge_tailscale_peers(store: &mut SshHostStore, peers: &[crate::remote::disco
             }
             host
         } else {
-            SshHost { id: id.clone(), label: peer.dns_name.clone().unwrap_or_else(|| peer.hostname.clone()), hostname: peer.ipv4.clone(), username: None, port: None, identity_file: None, jump_host: None, source: crate::ssh::SshHostSource::Tailscale, auth_method: crate::ssh::SshAuthMethod::Agent, disabled: None }
+            SshHost { id: id.clone(), label: peer.dns_name.clone().unwrap_or_else(|| peer.hostname.clone()), hostname: peer.ipv4.clone(), username: None, port: None, identity_file: None, jump_host: None, source: crate::ssh::SshHostSource::Tailscale, auth_method: crate::ssh::SshAuthMethod::Agent, disabled: None, shell: None }
         };
         if let Some(index) = store.hosts.iter().position(|current| current.id == host.id) {
             store.hosts[index] = host;
@@ -1413,6 +1413,7 @@ mod tests {
                 source: SshHostSource::Config,
                 auth_method: SshAuthMethod::Agent,
                 disabled: None,
+                shell: None,
             }],
             tombstones: vec!["maho-win:22".into()],
         };
@@ -1670,6 +1671,7 @@ Host dev-box
             source: SshHostSource::Manual,
             auth_method: SshAuthMethod::Agent,
             disabled: None,
+            shell: None,
         };
         save_store(
             &path,

@@ -497,7 +497,7 @@ export function Sidebar({
           }}
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}
-          supervisor={onFocusSupervisorSession ? { content: <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} /> } : undefined}
+          supervisor={onFocusSupervisorSession ? { content: <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} workspaceId={activeProjectId ?? null} /> } : undefined}
           titlebarLeading={isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
           titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
           shortcuts={{

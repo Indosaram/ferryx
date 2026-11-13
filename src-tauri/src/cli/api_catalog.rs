@@ -121,7 +121,7 @@ const OK_OR_FAILURE: &[(&str, &str)] = &[("0", "ok"), ("1", "failure, including 
 pub const CATALOG: &[Command] = &[
     Command {
         name: "agents",
-        summary: "List, read, drive and wait on agent panes on this machine or a paired host",
+        summary: "List, read, drive, wait on and spawn agent panes on this machine or a paired host",
         output: "json",
         subcommands: &[
             sub!("list", &[], &[HOST, JSON]),
@@ -148,6 +148,24 @@ pub const CATALOG: &[Command] = &[
                 &[required!("--until"), value!("--after"), value!("--revision"), value!("--timeout-ms"), HOST, JSON],
             ),
             sub!("events", &[], &[value!("--after"), HOST, JSON]),
+            sub!("ack", &[SESSION], &[HOST, JSON]),
+            sub!(
+                "spawn",
+                &[],
+                &[
+                    required!("--agent"),
+                    required!("--cwd"),
+                    value!("--parent"),
+                    value!("--workspace"),
+                    value!("--name"),
+                    value!("--prompt"),
+                    value!("--command"),
+                    value!("--arg"),
+                    REQUEST_ID,
+                    HOST,
+                    JSON,
+                ],
+            ),
         ],
         exit_codes: DAEMON_JSON_EXIT_CODES,
     },
@@ -274,7 +292,7 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         name: "browser",
-        summary: "Drive Ferryx browser panes: navigation, DOM actions, queries, tabs and state",
+        summary: "Drive Ferryx browser panes: navigation, DOM actions, queries, tabs, state and human-approved vault fills",
         output: "json",
         subcommands: &[
             sub!("list", &[], &[]),
@@ -289,6 +307,10 @@ pub const CATALOG: &[Command] = &[
             sub!("url", &[], &[BROWSER_ID]),
             sub!("title", &[], &[BROWSER_ID]),
             sub!("snapshot", &[], &[BROWSER_ID]),
+            sub!("vault list-for-page", &[], &[BROWSER_ID, value!("--controller")]),
+            sub!("vault request-use", &[], &[BROWSER_ID, required!("--handle"), value!("--controller")]),
+            sub!("vault fill", &[], &[BROWSER_ID, required!("--handle"), required!("--grant"), value!("--controller")]),
+            sub!("vault totp", &[], &[BROWSER_ID, required!("--handle"), required!("--grant"), value!("--controller")]),
             sub!("click", &[], &[BROWSER_ID, GENERATION, REF]),
             sub!("dblclick", &[], &[BROWSER_ID, GENERATION, REF]),
             sub!("hover", &[], &[BROWSER_ID, GENERATION, REF]),

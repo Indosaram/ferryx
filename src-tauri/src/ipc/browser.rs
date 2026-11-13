@@ -349,7 +349,7 @@ fn automation_script(action: &BrowserAutomationAction) -> Result<String, Browser
             let text_json = serde_json::to_string(text)
                 .map_err(|error| BrowserError::AutomationFailed(error.to_string()))?;
             Ok(format!(
-                "(() => {{ const element = document.activeElement || document.body; if (!element) throw new Error('element disappeared'); element.focus(); const str = {text_json}; for (const ch of str) {{ const init = {{ bubbles: true, cancelable: true, key: ch }}; element.dispatchEvent(new KeyboardEvent('keydown', init)); element.dispatchEvent(new KeyboardEvent('keypress', init)); if (element.value !== undefined) {{ element.value = (element.value || '') + ch; element.dispatchEvent(new Event('input', {{ bubbles: true }})); }} else if (element.isContentEditable) {{ document.execCommand('insertText', false, ch); }} element.dispatchEvent(new KeyboardEvent('keyup', init)); }} if (element.value !== undefined) {{ element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} return 'ok'; }})()"
+                "(() => {{ const element = document.activeElement || document.body; if (!element) throw new Error('element disappeared'); if (element.matches('input[type=\"password\"]')) return JSON.stringify({{ok:false,code:'BROWSER_CREDENTIAL_BLOCKED',message:'password fields require `ferryx browser vault`'}}); element.focus(); const str = {text_json}; for (const ch of str) {{ const init = {{ bubbles: true, cancelable: true, key: ch }}; element.dispatchEvent(new KeyboardEvent('keydown', init)); element.dispatchEvent(new KeyboardEvent('keypress', init)); if (element.value !== undefined) {{ element.value = (element.value || '') + ch; element.dispatchEvent(new Event('input', {{ bubbles: true }})); }} else if (element.isContentEditable) {{ document.execCommand('insertText', false, ch); }} element.dispatchEvent(new KeyboardEvent('keyup', init)); }} if (element.value !== undefined) {{ element.dispatchEvent(new Event('change', {{ bubbles: true }})); }} return JSON.stringify({{ok:true}}); }})()"
             ))
         }
         _ => Err(BrowserError::AutomationFailed("element actions are addressed by ref".into())),
@@ -380,6 +380,32 @@ mod automation_tests {
         let error = automation_script(&BrowserAutomationAction::Click { reference: "d1.1".into() })
             .expect_err("element actions go through observe.js");
         assert_eq!(error, BrowserError::AutomationFailed("element actions are addressed by ref".into()));
+    }
+
+    #[test]
+    fn untargeted_type_refuses_a_focused_password_field_in_band() {
+        let typed = || BrowserAutomationRequest {
+            postcondition: None,
+            browser_id: "b1".into(),
+            generation: 1,
+            action: BrowserAutomationAction::Type { reference: None, text: "pw".into() },
+        };
+        let script = automation_script(&typed().action).expect("type into the focused element");
+        // The page refuses before it touches value or input events.
+        assert!(script.contains(r#"element.matches('input[type="password"]')"#));
+        assert!(script.contains("BROWSER_CREDENTIAL_BLOCKED"));
+        // The dispatcher reads that refusal back instead of discarding it, so a blocked
+        // password field never reports a successful keystroke.
+        let error = parse_type_refusal(&typed(), r#"{"ok":false,"code":"BROWSER_CREDENTIAL_BLOCKED"}"#)
+            .expect_err("a password refusal is not a successful act");
+        assert_eq!(
+            crate::ipc::error::IpcError::from(error).code.to_string(),
+            "BROWSER_CREDENTIAL_BLOCKED"
+        );
+        // The same page result on an action that only moves focus reads nothing, so it stands.
+        let mut click = typed();
+        click.action = BrowserAutomationAction::Focus { reference: "d1.1".into() };
+        assert!(parse_type_refusal(&click, r#"{"ok":true}"#).is_ok());
     }
 
     #[test]
@@ -3580,7 +3606,9 @@ async fn dispatch_untargeted_act<R: tauri::Runtime>(
         if !crate::browser::agent::page::trusted_act(&request.browser_id, &request.action).await? {
             let script = automation_script(&request.action)?;
             crate::browser::agent::service::recheck_act(&request.browser_id)?;
-            crate::browser::agent::page::eval(app, manager, &request.browser_id, script).await?;
+            let result =
+                crate::browser::agent::page::eval(app, manager, &request.browser_id, script).await?;
+            parse_type_refusal(request, &result)?;
         }
         return Ok(());
     }
@@ -3600,7 +3628,21 @@ async fn dispatch_untargeted_act<R: tauri::Runtime>(
 
     let script = automation_script(&request.action)?;
     crate::browser::agent::service::recheck_act(&request.browser_id)?;
-    let _ = eval_webview(webview, script).await?;
+    let result = eval_webview(webview, script).await?;
+    parse_type_refusal(request, &result)?;
+    Ok(())
+}
+
+/// A type into an untargeted field reports a refused password field in-band. Reading the
+/// result is what keeps a blocked credential from being reported as a successful keystroke,
+/// on both the system-webview and the engine path.
+fn parse_type_refusal(
+    request: &BrowserAutomationRequest,
+    result: &str,
+) -> Result<(), BrowserError> {
+    if matches!(request.action, BrowserAutomationAction::Type { .. }) {
+        crate::browser::agent::observe::parse_act(result)?;
+    }
     Ok(())
 }
 

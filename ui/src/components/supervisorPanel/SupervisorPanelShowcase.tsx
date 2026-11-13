@@ -3,6 +3,8 @@ import { type ReactNode } from 'react';
 import type { PanelActions } from '../../lib/supervisorPanel/actions';
 import { panelSnapshotFixture } from '../../lib/supervisorPanel/fixtures';
 import type { PanelSnapshot, SessionHealth } from '../../lib/supervisorPanel/contract';
+import type { PrLane, PullRequest } from '../../lib/supervisorPanel/contract';
+import type { WorktreeOnBranch } from '../../lib/supervisorPanel/prLane';
 import type { LegacyGoal } from '../../lib/supervisorPanel/legacyGoals';
 import type { TranscriptMessage } from '../../lib/supervisorPanel/transcript';
 import type { SupervisorHubState } from '../../lib/supervisorModel';
@@ -24,6 +26,7 @@ const inertActions: PanelActions = {
   undo: ok,
   turnOn: ok,
   openSession: noop,
+  handOffPr: ok,
 };
 
 // The fixture's clock, so ages read the same on every render.
@@ -102,6 +105,38 @@ const holderHub: SupervisorHubState = {
   machinesWithoutLease: ['old-laptop'],
 };
 
+/** Todo 10: one PR per lane, so the order and the check states are visible in the showcase. */
+const showcasePr = (overrides: Partial<PullRequest>): PullRequest => ({
+  url: 'https://github.com/o/r/pull/1',
+  title: 'Relay reconnect backoff',
+  number: 1,
+  repo: 'ferryx/ferryx',
+  headRefName: 'fix/relay-backoff',
+  isDraft: false,
+  reviewDecision: null,
+  checks: 'success',
+  reviewRequested: false,
+  updatedAt: '2026-11-12T00:00:00Z',
+  lane: 'waits_on_owner',
+  ...overrides,
+});
+
+const showcasePrLane: PrLane = {
+  prs: [
+    showcasePr({ number: 412, title: 'Relay reconnect backoff', checks: 'success', reviewRequested: true }),
+    showcasePr({ number: 408, title: 'Daemon handover keeps the lease', lane: 'agent_working', headRefName: 'feat/handover', checks: 'pending', url: 'u408' }),
+    showcasePr({ number: 401, title: 'Windows path quoting', lane: 'failing', headRefName: 'fix/win-quote', checks: 'failure', url: 'u401' }),
+    showcasePr({ number: 399, title: 'Docs: transport notes', lane: 'pending', headRefName: 'docs/transport', checks: 'none', isDraft: true, url: 'u399' }),
+  ],
+  outage: null,
+  refreshedAtMs: SHOWCASE_NOW,
+};
+
+/** Only #412 has a worktree; the rest show their refusal when handed off. */
+const showcaseWorktrees: readonly WorktreeOnBranch[] = [
+  { path: '/Users/me/ferryx-wt/relay-backoff', branch: 'fix/relay-backoff' },
+];
+
 function Block({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex min-w-0 flex-col gap-3 rounded-xl border border-border p-4">
@@ -117,12 +152,16 @@ function Surface({
   health,
   goals,
   transcript,
+  prLane,
+  worktrees,
 }: {
   touch: boolean;
   snapshot: PanelSnapshot;
   health?: ReadonlyMap<string, SessionHealth>;
   goals?: ReadonlyMap<string, LegacyGoal>;
   transcript?: typeof showcaseTranscript;
+  prLane?: PrLane | null;
+  worktrees?: readonly WorktreeOnBranch[];
 }) {
   return (
     <PanelSurface
@@ -133,6 +172,8 @@ function Surface({
       health={health}
       goals={goals}
       transcript={transcript}
+      prLane={prLane}
+      worktrees={worktrees}
       computerLabel="This Mac"
     />
   );
@@ -163,11 +204,11 @@ export function SupervisorPanelShowcase({ touch }: { touch?: boolean } = {}) {
       <div className="grid gap-6 lg:grid-cols-[380px_390px_minmax(0,1fr)]">
         {touch ? null : (
           <Block title="Desktop 380">
-            <Surface touch={false} snapshot={panelSnapshotFixture} goals={showcaseGoals} transcript={showcaseTranscript} />
+            <Surface touch={false} snapshot={panelSnapshotFixture} goals={showcaseGoals} transcript={showcaseTranscript} prLane={showcasePrLane} worktrees={showcaseWorktrees} />
           </Block>
         )}
         <Block title="Phone 390">
-          <Surface touch snapshot={panelSnapshotFixture} goals={showcaseGoals} transcript={showcaseTranscript} />
+          <Surface touch snapshot={panelSnapshotFixture} goals={showcaseGoals} transcript={showcaseTranscript} prLane={showcasePrLane} worktrees={showcaseWorktrees} />
         </Block>
         <div className="flex min-w-0 flex-col gap-6">
           <Block title="A failed session">

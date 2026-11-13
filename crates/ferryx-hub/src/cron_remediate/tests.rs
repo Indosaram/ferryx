@@ -4,11 +4,148 @@ use super::*;
 
 /// Records what remediation asked of the hub; reruns answer from a script.
 #[derive(Default)]
-struct Fake {
+struct RecordingFake {
     receipts: Mutex<Vec<RunReceipt>>,
     reruns: Mutex<Vec<(String, bool)>>,
     lanes: Mutex<Vec<LaneRequest>>,
+    lane_updates: Mutex<Vec<LaneRequest>>,
     outcomes: Mutex<Vec<String>>,
+    gate: tokio::sync::OnceCell<HubRuntime>,
+}
+
+async fn allocation_db() -> (SqlitePool, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("fx-cron-claims-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pool = crate::storage::connect(&dir.join("hub.db")).await.unwrap();
+    sqlx::query("INSERT INTO scheduled_jobs(id, expression, payload_json, enabled) VALUES('job', 'every 1h', '{}', 1), ('other', 'every 1h', '{}', 1)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, status, kind, signature, detail, run_id, updated_at) VALUES('1', 'job', 'timeout', ?, 'open', 'failed', 'sig', 'timeout', 'r0', ?)")
+        .bind(now_rfc3339()).bind(now_rfc3339()).execute(&pool).await.unwrap();
+    (pool, dir)
+}
+
+#[tokio::test]
+async fn concurrent_job_claims_have_one_winner() {
+    let (pool, dir) = allocation_db().await;
+    sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, status, kind, signature, detail, run_id, updated_at) SELECT '2', job_id, summary, created_at, status, kind, 'sig2', detail, 'r1', updated_at FROM cron_problems WHERE id = '1'")
+        .execute(&pool).await.unwrap();
+    // Distinct incidents must contend: status='open' alone lets both win.
+    for second in [2] {
+        sqlx::query("UPDATE cron_problems SET status = 'open'").execute(&pool).await.unwrap();
+        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(
+                claim_problem(&pool, 1, "timeout", None),
+                claim_problem(&pool, second, "timeout", None),
+            )
+        }).await.unwrap();
+        let results = [first, second];
+        assert_eq!(results.iter().filter(|r| matches!(r, Ok(1))).count(), 1);
+        assert_eq!(results.iter().filter(|r| matches!(r, Err(e) if sibling_claim_busy(e))).count(), 1);
+        let claimed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cron_problems WHERE status = 'remediating'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(claimed, 1);
+    }
+    pool.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn shared_lane_stays_open_until_all_jobs_are_fixed() {
+    let (pool, dir) = allocation_db().await;
+    crate::lanes::state::insert_lane(&pool, "shared-cron", "repair", "meta", "/tmp", "[]")
+        .await.unwrap();
+    sqlx::query("UPDATE cron_problems SET status = 'fixed', lane_key = 'shared-cron' WHERE id = '1'")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, status, kind, signature, detail, run_id, updated_at, lane_key) SELECT '2', 'other', summary, created_at, 'remediating', kind, 'sig2', detail, 'r1', updated_at, lane_key FROM cron_problems WHERE id = '1'")
+        .execute(&pool).await.unwrap();
+    reconcile_fixed(&pool, "job").await.unwrap();
+    let state: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = 'shared-cron'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(state, "queued");
+    let history: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lane_history WHERE lane_key = 'shared-cron'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(history, 0);
+    sqlx::query("UPDATE cron_problems SET status = 'fixed' WHERE id = '2'")
+        .execute(&pool).await.unwrap();
+    reconcile_fixed(&pool, "job").await.unwrap();
+    let state: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = 'shared-cron'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(state, "verified_done");
+    pool.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn dispatch_failure_leaves_delivered_at_null() {
+    let (pool, dir) = allocation_db().await;
+    let r = remediator(&pool, "unknown", Arc::new(RecordingFake::default()));
+    // Malformed input fails handle_event before it can acknowledge the event.
+    crate::lanes::dispatch::enqueue(&pool, "job", "meta", "cron_problem", "{invalid")
+        .await.unwrap();
+    assert_eq!(dispatch_once(&pool, &r).await.unwrap(), 0);
+    let deliveries: Vec<Option<String>> = sqlx::query_scalar("SELECT delivered_at FROM lane_events WHERE kind = 'cron_problem'")
+        .fetch_all(&pool).await.unwrap();
+    assert_eq!(deliveries, vec![None]);
+    pool.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn sibling_loss_stays_queued_then_retries_after_settlement() {
+    let (pool, dir) = allocation_db().await;
+    sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, status, kind, signature, detail, run_id, updated_at) SELECT '2', job_id, summary, created_at, status, kind, 'sig2', detail, 'r1', updated_at FROM cron_problems WHERE id = '1'")
+        .execute(&pool).await.unwrap();
+    assert_eq!(claim_problem(&pool, 1, "timeout", None).await.unwrap(), 1);
+    let fake = Arc::new(RecordingFake::default());
+    let r = remediator(&pool, "transient_retry_once", fake.clone());
+    crate::lanes::dispatch::enqueue(&pool, "job", "meta", "cron_problem", &json!({"problem_id": 2}).to_string())
+        .await.unwrap();
+    let before = chrono::Utc::now();
+    assert_eq!(dispatch_once(&pool, &r).await.unwrap(), 0);
+    let (delivered, release): (Option<String>, String) = sqlx::query_as("SELECT delivered_at, release_at FROM lane_events WHERE kind = 'cron_problem'")
+        .fetch_one(&pool).await.unwrap();
+    assert!(delivered.is_none());
+    let release = chrono::DateTime::parse_from_rfc3339(&release).unwrap();
+    assert!(release >= before + chrono::TimeDelta::seconds(30));
+    assert!(release <= chrono::Utc::now() + chrono::TimeDelta::seconds(30));
+    assert_eq!(status(&pool, 2).await.0, "open");
+    assert!(fake.outcomes.lock().unwrap().is_empty());
+    // A far-future release proves the dispatcher honors backoff without sleeping.
+    sqlx::query("UPDATE lane_events SET release_at = '9999-01-01T00:00:00+00:00'")
+        .execute(&pool).await.unwrap();
+    assert_eq!(dispatch_once(&pool, &r).await.unwrap(), 0);
+    sqlx::query("UPDATE cron_problems SET status = 'needs_owner' WHERE id = '1'")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE lane_events SET release_at = '2000-01-01T00:00:00+00:00'")
+        .execute(&pool).await.unwrap();
+    assert_eq!(dispatch_once(&pool, &r).await.unwrap(), 1);
+    assert_eq!(status(&pool, 2).await.0, "fixed");
+    assert_eq!(fake.outcomes.lock().unwrap().len(), 1);
+    let delivered: Option<String> = sqlx::query_scalar("SELECT delivered_at FROM lane_events WHERE kind = 'cron_problem'")
+        .fetch_one(&pool).await.unwrap();
+    assert!(delivered.is_some());
+    assert_eq!(dispatch_once(&pool, &r).await.unwrap(), 0);
+    assert_eq!(fake.outcomes.lock().unwrap().len(), 1);
+    pool.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn successful_claim_consumes_event_once() {
+    let (pool, dir) = allocation_db().await;
+    let fake = Arc::new(RecordingFake::default());
+    let r = remediator(&pool, "transient_retry_once", fake.clone());
+    crate::lanes::dispatch::enqueue(&pool, "job", "meta", "cron_problem", &json!({"problem_id": 1}).to_string())
+        .await.unwrap();
+    assert_eq!(dispatch_once(&pool, &r).await.unwrap(), 1);
+    assert_eq!(status(&pool, 1).await.0, "fixed");
+    let delivered: Option<String> = sqlx::query_scalar("SELECT delivered_at FROM lane_events WHERE kind = 'cron_problem'")
+        .fetch_one(&pool).await.unwrap();
+    assert!(delivered.is_some());
+    assert_eq!(dispatch_once(&pool, &r).await.unwrap(), 0);
+    assert_eq!(fake.outcomes.lock().unwrap().len(), 1);
+    pool.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
@@ -65,9 +202,13 @@ fn receipt(status: &str, output: &str) -> RunReceipt {
 }
 
 #[async_trait]
-impl Runtime for Fake {
+impl Runtime for RecordingFake {
     async fn open_lane(&self, request: LaneRequest) -> Result<()> {
         self.lanes.lock().unwrap().push(request);
+        Ok(())
+    }
+    async fn update_lane(&self, request: LaneRequest) -> Result<()> {
+        self.lane_updates.lock().unwrap().push(request);
         Ok(())
     }
     async fn rerun(&self, job: &str, approved: bool) -> Result<RunReceipt> {
@@ -87,6 +228,19 @@ impl Runtime for Fake {
     }
     async fn log_excerpt(&self, job: &str) -> Result<String> {
         Ok(format!("{job} Traceback: KeyError 'x'"))
+    }
+    fn records_obligations(&self) -> bool {
+        true
+    }
+    async fn owner_notice_obligated(&self, problem: &Problem, message: &str, obligation: &str) -> Result<()> {
+        let gate = self.gate.get_or_try_init(|| async {
+            let pool = crate::storage::memory().await?;
+            let mut hub = HubRuntime::new(pool, Some("fake-owner".into()));
+            hub.transport = false;
+            Ok::<_, HubError>(hub)
+        }).await?;
+        gate.owner_notice_obligated(problem, message, obligation).await?;
+        self.outcome(problem, message).await
     }
     async fn outcome(&self, _problem: &Problem, message: &str) -> Result<()> {
         self.outcomes.lock().unwrap().push(message.to_owned());
@@ -114,7 +268,7 @@ async fn seeded(job: &str, payload: Value, detail: &str) -> (SqlitePool, i64) {
     (pool, 1)
 }
 
-fn remediator(pool: &SqlitePool, cause: &str, fake: Arc<Fake>) -> Remediator {
+fn remediator(pool: &SqlitePool, cause: &str, fake: Arc<RecordingFake>) -> Remediator {
     let cause = cause.to_owned();
     Remediator {
         pool: pool.clone(),
@@ -134,7 +288,7 @@ async fn status(pool: &SqlitePool, id: i64) -> (String, Detail) {
 #[tokio::test]
 async fn a_transient_failure_gets_one_verified_rerun_and_is_fixed() {
     let (pool, id) = seeded("job", json!({"command": "true"}), "connection reset").await;
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     let r = remediator(&pool, "transient_retry_once", fake.clone());
     r.handle_event(&json!({"problem_id": id}).to_string(), "meta")
         .await
@@ -166,7 +320,7 @@ async fn an_unverified_rerun_goes_to_the_owner_with_a_local_approval_command() {
         "timeout",
     )
     .await;
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     // Succeeds but prints the wrong thing: not verified.
     fake.receipts
         .lock()
@@ -182,6 +336,12 @@ async fn an_unverified_rerun_goes_to_the_owner_with_a_local_approval_command() {
         "{message}"
     );
     assert_eq!(detail.outcome.as_deref(), Some("unverified"));
+    let gate = fake.gate.get().unwrap();
+    let recorded: (String, bool) = sqlx::query_as(
+        "SELECT o.state, EXISTS(SELECT 1 FROM report_delivery_parts p WHERE p.report_id = o.report_id) FROM delivery_obligations o WHERE o.id = ?",
+    ).bind(format!("{}cron:job:job", crate::owner_alert::OBLIGATION_PREFIX))
+        .fetch_one(&gate.pool).await.unwrap();
+    assert_eq!(recorded, ("pending".to_owned(), true));
     // The notice names the command that exists in this build and carries no secret.
     assert!(
         message.ends_with(&format!("ferryx hub cron approve-rerun {id}")),
@@ -230,7 +390,7 @@ async fn an_unverified_rerun_goes_to_the_owner_with_a_local_approval_command() {
 #[tokio::test]
 async fn login_or_quota_trouble_is_the_owners_with_a_direct_quota_check() {
     let (pool, id) = seeded("job", json!({"command": "true"}), "HTTP 429 quota exceeded").await;
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     let r = remediator(&pool, "needs_owner_login_or_quota", fake.clone());
     r.on_problem(id, "meta").await.unwrap();
     assert_eq!(status(&pool, id).await.0, "needs_owner");
@@ -291,7 +451,7 @@ async fn a_script_bug_opens_a_lane_that_settles_on_the_hubs_rerun() {
         "Traceback (most recent call last): KeyError 'x'",
     )
     .await;
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     let r = remediator(&pool, "script_bug_needs_fix", fake.clone());
     r.on_problem(id, "lead-1").await.unwrap();
     let (state, _) = status(&pool, id).await;
@@ -303,6 +463,7 @@ async fn a_script_bug_opens_a_lane_that_settles_on_the_hubs_rerun() {
         lane.key
     );
     assert!(crate::lanes::state::valid_key(&lane.key));
+    assert_eq!(lane.title, "Cron fix: Daily Report");
     assert_eq!(lane.cwd, PathBuf::from(script).parent().unwrap());
     assert_eq!(lane.lead, "lead-1");
     assert!(lane.brief.contains("Job: Daily Report / daily"));
@@ -322,6 +483,47 @@ async fn a_script_bug_opens_a_lane_that_settles_on_the_hubs_rerun() {
 }
 
 #[tokio::test]
+async fn repeated_cron_failure_reuses_the_existing_active_lane() {
+    let (pool, first_id) = seeded(
+        "daily-report",
+        json!({"script": "/opt/jobs/report.py"}),
+        "first failure",
+    )
+    .await;
+    let lane_key = "cron-fix-daily-report-live";
+    crate::lanes::state::insert_lane(&pool, lane_key, "Cron root-cause remediation", "lead-1", "/opt/jobs", "command true")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cron_problems SET status = 'remediating', lane_key = ? WHERE CAST(id AS INTEGER) = ?")
+        .bind(lane_key)
+        .bind(first_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO cron_problems(id, job_id, summary, created_at, status, kind, signature, detail, run_id, updated_at) VALUES('2', 'daily-report', 'second failure', ?, 'open', 'failed', 'sig-2', 'second failure', 'r2', ?)")
+        .bind(now_rfc3339())
+        .bind(now_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let fake = Arc::new(RecordingFake::default());
+    remediator(&pool, "script_bug_needs_fix", fake.clone())
+        .on_problem(2, "lead-2")
+        .await
+        .unwrap();
+
+    assert!(fake.lanes.lock().unwrap().is_empty(), "must not create a second lane");
+    {
+        let updates = fake.lane_updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].key, lane_key);
+        assert_eq!(updates[0].title, "Cron fix: daily-report");
+    }
+    assert_eq!(problem(&pool, 2).await.unwrap().unwrap().lane_key.as_deref(), Some(lane_key));
+}
+
+#[tokio::test]
 async fn a_publishing_job_waits_for_the_owner_before_any_rerun() {
     let (pool, id) = seeded(
         "omon-playstore-daily-publish",
@@ -329,7 +531,7 @@ async fn a_publishing_job_waits_for_the_owner_before_any_rerun() {
         "connection reset",
     )
     .await;
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     let r = remediator(&pool, "transient_retry_once", fake.clone());
     r.on_problem(id, "meta").await.unwrap();
     assert_eq!(status(&pool, id).await.0, "needs_owner");
@@ -368,7 +570,7 @@ async fn an_exhausted_budget_and_a_stale_row_both_reach_the_owner() {
         .execute(&pool)
         .await
         .unwrap();
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     let r = remediator(&pool, "transient_retry_once", fake.clone());
     assert!(r.verify_once(id).await.unwrap().is_none());
     assert!(fake.reruns.lock().unwrap().is_empty());
@@ -571,7 +773,7 @@ async fn two_problems_of_one_job_share_one_open_owner_item() {
         .execute(&pool)
         .await
         .unwrap();
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     let r = remediator(&pool, "needs_owner_login_or_quota", fake.clone());
     r.on_problem(first, "meta").await.unwrap();
     let opened: String =
@@ -634,9 +836,9 @@ async fn the_same_owner_ask_is_told_once_until_the_job_recovers() {
     r.on_problem(2, "meta").await.unwrap();
     assert_eq!(decisions(pool.clone()).await, ["sent", "duplicate"]);
     // A verified recovery ends the ask: the next login failure is news again.
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     fake.receipts.lock().unwrap().push(receipt("succeeded", "saved items: 3 (ids 11, 12, 13)"));
-    let healer = Remediator { runtime: fake, ..remediator(&pool, "transient_retry_once", Arc::new(Fake::default())) };
+    let healer = Remediator { runtime: fake, ..remediator(&pool, "transient_retry_once", Arc::new(RecordingFake::default())) };
     fail("3", "run-3", "connection reset").await;
     healer.on_problem(3, "meta").await.unwrap();
     fail("4", "run-4", "freemoa: LOGIN_FAILED").await;
@@ -784,7 +986,7 @@ async fn leaked_tokens_are_redacted_from_stored_chat_and_their_hashes_revoked() 
         .execute(&pool)
         .await
         .unwrap();
-    let r = remediator(&pool, "transient_retry_once", Arc::new(Fake::default()));
+    let r = remediator(&pool, "transient_retry_once", Arc::new(RecordingFake::default()));
     assert!(
         r.approve_rerun_with_token(id, LEAKED).await.is_ok(),
         "precondition: the leaked token works before the migration"
@@ -873,7 +1075,7 @@ async fn exit_zero_without_output_is_unverified() {
 
     // Through the remediator: the problem goes to the owner, never to `fixed`.
     let (pool, id) = seeded("job", json!({"command": "true"}), "connection reset").await;
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     fake.receipts.lock().unwrap().push(receipt("succeeded", ""));
     let r = remediator(&pool, "transient_retry_once", fake.clone());
     r.on_problem(id, "meta").await.unwrap();
@@ -891,7 +1093,7 @@ async fn exit_zero_without_output_is_unverified() {
 async fn skipped_or_unassessable_output_never_closes_the_problem() {
     for verdict in ["unverified", "failed", "unavailable"] {
         let (pool, id) = seeded("collect", json!({"command":"true"}), "connection reset").await;
-        let fake = Arc::new(Fake::default());
+        let fake = Arc::new(RecordingFake::default());
         fake.receipts.lock().unwrap().push(receipt("succeeded", "프리모아 로그인이 필요해 수집을 건너뜁니다. Google 로그인을 해 주세요."));
         let r = Remediator {
             pool: pool.clone(), runtime: fake,
@@ -913,7 +1115,7 @@ async fn skipped_or_unassessable_output_never_closes_the_problem() {
 #[tokio::test]
 async fn unavailable_cause_judgment_neither_retries_nor_claims_login_failure() {
     let (pool, id) = seeded("collect", json!({"command":"true"}), "TimeoutError: The operation timed out").await;
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     let r = Remediator {
         pool: pool.clone(), runtime: fake.clone(),
         judge: Judge::bare().with_jev_enabled(false),
@@ -1077,7 +1279,7 @@ async fn an_environment_fault_whose_path_is_back_gets_one_verified_rerun() {
     let (root, fault) = missing_dir();
     std::fs::create_dir_all(&root).unwrap();
     let (pool, id) = seeded("job", json!({"command": "true"}), &fault.message()).await;
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     fake.receipts.lock().unwrap().push(receipt("succeeded", "sent 2"));
     let r = Remediator {
         pool: pool.clone(),
@@ -1098,7 +1300,7 @@ async fn an_environment_fault_whose_path_is_back_gets_one_verified_rerun() {
 #[tokio::test]
 async fn a_failed_verification_tells_what_failed_without_the_receipt_or_ansi() {
     let (pool, id) = seeded("collect", json!({"command": "true"}), "connection reset").await;
-    let fake = Arc::new(Fake::default());
+    let fake = Arc::new(RecordingFake::default());
     fake.receipts.lock().unwrap().push(RunReceipt {
         job_id: "collect".into(),
         run_id: "932f5e3c-4ba1-4cfd-8a21-aa6f3526fe75".into(),
@@ -1165,4 +1367,332 @@ fn owner_text_follows_an_english_owner() {
         );
         assert!(!report.body.chars().any(crate::locale::is_hangul), "{}", report.body);
     });
+}
+
+/// 2026-11-12: `needs_owner` committed a bare 'pending' obligation before the gate answered
+/// Duplicate, so the item was never posted and the alert sweep skipped it forever.
+#[tokio::test]
+async fn a_repeated_owner_notice_never_leaves_a_pending_obligation_without_its_outbox_row() {
+    let (pool, id) = seeded("collect", json!({"command":"collect-projects"}), "LOGIN_FAILED").await;
+    let r = Remediator {
+        pool: pool.clone(), judge: Judge::forced("unused"),
+        runtime: Arc::new(HubRuntime { transport: false, ..HubRuntime::new(pool.clone(), Some("owner-dm".into())) }),
+    };
+    let problem = problem(&pool, id).await.unwrap().unwrap();
+    for _ in 0..2 {
+        r.needs_owner(&problem, &Outcome::Unverified("수집 결과가 없습니다".into()), None).await.unwrap();
+    }
+    let obligation = format!("{}{}", crate::owner_alert::OBLIGATION_PREFIX, crate::schedule::cron_owner_item_id("collect"));
+    let bare: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM delivery_obligations o WHERE o.id = ? AND o.state = 'pending'
+           AND NOT EXISTS (SELECT 1 FROM report_delivery_parts p WHERE p.report_id = o.report_id)",
+    ).bind(&obligation).fetch_one(&pool).await.unwrap();
+    assert_eq!(bare, 0);
+    let state: String = sqlx::query_scalar("SELECT state FROM delivery_obligations WHERE id = ?")
+        .bind(&obligation).fetch_one(&pool).await.unwrap();
+    assert_eq!(state, "pending");
+}
+
+/// Seeds a `remediating` problem whose current verification attempt is `current`.
+async fn claimed(current: &str) -> (SqlitePool, i64) {
+    let detail = Detail {
+        cause: "timeout".into(),
+        reruns: 1,
+        attempt: Some(current.into()),
+        ..Detail::default()
+    };
+    let (pool, id) = seeded("job", json!({"command": "true"}), &detail.encode().unwrap()).await;
+    sqlx::query("UPDATE cron_problems SET status = 'remediating' WHERE CAST(id AS INTEGER) = ?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    (pool, id)
+}
+
+#[tokio::test]
+async fn a_stale_verification_attempt_writes_no_row_and_keeps_the_status() {
+    let (pool, id) = claimed("newer").await;
+    let stale = Detail { cause: "timeout".into(), attempt: Some("older".into()), ..Detail::default() };
+    let owned = record_attempt_outcome(&pool, id, "older", &stale.encode().unwrap(), "fixed")
+        .await
+        .unwrap();
+    assert!(!owned);
+    let (state, detail) = status(&pool, id).await;
+    assert_eq!(state, "remediating");
+    assert_eq!(detail.attempt.as_deref(), Some("newer"));
+}
+
+#[tokio::test]
+async fn the_current_verification_attempt_writes_its_outcome() {
+    let (pool, id) = claimed("current").await;
+    let next = Detail {
+        cause: "timeout".into(),
+        reruns: 1,
+        attempt: Some("current".into()),
+        outcome: Some("verified".into()),
+        ..Detail::default()
+    };
+    let owned = record_attempt_outcome(&pool, id, "current", &next.encode().unwrap(), "fixed")
+        .await
+        .unwrap();
+    assert!(owned);
+    let (state, detail) = status(&pool, id).await;
+    assert_eq!(state, "fixed");
+    assert_eq!(detail.outcome.as_deref(), Some("verified"));
+    assert_eq!(detail.attempt, None);
+}
+
+async fn stored_detail(pool: &SqlitePool, id: i64) -> String {
+    sqlx::query_scalar("SELECT detail FROM cron_problems WHERE CAST(id AS INTEGER) = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn next_attempt(token: &str) -> String {
+    Detail { cause: "timeout".into(), reruns: 2, attempt: Some(token.into()), ..Detail::default() }
+        .encode()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn two_verifiers_reading_the_same_detail_spend_exactly_one_rerun() {
+    let (pool, id) = claimed("previous").await;
+    let prior = stored_detail(&pool, id).await;
+    let first = spend_attempt(&pool, id, "remediating", &prior, &next_attempt("a")).await.unwrap();
+    let second = spend_attempt(&pool, id, "remediating", &prior, &next_attempt("b")).await.unwrap();
+    assert!(first);
+    assert!(!second);
+    let (state, detail) = status(&pool, id).await;
+    assert_eq!(state, "remediating");
+    assert_eq!(detail.attempt.as_deref(), Some("a"));
+    assert_eq!(detail.reruns, 2);
+}
+
+#[tokio::test]
+async fn a_stale_verifier_cannot_overwrite_a_newer_attempts_detail() {
+    let (pool, id) = claimed("previous").await;
+    let stale_read = stored_detail(&pool, id).await;
+    // A newer attempt claims the problem after the stale verifier read it.
+    assert!(spend_attempt(&pool, id, "remediating", &stale_read, &next_attempt("newer")).await.unwrap());
+    let newer = stored_detail(&pool, id).await;
+    assert!(!spend_attempt(&pool, id, "remediating", &stale_read, &next_attempt("stale")).await.unwrap());
+    assert_eq!(stored_detail(&pool, id).await, newer);
+    let (state, detail) = status(&pool, id).await;
+    assert_eq!(state, "remediating");
+    assert_eq!(detail.attempt.as_deref(), Some("newer"));
+}
+
+#[tokio::test]
+async fn two_outcome_writes_with_the_same_token_record_once() {
+    let (pool, id) = claimed("current").await;
+    // The first write leaves a nonterminal status, so only the consumed token can refuse the second.
+    let first = Detail { cause: "timeout".into(), attempt: Some("current".into()), outcome: Some("rerun".into()), ..Detail::default() };
+    let failed = Detail { cause: "timeout".into(), attempt: Some("current".into()), outcome: Some("failed".into()), ..Detail::default() };
+    assert!(record_attempt_outcome(&pool, id, "current", &first.encode().unwrap(), "remediating").await.unwrap());
+    assert!(!record_attempt_outcome(&pool, id, "current", &failed.encode().unwrap(), "needs_owner").await.unwrap());
+    let (state, detail) = status(&pool, id).await;
+    assert_eq!(state, "remediating");
+    assert_eq!(detail.outcome.as_deref(), Some("rerun"));
+    assert_eq!(detail.attempt, None);
+}
+
+#[tokio::test]
+async fn an_escalation_that_lost_the_token_leaves_a_newer_attempt_untouched() {
+    // Attempt A read the row, then an approval re-claimed it for attempt B.
+    let (pool, id) = claimed("newer").await;
+    let fake = Arc::new(RecordingFake::default());
+    let r = remediator(&pool, "timeout", fake.clone());
+    let problem = problem(&pool, id).await.unwrap().unwrap();
+    let before = stored_detail(&pool, id).await;
+    let stale = Detail { cause: "timeout".into(), evidence: Some("stale".into()), ..Detail::default() };
+    let escalated = r
+        .escalate(
+            &problem,
+            &Outcome::NeedsOwner("approve a retry".into()),
+            Some("stale failure"),
+            Some((&stale.encode().unwrap(), Some("older"))),
+        )
+        .await
+        .unwrap();
+    assert!(!escalated);
+    let (state, detail) = status(&pool, id).await;
+    assert_eq!(state, "remediating");
+    assert_eq!(detail.attempt.as_deref(), Some("newer"));
+    assert_eq!(stored_detail(&pool, id).await, before);
+    assert!(fake.outcomes.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_current_attempts_failure_escalates_to_the_owner() {
+    let (pool, id) = claimed("current").await;
+    let fake = Arc::new(RecordingFake::default());
+    let r = remediator(&pool, "timeout", fake.clone());
+    let owned = r
+        .record_failure(id, "verification", &HubError::message("rerun spawn failed"), Some("current"))
+        .await
+        .unwrap();
+    assert!(owned);
+    let (state, detail) = status(&pool, id).await;
+    assert_eq!(state, "needs_owner");
+    assert_eq!(detail.attempt, None);
+    assert!(detail.evidence.as_deref().unwrap().contains("rerun spawn failed"));
+    assert_eq!(fake.outcomes.lock().unwrap().len(), 1);
+}
+
+/// A rerun that is overtaken by a newer attempt and then errors.
+struct OvertakenThenFails {
+    pool: SqlitePool,
+    id: i64,
+    fake: RecordingFake,
+}
+
+#[async_trait]
+impl Runtime for OvertakenThenFails {
+    async fn open_lane(&self, request: LaneRequest) -> Result<()> {
+        self.fake.open_lane(request).await
+    }
+    async fn rerun(&self, _job: &str, _approved: bool) -> Result<RunReceipt> {
+        let (_, mut detail) = status(&self.pool, self.id).await;
+        detail.attempt = Some("newer".into());
+        sqlx::query("UPDATE cron_problems SET detail = ? WHERE CAST(id AS INTEGER) = ?")
+            .bind(detail.encode().unwrap())
+            .bind(self.id)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        Err(HubError::message("rerun spawn failed"))
+    }
+    async fn quota_check(&self) -> Result<Value> {
+        self.fake.quota_check().await
+    }
+    async fn log_excerpt(&self, job: &str) -> Result<String> {
+        self.fake.log_excerpt(job).await
+    }
+    async fn outcome(&self, problem: &Problem, message: &str) -> Result<()> {
+        self.fake.outcome(problem, message).await
+    }
+}
+
+#[tokio::test]
+async fn a_superseded_attempt_that_errors_leaves_the_row_untouched() {
+    let (pool, id) = claimed("previous").await;
+    let runtime = Arc::new(OvertakenThenFails { pool: pool.clone(), id, fake: RecordingFake::default() });
+    let r = Remediator {
+        pool: pool.clone(),
+        judge: Judge::scripted(|_, _, _| "completed".into()),
+        runtime: runtime.clone(),
+    };
+    let before = stored_detail(&pool, id).await;
+    assert!(r.verify_once(id).await.unwrap().is_none());
+    let (state, detail) = status(&pool, id).await;
+    assert_eq!(state, "remediating");
+    assert_eq!(detail.attempt.as_deref(), Some("newer"));
+    assert_eq!(detail.evidence, Detail::parse(&before).evidence);
+    assert!(runtime.fake.outcomes.lock().unwrap().is_empty());
+}
+
+/// A rerun that finishes after a newer attempt claimed the problem must not close owner items.
+struct Overtaken {
+    pool: SqlitePool,
+    id: i64,
+    fake: RecordingFake,
+}
+
+#[async_trait]
+impl Runtime for Overtaken {
+    async fn open_lane(&self, request: LaneRequest) -> Result<()> {
+        self.fake.open_lane(request).await
+    }
+    async fn rerun(&self, job: &str, approved: bool) -> Result<RunReceipt> {
+        // A newer verifier claims the attempt while this rerun is still running.
+        let (_, mut detail) = status(&self.pool, self.id).await;
+        detail.attempt = Some("newer".into());
+        sqlx::query("UPDATE cron_problems SET detail = ? WHERE CAST(id AS INTEGER) = ?")
+            .bind(detail.encode().unwrap())
+            .bind(self.id)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        self.fake.rerun(job, approved).await
+    }
+    async fn quota_check(&self) -> Result<Value> {
+        self.fake.quota_check().await
+    }
+    async fn log_excerpt(&self, job: &str) -> Result<String> {
+        self.fake.log_excerpt(job).await
+    }
+    async fn outcome(&self, problem: &Problem, message: &str) -> Result<()> {
+        self.fake.outcome(problem, message).await
+    }
+}
+
+#[tokio::test]
+async fn a_superseded_verification_attempt_closes_no_owner_items() {
+    let (pool, id) = seeded("job", json!({"command": "true"}), "connection reset").await;
+    sqlx::query("UPDATE cron_problems SET status = 'remediating' WHERE CAST(id AS INTEGER) = ?")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for item in [format!("cron:{id}"), "cron:job:job".to_owned()] {
+        sqlx::query("INSERT INTO inbox_items(id, source, source_ref, snippet, received_at, raw_hash, collected_at) VALUES(?, 'cron', ?, 's', ?, 'h', ?)")
+            .bind(&item)
+            .bind(&item)
+            .bind(now_rfc3339())
+            .bind(now_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_decisions(item_id, class, reason, proposed_action, status, decided_at) VALUES(?, 'owner', 'r', 'a', 'open', ?)")
+            .bind(item)
+            .bind(now_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let runtime = Arc::new(Overtaken { pool: pool.clone(), id, fake: RecordingFake::default() });
+    let r = Remediator {
+        pool: pool.clone(),
+        judge: Judge::scripted(|_, _, _| "completed".into()),
+        runtime: runtime.clone(),
+    };
+    assert!(r.verify_once(id).await.unwrap().is_none());
+    let (state, detail) = status(&pool, id).await;
+    assert_eq!(state, "remediating");
+    assert_eq!(detail.attempt.as_deref(), Some("newer"));
+    let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbox_decisions WHERE status = 'open'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(open, 2);
+    assert!(runtime.fake.outcomes.lock().unwrap().is_empty());
+}
+
+/// Deliberately gate-less runtime for the rejection contract in the parent test module.
+#[derive(Default)]
+struct Fake {
+    outcomes: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Runtime for Fake {
+    async fn open_lane(&self, _: LaneRequest) -> Result<()> {
+        Err(HubError::message("unexpected lane request"))
+    }
+    async fn rerun(&self, _: &str, _: bool) -> Result<RunReceipt> {
+        Err(HubError::message("unexpected rerun"))
+    }
+    async fn quota_check(&self) -> Result<Value> {
+        Err(HubError::message("unexpected quota check"))
+    }
+    async fn log_excerpt(&self, _: &str) -> Result<String> {
+        Err(HubError::message("unexpected log read"))
+    }
+    async fn outcome(&self, _: &Problem, message: &str) -> Result<()> {
+        self.outcomes.lock().unwrap().push(message.to_owned());
+        Ok(())
+    }
 }

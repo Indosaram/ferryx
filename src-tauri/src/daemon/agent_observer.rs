@@ -163,6 +163,7 @@ fn provider_report(states: &AgentStateHub, session_id: &str) -> Option<ProviderR
         state: state.state,
         self_reported: state.origin.is_provider_report(),
         detail: state.detail,
+        outcome: state.outcome,
     })
 }
 
@@ -266,6 +267,7 @@ async fn observe_session(
                             state: update.state.state.clone(),
                             self_reported: update.state.origin.is_provider_report(),
                             detail: update.state.detail.clone(),
+                            outcome: update.state.outcome,
                         };
                         publish_if_changed(
                             &bus,
@@ -590,6 +592,7 @@ mod tests {
             state: "working".into(),
             self_reported: true,
             detail: None,
+            outcome: None,
         }
     }
 

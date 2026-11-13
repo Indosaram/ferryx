@@ -154,12 +154,24 @@ pub(crate) async fn seed_owner_memory(
     seed_with_roots(pool, memory, principal, home, roots, None).await
 }
 
-/// The hub workspace where legacy Slack turns run, resolved as the Slack bot resolves it
-/// ([`ferryx_hub::meta::omo_client::workspace_root_from`]): `configured_root`
+/// The hub workspace where legacy Slack turns run, resolved by the same ungated rule the bot
+/// uses ([`ferryx_hub::hub_env::workspace_root_from`]): `configured_root`
 /// (`OMON_WORKSPACE_ROOT`), else `<home>/.ferryx/hub/workspace`. Every bot session runs
 /// under it, with or without a persona.
+///
+/// Without `hub-slack`/`hub-discord` the Slack connector is not compiled, so the same rule is
+/// applied here: seeding still has to know where the hub keeps its sessions.
+#[cfg(any(feature = "hub-slack", feature = "hub-discord"))]
 fn hub_workspace(configured_root: Option<String>, home: &Path) -> PathBuf {
-    ferryx_hub::meta::omo_client::workspace_root_from(configured_root, Some(home))
+    ferryx_hub::hub_env::workspace_root_from(configured_root, Some(home))
+        .unwrap_or_else(|| home.join(".ferryx").join("hub").join("workspace"))
+}
+
+#[cfg(not(any(feature = "hub-slack", feature = "hub-discord")))]
+fn hub_workspace(configured_root: Option<String>, home: &Path) -> PathBuf {
+    configured_root
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".ferryx").join("hub").join("workspace"))
 }
 

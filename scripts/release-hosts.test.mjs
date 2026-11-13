@@ -472,31 +472,28 @@ process.exit(res.status ?? 0);
   }
 });
 
-test("runHostScript: maho-win Windows SSH transport invokes base64 UTF16LE EncodedCommand via executable SSH fixture", async () => {
+test("runHostScript: maho-win stages the script to a host temp file and runs it with -File", async () => {
   const fixtureDir = mkdtempSync(join(tmpdir(), "ferryx-ssh-maho-"));
   const sshLogFile = join(fixtureDir, "ssh-calls.json");
   const fakeSshBin = join(fixtureDir, "ssh");
 
-  // Create an executable SSH fixture that decodes the PowerShell -EncodedCommand argument
+  // Fixture records argv plus any stdin, and succeeds on both transport steps.
   const fakeSshScript = `#!/usr/bin/env node
 const fs = require('node:fs');
 
 const args = process.argv.slice(2);
-const encodedIdx = args.indexOf('-EncodedCommand');
-let decodedCommand = '';
-if (encodedIdx !== -1 && args[encodedIdx + 1]) {
-  const b64 = args[encodedIdx + 1];
-  decodedCommand = Buffer.from(b64, 'base64').toString('utf16le');
-}
-
-const calls = fs.existsSync(${JSON.stringify(sshLogFile)})
-  ? JSON.parse(fs.readFileSync(${JSON.stringify(sshLogFile)}, 'utf8'))
-  : [];
-calls.push({ args, decodedCommand });
-fs.writeFileSync(${JSON.stringify(sshLogFile)}, JSON.stringify(calls, null, 2));
-
-process.stdout.write('MAHO_WIN_POWERSHELL_SIMULATION_OK\\n');
-process.exit(0);
+let stdinPiped = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => { stdinPiped += chunk; });
+process.stdin.on('end', () => {
+  const calls = fs.existsSync(${JSON.stringify(sshLogFile)})
+    ? JSON.parse(fs.readFileSync(${JSON.stringify(sshLogFile)}, 'utf8'))
+    : [];
+  calls.push({ args, stdinPiped });
+  fs.writeFileSync(${JSON.stringify(sshLogFile)}, JSON.stringify(calls, null, 2));
+  process.stdout.write('STAGE_OK\\n');
+  process.exit(0);
+});
 `;
   writeFileSync(fakeSshBin, fakeSshScript, "utf8");
   chmodSync(fakeSshBin, 0o755);
@@ -510,31 +507,45 @@ process.exit(0);
     );
 
     assert.equal(result.exitCode, 0);
-    assert.match(result.stdout, /MAHO_WIN_POWERSHELL_SIMULATION_OK/);
 
     const calls = JSON.parse(readFileSync(sshLogFile, "utf8"));
-    assert.equal(calls.length, 1);
-    const call = calls[0];
+    assert.equal(calls.length, 2, "expected a staging call and a run call");
 
-    // Assert exact SSH options and PowerShell flags
-    assert.ok(call.args.includes("-o"));
-    assert.ok(call.args.includes("BatchMode=yes"));
-    assert.ok(call.args.includes("ConnectTimeout=10"));
-    assert.ok(call.args.includes("ServerAliveInterval=30"));
-    assert.ok(call.args.includes("ServerAliveCountMax=20"));
-    assert.ok(call.args.includes("maho-win"));
-    assert.ok(call.args.includes("powershell"));
-    assert.ok(call.args.includes("-NoProfile"));
-    assert.ok(call.args.includes("-NonInteractive"));
-    assert.ok(call.args.includes("-EncodedCommand"));
+    // Step 1 stages the script over stdin.
+    const stage = calls[0];
+    assert.ok(stage.args.includes("maho-win"));
+    assert.ok(stage.args.includes("powershell"));
+    assert.ok(stage.args.includes("-NoProfile"));
+    assert.ok(stage.args.includes("-NonInteractive"));
+    assert.ok(stage.stdinPiped.includes("$ProgressPreference = 'SilentlyContinue'"));
+    assert.ok(stage.stdinPiped.includes("Write-Output 'Windows Build Step'"));
+    assert.ok(stage.stdinPiped.includes("$LASTEXITCODE"));
 
-    // Verify decoded PowerShell payload has SilentlyContinue and exit status handling
-    assert.ok(call.decodedCommand.includes("$ProgressPreference = 'SilentlyContinue'"));
-    assert.ok(call.decodedCommand.includes("Write-Output 'Windows Build Step'"));
-    assert.ok(
-      call.decodedCommand.includes("$LASTEXITCODE") ||
-      call.decodedCommand.includes("exit")
-    );
+    // Step 2 runs the staged file; no script text on the command line at all.
+    const run = calls[1];
+    assert.ok(run.args.includes("-o"));
+    assert.ok(run.args.includes("BatchMode=yes"));
+    assert.ok(run.args.includes("ConnectTimeout=10"));
+    assert.ok(run.args.includes("ServerAliveInterval=30"));
+    assert.ok(run.args.includes("ServerAliveCountMax=20"));
+    assert.ok(run.args.includes("maho-win"));
+    assert.ok(run.args.includes("-ExecutionPolicy"));
+    assert.ok(run.args.includes("Bypass"));
+    assert.ok(run.args.includes("-File"));
+    assert.equal(run.stdinPiped, "");
+
+    // No step may put the script (or its base64 form) back on the command line:
+    // Windows rejects a command line over 8191 characters, and a release build
+    // script exceeds that.
+    for (const call of calls) {
+      assert.ok(!call.args.includes("-EncodedCommand"));
+      for (const arg of call.args) {
+        // The build script itself must never appear in argv, only the tiny
+        // staging snippet; Windows rejects any argument past 8191 characters.
+        assert.ok(!arg.includes("Windows Build Step"), "build script must not ride on the command line");
+        assert.ok(arg.length <= 8191, `argument exceeds the Windows command-line limit: ${arg.length}`);
+      }
+    }
   } finally {
     rmSync(fixtureDir, { recursive: true, force: true });
   }
@@ -569,7 +580,7 @@ test("runHostScript: rejects invalid script requests for host platform", async (
 // 5. Optional Real Remote Read-Only Smoke Check
 // ---------------------------------------------------------------------------
 
-test("runHostScript: live read-only remote smoke probe (if available)", async (t) => {
+test("runHostScript: live read-only remote smoke probe (if available)", { timeout: 180000 }, async (t) => {
   // Probe if maho-win is directly reachable
   const check = spawnSync("ssh", [
     "-o", "BatchMode=yes",
@@ -584,9 +595,11 @@ test("runHostScript: live read-only remote smoke probe (if available)", async (t
   }
 
   const config = makeValidConfig();
+  // The Windows transport stages the script then runs it: two SSH round trips,
+  // so this needs more than node:test's 5 s default.
   const result = await runHostScript(config.hosts["maho-win"], {
     powershell: "Write-Output 'REMOTE_LIVE_MAHO_WIN_OK'",
-  });
+  }, { timeoutMs: 120000 });
   assert.equal(result.exitCode, 0);
   assert.match(result.stdout, /REMOTE_LIVE_MAHO_WIN_OK/);
 });

@@ -25,6 +25,8 @@ use tokio::io::BufReader;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "camelCase")]
 pub enum BrowserCliRequest {
+    #[serde(rename_all = "camelCase")]
+    Vault { browser_id: String, action: BrowserVaultCliAction },
     List,
     Snapshot {
         browser_id: String,
@@ -239,6 +241,71 @@ pub enum BrowserCliRequest {
         #[serde(default)]
         profile: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum BrowserVaultCliAction {
+    ListForPage,
+    RequestUse { handle: String },
+    Fill { handle: String, grant: String },
+    Totp { handle: String, grant: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultCredentialHandle {
+    pub handle: String,
+    pub origin: String,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum VaultCliReply {
+    ListForPage { handles: Vec<VaultCredentialHandle> },
+    RequestUse { grant: String, expires_in_secs: u64 },
+    Fill { status: VaultFillStatus },
+    Totp { filled: bool, code_never_returned: bool },
+}
+
+/// A closed set of fill outcomes. The page script can distinguish these but must never
+/// report a value, selector, field count, or exception text: any of those would turn the
+/// reply into a read oracle for the credential it just placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VaultFillStatus {
+    /// The password (and possibly the username) were written into visible fields.
+    Filled,
+    /// Only a username field was found; no password was written.
+    UsernameOnly,
+    /// The password field exists but every candidate was hidden or unusable.
+    NotVisible,
+    /// No usable field was found at all.
+    NoFields,
+    /// The document was no longer the approved origin when the script ran.
+    OriginMismatch,
+    /// The script ran in a subframe and refused to touch the page.
+    NotTop,
+    /// The script was dispatched but this engine cannot report its result back.
+    Dispatched,
+}
+
+impl VaultFillStatus {
+    /// Maps the raw script token to the closed set. An unrecognised token is reported as
+    /// dispatched rather than as success, so a new script outcome can never be mistaken
+    /// for a verified fill.
+    pub fn from_script_token(token: &str) -> Self {
+        match token.trim() {
+            "filled" => Self::Filled,
+            "username-only" => Self::UsernameOnly,
+            "not-visible" => Self::NotVisible,
+            "no-fields" => Self::NoFields,
+            "origin-mismatch" => Self::OriginMismatch,
+            "not-top" => Self::NotTop,
+            _ => Self::Dispatched,
+        }
+    }
 }
 
 /// Custom serde deserializer that cleanly converts between a u64 integer or decimal string
@@ -1590,6 +1657,7 @@ fn read_token_file(path: &Path) -> Result<String, BrowserError> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BrowserCliResponse {
+    Vault(VaultCliReply),
     List {
         sessions: Vec<BrowserSessionSummary>,
     },
@@ -2492,6 +2560,12 @@ async fn execute_request<R: tauri::Runtime>(
     request: BrowserCliRequest,
 ) -> BrowserCliResponse {
     match request {
+        BrowserCliRequest::Vault { browser_id, action } => {
+            match crate::browser::agent::service::execute_vault(app, manager, &browser_id, action).await {
+                Ok(reply) => BrowserCliResponse::Vault(reply),
+                Err(error) => error_response(error),
+            }
+        }
         BrowserCliRequest::List => BrowserCliResponse::List {
             sessions: manager.list_sessions(),
         },

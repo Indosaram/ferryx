@@ -1283,7 +1283,22 @@ fn install_macos_terminal_scroll_monitor<R: tauri::Runtime>(
                                                 }
                                             });
                                         }
-                                        _ => {}
+                                        Ok(crate::native_terminal::TerminalWheelOutcome::None) => {}
+                                        Ok(crate::native_terminal::TerminalWheelOutcome::ScrollViewport(_)) => {
+                                            // The guard above already accepted every applied scroll,
+                                            // so this is a surface that detached mid-gesture.
+                                            tracing::debug!(
+                                                session_id = %session_id,
+                                                "Native wheel scroll dropped: surface detached"
+                                            );
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                session_id = %session_id,
+                                                %error,
+                                                "Native wheel outcome failed"
+                                            );
+                                        }
                                     }
                                 }
                                 return ptr::null_mut();
@@ -2070,10 +2085,14 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::supervisor::cmd_supervisor_converse,
         ipc::supervisor::cmd_supervisor_transcript_export,
         ipc::supervisor::cmd_supervisor_panel,
+        ipc::supervisor::cmd_supervisor_prs,
+        ipc::supervisor::cmd_agent_spawn,
         ipc::supervisor::cmd_supervisor_move_here,
         ipc::supervisor::cmd_supervisor_setup_status,
         ipc::supervisor::cmd_supervisor_setup_run,
         ipc::supervisor::cmd_supervisor_adopt_all,
+        ipc::supervisor::cmd_supervisor_project_memory,
+        ipc::supervisor::cmd_supervisor_set_project_memory,
         ipc::supervisor::cmd_session_stop,
         ipc::supervisor::cmd_supervisor_answer,
         ipc::supervisor::cmd_supervisor_pause,

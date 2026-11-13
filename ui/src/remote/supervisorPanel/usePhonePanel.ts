@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { parseConverseReply, type PanelActionResult, type PanelActions } from "../../lib/supervisorPanel/actions";
-import type { PanelSnapshot } from "../../lib/supervisorPanel/contract";
+import type { PanelSnapshot, PrLane } from "../../lib/supervisorPanel/contract";
 import { parseTranscriptPage, type TranscriptPageLoader } from "../../lib/supervisorPanel/transcript";
 import { useTranscript, type TranscriptSource } from "../../lib/supervisorPanel/useTranscript";
 import type { SupervisorFrameBus } from "../home/machineSupervisorSources";
@@ -33,6 +33,25 @@ function isSnapshot(value: unknown): value is PanelSnapshot {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   return Array.isArray(record.decisions) && Array.isArray(record.handling) && Array.isArray(record.sessions) && Array.isArray(record.log);
+}
+
+function isPrLane(value: unknown): value is PrLane {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return Array.isArray(record.prs) && typeof record.refreshedAtMs === "number";
+}
+
+/** `GET /api/v1/supervisor/prs`: the lane the panel's Pull requests section draws. */
+export async function fetchPrLane(fetchLike: SupervisorFetch): Promise<PrLane | null> {
+  let res;
+  try {
+    res = await fetchLike("/api/v1/supervisor/prs");
+  } catch {
+    return null;
+  }
+  if (res.status < 200 || res.status >= 300) return null;
+  const data = decode(res.body);
+  return isPrLane(data) ? data : null;
 }
 
 export async function fetchPanel(fetchLike: SupervisorFetch): Promise<PanelState> {
@@ -98,6 +117,8 @@ export function transcriptLoaderFor(fetchLike: SupervisorFetch): TranscriptPageL
 
 export type PhonePanel = {
   readonly state: PanelState;
+  /** The hub's pull-request lane; null until read or when the host has no route for it. */
+  readonly prLane: PrLane | null;
   /** Refetches; the promise settles when the new snapshot is in (pull-to-refresh holds on it). */
   readonly refresh: () => Promise<void>;
   /** The panel's writes, as direct hub routes; `openSession` is filled in by the caller. */
@@ -114,6 +135,7 @@ export function usePhonePanel(input: {
 }): PhonePanel {
   const { hostId, fetchFor, bus, enabled } = input;
   const [state, setState] = useState<PanelState>({ kind: "loading" });
+  const [prLane, setPrLane] = useState<PrLane | null>(null);
   const fetchLike = enabled && hostId ? fetchFor(hostId) : null;
   const fetchRef = useRef(fetchLike);
   fetchRef.current = fetchLike;
@@ -131,6 +153,8 @@ export function usePhonePanel(input: {
     // keeps the last good snapshot on screen.
     if (seqRef.current !== seq) return;
     setState((previous) => (next.kind === "error" && previous.kind === "ready" ? previous : next));
+    // The lane rides with the panel: a pull-to-refresh reads both.
+    setPrLane(await fetchPrLane(current));
   }, []);
 
   useEffect(() => {
@@ -146,6 +170,11 @@ export function usePhonePanel(input: {
       }
       const event = parsePanelFrame(frame);
       if (!event) return;
+      // The lane is not part of the snapshot: its own frame replaces it whole.
+      if (event.type === "panel.prs") {
+        setPrLane(event.lane);
+        return;
+      }
       seqRef.current += 1;
       setState((previous) => (previous.kind === "ready" ? { kind: "ready", snapshot: applyPanelEvent(previous.snapshot, event) } : previous));
     });
@@ -181,5 +210,5 @@ export function usePhonePanel(input: {
     undo: (actionId) => act(`/api/v1/supervisor/actions/${actionId}/undo`),
     turnOn: () => act("/api/v1/supervisor/start"),
   };
-  return { state, refresh, actions, transcript };
+  return { state, prLane, refresh, actions, transcript };
 }

@@ -20,6 +20,7 @@ pub mod handover_wire;
 pub mod launchd;
 pub(crate) mod logging;
 pub mod manifest;
+pub mod parent_notice;
 pub(crate) mod owner_admission;
 pub mod protocol;
 pub mod proxy;

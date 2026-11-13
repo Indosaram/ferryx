@@ -63,6 +63,68 @@ const MHC_TOOL_IDS: &[&str] = &[
 ];
 pub const TURN_START_ACK_TIMEOUT: &str =
     "timeout waiting for mhc prompt acknowledgement; submission outcome unknown, do not resubmit";
+/// The error of a turn whose transport died after the prompt was sent: the engine may already
+/// have run tools, so the outcome is unknown. Carries `OPERATION_OUTCOME_UNKNOWN` upward.
+pub const TRANSPORT_LOST_MID_TURN: &str =
+    "OPERATION_OUTCOME_UNKNOWN: mhc RPC stdout closed before completing the turn";
+
+/// The three outcomes of one turn attempt. `Ambiguous` is neither a success nor a definite
+/// failure: the provider may have performed side effects, so it is never retried or resumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttemptOutcome {
+    Succeeded,
+    Failed(String),
+    Ambiguous(String),
+}
+
+/// True when a failure's outcome is unknown (`OPERATION_OUTCOME_UNKNOWN` or an ACK timeout).
+pub fn is_ambiguous_failure(error: &str) -> bool {
+    error.contains(crate::agent_control::OPERATION_OUTCOME_UNKNOWN) || error.contains(TURN_START_ACK_TIMEOUT)
+}
+
+/// The total-timeout error of a turn.
+pub const TURN_TIMED_OUT: &str = "timed out waiting for the turn to finish";
+
+/// The error of a transport, I/O, timeout or parse failure, given the attempt's engagement.
+/// An attempt is engaged once the prompt write began (it may be partially written), which
+/// precedes any acknowledgement or turn output. Engaged, the engine may already have run, so
+/// the error carries `OPERATION_OUTCOME_UNKNOWN` and classifies `Ambiguous`; before that it
+/// stays a definite, retryable failure.
+pub fn transport_failure(engaged: bool, error: impl Into<String>) -> HubError {
+    let error = error.into();
+    if engaged && !is_ambiguous_failure(&error) {
+        HubError::message(format!("{}: {error}", crate::agent_control::OPERATION_OUTCOME_UNKNOWN))
+    } else {
+        HubError::message(error)
+    }
+}
+
+/// Classifies an attempt; see `attempt_failure` for what counts as a failure.
+pub fn classify_attempt(result: &Result<TurnOutcome>) -> AttemptOutcome {
+    match attempt_failure(result) {
+        None => AttemptOutcome::Succeeded,
+        Some(error) if is_ambiguous_failure(&error) => AttemptOutcome::Ambiguous(error),
+        Some(error) => AttemptOutcome::Failed(error),
+    }
+}
+/// Dedup tag for an ACK-timeout notice.
+pub const ACK_TIMEOUT_DEDUP_TAG: &str = "ack_timeout";
+/// Notice text for an ACK timeout; the underlying cause is not known.
+pub const ACK_TIMEOUT_NOTICE_TEXT: &str = "acknowledgement not received; underlying cause unknown";
+
+/// Parses `FERRYX_HUB_ACK_WINDOW_MS`: absent, empty, unparseable, zero or negative values give
+/// the default; values above 180000 ms are capped there.
+fn parse_ack_window_ms(raw: Option<&str>) -> Duration {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(|ms| Duration::from_millis(ms.min(180_000)))
+        .unwrap_or(TURN_START_ACK_WINDOW)
+}
+
+/// The initial wait for a prompt ACK before any output: the shorter of the ACK window and the idle timeout.
+fn initial_ack_wait(ack_window: Duration, idle_timeout: Duration) -> Duration {
+    ack_window.min(idle_timeout)
+}
 #[derive(Debug, Clone)]
 pub struct OmoClientConfig {
     pub binary: String,
@@ -111,6 +173,7 @@ impl OmoClientConfig {
         if let Some(v) = secs("OMON_OMO_BACKGROUND_MAX_SECS") {
             self.background_max = v;
         }
+        self.ack_window = parse_ack_window_ms(crate::hub_env::var("FERRYX_HUB_ACK_WINDOW_MS").ok().as_deref());
         self
     }
 }
@@ -314,10 +377,16 @@ pub fn attempt_failure(result: &Result<TurnOutcome>) -> Option<String> {
 /// The error of a turn ended because the owner or policy declined too many tool requests.
 pub const DENIAL_LIMIT: &str = "mhc approval denial limit reached";
 
-/// True when a failed attempt is retried: every failure except one that ended on declined
-/// approvals, which a retry would only put to the owner again.
+/// True when a failed attempt is retried: every definite failure except one that ended on
+/// declined approvals, which a retry would only put to the owner again. An ACK timeout or any
+/// other ambiguous outcome is never retried: the first attempt may already have run.
 pub fn retry_eligible(result: &Result<TurnOutcome>) -> bool {
-    attempt_failure(result).is_some_and(|error| !error.contains(DENIAL_LIMIT))
+    match classify_attempt(result) {
+        AttemptOutcome::Failed(error) => {
+            !error.contains(DENIAL_LIMIT) && !error.contains(TURN_START_ACK_TIMEOUT)
+        }
+        AttemptOutcome::Succeeded | AttemptOutcome::Ambiguous(_) => false,
+    }
 }
 
 /// Sentinel the retry of an attempt that failed after it started work begins with.
@@ -557,26 +626,37 @@ struct Rpc {
     allowed: u32,
     denied: u32,
     eof: bool,
+    /// Set right before the prompt write begins; see `transport_failure`.
+    engaged: bool,
 }
 impl Rpc {
     async fn send(&mut self, value: Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(&value).map_err(|e| HubError::message(e.to_string()))?;
         bytes.push(b'\n');
-        self.input.write_all(&bytes).await?;
-        self.input.flush().await?;
+        let engaged = self.engaged;
+        self.input.write_all(&bytes).await.map_err(|e| transport_failure(engaged, e.to_string()))?;
+        self.input.flush().await.map_err(|e| transport_failure(engaged, e.to_string()))?;
         Ok(())
     }
     async fn read(&mut self) -> Result<Value> {
         loop {
-            let Some(line) = self.lines.next_line().await? else {
+            let engaged = self.engaged;
+            let Some(line) = self
+                .lines
+                .next_line()
+                .await
+                .map_err(|e| transport_failure(engaged, e.to_string()))?
+            else {
                 self.eof = true;
-                return Err(HubError::message(
-                    "mhc RPC stdout closed before completing the turn",
-                ));
+                return Err(if engaged {
+                    HubError::message(TRANSPORT_LOST_MID_TURN)
+                } else {
+                    HubError::message("mhc RPC stdout closed before the prompt was sent")
+                });
             };
             if !line.trim().is_empty() {
                 return serde_json::from_str(&line)
-                    .map_err(|e| HubError::message(format!("invalid mhc RPC JSONL: {e}")));
+                    .map_err(|e| transport_failure(engaged, format!("invalid mhc RPC JSONL: {e}")));
             }
         }
     }
@@ -867,6 +947,7 @@ async fn spawn_engine(config: &OmoClientConfig, request: &TurnRequest) -> Result
         allowed: 0,
         denied: 0,
         eof: false,
+        engaged: false,
     };
     let group = GroupKill(child.id());
     Ok((
@@ -908,7 +989,7 @@ pub async fn run_turn(
         session_path,
     );
     let mut result = tokio::select! {
-        result = tokio::time::timeout(config.total_timeout,work) => result.unwrap_or_else(|_|Err(HubError::message("timed out waiting for the turn to finish"))),
+        result = tokio::time::timeout(config.total_timeout,work) => result.unwrap_or_else(|_|Err(HubError::message(TURN_TIMED_OUT))),
         _ = async {
             match cancel.as_mut() {
                 Some(rx) => { if !*rx.borrow() { let _ = rx.changed().await; } }
@@ -916,6 +997,9 @@ pub async fn run_turn(
             }
         } => Err(HubError::message(STOPPED)),
     };
+    if engine.rpc.engaged && matches!(&result, Err(error) if error.to_string() == TURN_TIMED_OUT) {
+        result = Err(transport_failure(true, TURN_TIMED_OUT));
+    }
     if engine.rpc.eof {
         // Only inspect exit after stdout is drained: racing wait() against reads can hide
         // a successful final boundary already buffered in the pipe.
@@ -924,9 +1008,11 @@ pub async fn run_turn(
             Ok(Err(error)) => format!("status unavailable: {error}"),
             Err(_) => "process still running after stdout EOF".to_owned(),
         };
-        result = Err(HubError::message(format!(
-            "mhc RPC process exited before completing the turn ({status})"
-        )));
+        // Keep the engagement marker: an exit after the prompt write is an unknown outcome.
+        result = Err(transport_failure(
+            engine.rpc.engaged,
+            format!("mhc RPC process exited before completing the turn ({status})"),
+        ));
     }
     // Background work the turn started (senpi-task children) lives inside this process:
     // closing it now would kill that work. A holder keeps the engine until the session settles,
@@ -1371,10 +1457,11 @@ async fn run_owned(
     }
     let mut prompt = protocol::command("3", "prompt");
     prompt["message"] = json!(request.text);
+    rpc.engaged = true;
     rpc.send(prompt.clone()).await?;
     let mut acked = false;
     let mut started = false;
-    let mut ack_until = tokio::time::Instant::now() + config.ack_window;
+    let mut ack_until = tokio::time::Instant::now() + initial_ack_wait(config.ack_window, config.idle_timeout);
     let mut idle_until = tokio::time::Instant::now() + config.idle_timeout;
     // A compaction rejected the prompt: resubmit once it ends (or after a bounded wait).
     let mut compaction_resubmits = 0u32;
@@ -1421,7 +1508,7 @@ async fn run_owned(
                     continue_until = Some(tokio::time::Instant::now() + config.continue_window);
                     continue;
                 }
-                Err(_) => return Err(HubError::message(if acked || started || engine_busy { "mhc no output within idle timeout" } else { TURN_START_ACK_TIMEOUT })),
+                Err(_) => return Err(if acked || started || engine_busy { transport_failure(true, "mhc no output within idle timeout") } else { HubError::message(TURN_START_ACK_TIMEOUT) }),
             },
             Some(g) = guidance.recv() => {
                 steer_id += 1;
@@ -1609,13 +1696,8 @@ pub fn workspace_root(home: Option<&std::path::Path>) -> Option<PathBuf> {
 }
 
 /// [`workspace_root`] with the configured `OMON_WORKSPACE_ROOT` value given; a blank value
-/// counts as unset.
-pub fn workspace_root_from(configured: Option<String>, home: Option<&std::path::Path>) -> Option<PathBuf> {
-    configured
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| home.map(|home| home.join(".ferryx").join("hub").join("workspace")))
-}
+/// counts as unset. The rule itself is ungated in [`crate::hub_env`] so headless builds resolve it.
+pub use crate::hub_env::workspace_root_from;
 
 fn workspace_in(root: &std::path::Path, persona: Option<&str>) -> Option<protocol::Workspace> {
     let persona_dir = persona
@@ -2207,6 +2289,15 @@ for line in sys.stdin:
         assert!(error.contains("17"), "{error}");
     }
     #[tokio::test]
+    async fn process_exit_after_the_prompt_write_stays_ambiguous() {
+        let script = Script::new();
+        let result = script.run("exit", None, None).await;
+        let error = result.as_ref().unwrap_err().to_string();
+        assert!(error.contains(crate::agent_control::OPERATION_OUTCOME_UNKNOWN), "{error}");
+        assert!(matches!(classify_attempt(&result), AttemptOutcome::Ambiguous(_)));
+        assert!(!retry_eligible(&result));
+    }
+    #[tokio::test]
     async fn active_process_receives_steer_and_stop_without_polling() {
         for scenario in ["steer", "stop"] {
             let script = Script::new();
@@ -2442,6 +2533,83 @@ mod lifecycle_tests {
         assert!(retry_eligible(&Err(HubError::message("mhc turn failed: boom"))));
         assert!(!retry_eligible(&Err(HubError::message(DENIAL_LIMIT))));
         assert!(!retry_eligible(&Ok(outcome("done", 0, 0))));
+    }
+
+    #[test]
+    fn ack_window_env_parses_with_default_floor_and_cap() {
+        assert_eq!(parse_ack_window_ms(None), Duration::from_millis(30_000));
+        for raw in ["0", "-5", "garbage", ""] {
+            assert_eq!(parse_ack_window_ms(Some(raw)), Duration::from_millis(30_000));
+        }
+        assert_eq!(parse_ack_window_ms(Some("179999")), Duration::from_millis(179_999));
+        assert_eq!(parse_ack_window_ms(Some("999999")), Duration::from_millis(180_000));
+    }
+
+    #[test]
+    fn initial_silent_ack_wait_uses_the_shorter_of_ack_window_and_idle_timeout() {
+        assert_eq!(
+            initial_ack_wait(Duration::from_secs(30), Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            initial_ack_wait(Duration::from_secs(30), Duration::from_secs(1800)),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_outcome_is_not_retried_automatically() {
+        let lost = Err(HubError::message(TRANSPORT_LOST_MID_TURN));
+        assert!(matches!(classify_attempt(&lost), AttemptOutcome::Ambiguous(_)));
+        assert!(!retry_eligible(&lost));
+        let unknown = Err(HubError::message("OPERATION_OUTCOME_UNKNOWN the writer did not answer"));
+        assert!(matches!(classify_attempt(&unknown), AttemptOutcome::Ambiguous(_)));
+        assert!(!retry_eligible(&unknown));
+    }
+
+    #[test]
+    fn a_definite_failure_is_still_retried() {
+        let failed = Err(HubError::message("mhc turn failed: model rejected the request"));
+        assert!(matches!(classify_attempt(&failed), AttemptOutcome::Failed(_)));
+        assert!(retry_eligible(&failed));
+    }
+
+    #[test]
+    fn a_definite_success_is_unchanged() {
+        let done = Ok(outcome("done", 0, 0));
+        assert_eq!(classify_attempt(&done), AttemptOutcome::Succeeded);
+        assert!(!retry_eligible(&done));
+        assert_eq!(attempt_failure(&done), None);
+    }
+
+    #[test]
+    fn an_idle_timeout_after_ack_is_ambiguous() {
+        let idle = Err(transport_failure(true, "mhc no output within idle timeout"));
+        assert!(matches!(classify_attempt(&idle), AttemptOutcome::Ambiguous(_)));
+        assert!(!retry_eligible(&idle));
+        let total = Err(transport_failure(true, TURN_TIMED_OUT));
+        assert!(matches!(classify_attempt(&total), AttemptOutcome::Ambiguous(_)));
+    }
+
+    #[test]
+    fn a_pre_acceptance_write_error_stays_failed_and_retryable() {
+        let broken = Err(transport_failure(false, "Broken pipe (os error 32)"));
+        assert!(matches!(classify_attempt(&broken), AttemptOutcome::Failed(_)));
+        assert!(retry_eligible(&broken));
+        let partial = Err(transport_failure(true, "Broken pipe (os error 32)"));
+        assert!(matches!(classify_attempt(&partial), AttemptOutcome::Ambiguous(_)));
+    }
+
+    #[test]
+    fn a_jsonl_parse_failure_after_output_is_ambiguous() {
+        let parse = Err(transport_failure(true, "invalid mhc RPC JSONL: expected value at line 1 column 1"));
+        assert!(matches!(classify_attempt(&parse), AttemptOutcome::Ambiguous(_)));
+        assert!(!retry_eligible(&parse));
+    }
+
+    #[test]
+    fn an_ack_timeout_is_not_retry_eligible() {
+        assert!(!retry_eligible(&Err(HubError::message(TURN_START_ACK_TIMEOUT))));
     }
 
     #[test]

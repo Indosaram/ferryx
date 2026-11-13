@@ -676,7 +676,9 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::SupervisorReadV1 { .. }
             | DaemonRequest::SupervisorSetup {
                 request: crate::daemon::protocol::SupervisorSetupAction::Status
+                    | crate::daemon::protocol::SupervisorSetupAction::ProjectMemory
             }
+            | DaemonRequest::AgentMemoryBlock { .. }
             | DaemonRequest::AgentControlSettingsGet
             | DaemonRequest::SupervisorSettings { enabled: None }
             | DaemonRequest::ReferenceChatIdentity
@@ -828,6 +830,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::RemoteDesktopHostSet { .. } => "remoteDesktopHostSet",
         DaemonRequest::RemoteDesktopHostRespond { .. } => "remoteDesktopHostRespond",
         DaemonRequest::ReferenceChatIdentity => "referenceChatIdentity",
+        DaemonRequest::AgentMemoryBlock { .. } => "agentMemoryBlock",
         DaemonRequest::ReferenceChat { .. } => "referenceChat",
     }
 }
@@ -1038,7 +1041,8 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
         DaemonRequest::AgentControl {
             host_id: Some(_),
             request: crate::agent_control::AgentControlOp::Stop { .. }
-                | crate::agent_control::AgentControlOp::Answer { .. },
+                | crate::agent_control::AgentControlOp::Answer { .. }
+                | crate::agent_control::AgentControlOp::Spawn { .. },
             ..
         } => DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT,
         // A move waits for the holder's final checkpoint, its transfer and the import.
@@ -5786,6 +5790,7 @@ mod local_control_isolation_tests {
                                     source: crate::ssh::SshHostSource::Config,
                                     auth_method: crate::ssh::SshAuthMethod::Agent,
                                     disabled: None,
+                                    shell: None,
                                 },
                                 environment: crate::ssh::runtime::RemoteEnvironment {
                                     platform: crate::ssh::runtime::RemotePlatform::Posix,

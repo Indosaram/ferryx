@@ -23,7 +23,7 @@ use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer,
 mod setup;
 mod seed;
 pub use setup::{
-    supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
+    agent_memory_block, supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
     SetupRunRequest, SLACK_TEAM_UNRESOLVED,
 };
 
@@ -3836,6 +3836,13 @@ pub async fn supervisor_read(
         SupervisorReadAction::Memory => supervisor_memory(state, SupervisorCaller::Desktop).await,
         SupervisorReadAction::Transcript { cursor } => supervisor_transcript(state, cursor.unwrap_or(0)).await,
         SupervisorReadAction::Panel => Ok(json!(supervisor_panel(state).await)),
+        SupervisorReadAction::Prs => Ok(json!(supervisor_prs().unwrap_or(
+            ferryx_hub::supervisor::pr_lane::PrLane {
+                prs: Vec::new(),
+                outage: None,
+                refreshed_at_ms: 0,
+            }
+        ))),
         SupervisorReadAction::Fleet => Ok(json!({ "sessions": panel_autonomy::fleet_sessions(state).await })),
         SupervisorReadAction::Role => Ok(supervisor_role()),
     }
@@ -3888,6 +3895,16 @@ pub async fn local_fleet_session(
     state: &Arc<RemoteGatewayState>,
     session_id: &str,
 ) -> Option<ferryx_hub::supervisor::panel_contract::FleetSession> {
+    local_fleet_session_over(state, session_id, &panel_autonomy::panel_sources()).await
+}
+
+/// [`local_fleet_session`] with its attention overlaid from `sources` (handling entries and
+/// pending decisions), the same rule the panel snapshot applies.
+pub(crate) async fn local_fleet_session_over(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    sources: &ferryx_hub::fleet::PanelSources,
+) -> Option<ferryx_hub::supervisor::panel_contract::FleetSession> {
     let read = crate::remote::server::agent_control_service::handle(
         state,
         AgentControlOp::Read { session_id: session_id.to_string() },
@@ -3903,7 +3920,34 @@ pub async fn local_fleet_session(
         stale: false,
     };
     let labels = std::collections::HashMap::from([(host_id, LOCAL_FLEET_LABEL.to_string())]);
-    ferryx_hub::fleet::merge_sessions(&labels, &[one], unix_ms()).pop()
+    let session = ferryx_hub::fleet::merge_sessions(&labels, &[one], unix_ms()).pop()?;
+    Some(ferryx_hub::fleet::overlay_attention_from_sources(session, sources, unix_ms() - PANEL_LOG_WINDOW_MS).await)
+}
+
+/// Publishes a freshly overlaid `panel.session` for `session_ref` when it is a pane of this
+/// computer: its handling or decision membership changed, which moves its attention group
+/// without moving its agent state. Runs on its own task; a session that cannot be read sends
+/// nothing.
+pub(crate) fn refresh_panel_session(
+    state: std::sync::Weak<RemoteGatewayState>,
+    session_ref: &ferryx_hub::supervisor::panel_contract::SessionRef,
+    sources: ferryx_hub::fleet::PanelSources,
+) {
+    if !panel_autonomy::is_local_host(session_ref.host_id()) {
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    let session_id = session_ref.backend_session_id().to_string();
+    runtime.spawn(async move {
+        let Some(state) = state.upgrade() else { return };
+        let read = tokio::time::timeout(
+            crate::remote::machine_events::PANEL_SESSION_READ,
+            local_fleet_session_over(&state, &session_id, &sources),
+        );
+        if let Ok(Some(session)) = read.await {
+            publish_panel_session(&session);
+        }
+    });
 }
 
 /// The supervisor pause flag the panel reports. The pause route sets it.
@@ -3914,6 +3958,7 @@ static PANEL_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub const PANEL_DECISION_EVENT: &str = "panel.decision";
 pub const PANEL_ACTION_EVENT: &str = "panel.action";
 pub const PANEL_RULES_EVENT: &str = "panel.rules";
+pub const PANEL_PRS_EVENT: &str = "panel.prs";
 
 /// Owner-scoped panel frames on their way to owner event sockets. The supervisor workers that
 /// own decisions, the action log and rules call the `publish_panel_*` functions below; the
@@ -3958,6 +4003,40 @@ pub fn publish_panel_action(action: &ferryx_hub::supervisor::panel_contract::Act
 /// The standing rules list changed; `rules` is the whole new list.
 pub fn publish_panel_rules(rules: &[ferryx_hub::supervisor::panel_contract::StandingRule]) {
     let _ = PANEL_EVENTS.send(json!({ "type": PANEL_RULES_EVENT, "rules": rules }));
+}
+
+/// The last pull-request lane the hub fetched; `None` until the first refresh of this process.
+static PR_LANE: std::sync::RwLock<Option<ferryx_hub::supervisor::pr_lane::PrLane>> =
+    std::sync::RwLock::new(None);
+
+/// The last fetched pull-request lane (`GET supervisor/prs`); `None` before the first refresh.
+pub fn supervisor_prs() -> Option<ferryx_hub::supervisor::pr_lane::PrLane> {
+    PR_LANE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Stores a refreshed pull-request lane and publishes `panel.prs` when its PRs or outage moved.
+/// The frame is never a push (`push_policy::classify_frame`).
+pub fn publish_panel_prs(lane: &ferryx_hub::supervisor::pr_lane::PrLane) {
+    let changed = {
+        let mut slot = PR_LANE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = slot.as_ref().is_none_or(|previous| !previous.same_content(lane));
+        *slot = Some(lane.clone());
+        changed
+    };
+    if changed {
+        let _ = PANEL_EVENTS.send(json!({ "type": PANEL_PRS_EVENT, "lane": lane }));
+    }
+}
+
+/// The head branches live agent sessions are on, which mark a PR `agent_working`: the whole
+/// fleet (this computer and paired hosts), read the way the panel reads it.
+async fn live_session_branches(state: Arc<RemoteGatewayState>) -> std::collections::HashSet<String> {
+    ferryx_hub::supervisor::pr_lane::live_branches(&panel_autonomy::fleet_sessions(&state).await)
 }
 
 /// Sets the supervisor pause flag the panel reports.
@@ -5208,8 +5287,21 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
         launch.hub.owner_session().storage_key(),
     )));
     tasks.push(tokio::spawn(ferryx_hub::retention::serve(launch.hub.pool.clone())));
+    tasks.push(tokio::spawn(ferryx_hub::inbox_cards::approval::run_age_sweep(
+        launch.hub.pool.clone(),
+    )));
     // `/api/agent/sessions` lists and drives panes through the hub's control.
     ferryx_hub::sessions::live::install(launch.bridge.clone());
+    // The pull-request lane: refreshed every minute with the owner's gh sign-in, published as
+    // `panel.prs` and served by `GET supervisor/prs`. Only the lease holder's generation runs it.
+    {
+        let state = Arc::clone(launch.server.remote_state());
+        tasks.push(tokio::spawn(ferryx_hub::supervisor::pr_lane::serve(
+            launch.hub.pool.clone(),
+            move || live_session_branches(Arc::clone(&state)),
+            publish_panel_prs,
+        )));
+    }
     // omo's judge breaker alert reaches the owner through the owner alert sweep.
     ferryx_hub::judge::install_alerts(
         launch.hub.pool.clone(),

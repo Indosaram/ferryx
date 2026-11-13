@@ -364,6 +364,10 @@ pub async fn admit_cli(
 /// `None` sends it through the policy as [`Caller::TransportOnly`] (which refuses browser tools
 /// with `BROWSER_CONTROLLER_PAIRING_REQUIRED`).
 fn token_only_admission(settings: &AgentSettings, request: &BrowserCliRequest) -> Option<Admission> {
+    // Turning off general pairing must never turn off credential authority.
+    if matches!(request, BrowserCliRequest::Vault { .. }) {
+        return None;
+    }
     if !settings.require_pairing || matches!(request, BrowserCliRequest::RemoteAttach { .. }) {
         return Some(Admission::Allowed(Admitted::default()));
     }
@@ -402,6 +406,114 @@ fn decide(
 
 fn tab_url_of(manager: &BrowserManager, browser_id: &str) -> Option<String> {
     manager.get_state(browser_id).ok().map(|state| state.url)
+}
+
+static CREDENTIAL_HANDLES: LazyLock<crate::browser::vault::grants::CredentialGrants> = LazyLock::new(Default::default);
+static CREDENTIAL_GRANTS: LazyLock<crate::browser::vault::grants::CredentialGrants> = LazyLock::new(Default::default);
+
+fn credential_binding(browser_id: &str, handle: &str, generation: u64) -> Result<String, IpcError> {
+    ACT_FENCE.try_with(|fence| {
+        format!("{}:{}:{browser_id}:{generation}:{handle}", fence.controller, fence.session_epoch)
+    })
+    .map_err(|_| IpcError::from(AuthorityError::CredentialBlocked))
+}
+
+/// Runs only inside the admitted controller's task-local lease fence.
+pub async fn execute_vault<R: tauri::Runtime>(
+    app: &AppHandle<R>, manager: &BrowserManager, browser_id: &str,
+    action: crate::ipc::browser_cli::BrowserVaultCliAction,
+) -> Result<crate::ipc::browser_cli::VaultCliReply, IpcError> {
+    use crate::browser::agent::protocol::VaultAction;
+    use crate::browser::vault::{origin_of_page, fill_for_page, credential_origin_matches, VaultError};
+    use crate::ipc::browser_cli::{BrowserVaultCliAction as A, VaultCliReply as Reply, VaultCredentialHandle};
+    use tauri::Manager;
+    let refused = || IpcError::new(IpcErrorCode::Custom("BROWSER_CREDENTIAL_BLOCKED".into()), "credential capability is expired, consumed, or does not match this origin; use `ferryx browser vault`");
+    if ACT_FENCE.try_with(|_| ()).is_err() { return Err(refused()); }
+    recheck_act(browser_id)?;
+    let state = manager.get_state(browser_id)?;
+    if state.profile_id.is_private() {
+        return match action {
+            A::ListForPage => Ok(Reply::ListForPage { handles: Vec::new() }),
+            _ => Err(refused()),
+        };
+    }
+    let origin = origin_of_page(&state.url).map_err(|_| refused())?;
+    // F6: eval reaches page-world values, so a controller allowed to run eval on this origin
+    // could read back anything a fill just wrote. Vault and eval are mutually exclusive on the
+    // same origin; the controller has to give up the eval grant first.
+    {
+        let service = SERVICE.lock();
+        let fence = ACT_FENCE.try_with(|fence| (fence.controller, fence.session_epoch)).map_err(|_| refused())?;
+        if service.state.eval_blocks_vault(&fence.0, &state.url) {
+            return Err(IpcError::new(
+                IpcErrorCode::Custom("BROWSER_CREDENTIAL_BLOCKED".into()),
+                "this controller holds an eval grant on this origin, so a credential could be read back after filling; revoke the eval grant to use the vault",
+            ));
+        }
+    }
+    match action {
+        A::ListForPage => {
+            let url = state.url;
+            let items = crate::ipc::browser_vault::with_store(app, move |store, _| Ok(store.matches(&url))).await?;
+            recheck_act(browser_id)?;
+            if origin_of_page(&manager.get_state(browser_id)?.url).ok().as_ref() != Some(&origin) { return Err(refused()); }
+            let binding = credential_binding(browser_id, "", state.generation)?;
+            let handles = items.into_iter().map(|item| VaultCredentialHandle {
+                handle: CREDENTIAL_HANDLES.issue(&binding, &item.id, origin.clone(), VaultAction::RequestUse),
+                origin: item.origin, username: item.username,
+            }).collect();
+            Ok(Reply::ListForPage { handles })
+        }
+        A::RequestUse { handle } => {
+            let item_id = CREDENTIAL_HANDLES.take(&handle, &credential_binding(browser_id, "", state.generation)?, VaultAction::RequestUse, &origin).ok_or_else(refused)?;
+            crate::ipc::run_blocking(|| {
+                crate::browser::vault::reauth::confirm_user("allow an agent to fill a saved password")
+                    .map_err(|reason| IpcError::new(IpcErrorCode::Custom(crate::ipc::browser_vault::VAULT_REAUTH_FAILED.into()), reason))
+            }).await?;
+            recheck_act(browser_id)?;
+            if origin_of_page(&manager.get_state(browser_id)?.url).ok().as_ref() != Some(&origin) { return Err(refused()); }
+            let generation = manager.get_state(browser_id)?.generation;
+            let grant = CREDENTIAL_GRANTS.issue(&credential_binding(browser_id, &handle, generation)?, &item_id, origin, VaultAction::Fill);
+            Ok(Reply::RequestUse { grant, expires_in_secs: 60 })
+        }
+        A::Fill { handle, grant } => {
+            let generation = manager.get_state(browser_id)?.generation;
+            let item_id = CREDENTIAL_GRANTS.take(&grant, &credential_binding(browser_id, &handle, generation)?, VaultAction::Fill, &origin).ok_or_else(refused)?;
+            // Captured after the one-shot grant is consumed and before the store read: from
+            // here until the write, a revocation, reclaim, or navigation must abort the fill.
+            let captured = CREDENTIAL_GRANTS.generation();
+            let url = state.url.clone();
+            let script = crate::ipc::browser_vault::with_store(app, move |store, _| {
+                let credential = store.credential(&item_id)?;
+                if !credential_origin_matches(credential.origin.as_str(), &url) {
+                    return Err(VaultError::InvalidArgument("credential origin changed".into()));
+                }
+                fill_for_page(&credential, &url)
+            }).await?;
+            recheck_act(browser_id)?;
+            let current = manager.get_state(browser_id)?;
+            if origin_of_page(&current.url).ok().as_ref() != Some(&origin) { return Err(refused()); }
+            // Last check before the secret leaves this process: the grant was consumed, so
+            // only the generation can tell us that authority changed while we were reading.
+            if !CREDENTIAL_GRANTS.still_current(captured) { return Err(refused()); }
+            match current.engine {
+                crate::browser::BrowserEngine::Chromium => crate::ipc::browser_vault::fill_chromium(browser_id, script.to_string())?,
+                crate::browser::BrowserEngine::System => {
+                    if current.trusted_bridge != crate::browser::TrustedBridgeKind::Isolated {
+                        return Err(IpcError::new(IpcErrorCode::UnsupportedCapability, "this tab has no isolated script world, so a password cannot be filled safely"));
+                    }
+                    let webview = app.get_webview(&current.webview_label)
+                        .ok_or_else(|| BrowserError::WebviewNotFound(current.webview_label.clone()))?;
+                    let outcome = crate::browser::bridge::eval_in_world(webview, script.to_string()).await?;
+                    return Ok(Reply::Fill { status: crate::ipc::browser_cli::VaultFillStatus::from_script_token(&outcome) });
+                }
+            }
+            // The Chromium engine dispatches the script to the tab but does not return its
+            // result to this caller, so success here means "dispatched", never "filled".
+            Ok(Reply::Fill { status: crate::ipc::browser_cli::VaultFillStatus::Dispatched })
+        }
+        A::Totp { .. } => Err(IpcError::new(IpcErrorCode::UnsupportedCapability, "this vault stores no one-time-code secret")),
+    }
 }
 
 /// Whether a controller may see a download: it must belong to an open tab the controller
@@ -588,12 +700,16 @@ pub fn desktop_touched(browser_id: &str) {
     let mut service = SERVICE.lock();
     if service.state.lease_epoch(browser_id).is_some() {
         service.state.reclaim(browser_id);
+        // Reclaim ends the agent lease; a fill already holding a consumed grant must not
+        // still be able to write after the desktop user took the tab back.
+        CREDENTIAL_GRANTS.bump_generation();
     }
 }
 
 /// Forgets a closed tab's lease and reclaim mark.
 pub fn tab_closed(browser_id: &str) {
     SERVICE.lock().state.release_tab(browser_id);
+    CREDENTIAL_GRANTS.bump_generation();
 }
 
 fn desktop_only<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<(), IpcError> {
@@ -654,6 +770,8 @@ pub async fn cmd_browser_agent_revoke<R: tauri::Runtime>(
             None => service.state.revoke(&controller, Instant::now()),
         }
     };
+    CREDENTIAL_HANDLES.revoke_all();
+    CREDENTIAL_GRANTS.revoke_all();
     persist().await?;
     notify_approvals(&app);
     Ok(changed)
@@ -753,6 +871,16 @@ mod tests {
     use super::*;
     use crate::browser::download::DownloadStatus;
     use crate::browser::BrowserProfileId;
+
+    #[test]
+    fn vault_never_uses_token_only_pairing_bypass() {
+        let request = BrowserCliRequest::Vault {
+            browser_id: "b1".into(),
+            action: crate::ipc::browser_cli::BrowserVaultCliAction::ListForPage,
+        };
+        assert!(token_only_admission(&AgentSettings { require_pairing: false }, &request).is_none());
+        assert!(token_only_admission(&AgentSettings { require_pairing: true }, &request).is_none());
+    }
 
     const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef";
     const GRANTED: &str = "https://granted.test/page";

@@ -101,6 +101,29 @@ pub fn point_script(reference: &str, expect: &str, isolated: bool) -> String {
     }))
 }
 
+/// Checks the same ref as a trusted type action before inserting text through CDP.
+pub fn credential_check_script(reference: &str, expect: &str) -> String {
+    script(json!({ "op": "act", "isolated": true, "ref": reference, "expect": expect,
+        "action": { "type": "credentialCheck" } }))
+}
+
+pub fn focused_credential_check_script() -> &'static str {
+    "(() => { const el = document.activeElement; return JSON.stringify(el && el.matches('input[type=\"password\"]') ? {ok:false,code:'BROWSER_CREDENTIAL_BLOCKED',message:'password fields require `ferryx browser vault`'} : {ok:true}); })()"
+}
+
+/// Focuses the addressed element and proves the focus actually landed on it. A page can move
+/// the focus in a focus handler, and trusted text insertion writes wherever the focus is, so a
+/// write meant for one element must never be dispatched to a different one.
+pub fn focus_bind_script(reference: &str, expect: &str) -> String {
+    script(json!({
+        "op": "act",
+        "isolated": true,
+        "ref": reference,
+        "expect": expect,
+        "action": { "type": "focusBind" },
+    }))
+}
+
 /// The ref an action addresses, if any.
 pub fn action_reference(action: &BrowserAutomationAction) -> Option<&str> {
     page_action(action).map(|(reference, _)| reference)
@@ -225,6 +248,7 @@ fn checked(value: Value) -> Result<Value, BrowserError> {
     match envelope.code.as_deref() {
         // A ref from another document, a removed or replaced node, or a node that changed
         // identity: the caller must observe again.
+        Some("BROWSER_CREDENTIAL_BLOCKED") => Err(BrowserError::Authority(super::AuthorityError::CredentialBlocked)),
         Some("stale" | "changed") => Err(BrowserError::AutomationSnapshotStale),
         Some("unknown") => Err(BrowserError::AutomationTargetNotFound(message)),
         _ => Err(BrowserError::AutomationFailed(message)),
@@ -257,6 +281,13 @@ pub fn parse_check(raw: &str) -> Result<bool, BrowserError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_refusal_preserves_typed_code() {
+        let error = parse_act(r#"{"ok":false,"code":"BROWSER_CREDENTIAL_BLOCKED"}"#).unwrap_err();
+        let error = crate::ipc::error::IpcError::from(error);
+        assert_eq!(error.code.to_string(), "BROWSER_CREDENTIAL_BLOCKED");
+    }
 
     fn element(reference: &str, role: &str, name: &str, tag: &str) -> ObservedElement {
         ObservedElement {

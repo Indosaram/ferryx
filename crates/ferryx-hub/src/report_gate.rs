@@ -382,6 +382,12 @@ pub struct TopicRow {
 }
 
 /// Hex SHA-256 of a state description.
+/// The version of a notice: its gate verdict (salience) and its body. Evidence (quote, sender,
+/// incident) is not part of it, so an evidence-only rewrite keeps the version.
+pub fn report_version(report: &Report) -> String {
+    state_hash(&format!("{}\n{}", report.salience.as_str(), report.body))
+}
+
 pub fn state_hash(state: &str) -> String {
     let digest = Sha256::digest(state.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -841,11 +847,22 @@ async fn queue_content_in(
         outbox_id = Some(id);
     }
     if let Some(obligation) = obligation {
+        // A state transition in the gate's transaction, never a silent no-op: Sent binds this
+        // report (whose outbox row commits with it) as 'pending'; Duplicate or Suppressed turns a
+        // bare 'pending' (no outbox part for its report) into 'suppressed'. A pending obligation
+        // with its outbox row, or one attempting or delivered, keeps its state, so re-running the
+        // same notice is idempotent.
         let state = if decision == Decision::Sent { "pending" } else { "suppressed" };
-        sqlx::query("INSERT INTO delivery_obligations(id, state, body, updated_at, report_id)
-            VALUES(?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING")
+        sqlx::query("INSERT INTO delivery_obligations(id, state, body, updated_at, report_id, version)
+            VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET state = excluded.state, body = excluded.body,
+                updated_at = excluded.updated_at, report_id = excluded.report_id, version = excluded.version
+            WHERE excluded.state = 'pending'
+               OR (delivery_obligations.state = 'pending' AND NOT EXISTS (
+                    SELECT 1 FROM report_delivery_parts p
+                     WHERE delivery_obligations.report_id IS NOT NULL
+                       AND p.report_id = delivery_obligations.report_id))")
             .bind(obligation).bind(state).bind(text).bind(Utc::now().to_rfc3339())
-            .bind(&report.id).execute(&mut *conn).await?;
+            .bind(&report.id).bind(report_version(report)).execute(&mut *conn).await?;
     }
     Ok((decision, outbox_id))
 }
@@ -873,10 +890,23 @@ async fn outbox_reports(pool: &SqlitePool, id: i64) -> Result<Vec<Report>> {
         .collect()
 }
 
+/// How long an `unchecked` (judge unavailable) directive decision may be reused.
+pub(crate) const UNCHECKED_DECISION_TTL_SECS: i64 = 15 * 60;
+
+/// Whether an `unchecked` decision written at `created_at` (RFC 3339, from the decision upsert)
+/// has expired at `now`. Expiry is inclusive: exactly 900s old is expired. An unreadable
+/// timestamp counts as expired, so the report is judged again rather than trusted.
+fn unchecked_expired(created_at: &str, now: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(created_at).map_or(true, |created| {
+        created.with_timezone(&Utc) <= now - chrono::Duration::seconds(UNCHECKED_DECISION_TTL_SECS)
+    })
+}
+
 /// Applies the owner's projected directives to each report. A decided verdict is durable per
 /// (report, state, projection): retries reuse it without a judge call, and a new projection (a
 /// newer directive that reverses an older one) is judged afresh. An unavailable judge is recorded
-/// as `unchecked` with no effect, so delivery keeps its default and the next check asks again.
+/// as `unchecked` with no effect, so delivery keeps its default. The unchecked row is reused for
+/// `UNCHECKED_DECISION_TTL_SECS`; after that window the next check asks the judge again.
 /// Only short autocommit statements run here; no transaction is held across the judge call.
 pub(crate) async fn directive_decisions(
     pool: &SqlitePool,
@@ -891,10 +921,17 @@ pub(crate) async fn directive_decisions(
     }
     for report in reports {
         let key = "WHERE report_id = ? AND state_hash = ? AND projection_hash = ?";
-        let cached: Option<(i64, String, Option<String>)> = sqlx::query_as(&format!(
-            "SELECT id, effect, directive_ref FROM report_directive_decisions {key} AND verdict <> 'unchecked'"))
+        // Completed verdicts are reused forever; an `unchecked` row only until it ages out. A hit
+        // never rewrites the row, so reuse does not refresh the TTL. Concurrent misses may both
+        // judge (accepted); the upsert below still lets a completed verdict win.
+        let found: Option<(i64, String, Option<String>, String, String)> = sqlx::query_as(&format!(
+            "SELECT id, effect, directive_ref, verdict, created_at FROM report_directive_decisions {key}"))
             .bind(&report.id).bind(&report.state_hash).bind(&projection.hash)
             .fetch_optional(pool).await?;
+        let now = Utc::now();
+        let cached = found.filter(|(.., verdict, created_at)| verdict != "unchecked"
+            || !unchecked_expired(created_at, now))
+            .map(|(row, effect, directive, ..)| (row, effect, directive));
         let (row, effect, directive) = match cached {
             Some(cached) => cached,
             None => {
@@ -909,6 +946,7 @@ pub(crate) async fn directive_decisions(
                     DeliveryVerdict::None => ("none", "no directive governs this report"),
                     DeliveryVerdict::Unchecked => ("none", "judge unavailable; default delivery, not an owner decision"),
                 };
+                let note = if judgment.partial_input { format!("{note}; partial input") } else { note.to_owned() };
                 sqlx::query("INSERT INTO report_directive_decisions(report_id, topic_key, state_hash,
                         projection_hash, verdict, effect, directive_ref, note, created_at)
                     VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -919,7 +957,7 @@ pub(crate) async fn directive_decisions(
                     WHERE report_directive_decisions.verdict = 'unchecked'")
                     .bind(&report.id).bind(&report.topic_key).bind(&report.state_hash)
                     .bind(&projection.hash).bind(judgment.verdict.as_str()).bind(effect)
-                    .bind(&judgment.directive).bind(note).bind(Utc::now().to_rfc3339())
+                    .bind(&judgment.directive).bind(&note).bind(Utc::now().to_rfc3339())
                     .execute(pool).await?;
                 // A concurrent checker may have decided first; its durable row wins.
                 sqlx::query_as(&format!("SELECT id, effect, directive_ref FROM report_directive_decisions {key}"))
@@ -990,8 +1028,17 @@ pub enum ParentPolicy {
 }
 
 /// Whether a follow-up (update, attachment) to outbox row `id` may be sent under the owner's
-/// current rules and directives. It neither re-admits nor dedupes the reports: no topic,
-/// suppression or outbox state changes; only the directive decision audit row is written.
+/// current rules and directives. It neither re-admits nor dedupes the replayed reports: no topic
+/// or suppression state for those reports changes. Directive decision audit rows are created or
+/// updated only when judgment is actually needed; a cached decision writes nothing new.
+///
+/// Replay contract (audit-only): this entry may be run over delivered or cancelled rows to
+/// re-derive their policy. It reads `chat_outbox` and never inserts a `chat_outbox` row for the
+/// replayed reports. The only possible insert is the judge circuit-breaker owner alert, which any
+/// judge call may queue (see `judge.rs`, which calls `crate::report_gate::queue`).
+/// Directives applicable to the report are resolved before cancellation/delivery eligibility is
+/// consulted; that ordering is the guarantee. Projection refresh rows and the judge circuit-breaker
+/// owner alert are also allowed side effects of a replay.
 pub async fn check_parent_policy(pool: &SqlitePool, id: i64) -> Result<ParentPolicy> {
     Ok(parent_policy_snapshot(pool, id).await?.0)
 }
@@ -1696,6 +1743,77 @@ mod tests {
         assert_eq!(feedback, 1);
     }
 
+    async fn obligation(pool: &SqlitePool, id: &str) -> (String, Option<String>) {
+        sqlx::query_as("SELECT state, report_id FROM delivery_obligations WHERE id = ?")
+            .bind(id).fetch_one(pool).await.unwrap()
+    }
+
+    async fn parts_for(pool: &SqlitePool, report: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM report_delivery_parts WHERE report_id = ?")
+            .bind(report).fetch_one(pool).await.unwrap()
+    }
+
+    /// 2026-11-12: a cron owner notice committed a bare 'pending' obligation, the gate answered
+    /// Duplicate, and `ON CONFLICT DO NOTHING` left it pending with no outbox row.
+    #[tokio::test]
+    async fn a_duplicate_decision_turns_a_bare_pending_obligation_suppressed() {
+        let pool = crate::storage::memory().await.unwrap();
+        let told = action("cron:1", "작업을 확인해 주세요.");
+        assert_eq!(queue(&pool, "owner", &told, false).await.unwrap().0, Decision::Sent);
+        sqlx::query("INSERT INTO delivery_obligations(id, state, body, updated_at) VALUES('obl:dup', 'pending', 'x', '2026-11-12T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        let repeat = Report::new("r-repeat", "mail", "cron:1", Salience::Action, "작업을 확인해 주세요.");
+        let (decision, outbox) = queue_delivery(&pool, "owner", &repeat, false, &repeat.body, Some("obl:dup")).await.unwrap();
+        assert_eq!((decision, outbox), (Decision::Duplicate, None));
+        assert_eq!(obligation(&pool, "obl:dup").await, ("suppressed".to_owned(), Some("r-repeat".to_owned())));
+        // Not suppressed forever: the next sent notice for the item makes it pending again.
+        let news = Report::new("r-news", "mail", "cron:1", Salience::Action, "새 요청입니다.").with_state("changed");
+        assert_eq!(queue_delivery(&pool, "owner", &news, false, &news.body, Some("obl:dup")).await.unwrap().0, Decision::Sent);
+        assert_eq!(obligation(&pool, "obl:dup").await, ("pending".to_owned(), Some("r-news".to_owned())));
+        assert_eq!(parts_for(&pool, "r-news").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_sent_decision_commits_a_pending_obligation_with_exactly_one_outbox_row() {
+        let pool = crate::storage::memory().await.unwrap();
+        let report = action("cron:2", "재시도를 승인해 주세요.");
+        let (decision, outbox) = queue_delivery(&pool, "owner", &report, false, &report.body, Some("obl:sent")).await.unwrap();
+        assert_eq!(decision, Decision::Sent);
+        assert!(outbox.is_some());
+        assert_eq!(obligation(&pool, "obl:sent").await, ("pending".to_owned(), Some(report.id.clone())));
+        assert_eq!(parts_for(&pool, &report.id).await, 1);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox").fetch_one(&pool).await.unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_obligation_write_rolls_back_the_gate_decision_and_outbox() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_obligation BEFORE INSERT ON delivery_obligations BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+            .execute(&pool).await.unwrap();
+        let report = action("cron:3", "재시도를 승인해 주세요.");
+        assert!(queue_delivery(&pool, "owner", &report, false, &report.body, Some("obl:fail")).await.is_err());
+        for table in ["chat_outbox", "report_delivery_parts", "report_topics", "delivery_obligations"] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+        assert!(decisions(&pool).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queueing_the_same_obligated_notice_twice_is_idempotent() {
+        let pool = crate::storage::memory().await.unwrap();
+        let report = action("cron:4", "재시도를 승인해 주세요.");
+        for _ in 0..2 {
+            queue_delivery(&pool, "owner", &report, false, &report.body, Some("obl:twice")).await.unwrap();
+        }
+        assert_eq!(obligation(&pool, "obl:twice").await, ("pending".to_owned(), Some(report.id.clone())));
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox").fetch_one(&pool).await.unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(parts_for(&pool, &report.id).await, 1);
+    }
+
     #[tokio::test]
     async fn failed_queue_does_not_consume_topic_or_feedback() {
         let pool = crate::storage::memory().await.unwrap();
@@ -2078,11 +2196,141 @@ mod tests {
         assert_eq!(decisions(&pool).await, ["sent"]);
 
         // A retry asks again; once the judge answers, its decision replaces the unchecked row.
+        // The unchecked row is reused until it ages out, so the retry comes after the TTL.
+        age_decision(&pool, &report, 900).await;
         let judge = crate::judge::Judge::forced("1:mute");
         assert!(check(&pool, &judge, &directives, id).await.is_none());
         let verdict: String = sqlx::query_scalar("SELECT verdict FROM report_directive_decisions WHERE report_id = ?")
             .bind(&report.id).fetch_one(&pool).await.unwrap();
         assert_eq!(verdict, "mute");
+    }
+
+    #[test]
+    fn an_unchecked_decision_expires_at_exactly_fifteen_minutes() {
+        let now = Utc::now();
+        let at = |secs: i64| (now - chrono::Duration::seconds(secs)).to_rfc3339();
+        assert!(!unchecked_expired(&at(899), now));
+        assert!(unchecked_expired(&at(900), now));
+        assert!(unchecked_expired(&at(901), now));
+    }
+
+    /// A judge that answers `selected` and counts its calls.
+    fn counting_judge(selected: &'static str) -> (crate::judge::Judge, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let judge = crate::judge::Judge::scripted(move |_, _, _| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            selected.into()
+        });
+        (judge, calls)
+    }
+
+    async fn age_decision(pool: &SqlitePool, report: &Report, secs: i64) {
+        sqlx::query("UPDATE report_directive_decisions SET created_at = ? WHERE report_id = ?")
+            .bind((Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()).bind(&report.id)
+            .execute(pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_fresh_unchecked_decision_is_reused_without_refreshing_its_ttl() {
+        let pool = crate::storage::memory().await.unwrap();
+        let report = action("ci:run-20", "배포 파이프라인 결과를 확인해 주세요.");
+        let directives = projection(&pool, &[("2026-10-30", "CI 결과 알림은 보내지 마세요")]).await;
+        let unavailable = crate::judge::Judge::forced("unused").with_jev_enabled(false);
+        directive_decisions(&pool, &unavailable, &directives, std::slice::from_ref(&report)).await.unwrap();
+        age_decision(&pool, &report, 600).await;
+        let before: String = sqlx::query_scalar("SELECT created_at FROM report_directive_decisions WHERE report_id = ?")
+            .bind(&report.id).fetch_one(&pool).await.unwrap();
+
+        let (judge, calls) = counting_judge("1:mute");
+        let reused = directive_decisions(&pool, &judge, &directives, std::slice::from_ref(&report)).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(reused[&report.id].effect, None);
+        let after: String = sqlx::query_scalar("SELECT created_at FROM report_directive_decisions WHERE report_id = ?")
+            .bind(&report.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(after, before, "a cache hit must not refresh the TTL");
+    }
+
+    #[tokio::test]
+    async fn an_expired_unchecked_decision_is_judged_again_once() {
+        for secs in [900, 901] {
+            let pool = crate::storage::memory().await.unwrap();
+            let report = action("ci:run-21", "배포 파이프라인 결과를 확인해 주세요.");
+            let directives = projection(&pool, &[("2026-10-30", "CI 결과 알림은 보내지 마세요")]).await;
+            let unavailable = crate::judge::Judge::forced("unused").with_jev_enabled(false);
+            directive_decisions(&pool, &unavailable, &directives, std::slice::from_ref(&report)).await.unwrap();
+            age_decision(&pool, &report, secs).await;
+
+            let (judge, calls) = counting_judge("1:mute");
+            let judged = directive_decisions(&pool, &judge, &directives, std::slice::from_ref(&report)).await.unwrap();
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "age {secs}s");
+            assert_eq!(judged[&report.id].effect, Some(RuleEffect::Mute));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_completed_verdict_never_expires() {
+        let pool = crate::storage::memory().await.unwrap();
+        let report = action("ci:run-22", "배포 파이프라인 결과를 확인해 주세요.");
+        let directives = projection(&pool, &[("2026-10-30", "CI 결과 알림은 보내지 마세요")]).await;
+        directive_decisions(&pool, &crate::judge::Judge::forced("1:mute"), &directives, std::slice::from_ref(&report)).await.unwrap();
+        age_decision(&pool, &report, 24 * 60 * 60).await;
+
+        let (judge, calls) = counting_judge("1:send");
+        let reused = directive_decisions(&pool, &judge, &directives, std::slice::from_ref(&report)).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(reused[&report.id].effect, Some(RuleEffect::Mute));
+    }
+
+    // Covers the directive judgment and audit path for a DELIVERED row, driven through
+    // `directive_decisions` and `check_parent_policy_with` directly. It does NOT call the replay
+    // entry `check_parent_policy`, and the scripted judge returns before any circuit-breaker path.
+    #[tokio::test]
+    async fn delivered_report_directive_audit_writes_no_outbox_row() {
+        let pool = crate::storage::memory().await.unwrap();
+        let report = action("ci:run-23", "배포 파이프라인 결과를 확인해 주세요.");
+        let id = queue(&pool, "owner", &report, false).await.unwrap().1.unwrap();
+        sqlx::query("UPDATE chat_outbox SET delivered_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339()).bind(id).execute(&pool).await.unwrap();
+        let directives = projection(&pool, &[("2026-10-30", "CI 결과 알림은 보내지 마세요")]).await;
+        let rows = |pool: SqlitePool| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chat_outbox").fetch_one(&pool).await.unwrap()
+        };
+        let outbox_before = rows(pool.clone()).await;
+
+        // Judgment runs before eligibility: the delivered row still gets its audit decision.
+        let (judge, calls) = counting_judge("1:mute");
+        let decisions = directive_decisions(&pool, &judge, &directives, &reports_of(&pool, id).await).await.unwrap();
+        check_parent_policy_with(&pool, id, &decisions).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let audited: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM report_directive_decisions WHERE report_id = ?")
+            .bind(&report.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(audited, 1);
+        assert_eq!(rows(pool.clone()).await, outbox_before, "directive audit must not insert chat_outbox rows");
+    }
+
+    // Drives a CANCELLED report through the replay entry `check_parent_policy`. With no owner
+    // directive projection, no judge is consulted, so the outcome is only the eligibility check.
+    #[tokio::test]
+    async fn replaying_a_cancelled_report_yields_cancelled_without_outbox_insert() {
+        let pool = crate::storage::memory().await.unwrap();
+        let report = action("ci:run-cancelled", "배포 파이프라인 결과를 확인해 주세요.");
+        let id = queue(&pool, "owner", &report, false).await.unwrap().1.unwrap();
+        sqlx::query("UPDATE chat_outbox SET cancelled_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339()).bind(id).execute(&pool).await.unwrap();
+        let outbox_rows = |pool: SqlitePool| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chat_outbox").fetch_one(&pool).await.unwrap()
+        };
+        let outbox_before = outbox_rows(pool.clone()).await;
+        let report_rows_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox WHERE session_key = 'owner'")
+            .fetch_one(&pool).await.unwrap();
+
+        let policy = check_parent_policy(&pool, id).await.unwrap();
+        assert!(matches!(policy, ParentPolicy::Cancelled));
+        assert_eq!(outbox_rows(pool.clone()).await, outbox_before, "replay must not insert chat_outbox rows");
+        let report_rows_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox WHERE session_key = 'owner'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(report_rows_after, report_rows_before);
     }
 
     #[tokio::test]

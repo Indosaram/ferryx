@@ -487,6 +487,13 @@ impl AuthorityState {
             .is_some_and(|scopes| scopes.session.contains(&scope) || scopes.persistent.contains(&scope))
     }
 
+    /// F6: eval reads page-world values, so a controller holding eval on this origin could read
+    /// back whatever a fill wrote. Vault use and eval are mutually exclusive per origin; the
+    /// controller must revoke the eval grant before it may touch credentials here.
+    pub fn eval_blocks_vault(&self, controller: &ControllerId, url: &str) -> bool {
+        self.has_grant(controller, url, GrantScope::Eval)
+    }
+
     pub fn controllers(&self) -> Vec<ControllerSummary> {
         let mut list: Vec<_> = self
             .controllers
@@ -640,7 +647,8 @@ impl AuthorityState {
                     }
                 }
                 // Listing filters and the remaining kinds are applied by the dispatcher.
-                Obligation::FilterToGranted
+                Obligation::VaultGrant { .. }
+                | Obligation::FilterToGranted
                 | Obligation::DriverLease
                 | Obligation::ReclaimTab
                 | Obligation::NonBrowserPolicy => {}
@@ -987,6 +995,23 @@ mod tests {
         assert!(state.revoke_grant(&id, ORIGIN));
         assert!(!state.has_grant(&id, ORIGIN, GrantScope::Read));
         assert!(!state.has_grant(&id, ORIGIN, GrantScope::Interact));
+    }
+
+    // F6: eval reads page-world values, so a controller allowed to run eval on an origin must
+    // not also be allowed to fill credentials there. Revoking the eval grant is the only way
+    // back, and the exclusion is per origin.
+    #[test]
+    fn eval_on_an_origin_blocks_vault_there() {
+        let now = Instant::now();
+        let mut state = AuthorityState::default();
+        let (id, _) = paired(&mut state, now);
+        grant(&mut state, id, &[GrantScope::Read, GrantScope::Interact], now);
+        assert!(!state.eval_blocks_vault(&id, ORIGIN), "read+interact alone must not block the vault");
+        grant(&mut state, id, &[GrantScope::Eval], now);
+        assert!(state.eval_blocks_vault(&id, ORIGIN), "an eval grant on the same origin must block the vault");
+        assert!(!state.eval_blocks_vault(&id, "https://b.test"), "the exclusion is per origin");
+        assert!(state.revoke_grant(&id, ORIGIN));
+        assert!(!state.eval_blocks_vault(&id, ORIGIN), "revoking the origin grant clears the exclusion");
     }
 
     #[test]

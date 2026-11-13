@@ -262,3 +262,22 @@ test('ssh helper teardown: recorded by exact identity, killed by recorded pid, r
 });
 
 
+
+// Run 20261112t072829z: Q08b blocked with ARTIFACT_MISSING on maho-win because the v1bump build ran
+// with buildEnv's Zig 0.17.0 while the handover_v1 tree pins 0.16.0, so the ghostty build script
+// refused it and Q08b had no artifact to test. Only linux carried a v1BuildEnv.
+test('the hosts that build v1bump pin their own Zig 0.16 toolchain', () => {
+  // Windows and Linux each run the gate in place, so a missing v1BuildEnv silently costs Q08b there
+  // (maho-win, run 20261112t072829z). mac is driven over ssh to a host whose toolchain layout this
+  // repo cannot verify, so it is only held to the rule that any declared v1 Zig is 0.16 and distinct.
+  for (const platform of ['linux', 'windows']) {
+    assert.ok(hostFor(platform).v1BuildEnv?.ZIG, `${platform} must define v1BuildEnv.ZIG or v1bump cannot build`);
+  }
+  for (const platform of ['mac', 'linux', 'windows']) {
+    const host = hostFor(platform);
+    if (!host.v1BuildEnv?.ZIG) continue;
+    assert.match(host.v1BuildEnv.ZIG, /0\.16\.0/, `${platform} v1 Zig must be 0.16.0, got ${host.v1BuildEnv.ZIG}`);
+    // The two toolchains are different by construction; a shared path means one of them is wrong.
+    assert.notEqual(host.v1BuildEnv.ZIG, host.buildEnv?.ZIG, `${platform} v1 Zig must differ from build Zig`);
+  }
+});

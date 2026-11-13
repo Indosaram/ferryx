@@ -2916,9 +2916,12 @@ async fn handle_machine_terminal_socket(
                             Ok(MachineTerminalControl::AcknowledgeAgentOutcome {
                                 generation: supplied,
                             }) if supplied.0 == generation => {
-                                state.session_backend
-                                    .acknowledge_agent_outcome(&target.session_id).await
-                                    .map_err(|error| error.to_string())
+                                // The owner of a paired pane keeps its read state.
+                                let read = agent_control_service::acknowledge_read(&state, &target.session_id);
+                                match state.session_backend.acknowledge_agent_outcome(&target.session_id).await {
+                                    Err(crate::remote::backend::OutcomeAckError::NoMirror) if read => Ok(()),
+                                    other => other.map_err(|error| error.to_string()),
+                                }
                             }
                             Ok(MachineTerminalControl::Resize {
                                 generation: supplied,
@@ -3171,6 +3174,7 @@ async fn handle_terminal_socket(
     let can_control = device.permission == DevicePermission::Control;
     let recv_recovery_state = Arc::clone(&recovery_state);
     let input_marks = Arc::clone(&state.agent_events);
+    let read_state = Arc::clone(&state);
 
     let mut recv_task = std::pin::pin!(async move {
         while let Some(Ok(msg)) = receiver.next().await {
@@ -3222,8 +3226,13 @@ async fn handle_terminal_socket(
                                 if !can_control {
                                     continue;
                                 }
+                                let read = agent_control_service::acknowledge_read(&read_state, &session_id_clone);
                                 if let Err(error) = session_backend
                                     .acknowledge_agent_outcome(&session_id_clone).await
+                                    .or_else(|error| match error {
+                                        crate::remote::backend::OutcomeAckError::NoMirror if read => Ok(()),
+                                        other => Err(other),
+                                    })
                                 {
                                     tracing::warn!(session_id = session_id_clone, %error, "outcome acknowledgement failed");
                                 }
@@ -3699,6 +3708,7 @@ async fn handle_terminal_grid_socket(
     let recv_tx = outbound_tx.clone();
     let recv_recovery_state = Arc::clone(&recovery_state);
     let input_marks = Arc::clone(&state.agent_events);
+    let read_state = Arc::clone(&state);
 
     let mut recv_task = std::pin::pin!(async move {
         while let Some(Ok(msg)) = receiver.next().await {
@@ -3762,8 +3772,13 @@ async fn handle_terminal_grid_socket(
                                 if !can_control {
                                     continue;
                                 }
+                                let read = agent_control_service::acknowledge_read(&read_state, &session_id_clone);
                                 if let Err(error) = session_backend
                                     .acknowledge_agent_outcome(&session_id_clone).await
+                                    .or_else(|error| match error {
+                                        crate::remote::backend::OutcomeAckError::NoMirror if read => Ok(()),
+                                        other => Err(other),
+                                    })
                                 {
                                     tracing::warn!(session_id = session_id_clone, %error, "outcome acknowledgement failed");
                                 }
@@ -4424,7 +4439,9 @@ fn gateway_capability_names(
         capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
+        capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
         capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
+        capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
         if supervisor {
             capabilities.push(supervisor_api::SUPERVISOR_CAPABILITY);
             capabilities.push(supervisor_api::SUPERVISOR_OBSERVE_CAPABILITY);
@@ -7838,8 +7855,14 @@ async fn reference_chat_acknowledge_outcome(
     if let Err(response) = authenticate_machine_request(&state, &headers) {
         return *response;
     }
+    // The phone's acknowledgement marks the daemon's read state too; a pane without a program
+    // status mirror is then still acknowledged.
+    let read = agent_control_service::acknowledge_read(&state, &session_id);
     match state.session_backend.acknowledge_agent_outcome(&session_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(crate::remote::backend::OutcomeAckError::NoMirror) if read => {
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(error) => {
             let (status, code) = acknowledge_outcome_failure_status(&error);
             machine_error_with_details(status, code, &error.to_string(), serde_json::Map::new())
@@ -9175,6 +9198,10 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
             get(agent_control_service::http_wait),
         )
         .route(
+            "/api/v1/agent-control/sessions/{sessionId}/ack",
+            post(agent_control_service::http_ack),
+        )
+        .route(
             "/api/v1/agent-control/sessions/{sessionId}/send",
             post(agent_control_service::http_send).layer(axum::extract::DefaultBodyLimit::max(
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
@@ -9192,8 +9219,15 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
                 crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
             )),
         )
+        .route(
+            "/api/v1/agent-control/spawn",
+            post(agent_control_service::http_spawn).layer(axum::extract::DefaultBodyLimit::max(
+                crate::agent_control::policy::AGENT_CONTROL_HTTP_BODY_MAX,
+            )),
+        )
         .route("/api/v1/supervisor", get(supervisor_api::http_snapshot))
         .route("/api/v1/supervisor/panel", get(supervisor_api::http_panel))
+        .route("/api/v1/supervisor/prs", get(supervisor_api::http_prs))
         .route("/api/v1/fleet/sessions", get(supervisor_api::http_fleet_sessions))
         .route("/api/v1/supervisor/start", post(supervisor_api::http_start))
         .route(

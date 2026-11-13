@@ -2103,6 +2103,7 @@ mod tests {
                     source: crate::ssh::SshHostSource::Config,
                     auth_method: crate::ssh::SshAuthMethod::Agent,
                     disabled: None,
+                    shell: None,
                 },
                 environment: RemoteEnvironment {
                     platform: crate::ssh::runtime::RemotePlatform::Posix,

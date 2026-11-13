@@ -1920,6 +1920,51 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
 }
 
 #[test]
+fn agent_control_spawn_rides_its_own_route_only_to_a_host_that_can_spawn() {
+    use crate::agent_control::AgentControlOp;
+    let spawn = Operation::AgentControl {
+        op: AgentControlOp::Spawn {
+            agent: "claude".into(),
+            cwd: "/w".into(),
+            workspace_id: None,
+            parent_session_id: Some("s-1".into()),
+            name: None,
+            prompt: Some("go".into()),
+            command: None,
+            args: Vec::new(),
+            request_id: "spawn-r1".into(),
+        },
+        fence: None,
+    };
+    assert!(spawn.is_mutation());
+    assert_eq!(spawn.agent_control_mutation_id().as_deref(), Some("spawn-r1"));
+    let route = spawn.route().expect("spawn route");
+    assert_eq!(route.capability, Some("agentControlSpawnV1"));
+    assert_eq!(route.segments, vec!["agent-control", "spawn"]);
+    assert_eq!(route.method, Method::POST);
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        body,
+        json!({"agent": "claude", "cwd": "/w", "parentSessionId": "s-1", "prompt": "go", "requestId": "spawn-r1"})
+    );
+    let bad_parent = Operation::AgentControl {
+        op: AgentControlOp::Spawn {
+            agent: "claude".into(),
+            cwd: "/w".into(),
+            workspace_id: None,
+            parent_session_id: Some("../x".into()),
+            name: None,
+            prompt: None,
+            command: None,
+            args: Vec::new(),
+            request_id: "spawn-r2".into(),
+        },
+        fence: None,
+    };
+    assert!(bad_parent.route().is_err());
+}
+
+#[test]
 fn a_delivery_rides_the_send_route_only_to_a_host_with_receipts() {
     use crate::agent_control::AgentControlOp;
     let deliver = Operation::AgentControl {
@@ -1999,6 +2044,42 @@ async fn a_delivery_to_a_host_without_receipts_reaches_nothing_and_is_a_capabili
         ferryx_hub::agent_control::Delivery::Unsupported {
             code: "PAIRED_HOST_CAPABILITY_UNAVAILABLE".into()
         }
+    );
+}
+
+/// An acknowledgement to a host that does not advertise `agentControlAckV1` is never sent, and
+/// the caller sees `UNSUPPORTED`.
+#[tokio::test]
+async fn an_old_paired_host_without_ack_capability_refuses_unsupported() {
+    let ack = Operation::AgentControl {
+        op: crate::agent_control::AgentControlOp::Acknowledge { session_id: "s-1".into() },
+        fence: None,
+    };
+    let route = ack.route().expect("ack route");
+    assert_eq!(route.capability, Some("agentControlAckV1"));
+    assert_eq!(route.segments, vec!["agent-control", "sessions", "s-1", "ack"]);
+    assert_eq!(route.method, Method::POST);
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = hits.clone();
+    let ack_route = Router::new().route(
+        "/host/a/api/v1/agent-control/sessions/s-1/ack",
+        post(move || {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Json(json!({"session": {"sessionId": "s-1", "read": true}}))
+            }
+        }),
+    );
+    // The fixture host advertises no agent-control capability, like a host from before acks.
+    let (root, service, host, task) = fixture(ack_route).await;
+    let error = MachineClient::new().execute(&service, request(&host, ack)).await.unwrap_err();
+    cleanup(root, task).await;
+    assert_eq!(error.code, "PAIRED_HOST_CAPABILITY_UNAVAILABLE");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing was forwarded");
+    assert_eq!(
+        crate::remote::server::agent_control_service::forward_code(&error.code),
+        "UNSUPPORTED"
     );
 }
 

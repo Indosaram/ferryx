@@ -579,6 +579,122 @@ pub fn apply_commitments(report: &mut crate::report_gate::Report, commitments: C
 
 /// Returns `true` when the reply was withheld because it only promised work the commitment
 /// ledger now owns; the owner's message then shows that the work is pending, not done.
+/// The owner-facing line for a turn whose prompt the engine never acknowledged.
+fn ack_failure_notice() -> String {
+    format!("\u{26a0}\u{fe0f} {}", crate::locale::text(
+        "엔진 수신 확인을 받지 못했어요; 근본 원인은 알 수 없어요",
+        "acknowledgement not received; underlying cause unknown",
+    ))
+}
+
+/// What became of the one owner notice for an unacknowledged turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckNotice {
+    /// This caller claimed the notice and queued it as this `chat_outbox` row.
+    Queued(i64),
+    /// The notice for this owner turn was already claimed (retry, resume or restart).
+    Duplicate,
+    /// Claimed, but the outbox row could not be written: the owner may not have been told.
+    Uncertain,
+}
+
+/// Tag carried in a resume lane event body (right after [`RESUME_MARKER`]) naming the owner
+/// turn being resumed, so the resumed turn shares that turn's notice claim.
+const OWNER_TURN_TAG: &str = "[owner_turn=";
+
+/// Stable identity of the owner turn this turn answers, used for the one-notice claim:
+/// the admitted Slack message ts, else the owner turn a hub resume carries in its text.
+/// `status_ts` itself stays reaction targeting only. `None` for a dashboard turn, which has no
+/// stable per-turn value; [`run_session_turn`] then mints a `dashboard:<uuid>` id once per turn.
+fn owner_turn_id(turn: &SessionTurn) -> Option<String> {
+    if let Some(ts) = &turn.status_ts {
+        return Some(ts.clone());
+    }
+    let start = turn.text.find(OWNER_TURN_TAG)? + OWNER_TURN_TAG.len();
+    let rest = &turn.text[start..];
+    Some(rest[..rest.find(']')?].to_owned()).filter(|id| !id.is_empty())
+}
+
+#[cfg(test)]
+async fn notify_ack_failure(
+    pool: &SqlitePool,
+    turn: &SessionTurn,
+    result: &Result<omo_client::TurnOutcome>,
+) -> Option<AckNotice> {
+    let owner_turn = owner_turn_id(turn)?;
+    notify_ack_failure_for(pool, turn, &owner_turn, result).await
+}
+
+/// Queues exactly one notice per owner turn (`owner_turn` with the session key) whose final
+/// result is the engine never acknowledging the prompt. `None` when the final result is not
+/// that failure (a timeout the hub's retry recovered never reaches here as a failure) or the
+/// turn has no Slack reply channel.
+async fn notify_ack_failure_for(
+    pool: &SqlitePool,
+    turn: &SessionTurn,
+    owner_turn: &str,
+    result: &Result<omo_client::TurnOutcome>,
+) -> Option<AckNotice> {
+    let failure = omo_client::attempt_failure(result)?;
+    if !failure.contains(omo_client::TURN_START_ACK_TIMEOUT) {
+        return None;
+    }
+    let channel = turn.reply_channel.as_ref()?;
+    // The owner turn identity survives retry, resume (via the lane event) and restart.
+    let turn_seq = owner_turn;
+    let session_key = turn.key.storage_key();
+    let now = chrono::Utc::now().to_rfc3339();
+    let claimed = sqlx::query(
+        "INSERT INTO turn_failure_notices(session_key, turn_seq, kind, state, created_at)
+         VALUES(?, ?, 'ack_timeout', 'claimed', ?) ON CONFLICT DO NOTHING",
+    )
+    .bind(&session_key).bind(turn_seq).bind(&now)
+    .execute(pool).await;
+    match claimed {
+        Ok(done) if done.rows_affected() == 0 => return Some(AckNotice::Duplicate),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::error!(%error, session = %session_key, "ack failure notice could not be claimed; owner notice uncertain");
+            // Durable trace: a best-effort 'uncertain' row in the same table, so the store
+            // shows this owner turn's notice as unconfirmed (never 'queued') and a later
+            // attempt for the turn does not claim it afresh.
+            if let Err(error) = sqlx::query(
+                "INSERT INTO turn_failure_notices(session_key, turn_seq, kind, state, created_at)
+                 VALUES(?, ?, 'ack_timeout', 'uncertain', ?) ON CONFLICT DO NOTHING",
+            )
+            .bind(&session_key).bind(turn_seq).bind(&now)
+            .execute(pool).await
+            {
+                tracing::error!(%error, session = %session_key, "ack failure notice uncertainty not recorded either");
+            }
+            return Some(AckNotice::Uncertain);
+        }
+    }
+    let reply_key = SessionKey::new("slack", None::<String>, channel, turn.reply_thread.clone(), "owner").storage_key();
+    let queued = sqlx::query("INSERT INTO chat_outbox(session_key, platform, text, created_at) VALUES(?, 'slack', ?, ?)")
+        .bind(&reply_key).bind(ack_failure_notice()).bind(&now)
+        .execute(pool).await
+        .map(|done| done.last_insert_rowid());
+    let (state, outbox_id, notice) = match queued {
+        Ok(id) => ("queued", Some(id), AckNotice::Queued(id)),
+        Err(error) => {
+            tracing::error!(%error, session = %session_key, "ack failure notice was not queued; owner notice uncertain");
+            ("uncertain", None, AckNotice::Uncertain)
+        }
+    };
+    if let Err(error) = sqlx::query(
+        "UPDATE turn_failure_notices SET state=?, outbox_id=?
+         WHERE session_key=? AND turn_seq=? AND kind='ack_timeout'",
+    )
+    .bind(state).bind(outbox_id).bind(&session_key).bind(turn_seq)
+    .execute(pool).await
+    {
+        // The row stays 'claimed' with no outbox id: still visibly unconfirmed.
+        tracing::error!(%error, session = %session_key, ?outbox_id, "ack failure notice receipt not recorded");
+    }
+    Some(notice)
+}
+
 async fn emit_result(pool: &SqlitePool, turn: &SessionTurn, text: &str, commitments: Commitments, final_answer: bool) -> bool {
     match &turn.reply_channel {
         Some(channel) => {
@@ -1028,12 +1144,29 @@ pub async fn run_session_turn(
     }
     if let Some(failure) = failure {
         tracing::warn!(session = %storage_key, error = %failure, "session turn failed after its retry");
-        let notice = if schedule_resume(pool, &turn, &failure).await {
-            omo_client::owner_resume_text(&failure, RESUME_AFTER_MINUTES)
-        } else {
-            omo_client::owner_failure_text(&failure)
-        };
-        emit_result(pool, &turn, &notice, Commitments::default(), true).await;
+        // One identity for this owner turn, shared by the resume event and the notice claim.
+        let owner_turn = owner_turn_id(&turn)
+            .unwrap_or_else(|| format!("dashboard:{}", uuid::Uuid::new_v4()));
+        let resumed = schedule_resume_for(pool, &turn, &failure, &owner_turn).await;
+        match notify_ack_failure_for(pool, &turn, &owner_turn, &result).await {
+            Some(AckNotice::Queued(outbox_id)) => {
+                tracing::info!(session = %storage_key, outbox_id, "ack failure notice queued");
+            }
+            Some(AckNotice::Duplicate) => {
+                tracing::info!(session = %storage_key, "ack failure notice already sent for this turn");
+            }
+            Some(AckNotice::Uncertain) => {
+                tracing::error!(session = %storage_key, "ack failure notice state uncertain");
+            }
+            None => {
+                let notice = if resumed {
+                    omo_client::owner_resume_text(&failure, RESUME_AFTER_MINUTES)
+                } else {
+                    omo_client::owner_failure_text(&failure)
+                };
+                emit_result(pool, &turn, &notice, Commitments::default(), true).await;
+            }
+        }
         status(&turn, "x", true).await;
         return None;
     }
@@ -1219,11 +1352,11 @@ pub const RESUME_AFTER_MINUTES: i64 = 5;
 pub const RESUME_MARKER: &str = "[hub resume]";
 
 /// Lane event body that resumes a failed turn in its own conversation.
-fn resume_body(turn: &SessionTurn, failure: &str) -> String {
+fn resume_body(turn: &SessionTurn, failure: &str, owner_turn: &str) -> String {
     let error: String = failure.chars().take(120).collect();
     let message: String = turn.text.chars().take(300).collect();
     format!(
-        "{RESUME_MARKER} The hub could not answer the message below even after one retry ({error}). Answer it now in this conversation, continuing any work already done. Message: {message}"
+        "{RESUME_MARKER} {OWNER_TURN_TAG}{owner_turn}] The hub could not answer the message below even after one retry ({error}). Answer it now in this conversation, continuing any work already done. Message: {message}"
     )
 }
 
@@ -1231,7 +1364,15 @@ fn resume_body(turn: &SessionTurn, failure: &str) -> String {
 /// turn's session, released after [`RESUME_AFTER_MINUTES`], which the lane dispatcher runs as
 /// a turn in the same conversation. Returns false (nothing queued) for a resume that failed
 /// again, a dashboard turn, or a store error.
+#[cfg(test)]
 async fn schedule_resume(pool: &SqlitePool, turn: &SessionTurn, failure: &str) -> bool {
+    let owner_turn = owner_turn_id(turn).unwrap_or_else(|| "test".into());
+    schedule_resume_for(pool, turn, failure, &owner_turn).await
+}
+
+/// `owner_turn` travels in the body tag (what the resumed turn sees) and in
+/// `source_event_id` as `owner-turn:<id>` (queryable without parsing the body).
+async fn schedule_resume_for(pool: &SqlitePool, turn: &SessionTurn, failure: &str, owner_turn: &str) -> bool {
     if turn.reply_channel.is_none()
         || turn.text.contains(RESUME_MARKER)
         || failure.contains(omo_client::DENIAL_LIMIT)
@@ -1239,14 +1380,33 @@ async fn schedule_resume(pool: &SqlitePool, turn: &SessionTurn, failure: &str) -
         return false;
     }
     let now = chrono::Utc::now();
+    // A turn whose outcome is unknown may already have run: it is recorded for the operator
+    // and never resumed, so its side effects are not repeated.
+    if omo_client::is_ambiguous_failure(failure) {
+        let recorded = sqlx::query(
+            "INSERT OR IGNORE INTO lane_events(lane_key, lead_session_key, kind, body, created_at, release_at, source_event_id) VALUES(NULL,?,'owner_turn_ambiguous',?,?,?,?)",
+        )
+        .bind(turn.key.storage_key())
+        .bind(resume_body(turn, failure, owner_turn))
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(format!("owner-turn-ambiguous:{owner_turn}"))
+        .execute(pool)
+        .await;
+        if let Err(error) = recorded {
+            tracing::error!(%error, "the ambiguous turn outcome could not be recorded");
+        }
+        return false;
+    }
     let release = now + chrono::Duration::minutes(RESUME_AFTER_MINUTES);
     let queued = sqlx::query(
-        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at, release_at) VALUES(NULL,?,'owner_reply_failed',?,?,?)",
+        "INSERT INTO lane_events(lane_key, lead_session_key, kind, body, created_at, release_at, source_event_id) VALUES(NULL,?,'owner_reply_failed',?,?,?,?)",
     )
     .bind(turn.key.storage_key())
-    .bind(resume_body(turn, failure))
+    .bind(resume_body(turn, failure, owner_turn))
     .bind(now.to_rfc3339())
     .bind(release.to_rfc3339())
+    .bind(format!("owner-turn:{owner_turn}"))
     .execute(pool)
     .await;
     match queued {
@@ -1873,6 +2033,26 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn an_ambiguous_turn_is_recorded_and_not_requeued_for_resume() {
+        let pool = crate::storage::memory().await.unwrap();
+        let turn = SessionTurn {
+            key: SessionKey::new("slack", None::<String>, "D1", None::<String>, "U1"),
+            reply_channel: Some("D1".into()), reply_thread: None,
+            status_ts: Some("1.0".into()), text: "Deploy the release".into(), background: false,
+        };
+        let resumed = schedule_resume_for(&pool, &turn, omo_client::TRANSPORT_LOST_MID_TURN, "slack:D1:1.0").await;
+        assert!(!resumed);
+        let requeued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE kind='owner_reply_failed'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(requeued, 0);
+        let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE kind='owner_turn_ambiguous'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(recorded, 1);
+        // A definite failure is still queued for resume.
+        assert!(schedule_resume_for(&pool, &turn, "mhc turn failed: model rejected", "slack:D1:2.0").await);
+    }
+
+    #[tokio::test]
     async fn direct_owner_answer_is_not_filtered_as_background_narration() {
         use crate::report_gate::{queue, Decision};
         let pool = crate::storage::memory().await.unwrap();
@@ -2396,5 +2576,139 @@ mod tests {
         assert!(!first_delivery_persisted(&pool, "C1", "1.000001").await);
         assert!(first_delivery_persisted(&pool, "C1", "1.000002").await);
         assert!(first_delivery_persisted(&pool, "C2", "1.000001").await);
+    }
+
+    fn ack_turn(ts: &str) -> SessionTurn {
+        SessionTurn {
+            key: SessionKey::new("slack", None::<String>, "D1", None::<String>, "U1"),
+            reply_channel: Some("D1".into()), reply_thread: None,
+            status_ts: Some(ts.into()), text: "deploy it".into(), background: false,
+        }
+    }
+
+    fn ack_timeout() -> Result<omo_client::TurnOutcome> {
+        Err(crate::HubError::message(omo_client::TURN_START_ACK_TIMEOUT))
+    }
+
+    async fn ack_notices(pool: &SqlitePool) -> Vec<(String, Option<i64>)> {
+        sqlx::query_as("SELECT state, outbox_id FROM turn_failure_notices WHERE kind='ack_timeout'")
+            .fetch_all(pool).await.unwrap()
+    }
+
+    async fn outbox_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM chat_outbox").fetch_one(pool).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn ack_timeout_recovered_by_the_retry_sends_no_notice() {
+        let pool = crate::storage::memory().await.unwrap();
+        // The hub's retry replaced the timed-out attempt with an answer: the final result is Ok.
+        let recovered: Result<omo_client::TurnOutcome> = Ok(omo_client::TurnOutcome {
+            thread_id: "t".into(), resumed: false, turn_id: "u".into(), text: "done".into(),
+            approvals_allowed: 0, approvals_denied: 0, messages_delivered: 0, tool_calls: 0,
+        });
+        assert_eq!(notify_ack_failure(&pool, &ack_turn("1.0"), &recovered).await, None);
+        assert!(ack_notices(&pool).await.is_empty());
+        assert_eq!(outbox_count(&pool).await, 0);
+    }
+
+    #[tokio::test]
+    async fn exhausted_ack_timeout_queues_exactly_one_receipted_notice() {
+        let pool = crate::storage::memory().await.unwrap();
+        let Some(AckNotice::Queued(id)) = notify_ack_failure(&pool, &ack_turn("1.0"), &ack_timeout()).await else {
+            panic!("the exhausted ack timeout queued no notice");
+        };
+        assert_eq!(ack_notices(&pool).await, vec![("queued".to_owned(), Some(id))]);
+        let text: String = sqlx::query_scalar("SELECT text FROM chat_outbox WHERE id=?")
+            .bind(id).fetch_one(&pool).await.unwrap();
+        assert_eq!(text, ack_failure_notice());
+        assert_eq!(outbox_count(&pool).await, 1);
+    }
+
+    #[tokio::test]
+    async fn the_same_owner_turn_is_noticed_once() {
+        let pool = crate::storage::memory().await.unwrap();
+        let turn = ack_turn("1.0");
+        assert!(matches!(notify_ack_failure(&pool, &turn, &ack_timeout()).await, Some(AckNotice::Queued(_))));
+        assert_eq!(notify_ack_failure(&pool, &turn, &ack_timeout()).await, Some(AckNotice::Duplicate));
+        assert_eq!(outbox_count(&pool).await, 1);
+        assert!(matches!(notify_ack_failure(&pool, &ack_turn("2.0"), &ack_timeout()).await, Some(AckNotice::Queued(_))));
+        assert_eq!(outbox_count(&pool).await, 2);
+    }
+
+    #[tokio::test]
+    async fn an_unwritable_ack_notice_stays_uncertain_not_delivered() {
+        let pool = crate::storage::memory().await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_outbox BEFORE INSERT ON chat_outbox BEGIN SELECT RAISE(ABORT, 'outbox down'); END")
+            .execute(&pool).await.unwrap();
+        assert_eq!(notify_ack_failure(&pool, &ack_turn("1.0"), &ack_timeout()).await, Some(AckNotice::Uncertain));
+        assert_eq!(ack_notices(&pool).await, vec![("uncertain".to_owned(), None)]);
+        assert_eq!(outbox_count(&pool).await, 0);
+        // A later attempt for the same turn does not paper over the uncertain state.
+        assert_eq!(notify_ack_failure(&pool, &ack_turn("1.0"), &ack_timeout()).await, Some(AckNotice::Duplicate));
+        assert_eq!(ack_notices(&pool).await, vec![("uncertain".to_owned(), None)]);
+    }
+
+    #[tokio::test]
+    async fn the_resumed_owner_turn_shares_the_one_ack_notice() {
+        let pool = crate::storage::memory().await.unwrap();
+        let turn = ack_turn("1.0");
+        // An ACK timeout is ambiguous: recorded for the operator, never resumed.
+        assert!(!schedule_resume(&pool, &turn, omo_client::TURN_START_ACK_TIMEOUT).await);
+        assert!(matches!(notify_ack_failure(&pool, &turn, &ack_timeout()).await, Some(AckNotice::Queued(_))));
+        let (body, source): (String, String) = sqlx::query_as("SELECT body, source_event_id FROM lane_events")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(source, "owner-turn-ambiguous:1.0");
+        let kind: String = sqlx::query_scalar("SELECT kind FROM lane_events").fetch_one(&pool).await.unwrap();
+        assert_eq!(kind, "owner_turn_ambiguous");
+        // The lane dispatcher's resumed turn: no status_ts, identity only in the event text.
+        let resumed = SessionTurn {
+            status_ts: None,
+            text: format!("[LANE_EVENT]\n- owner_reply_failed: {body}"),
+            ..turn.clone()
+        };
+        assert_eq!(owner_turn_id(&resumed).as_deref(), Some("1.0"));
+        assert_eq!(notify_ack_failure(&pool, &resumed, &ack_timeout()).await, Some(AckNotice::Duplicate));
+        assert_eq!(outbox_count(&pool).await, 1);
+        assert_eq!(ack_notices(&pool).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reopened_store_still_holds_the_one_ack_notice() {
+        let path = std::env::temp_dir().join(format!("ferryx-ack-notice-{}.db", uuid::Uuid::new_v4()));
+        let pool = crate::storage::connect(&path).await.unwrap();
+        let turn = ack_turn("1.0");
+        // An ACK timeout is ambiguous: recorded for the operator, never resumed.
+        assert!(!schedule_resume(&pool, &turn, omo_client::TURN_START_ACK_TIMEOUT).await);
+        assert!(matches!(notify_ack_failure(&pool, &turn, &ack_timeout()).await, Some(AckNotice::Queued(_))));
+        let body: String = sqlx::query_scalar("SELECT body FROM lane_events").fetch_one(&pool).await.unwrap();
+        crate::storage::close_fully(&pool).await;
+        let pool = crate::storage::connect(&path).await.unwrap();
+        let resumed = SessionTurn { status_ts: None, text: format!("[LANE_EVENT]\n- owner_reply_failed: {body}"), ..turn };
+        assert_eq!(notify_ack_failure(&pool, &resumed, &ack_timeout()).await, Some(AckNotice::Duplicate));
+        assert_eq!(outbox_count(&pool).await, 1);
+        assert_eq!(ack_notices(&pool).await.len(), 1);
+        crate::storage::close_fully(&pool).await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn an_unclaimable_ack_notice_leaves_a_durable_uncertain_row() {
+        let pool = crate::storage::memory().await.unwrap();
+        // The claim write fails; the best-effort uncertainty row is not rejected.
+        sqlx::query("CREATE TRIGGER reject_claim BEFORE INSERT ON turn_failure_notices WHEN NEW.state='claimed' BEGIN SELECT RAISE(ABORT, 'claim store down'); END")
+            .execute(&pool).await.unwrap();
+        assert_eq!(notify_ack_failure(&pool, &ack_turn("1.0"), &ack_timeout()).await, Some(AckNotice::Uncertain));
+        assert_eq!(ack_notices(&pool).await, vec![("uncertain".to_owned(), None)]);
+        assert_eq!(outbox_count(&pool).await, 0);
+        // Never upgraded to delivered by a later attempt for the same owner turn.
+        assert_eq!(notify_ack_failure(&pool, &ack_turn("1.0"), &ack_timeout()).await, Some(AckNotice::Duplicate));
+        assert_eq!(ack_notices(&pool).await, vec![("uncertain".to_owned(), None)]);
+    }
+
+    #[test]
+    fn a_dashboard_turn_has_no_stable_owner_turn_id() {
+        let web = SessionTurn { status_ts: None, text: "hi".into(), ..ack_turn("1.0") };
+        assert_eq!(owner_turn_id(&web), None);
     }
 }

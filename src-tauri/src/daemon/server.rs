@@ -246,6 +246,7 @@ mod prompt_changed_event_tests {
             screen_revision: Some("r-1".into()),
             state_since_ms: None,
             screen_changed_at_ms: None,
+            read: false,
         };
         let frame = crate::agent_control::events::PromptChangeFilter::default()
             .frame(&observation)
@@ -312,6 +313,9 @@ mod prompt_changed_event_tests {
             updated_at_ms: 1,
             stale: false,
             health: None,
+            attention: None,
+            reason: None,
+            branch: None,
         });
         let event = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -346,6 +350,7 @@ mod prompt_changed_event_tests {
             screen_revision: Some(revision.into()),
             state_since_ms: None,
             screen_changed_at_ms: None,
+            read: false,
         };
         let mut shown = HashMap::new();
         assert!(prompt_moved(&mut shown, &observation(Some("p"), "r1")), "a first prompt is news");
@@ -456,6 +461,8 @@ mod pane_liveness_adopted_ownership_tests {
 
     fn owner_record(workspace_id: &str, worktree: Option<WorktreeIdentity>) -> StoredSessionMeta {
         StoredSessionMeta {
+            lineage: None,
+            spawned_agent: None,
             machine_session: None,
             client_request_id: format!("req-{workspace_id}"),
             workspace_id: workspace_id.to_owned(),
@@ -6435,6 +6442,8 @@ impl DaemonServer {
         // that pane with no endpoint for its whole lifetime.
         let agent_state_ingress = self.spawn_agent_state_listener();
         self.spawn_foreground_observer();
+        // A pane spawned as another pane's child reports its block or stall to that parent.
+        crate::daemon::parent_notice::spawn(&self.remote_state);
         self.spawn_paired_host_probe(crate::paired_host::client::PROBE_INTERVAL);
         self.spawn_paired_host_route_forwarder();
         // Restart the remote desktop host the owner left enabled. Capture setup may block, so it
@@ -6708,7 +6717,11 @@ impl DaemonServer {
                         || matches!(
                             req.as_ref(),
                             Ok(DaemonRequest::SupervisorSetup { request })
-                                if !matches!(request, super::protocol::SupervisorSetupAction::Status)
+                                if !matches!(
+                                    request,
+                                    super::protocol::SupervisorSetupAction::Status
+                                        | super::protocol::SupervisorSetupAction::ProjectMemory
+                                )
                         )
                         || matches!(req.as_ref(), Ok(request) if request.is_owner_supervisor_control());
                     let peer_refusal = if owner_decision {
@@ -6819,6 +6832,9 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::ReferenceChatIdentity) => DaemonResponse::ReferenceChatIdentityOk {
                     identity: crate::remote::server::desktop_reference_chat_identity(&self.remote_state),
+                },
+                Ok(DaemonRequest::AgentMemoryBlock { cwd }) => DaemonResponse::AgentMemoryBlockOk {
+                    block: crate::hub_runtime::agent_memory_block(&self.remote_state, cwd).await,
                 },
                 Ok(DaemonRequest::ReferenceChat { request }) => DaemonResponse::ReferenceChatOk {
                     reply: crate::remote::server::desktop_reference_chat(&self.remote_state, request).await,
@@ -7302,10 +7318,20 @@ impl DaemonServer {
                     }
                 }
                 Ok(DaemonRequest::AcknowledgeAgentOutcome { session_id }) => {
+                    // Desktop focus: one read state for every client, and the program's OSC 7501
+                    // outcome is still dropped. A pane without that mirror is acknowledged too.
+                    let read = self.session_router.is_local_session(&session_id)
+                        && crate::remote::server::agent_control_service::acknowledge_read(
+                            &self.remote_state,
+                            &session_id,
+                        );
                     match crate::remote::backend::RemoteSessionBackend::acknowledge_agent_outcome(
                         self.session_router.as_ref(), &session_id,
                     ).await {
                         Ok(()) => DaemonResponse::AcknowledgeAgentOutcomeOk,
+                        Err(crate::remote::backend::OutcomeAckError::NoMirror) if read => {
+                            DaemonResponse::AcknowledgeAgentOutcomeOk
+                        }
                         Err(crate::remote::backend::OutcomeAckError::UnknownSession) => {
                             daemon_session_not_found(&session_id, "daemon_acknowledge_outcome")
                         }
@@ -8032,6 +8058,8 @@ impl DaemonServer {
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
@@ -8043,6 +8071,7 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::AGENT_MEMORY_BLOCK_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY.into());
                     capabilities.push(crate::remote::reference_chat::REFERENCE_HISTORY_DELTA_V1.into());
                     capabilities.push(crate::remote::reference_chat::REFERENCE_PAYLOAD_V1.into());
@@ -14838,6 +14867,8 @@ mod instance_lock_deadline_tests {
         server.session_service.session_metadata.write().insert(
             local_id.clone(),
             crate::daemon::session_service::StoredSessionMeta {
+                lineage: None,
+                spawned_agent: None,
                 machine_session: None,
                 client_request_id: "retry-local-validation".into(),
                 workspace_id: missing_project.clone(),
