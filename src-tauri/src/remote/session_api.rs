@@ -412,6 +412,7 @@ async fn read(
     workspace: Option<String>,
 ) -> Result<Response, Refusal> {
     let id = uuid::Uuid::new_v4().to_string();
+    let token = super::server::extract_token(&headers);
     let admission = workspace_api::admit(state.clone(), headers, false, &id).await?;
     let path = path
         .transpose()
@@ -445,6 +446,9 @@ async fn read(
             Some(path) => json(200, sessions.machine_detail_routed(&path, epoch).await?),
             None => {
                 let mut rows = sessions.machine_sessions_routed(epoch).await?;
+                if let Some(token) = &token {
+                    sessions.merge_legacy_peer_sessions(&mut rows, token).await;
+                }
                 if let Some(workspace) = &workspace {
                     rows.sessions.retain(|row| &row.workspace_id == workspace);
                 }

@@ -1406,6 +1406,116 @@ async fn read_remote_conversation(
     Ok((items, malformed, truncated))
 }
 
+/// One history page of a session whose transcript lives on its paired SSH host.
+///
+/// The store is located on that host the way its own gateway would: the provider record's
+/// transcript path when the daemon has one, else the provider session's own file in the project's
+/// `.omo` session directory (both derived from the session's store entry, never from the client).
+/// The newest bounded tail is read over SSH and paged by the same reader the local path uses, so
+/// the page, its cursor and its generation follow one contract. A host or reader that cannot be
+/// read this way answers the pane's own output, disclosed as such, instead of an error.
+async fn reference_chat_remote_history_page(
+    state: &Arc<RemoteGatewayState>,
+    identity: &reference_history::ReferenceHistoryIdentity,
+    limit: usize,
+    cursor: Option<&reference_types::ReferenceHistoryCursor>,
+) -> Result<
+    (
+        reference_history::ReferenceHistoryStream,
+        reference_types::ReferenceHistoryPage,
+    ),
+    ScopeError,
+> {
+    let scrollback = |reason: &str| {
+        let stream = reference_history::remote_reference_scrollback_stream(
+            identity,
+            format!("{reason}; showing this pane's own output"),
+        );
+        reference_history::reference_history_page_from_window(&stream, identity, 0, &[], limit, cursor)
+            .map(|page| (stream.clone(), page))
+    };
+    let kind = identity.native_kind();
+    if !reference_history::remote_reference_history_kind_is_tail_readable(kind) {
+        return scrollback("this agent's transcript on the paired host has no remote reader");
+    }
+    let session_id = identity.target.target.backend_session_id.clone();
+    let Some(services) = state.machine_services.clone() else {
+        return scrollback("the paired host's session record is unavailable");
+    };
+    let store = services.sessions.remote_sessions_store_path().to_path_buf();
+    let raw = crate::ipc::run_blocking(move || {
+        std::fs::read_to_string(store).map_err(|e| crate::ipc::IpcError::internal(e.to_string()))
+    })
+    .await
+    .unwrap_or_default();
+    let Some(target) = crate::agent_transcript::remote_target_from_store(&raw, &session_id) else {
+        return scrollback("the paired host's transcript directory is unknown");
+    };
+    let Ok(host) = serde_json::from_value::<crate::ssh::SshHost>(target.host) else {
+        return scrollback("the paired host's address is unreadable");
+    };
+    let named = identity
+        .provider_transcript_path
+        .as_ref()
+        .and_then(|path| path.to_str())
+        .filter(|path| path.starts_with('/') && !path.contains('\n'))
+        .map(str::to_owned);
+    let provider = identity
+        .provider_session_id()
+        .or(identity.agent_session_id.as_deref())
+        .filter(|id| crate::agent_transcript::is_valid_session_id(id))
+        .map(str::to_owned);
+    let budget = reference_history::REFERENCE_HISTORY_MAX_BYTES;
+    // The first line is the resolved path, the second the store's true size; then the tail.
+    let locate = match (&named, &provider) {
+        (Some(path), _) => format!("f={}", crate::ssh::direct::quote_posix(path)),
+        (None, Some(id)) if reference_history::remote_reference_history_reads_omo_root(kind) => format!(
+            "f=$(ls -t {dir}/*_{id}.jsonl {dir}/{id}.jsonl 2>/dev/null | head -n 1)",
+            dir = crate::ssh::direct::quote_posix(&target.dir),
+            id = id,
+        ),
+        _ => return scrollback("the pane's conversation on the paired host is not identified yet"),
+    };
+    let script = format!(
+        "{locate}; if [ -n \"$f\" ] && [ -f \"$f\" ]; then \
+           printf '%s\\n' \"$f\"; n=$(wc -c < \"$f\"); printf '%s\\n' $n; \
+           if [ $n -gt {budget} ]; then tail -c {budget} \"$f\" | tail -n +2; else cat -- \"$f\"; fi; \
+         fi",
+    );
+    let command = format!("sh -c {}", crate::ssh::direct::quote_posix(&script));
+    let Ok(plan) = crate::ssh::direct::ssh_plan(&host, command, false) else {
+        return scrollback("the paired host cannot be reached over SSH");
+    };
+    let Ok(bytes) = crate::ssh::direct::bounded_output_with_limit(
+        &plan,
+        std::time::Duration::from_secs(15),
+        budget + 8192,
+    )
+    .await
+    else {
+        return scrollback("the paired host did not answer the transcript read");
+    };
+    let Some(split) = bytes.iter().position(|byte| *byte == b'\n') else {
+        return scrollback("the pane's conversation on the paired host has no transcript yet");
+    };
+    let remote_path = String::from_utf8_lossy(&bytes[..split]).into_owned();
+    let Some((true_bytes, body)) = crate::agent_transcript::split_remote_size_line(&bytes[split + 1..])
+    else {
+        return scrollback("the paired host's transcript read was incomplete");
+    };
+    let stream = reference_history::remote_reference_history_stream(identity, &remote_path);
+    let window_start = (true_bytes as u64).saturating_sub(body.len() as u64);
+    let page = reference_history::reference_history_page_from_window(
+        &stream,
+        identity,
+        window_start,
+        body,
+        limit,
+        cursor,
+    )?;
+    Ok((stream, page))
+}
+
 async fn get_agent_history(
     State(state): State<Arc<RemoteGatewayState>>,
     AxumPath(session_id): AxumPath<String>,
@@ -1929,7 +2039,7 @@ async fn ws_events_handler(
         return Ok(ws.on_upgrade(move |socket| async move {
             let _ = while_device_authorized(
                 &mut revocation,
-                super::machine_events::serve(socket, state, receiver, device_id),
+                super::machine_events::serve(socket, state, receiver, device_id, token),
             )
             .await;
         }));
@@ -7538,12 +7648,29 @@ where
         ));
     }
     if reference_chat_session_is_remote(&state, &session_id).await {
+        // No local file backs this stream, so there is nothing for the watch to follow; the
+        // client's poll reads the paired host again.
         state.history_watch.forget(&read.target);
-        return reference_chat_error(
-            ScopeErrorCode::Unsupported,
-            "this session's transcript lives on its paired host; read it through that host's own \
-             reference-chat route",
-        );
+        let page_cursor = if after.is_some() { None } else { cursor.as_ref() };
+        let (stream, page) =
+            match reference_chat_remote_history_page(&state, &read.identity, limit, page_cursor).await {
+                Ok(read) => read,
+                Err(error) => return reference_chat_refusal(&error),
+            };
+        return match crate::remote::reference_chat::history_delta::reference_history_negotiate(
+            &page,
+            &stream.stream_id,
+            cursor.as_ref(),
+            after.as_ref(),
+        ) {
+            Ok(crate::remote::reference_chat::history_delta::ReferenceHistoryRead::Page(_)) => {
+                ([(header::CACHE_CONTROL, "no-store")], Json(&page)).into_response()
+            }
+            Ok(crate::remote::reference_chat::history_delta::ReferenceHistoryRead::Negotiated(body)) => {
+                ([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
+            }
+            Err(error) => reference_chat_refusal(&error),
+        };
     }
     let Some(home) = reference_chat_history_home(&state) else {
         return reference_chat_error(

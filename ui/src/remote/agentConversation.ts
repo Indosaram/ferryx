@@ -1092,9 +1092,16 @@ function optionalPartId(entry: Record<string, unknown>, detail: string) {
   return id !== undefined ? { id } : {};
 }
 
-function toReferencePart(raw: unknown, detail: string): ReferencePart {
+/**
+ * A part whose kind this client does not know yet is skipped, never a parse failure: hosts add
+ * part kinds (`diff` arrived after clients that only knew eight), and one unknown part must not
+ * withdraw the whole conversation. A part without a string kind is still malformed.
+ */
+function toReferencePart(raw: unknown, detail: string): ReferencePart | null {
   const entry = requireRecord(raw, detail);
-  const kind = requireEnum(entry, "kind", REFERENCE_PART_KINDS, detail);
+  if (typeof entry.kind !== "string") malformed(`${detail}.kind is not a string`);
+  if (!(REFERENCE_PART_KINDS as readonly string[]).includes(entry.kind)) return null;
+  const kind = entry.kind as ReferencePartKind;
   switch (kind) {
     case "text": {
       const phase = optionalEnum(entry, "phase", REFERENCE_TEXT_PHASES, detail);
@@ -1221,7 +1228,7 @@ function toReferenceTurn(raw: unknown, detail: string): ReferenceTurn {
   }
   return {
     role: requireEnum(entry, "role", REFERENCE_TURN_ROLES, detail),
-    parts: entry.parts.map((part, index) => toReferencePart(part, `${detail}.parts[${index}]`)),
+    parts: entry.parts.flatMap((part, index) => toReferencePart(part, `${detail}.parts[${index}]`) ?? []),
     ...(startedAt !== undefined ? { startedAt } : {}),
     ...(endedAt !== undefined ? { endedAt } : {}),
     ...(source !== undefined ? { source } : {}),

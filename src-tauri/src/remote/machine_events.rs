@@ -255,6 +255,7 @@ pub(crate) async fn serve(
     state: Arc<super::state::RemoteGatewayState>,
     mut receiver: broadcast::Receiver<Value>,
     device_id: String,
+    token: String,
 ) {
     use axum::extract::ws::Message;
     use futures_util::StreamExt;
@@ -376,6 +377,7 @@ pub(crate) async fn serve(
                     .machine_sessions_routed(epoch)
                     .await
                     .map_err(crate::ipc::IpcError::internal)?;
+                sessions.merge_legacy_peer_sessions(&mut inventory, &token).await;
                 for session in &inventory.sessions {
                     if sessions
                         .router()

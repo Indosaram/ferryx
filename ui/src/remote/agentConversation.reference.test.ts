@@ -272,7 +272,7 @@ describe("reference history page parsing", () => {
       { ...nativeBody(), turns: "none" },
       { ...nativeBody(), cursor: { streamId: "dev:ino", offset: "4096" } },
       { ...nativeBody(), turns: [{ role: "system", parts: [] }] },
-      { ...nativeBody(), turns: [{ role: "user", parts: [{ kind: "audio", text: "x" }] }] },
+      { ...nativeBody(), turns: [{ role: "user", parts: [{ text: "x" }] }] },
       { ...nativeBody(), turns: [{ role: "user" }] },
       { ...nativeBody(), turns: [{ role: "assistant", parts: [{ kind: "taskResult", tasks: "one" }] }] },
       { ...nativeBody(), turns: [{ role: "assistant", parts: [{ kind: "tool", name: "read" }] }] },
@@ -295,6 +295,26 @@ describe("reference history page parsing", () => {
 
     expect(() => parseReferenceHistoryPage(null)).toThrowError(/is not an object/);
     expect(() => parseReferenceHistoryPage("page")).toThrowError(/is not an object/);
+  });
+
+  it("skips a part kind this client does not know instead of rejecting the page", () => {
+    const body = nativeBody({
+      turns: [
+        {
+          role: "assistant",
+          parts: [
+            { kind: "text", text: "before" },
+            { kind: "audio", ref: "a-1" },
+            { kind: "text", text: "after" },
+          ],
+        },
+      ],
+    });
+    const page = parseReferenceHistoryPage(body);
+    expect(page.turns[0]?.parts).toEqual([
+      { kind: "text", text: "before" },
+      { kind: "text", text: "after" },
+    ]);
   });
 
   it("accepts a page whose cursor is omitted entirely", () => {

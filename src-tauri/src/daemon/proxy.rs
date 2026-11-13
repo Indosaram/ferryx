@@ -794,6 +794,11 @@ impl SessionRouter {
         self.legacy_peers.write().push(peer);
     }
 
+    /// Every predecessor this daemon still routes sessions to.
+    pub(crate) fn legacy_peers(&self) -> Vec<Arc<LegacyPeer>> {
+        self.legacy_peers.read().clone()
+    }
+
     pub async fn adopt_routes_from_manifest(&self) -> Result<(), String> {
         self.adopt_routes_from_manifest_at(get_manifest_path()).await
     }

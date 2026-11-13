@@ -12,13 +12,41 @@ impl LegacyPeer {
         token: &str,
         body: &[u8],
     ) -> Result<(u16, Vec<u8>), String> {
+        self.machine_http("DELETE", &["api", "v1", "sessions", id], token, body, 64 * 1024)
+            .await
+    }
+
+    /// The predecessor's own machine inventory, read through its gateway with the caller's
+    /// bearer. A successor cannot describe a predecessor's SSH sessions any other way: their
+    /// rows (agent, provider session, the owner's own epoch) live only in that owner.
+    pub(crate) async fn machine_sessions_http(
+        &self,
+        token: &str,
+    ) -> Result<crate::remote::machine_protocol::Sessions, String> {
+        let (status, bytes) = self
+            .machine_http("GET", &["api", "v1", "sessions"], token, &[], 1024 * 1024)
+            .await?;
+        if status != 200 {
+            return Err("HOST_UNAVAILABLE".into());
+        }
+        serde_json::from_slice(&bytes).map_err(|_| "HOST_UNAVAILABLE".into())
+    }
+
+    async fn machine_http(
+        &self,
+        method: &str,
+        segments: &[&str],
+        token: &str,
+        body: &[u8],
+        max_body: usize,
+    ) -> Result<(u16, Vec<u8>), String> {
         use tokio::io::AsyncReadExt;
         tokio::time::timeout(Duration::from_secs(40), async {
             let mut stream = self.machine_gateway().await?;
             let mut url = reqwest::Url::parse("http://localhost/").map_err(|_| "INVALID_REQUEST")?;
-            url.path_segments_mut().map_err(|_| "INVALID_REQUEST")?.extend(["api", "v1", "sessions", id]);
+            url.path_segments_mut().map_err(|_| "INVALID_REQUEST")?.extend(segments);
             let authorization = axum::http::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| "UNAUTHORIZED")?;
-            let head = format!("DELETE {} HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", url.path(), authorization.to_str().map_err(|_| "UNAUTHORIZED")?, body.len());
+            let head = format!("{method} {} HTTP/1.1\r\nHost: localhost\r\nAuthorization: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", url.path(), authorization.to_str().map_err(|_| "UNAUTHORIZED")?, body.len());
             stream.write_all(head.as_bytes()).await.map_err(|_| "HOST_UNAVAILABLE")?;
             stream.write_all(body).await.map_err(|_| "HOST_UNAVAILABLE")?;
             let mut reader = BufReader::new(stream);
@@ -44,7 +72,7 @@ impl LegacyPeer {
                 (_, Some(length)) => length,
                 (_, None) => return Err("HOST_UNAVAILABLE".into()),
             };
-            if length > 64 * 1024 { return Err("HOST_UNAVAILABLE".into()); }
+            if length > max_body { return Err("HOST_UNAVAILABLE".into()); }
             let mut bytes = vec![0; length];
             reader.read_exact(&mut bytes).await.map_err(|_| "HOST_UNAVAILABLE")?;
             Ok((status, bytes))

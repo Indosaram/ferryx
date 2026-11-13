@@ -2743,8 +2743,11 @@ async fn r25_history_and_prompt_preserve_real_resolver_selection_matrix() {
                 assert!(prompt.is_none());
             }
             "remote" => {
-                assert_eq!(status, 422, "{body}");
-                assert_eq!(body["error"]["code"], "UNSUPPORTED");
+                // A paired-host session is read on that host, never locally. When the host
+                // cannot be reached, the page falls back to this pane's own output and says why.
+                assert_eq!(status, 200, "{body}");
+                assert_eq!(body["availability"], "scrollback", "{body}");
+                assert!(body["unavailableReason"].as_str().is_some_and(|reason| !reason.is_empty()), "{body}");
                 assert!(prompt.is_none());
             }
             _ => unreachable!("fixed matrix"),

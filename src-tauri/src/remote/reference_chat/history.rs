@@ -629,6 +629,50 @@ fn native_stream(
     located_stream(identity, kind, ReferenceHistoryLocation::File(path.to_path_buf()))
 }
 
+/// The stream of a store that lives on a paired SSH host, named by its path THERE.
+///
+/// The path only names the stream (its identity and cursor domain); the caller reads the bytes
+/// over SSH and pages them with [`reference_history_page_from_window`], never from this host.
+pub fn remote_reference_history_stream(
+    identity: &ReferenceHistoryIdentity,
+    remote_path: &str,
+) -> ReferenceHistoryStream {
+    native_stream(identity, identity.native_kind(), Path::new(remote_path))
+}
+
+/// Same-pane output for a paired-host session whose store cannot be read from here.
+pub fn remote_reference_scrollback_stream(
+    identity: &ReferenceHistoryIdentity,
+    reason: impl Into<String>,
+) -> ReferenceHistoryStream {
+    let kind = identity.native_kind();
+    ReferenceHistoryStream {
+        source: ReferenceHistorySource::Scrollback,
+        kind,
+        availability: ReferenceHistoryAvailability::Scrollback,
+        stream_id: reference_history_stream_id(identity, kind, None),
+        location: ReferenceHistoryLocation::Scrollback,
+        unavailable_reason: Some(reason.into()),
+        owner: identity.target.clone(),
+    }
+}
+
+/// Can a paired-host store of this reader be paged from a byte tail read over SSH?
+///
+/// Line-oriented stores only: pi needs its whole entry tree, and the projected and SQLite
+/// stores are not byte streams.
+pub fn remote_reference_history_kind_is_tail_readable(kind: ReferenceNativeHistoryKind) -> bool {
+    kind.is_native()
+        && kind != ReferenceNativeHistoryKind::Pi
+        && kind != ReferenceNativeHistoryKind::Crush
+        && !reference_history_kind_is_projected(kind)
+}
+
+/// Does this reader keep its store under the `.omo` session root on the owning host?
+pub fn remote_reference_history_reads_omo_root(kind: ReferenceNativeHistoryKind) -> bool {
+    reads_omo_root(kind)
+}
+
 fn located_stream(
     identity: &ReferenceHistoryIdentity,
     kind: ReferenceNativeHistoryKind,

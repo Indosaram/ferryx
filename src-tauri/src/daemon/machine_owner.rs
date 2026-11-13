@@ -303,4 +303,31 @@ impl DaemonSessionService {
         }
         Ok(inventory)
     }
+
+    /// Add the sessions a predecessor still owns but never journaled here.
+    ///
+    /// A rolling handover leaves SSH sessions running in the predecessor, and their rows (agent,
+    /// provider session, the predecessor's own epoch) exist only there: the successor's journal
+    /// and PTY list never name them, so without this the remote client cannot see or open them.
+    /// Only rows the predecessor currently routes are taken, so its stale journal rows stay out.
+    /// A predecessor that cannot answer marks the inventory partial instead of failing it.
+    pub(crate) async fn merge_legacy_peer_sessions(&self, inventory: &mut Sessions, token: &str) {
+        for peer in self.session_router.legacy_peers() {
+            match peer.machine_sessions_http(token).await {
+                Ok(rows) => {
+                    for row in rows.sessions {
+                        let id = row.target.session_id.as_str();
+                        let routed = self
+                            .session_router
+                            .find_legacy_peer_for_session(id)
+                            .is_some_and(|owner| Arc::ptr_eq(&owner, &peer));
+                        if routed && !inventory.sessions.iter().any(|s| s.target.session_id == id) {
+                            inventory.sessions.push(row);
+                        }
+                    }
+                }
+                Err(_) => inventory.completeness = Completeness::Partial,
+            }
+        }
+    }
 }
