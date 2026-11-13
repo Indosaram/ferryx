@@ -322,7 +322,7 @@ $rustV = ((rustc --version 2>$null) -replace '^rustc\\s+', '' -replace '\\s+.*$'
 $cargoV = ((cargo --version 2>$null) -replace '^cargo\\s+', '' -replace '\\s+.*$', '')
 
 # vswhere & link.exe
-$vswhere = Join-Path \${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+$vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) "Microsoft Visual Studio/Installer/vswhere.exe"
 $hasVswhere = Test-Path $vswhere
 $linker = $null
 if ($hasVswhere) {
@@ -737,13 +737,32 @@ $ffmpegPrefix = Join-Path $ffmpegCache "lgpl-$ffmpegKey-win64"
 # at the host root and survives a workspace cleanup, so on a second run this block is skipped --
 # with vcvars inside it, cargo would run without VCINSTALLDIR/WindowsSdkDir and ffmpeg-sys-next
 # would die with STATUS_STACK_OVERFLOW. MSYS2 also inherits cl.exe/link.exe from here.
-  $vswhere = Join-Path \${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+  # vswhere is reached through [Environment] instead of the env:ProgramFiles(x86) variable:
+  # the parenthesised name is not a valid variable literal and expands to nothing on this host.
+  $vswhere = Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Microsoft Visual Studio/Installer/vswhere.exe'
   $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
   if (-not $vsInstall) { throw 'Visual Studio C++ build tools not found (vswhere)' }
   $vcvars = Join-Path $vsInstall 'VC/Auxiliary/Build/vcvars64.bat'
   # Import the MSVC x64 developer environment into this process so MSYS2 inherits cl.exe/link.exe.
-  foreach ($line in (cmd.exe /d /c "\`"$vcvars\`" >nul && set")) {
+  #
+  # vcvars64.bat re-enters a subshell through %COMSPEC%, and on this host COMSPEC is pwsh.exe,
+  # which cannot run .bat syntax: the call returned exit code 0 having set nothing, leaving
+  # VCINSTALLDIR and WindowsSdkDir empty. ffmpeg-sys-next then died with STATUS_STACK_OVERFLOW
+  # and openssl-src failed under nmake. Force COMSPEC to the real cmd.exe for the import, and
+  # run vcvars through a temporary .bat so no quoting survives the ssh hop.
+  $comspecBackup = $env:COMSPEC
+  $env:COMSPEC = Join-Path $env:SystemRoot 'System32\cmd.exe'
+  $vcImportBat = Join-Path $env:TEMP 'ferryx-vcvars-import.bat'
+  Set-Content -LiteralPath $vcImportBat -Encoding ASCII -Value @(
+    '@echo off',
+    ('call "' + $vcvars + '"'),
+    'set'
+  )
+  foreach ($line in (& $env:COMSPEC /d /c $vcImportBat)) {
     if ($line -match '^([^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) }
+  }
+  Remove-Item -LiteralPath $vcImportBat -Force -ErrorAction SilentlyContinue
+  $env:COMSPEC = $comspecBackup
   }
 
 if (-not (Test-Path -LiteralPath (Join-Path $ffmpegPrefix 'build-receipt.txt'))) {
