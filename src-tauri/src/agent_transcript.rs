@@ -101,11 +101,19 @@ pub fn is_valid_session_id(session_id: &str) -> bool {
 }
 
 pub fn transcript_path_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
+    transcript_path_in(&home.join(".omo").join("agent").join("sessions"), session_id)
+}
+
+/// The `<ts>_<id>.jsonl` file one session store root holds for `session_id`, if any.
+///
+/// Split out from `transcript_path_for_session` so a caller that must search more than omo's own
+/// root (a `maho` pane launched from `mhc`, which may write to either root) can name the roots
+/// itself instead of re-deriving the layout.
+pub fn transcript_path_in(sessions_root: &Path, session_id: &str) -> Option<PathBuf> {
     if !is_valid_session_id(session_id) {
         return None;
     }
-    let sessions_root = home.join(".omo").join("agent").join("sessions");
-    let entries = std::fs::read_dir(&sessions_root).ok()?;
+    let entries = std::fs::read_dir(sessions_root).ok()?;
     let suffix1 = format!("_{session_id}.jsonl");
     let exact = format!("{session_id}.jsonl");
 

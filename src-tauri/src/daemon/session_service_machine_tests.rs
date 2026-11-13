@@ -126,6 +126,205 @@ async fn provider_resume_uses_only_remote_validated_identity() {
     eprintln!("A09 provider fixture cleanup: private child waited; PTY lifecycle joined; private executable/transcript/root removed");
 }
 
+/// The conversation id both store files below name; the pane's own session id is unrelated.
+#[cfg(unix)]
+const PATH_PROBE_ID: &str = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
+
+/// Clause 12 of the identity plan: on an `mhc`-owned pane a path-bearing report is admitted only
+/// after the path is stripped and the id is proven against the pane's own cwd, so the claimed path
+/// never decides anything. The decoy is readable and sits inside a real store root, but its header
+/// names a different project: an implementation that opened it would answer `AGENT_CWD_MISMATCH`
+/// instead of admitting, while the stripped one resolves `fixture_<id>.jsonl` and admits.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_mhc_owned_pane_never_opens_the_path_a_report_claims() {
+    let root = tokio::task::spawn_blocking(|| {
+        let root = tempfile::tempdir().unwrap();
+        for path in ["project", "elsewhere", "omo/sessions/project", "bin"] {
+            std::fs::create_dir_all(root.path().join(path)).unwrap();
+        }
+        let project = std::fs::canonicalize(root.path().join("project")).unwrap();
+        let elsewhere = std::fs::canonicalize(root.path().join("elsewhere")).unwrap();
+        let store = root.path().join("omo/sessions/project");
+        for (name, cwd) in [
+            (format!("fixture_{PATH_PROBE_ID}.jsonl"), project),
+            (format!("{PATH_PROBE_ID}.jsonl"), elsewhere),
+        ] {
+            std::fs::write(
+                store.join(name),
+                serde_json::json!({"type":"session","id":PATH_PROBE_ID,"cwd":cwd}).to_string(),
+            )
+            .unwrap();
+        }
+        root
+    })
+    .await
+    .unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "daemon::session_service::machine_tests::path_bearing_report_child",
+            "--nocapture",
+        ])
+        .env("MHC_OWNED_PATH_PROBE_ROOT", root.path())
+        .env("OMO_CODING_AGENT_DIR", root.path().join("omo"))
+        .env("HOME", root.path())
+        .env("SHELL", "/bin/sh")
+        .env(
+            "PATH",
+            std::env::join_paths(["/usr/bin", "/bin", "/usr/sbin", "/sbin"]).unwrap(),
+        )
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(60), child.wait()).await;
+    if result.is_err() {
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+    tokio::task::spawn_blocking(move || root.close().unwrap())
+        .await
+        .unwrap();
+    assert!(result.unwrap().unwrap().success());
+}
+
+/// Child half of the probe above, in its own process so `HOME` and the store overrides cannot
+/// reach a concurrent test.
+#[cfg(unix)]
+#[tokio::test]
+async fn path_bearing_report_child() {
+    let Some(root) = std::env::var_os("MHC_OWNED_PATH_PROBE_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    let owner = DaemonServer::new_with_paths(
+        Some(root.join("config")),
+        Some(root.join("auth")),
+    );
+    let service = owner.session_service.clone();
+    let workspace = service
+        .workspace_service
+        .register_machine(root.join("project").to_str().unwrap())
+        .unwrap();
+    // A symlink keeps `argv[0]` spelled `mhc` while the body is a real program that idles.
+    let mhc = root.join("bin/mhc");
+    std::os::unix::fs::symlink("/bin/sleep", &mhc).unwrap();
+    let mut command = portable_pty::CommandBuilder::new(&mhc);
+    command.arg("300");
+    service.set_test_shell_command(command);
+    let target = target();
+    let id = service
+        .spawn_machine(
+            request(workspace),
+            "device".into(),
+            "digest".into(),
+            target.clone(),
+            std::time::Instant::now() + Duration::from_secs(30),
+            Arc::new(|| Ok(())),
+        )
+        .await
+        .expect("the pane spawns");
+    assert_eq!(id, target.session_id);
+    let report = crate::daemon::protocol::AgentStateReport {
+        session_id: id.clone(),
+        state: "idle".into(),
+        agent: Some("omo".into()),
+        detail: None,
+        provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+            launcher: Some(crate::daemon::protocol::AgentLauncher::Mhc),
+            key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+            id: PATH_PROBE_ID.into(),
+            transcript_path: Some(
+                root.join(format!("omo/sessions/project/{PATH_PROBE_ID}.jsonl"))
+                    .to_str()
+                    .unwrap()
+                    .into(),
+            ),
+        }),
+    };
+    let admitted = service
+        .validate_machine_agent_report(target, report)
+        .await
+        .expect("an mhc-owned pane admits the report");
+    assert_eq!(admitted.agent_type.as_deref(), Some("omo"));
+    let provider = admitted.provider_session.expect("the provider is kept");
+    assert_eq!(provider.id, PATH_PROBE_ID);
+    assert_eq!(provider.launcher, Some(crate::daemon::protocol::AgentLauncher::Mhc));
+    assert!(
+        provider.transcript_path.is_none(),
+        "the reported path must not survive admission on an mhc-owned pane"
+    );
+    for id in service.terminal_service.list_sessions() {
+        service.terminal_service.close_session(&id).await.unwrap();
+        service.wait_machine_lifecycle(&id).await.unwrap();
+    }
+    drop(service);
+    drop(owner);
+}
+
+/// Clause 12 companion: only an `mhc` owner justifies a path. The same report on a pane whose
+/// process the walk cannot call `mhc` keeps the refusal, so the fix is never a blanket pass-through.
+#[cfg(unix)]
+#[tokio::test]
+async fn path_bearing_report_on_a_non_mhc_owner_is_refused() {
+    let (_root, owner, request) = fixture().await;
+    let service = owner.session_service.clone();
+    // A plain shell as the pane's PTY root, so the owner walk has nothing agent-shaped to find.
+    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
+    command.arg("-c");
+    command.arg("sleep 60");
+    service.set_test_shell_command(command);
+    let target = target();
+    let id = service
+        .spawn_machine(
+            request,
+            "device".into(),
+            "digest".into(),
+            target.clone(),
+            std::time::Instant::now() + Duration::from_secs(30),
+            Arc::new(|| Ok(())),
+        )
+        .await
+        .expect("the pane spawns");
+    assert_eq!(id, target.session_id);
+    let pid = service
+        .terminal_service
+        .get_session(&id)
+        .and_then(|session| session.pid())
+        .expect("the pane has a process");
+    let owner_proof = crate::ipc::agents::prove_pane_owner(pid);
+    assert!(
+        !matches!(owner_proof, crate::agent_detect::OwnerProof::Mhc),
+        "this pane must not be owned by mhc for the refusal to be the thing under test"
+    );
+    let report = crate::daemon::protocol::AgentStateReport {
+        session_id: id.clone(),
+        state: "idle".into(),
+        agent: Some("omo".into()),
+        detail: None,
+        provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+            launcher: Some(crate::daemon::protocol::AgentLauncher::Mhc),
+            key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+            id: PATH_PROBE_ID.into(),
+            transcript_path: Some("/home/u/.omo/agent/sessions/p/decoy.jsonl".into()),
+        }),
+    };
+    assert_eq!(
+        service
+            .validate_machine_agent_report(target, report)
+            .await
+            .unwrap_err(),
+        "AGENT_RESUME_INVALID",
+        "a path on a pane no `mhc` owns is refused, never stripped and admitted"
+    );
+    service
+        .terminal_service
+        .close_session(&id)
+        .await
+        .unwrap();
+    service.wait_machine_lifecycle(&id).await.unwrap();
+}
+
 fn request(workspace: String) -> CreateSessionRequest {
     CreateSessionRequest {
         request_id: uuid::Uuid::new_v4().to_string(),

@@ -37,9 +37,6 @@ pub(crate) fn resolve_agent_resume_cwd(
     if !store_backed {
         return Ok(None);
     }
-    if provider_session.transcript_path.is_some() {
-        return resolve_omo_cwd(provider_session, &[]);
-    }
 
     let mut roots = Vec::new();
     for key in ["OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR"] {
@@ -57,13 +54,29 @@ pub(crate) fn resolve_agent_resume_cwd(
     }
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         let home = PathBuf::from(home);
-        // Every store spelling the agent's registry entry lists, relative to the home directory:
-        // omo keeps `~/.omo/agent/sessions` (and the older `~/.omo/sessions`), maho
-        // `~/.maho/agent/sessions`.
-        for marker in crate::agent_detect::registry::store_markers(&agent).unwrap_or(&[]) {
+        // Which stores this pair may search is one decision, taken once, by the same function that
+        // answers it at ingress: only an `OmoCompatible` pair may read omo's roots, and `maho`
+        // reaches them solely through the `mhc` launcher that wrote there. A pathless `maho` with no
+        // launcher is `Own`, so its aliases stay unread and the id is looked for only in its own
+        // store. Read-only search roots either way: nothing here writes or resumes into them.
+        let semantics = crate::daemon::protocol::store_semantics(
+            &agent,
+            provider_session.launcher,
+        );
+        let readable: Vec<&'static str> = match semantics {
+            crate::daemon::protocol::StoreSemantics::OmoCompatible => {
+                crate::agent_detect::registry::readable_store_markers(&agent)
+            }
+            crate::daemon::protocol::StoreSemantics::Own => {
+                crate::agent_detect::registry::store_markers(&agent).unwrap_or_default().to_vec()
+            }
+        };
+        for marker in readable {
             roots.push(home.join(marker.trim_matches('/')));
         }
-        if agent == "omo" {
+        // The profile-scoped store is omo's own layout, so it is searched on exactly the same
+        // terms as omo's markers above - never for an agent that is not `OmoCompatible`.
+        if semantics == crate::daemon::protocol::StoreSemantics::OmoCompatible {
             let config = home.join(".omo");
             match fs::read_dir(config.join("profiles")) {
                 Ok(profiles) => {
@@ -80,6 +93,16 @@ pub(crate) fn resolve_agent_resume_cwd(
     }
     roots.sort();
     roots.dedup();
+    // A caller-supplied path is only read for `omo`, and only after it is proven to lie inside
+    // these roots. Every other agent names its session by id alone on this path; a path arriving
+    // for one of them did not come from a spawn this daemon built, so it is refused rather than
+    // read. (`verify_machine_resume_cwd` never reaches this: it refuses a path before calling.)
+    if provider_session.transcript_path.is_some() && agent != "omo" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Agent transcript path is not accepted for this agent",
+        ));
+    }
     resolve_omo_cwd(provider_session, &roots)
 }
 
@@ -170,7 +193,9 @@ fn matching_cwd(recorded: PathBuf, requested: &Path) -> Result<PathBuf, &'static
     Ok(recorded)
 }
 
-fn session_cwd(path: &Path, expected_id: &str) -> io::Result<PathBuf> {
+/// Windows has no `openat`, so the non-Unix containment walk ends by reopening the checked path.
+#[cfg(not(unix))]
+fn open_readonly(path: &Path) -> io::Result<std::fs::File> {
     #[cfg(not(unix))]
     if !fs::metadata(path)?.is_file() {
         return Err(io::Error::new(
@@ -182,7 +207,14 @@ fn session_cwd(path: &Path, expected_id: &str) -> io::Result<PathBuf> {
     options.read(true);
     #[cfg(unix)]
     options.custom_flags(libc::O_NONBLOCK);
-    let file = options.open(path)?;
+    options.open(path)
+}
+
+/// The recorded project directory of the session `expected_id` in an already-open record.
+///
+/// Takes the handle, not a path, so the bytes are read from the same file whose provenance the
+/// caller checked: a path re-opened here could name a different file by then.
+fn session_header_cwd(file: std::fs::File, expected_id: &str) -> io::Result<PathBuf> {
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -213,7 +245,8 @@ fn resolve_omo_cwd(
     session_roots: &[PathBuf],
 ) -> io::Result<Option<PathBuf>> {
     if let Some(path) = &provider.transcript_path {
-        return session_cwd(Path::new(path), provider.id.trim()).map(Some);
+        let file = open_beneath(Path::new(path), session_roots)?;
+        return session_header_cwd(file, provider.id.trim()).map(Some);
     }
     let suffix = format!("_{}.jsonl", provider.id.trim());
     let mut found = None;
@@ -241,7 +274,16 @@ fn resolve_omo_cwd(
             {
                 continue;
             }
-            let cwd = session_cwd(&path, provider.id.trim())?;
+            let cwd = match open_beneath(&path, session_roots)
+                .and_then(|file| session_header_cwd(file, provider.id.trim()))
+            {
+                Ok(cwd) => cwd,
+                // One unreadable record must not hide the id's real record under another root: a
+                // file whose name merely ends in this id, or a header that does not match, is not
+                // this session. A failure that no root can satisfy surfaces at the end as
+                // `NotFound` rather than as this candidate's error.
+                Err(_) => continue,
+            };
             if found.as_ref().is_some_and(|previous| previous != &cwd) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -257,6 +299,190 @@ fn resolve_omo_cwd(
             "Cannot find the requested OMO session's original project directory",
         )
     })
+}
+
+/// Opens a caller-supplied session record, refusing anything that leaves an admitted store root.
+///
+/// `session_header_cwd` reads a header off whatever handle it is given, so a path alone is
+/// self-certifying: a header-valid file anywhere on the disk would pass the id and cwd checks. The
+/// root is therefore the trust anchor - it is this process's own construction (the home directory
+/// plus a registry marker), opened once by path - and the claim's components *below* that root are
+/// then walked with `openat` and `O_NOFOLLOW` at every step, the leaf read through the same handle
+/// that was checked. Never `canonicalize`-then-open: a swapped intermediate directory redirects
+/// between those two calls, and `O_NOFOLLOW` on the final component alone does not help.
+///
+/// `.`, `..` and empty components are refused before any syscall, so the filesystem never gets to
+/// interpret a traversal token.
+#[cfg(unix)]
+fn open_beneath(claimed: &Path, roots: &[PathBuf]) -> io::Result<std::fs::File> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    /// The plain names of `path`, dropping only the leading root/prefix marker.
+    fn plain_components(path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+        path.components()
+            .filter(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Prefix(_)
+                )
+            })
+            .map(|component| match component {
+                std::path::Component::Normal(name) => Ok(name.to_os_string()),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Session transcript path must name plain path components",
+                )),
+            })
+            .collect()
+    }
+
+    if !claimed.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Session transcript path must be absolute",
+        ));
+    }
+    let components = plain_components(claimed)?;
+    let name = |component: &std::ffi::OsStr| {
+        std::ffi::CString::new(component.as_encoded_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid path component"))
+    };
+    let from_fd = |fd: libc::c_int| {
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a freshly opened descriptor this branch alone owns.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    };
+
+    let mut last = io::Error::new(
+        io::ErrorKind::NotFound,
+        "No admitted store root holds this session",
+    );
+    for root in roots {
+        // The root itself is opened by path: its own leading components (`/var` on macOS, a home
+        // directory below a symlink) are not part of the claim and are not ours to reject.
+        let mut current = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(root)
+        {
+            Ok(dir) => dir,
+            Err(error) => {
+                last = error;
+                continue;
+            }
+        };
+        let root_components = plain_components(root)?;
+        // The claim must literally live under this root; anything else is another store's file.
+        if components.len() <= root_components.len()
+            || !root_components
+                .iter()
+                .zip(&components)
+                .all(|(root, claim)| root == claim)
+        {
+            last = io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Session transcript is outside every admitted store root",
+            );
+            continue;
+        }
+        let below = &components[root_components.len()..];
+        let mut walked = Ok(());
+        for (index, component) in below.iter().enumerate() {
+            let is_leaf = index + 1 == below.len();
+            let step = name(component).and_then(|position| {
+                // The leaf is a file, so `O_DIRECTORY` there would fail every legitimate resume;
+                // `O_NONBLOCK` matches the by-path open so a fifo cannot stall it either.
+                let flags = libc::O_RDONLY
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK
+                    | if is_leaf { 0 } else { libc::O_DIRECTORY };
+                // SAFETY: `position` is a valid NUL-terminated C string and `current` is live.
+                from_fd(unsafe { libc::openat(current.as_raw_fd(), position.as_ptr(), flags) })
+            });
+            match step {
+                Ok(opened) if is_leaf => return Ok(opened),
+                Ok(opened) => current = opened,
+                Err(error) => {
+                    walked = Err(error);
+                    break;
+                }
+            }
+        }
+        // Reaching here with `Ok` means the claim named the root itself, not a file under it.
+        last = walked.err().unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Session transcript path must name a file below its store root",
+            )
+        });
+    }
+    Err(last)
+}
+
+/// Opens a caller-supplied session record, refusing anything outside an admitted store root.
+///
+/// Windows has no `openat`, so containment is checked by comparing canonical paths after a
+/// per-component reparse-point refusal. That leaves the window the Unix walk closes - the file is
+/// reopened by path - so it is stated here rather than implied: this target does not harden the
+/// local spawn path against a concurrent swap, and nothing on it claims to.
+#[cfg(not(unix))]
+fn open_beneath(claimed: &Path, roots: &[PathBuf]) -> io::Result<std::fs::File> {
+    if !claimed.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Session transcript path must be absolute",
+        ));
+    }
+    if claimed.components().any(|component| {
+        !matches!(
+            component,
+            std::path::Component::Normal(_)
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Session transcript path must name plain path components",
+        ));
+    }
+    let inside = roots.iter().find_map(|root| {
+        let (Ok(root), Ok(claim)) = (fs::canonicalize(root), fs::canonicalize(claimed)) else {
+            return None;
+        };
+        (claim != root && claim.starts_with(&root)).then_some((root, claim))
+    });
+    let Some((root, claim)) = inside else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Session transcript is outside every admitted store root",
+        ));
+    };
+    // Only the components *below* the root are the claim's: an ancestor of the root is where the
+    // store was installed, not something a session record chose, and the Unix walk leaves it alone
+    // for the same reason.
+    let mut current = root.clone();
+    for component in claim
+        .strip_prefix(&root)
+        .map(|below| below.components())
+        .into_iter()
+        .flatten()
+    {
+        current.push(component);
+        let is_link = fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        if is_link {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Session transcript path must not contain a link",
+            ));
+        }
+    }
+    open_readonly(&claim)
 }
 
 #[cfg(test)]
@@ -291,8 +517,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("project/vuev.net");
         let path = transcript(dir.path(), SESSION_ID, &cwd);
+        let roots = [dir.path().to_path_buf()];
         assert_eq!(
-            resolve_omo_cwd(&provider(Some(&path)), &[]).unwrap(),
+            resolve_omo_cwd(&provider(Some(&path)), &roots).unwrap(),
             Some(cwd)
         );
     }
@@ -313,7 +540,7 @@ mod tests {
     fn rejects_transcript_belonging_to_another_session() {
         let dir = tempfile::tempdir().unwrap();
         let path = transcript(dir.path(), "another-session", dir.path());
-        assert!(resolve_omo_cwd(&provider(Some(&path)), &[]).is_err());
+        assert!(resolve_omo_cwd(&provider(Some(&path)), &[dir.path().to_path_buf()]).is_err());
     }
 
     #[test]
@@ -327,7 +554,7 @@ mod tests {
     fn rejects_relative_project_directory() {
         let dir = tempfile::tempdir().unwrap();
         let path = transcript(dir.path(), SESSION_ID, Path::new("relative/project"));
-        assert!(resolve_omo_cwd(&provider(Some(&path)), &[]).is_err());
+        assert!(resolve_omo_cwd(&provider(Some(&path)), &[dir.path().to_path_buf()]).is_err());
     }
 
     #[cfg(unix)]
@@ -355,7 +582,7 @@ mod tests {
             })
         )
         .unwrap();
-        assert!(resolve_omo_cwd(&provider(Some(&path)), &[]).is_err());
+        assert!(resolve_omo_cwd(&provider(Some(&path)), &[dir.path().to_path_buf()]).is_err());
     }
 
     #[test]
@@ -381,17 +608,276 @@ mod tests {
         assert_eq!(resolve_agent_resume_cwd(Some(&startup)).unwrap(), None);
     }
 
+    /// A harness over the two environment variables `resolve_agent_resume_cwd` reads, so a test can
+    /// point the builder at a temporary home without touching the real one and without two tests
+    /// fighting over the process globals.
+    struct ResumeEnv {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    /// The process environment is global, so every test that rewrites it must hold one lock. A
+    /// per-constructor `static` would let `new` and `without_home` run at the same time and each
+    /// would restore a HOME the other never saw.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl ResumeEnv {
+        const KEYS: [&'static str; 6] = [
+            "HOME",
+            "USERPROFILE",
+            "OMO_CODING_AGENT_DIR",
+            "SENPI_CODING_AGENT_DIR",
+            "OMO_CODING_AGENT_SESSION_DIR",
+            "SENPI_CODING_AGENT_SESSION_DIR",
+        ];
+
+        fn new(home: &Path) -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = Self::KEYS
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            for key in Self::KEYS {
+                std::env::remove_var(key);
+            }
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+
+        fn without_home() -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = Self::KEYS
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            for key in Self::KEYS {
+                std::env::remove_var(key);
+            }
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for ResumeEnv {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// A `maho` provider as the post-split report carries it: mhc hosts the pane, so the record may
+    /// sit in maho's store or in omo's pre-split one.
+    fn maho_session(id: &str) -> AgentProviderSession {
+        AgentProviderSession {
+            launcher: Some(crate::daemon::protocol::AgentLauncher::Mhc),
+            key: AgentProviderSessionKey::SessionId,
+            id: id.to_string(),
+            transcript_path: None,
+        }
+    }
+
+    fn startup(agent: &str, provider_session: AgentProviderSession) -> TerminalStartup {
+        TerminalStartup::AgentResume {
+            agent_type: agent.to_string(),
+            provider_session,
+        }
+    }
+
+    #[test]
+    fn a_pathless_maho_session_is_found_in_omos_pre_split_store() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/ferryx");
+        let store = home.path().join(".omo/agent/sessions");
+        fs::create_dir_all(&store).unwrap();
+        let path = transcript(&store, SESSION_ID, &cwd);
+        assert!(path.is_file(), "fixture must write the record mhc writes today");
+
+        let _env = ResumeEnv::new(home.path());
+        assert_eq!(
+            resolve_agent_resume_cwd(Some(&startup("maho", maho_session(SESSION_ID)))).unwrap(),
+            Some(cwd)
+        );
+    }
+
+    #[test]
+    fn a_pathless_maho_session_is_found_in_its_own_store() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/ferryx");
+        let store = home.path().join(".maho/agent/sessions");
+        fs::create_dir_all(&store).unwrap();
+        transcript(&store, SESSION_ID, &cwd);
+
+        let _env = ResumeEnv::new(home.path());
+        assert_eq!(
+            resolve_agent_resume_cwd(Some(&startup("maho", maho_session(SESSION_ID)))).unwrap(),
+            Some(cwd)
+        );
+    }
+
+    #[test]
+    fn the_same_maho_provider_without_the_mhc_launcher_does_not_read_omos_store() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/ferryx");
+        let store = home.path().join(".omo/agent/sessions");
+        fs::create_dir_all(&store).unwrap();
+        transcript(&store, SESSION_ID, &cwd);
+
+        let _env = ResumeEnv::new(home.path());
+        let mut unlaunched = maho_session(SESSION_ID);
+        unlaunched.launcher = None;
+        assert!(
+            resolve_agent_resume_cwd(Some(&startup("maho", unlaunched))).is_err(),
+            "maho without the mhc launcher may only read its own store, which holds no record here"
+        );
+    }
+
+    #[test]
+    fn a_transcript_path_is_refused_for_every_agent_but_omo() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/ferryx");
+        let store = home.path().join(".maho/agent/sessions");
+        fs::create_dir_all(&store).unwrap();
+        let path = transcript(&store, SESSION_ID, &cwd);
+
+        let _env = ResumeEnv::new(home.path());
+        let mut inside_its_own_store = maho_session(SESSION_ID);
+        inside_its_own_store.transcript_path = Some(path.to_string_lossy().into_owned());
+        assert!(
+            resolve_agent_resume_cwd(Some(&startup("maho", inside_its_own_store))).is_err(),
+            "only a local omo pane supplies a path on this channel"
+        );
+    }
+
+    #[test]
+    fn a_maho_session_found_in_two_stores_with_different_cwds_stays_unverified() {
+        let home = tempfile::tempdir().unwrap();
+        let own = home.path().join("project/own");
+        let pre_split = home.path().join("project/pre-split");
+        for (root, cwd) in [(".maho", &own), (".omo", &pre_split)] {
+            let store = home.path().join(root).join("agent/sessions");
+            fs::create_dir_all(&store).unwrap();
+            transcript(&store, SESSION_ID, cwd);
+        }
+
+        let _env = ResumeEnv::new(home.path());
+        assert!(
+            resolve_agent_resume_cwd(Some(&startup("maho", maho_session(SESSION_ID)))).is_err(),
+            "two records for one id must never let the builder pick one silently"
+        );
+    }
+
+    #[test]
+    fn a_transcript_outside_every_store_root_is_never_read() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/ferryx");
+        // Header-valid, right id, absolute cwd: everything the old path check asked for.
+        let path = transcript(elsewhere.path(), SESSION_ID, &cwd);
+
+        let _env = ResumeEnv::new(home.path());
+        let mut escape = provider(Some(&path));
+        escape.id = SESSION_ID.to_string();
+        assert!(
+            resolve_agent_resume_cwd(Some(&startup("omo", escape))).is_err(),
+            "a header-valid record outside the store roots is not a session of this store"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_transcript_reached_through_a_link_is_never_read() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/ferryx");
+        let real = transcript(elsewhere.path(), SESSION_ID, &cwd);
+        let store = home.path().join(".omo/agent/sessions");
+        fs::create_dir_all(&store).unwrap();
+        let linked = store.join(real.file_name().unwrap());
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+        let _env = ResumeEnv::new(home.path());
+        assert!(
+            resolve_agent_resume_cwd(Some(&startup("omo", provider(Some(&linked))))).is_err(),
+            "a link out of the store must not be followed, however valid its target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_intermediate_directory_that_is_a_link_is_never_followed() {
+        // `O_NOFOLLOW` on the leaf alone misses this: the leaf is a regular file inside a real
+        // directory, and only the directory the claim names is the link.
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/ferryx");
+        let real = transcript(elsewhere.path(), SESSION_ID, &cwd);
+        let real_dir = real.parent().unwrap();
+        let store = home.path().join(".omo/agent/sessions");
+        fs::create_dir_all(&store).unwrap();
+        let linked_dir = store.join("proj");
+        std::os::unix::fs::symlink(real_dir, &linked_dir).unwrap();
+        let via_link = linked_dir.join(real.file_name().unwrap());
+        assert!(via_link.is_file(), "the claim must name a file that really opens");
+
+        let _env = ResumeEnv::new(home.path());
+        assert!(
+            resolve_agent_resume_cwd(Some(&startup("omo", provider(Some(&via_link))))).is_err(),
+            "a link in an intermediate component redirects the walk and must be refused"
+        );
+    }
+
+    #[test]
+    fn a_traversal_component_is_refused_without_touching_the_filesystem() {
+        let home = tempfile::tempdir().unwrap();
+        let store = home.path().join(".omo/agent/sessions");
+        fs::create_dir_all(&store).unwrap();
+        let cwd = home.path().join("project/ferryx");
+        let path = transcript(&store, SESSION_ID, &cwd);
+        let lexical = store.join("..").join("sessions").join(
+            path.file_name().unwrap(),
+        );
+
+        let _env = ResumeEnv::new(home.path());
+        assert!(
+            resolve_agent_resume_cwd(Some(&startup("omo", provider(Some(&lexical))))).is_err(),
+            "`..` must be refused before any syscall, even when it resolves inside the store"
+        );
+    }
+
+    #[test]
+    fn a_pathless_provider_with_no_home_proves_nothing() {
+        // No store to search means no proof of the session's project, and a resume that cannot
+        // prove where the conversation lives must be refused rather than started elsewhere.
+        let _env = ResumeEnv::without_home();
+        assert!(resolve_agent_resume_cwd(Some(&startup("maho", maho_session(SESSION_ID)))).is_err());
+    }
+
     #[test]
     fn resolved_resume_directory_is_used_by_a_real_process() {
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().join("project/vuev.net");
+        // A caller-supplied record is only read from inside an admitted store root, so the fixture
+        // lives in omo's own store rather than in a bare temp directory.
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/vuev.net");
         fs::create_dir_all(&cwd).unwrap();
         let cwd = fs::canonicalize(cwd).unwrap();
-        let path = transcript(dir.path(), SESSION_ID, &cwd);
+        let store = home.path().join(".omo/agent/sessions");
+        fs::create_dir_all(&store).unwrap();
+        let path = transcript(&store, SESSION_ID, &cwd);
         let startup = TerminalStartup::AgentResume {
             agent_type: "omo".to_string(),
             provider_session: provider(Some(&path)),
         };
+        let _env = ResumeEnv::new(home.path());
         let resolved = resolve_agent_resume_cwd(Some(&startup)).unwrap().unwrap();
         #[cfg(windows)]
         let mut command = {

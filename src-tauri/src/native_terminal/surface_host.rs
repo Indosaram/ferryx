@@ -139,6 +139,11 @@ pub struct NativeTerminalAgentStatePayload {
     pub state: String,
     pub rule_id: String,
     pub manifest_id: String,
+    /// The resolved agent identity on this report. It rides beside `state` because the identity
+    /// can change while the activity stands still (a reloaded `omo` pane correcting to `maho`),
+    /// and a reducer that only saw activity would swallow that change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_session: Option<crate::daemon::protocol::AgentProviderSession>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -612,6 +617,11 @@ pub struct NativeTerminalSession {
     /// of the change test; otherwise the report is swallowed here and the pane keeps resuming
     /// the conversation it was opened with.
     pub last_provider_session: Option<crate::daemon::protocol::AgentProviderSession>,
+    /// Last agent identity this pane forwarded to the reducer. A correction moves the identity
+    /// without moving the activity (`omo` -> `maho` at the same idle state), so the repeat test
+    /// below has to see it; otherwise the corrected identity is swallowed here and the pane keeps
+    /// the stale one for the rest of its life.
+    pub last_agent_identity: Option<String>,
     pub last_agent_detect_at: Option<std::time::Instant>,
     /// Set when the throttle skipped detection on an output chunk; the pump re-runs a forced
     /// detection once the burst drains so the trailing frame still produces transitions.
@@ -2651,6 +2661,7 @@ fn take_native_terminal_events(
                             state: state_str.to_string(),
                             rule_id: detection.rule_id,
                             manifest_id: detection.manifest_id,
+                            agent: None,
                             provider_session: None,
                             detail: None,
                             is_snapshot: false,
@@ -3552,6 +3563,7 @@ impl NativeTerminalSurfaceHostState {
                 state: "idle".to_string(),
                 rule_id: "manual-reset".to_string(),
                 manifest_id: "".to_string(),
+                agent: None,
                 provider_session: None,
                 detail: None,
                 is_snapshot: false,
@@ -3863,6 +3875,7 @@ impl NativeTerminalSurfaceHostState {
                         render_coordinator,
                         last_agent_activity: None,
                         last_provider_session: None,
+                        last_agent_identity: None,
                         last_agent_detect_at: None,
                         agent_detect_pending: false,
                         last_scrollbar: None,
@@ -4572,6 +4585,7 @@ impl NativeTerminalSurfaceHostState {
                         render_coordinator: Arc::clone(&render_coordinator),
                         last_agent_activity: None,
                         last_provider_session: None,
+                        last_agent_identity: None,
                         last_agent_detect_at: None,
                         agent_detect_pending: false,
                         last_scrollbar: None,
@@ -5190,11 +5204,20 @@ impl NativeTerminalSurfaceHostState {
                                             sess.last_provider_session = provider_session.clone();
                                         }
                                         let repeats = sess.last_agent_activity == Some(reported);
-                                        // The reported state is the new inference baseline either
+                                        // A correction changes the identity while the activity
+                                        // stands still, so identity alone has to count as a
+                                        // change; the reported state is the new baseline either
                                         // way: a released session that keeps its old activity here
                                         // would replay it from the exited agent's leftover screen.
+                                        let agent_changed = sess.last_agent_identity.as_deref() != agent.as_deref();
+                                        sess.last_agent_identity = agent.as_deref().map(str::to_owned);
                                         sess.last_agent_activity = Some(reported);
-                                        !(!is_snapshot && repeats && !provider_rotated)
+                                        agent_state_report_is_news(
+                                            is_snapshot,
+                                            repeats,
+                                            provider_rotated,
+                                            agent_changed,
+                                        )
                                     }
                                     None => false,
                                 }
@@ -5212,6 +5235,7 @@ impl NativeTerminalSurfaceHostState {
                                                 .as_deref()
                                                 .unwrap_or(AGENT_EXTENSION_MANIFEST_ID)
                                                 .to_string(),
+                                            agent: agent.as_deref().map(str::to_owned),
                                             provider_session: provider_session.clone(),
                                             detail: detail.as_ref().map(|value| value.to_string()),
                                             is_snapshot,
@@ -5882,6 +5906,7 @@ impl NativeTerminalSurfaceHostState {
             render_coordinator: Arc::clone(&render_coordinator),
             last_agent_activity: None,
             last_provider_session: None,
+            last_agent_identity: None,
             last_agent_detect_at: None,
             agent_detect_pending: false,
             last_scrollbar: None,
@@ -6127,6 +6152,7 @@ impl NativeTerminalSurfaceHostState {
                         render_coordinator,
                         last_agent_activity: None,
                         last_provider_session: None,
+                        last_agent_identity: None,
                         last_agent_detect_at: None,
                         agent_detect_pending: false,
                         last_scrollbar: None,
@@ -6730,6 +6756,23 @@ struct GpuLeg {
     renderer_released: bool,
 }
 
+/// Whether an agent-state report reaches the reducer at all.
+///
+/// A repeat is suppressed so a steady agent does not stream the same state out of every frame, but
+/// three things make a report news even when the activity is unchanged: an explicit snapshot, a
+/// rotated conversation id (`/new`), and a corrected identity. The last one is the reason this is
+/// a function rather than an inline expression - a reloaded pane reports the same idle state under
+/// the right name, and suppression there would leave the stale name in place for the session's
+/// whole life.
+fn agent_state_report_is_news(
+    is_snapshot: bool,
+    repeats: bool,
+    provider_rotated: bool,
+    agent_changed: bool,
+) -> bool {
+    !(!is_snapshot && repeats && !provider_rotated && !agent_changed)
+}
+
 /// An occluded (suspended) surface presents nothing until visibility returns, so its renderer's
 /// GPU resources are released; a plain dropped frame keeps them because it retries immediately.
 fn release_renderer_on_suspend(render_suspended: bool) -> bool {
@@ -7126,6 +7169,27 @@ mod tests {
     #[test]
     fn visible_or_dropped_frame_keeps_the_renderer() {
         assert!(!release_renderer_on_suspend(false));
+    }
+
+    #[test]
+    fn an_identity_correction_is_forwarded_at_unchanged_activity() {
+        // The reloaded pane's report: same `idle` as before, new name. Suppression here would keep
+        // the stale name for the session's life, so identity alone must count as news.
+        assert!(agent_state_report_is_news(false, true, false, true));
+    }
+
+    #[test]
+    fn a_plain_repeat_stays_suppressed() {
+        // Suppression is the narrow case: not a snapshot, the same activity, the same conversation,
+        // the same name. Anything else - including a new activity - is news.
+        assert!(!agent_state_report_is_news(false, true, false, false));
+        assert!(agent_state_report_is_news(false, false, false, false));
+    }
+
+    #[test]
+    fn a_snapshot_or_a_rotated_conversation_is_always_forwarded() {
+        assert!(agent_state_report_is_news(true, true, false, false));
+        assert!(agent_state_report_is_news(false, true, true, false));
     }
 
     #[test]

@@ -1,10 +1,22 @@
 //! Agent reports are hints; only the PTY owner can admit provider metadata.
 use crate::daemon::{
-    protocol::{AgentStateReport, DaemonRequest, DaemonResponse, TerminalStartup},
+    protocol::{AgentProviderSession, AgentStateReport, DaemonRequest, DaemonResponse, TerminalStartup},
     session_service::{DaemonSessionService, ProviderSessionClaimKey},
 };
 use crate::remote::machine_protocol::{RemoteTerminalTarget, Session};
 use std::sync::Arc;
+
+/// Removes `transcript_path` before a `MachineSessionMetadata` request is forwarded.
+///
+/// A pre-upgrade peer rejects any path-bearing provider in its own admission (the old
+/// `AGENT_RESUME_INVALID` check), and it has no process walk that could justify the path. An
+/// upgraded owner is the only one allowed to see a path, so the forwarding side strips it here.
+pub(crate) fn strip_path_for_legacy_peer(mut report: AgentStateReport) -> AgentStateReport {
+    if let Some(provider) = report.provider_session.as_mut() {
+        provider.transcript_path = None;
+    }
+    report
+}
 
 impl DaemonSessionService {
     /// Local authenticated IPC only: no HTTP metadata mutation surface exists.
@@ -23,7 +35,7 @@ impl DaemonSessionService {
             let response = peer
                 .send_request(&DaemonRequest::MachineSessionMetadata {
                     target: target.clone(),
-                    report,
+                    report: strip_path_for_legacy_peer(report),
                 })
                 .await
                 .map_err(|_| "HOST_UNAVAILABLE")?;
@@ -64,18 +76,37 @@ impl DaemonSessionService {
         if !crate::terminal::resume_cwd::machine_admits_agent(agent) {
             return Err("AGENT_RESUME_UNSUPPORTED".into());
         }
-        let provider = report
+        let reported_provider = report
             .provider_session
             .as_ref()
             .ok_or("AGENT_RESUME_INVALID")?;
-        if provider.transcript_path.is_some() {
-            return Err("AGENT_RESUME_INVALID".into());
-        }
         let pty = self
             .terminal_service
             .get_session(&target.session_id)
             .ok_or("SESSION_EXPIRED")?;
         let pid = pty.pid().ok_or("SESSION_EXPIRED")?;
+        // Derive the identity before judging the report, because the proof needs the PTY and a
+        // path-bearing provider may be legitimate on a pane whose owner is `mhc` (a peer that could
+        // not classify `maho` forwards the report unmodified).
+        let owner = crate::ipc::agents::prove_pane_owner(pid);
+        let owned_provider;
+        let provider = if reported_provider.transcript_path.is_some() {
+            // Nothing but an `mhc` owner justifies a path: that owner re-admits the report pathless
+            // and proves the store against the pane's own cwd below. Any other owner keeps the
+            // refusal, so a path is never accepted on the strength of the report alone.
+            if !matches!(owner, crate::agent_detect::OwnerProof::Mhc) {
+                return Err("AGENT_RESUME_INVALID".into());
+            }
+            owned_provider = AgentProviderSession {
+                launcher: reported_provider.launcher,
+                key: reported_provider.key,
+                id: reported_provider.id.clone(),
+                transcript_path: None,
+            };
+            &owned_provider
+        } else {
+            reported_provider
+        };
         match crate::ipc::agents::discover_agent_session(pid, agent)
             .and_then(|(found, source)| crate::daemon::server::binding_discovery(agent, found, source))
         {
@@ -269,6 +300,52 @@ impl DaemonSessionService {
 #[cfg(test)]
 mod tests {
     use crate::terminal::resume_cwd::machine_admits_agent;
+
+    /// A path a pre-upgrade peer would reject must not reach it.
+    ///
+    /// The old peer still runs its own `AGENT_RESUME_INVALID` check on any path-bearing provider
+    /// and has no process walk to justify the path, so forwarding the unmodified report turns a
+    /// legitimate report into a refusal on exactly the route this fix exists to repair.
+    #[test]
+    fn a_forwarded_report_carries_no_path_for_a_legacy_peer() {
+        let report = crate::daemon::protocol::AgentStateReport {
+            session_id: "s".into(),
+            state: "idle".into(),
+            agent: Some("maho".into()),
+            provider_session: Some(crate::daemon::protocol::AgentProviderSession {
+                launcher: Some(crate::daemon::protocol::AgentLauncher::Mhc),
+                key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
+                id: "abc".into(),
+                transcript_path: Some("/tmp/elsewhere/abc.jsonl".into()),
+            }),
+            detail: None,
+        };
+        let stripped = super::strip_path_for_legacy_peer(report);
+        let provider = stripped.provider_session.expect("the provider survives");
+        assert!(provider.transcript_path.is_none());
+        // Everything a legacy peer does understand is untouched.
+        assert_eq!(provider.id, "abc");
+        assert_eq!(
+            provider.launcher,
+            Some(crate::daemon::protocol::AgentLauncher::Mhc)
+        );
+        assert_eq!(stripped.agent.as_deref(), Some("maho"));
+    }
+
+    /// The strip must not invent a provider on a report that carries none.
+    #[test]
+    fn a_forwarded_report_without_a_provider_stays_without_one() {
+        let report = crate::daemon::protocol::AgentStateReport {
+            session_id: "s".into(),
+            state: "idle".into(),
+            agent: None,
+            provider_session: None,
+            detail: None,
+        };
+        assert!(super::strip_path_for_legacy_peer(report)
+            .provider_session
+            .is_none());
+    }
 
     #[test]
     fn machine_admission_covers_process_bound_discovery_only() {

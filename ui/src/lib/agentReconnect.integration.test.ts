@@ -109,8 +109,11 @@ describe("agent reconnect cross-layer contracts", () => {
       dispatch: (action) => { state = workspaceReducer(state, action); },
       spawn, attach: async () => undefined, createRequestId: () => "omo-cwd-repair",
     });
+    // The record's own launcher witness settles the identity: `mhc` is maho's launcher, so a
+    // record persisted as `omo` while carrying it was written before the split and resumes as
+    // `maho`. Without the witness nothing has changed and the label stands.
     expect(spawn).toHaveBeenCalledWith(expect.objectContaining({
-      startup: { kind: "agentResume", agentType: "omo", providerSession },
+      startup: { kind: "agentResume", agentType: launcher ? "maho" : "omo", providerSession },
     }));
     const saved = serializeWorkspaceState("ws", "/repo", state, persisted);
     expect(saved.workspaces.ws?.terminalSessions["local-agent"]).toMatchObject({

@@ -26,7 +26,7 @@ import { hasValidProjectTarget } from "../lib/projectIdentity";
 import { getCachedSshHosts } from "../lib/sshHosts";
 import { getMigratedItem, PROJECTS_STORAGE_KEY } from "../lib/storageKeys";
 import { startSshRecovery } from "../lib/sshRecovery";
-import { canCaptureAuthoritativeProviderSession, continuationOutcomeUnknown, continuationUnknownHeld, holdContinuationUnknown } from "../lib/agentResume";
+import { canCaptureAuthoritativeProviderSession, continuationOutcomeUnknown, continuationUnknownHeld, holdContinuationUnknown, isIdentityCorrection } from "../lib/agentResume";
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
 import { getNativeWindowFocused } from "../lib/nativeWindowFocus";
 import { isWindowForegroundFocused } from "../lib/notificationCoordinator";
@@ -849,6 +849,10 @@ export type WorkspaceAction =
       state: "working" | "blocked" | "idle";
       ruleId: string;
       manifestId?: string;
+      /// The resolved agent identity carried by the same report. Identity alone can be the whole
+      /// news (an `omo` pane correcting to `maho` at an unchanged idle), so it rides beside the
+      /// activity rather than being folded into it.
+      agentType?: string;
       providerSession?: AgentProviderSession | null;
       detail?: string | null;
       isSnapshot?: boolean;
@@ -1196,6 +1200,7 @@ export function useWorkspaceStore({
           state: payload.state,
           ruleId: payload.ruleId,
           manifestId: payload.manifestId,
+          agentType: payload.agent ?? undefined,
           providerSession: payload.providerSession,
           detail: payload.detail,
           isSnapshot: payload.isSnapshot,
@@ -1211,6 +1216,7 @@ export function useWorkspaceStore({
         state: payload.state,
         ruleId: payload.ruleId,
         manifestId: payload.manifestId,
+        agentType: payload.agent ?? undefined,
         providerSession: payload.providerSession,
         detail: payload.detail,
         isSnapshot: payload.isSnapshot,
@@ -4242,7 +4248,9 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // The freshest answer wins. Keeping the id already on the session is what pinned a pane to
       // the first conversation it ever ran: `/new` rotates the agent's session id in place, and a
       // pane restored from disk always arrives with the previous id already set.
-      const nextAgentType = session.agentType ?? (action.agentType || null);
+      const nextAgentType = isIdentityCorrection(session.agentType ?? null, action.agentType ?? null, action.providerSession)
+        ? (action.agentType ?? session.agentType)
+        : (session.agentType ?? (action.agentType || null));
       if (
         sameProviderSession(session.providerSession, action.providerSession)
         && nextAgentType === session.agentType
@@ -4331,24 +4339,51 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       };
     }
     case "SESSION_SCREEN_ACTIVITY": {
-      const previous = state.activityBySessionId?.[action.sessionId];
+      // A correction is an identity-only repair, and it has to run before the activity guard below:
+      // that guard drops a non-snapshot `idle` report when nothing was working, which is exactly
+      // the shape a reloaded pane arrives in (`omo` stored, `maho` reported, nothing running).
+      const identityBefore = state.sessions[action.sessionId];
+      let nextState = state;
+      if (
+        identityBefore
+        && isIdentityCorrection(
+          identityBefore.agentType ?? null,
+          action.agentType ?? null,
+          action.providerSession,
+        )
+      ) {
+        nextState = {
+          ...state,
+          sessions: {
+            ...state.sessions,
+            [action.sessionId]: {
+              ...identityBefore,
+              agentType: action.agentType as string,
+              ...(action.providerSession ? { providerSession: action.providerSession } : {}),
+            },
+          },
+        };
+      }
+      const previous = nextState.activityBySessionId?.[action.sessionId];
       let mappedState: TerminalActivityState;
       if (action.state === "working") {
-        if (isSessionBackendDead(state, action.sessionId)) return state;
+        if (isSessionBackendDead(nextState, action.sessionId)) return nextState;
         mappedState = "working";
       } else if (action.state === "blocked") {
-        if (isSessionBackendDead(state, action.sessionId)) return state;
+        if (isSessionBackendDead(nextState, action.sessionId)) return nextState;
         mappedState = "waiting";
       } else if (action.state === "idle") {
         if (!action.isSnapshot && (!previous || (previous.state !== "working" && previous.state !== "waiting"))) {
-          return state;
+          return nextState;
         }
         mappedState = "done";
       } else {
-        return state;
+        return nextState;
       }
 
-      const authoritativeAgentType = state.sessions[action.sessionId]?.agentType ?? null;
+      // Read through the corrected state: this same report may have corrected the identity above, and
+      // the activity record must carry the identity it now holds rather than the label it replaced.
+      const authoritativeAgentType = nextState.sessions[action.sessionId]?.agentType ?? null;
       const normalizedManifestId = action.manifestId?.trim().toLowerCase();
       const isSupportedManifest = Boolean(normalizedManifestId && resolveAgentLogo(normalizedManifestId));
       const prevActivity = previous as WorkspaceTerminalActivity | undefined;
@@ -4378,7 +4413,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           ? { seen: true, notificationSuppressed: true }
           : {}),
       };
-      let nextState = applySessionActivity(state, action.tabId, action.sessionId, activity, action.observed);
+      nextState = applySessionActivity(nextState, action.tabId, action.sessionId, activity, action.observed);
       const replacesUnseenAttention =
         previous?.seen !== true && (previous?.state === "done" || previous?.state === "waiting");
       if (action.isSnapshot && mappedState !== "working" && replacesUnseenAttention) {

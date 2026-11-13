@@ -1,10 +1,12 @@
 pub mod engine;
 pub mod manifest;
 pub mod matcher;
+pub mod owner;
 pub mod registry;
 pub mod region;
 
 pub use engine::{default_engine, AgentActivity, Detection, DetectionEngine, SHIPPED_MANIFESTS};
+pub use owner::{classify_agent_process, owner_proof, Classified, OwnerProof};
 pub use manifest::{
     load_manifest_from_str, CompiledManifest, CompiledRule, ManifestError, RawManifest, RawRule,
     RuleState,

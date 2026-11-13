@@ -279,6 +279,29 @@ pub enum AgentLauncher {
     Mhc,
 }
 
+/// Which store layout a provider session's record lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreSemantics {
+    /// The agent's own store, named by its registry entry.
+    Own,
+    /// The pre-split store `mhc` wrote under omo's roots, which a `maho` pane may still use.
+    OmoCompatible,
+}
+
+/// The store layout `agent`'s provider claims, read off the launcher it names.
+///
+/// The launcher is the only field that survives serialization, so it is what this decision can
+/// consult on every path (a replayed report included). `omo` is the pre-split name of the same
+/// store, so it is compatible with itself; `maho` reaches it only when `mhc` - the binary that
+/// wrote there - is the one hosting the pane.
+pub fn store_semantics(agent: &str, launcher: Option<AgentLauncher>) -> StoreSemantics {
+    if agent == "omo" || (agent == "maho" && launcher == Some(AgentLauncher::Mhc)) {
+        StoreSemantics::OmoCompatible
+    } else {
+        StoreSemantics::Own
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentProviderSession {

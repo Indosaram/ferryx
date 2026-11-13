@@ -35,6 +35,15 @@ pub(crate) struct AgentStateSubscription {
     hub: Arc<AgentStateHub>,
 }
 
+/// An identity-only change: what the caller saw, and what it proved instead.
+#[derive(Clone, Debug)]
+pub(crate) struct IdentityCorrection {
+    pub expected_agent: Option<String>,
+    pub expected_provider: Option<AgentProviderSession>,
+    pub agent: String,
+    pub provider: Option<AgentProviderSession>,
+}
+
 pub(crate) struct AgentStateHub {
     retained: Mutex<HashMap<String, AgentState>>,
     /// Revision of the newest OSC 7501 summary seen per session. Locked only while `retained`
@@ -65,6 +74,36 @@ impl AgentStateHub {
             state,
             is_snapshot: false,
         });
+    }
+
+    /// Applies an identity-only correction iff the retained identity is still the one the process
+    /// walk was taken against.
+    ///
+    /// A plain republication would overwrite whatever activity or provider landed during the
+    /// blocking walk, and would resurrect a session the user had already removed. So the identity
+    /// fields are compared and replaced under the publishers' lock, and only when they still match.
+    ///
+    /// Returns `false` for a removed session, a changed expectation, or a cleared publication; the
+    /// caller then re-reads, because a correction is never applied to state it did not observe.
+    pub(crate) fn correct_identity(&self, session_id: &str, correction: IdentityCorrection) -> bool {
+        let mut retained = self.retained.lock();
+        let Some(previous) = retained.get(session_id) else {
+            return false;
+        };
+        if previous.agent != correction.expected_agent
+            || previous.provider_session != correction.expected_provider
+        {
+            return false;
+        }
+        let mut state = previous.clone();
+        state.agent = Some(correction.agent);
+        state.provider_session = correction.provider;
+        retained.insert(session_id.to_string(), state.clone());
+        let _ = self.tx.send(AgentStateUpdate {
+            state,
+            is_snapshot: false,
+        });
+        true
     }
 
     /// Publishes a provider session the daemon discovered from the pane's agent process, unless
@@ -325,9 +364,26 @@ pub(crate) fn holds_live_provider(
 ) -> bool {
     current.is_some_and(|state| {
         state.provider_session.as_ref().is_some_and(|provider| {
-            state.origin == AgentStateOrigin::Agent || Some(provider) != baseline
+            state.origin == AgentStateOrigin::Agent || !same_provider_binding(provider, baseline)
         })
     })
+}
+
+/// Do these two provider sessions name the same conversation?
+///
+/// The launcher is ignored: it says which program hosts the conversation, never that a different
+/// one started. Without this, enriching a released leftover with `launcher = Mhc` would make it
+/// differ from its own baseline and permanently suppress discovery of the next conversation.
+fn same_provider_binding(
+    provider: &AgentProviderSession,
+    baseline: Option<&AgentProviderSession>,
+) -> bool {
+    let Some(baseline) = baseline else {
+        return false;
+    };
+    provider.key == baseline.key
+        && provider.id == baseline.id
+        && provider.transcript_path == baseline.transcript_path
 }
 
 impl AgentStateSubscription {
@@ -362,6 +418,14 @@ mod tests {
             key: crate::daemon::protocol::AgentProviderSessionKey::SessionId,
             id: id.to_string(),
             transcript_path: None,
+        }
+    }
+
+    /// The identity a proven `mhc` pane carries: same conversation, launcher now named.
+    fn mhc_claimed(id: &str) -> AgentProviderSession {
+        AgentProviderSession {
+            launcher: Some(crate::daemon::protocol::AgentLauncher::Mhc),
+            ..provider(id)
         }
     }
 
@@ -438,6 +502,281 @@ mod tests {
         assert!(holds_live_provider(hub.current("s3").as_ref(), leftover.as_ref()));
         assert!(!hub.publish_discovered(discovered("s3", "gjc", "newer"), leftover.as_ref()));
         assert!(!holds_live_provider(None, None));
+    }
+
+    #[test]
+    fn a_binding_differs_on_the_conversation_and_never_on_the_launcher() {
+        // What makes two provider sessions the same conversation: the key, the id, and the path.
+        let base = provider("same");
+        let with_path = AgentProviderSession {
+            transcript_path: Some("/stores/a.jsonl".into()),
+            ..base.clone()
+        };
+        assert!(same_provider_binding(&base, Some(&base)));
+        assert!(same_provider_binding(&with_path, Some(&with_path)));
+        // The launcher says which program hosts it, not that it is another conversation.
+        assert!(same_provider_binding(
+            &AgentProviderSession {
+                launcher: Some(crate::daemon::protocol::AgentLauncher::Mhc),
+                ..base.clone()
+            },
+            Some(&base)
+        ));
+        // A different id, key or path is a different conversation.
+        assert!(!same_provider_binding(&provider("other"), Some(&base)));
+        assert!(!same_provider_binding(
+            &AgentProviderSession {
+                key: crate::daemon::protocol::AgentProviderSessionKey::ConversationId,
+                ..base.clone()
+            },
+            Some(&base)
+        ));
+        assert!(!same_provider_binding(&with_path, Some(&base)));
+        assert!(!same_provider_binding(&base, None));
+    }
+
+    #[test]
+    fn enriching_a_leftover_with_a_launcher_does_not_suppress_the_next_discovery() {
+        // A released leftover carries no launcher. Correcting its agent must be able to add one
+        // without the enrichment making it look like a newer claim than its own baseline - that
+        // would suppress discovery of the next conversation for the rest of the pane's life.
+        let hub = AgentStateHub::new(8);
+        hub.publish_discovered(discovered("s4", "omo", "old"), None);
+        hub.release_foreground("s4");
+        let leftover = hub.current("s4").unwrap().provider_session;
+        let corrected = AgentProviderSession {
+            launcher: Some(crate::daemon::protocol::AgentLauncher::Mhc),
+            ..provider("old")
+        };
+        assert!(hub.correct_identity(
+            "s4",
+            IdentityCorrection {
+                expected_agent: Some("omo".into()),
+                expected_provider: leftover.clone(),
+                agent: "maho".into(),
+                provider: Some(corrected),
+            }
+        ));
+        // Same conversation, different hosting program: still the baseline, still replaceable.
+        assert!(!holds_live_provider(hub.current("s4").as_ref(), leftover.as_ref()));
+        assert!(hub.publish_discovered(discovered("s4", "maho", "new"), leftover.as_ref()));
+        assert_eq!(
+            hub.current("s4").unwrap().provider_session,
+            Some(provider("new"))
+        );
+    }
+
+    #[test]
+    fn an_identity_correction_replaces_only_the_identity() {
+        let hub = AgentStateHub::new(8);
+        hub.publish_canonical(AgentState {
+            detail: Some("approve?".into()),
+            outcome: Some(crate::daemon::protocol::AgentOutcome::Done),
+            origin: AgentStateOrigin::Protocol,
+            ..state("s5", "blocked")
+        });
+        let before = hub.current("s5").unwrap();
+        assert!(hub.correct_identity(
+            "s5",
+            IdentityCorrection {
+                expected_agent: before.agent.clone(),
+                expected_provider: before.provider_session.clone(),
+                agent: "maho".into(),
+                provider: Some(provider("kept")),
+            }
+        ));
+        let after = hub.current("s5").unwrap();
+        assert_eq!(after.agent.as_deref(), Some("maho"));
+        assert_eq!(after.provider_session, Some(provider("kept")));
+        // Everything that is not identity is untouched.
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.detail, before.detail);
+        assert_eq!(after.outcome, before.outcome);
+        assert_eq!(after.origin, before.origin);
+    }
+
+    #[test]
+    fn a_correction_against_a_moved_identity_or_absent_session_does_nothing() {
+        let hub = AgentStateHub::new(8);
+        hub.publish_canonical(AgentState {
+            provider_session: Some(provider("current")),
+            ..state("s6", "idle")
+        });
+        let stale = IdentityCorrection {
+            expected_agent: Some("omo".into()),
+            expected_provider: Some(provider("previous")),
+            agent: "maho".into(),
+            provider: None,
+        };
+        assert!(!hub.correct_identity("s6", stale));
+        // Unchanged: a rejected correction publishes nothing at all.
+        assert_eq!(hub.current("s6").unwrap().agent.as_deref(), Some("omo"));
+        assert!(!hub.correct_identity(
+            "absent",
+            IdentityCorrection {
+                expected_agent: Some("omo".into()),
+                expected_provider: None,
+                agent: "maho".into(),
+                provider: None,
+            }
+        ));
+        assert!(hub.current("absent").is_none());
+    }
+
+    #[test]
+    fn a_correction_is_a_compare_and_swap_not_a_blind_write() {
+        // The reconciler runs off a snapshot taken earlier; the live state may have moved on since.
+        // The expected identity is the whole guarantee that it never overwrites a newer report.
+        let hub = AgentStateHub::new(8);
+        hub.publish_canonical(AgentState {
+            provider_session: Some(provider("first")),
+            ..state("s7", "idle")
+        });
+        let snapshot = hub.current("s7").unwrap();
+        // A newer report lands before the correction does.
+        hub.publish_canonical(AgentState {
+            provider_session: Some(provider("second")),
+            ..state("s7", "working")
+        });
+        assert!(!hub.correct_identity(
+            "s7",
+            IdentityCorrection {
+                expected_agent: snapshot.agent.clone(),
+                expected_provider: snapshot.provider_session.clone(),
+                agent: "maho".into(),
+                provider: Some(provider("first")),
+            }
+        ));
+        let after = hub.current("s7").unwrap();
+        assert_eq!(after.agent.as_deref(), Some("omo"));
+        assert_eq!(after.provider_session, Some(provider("second")));
+        assert_eq!(after.state, "working");
+    }
+
+    #[test]
+    fn a_correction_survives_an_activity_only_change_and_keeps_the_newer_activity() {
+        // An identity-only CAS is *supposed* to tolerate a newer activity word: the reconciler's
+        // proof is about who the pane is, not about what it is doing right now.
+        let hub = Arc::new(AgentStateHub::new(8));
+        hub.publish_canonical(AgentState {
+            provider_session: Some(provider("first")),
+            ..state("s8", "idle")
+        });
+        let snapshot = hub.current("s8").unwrap();
+        hub.publish_canonical(AgentState {
+            detail: Some("awaiting input".into()),
+            provider_session: Some(provider("first")),
+            ..state("s8", "blocked")
+        });
+        assert!(hub.correct_identity(
+            "s8",
+            IdentityCorrection {
+                expected_agent: snapshot.agent.clone(),
+                expected_provider: snapshot.provider_session.clone(),
+                agent: "maho".into(),
+                provider: Some(mhc_claimed("first")),
+            }
+        ));
+        let after = hub.current("s8").unwrap();
+        assert_eq!(after.agent.as_deref(), Some("maho"));
+        // The activity that landed during the walk is the pane's, not the correction's.
+        assert_eq!(after.state, "blocked");
+        assert_eq!(after.detail.as_deref(), Some("awaiting input"));
+    }
+
+    #[test]
+    fn a_correction_is_refused_when_the_identity_it_observed_is_gone() {
+        // Cases 3 and 4 need a publisher that can actually move the provider: both protocol
+        // branches carry it forward, so asserting through them would test nothing.
+        for (label, landed) in [
+            (
+                "different agent",
+                AgentState {
+                    agent: Some("claude".into()),
+                    ..state("s9", "idle")
+                },
+            ),
+            (
+                "moved provider",
+                AgentState {
+                    provider_session: Some(provider("second")),
+                    ..state("s9", "idle")
+                },
+            ),
+            (
+                "cleared identity",
+                AgentState {
+                    agent: None,
+                    provider_session: None,
+                    ..state("s9", "idle")
+                },
+            ),
+            (
+                "removed session",
+                AgentState {
+                    session_id: "elsewhere".into(),
+                    ..state("s9", "idle")
+                },
+            ),
+        ] {
+            let hub = Arc::new(AgentStateHub::new(8));
+            hub.publish_canonical(AgentState {
+                provider_session: Some(provider("first")),
+                ..state("s9", "idle")
+            });
+            let snapshot = hub.current("s9").unwrap();
+            if label == "removed session" {
+                hub.remove("s9");
+            } else {
+                hub.publish_canonical(landed.clone());
+            }
+            assert!(
+                !hub.correct_identity(
+                    "s9",
+                    IdentityCorrection {
+                        expected_agent: snapshot.agent.clone(),
+                        expected_provider: snapshot.provider_session.clone(),
+                        agent: "maho".into(),
+                        provider: Some(mhc_claimed("first")),
+                    }
+                ),
+                "{label}: a correction never applies to state it did not observe"
+            );
+            // And a refusal emits nothing at all.
+            let mut subscription = hub.subscribe("s9");
+            assert!(subscription.receiver.try_recv().is_err(), "{label}: silent");
+        }
+    }
+
+    #[test]
+    fn a_correction_keeps_every_non_identity_field() {
+        let hub = Arc::new(AgentStateHub::new(8));
+        let original = AgentState {
+            provider_session: Some(provider("first")),
+            state: "blocked".into(),
+            detail: Some("pick a branch".into()),
+            outcome: Some(AgentOutcome::Done),
+            kind: Some(AgentBlockedKind::Question),
+            ..state("s10", "blocked")
+        };
+        hub.publish_canonical(original.clone());
+        assert!(hub.correct_identity(
+            "s10",
+            IdentityCorrection {
+                expected_agent: original.agent.clone(),
+                expected_provider: original.provider_session.clone(),
+                agent: "maho".into(),
+                provider: Some(mhc_claimed("first")),
+            }
+        ));
+        let after = hub.current("s10").unwrap();
+        assert_eq!((after.state, after.detail, after.outcome, after.kind), (
+            original.state,
+            original.detail,
+            original.outcome,
+            original.kind
+        ));
+        assert!(matches!(after.origin, AgentStateOrigin::Agent));
     }
 
 
