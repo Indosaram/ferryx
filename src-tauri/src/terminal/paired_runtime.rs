@@ -362,7 +362,7 @@ impl RetryOwnedResult {
     fn blocked(code: &str) -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: false, blocked: true, affirmative_exit: false, blocked_code: Some(code.to_owned()) } }
     fn affirmative_exit() -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: false, blocked: false, affirmative_exit: true, blocked_code: None } }
     #[cfg(test)]
-    fn protocol_flags_valid(self) -> bool {
+    fn protocol_flags_valid(&self) -> bool {
         [self.admitted, self.owner_unavailable, self.stale_tuple, self.blocked, self.affirmative_exit]
             .into_iter().filter(|flag| *flag).count() == 1
     }
