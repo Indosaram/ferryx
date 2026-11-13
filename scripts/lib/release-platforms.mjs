@@ -1673,7 +1673,7 @@ export async function buildHost({
           });
           const result = await runHostScript(hostConfig, { powershell: script }, { timeoutMs });
           toolchains = parseBuildResult(result.stdout);
-          const names = ["Ferryx_x64.msix"];
+          const names = ["Ferryx_x64.msix", "ferryx-rd-client-windows-amd64.exe"];
           if (plan.channels.nsisMigration) names.push("Ferryx_x64-setup.exe");
           for (const name of names) {
             await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir.replaceAll("\\", "/")}/out/${name}`, artifactsOutDir], { timeoutMs });
