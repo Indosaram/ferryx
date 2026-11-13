@@ -287,6 +287,8 @@ export type PairedSessionRetryResult = {
   staleTuple: boolean;
   blocked: boolean;
   affirmativeExit: boolean;
+  /** The owner's own block reason, when it blocked. Older daemons omit it. */
+  blockedCode?: string | null;
   actorIdentity: PairedSessionActorIdentity | null;
 };
 export type PairedRecoveryStatus = {

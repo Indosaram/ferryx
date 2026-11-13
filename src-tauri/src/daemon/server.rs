@@ -7763,6 +7763,7 @@ impl DaemonServer {
                             stale_tuple: result.stale_tuple,
                             blocked: result.blocked,
                             affirmative_exit: result.affirmative_exit,
+                            blocked_code: result.blocked_code,
                         },
                         Err(code) => daemon_error(code),
                     }

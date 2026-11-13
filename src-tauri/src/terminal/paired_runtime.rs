@@ -289,7 +289,7 @@ pub struct Runtime {
     status_events: tokio::sync::broadcast::Sender<StatusEvent>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryOwnedResult {
     pub admitted: bool,
@@ -297,6 +297,11 @@ pub struct RetryOwnedResult {
     pub stale_tuple: bool,
     pub blocked: bool,
     pub affirmative_exit: bool,
+    /// The owner's own reason for blocking (`CONTROL_CONFLICT`, `PAIRED_HOST_UNAUTHORIZED`, ...).
+    /// The boolean alone cannot distinguish a revoked pairing from a protocol rejection, so the
+    /// UI could only ever say "identity conflict". Carried verbatim to the pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_code: Option<String>,
 }
 
 #[cfg(feature = "local-split-qa")]
@@ -351,11 +356,11 @@ pub struct PairedRecoveryAttemptReceipt {
     pub failure_code: Option<String>,
 }
 impl RetryOwnedResult {
-    fn admitted() -> Self { Self { admitted: true, owner_unavailable: false, stale_tuple: false, blocked: false, affirmative_exit: false } }
-    fn owner_unavailable() -> Self { Self { admitted: false, owner_unavailable: true, stale_tuple: false, blocked: false, affirmative_exit: false } }
-    fn stale_tuple() -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: true, blocked: false, affirmative_exit: false } }
-    fn blocked() -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: false, blocked: true, affirmative_exit: false } }
-    fn affirmative_exit() -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: false, blocked: false, affirmative_exit: true } }
+    fn admitted() -> Self { Self { admitted: true, owner_unavailable: false, stale_tuple: false, blocked: false, affirmative_exit: false, blocked_code: None } }
+    fn owner_unavailable() -> Self { Self { admitted: false, owner_unavailable: true, stale_tuple: false, blocked: false, affirmative_exit: false, blocked_code: None } }
+    fn stale_tuple() -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: true, blocked: false, affirmative_exit: false, blocked_code: None } }
+    fn blocked(code: &str) -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: false, blocked: true, affirmative_exit: false, blocked_code: Some(code.to_owned()) } }
+    fn affirmative_exit() -> Self { Self { admitted: false, owner_unavailable: false, stale_tuple: false, blocked: false, affirmative_exit: true, blocked_code: None } }
     #[cfg(test)]
     fn protocol_flags_valid(self) -> bool {
         [self.admitted, self.owner_unavailable, self.stale_tuple, self.blocked, self.affirmative_exit]
@@ -606,7 +611,11 @@ impl Runtime {
                 return Ok(RetryOwnedResult::stale_tuple());
             }
             if status.0 == "affirmative_exit" { return Ok(RetryOwnedResult::affirmative_exit()); }
-            if status.0 == "blocked" { return Ok(RetryOwnedResult::blocked()); }
+            if status.0 == "blocked" {
+                // Carry the owner's own reason so the pane can name it instead of collapsing every
+                // block into a generic identity conflict.
+                return Ok(RetryOwnedResult::blocked(status.3.as_deref().unwrap_or("PAIRED_PROXY_BLOCKED")));
+            }
             if owner.task.is_finished() { return Ok(RetryOwnedResult::owner_unavailable()); }
             let (reply, result) = oneshot::channel();
             if owner.sender.try_send(Command::RetryOwned {
@@ -620,7 +629,7 @@ impl Runtime {
             Err(_) => Ok(RetryOwnedResult::owner_unavailable()),
             Ok(Ok(Ok(()))) => Ok(RetryOwnedResult::admitted()),
             Ok(Ok(Err(ref code))) if code == "PAIRED_PROXY_EXITED" => Ok(RetryOwnedResult::affirmative_exit()),
-            Ok(Ok(Err(ref code))) if code == "PAIRED_PROXY_BLOCKED" => Ok(RetryOwnedResult::blocked()),
+            Ok(Ok(Err(ref code))) if code == "PAIRED_PROXY_BLOCKED" => Ok(RetryOwnedResult::blocked("PAIRED_PROXY_BLOCKED")),
             Ok(Ok(Err(ref code))) if code == "PAIRED_PROXY_STALE_TUPLE" => Ok(RetryOwnedResult::stale_tuple()),
             _ => Ok(RetryOwnedResult::owner_unavailable()),
         }
@@ -1387,6 +1396,26 @@ mod tests {
     use serde_json::json;
 
     static FAULT_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_blocked_retry_carries_the_owners_own_reason() {
+        // The pane must be able to name the failure. Collapsing every block into a boolean is what
+        // made a revoked pairing and a control conflict both read as "identity conflict".
+        let blocked = RetryOwnedResult::blocked("PAIRED_HOST_UNAUTHORIZED");
+        assert!(blocked.blocked && blocked.protocol_flags_valid());
+        assert_eq!(blocked.blocked_code.as_deref(), Some("PAIRED_HOST_UNAUTHORIZED"));
+
+        // The other outcomes carry no block code, so nothing invents a reason that did not happen.
+        for quiet in [
+            RetryOwnedResult::admitted(),
+            RetryOwnedResult::owner_unavailable(),
+            RetryOwnedResult::stale_tuple(),
+            RetryOwnedResult::affirmative_exit(),
+        ] {
+            assert!(quiet.protocol_flags_valid());
+            assert_eq!(quiet.blocked_code, None);
+        }
+    }
 
     #[tokio::test]
     async fn test_runtime_wires_agent_sink_to_installed_proxy() {

@@ -1484,6 +1484,10 @@ pub enum DaemonResponse {
         stale_tuple: bool,
         blocked: bool,
         affirmative_exit: bool,
+        /// The owner's reason for blocking, so the pane can name it rather than reporting a
+        /// generic identity conflict. Absent on older daemons and when nothing blocked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocked_code: Option<String>,
     },
     PairedRecoveryOutcomeResult { outcome: Option<crate::terminal::paired_runtime::PairedRecoveryOutcome> },
     #[serde(rename_all = "camelCase")]
@@ -2891,10 +2895,21 @@ mod tests {
 
         let response = DaemonResponse::RetryPairedSessionResult {
             admitted: false, owner_unavailable: false, stale_tuple: true, blocked: false, affirmative_exit: false,
+            blocked_code: None,
         };
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["type"], "retryPairedSessionResult");
         assert_eq!(value["staleTuple"], true);
+        // No block happened, so no reason is invented on the wire.
+        assert!(value.get("blockedCode").is_none());
+
+        let blocked = DaemonResponse::RetryPairedSessionResult {
+            admitted: false, owner_unavailable: false, stale_tuple: false, blocked: true, affirmative_exit: false,
+            blocked_code: Some("PAIRED_HOST_UNAUTHORIZED".into()),
+        };
+        let value = serde_json::to_value(blocked).unwrap();
+        assert_eq!(value["blocked"], true);
+        assert_eq!(value["blockedCode"], "PAIRED_HOST_UNAUTHORIZED");
     }
 
     #[test]
