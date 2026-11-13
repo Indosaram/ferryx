@@ -359,35 +359,16 @@ const PAIRED_WATCH_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::f
 const PAIRED_WATCH_SUBSCRIBE_MAX_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_secs(30);
 
-/// One backoff step. Pure so the escalation is testable without sleeping.
-fn escalated_retry_delay(
-    current: std::time::Duration,
-    max_retry_delay: std::time::Duration,
-) -> std::time::Duration {
-    std::cmp::min(current.saturating_mul(2), max_retry_delay)
-}
-
-/// Cancellable retry sleep. Returns false when the watcher was cancelled, so no frame and no
-/// status can be emitted after an unwatch under this generation.
+/// Cancellable retry sleep, delegated to the shared SSH capability-retry helper so both
+/// watchers use one backoff implementation. Returns false when the watcher was cancelled,
+/// so no frame and no status can be emitted after an unwatch under this generation.
 async fn paired_watch_retry_sleep(
     cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
     retry_delay: &mut tokio::time::Duration,
     max_retry_delay: std::time::Duration,
 ) -> bool {
-    if *cancel_rx.borrow() {
-        return false;
-    }
-    tokio::select! {
-        biased;
-        changed = cancel_rx.changed() => {
-            if changed.is_err() || *cancel_rx.borrow() {
-                return false;
-            }
-        }
-        _ = tokio::time::sleep(*retry_delay) => {}
-    }
-    *retry_delay = escalated_retry_delay(*retry_delay, max_retry_delay);
-    true
+    wait_ssh_capability_retry(cancel_rx, retry_delay, max_retry_delay).await
+        == SshCapabilityRetryAction::Retry
 }
 
 #[tauri::command]
@@ -2223,41 +2204,44 @@ mod tests {
     /// session per attempt. At a fixed one-second delay that kept the relay's 30-per-minute
     /// admission budget empty and refused unrelated work with RATE_LIMITED, so the delay must
     /// escalate and be capped below the relay window instead of resetting per attempt.
-    #[test]
-    fn test_paired_watch_subscribe_backoff_escalates_to_its_cap() {
+    #[tokio::test]
+    async fn test_paired_watch_subscribe_backoff_escalates_to_its_cap() {
+        tokio::time::pause();
         let cap = PAIRED_WATCH_SUBSCRIBE_MAX_RETRY_DELAY;
-        let mut delay = std::time::Duration::from_millis(1000);
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let mut delay = tokio::time::Duration::from_millis(1000);
         let mut steps = Vec::new();
-        for _ in 0..8 {
-            delay = escalated_retry_delay(delay, cap);
+        for _ in 0..6 {
+            assert!(paired_watch_retry_sleep(&mut cancel_rx, &mut delay, cap).await);
             steps.push(delay);
         }
         // 1s -> 2s -> 4s -> 8s -> 16s -> 30s (capped), never back to one second.
-        assert_eq!(steps[0], std::time::Duration::from_millis(2000));
-        assert_eq!(steps[1], std::time::Duration::from_millis(4000));
-        assert_eq!(steps[2], std::time::Duration::from_millis(8000));
-        assert_eq!(steps[3], std::time::Duration::from_millis(16000));
+        assert_eq!(steps[0], tokio::time::Duration::from_millis(2000));
+        assert_eq!(steps[1], tokio::time::Duration::from_millis(4000));
+        assert_eq!(steps[2], tokio::time::Duration::from_millis(8000));
+        assert_eq!(steps[3], tokio::time::Duration::from_millis(16000));
         assert_eq!(steps[4], cap);
-        assert_eq!(steps[7], cap);
+        assert_eq!(steps[5], cap);
         // The cap stays inside the relay's 60s admission window, so an idle watcher recovers.
         assert!(cap <= std::time::Duration::from_secs(60));
-        // A zero or already-capped value never exceeds the cap.
-        assert_eq!(escalated_retry_delay(std::time::Duration::ZERO, cap), std::time::Duration::ZERO);
-        assert_eq!(escalated_retry_delay(cap, cap), cap);
     }
 
     /// Six refused attempts at the observed cadence must not spend the relay's per-minute
     /// admission budget; the old fixed 1s loop spent 60 of them.
-    #[test]
-    fn test_paired_watch_subscribe_backoff_spends_at_most_six_attempts_per_minute() {
+    #[tokio::test]
+    async fn test_paired_watch_subscribe_backoff_spends_at_most_six_attempts_per_minute() {
+        tokio::time::pause();
         let cap = PAIRED_WATCH_SUBSCRIBE_MAX_RETRY_DELAY;
-        let mut delay = std::time::Duration::from_millis(1000);
-        let mut elapsed = std::time::Duration::ZERO;
+        let (_cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let mut delay = tokio::time::Duration::from_millis(1000);
+        let started = tokio::time::Instant::now();
         let mut attempts = 0u32;
-        while elapsed < std::time::Duration::from_secs(60) && attempts < 100 {
+        // Each iteration is one refused attempt followed by its retry sleep.
+        while started.elapsed() < tokio::time::Duration::from_secs(60) && attempts < 100 {
             attempts += 1;
-            elapsed += delay;
-            delay = escalated_retry_delay(delay, cap);
+            if !paired_watch_retry_sleep(&mut cancel_rx, &mut delay, cap).await {
+                break;
+            }
         }
         assert!(
             attempts <= 6,
