@@ -15,12 +15,27 @@ use std::sync::{
     Arc, Mutex,
 };
 
+/// The same host, now advertising a direct origin. Used to prove the probe loop adopts what a
+/// host publishes about itself between pairings.
+fn caps_with_origin() -> serde_json::Value {
+    let mut value = caps();
+    // Stamped at call time: an origin older than PUBLISHED_ORIGIN_MAX_AGE_MS is dropped by the
+    // router before it can become a candidate, so a fixed stamp would pass today and rot later.
+    value["publishedOrigins"] = json!([
+        {"kind": "tailscale", "origin": "http://100.101.102.103:43821",
+         "observedAt": super::super::direct_wire::unix_now_ms()}
+    ]);
+    value
+}
+
 const OK: u8 = 0;
 const NO_CONTROL_CHANNEL: u8 = 1;
 const BAD_GATEWAY: u8 = 2;
 const REJECTED: u8 = 3;
 /// The relay's 409 `MACHINE_OFFLINE`: no live control channel could check the token.
 const MACHINE_OFFLINE: u8 = 4;
+/// A valid answer from a host that also advertises a direct origin.
+const PUBLISHING: u8 = 5;
 
 fn caps() -> serde_json::Value {
     json!({"apiVersion":1,"machineId":"a","daemonEpoch":"1","platform":"linux","accessScope":"machine","permission":"control","capabilities":[],"limits":{"directoryEntries":10,"terminalSessions":10}})
@@ -65,6 +80,7 @@ async fn fixture() -> Fixture {
             async move {
                 match mode {
                     OK => Json(caps()).into_response(),
+                    PUBLISHING => Json(caps_with_origin()).into_response(),
                     // The relay's bodyless answer for a machine with no live control channel.
                     NO_CONTROL_CHANNEL => axum::http::StatusCode::NOT_FOUND.into_response(),
                     BAD_GATEWAY => axum::http::StatusCode::BAD_GATEWAY.into_response(),
@@ -134,6 +150,101 @@ impl Fixture {
         .await
         .unwrap();
     }
+}
+
+/// A host that starts advertising a direct path is adopted by the probe loop, with no
+/// re-pair: this is what keeps a machine that moved reachable without waiting for the user.
+#[tokio::test]
+async fn probe_adopts_an_origin_the_host_publishes_later() {
+    let f = fixture().await;
+    assert!(
+        f.service.list().await.unwrap()[0].published_origins.is_empty(),
+        "the fixture host advertises nothing at pairing time"
+    );
+    f.mode.store(PUBLISHING, Ordering::SeqCst);
+    assert_eq!(f.probe().await, ReachabilityState::Online);
+    let listed = f.service.list().await.unwrap().remove(0);
+    assert_eq!(listed.published_origins.len(), 1);
+    assert_eq!(listed.published_origins[0].origin, "http://100.101.102.103:43821");
+    // The attached path now builds a direct candidate from that origin, relay appended last.
+    let candidates = super::super::path_select::candidates_for_published(
+        &listed.published_origins,
+        &listed.relay_origin,
+        &listed.machine_id,
+    );
+    let paths: Vec<_> = candidates.iter().map(|candidate| candidate.path).collect();
+    assert_eq!(
+        paths,
+        vec![
+            super::super::path_select::AttachPath::Tailscale,
+            super::super::path_select::AttachPath::Relay
+        ],
+        "the advertised overlay is raced first and the relay stays the guaranteed last resort"
+    );
+    assert_eq!(candidates[0].expected_machine_id.as_deref(), Some("a"));
+    f.finish().await;
+}
+
+/// A publication is bound to the generation that answered. Once the row is re-paired - a new
+/// generation - an answer captured for the old one must not rewrite the new row's hints.
+#[tokio::test]
+async fn an_origin_published_for_an_old_generation_is_refused() {
+    let f = fixture().await;
+    let stale_generation = f.host.generation;
+    f.mode.store(PUBLISHING, Ordering::SeqCst);
+    assert_eq!(f.probe().await, ReachabilityState::Online);
+    let current = f.service.list().await.unwrap().remove(0);
+    assert_eq!(current.published_origins.len(), 1);
+
+    // Advance the row to a new generation, exactly as a confirmed auth failure does.
+    f.service
+        .revoke_confirmed_auth_failure(current.host_id.clone(), stale_generation, "UNAUTHORIZED")
+        .await;
+    let advanced = f.service.list().await.unwrap().remove(0);
+    assert_ne!(
+        advanced.generation, stale_generation,
+        "the row must really have moved to a new generation"
+    );
+    let carried = advanced.published_origins.clone();
+
+    // A publication captured for the generation that no longer exists must not land: it could
+    // otherwise revive reachability for an identity the user has since re-paired.
+    let refused = f
+        .service
+        .publish_origins(
+            current.host_id.clone(),
+            stale_generation,
+            vec![super::super::inventory::PublishedOrigin {
+                kind: super::super::inventory::PublishedOriginKind::Lan,
+                origin: "http://192.168.1.9:43821".into(),
+                observed_at: super::super::direct_wire::unix_now_ms(),
+            }],
+        )
+        .await;
+    assert!(refused.is_err(), "a publication from a dead generation must not land");
+    let after = f.service.list().await.unwrap().remove(0);
+    assert_eq!(after.published_origins, carried);
+    f.finish().await;
+}
+
+/// A host that publishes nothing leaves the stored hints alone rather than clearing them, so a
+/// momentary empty read does not cost the user their direct path.
+#[tokio::test]
+async fn a_host_that_publishes_nothing_keeps_its_stored_origins() {
+    let f = fixture().await;
+    f.mode.store(PUBLISHING, Ordering::SeqCst);
+    assert_eq!(f.probe().await, ReachabilityState::Online);
+    let with_origin = f.service.list().await.unwrap().remove(0);
+    assert_eq!(with_origin.published_origins.len(), 1);
+
+    f.mode.store(OK, Ordering::SeqCst);
+    assert_eq!(f.probe().await, ReachabilityState::Online);
+    let after = f.service.list().await.unwrap().remove(0);
+    assert_eq!(
+        after.published_origins, with_origin.published_origins,
+        "an empty publication is silence, not a retraction"
+    );
+    f.finish().await;
 }
 
 #[tokio::test]

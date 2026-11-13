@@ -591,6 +591,32 @@ impl PairedHostService {
         self.run(move |store| store.publish_origins(&host_id, generation, origins))
             .await
     }
+    /// Records what the host advertised about itself during a round-trip that just succeeded.
+    ///
+    /// Best-effort by construction: the pairing or migration it follows has already been
+    /// committed, so a refused publication (a concurrent re-pair bumped the generation) must
+    /// not fail the caller. The origins are only a routing hint, and the relay still covers a
+    /// host whose hints could not be stored.
+    async fn adopt_advertised_origins(
+        &self,
+        host_id: String,
+        generation: Epoch,
+        origins: Vec<crate::paired_host::inventory::PublishedOrigin>,
+    ) {
+        if origins.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .publish_origins(host_id.clone(), generation, origins)
+            .await
+        {
+            tracing::debug!(
+                host_id = %host_id,
+                generation = generation.0,
+                "advertised origins not stored: {error:?}"
+            );
+        }
+    }
     pub async fn read(&self, request: MigrationReceipt) -> Result<HostView> {
         self.run(move |store| store.read_verified(&request.host_id, request.generation))
             .await
@@ -750,7 +776,12 @@ impl PairedHostService {
             retryable: Some(false),
         })
     }
-    async fn authenticate(&self, origin: &str, machine: &str, token: &str) -> Result<GrantScope> {
+    async fn authenticate(
+        &self,
+        origin: &str,
+        machine: &str,
+        token: &str,
+    ) -> Result<(GrantScope, Vec<crate::paired_host::inventory::PublishedOrigin>)> {
         if token.is_empty() || token.len() > 8192 || !token.bytes().all(|b| (33..=126).contains(&b))
         {
             return Err(ServiceError::invalid());
@@ -773,10 +804,11 @@ impl PairedHostService {
         {
             return Err(InventoryError::Unauthorized.into());
         }
-        Ok(match caps.access_scope {
+        let scope = match caps.access_scope {
             crate::remote::machine_protocol::AccessScope::Machine => GrantScope::Machine,
             crate::remote::machine_protocol::AccessScope::Mirror => GrantScope::Mirror,
-        })
+        };
+        Ok((scope, caps.published_origins))
     }
     pub async fn pair(&self, request: PairRequest) -> Result<HostView> {
         let mut host = tokio::time::timeout(Duration::from_secs(30), self.pair_inner(request))
@@ -839,7 +871,7 @@ impl PairedHostService {
             .header("content-type", "application/json")
             .header(super::secure_http::CLIENT_BUILD_HEADER, super::secure_http::CLIENT_BUILD)
             .body(serde_json::to_vec(&serde_json::json!({"pin": request.pin.0, "deviceName": "Ferryx Desktop"})).map_err(|_| ServiceError::invalid())?)).await?;
-        let grant_scope = self
+        let (grant_scope, advertised_origins) = self
             .authenticate(&origin, &exchanged.machine_id, &exchanged.token.0)
             .await?;
         let issued_scope = match exchanged.device.access_scope {
@@ -858,13 +890,18 @@ impl PairedHostService {
             grant_scope,
             device_token: exchanged.token.0,
         };
-        self.run(move |store| {
-            if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
-                return Err(InventoryError::StaleGeneration);
-            }
-            store.pair_with_device(&pairing, device_id)
-        })
-        .await
+        let host_id_for_origins = host_id.clone();
+        let host = self
+            .run(move |store| {
+                if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
+                    return Err(InventoryError::StaleGeneration);
+                }
+                store.pair_with_device(&pairing, device_id)
+            })
+            .await?;
+        self.adopt_advertised_origins(host_id_for_origins, host.generation, advertised_origins)
+            .await;
+        Ok(host)
     }
     pub async fn migrate_legacy(&self, request: MigrationRequest) -> Result<MigrationReceipt> {
         let (receipt, mut view) =
@@ -1059,13 +1096,19 @@ impl PairedHostService {
             grant_scope,
             device_token: exchanged.token.0,
         };
-        self.run(move |store| {
-            if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
-                return Err(InventoryError::StaleGeneration);
-            }
-            store.pair_attached(&pairing, device_id, attach)
-        })
-        .await
+        let advertised_origins = caps.published_origins;
+        let host_id_for_origins = host_id.clone();
+        let host = self
+            .run(move |store| {
+                if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
+                    return Err(InventoryError::StaleGeneration);
+                }
+                store.pair_attached(&pairing, device_id, attach)
+            })
+            .await?;
+        self.adopt_advertised_origins(host_id_for_origins, host.generation, advertised_origins)
+            .await;
+        Ok(host)
     }
     async fn migrate_inner(
         &self,
@@ -1074,7 +1117,7 @@ impl PairedHostService {
         let origin = self.origin(&request.relay_origin)?;
         let host_id = inventory::host_key(&origin, &request.machine_id)?;
         let snapshot = self.run(|store| store.generation_snapshot()).await?;
-        let grant_scope = self
+        let (grant_scope, advertised_origins) = self
             .authenticate(&origin, &request.machine_id, &request.device_token.0)
             .await?;
         let legacy = LegacyCredential {
@@ -1087,19 +1130,25 @@ impl PairedHostService {
                 device_token: request.device_token.0,
             },
         };
-        self.run(move |store| {
-            if store.generation_snapshot()?.get(&legacy.host_id) != snapshot.get(&legacy.host_id) {
-                return Err(InventoryError::MigrationPending);
-            }
-            let receipt = store.migrate_copy(&legacy)?;
-            let view = store
-                .list()
-                .into_iter()
-                .find(|v| v.host_id == receipt.host_id)
-                .ok_or(InventoryError::MigrationPending)?;
-            Ok((receipt, view))
-        })
-        .await
+        let (receipt, view) = self
+            .run(move |store| {
+                if store.generation_snapshot()?.get(&legacy.host_id)
+                    != snapshot.get(&legacy.host_id)
+                {
+                    return Err(InventoryError::MigrationPending);
+                }
+                let receipt = store.migrate_copy(&legacy)?;
+                let view = store
+                    .list()
+                    .into_iter()
+                    .find(|v| v.host_id == receipt.host_id)
+                    .ok_or(InventoryError::MigrationPending)?;
+                Ok((receipt, view))
+            })
+            .await?;
+        self.adopt_advertised_origins(receipt.host_id.clone(), receipt.generation, advertised_origins)
+            .await;
+        Ok((receipt, view))
     }
 }
 

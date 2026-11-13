@@ -1768,6 +1768,20 @@ impl MachineClient {
         };
         let result = self.capabilities_round_trip(service, &host, &lease).await;
         drop(lease);
+        // A host that moved re-advertises on every successful round-trip, so the probe loop is
+        // what keeps its routing hints current between pairings. The host's current list
+        // replaces the stored one; origins it stopped naming expire on their own.
+        if let Ok(caps) = &result {
+            if caps.machine_id == host.machine_id && !caps.published_origins.is_empty() {
+                let _ = service
+                    .publish_origins(
+                        host.host_id.clone(),
+                        host.generation,
+                        caps.published_origins.clone(),
+                    )
+                    .await;
+            }
+        }
         match probe_outcome(&result, &host) {
             ProbeOutcome::Unauthorized => {
                 let code = result.err().map(|error| error.code).unwrap_or_default();
