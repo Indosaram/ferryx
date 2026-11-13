@@ -1309,6 +1309,13 @@ export async function onWorktreeChanged(handler: (payload: WorktreeChangedPayloa
   return listen<WorktreeChangedPayload>("worktree_changed", (event) => handler(event.payload));
 }
 
+export async function onSessionCorrupted(handler: (backupPath: string) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  // emit_to(window.label()) is addressed to ONE window, but plain listen() is a target-Any
+  // listener: every open window would show a toast naming another window backup path.
+  return listenToThisWindow<string>("session_corrupted", (event) => handler(event.payload));
+}
+
 export function toIpcError(error: unknown): StructuredIpcError {
   if (isStructuredIpcError(error)) {
     return { code: error.code, message: error.message, details: error.details ?? {} };

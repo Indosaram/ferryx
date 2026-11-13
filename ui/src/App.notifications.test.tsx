@@ -120,6 +120,7 @@ vi.mock("./lib/tauri", () => ({
   listExternalWorktrees: vi.fn(async () => []),
   discardWindowSession: vi.fn(async () => undefined),
   onWindowSessionsOrphaned: vi.fn(async () => () => undefined),
+  onSessionCorrupted: vi.fn(async () => () => undefined),
   onWindowSessionsAdopt: vi.fn(async () => () => undefined),
   takePendingWindowAdoptions: vi.fn(async () => []),
   moveSessionsToWindow: vi.fn(async () => ({ targetLabel: "ws-new", moved: [], skipped: [], queued: false })),

@@ -35,7 +35,20 @@ fn store() -> &'static Mutex<HashMap<String, Credential>> {
     STORE.get_or_init(Default::default)
 }
 fn key(host: &SshHost) -> String {
-    format!("{}|{}", host.key(), host.jump_host.as_deref().unwrap_or(""))
+    // Must be byte-identical to what the askpass lookup derives from the `-J` argv value, which
+    // `jump_target` normalizes by trimming EVERY comma-separated part. Trimming only the outer
+    // whitespace here would store `bastion1, bastion2` under a name the lookup (`bastion1,bastion2`)
+    // can never produce, so the credential would always miss and the host would fail forever.
+    let jump: String = host
+        .jump_host
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .split(',')
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{}|{}", host.key(), jump)
 }
 fn error(message: &str) -> IpcError {
     super::runtime::error(IpcErrorCode::IoError, "authentication", message)

@@ -336,6 +336,35 @@ fn upload_temp_command_writes_stdin_to_a_private_file_and_prints_its_path() {
     assert_eq!(mode & 0o777, 0o700);
 }
 
+/// A blank or padded jump host is absent, not malformed. The saved field defaults to empty, so
+/// rejecting it refused every ordinary host that never configured a bastion; the padded form is
+/// normalized rather than passed through as `-J " bastion "`.
+#[test]
+fn a_blank_jump_host_is_absent_and_a_padded_one_is_planned() {
+    for blank in ["", "   ", "\t"] {
+        let mut h = host();
+        h.jump_host = Some(blank.into());
+        assert!(validate_host(&h).is_ok(), "{blank:?} must not be rejected");
+        let argv = ssh_plan(&h, "true".into(), true).unwrap().args;
+        assert!(
+            !argv.iter().any(|arg| arg == "-J"),
+            "{blank:?} must not reach the argv: {argv:?}"
+        );
+    }
+
+    let mut padded = host();
+    padded.jump_host = Some("  jump-user@bastion:2222  ".into());
+    assert!(validate_host(&padded).is_ok());
+    let argv = ssh_plan(&padded, "true".into(), true).unwrap().args;
+    let jump_at = argv.iter().position(|arg| arg == "-J").expect("a -J option is planned");
+    assert_eq!(argv[jump_at + 1], "jump-user@bastion:2222", "{argv:?}");
+
+    // Injection through the padded field is still refused.
+    let mut injected = host();
+    injected.jump_host = Some("  -oProxyCommand=evil  ".into());
+    assert!(validate_host(&injected).is_err());
+}
+
 #[test]
 fn unsafe_connection_tokens_and_paths_are_rejected() {
     for hostname in [
@@ -882,4 +911,31 @@ async fn failed_probe_distinguishes_non_utf8_and_empty_stderr() {
         "got: {}",
         err_empty.message
     );
+}
+
+#[test]
+fn jump_host_rejects_an_option_after_the_user_prefix() {
+    for jump in [
+        "a@-Ffoo",
+        "a@-Elog",
+        "-oProxyCommand=x",
+        "a@-oProxyCommand=x",
+        // Bracketed forms are IPv6 literals, so a stray bracket in a hostname is malformed
+        // rather than something ssh could resolve.
+        "bastion]",
+        "ba[stion",
+        "a[b:22",
+        "x]:22",
+        "[not-an-ip]",
+        "[::::]",
+        "[]:22",
+    ] {
+        assert!(
+            super::validate_jump_host(jump).is_err(),
+            "{jump} must be rejected: after the user prefix it is an ssh option, not a host"
+        );
+    }
+    for jump in ["a@bastion.example.com", "bastion.example.com:2222", "a@bastion:22,b@two"] {
+        assert!(super::validate_jump_host(jump).is_ok(), "{jump} must stay usable");
+    }
 }

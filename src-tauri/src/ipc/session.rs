@@ -1,12 +1,12 @@
 use crate::ipc::{run_blocking, IpcError, IpcErrorCode};
 use crate::session::{
-    clear_session_from_path, load_session_from_path, save_session_to_path,
-    session_path_for_window, with_session_path_lock, PersistedWorkspaceSession,
-    PRIMARY_SESSION_WINDOW_LABEL,
+    clear_session_from_path, load_session_from_path, load_session_reporting_corruption,
+    save_session_to_path, session_path_for_window,
+    PersistedWorkspaceSession, PRIMARY_SESSION_WINDOW_LABEL,
 };
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager, Runtime, Window};
+use tauri::{AppHandle, Emitter, Manager, Runtime, Window};
 
 /// The UI session file: `FERRYX_SESSION_DIR`, else the `FERRYX_DATA_DIR` isolation root (one
 /// file for dev and release, as the root is already per run), else the app data dir with its
@@ -69,9 +69,14 @@ pub async fn cmd_session_save<R: Runtime>(
     session: PersistedWorkspaceSession,
 ) -> Result<(), IpcError> {
     let path = get_window_session_file_path(&app, window.label())?;
-    run_blocking(move || with_session_path_lock(&path, || save_session_to_path(&path, &session)))
-        .await
+    // The entry point takes the gate itself; wrapping it again here would only add a second
+    // (reentrant, but panicking) admission on the same key.
+    run_blocking(move || save_session_to_path(&path, &session)).await
 }
+
+/// Emitted to the window whose session file could not be parsed, so the UI can say where the
+/// quarantined copy went. The payload is the backup path as a string.
+pub const SESSION_CORRUPTED_EVENT: &str = "session_corrupted";
 
 #[tauri::command]
 pub async fn cmd_session_load<R: Runtime>(
@@ -79,7 +84,18 @@ pub async fn cmd_session_load<R: Runtime>(
     window: Window<R>,
 ) -> Result<Option<PersistedWorkspaceSession>, IpcError> {
     let path = get_window_session_file_path(&app, window.label())?;
-    run_blocking(move || with_session_path_lock(&path, || load_session_from_path(&path))).await
+    let (session, quarantined) =
+        run_blocking(move || load_session_reporting_corruption(&path)).await?;
+    if let Some(backup) = quarantined {
+        // The layout could not be read and was preserved at `backup`. Tell the person where it
+        // went instead of silently booting an empty window.
+        let _ = app.emit_to(
+            window.label(),
+            SESSION_CORRUPTED_EVENT,
+            backup.to_string_lossy().to_string(),
+        );
+    }
+    Ok(session)
 }
 
 #[tauri::command]
@@ -88,7 +104,7 @@ pub async fn cmd_session_clear<R: Runtime>(
     window: Window<R>,
 ) -> Result<(), IpcError> {
     let path = get_window_session_file_path(&app, window.label())?;
-    run_blocking(move || with_session_path_lock(&path, || clear_session_from_path(&path))).await
+    run_blocking(move || clear_session_from_path(&path)).await
 }
 
 /// Copies one window's session file onto another's so a newly opened window boots with exactly
@@ -105,11 +121,13 @@ pub(crate) async fn clone_window_session<R: Runtime>(
 }
 
 fn clone_session_file(source: &Path, target: &Path) -> Result<(), IpcError> {
-    let loaded = with_session_path_lock(source, || load_session_from_path(source))?;
+    // Both entry points take their own gate, so the pair cannot deadlock on a shared key and
+    // neither runs unprotected.
+    let loaded = load_session_from_path(source)?;
     let Some(session) = loaded else {
         return Ok(());
     };
-    with_session_path_lock(target, || save_session_to_path(target, &session))
+    save_session_to_path(target, &session)
 }
 
 /// Deletes a closed secondary window's session file after its tabs were adopted by another
@@ -126,7 +144,7 @@ pub async fn cmd_session_discard_window<R: Runtime>(
         ));
     }
     let path = get_window_session_file_path(&app, &label)?;
-    run_blocking(move || with_session_path_lock(&path, || clear_session_from_path(&path))).await
+    run_blocking(move || clear_session_from_path(&path)).await
 }
 
 #[cfg(test)]

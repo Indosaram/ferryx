@@ -940,8 +940,11 @@ impl PairedHostService {
         let snapshot = self.run(|store| store.generation_snapshot()).await?;
         let client_error =
             |error: super::client::ClientError| ServiceError::new(error.code, "paired host grant redemption failed");
+        // Grant redemption creates the host record, so there is no host id to race a direct
+        // route with yet: this attach is relay-only by construction.
         let mut session = SecureHttpSession::establish(
             &self.http,
+            None,
             &origin,
             &request.account_session_token.0,
             &request.machine_id,
@@ -992,6 +995,7 @@ impl PairedHostService {
         if !reusable {
             session = SecureHttpSession::establish(
                 &self.http,
+                None,
                 &origin,
                 &exchanged.token.0,
                 &request.machine_id,

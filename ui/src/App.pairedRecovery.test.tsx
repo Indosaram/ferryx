@@ -2,6 +2,13 @@ import { act, cleanup, render } from "@testing-library/react";
 import { useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+if (!(window as any).__TAURI_INTERNALS__) {
+  (window as any).__TAURI_INTERNALS__ = {
+    invoke: async () => undefined,
+    transformCallback: () => 1,
+  };
+}
+
 import type { RegisteredProject, PersistedWorkspaceSession } from "./lib/types";
 
 const native = vi.hoisted(() => ({
@@ -18,6 +25,10 @@ const native = vi.hoisted(() => ({
   retryPairedSession: vi.fn(),
   retryTerminalRemoteSession: vi.fn().mockResolvedValue({ type: "retryRemoteSessionOk" }),
   terminalStatusSubscriptions: [] as string[],
+  sessionCorruptedSubscriptions: 0,
+  sessionCorruptedHandler: null as null | ((backupPath: string) => void),
+  sessionCorruptedGate: Promise.resolve(),
+  sessionCorruptedReady: 0,
   terminalLifecycleHandler: null as null | ((event: import("./lib/types").TerminalLifecyclePayload) => void),
   terminalRemoteStatusHandler: null as null | ((status: import("./lib/types").TerminalRemoteStatus) => void),
   onTerminalRemoteStatus: null as null | ((handler: (status: import("./lib/types").TerminalRemoteStatus) => void) => Promise<() => void>),
@@ -65,6 +76,15 @@ vi.mock("./lib/tauri", async (importOriginal) => ({
     return () => { if (native.terminalLifecycleHandler === handler) native.terminalLifecycleHandler = null; };
   },
   onTerminalOutput: async () => () => undefined,
+  onSessionCorrupted: async (handler: (backupPath: string) => void) => {
+    native.sessionCorruptedSubscriptions += 1;
+    native.sessionCorruptedHandler = handler;
+    // Registration is asynchronous in the real bridge (`listen()` resolves later), so the mock
+    // must not resolve eagerly either: an eager mock would hide a load that starts before the
+    // listener is armed.
+    await native.sessionCorruptedGate;
+    return () => { if (native.sessionCorruptedHandler === handler) native.sessionCorruptedHandler = null; };
+  },
   onNewTerminalTabMenu: async () => () => undefined,
   onNewWindowMenu: async () => () => undefined,
   onSplitRightMenu: async () => () => undefined,
@@ -110,10 +130,12 @@ vi.mock("./lib/terminalEvents", async (importOriginal) => ({
   ensureTerminalEvents: async () => undefined,
 }));
 
-vi.mock("./lib/updater", () => ({
+vi.mock("./lib/updater", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./lib/updater")>(),
   subscribeUpdateStatus: () => () => undefined,
   startUpdatePolling: () => undefined,
   registerWindowCloseGuard: () => () => undefined,
+  getCurrentVersion: async () => null,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => undefined }));
@@ -232,6 +254,8 @@ describe("App paired recovery boundary", () => {
     resetWorkspaceRestore();
     clearWorkspaceSnapshot(); clearHmrWorkspaceState();
     vi.clearAllMocks();
+    // Reset the shared subscription counter so an assertion on it cannot depend on test order.
+    native.sessionCorruptedSubscriptions = 0;
     native.retryPairedSession.mockReset();
     native.loadSession.mockReset();
     native.saveSession.mockReset();
@@ -851,6 +875,37 @@ describe("App paired recovery boundary", () => {
       vi.useRealTimers();
     }
   });
+  it("does not start loading the session until corruption registration has completed", async () => {
+    // A corrupt session file is reported by the loadSession call itself, so a listener that is only
+    // *starting* when the load runs still misses the event. Registration is async in the real
+    // bridge, therefore the load must wait for it to settle.
+    const localProject: RegisteredProject = {
+      workspaceId: "local",
+      repoRoot: "/local",
+      gitRoot: null,
+    };
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([localProject]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "local");
+    native.isTauriRuntime.mockReturnValue(true);
+
+    // Hold registration open: nothing may load while this gate is shut.
+    let releaseRegistration!: () => void;
+    native.sessionCorruptedGate = new Promise<void>((resolve) => { releaseRegistration = resolve; });
+    native.loadSession.mockImplementationOnce(async () => null);
+
+    await act(async () => { render(<App />); });
+
+    expect(native.sessionCorruptedSubscriptions).toBe(1);
+    expect(native.loadSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseRegistration();
+      await native.sessionCorruptedGate;
+    });
+
+    expect(native.loadSession).toHaveBeenCalled();
+  });
+
   it("rejects invalidated admission after real App loadSession and before saveSession", async () => {
     const localProject: RegisteredProject = {
       workspaceId: "local",

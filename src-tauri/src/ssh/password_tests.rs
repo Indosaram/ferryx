@@ -64,6 +64,26 @@ fn stale_generation_cannot_clear_replacement() {
 }
 
 #[test]
+fn a_jump_host_with_padded_parts_stores_the_key_the_lookup_will_build() {
+    // `jump_target` trims every comma-separated part before `-J` reaches ssh, and the askpass
+    // lookup keys on that same argv value. The credential key must match it exactly or the
+    // password is stored under a name the lookup can never produce.
+    let mut host = host();
+    host.jump_host = Some(" bastion1 , bastion2 ".into());
+    set(&host, Password::new("secret".into())).unwrap();
+
+    let argv = crate::ssh::exec::jump_target(&host)
+        .expect("a valid jump host is accepted")
+        .expect("the jump host is set");
+    assert_eq!(argv, "bastion1,bastion2", "each part is trimmed");
+    assert_eq!(
+        key(&host),
+        format!("{}|{}", host.key(), argv),
+        "the stored key is exactly the key the lookups derive from the argv"
+    );
+}
+
+#[test]
 fn argument_endpoint_lookup_matches_explicit_default_user_ipv6_and_jump() {
     for (hostname, username, port, jump) in [
         ("ssh-alias", None, None, None),
