@@ -714,8 +714,8 @@ export function createWindowsBuildScript({ workspaceDir, plan, hostConfig, signi
     ? `$env:PATH = ${quotePowerShell(`${hostConfig.path};`)} + $env:PATH\n`
     : "";
   const targetDirCode = hostConfig.root
-    ? `$cargoTarget = Join-Path ${quotePowerShell(hostConfig.root)} 'cargo-target'\nif (-not (Test-Path $cargoTarget)) { New-Item -ItemType Directory -Path $cargoTarget -Force | Out-Null }\n$env:CARGO_TARGET_DIR = $cargoTarget`
-    : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget`;
+    ? `$cargoTarget = Join-Path ${quotePowerShell(hostConfig.root)} 'cargo-target'\nif (-not (Test-Path $cargoTarget)) { New-Item -ItemType Directory -Path $cargoTarget -Force | Out-Null }\n$env:CARGO_TARGET_DIR = $cargoTarget\n# ffmpeg-sys-next's build script compiles and runs check.exe to probe the FFmpeg API.\n# With the MSVC toolchain it dies with 0xc00000fd (STATUS_STACK_OVERFLOW) before printing\n# anything, which fails the whole build. Raise the stack for the process cargo spawns\n# and tell the MSVC linker to reserve more for the probe binary.\n$env:RUST_MIN_STACK = '33554432'\n$env:RUSTFLAGS = ((if ($env:RUSTFLAGS) { $env:RUSTFLAGS + ' ' } else { '' }) + '-C link-arg=/STACK:33554432')`
+    : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget\n$env:RUST_MIN_STACK = '33554432'\n$env:RUSTFLAGS = ((if ($env:RUSTFLAGS) { $env:RUSTFLAGS + ' ' } else { '' }) + '-C link-arg=/STACK:33554432')`;
   // FFmpeg: build it from the pinned source tarball with scripts/build-ffmpeg-lgpl.sh
   // (MSYS2 bash + MSVC toolchain, no OpenH264; cached per script hash), stage it, link against
   // its import libs (FFMPEG_DIR), and pass the payload to NSIS (overlay merged into one -c file)
