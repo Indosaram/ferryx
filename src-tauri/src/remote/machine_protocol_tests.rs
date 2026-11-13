@@ -292,6 +292,41 @@ fn malformed_epochs_and_oversized_json_are_rejected() {
 }
 
 #[test]
+fn published_origins_are_optional_on_the_wire_and_omitted_when_empty() {
+    // A host that publishes nothing - loopback-only, or an older build - keeps the exact wire
+    // shape it had before this field existed: no key on the way out, empty list on the way in.
+    let legacy = json!({
+        "apiVersion": 1,
+        "machineId": "machine-a",
+        "daemonEpoch": "9007199254740993",
+        "platform": "linux",
+        "accessScope": "machine",
+        "permission": "control",
+        "capabilities": ["terminalStreamV1"],
+        "limits": {"directoryEntries": 1000, "terminalSessions": 64}
+    });
+    let parsed: Capabilities =
+        decode_json(&serde_json::to_vec(&legacy).unwrap(), MACHINE_JSON_MAX_BYTES).unwrap();
+    assert!(
+        parsed.published_origins.is_empty(),
+        "an absent list must decode as no hints, not as a failure"
+    );
+    assert_eq!(
+        serde_json::to_value(&parsed).unwrap(),
+        legacy,
+        "a host with no hints must not grow a new key on the wire"
+    );
+
+    // A publishing host adds the list, and observedAt survives the trip unchanged: it is the
+    // ordering key a client uses to prefer the freshest record, so it cannot be rounded.
+    let mut publishing = legacy.clone();
+    publishing["publishedOrigins"] = json!([
+        {"kind": "tailscale", "origin": "http://100.101.102.103:43821", "observedAt": 1794530854000_u64}
+    ]);
+    roundtrip::<Capabilities>(&publishing, MACHINE_JSON_MAX_BYTES);
+}
+
+#[test]
 fn request_ids_must_be_bare_hyphenated_uuids_on_the_host_wire() {
     let uuid = "2f9a1c3e-4b5d-4e6f-8a90-1b2c3d4e5f60";
     assert!(is_hyphenated_uuid(uuid));

@@ -2784,7 +2784,10 @@ impl UdpTransport {
                     }
                     // Whole milliseconds keep a short fixed timeout from
                     // yielding a fresh nanosecond slice (and setsockopt) per
-                    // datagram; overshoot is below 1ms. Rounding up from
+                    // datagram. The kernel rounds `SO_RCVTIMEO` up to the next
+                    // timer tick, so the observed overshoot is bounded by one
+                    // jiffy (10ms at `CONFIG_HZ=100`, the coarsest supported
+                    // rate) rather than staying below 1ms. Rounding up from
                     // nanoseconds keeps a sub-microsecond remainder at 1ms:
                     // a zero socket timeout is rejected by std.
                     let millis = remaining.as_nanos().div_ceil(1_000_000);
@@ -2948,6 +2951,23 @@ mod udp_transport_tests {
         }
     }
 
+    /// `SO_RCVTIMEO` is stored in timer ticks, so reading it back returns the
+    /// requested slice rounded *up* to the next jiffy. One jiffy is 10ms at
+    /// `CONFIG_HZ=100`, the coarsest rate Linux supports, which bounds the
+    /// rounding on every kernel. Assert the requested bound plus that rounding
+    /// instead of exact equality, which only holds on `CONFIG_HZ=1000`.
+    fn assert_socket_timeout(expected: Duration, actual: Option<Duration>) {
+        let actual = actual.expect("a receive timeout must be installed");
+        assert!(
+            actual >= expected,
+            "kernel must not shorten {expected:?}; got {actual:?}"
+        );
+        assert!(
+            actual <= expected + Duration::from_millis(10),
+            "timeout {actual:?} exceeds {expected:?} plus one jiffy"
+        );
+    }
+
     #[test]
     fn unchanged_poll_slice_sets_socket_timeout_once() {
         let (peer, transport) = pair();
@@ -2957,9 +2977,9 @@ mod udp_transport_tests {
             assert_eq!(take(&transport), vec![round as u8]);
         }
         assert_eq!(transport.timeout_syscalls.load(SeqCst), 1);
-        assert_eq!(
+        assert_socket_timeout(
+            UDP_RECV_POLL_SLICE,
             transport.socket.read_timeout().unwrap(),
-            Some(UDP_RECV_POLL_SLICE)
         );
     }
 
@@ -2981,7 +3001,10 @@ mod udp_transport_tests {
         let error = transport.receive().err().expect("no datagram was sent");
         assert!(matches!(&error, SessionError::Io(io) if io.kind() == io::ErrorKind::TimedOut));
         assert!(transport.timeout_syscalls.load(SeqCst) >= 1);
-        assert!(transport.socket.read_timeout().unwrap().unwrap() <= Duration::from_millis(10));
+        assert_socket_timeout(
+            Duration::from_millis(10),
+            transport.socket.read_timeout().unwrap(),
+        );
     }
 
     #[test]

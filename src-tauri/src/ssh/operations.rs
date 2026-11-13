@@ -28,7 +28,16 @@ pub async fn probe(
     environment.platform.validate_path(path)?;
     let marker = format!("FERRYX_DIR_V2_{}", uuid::Uuid::new_v4().simple());
     let script = project_probe_script(environment.platform, path, &marker);
-    let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    let mut plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    // A master is an optimisation, never a requirement: any failure to establish one keeps the
+    // cold path, and an operation that may already have been dispatched is never replayed.
+    // Held for the whole call: the lease is what keeps this master counted as active, and its
+    // drop is what arms idle expiry once the command has finished.
+    let master = super::master::acquire(host).await.ok().flatten();
+    if let Some(lease) = master.as_ref() {
+        direct::use_master(&mut plan, lease.socket());
+    }
+    super::master::note_path("project_probe", master.is_some());
     let output = direct::bounded_output(&plan, Duration::from_secs(12))
         .await
         .map_err(|mut err| {
@@ -194,7 +203,15 @@ pub async fn upload_dropped(
         RemotePlatform::Windows => windows_drop_upload_script(upload_id, file_name, &marker),
     };
 
-    let plan = |command| direct::ssh_plan(host, command, false);
+    let master = super::master::acquire(host).await.ok().flatten();
+    super::master::note_path("upload_dropped", master.is_some());
+    let plan = |command| {
+        let mut plan = direct::ssh_plan(host, command, false)?;
+        if let Some(lease) = master.as_ref() {
+            direct::use_master(&mut plan, lease.socket());
+        }
+        Ok(plan)
+    };
     let output = data_output_with(environment, &script, bytes, deadline, plan)
         .await
         .map_err(|mut err| {
@@ -214,8 +231,16 @@ pub async fn upload(
     file_name: &str,
     bytes: Vec<u8>,
 ) -> Result<String, IpcError> {
+    // Writes a file on the host, so the no-replay rule above applies unchanged: reuse the
+    // connection, report whatever outcome arrives, never dispatch the upload twice.
+    let master = super::master::acquire(host).await.ok().flatten();
+    super::master::note_path("upload", master.is_some());
     upload_with(environment, file_name, bytes, |command| {
-        direct::ssh_plan(host, command, false)
+        let mut plan = direct::ssh_plan(host, command, false)?;
+        if let Some(lease) = master.as_ref() {
+            direct::use_master(&mut plan, lease.socket());
+        }
+        Ok(plan)
     })
     .await
 }
@@ -1321,8 +1346,18 @@ async fn data_output(
     bytes: Vec<u8>,
     deadline: Duration,
 ) -> Result<Vec<u8>, IpcError> {
+    // Mutating callers reach the host through here: installing agent integration rewrites files
+    // on the far side. Sharing the daemon master saves the spawn, and the arrival of an exact
+    // outcome is the only thing reported either way - this never re-runs the script after a
+    // dispatch, because a mutation that may already have applied must not be sent twice.
+    let master = super::master::acquire(host).await.ok().flatten();
+    super::master::note_path("integration_script", master.is_some());
     data_output_with(environment, script, bytes, deadline, |command| {
-        direct::ssh_plan(host, command, false)
+        let mut plan = direct::ssh_plan(host, command, false)?;
+        if let Some(lease) = master.as_ref() {
+            direct::use_master(&mut plan, lease.socket());
+        }
+        Ok(plan)
     })
     .await
 }

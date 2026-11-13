@@ -28,6 +28,7 @@ vi.mock("./lib/tauri", async (importOriginal) => ({
   onTerminalOutput: async () => () => undefined,
   onTerminalRemoteStatus: (...args: any[]) => native.onTerminalRemoteStatus(...args),
   onNewTerminalTabMenu: async () => () => undefined,
+  onNewWindowMenu: async () => () => undefined,
   onCloseTabMenu: async () => () => undefined,
   onSelectWorktreeMenu: async () => () => undefined,
   onRemoteSelectionRequested: async (handler: (payload: import("./lib/tauri").RemoteSelectionRequestedPayload) => void) => {

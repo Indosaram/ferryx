@@ -430,6 +430,7 @@ wrap_dialog_handler! {
             let request = NEXT_DIALOG.get();
             NEXT_DIALOG.set(request.wrapping_add(1));
             FILE_DIALOGS.with_borrow_mut(|dialogs| dialogs.insert(request, callback.clone()));
+            super::platform::allow_foreground_handoff();
             emit(Event::FileDialog {
                 request,
                 tab,

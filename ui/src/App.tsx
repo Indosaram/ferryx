@@ -49,7 +49,7 @@ import { usePanelDecisionCount } from "./lib/supervisorPanel/usePanelDecisionCou
 import { getSetupStatus, setupFinished, setupProjectsFrom } from "./lib/supervisorSetup";
 import { DesktopSupervisorSetupBanner } from "./components/supervisor/DesktopSupervisorSetupBanner";
 import { getNativeWindowFocused, startNativeWindowFocusTracking } from "./lib/nativeWindowFocus";
-import { currentWindowLabel, isPrimaryWindow, windowScopedStorageKey } from "./lib/windowIdentity";
+import { PRIMARY_WINDOW_LABEL, currentWindowLabel, isPrimaryWindow, windowScopedStorageKey } from "./lib/windowIdentity";
 import {
   forwardNotificationTarget,
   routeNotificationTarget,
@@ -136,6 +136,7 @@ import {
   onCommandPaletteMenu,
   onToggleSidebarMenu,
   onOpenSettingsMenu,
+  onNewWindowMenu,
   onNewTerminalTabMenu,
   onRemoteSelectionRequested,
   publishFocusedTerminal,
@@ -473,7 +474,10 @@ export function secondaryWindowBootstrap(
   for (const project of recovered?.projects ?? []) {
     if (!projects.some((candidate) => candidate.workspaceId === project.workspaceId)) projects.push(project);
   }
-  const candidates = [recovered?.activeProjectId, loadWindowActiveProjectId()];
+  // A brand-new window has no namespaced selection of its own yet, so it opens on the same
+  // project the primary window is working in instead of the workspace picker. Once the user
+  // picks another project here, the namespaced key wins and the windows diverge on purpose.
+  const candidates = [recovered?.activeProjectId, loadWindowActiveProjectId(), loadActiveProjectId()];
   const activeProjectId = candidates.find((id) => id && projects.some((project) => project.workspaceId === id)) ?? "";
   return { projects, activeProjectId };
 }
@@ -3530,9 +3534,33 @@ function WorkspaceApp({
     setIsCommandPaletteOpen(true);
   }, []);
   const handleCloseCommandPalette = useCallback(() => setIsCommandPaletteOpen(false), []);
+  // Flush the in-memory layout before cloning it: the normal save is debounced, so opening a
+  // window immediately after editing tabs must not clone a stale file. Restored panes re-attach
+  // to the same daemon PTYs with a newer attach generation. Closing a window never kills those
+  // PTYs; ownership follows the latest attach and any remaining sessions use the orphan handoff.
   const handleNewWindow = useCallback(() => {
-    void openNewWindow().catch(reportRuntimeErrorRef.current);
-  }, []);
+    void (async () => {
+      const snapshot = stateRef.current;
+      const active = activeProjectRef.current;
+      const owner = snapshot.workspaceId ?? active.workspaceId;
+      const project = projectsRef.current.find((candidate) => candidate.workspaceId === owner) ?? active;
+      await persistSessionStrict(owner, project.repoRoot, snapshot);
+      await openNewWindow(currentWindowLabel());
+    })().catch(reportRuntimeErrorRef.current);
+  }, [persistSessionStrict]);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: () => void = () => undefined;
+    void onNewWindowMenu(handleNewWindow).then((dispose) => {
+      if (!active) dispose();
+      else unlisten = dispose;
+    });
+    return () => {
+      active = false;
+      unlisten();
+    };
+  }, [handleNewWindow]);
 
   // A closed secondary window hands its live backend sessions to this window (the shell lane
   // emits `window_sessions_orphaned` to the primary/focused window). They are re-attached as
@@ -3567,7 +3595,12 @@ function WorkspaceApp({
           reportRuntimeErrorRef.current(error);
         }
       }
-      if (adoptedAll && !disposed) await discardWindowSession(fromLabel);
+      // The primary window's session file is the app's long-lived session: the backend refuses to
+      // discard it (a clone saves into its own file). Asking anyway would surface a spurious
+      // runtime error every time the primary window closes behind a surviving clone.
+      if (adoptedAll && !disposed && fromLabel !== PRIMARY_WINDOW_LABEL) {
+        await discardWindowSession(fromLabel);
+      }
     };
     void onWindowSessionsOrphaned(({ fromLabel, sessionIds }) => {
       chain = chain
@@ -4407,6 +4440,12 @@ function WorkspaceApp({
       if ((action as string) === "zoom-reset") {
         const targetId = payload.browserId || shortcutBrowserId;
         if (targetId) void handleBrowserZoom(targetId, "reset");
+        return;
+      }
+      // The page owns OS focus, so Ctrl/Cmd+P reaches the app only as this native chord.
+      if ((action as string) === "print") {
+        const targetId = payload.browserId || shortcutBrowserId;
+        if (targetId) handleBrowserPrint(targetId);
         return;
       }
       if (action === "tab-close") {

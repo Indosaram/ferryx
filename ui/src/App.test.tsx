@@ -67,6 +67,7 @@ const native = {
   syncDesktopSidebar: vi.fn().mockResolvedValue(1),
   signalTerminal: vi.fn(),
   saveSession: vi.fn().mockResolvedValue(undefined),
+  openNewWindow: vi.fn().mockResolvedValue("ws-clone"),
   loadSession: vi.fn().mockResolvedValue(null),
   clearSession: vi.fn().mockResolvedValue(undefined),
   listTerminalSessions: vi.fn().mockResolvedValue([]),
@@ -76,6 +77,7 @@ const native = {
   writeTerminal: vi.fn().mockResolvedValue(undefined),
   isTauriRuntime: vi.fn(() => true),
   onNewTerminalTabMenu: vi.fn(),
+  onNewWindowMenu: vi.fn(),
   onCloseTabMenu: vi.fn(),
   onSelectWorktreeMenu: vi.fn(),
   onSelectTabMenu: vi.fn().mockResolvedValue(() => {}),
@@ -195,7 +197,7 @@ vi.mock("./lib/tauri", () => ({
   takePendingWindowAdoptions: vi.fn(async () => []),
   moveSessionsToWindow: vi.fn(async () => ({ targetLabel: "ws-new", moved: [], skipped: [], queued: false })),
   listAppWindows: vi.fn(async () => []),
-  openNewWindow: vi.fn(async () => undefined),
+  openNewWindow: native.openNewWindow,
   DEFAULT_WORKSPACE_ID: "default",
   DEFAULT_TERMINAL_FONT_STACK: "monospace",
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
@@ -246,6 +248,7 @@ vi.mock("./lib/tauri", () => ({
   writeTerminal: native.writeTerminal,
   isTauriRuntime: native.isTauriRuntime,
   onNewTerminalTabMenu: native.onNewTerminalTabMenu,
+  onNewWindowMenu: native.onNewWindowMenu,
   onCloseTabMenu: native.onCloseTabMenu,
   onSelectWorktreeMenu: native.onSelectWorktreeMenu,
   onSelectTabMenu: native.onSelectTabMenu,
@@ -571,6 +574,8 @@ describe("App project workspace flow", () => {
     native.spawnTerminalDetailed.mockReset();
     native.spawnTerminalDetailed.mockImplementation(async (req) => ({ sessionId: "mock-backend-id", daemonEpoch: "mock-epoch", session: { cwd: req.cwd } }));
     native.onNewTerminalTabMenu.mockReset();
+    native.onNewWindowMenu.mockReset();
+    native.onNewWindowMenu.mockResolvedValue(() => {});
     native.onSelectWorktreeMenu.mockReset();
     native.selectWorktreeMenuHandler = null;
     native.onSelectWorktreeMenu.mockImplementation(async (handler: (digit: number) => void) => {
@@ -3477,6 +3482,56 @@ describe("App project workspace flow", () => {
     expect(match).toBeTruthy();
     const deps = match ? match[1] : "";
     expect(deps).not.toMatch(/\bstate\b/);
+  });
+
+  it("saves the complete current layout before cloning through the native new-window menu", async () => {
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+    render(<App />);
+    await waitFor(() => expect(native.onNewWindowMenu).toHaveBeenCalled());
+    const newWindow = native.onNewWindowMenu.mock.calls[0]?.[0] as (() => void) | undefined;
+    expect(newWindow).toBeTypeOf("function");
+
+    let finishSave!: () => void;
+    native.saveSession.mockClear();
+    native.saveSession.mockImplementationOnce(() => new Promise<void>((resolve) => { finishSave = resolve; }));
+    native.openNewWindow.mockClear();
+    act(() => newWindow!());
+
+    await waitFor(() => expect(native.saveSession).toHaveBeenCalled());
+    expect(native.openNewWindow).not.toHaveBeenCalled();
+    const saved = native.saveSession.mock.lastCall?.[0];
+    expect(saved?.activeWorkspaceId).toBe("default");
+    expect(saved?.workspaces.default.layout.tabs.map((tab: { id: string }) => tab.id)).toEqual(
+      workspace.storeState.layout.tabs.map((tab) => tab.id),
+    );
+
+    act(() => finishSave());
+
+    await waitFor(() => expect(native.openNewWindow).toHaveBeenCalledWith("main"));
+  });
+
+  it("discards only a secondary window session after adopting its sessions", async () => {
+    const tauri = await import("./lib/tauri");
+    const orphaned = tauri.onWindowSessionsOrphaned as unknown as ReturnType<typeof vi.fn>;
+    let emitOrphaned!: (payload: { fromLabel: string; sessionIds: string[] }) => void;
+    orphaned.mockImplementation(async (handler: (payload: { fromLabel: string; sessionIds: string[] }) => void) => {
+      emitOrphaned = handler;
+      return () => {};
+    });
+    const discard = tauri.discardWindowSession as unknown as ReturnType<typeof vi.fn>;
+    discard.mockClear();
+    // The orphan subscription is gated on the native runtime, which beforeEach stubs off.
+    native.isTauriRuntime.mockReturnValue(true);
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+    render(<App />);
+    await waitFor(() => expect(orphaned).toHaveBeenCalled());
+
+    act(() => emitOrphaned({ fromLabel: "main", sessionIds: [] }));
+    await waitFor(() => expect(native.listTerminalSessions).toHaveBeenCalled());
+
+    act(() => emitOrphaned({ fromLabel: "ws-closed", sessionIds: [] }));
+    await waitFor(() => expect(discard).toHaveBeenCalledWith("ws-closed"));
+    expect(discard).not.toHaveBeenCalledWith("main");
   });
 
   it("does not starve debounced session persistence when transient title/activity ticks arrive faster than debounce interval", async () => {

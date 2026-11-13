@@ -4,6 +4,7 @@
 //! The connectors stay idle until a token or speech key is configured.
 #![deny(clippy::print_stdout)]
 
+pub mod agent_api;
 pub mod agent_control;
 pub mod adoption;
 pub mod autonomy;
@@ -68,10 +69,6 @@ pub mod supervisor;
 pub mod table_image;
 pub mod tools;
 pub mod tracker;
-pub mod tracker_lanes;
-pub mod tracker_linear;
-pub mod tracker_requests;
-pub mod tracker_sessions;
 pub mod usage;
 pub mod voice;
 pub mod voice_pcm;

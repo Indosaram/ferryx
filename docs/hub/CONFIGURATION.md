@@ -79,7 +79,7 @@ environment nor the env file sets them. Edit a setting and restart the daemon to
 | `OMON_PIRATETALK_URL` | optional | Base URL of a PirateTalk (KakaoTalk bridge) server for the Kakao inbox source. Set it only if you run one. **Known gap:** `inbox_watch::fetch_kakao` still falls back to the original owner's server when this is unset. Until that fallback is removed, set the URL explicitly or disable the Kakao source. |
 | `OMON_INBOX_KAKAO_ROOMS` | all rooms | Restricts the Kakao source to these rooms. |
 | `FERRYX_HUB_QUOTA_URL` | `http://127.0.0.1:18801` (planned) | The model gateway's quota endpoint. Cron remediation checks it directly before it claims a quota problem. **Known gap:** `cron_remediate::HubRuntime` still hardcodes `http://127.0.0.1:18801` and does not read this variable yet. |
-| `TRACKER_REQUESTERS` | none | Comma separated inbox author names whose requests are mirrored into labelled tracker issues. Unset means nothing is mirrored. |
+| `TRACKER_REQUESTERS` | none | Comma separated inbox author names whose `bot`-classed requests `/api/agent/requests` lists for openlinear to mirror. Unset lists none. |
 
 ## Notices and cron
 

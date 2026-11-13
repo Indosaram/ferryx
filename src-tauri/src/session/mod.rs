@@ -279,12 +279,26 @@ pub fn save_session_to_path(
                     ));
                 }
                 if version < 3 && session.version >= 3 {
-                    let backup = path.with_extension("json.pre-v3");
+                    let mut backup = path.with_extension("json.pre-v3");
                     // Linking the old inode publishes a complete snapshot without clobbering an
                     // earlier backup. Atomic replacement below never mutates that inode.
                     match fs::hard_link(path, &backup) {
                         Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                            // An older build can write a legacy file again after an earlier
+                            // upgrade left its backup. That backup is kept as it is, and this
+                            // legacy file gets its own; comparing it with the old backup would
+                            // refuse every later save.
+                            if fs::read(&backup).map_or(true, |kept| kept != original) {
+                                backup = path.with_extension(format!("json.pre-v3-{write_suffix}"));
+                                fs::hard_link(path, &backup).map_err(|e| {
+                                    IpcError::new(
+                                        IpcErrorCode::IoError,
+                                        format!("Failed to back up pre-v3 session: {e}"),
+                                    )
+                                })?;
+                            }
+                        }
                         Err(e) => {
                             return Err(IpcError::new(
                                 IpcErrorCode::IoError,
@@ -660,6 +674,33 @@ mod tests {
         assert_eq!(loaded.version, 3);
         assert_eq!(loaded.extra["testMarker"], "upgraded");
         assert_eq!(fs::read(session_file.with_extension("json.pre-v3")).unwrap(), legacy);
+    }
+
+    /// A v2 file written again after an earlier upgrade (an older build ran in between) must not
+    /// be compared with the earlier backup: that refused every save, so the session was never
+    /// written again (daemon-lifetime QA Q14 after Q11, run 20261111t153429z).
+    #[test]
+    fn test_v3_save_over_rewritten_v2_session_keeps_both_backups() {
+        let dir = tempdir().unwrap();
+        let session_file = dir.path().join("session_state.json");
+        let earlier = br#"{"version":2,"timestamp":1,"activeWorkspaceId":"a","workspaces":{}}"#.to_vec();
+        let rewritten = br#"{"version":2,"timestamp":2,"activeWorkspaceId":"b","workspaces":{}}"#.to_vec();
+        fs::write(&session_file, &earlier).unwrap();
+        save_session_to_path(&session_file, &minimal_v3_session("first")).unwrap();
+        fs::write(&session_file, &rewritten).unwrap();
+
+        save_session_to_path(&session_file, &minimal_v3_session("second")).unwrap();
+
+        let loaded = load_session_from_path(&session_file).unwrap().unwrap();
+        assert_eq!(loaded.extra["testMarker"], "second");
+        assert_eq!(fs::read(session_file.with_extension("json.pre-v3")).unwrap(), earlier);
+        let newer: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".pre-v3-"))
+            .collect();
+        assert_eq!(newer.len(), 1);
+        assert_eq!(fs::read(newer[0].path()).unwrap(), rewritten);
     }
 
     #[test]

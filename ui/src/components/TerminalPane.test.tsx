@@ -177,6 +177,19 @@ describe("TerminalPane native routing contract", () => {
     expect(screen.queryByTestId("dag-pane-badge")).not.toBeInTheDocument();
   });
 
+  it("docks the exit notice below the terminal viewport instead of covering the pane", () => {
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 600, 40));
+    render(<TerminalPane session={{ ...createSession(), lifecycle: "exited" }} active={true} onOpenNewShell={vi.fn()} />);
+    const bar = screen.getByTestId("terminal-pane-overlay");
+    const viewport = screen.getByTestId("terminal-native-viewport");
+    expect(bar).toHaveAttribute("data-pane-status-bar", "docked");
+    expect(bar).toHaveClass("bottom-0", "inset-x-0");
+    expect(bar).not.toHaveClass("inset-0");
+    expect(viewport).toHaveStyle({ top: "0px", bottom: "40px" });
+    expect(screen.getByTestId("native-terminal-pane")).toBeInTheDocument();
+    rect.mockRestore();
+  });
+
   it("overlays the running DAG indicator without opaque top or bottom strips", () => {
     dagStore.applySnapshot("/repo/main", {
       ...dagSnapshot,

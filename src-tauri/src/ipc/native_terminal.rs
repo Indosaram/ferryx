@@ -1133,8 +1133,8 @@ pub async fn cmd_native_terminal_attach<R: Runtime>(
     if active != expected_tuple {
         return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
     }
-    // The attaching window owns the session until another window attaches it.
-    crate::window_registry::record_owner(&app, &session_id, window.label());
+    // The attaching window presents (and, when first, owns) the session.
+    crate::window_registry::record_viewer(&app, &session_id, window.label());
     Ok(NativeTerminalAttachReceipt { session_id, attach_tuple: active, presented: false })
 }
 
@@ -1308,15 +1308,83 @@ fn font_metrics_for_bounds(bounds: LogicalBounds) -> CellMetrics {
 
 #[tauri::command]
 pub async fn cmd_native_terminal_detach<R: Runtime>(
-    _app: AppHandle<R>,
+    window: tauri::Window<R>,
     state: State<'_, NativeTerminalSurfaceHostState>,
     session_id: String,
     attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
 ) -> Result<(), IpcError> {
-    if !state.detach_session_fenced(&session_id, attach_tuple.as_ref()) {
+    // Detaching a pane drops only this window's viewer; other windows presenting the same
+    // session keep rendering. The last viewer's detach is today's background detach.
+    if !state.detach_viewer_fenced(&session_id, attach_tuple.as_ref(), window.label()) {
         return Err(IpcError::from(NativeTerminalError::SessionDetached(session_id)));
     }
+    crate::window_registry::forget_viewer(window.app_handle(), &session_id, window.label());
     Ok(())
+}
+
+/// Result of `cmd_native_terminal_attach_viewer`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTerminalViewerReceipt {
+    pub session_id: String,
+    /// True when this window joined a session already live in this process as a viewer. The pane
+    /// must then adopt `attach_tuple` verbatim and skip `cmd_native_terminal_attach`.
+    pub viewer: bool,
+    /// The session's active attach tuple (unchanged by the registration).
+    pub attach_tuple: Option<crate::daemon::protocol::PaneAttachTuple>,
+}
+
+/// Joins a session that another window of this process already presents, as a per-window viewer.
+///
+/// Never re-attaches to the daemon, never fences the pump and never bumps the attempt generation,
+/// so the other window keeps its binding and keeps rendering. When the session is not live here,
+/// returns `viewer: false` and the pane attaches normally.
+#[tauri::command]
+pub async fn cmd_native_terminal_attach_viewer<R: Runtime>(
+    window: tauri::Window<R>,
+    state: State<'_, NativeTerminalSurfaceHostState>,
+    session_id: String,
+    bounds: Option<NativeTerminalLogicalRect>,
+    scale_factor: Option<f64>,
+) -> Result<NativeTerminalViewerReceipt, IpcError> {
+    let not_viewer = |session_id: String| NativeTerminalViewerReceipt {
+        session_id,
+        viewer: false,
+        attach_tuple: None,
+    };
+    if !state.session_is_shareable(&session_id)
+        || state.viewer_windows(&session_id).iter().all(|label| label == window.label())
+    {
+        return Ok(not_viewer(session_id));
+    }
+    let logical_bounds = match (bounds, scale_factor) {
+        (Some(rect), Some(scale)) if scale.is_finite() && scale > 0.0 => Some(LogicalBounds {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            scale_factor: scale,
+        }),
+        _ => None,
+    };
+    let state_inner = state.inner().clone();
+    let surface_window = window.clone();
+    let (sender, receiver) = oneshot::channel();
+    let session_for_task = session_id.clone();
+    // Native child views are created on the UI thread on every platform.
+    window
+        .run_on_main_thread(move || {
+            let _ = sender.send(state_inner.register_viewer(&surface_window, &session_for_task, logical_bounds));
+        })
+        .map_err(|error| IpcError::internal(format!("Could not dispatch viewer registration: {error}")))?;
+    let registered = receiver
+        .await
+        .map_err(|_| IpcError::internal("Main thread stopped before viewer registration completed"))?
+        .map_err(IpcError::from)?;
+    Ok(match registered {
+        Some(attach_tuple) => NativeTerminalViewerReceipt { session_id, viewer: true, attach_tuple },
+        None => not_viewer(session_id),
+    })
 }
 
 #[tauri::command]
@@ -1535,6 +1603,10 @@ pub async fn cmd_native_terminal_set_focus<R: Runtime>(
     let surface_window = window.clone();
     let (sender, receiver) = oneshot::channel();
     let session_id_clone = session_id.clone();
+    if focused {
+        // PTY size policy: the most recently focused viewer drives cols/rows.
+        state.note_viewer_focused(&session_id, window.label());
+    }
     if let Err(error) = window.run_on_main_thread(move || {
         let result = state_inner
             .set_focus(&surface_window, &session_id_clone, focused)

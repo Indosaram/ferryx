@@ -1,5 +1,5 @@
 import { Loader2, RefreshCw, TerminalSquare } from "lucide-react";
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { TerminalActivity } from "../lib/activity";
 import { isMonochromeAgentLogo, resolveAgentLogo } from "../lib/agentIcon";
 import { getAgentReconnectAffordance } from "../lib/agentResumeAffordance";
@@ -56,6 +56,9 @@ type TerminalPaneProps = {
   onContinueInNewPane?: (mode: AgentContinueMode) => void;
   continuationHeld?: boolean;
 };
+
+/** How long a reconnect may run before its notice takes pane space. */
+export const OUTAGE_NOTICE_GRACE_MS = 1500;
 
 function friendlyAgentName(agentType: string | null | undefined): string {
   if (!agentType) return "Agent";
@@ -127,6 +130,12 @@ export function TerminalPane({
   const descId = useId();
   const autoResumeKeyRef = useRef<string | null>(null);
   const admissionDisposeRef = useRef<(() => void) | null>(null);
+  // Connection and exit states dock to the pane's bottom edge instead of covering it. The bar's
+  // measured height is taken out of the native viewport, so a native child surface (which stacks
+  // above the webview on Windows/Linux) never hides it and the last frame stays readable.
+  const statusBarRef = useRef<HTMLDivElement | null>(null);
+  const [statusBarHeight, setStatusBarHeight] = useState(0);
+  const [statusBarHasAction, setStatusBarHasAction] = useState(false);
   const nativeRendererUnavailable = useSyncExternalStore(
     subscribeNativeRendererAvailability,
     isNativeRendererUnavailable,
@@ -339,6 +348,53 @@ export function TerminalPane({
       .finally(() => setPendingLocal(false));
   }, [active, affordance.canReconnect, isAgentSession, isExited, isPending, isRecoveryBlocked, isRecoveryExited, isRemoteGone, isSshSession, onOpenNewShell, onReconnect, session.backendSessionId, session.id, session.reconnectLifecycle]);
 
+  const splitStatusShown = Boolean(splitIntent && session.reconnectLifecycle !== "idle");
+  // A reconnect that settles within the grace window changes nothing on screen: the docked bar
+  // would otherwise resize the PTY (SIGWINCH) twice for a blip. Past the window the notice docks.
+  const isTransientOutage = !isRecoveryBlocked && !isRecoveryExited && (isSshSession ? isSshReconnecting : isLocalReconnecting);
+  const isRecoverableOutage = !isRecoveryBlocked && !isRecoveryExited &&
+    (isSshSession ? isSshReconnecting || isSshDisconnected : isLocalReconnecting || isLocalDisconnected);
+  const [graceElapsed, setGraceElapsed] = useState(false);
+  useEffect(() => {
+    if (!isTransientOutage) {
+      setGraceElapsed(false);
+      return;
+    }
+    const timer = setTimeout(() => setGraceElapsed(true), OUTAGE_NOTICE_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [isTransientOutage]);
+  const statusBarHidden = isExited && isTransientOutage && !graceElapsed;
+  // Recoverable outages dock at the top (the session may come back); final states dock at the bottom.
+  const statusBarEdge: "top" | "bottom" = isRecoverableOutage ? "top" : "bottom";
+  const topDocked = isExited && statusBarEdge === "top";
+  const [exitedAt, setExitedAt] = useState<number | null>(null);
+  useEffect(() => {
+    setExitedAt(isExited ? Date.now() : null);
+  }, [isExited]);
+  const statusBarShown = (splitStatusShown || isExited || isSuspended) && !statusBarHidden;
+  useLayoutEffect(() => {
+    const bar = statusBarRef.current;
+    if (!statusBarShown || !bar) {
+      setStatusBarHeight(0);
+      return;
+    }
+    const measure = () => {
+      setStatusBarHeight(Math.ceil(bar.getBoundingClientRect().height));
+      setStatusBarHasAction(bar.querySelector("button:not(:disabled)") !== null);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined" || typeof MutationObserver === "undefined") return;
+    // Button availability changes without a size change (pending -> idle), so watch both.
+    const mutations = new MutationObserver(measure);
+    mutations.observe(bar, { subtree: true, childList: true, attributes: true, attributeFilter: ["disabled"] });
+    const observer = new ResizeObserver(measure);
+    observer.observe(bar);
+    return () => {
+      mutations.disconnect();
+      observer.disconnect();
+    };
+  }, [statusBarShown, splitStatusShown, isExited, isSuspended]);
+
   // If the native paired proxy session has not been established or expired,
   // do not mount local path/PTY tooling or offer SSH/agent respawn.
   if (isPairedWorkspaceId(session.workspaceId) && (!session.backendSessionId || session.remoteConnectionState === "expired")) {
@@ -370,6 +426,19 @@ export function TerminalPane({
     <div
       data-testid="terminal-pane-surface"
       className="relative h-full w-full min-h-0 min-w-0 overflow-hidden"
+      onKeyDownCapture={(event) => {
+        // Enter in an exited or disconnected pane runs the bar's primary action (its first enabled
+        // button), so recovery never needs the mouse. A live or still-reconnecting pane keeps Enter.
+        if (!active || !isExited || isPending || isTransientOutage || statusBarHidden) return;
+        if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return;
+        const bar = statusBarRef.current;
+        if (!bar || bar.contains(event.target as Node)) return;
+        const primary = bar.querySelector<HTMLButtonElement>("button:not(:disabled)");
+        if (!primary) return;
+        event.preventDefault();
+        event.stopPropagation();
+        primary.click();
+      }}
     >
       {advancedFeatures ? (
         <DagPaneBadge
@@ -385,7 +454,10 @@ export function TerminalPane({
       <div
         data-testid="terminal-native-viewport"
         className="absolute inset-x-0 bottom-0 min-h-0 min-w-0"
-        style={{ top: dockSearch ? TERMINAL_SEARCH_DOCK_HEIGHT : 0 }}
+        style={{
+          top: (dockSearch ? TERMINAL_SEARCH_DOCK_HEIGHT : 0) + (topDocked ? statusBarHeight : 0),
+          bottom: topDocked ? 0 : statusBarHeight,
+        }}
       >
         {nativeRendererUnavailable && session.backendSessionId && !isStandbyBackendSessionId(session.backendSessionId) ? (
           <CompatibilityTerminal backendSessionId={session.backendSessionId} />
@@ -405,11 +477,13 @@ export function TerminalPane({
       {splitIntent && session.reconnectLifecycle !== "idle" ? (
         <div
           role={splitPending ? "status" : "alert"}
+          ref={statusBarRef}
           data-testid="local-split-status"
-          className="absolute inset-0 z-20 flex items-center justify-center bg-background/85 p-6 text-center"
+          data-pane-status-bar="docked"
+          className="absolute inset-x-0 bottom-0 z-20 border-t border-border bg-card px-3 py-1.5 text-left"
         >
-          <div className="flex max-w-sm flex-col gap-3 rounded-lg border border-border bg-card p-5">
-            <h2 className="text-sm font-medium text-foreground">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+            <h2 className="shrink-0 whitespace-nowrap text-[12px] font-medium text-foreground">
               {splitPending
                 ? session.backendSessionId
                   ? "Connecting to shell..."
@@ -420,10 +494,10 @@ export function TerminalPane({
             </h2>
             {!splitPending ? (
               <>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-[12px] text-muted-foreground">
                   {replacementError ?? session.reconnectError?.message ?? "Startup was not confirmed."}
                 </p>
-                <div className="flex justify-center gap-2">
+                <div className="ml-auto flex gap-2">
                   <Button
                     onClick={() =>
                       void retryLocalSplit(session.id).catch((error) =>
@@ -468,18 +542,17 @@ export function TerminalPane({
               handleResume();
             }
           }}
-          className="absolute inset-0 z-20 flex cursor-pointer items-center justify-center bg-background/85 px-6 text-center select-none"
+          ref={statusBarRef}
+          data-pane-status-bar="docked"
+          className="absolute inset-x-0 bottom-0 z-20 cursor-pointer select-none border-t border-border bg-card px-3 py-1.5 text-left"
         >
-          <div className="flex max-w-sm flex-col items-center rounded-lg border border-border bg-card p-5 shadow-lg">
-            <div className="mb-3 flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-muted/60">
-              <span className="text-lg">💤</span>
-            </div>
-            <h2 className="text-sm font-medium text-foreground">Suspended</h2>
-            <p className="mt-1 text-xs text-muted-foreground">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+            <h2 className="shrink-0 whitespace-nowrap text-[12px] font-medium text-foreground">Suspended</h2>
+            <p className="text-[12px] text-muted-foreground">
               {getDaemonSuspension(session.id)?.suspensionSource ?? "Stop source unconfirmed"}
             </p>
-            <div className="mt-3">
-              <Button size="sm" onClick={(e) => { e.stopPropagation(); handleResume(); }}>
+            <div className="ml-auto">
+              <Button size="sm" className="h-7 shrink-0 text-[11px]" onClick={(e) => { e.stopPropagation(); handleResume(); }}>
                 Resume
               </Button>
             </div>
@@ -491,29 +564,38 @@ export function TerminalPane({
           role="region"
           aria-labelledby={titleId}
           aria-describedby={errorDescription ? descId : undefined}
+          ref={statusBarRef}
           data-testid="terminal-pane-overlay"
-          className="absolute inset-0 z-20 flex items-center justify-center bg-background/85 px-6 text-center"
+          data-pane-status-bar={statusBarHidden ? "pending" : "docked"}
+          data-pane-status-edge={statusBarEdge}
+          aria-keyshortcuts={isPending || isTransientOutage || !statusBarHasAction ? undefined : "Enter"}
+          style={topDocked ? { top: dockSearch ? TERMINAL_SEARCH_DOCK_HEIGHT : 0 } : undefined}
+          className={cn(
+            "absolute inset-x-0 z-20 border-border bg-card px-3 py-1.5 text-left",
+            topDocked ? "border-b" : "bottom-0 border-t",
+            statusBarHidden && "sr-only",
+          )}
         >
-          <div className="flex max-w-sm flex-col items-center rounded-lg border border-border bg-card p-5 shadow-lg">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
             {isAgentSession ? (
-              <div className="mb-3 flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-muted/60">
+              <div className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted/60">
                 {logo ? (
                   <img
                     src={logo}
                     alt=""
-                    className={cn("size-5", isMonochrome && "agent-tab-logo--monochrome")}
+                    className={cn("size-4", isMonochrome && "agent-tab-logo--monochrome")}
                   />
                 ) : (
-                  <TerminalSquare className="size-5 text-muted-foreground" aria-hidden="true" />
+                  <TerminalSquare className="size-4 text-muted-foreground" aria-hidden="true" />
                 )}
               </div>
             ) : (
-              <div className="mb-3 flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-muted/60">
-                <TerminalSquare className="size-5 text-muted-foreground" aria-hidden="true" />
+              <div className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted/60">
+                <TerminalSquare className="size-4 text-muted-foreground" aria-hidden="true" />
               </div>
             )}
 
-            <h2 id={titleId} className="text-sm font-medium text-foreground">
+            <h2 id={titleId} className="min-w-[4rem] shrink-[0.2] truncate text-[12px] font-medium text-foreground">
               {isSshSession
                 ? isRecoveryBlocked
                   ? "Session recovery blocked"
@@ -545,22 +627,28 @@ export function TerminalPane({
                         : "Shell exited"}
             </h2>
 
+            {exitedAt !== null && !isRecoverableOutage ? (
+              <time dateTime={new Date(exitedAt).toISOString()} className="min-w-0 truncate text-[12px] tabular-nums text-muted-foreground">
+                {new Date(exitedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </time>
+            ) : null}
+
             {isAgentSession ? (
-              <p className="mt-1 text-xs text-muted-foreground">{agentName}</p>
+              <p className="min-w-0 truncate text-[12px] text-muted-foreground">{agentName}</p>
             ) : null}
 
             {errorDescription ? (
-              <p id={descId} role={replacementError ? "alert" : undefined} className="mt-1 break-words text-xs text-muted-foreground">
+              <p id={descId} role={replacementError ? "alert" : undefined} className="min-w-0 truncate text-[12px] text-muted-foreground" title={errorDescription}>
                 {errorDescription}
               </p>
             ) : null}
 
             {isSshSession ? (
-              <div className="mt-4 flex w-full flex-col items-center gap-2">
+              <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
                 {isRecoveryBlocked ? (
                   <>
-                    <p role="status" className="text-xs text-muted-foreground">{recoveryState?.reason ?? "Recovery is blocked."}</p>
-                    <div className="flex w-full flex-col items-center gap-2">
+                    <p role="status" className="min-w-0 truncate text-[12px] text-muted-foreground">{recoveryState?.reason ?? "Recovery is blocked."}</p>
+                    <div className="flex shrink-0 items-center gap-2">
                       {canRetryRecovery ? (
                         <Button
                           type="button"
@@ -570,7 +658,7 @@ export function TerminalPane({
                           aria-busy={isPending}
                           aria-label="Retry session recovery"
                           onClick={handleReconnect}
-                          className="w-full max-w-[220px]"
+                          className="h-7 shrink-0 text-[11px]"
                         >
                           <RefreshCw className="size-3.5" aria-hidden="true" />
                           <span>Retry</span>
@@ -584,7 +672,7 @@ export function TerminalPane({
                           disabled={isPending}
                           aria-label="Open new shell"
                           onClick={handleOpenNewShell}
-                          className="w-full max-w-[220px]"
+                          className="h-7 shrink-0 text-[11px]"
                         >
                           <span>Open new shell</span>
                         </Button>
@@ -593,7 +681,7 @@ export function TerminalPane({
                   </>
                 ) : isRecoveryExited ? (
                   <>
-                    <p role="status" className="text-xs text-muted-foreground">The remote owner confirmed this session exited.</p>
+                    <p role="status" className="min-w-0 truncate text-[12px] text-muted-foreground">The remote owner confirmed this session exited.</p>
                     {onOpenNewShell ? (
                       <Button
                         type="button"
@@ -601,7 +689,7 @@ export function TerminalPane({
                         variant="secondary"
                         aria-label="Open new shell"
                         onClick={handleOpenNewShell}
-                        className="w-full max-w-[220px]"
+                        className="h-7 shrink-0 text-[11px]"
                       >
                         <span>Open new shell</span>
                       </Button>
@@ -609,23 +697,23 @@ export function TerminalPane({
                   </>
                 ) : isSshReconnecting ? (
                   <>
-                    <div role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <div role="status" className="flex min-w-0 items-center gap-2 truncate text-[12px] text-muted-foreground">
                       <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
                       <span>Reconnecting to remote session...</span>
                     </div>
-                    {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
+                    {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" className="h-7 shrink-0 text-[11px]" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
                   </>
                 ) : isSshExpired ? (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="min-w-0 truncate text-[12px] text-muted-foreground">
                     The remote process has exited or is no longer available on the host.
                   </p>
                 ) : isSshLegacyLost ? (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="min-w-0 truncate text-[12px] text-muted-foreground">
                     This session was started before process-preserving reconnection was supported and cannot be restored.
                   </p>
                 ) : (
                   <>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="min-w-0 truncate text-[12px] text-muted-foreground">
                       Remote connection lost. Retry to reattach to the running session.
                     </p>
                     <Button
@@ -636,7 +724,7 @@ export function TerminalPane({
                       aria-busy={isPending}
                       aria-label={isPending ? "Reconnecting SSH" : "Reconnect SSH"}
                       onClick={handleReconnect}
-                      className="w-full max-w-[220px]"
+                      className="h-7 shrink-0 text-[11px]"
                     >
                       {isPending ? <Loader2 className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : null}
                       <span>{isPending ? "Reconnecting..." : "Reconnect SSH"}</span>
@@ -645,11 +733,11 @@ export function TerminalPane({
                 )}
               </div>
             ) : isAgentSession ? (
-              <div className="mt-4 flex w-full flex-col items-center gap-2">
+              <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
                 {isRecoveryBlocked ? (
                   <>
-                    <p role="status" className="text-xs text-muted-foreground">{recoveryState?.reason ?? "Recovery is blocked."}</p>
-                    <div className="flex w-full flex-col items-center gap-2">
+                    <p role="status" className="min-w-0 truncate text-[12px] text-muted-foreground">{recoveryState?.reason ?? "Recovery is blocked."}</p>
+                    <div className="flex shrink-0 items-center gap-2">
                       {canRetryRecovery ? (
                         <Button
                           type="button"
@@ -659,7 +747,7 @@ export function TerminalPane({
                           aria-busy={isPending}
                           aria-label="Retry session recovery"
                           onClick={handleReconnect}
-                          className="w-full max-w-[220px]"
+                          className="h-7 shrink-0 text-[11px]"
                         >
                           <RefreshCw className="size-3.5" aria-hidden="true" />
                           <span>Retry</span>
@@ -673,7 +761,7 @@ export function TerminalPane({
                           disabled={isPending}
                           aria-label="Open new shell"
                           onClick={handleOpenNewShell}
-                          className="w-full max-w-[220px]"
+                          className="h-7 shrink-0 text-[11px]"
                         >
                           <span>Open new shell</span>
                         </Button>
@@ -682,11 +770,11 @@ export function TerminalPane({
                   </>
                 ) : isLocalReconnecting ? (
                   <>
-                    <div role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <div role="status" className="flex min-w-0 items-center gap-2 truncate text-[12px] text-muted-foreground">
                       <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
                       <span>{recoveryState?.reason ?? "Reconnecting session..."}</span>
                     </div>
-                    {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
+                    {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" className="h-7 shrink-0 text-[11px]" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
                     {onOpenNewShell ? (
                       <Button
                         type="button"
@@ -694,7 +782,7 @@ export function TerminalPane({
                         variant={canRetryRecovery ? "ghost" : "secondary"}
                         aria-label="Open new shell"
                         onClick={handleOpenNewShell}
-                        className="w-full max-w-[220px]"
+                        className="h-7 shrink-0 text-[11px]"
                       >
                         <span>Open new shell</span>
                       </Button>
@@ -715,7 +803,7 @@ export function TerminalPane({
                           : `Reconnect ${agentName} session`
                     }
                     onClick={handleReconnect}
-                    className="w-full max-w-[220px]"
+                    className="h-7 shrink-0 text-[11px]"
                   >
                     {isPending ? (
                       <>
@@ -740,7 +828,7 @@ export function TerminalPane({
                     aria-busy={isPending}
                     aria-label={isPending ? `Reconnecting ${agentName} session` : `Reconnect ${agentName} session`}
                     onClick={handleReconnect}
-                    className="w-full max-w-[220px]"
+                    className="h-7 shrink-0 text-[11px]"
                   >
                     {isPending ? (
                       <>
@@ -762,7 +850,7 @@ export function TerminalPane({
                     disabled={true}
                     aria-busy={true}
                     aria-label={`Reconnecting ${agentName} session`}
-                    className="w-full max-w-[220px]"
+                    className="h-7 shrink-0 text-[11px]"
                   >
                     <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
                     <span>Reconnecting session...</span>
@@ -775,18 +863,18 @@ export function TerminalPane({
                     disabled={isPending}
                     aria-label="Open new shell"
                     onClick={handleOpenNewShell}
-                    className="w-full max-w-[220px]"
+                    className="h-7 shrink-0 text-[11px]"
                   >
                     <span>Open new shell</span>
                   </Button>
                 ) : null}
               </div>
             ) : (
-              <div className="mt-4 flex w-full flex-col items-center gap-2">
+              <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2">
                 {isRecoveryBlocked ? (
                   <>
-                    <p role="status" className="text-xs text-muted-foreground">{recoveryState?.reason ?? "Recovery is blocked."}</p>
-                    <div className="flex w-full flex-col items-center gap-2">
+                    <p role="status" className="min-w-0 truncate text-[12px] text-muted-foreground">{recoveryState?.reason ?? "Recovery is blocked."}</p>
+                    <div className="flex shrink-0 items-center gap-2">
                       {canRetryRecovery ? (
                         <Button
                           type="button"
@@ -796,7 +884,7 @@ export function TerminalPane({
                           aria-busy={isPending}
                           aria-label="Retry session recovery"
                           onClick={handleReconnect}
-                          className="w-full max-w-[220px]"
+                          className="h-7 shrink-0 text-[11px]"
                         >
                           <RefreshCw className="size-3.5" aria-hidden="true" />
                           <span>Retry</span>
@@ -810,7 +898,7 @@ export function TerminalPane({
                           disabled={isPending}
                           aria-label="Open new shell"
                           onClick={handleOpenNewShell}
-                          className="w-full max-w-[220px]"
+                          className="h-7 shrink-0 text-[11px]"
                         >
                           <span>Open new shell</span>
                         </Button>
@@ -819,11 +907,11 @@ export function TerminalPane({
                   </>
                 ) : isLocalReconnecting ? (
                   <>
-                    <div role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <div role="status" className="flex min-w-0 items-center gap-2 truncate text-[12px] text-muted-foreground">
                       <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
                       <span>{recoveryState?.reason ?? "Reconnecting to session..."}</span>
                     </div>
-                    {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
+                    {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" className="h-7 shrink-0 text-[11px]" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
                     {onOpenNewShell ? (
                       <Button
                         type="button"
@@ -831,14 +919,14 @@ export function TerminalPane({
                         variant={canRetryRecovery ? "ghost" : "secondary"}
                         aria-label="Open new shell"
                         onClick={handleOpenNewShell}
-                        className="w-full max-w-[220px]"
+                        className="h-7 shrink-0 text-[11px]"
                       >
                         <span>Open new shell</span>
                       </Button>
                     ) : null}
                   </>
                 ) : isStandbyShell && isPending ? (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <div className="flex min-w-0 items-center gap-2 truncate text-[12px] text-muted-foreground">
                     <Loader2 className="size-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden="true" />
                     <span>Starting a new shell in this directory...</span>
                   </div>
@@ -853,7 +941,7 @@ export function TerminalPane({
                         aria-busy={isPending}
                         aria-label={isPending ? "Reconnecting shell" : canRetryRecovery ? "Retry session recovery" : "Reconnect shell"}
                         onClick={handleReconnect}
-                        className="w-full max-w-[220px]"
+                        className="h-7 shrink-0 text-[11px]"
                       >
                         {isPending ? (
                           <>
@@ -875,13 +963,18 @@ export function TerminalPane({
                       disabled={isPending || !onOpenNewShell}
                       aria-label={isStandbyShell ? "Start shell" : "Open new shell"}
                       onClick={handleOpenNewShell}
-                      className="w-full max-w-[220px]"
+                      className="h-7 shrink-0 text-[11px]"
                     >
                       <span>{isStandbyShell ? "Start shell" : "Open new shell"}</span>
                     </Button>
                   </>
                 )}
               </div>
+            )}
+            {isPending || isTransientOutage || !statusBarHasAction ? null : (
+              <kbd aria-hidden="true" className="hidden shrink-0 rounded border border-border px-1 font-mono text-[10px] text-muted-foreground sm:inline">
+                Enter
+              </kbd>
             )}
             <ContinueInNewPaneButtons
               modes={continuationModes}

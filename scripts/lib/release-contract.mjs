@@ -87,6 +87,30 @@ export const KIND_DEFINITIONS = Object.freeze({
     stableAlias: "ferryx-cli-darwin-universal",
     allowedExtensions: ["-darwin-universal", "ferryx-cli"],
   },
+  // The remote-desktop client: remote hosts need it to drive a GUI over the paired tunnel.
+  "rd-client-linux-amd64": {
+    permittedHost: "omaki",
+    isUpdater: false,
+    expectedTargets: [],
+    stableAlias: "ferryx-rd-client-linux-amd64",
+    allowedExtensions: ["-linux-amd64", "ferryx-rd-client"],
+  },
+  "rd-client-darwin-universal": {
+    permittedHost: "macbook",
+    isUpdater: false,
+    expectedTargets: [],
+    stableAlias: "ferryx-rd-client-darwin-universal",
+    allowedExtensions: ["-darwin-universal", "ferryx-rd-client"],
+  },
+  // Windows needs the client and its FFmpeg DLL sidecars together: the client links FFmpeg
+  // dynamically, so a bare .exe fails to start on a host without a system FFmpeg.
+  "rd-client-windows-amd64": {
+    permittedHost: "maho-win",
+    isUpdater: false,
+    expectedTargets: [],
+    stableAlias: "ferryx-rd-client-windows-amd64.exe",
+    allowedExtensions: ["-windows-amd64.exe", "ferryx-rd-client.exe"],
+  },
 });
 
 export const ALLOWED_RECEIPT_KEYS = Object.freeze([
@@ -344,7 +368,7 @@ export function parsePlan(value) {
  */
 export function requiredKinds(plan) {
   const p = typeof plan === "string" || !plan.schemaVersion ? parsePlan(plan) : plan;
-  const kinds = ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal"];
+  const kinds = ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "rd-client-linux-amd64", "rd-client-darwin-universal", "rd-client-windows-amd64"];
   if (p.channels && p.channels.nsisMigration) {
     kinds.push("nsis");
   }

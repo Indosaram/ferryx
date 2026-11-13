@@ -23,6 +23,9 @@ mod vault;
 #[cfg(target_os = "linux")]
 mod linux_sandbox;
 
+#[cfg(target_os = "windows")]
+mod file_drop;
+
 #[cfg(target_os = "macos")]
 pub mod mac_app;
 
@@ -759,6 +762,8 @@ wrap_window_delegate! {
                 Key::Manager => extensions::window_created(window),
                 key => {
                     platform::embed(window);
+                    #[cfg(target_os = "windows")]
+                    file_drop::install(window);
                     let handle = platform::handle(window);
                     let stored = with_pane(key, |pane| {
                         pane.window = Some(window.clone());

@@ -666,3 +666,91 @@ fn an_invalid_host_attach_is_refused() {
     );
     root.close().unwrap();
 }
+
+fn origin(kind: PublishedOriginKind, origin: &str, observed_at: u64) -> PublishedOrigin {
+    PublishedOrigin {
+        kind,
+        origin: origin.into(),
+        observed_at,
+    }
+}
+
+/// A publication is only ever read back through the outward projection, so assert it there.
+#[test]
+fn published_origins_round_trip_and_keep_the_freshest_record() {
+    let root = fixture();
+    let mut store = Inventory::open(root.path()).unwrap();
+    let saved = store.pair(&pairing("machine-publish")).unwrap();
+    let generation = saved.generation;
+    assert!(
+        store
+            .list()
+            .into_iter()
+            .find(|row| row.host_id == saved.host_id)
+            .unwrap()
+            .published_origins
+            .is_empty(),
+        "pairing learns no reachability, so a fresh host starts relay-only"
+    );
+    store
+        .publish_origins(
+            &saved.host_id,
+            generation,
+            vec![
+                origin(PublishedOriginKind::Tailscale, "https://100.64.0.9:43821", 1_000),
+                origin(PublishedOriginKind::Lan, "https://192.168.1.9:43821", 1_000),
+            ],
+        )
+        .unwrap();
+    let listed = store
+        .list()
+        .into_iter()
+        .find(|row| row.host_id == saved.host_id)
+        .unwrap();
+    assert_eq!(listed.published_origins.len(), 2, "each origin is one candidate");
+    // Re-observing the same origin replaces the record instead of duplicating the candidate.
+    store
+        .publish_origins(
+            &saved.host_id,
+            generation,
+            vec![origin(PublishedOriginKind::Lan, "https://192.168.1.9:43821", 2_000)],
+        )
+        .unwrap();
+    let listed = store
+        .list()
+        .into_iter()
+        .find(|row| row.host_id == saved.host_id)
+        .unwrap();
+    assert_eq!(listed.published_origins.len(), 1);
+    assert_eq!(listed.published_origins[0].observed_at, 2_000);
+    root.close().unwrap();
+}
+
+/// Reachability for an identity that no longer exists must not come back.
+#[test]
+fn a_publication_from_a_stale_generation_is_refused() {
+    let root = fixture();
+    let mut store = Inventory::open(root.path()).unwrap();
+    let saved = store.pair(&pairing("machine-stale")).unwrap();
+    let stale = Epoch(saved.generation.0 + 1);
+    assert_eq!(
+        store
+            .publish_origins(
+                &saved.host_id,
+                stale,
+                vec![origin(PublishedOriginKind::Tailscale, "https://100.64.0.9:43821", 1_000)],
+            )
+            .unwrap_err(),
+        InventoryError::StaleGeneration
+    );
+    let listed = store
+        .list()
+        .into_iter()
+        .find(|row| row.host_id == saved.host_id)
+        .unwrap();
+    assert!(
+        listed.published_origins.is_empty(),
+        "a refused publication must leave the host relay-only"
+    );
+    root.close().unwrap();
+}

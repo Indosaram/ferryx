@@ -3,6 +3,8 @@ import { AlertCircle, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
 import { MACHINE_STATUS_EXPLANATIONS } from "../../../lib/machineStatus";
 import type { SshAuthMethod, SshHost, SshRemoteEnvironment, SshTargetSummary } from "../../../lib/sshHosts";
 import type { HostFormData } from "../AddMachineModal";
+import { applySshTarget, hostnamePasteHandler, SshCommandField } from "./SshCommandField";
+import type { ParsedSshTarget } from "../../../lib/sshTarget";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
@@ -134,17 +136,24 @@ export interface SshEditState {
 
 function SshEditForm({ edit, busy }: { edit: SshEditState; busy: boolean }) {
   const { form } = edit;
+  const fill = (target: ParsedSshTarget) => {
+    edit.onChange(f => applySshTarget(f, target));
+    if ((target.jumpHost || target.identityFile) && !edit.showAdvanced) edit.onToggleAdvanced();
+  };
   const input = (label: string, key: keyof HostFormData, placeholder?: string, required?: boolean) => (
     <div className="space-y-1">
       <Label className="text-[12px]">{label}</Label>
       <Input aria-label={label} value={form[key]} placeholder={placeholder} required={required} className="h-7 text-[12px]"
+        autoComplete="off" spellCheck={false}
+        onPaste={key === "hostname" ? hostnamePasteHandler(fill) : undefined}
         onChange={e => { const value = e.target.value; edit.onChange(f => ({ ...f, [key]: value })); }} />
     </div>
   );
   return (
     <form onSubmit={edit.onSubmit} className="space-y-3 rounded border border-border bg-muted/30 p-3">
+      <SshCommandField compact disabled={busy} onParsed={fill} />
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        {input("Label", "label", undefined, true)}
+        {input("Label", "label", form.hostname.trim() || undefined)}
         {input("Hostname", "hostname", undefined, true)}
       </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">

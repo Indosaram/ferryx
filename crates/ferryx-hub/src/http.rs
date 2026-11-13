@@ -23,7 +23,6 @@ pub struct HttpState {
 
 pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
     api::mark_started();
-    let tracker = crate::tracker_linear::router().with_state(pool.clone());
     Router::new()
         .route("/api/health", get(api::health))
         .route("/api/ready", get(ready))
@@ -75,7 +74,7 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
         .route("/api/config", get(config))
         .route("/api/logs", get(logs))
         .route("/api/logs/ws", get(logs_ws))
-        .nest("/api/tracker", tracker)
+        .nest("/api/agent", crate::agent_api::router(pool.clone()))
         .fallback(static_or_missing)
         .layer(axum::middleware::from_fn(api::validate_host_and_origin))
         .with_state(HttpState { pool, web_root })

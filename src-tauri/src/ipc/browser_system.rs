@@ -349,6 +349,35 @@ pub async fn cmd_browser_drop_paths<R: Runtime>(
 // Print and Save as PDF
 // ---------------------------------------------------------------------------------------------
 
+/// Opens the OS print dialog for a system-webview tab. On Windows, wry's `print()` only runs
+/// `window.print()` through ExecuteScript, which WebView2 ignored on both the CI runner and a
+/// real Windows 11 desktop (no print UI after Mod+P or the toolbar button), so the tab asks
+/// WebView2 for its print preview directly (the one `window.print()` opens in Edge, with
+/// Save as PDF). Other platforms keep wry's print panel.
+#[cfg(target_os = "windows")]
+fn show_print_ui<R: Runtime>(webview: &tauri::Webview<R>) -> Result<(), IpcError> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2_16, COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER};
+    use windows::core::Interface;
+    webview
+        .with_webview(|platform| {
+            // SAFETY: the tab's live controller and its ICoreWebView2_16, on the UI thread that owns them.
+            let shown = unsafe { platform.controller().CoreWebView2() }
+                .and_then(|core| core.cast::<ICoreWebView2_16>())
+                .and_then(|core| unsafe { core.ShowPrintUI(COREWEBVIEW2_PRINT_DIALOG_KIND_BROWSER) });
+            if let Err(error) = shown {
+                tracing::warn!(%error, "WebView2 could not show its print preview");
+            }
+        })
+        .map_err(|error| IpcError::new(IpcErrorCode::Unsupported, format!("print failed: {error}")))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_print_ui<R: Runtime>(webview: &tauri::Webview<R>) -> Result<(), IpcError> {
+    webview
+        .print()
+        .map_err(|error| IpcError::new(IpcErrorCode::Unsupported, format!("print failed: {error}")))
+}
+
 /// Opens the print dialog for the tab (Cmd/Ctrl+P, toolbar). On the system webview it is the
 /// platform's print panel, which also offers Save as PDF (macOS, Windows, Linux).
 #[tauri::command]
@@ -365,9 +394,7 @@ pub async fn cmd_browser_print<R: Runtime>(
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    webview
-        .print()
-        .map_err(|error| IpcError::new(IpcErrorCode::Unsupported, format!("print failed: {error}")))
+    show_print_ui(&webview)
 }
 
 /// Saves the page as a PDF after a save dialog. Chromium tabs write it directly (the result
@@ -404,9 +431,7 @@ pub async fn cmd_browser_save_pdf<R: Runtime>(
     let webview = app
         .get_webview(&state.webview_label)
         .ok_or_else(|| BrowserError::WebviewNotFound(state.webview_label.clone()))?;
-    webview
-        .print()
-        .map_err(|error| IpcError::new(IpcErrorCode::Unsupported, format!("print failed: {error}")))?;
+    show_print_ui(&webview)?;
     Ok(true)
 }
 
@@ -587,6 +612,12 @@ fn pick_files<R: Runtime>(
 ) -> Vec<String> {
     use ferryx_browser_engine_protocol::FileDialogMode;
     let mut dialog = app.dialog().file();
+    // Windows: an unowned common dialog opens behind the Ferryx window while focus stays in
+    // the engine's child HWND, so the page's file chooser never gets an answer. Own it.
+    #[cfg(target_os = "windows")]
+    if let Some(owner) = file_dialog_owner(app) {
+        dialog = dialog.set_parent(&owner);
+    }
     let extensions = accept_extensions(accept);
     if !extensions.is_empty() {
         let refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
@@ -609,6 +640,17 @@ fn pick_files<R: Runtime>(
         FileDialogMode::OpenFolder => dialog.blocking_pick_folder().and_then(into).into_iter().collect(),
         FileDialogMode::Save => dialog.blocking_save_file().and_then(into).into_iter().collect(),
     }
+}
+
+/// The window a Chromium page's file chooser belongs to: the focused Ferryx window, else main.
+#[cfg(target_os = "windows")]
+fn file_dialog_owner<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
+    let windows = app.webview_windows();
+    windows
+        .values()
+        .find(|window| window.is_focused().unwrap_or(false))
+        .or_else(|| windows.get("main"))
+        .cloned()
 }
 
 // ---------------------------------------------------------------------------------------------

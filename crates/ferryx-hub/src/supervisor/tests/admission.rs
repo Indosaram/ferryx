@@ -1430,7 +1430,7 @@ async fn an_adoption_during_a_legacy_launch_wins_and_the_legacy_drive_sends_noth
 
 /// The legacy paths that reopen an ended lane and send to its pane leave an adopted lane to
 /// its supervisor goal: an owner reply in its Slack thread falls through to normal routing, a
-/// tracker move is refused, the reopen statement itself refuses it, and the legacy goal loop
+/// tracker reopen is refused, the reopen statement itself refuses it, and the legacy goal loop
 /// never sends to its pane. The adopting goal is the one worker.
 #[tokio::test]
 async fn an_adopted_lane_is_not_reopened_or_sent_to_by_the_legacy_paths() {
@@ -1492,30 +1492,14 @@ async fn an_adopted_lane_is_not_reopened_or_sent_to_by_the_legacy_paths() {
     assert!(!reopened);
     assert_eq!(lane_state().await, ended);
 
-    // Moving its tracker issue to started is refused, not a reopen.
-    for sql in [
-        "INSERT INTO tracker_users(id, name, display_name, avatar_color, kind, is_me, created_at)
-         VALUES('u1', 'ada', 'Ada', '#000', 'human', 1, '2020-01-01T00:00:00Z')",
-        "INSERT INTO tracker_teams(id, key, name, icon, color, created_at)
-         VALUES('t1', 'AGT', 'Agents', 'bot', '#fff', '2020-01-01T00:00:00Z')",
-        "INSERT INTO tracker_states(id, team_id, name, type, color)
-         VALUES('s-todo', 't1', 'Todo', 'unstarted', '#fff')",
-        "INSERT INTO tracker_states(id, team_id, name, type, color)
-         VALUES('s-started', 't1', 'In Progress', 'started', '#fff')",
-        "INSERT INTO tracker_issues(id, team_id, number, identifier, title, state_id, priority,
-                sort_order, lane_key, creator_id, created_at, updated_at)
-         VALUES('i1', 't1', 1, 'AGT-1', 'Nightly', 's-todo', 0, 0, 'nightly', 'u1', '2020', '2020')",
-    ] {
-        sqlx::query(sql).execute(&pool).await.unwrap();
-    }
-    let moved = crate::tracker_linear::router()
-        .with_state(pool.clone())
+    // Reopening it through the tracker's lane action is refused, not a reopen.
+    let moved = crate::agent_api::router::<()>(pool.clone())
         .oneshot(
             Request::builder()
-                .method("PATCH")
-                .uri("/issues/i1")
+                .method("POST")
+                .uri("/lanes/nightly/action")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"state_id":"s-started"}"#))
+                .body(Body::from(r#"{"action":"reopen"}"#))
                 .unwrap(),
         )
         .await
@@ -1960,7 +1944,7 @@ async fn an_owner_reply_racing_an_adoption_is_left_to_normal_routing() {
 /// A lane close never removes the worktree an adopted lane hands its supervisor goal: a close
 /// in progress refuses the adoption, a close whose caller checked ownership before the
 /// adoption committed is refused by its own claim, and the tracker's close and cancel moves
-/// and lane actions are refused with `SUPERVISOR_OWNED`. The tree stays registered on disk.
+/// lane actions are refused with `SUPERVISOR_OWNED`. The tree stays registered on disk.
 #[tokio::test]
 async fn an_adopted_lanes_worktree_is_never_removed_by_a_legacy_close() {
     use axum::body::Body;
@@ -2015,53 +1999,16 @@ async fn an_adopted_lanes_worktree_is_never_removed_by_a_legacy_close() {
     assert!(Path::new(&tree).is_dir());
     assert_eq!(tree_state().await, "registered");
 
-    for sql in [
-        "INSERT INTO tracker_users(id, name, display_name, avatar_color, kind, is_me, created_at)
-         VALUES('u1', 'ada', 'Ada', '#000', 'human', 1, '2020-01-01T00:00:00Z')",
-        "INSERT INTO tracker_teams(id, key, name, icon, color, created_at)
-         VALUES('t1', 'AGT', 'Agents', 'bot', '#fff', '2020-01-01T00:00:00Z')",
-        "INSERT INTO tracker_states(id, team_id, name, type, color)
-         VALUES('s-todo', 't1', 'Todo', 'unstarted', '#fff')",
-        "INSERT INTO tracker_states(id, team_id, name, type, color)
-         VALUES('s-done', 't1', 'Done', 'completed', '#fff')",
-        "INSERT INTO tracker_states(id, team_id, name, type, color)
-         VALUES('s-canceled', 't1', 'Canceled', 'canceled', '#fff')",
-        "INSERT INTO tracker_issues(id, team_id, number, identifier, title, state_id, priority,
-                sort_order, lane_key, creator_id, created_at, updated_at)
-         VALUES('i1', 't1', 1, 'AGT-1', 'Nightly', 's-todo', 0, 0, 'nightly', 'u1', '2020', '2020')",
-    ] {
-        sqlx::query(sql).execute(&pool).await.unwrap();
-    }
-    let router = crate::tracker_linear::router().with_state(pool.clone());
+    let router = crate::agent_api::router::<()>(pool.clone());
     let calls = [
-        (
-            "PATCH",
-            "/issues/i1",
-            json!({"state_id": "s-done", "force_note": "done"}),
-        ),
-        ("PATCH", "/issues/i1", json!({"state_id": "s-canceled"})),
-        (
-            "POST",
-            "/issues/i1/lane-action",
-            json!({"action": "close", "force": true}),
-        ),
-        (
-            "POST",
-            "/issues/i1/lane-action",
-            json!({"action": "reopen"}),
-        ),
-        (
-            "POST",
-            "/issues/i1/lane-action",
-            json!({"action": "send", "note": "go on"}),
-        ),
-        (
-            "POST",
-            "/issues/i1/lane-action",
-            json!({"action": "object", "note": "wait"}),
-        ),
+        json!({"action": "close", "force": true}),
+        json!({"action": "close", "force": true, "note": "done"}),
+        json!({"action": "reopen"}),
+        json!({"action": "send", "note": "go on"}),
+        json!({"action": "object", "note": "wait"}),
     ];
-    for (method, uri, body) in calls {
+    for body in calls {
+        let (method, uri) = ("POST", "/lanes/nightly/action");
         let response = router
             .clone()
             .oneshot(
@@ -2089,17 +2036,11 @@ async fn an_adopted_lanes_worktree_is_never_removed_by_a_legacy_close() {
             "{method} {uri} {body}: {text}"
         );
     }
-    let (status, state_id): (String, String) = sqlx::query_as(
-        "SELECT l.status, i.state_id FROM lanes l JOIN tracker_issues i ON i.lane_key = l.key
-         WHERE l.key = 'nightly'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        (status.as_str(), state_id.as_str()),
-        ("verified_done", "s-todo")
-    );
+    let status: String = sqlx::query_scalar("SELECT status FROM lanes WHERE key = 'nightly'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "verified_done");
     assert!(
         Path::new(&tree).is_dir(),
         "the adopted lane's worktree is intact"

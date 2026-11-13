@@ -171,6 +171,35 @@ describe("TabBar", () => {
     expect(onAdd).toHaveBeenCalledOnce();
   });
 
+  it("scrolls the strip so a tab activated off-screen becomes visible", () => {
+    const tabs = [terminalTab("tab-a", "main"), terminalTab("tab-b", "feature"), terminalTab("tab-c", "far")];
+    const rects: Record<string, { left: number; right: number }> = {
+      tablist: { left: 0, right: 200 },
+      main: { left: 0, right: 100 },
+      feature: { left: 100, right: 200 },
+      far: { left: 300, right: 400 },
+    };
+    const rectFor = (left: number, right: number) =>
+      ({ left, right, top: 0, bottom: 30, width: right - left, height: 30, x: left, y: 0, toJSON: () => ({}) }) as DOMRect;
+    const spy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("role") === "tablist") return rectFor(rects.tablist.left, rects.tablist.right);
+      const label = this.textContent ?? "";
+      const key = (["main", "feature", "far"] as const).find((name) => label.includes(name));
+      return key ? rectFor(rects[key].left, rects[key].right) : rectFor(0, 0);
+    });
+    try {
+      const { rerender } = render(
+        <TabBar groupId="group-a" tabs={tabs} activeTabId="tab-a" onActivate={vi.fn()} onClose={vi.fn()} onAdd={vi.fn()} />,
+      );
+      const tablist = screen.getByRole("tablist");
+      expect(tablist.scrollLeft).toBe(0);
+      rerender(<TabBar groupId="group-a" tabs={tabs} activeTabId="tab-c" onActivate={vi.fn()} onClose={vi.fn()} onAdd={vi.fn()} />);
+      expect(tablist.scrollLeft).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("renders the resolved display text and tooltip instead of the raw label", () => {
     render(
       <TabBar

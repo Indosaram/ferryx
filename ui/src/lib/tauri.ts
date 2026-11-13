@@ -1221,6 +1221,11 @@ export async function onNewTerminalTabMenu(handler: () => void): Promise<Unliste
   return listenShortcut<void>("menu_new_terminal_tab", () => handler());
 }
 
+export async function onNewWindowMenu(handler: () => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listenShortcut<void>("menu_new_window", () => handler());
+}
+
 export async function onCloseTabMenu(handler: () => void): Promise<UnlistenFn> {
   if (!isTauri()) return () => undefined;
   return listenShortcut<void>("menu_close_tab", () => handler());
@@ -1751,10 +1756,14 @@ export async function discardWindowSession(label: string): Promise<void> {
   return invokeCommand<void>('cmd_session_discard_window', { label });
 }
 
-/** Opens a new empty desktop window (label `ws-<id>`). */
-export async function openNewWindow(): Promise<void> {
-  if (!isTauri()) return;
-  return invokeCommand<void>('cmd_window_new');
+/**
+ * Opens a new desktop window (label `ws-<id>`) and returns its label. With `cloneFrom`, the new
+ * window boots from a copy of that window's session file, so it starts on the same projects,
+ * workspace, tabs and split layout instead of an empty picker.
+ */
+export async function openNewWindow(cloneFrom?: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<string>('cmd_window_new', { cloneFrom: cloneFrom ?? null });
 }
 
 export const WINDOW_SESSIONS_ORPHANED_EVENT = 'window_sessions_orphaned';

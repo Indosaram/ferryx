@@ -37,6 +37,7 @@ vi.mock("./lib/tauri", async (importOriginal) => ({
       if (native.newTerminalMenuHandler === handler) native.newTerminalMenuHandler = null;
     };
   },
+  onNewWindowMenu: async () => () => undefined,
   onCloseTabMenu: async (handler: () => void) => {
     native.closeMenuHandler = handler;
     return () => {

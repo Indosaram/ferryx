@@ -1,6 +1,6 @@
 # omo-gateway to ferryx hub cutover
 
-The ferryx daemon opens the hub only after `ferryx hub start` (the cutover script sends it after omo is unloaded) or with `FERRYX_HUB=on`. A fresh hub database stays stopped, because the hub reads the same `~/.omon/secrets` Slack tokens as omo and would otherwise open a second Socket Mode connection. Slack, Discord, and voice stay idle until a token or speech key is present. The dashboard listens on `127.0.0.1:9119` and serves `~/.omon/web` plus `/api/health`, `/api/tracker`, cron, approvals, and logs.
+The ferryx daemon opens the hub only after `ferryx hub start` (the cutover script sends it after omo is unloaded) or with `FERRYX_HUB=on`. A fresh hub database stays stopped, because the hub reads the same `~/.omon/secrets` Slack tokens as omo and would otherwise open a second Socket Mode connection. Slack, Discord, and voice stay idle until a token or speech key is present. The dashboard listens on `127.0.0.1:9119` and serves `~/.omon/web` plus `/api/health`, `/api/agent` (read by openlinear), cron, approvals, and logs.
 
 Two Socket Mode connections must not overlap. Unload `ai.omon.gateway` and `ai.omon.gateway-watchdog` before the ferryx hub opens Slack.
 
@@ -33,8 +33,6 @@ A dry-run against the live file prints these rows. The counts grow as the gatewa
 | cron_jobs_enabled | jobs with `enabled = 1` |
 | lanes | lanes |
 | lane_threads | `lane_thread_bindings` |
-| issues | tracker issues |
-| activity | tracker activity |
 | inbox_items | inbox items |
 | proposals | action proposals |
 | bot_profiles | bot profiles |
@@ -52,7 +50,7 @@ A dry-run against the live file prints these rows. The counts grow as the gatewa
 ferryx hub migrate --dry-run
 ```
 
-An import skips tracker rows whose deleted parent would fail a foreign key and prints `table orphans_skipped.<table> N`. The import still finishes. The dry run prints the same `orphans_skipped` rows and the same counts as a first import into an empty hub database, and fails where that import would fail. Against a hub database that already holds an earlier import, the real counts are only the new and changed rows.
+The Linear-style tracker lives in openlinear, so the import copies no `tracker_*` rows. An import skips rows whose deleted parent would fail a foreign key and prints `table orphans_skipped.<table> N`. The import still finishes. The dry run prints the same `orphans_skipped` rows and the same counts as a first import into an empty hub database, and fails where that import would fail. Against a hub database that already holds an earlier import, the real counts are only the new and changed rows.
 
 ## Cutover
 

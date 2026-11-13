@@ -234,6 +234,13 @@ type NativeTerminalClipboardContent =
   | { readonly kind: "image" }
   | { readonly kind: "empty" };
 
+/** Result of `cmd_native_terminal_attach_viewer`. */
+type NativeTerminalViewerReceipt = {
+  readonly sessionId: string;
+  readonly viewer: boolean;
+  readonly attachTuple: PaneAttachTuple | null;
+};
+
 type NativeTerminalIpcCommand =
   | "cmd_native_terminal_attach"
   | "cmd_native_terminal_detach"
@@ -550,10 +557,23 @@ export function dragDropPositionToLogical(
  * pane's. At DPR 1 a 0.5 px offset is a full 50/50 blend of neighbouring
  * pixels, which is exactly what the softness looks like.
  *
- * Edges are snapped, not sizes: `x`, `y`, `x + width` and `y + height` are each
- * rounded and the size is taken as the difference. Rounding the size instead
- * would let a pane creep over its neighbour, whereas snapping edges preserves
- * the 1 px divider gap exactly, because `round(aR + 1) === round(aR) + 1`.
+ * Edges are snapped outward, not to nearest, and never to a size. The macOS
+ * pane renders as a native view placed *below* the full-window `WryWebView`,
+ * and the DOM chain above it is transparent (see the
+ * `[data-native-terminal-presented]` rules in `index.css`). So the reported
+ * rect is a coverage contract rather than a hint: any part of it the native
+ * surface fails to cover stays transparent all the way down to the window
+ * backdrop, which reads as a lighter seam along that pane edge while the
+ * terminal is still loading.
+ *
+ * Rounding to nearest breaks that contract. A leading edge whose fraction is
+ * below .5 rounds inward, leaving up to half a device pixel of the reported box
+ * uncovered - measured at 0.16 px left, 0.50 px top and 0.42 px right on real
+ * split-pane geometry. Flooring the leading edges and ceiling the trailing
+ * edges makes the native rect a superset of the reported box, so none of it can
+ * go uncovered. That grows the surface by at most one device pixel per edge,
+ * and only towards a neighbouring pane or a divider, both of which the webview
+ * paints over it.
  */
 export function snapBoundsToDevicePixels(
   bounds: TerminalBounds,
@@ -561,11 +581,12 @@ export function snapBoundsToDevicePixels(
 ): TerminalBounds {
   if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) return bounds;
 
-  const snapEdge = (value: number) => Math.round(value * scaleFactor) / scaleFactor;
-  const left = Math.max(0, snapEdge(bounds.x));
-  const top = Math.max(0, snapEdge(bounds.y));
-  const right = Math.max(left, snapEdge(bounds.x + bounds.width));
-  const bottom = Math.max(top, snapEdge(bounds.y + bounds.height));
+  const floorEdge = (value: number) => Math.floor(value * scaleFactor) / scaleFactor;
+  const ceilEdge = (value: number) => Math.ceil(value * scaleFactor) / scaleFactor;
+  const left = Math.max(0, floorEdge(bounds.x));
+  const top = Math.max(0, floorEdge(bounds.y));
+  const right = Math.max(left, ceilEdge(bounds.x + bounds.width));
+  const bottom = Math.max(top, ceilEdge(bounds.y + bounds.height));
 
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
@@ -780,7 +801,9 @@ export function NativeTerminalPane({
       suspended,
     });
   }, [covered, paneIdentity, surfaceVisible, suspended, targetSessionId]);
-  const surfaceSessionId = targetSessionId ?? (isExited && !suspended && isMacShortcutPlatform() ? retainedPresentation?.backendSessionId ?? null : null);
+  // The exit/disconnect bar docks outside the native viewport, so the last presented frame is kept
+  // on every platform: no DOM notice sits under the surface for it to occlude.
+  const surfaceSessionId = targetSessionId ?? (isExited && !suspended ? retainedPresentation?.backendSessionId ?? null : null);
   // Exiting stops input, not the presented surface's attachment lifetime.
   // Keep its exact identity even if the exited session drops epoch/generation metadata.
   const bindingKey = targetSessionId
@@ -1492,6 +1515,22 @@ export function NativeTerminalPane({
       const session = sessionRef.current;
       const completedSpawn = !session?.spawnIntent ||
         (session.spawnIntent.ready && !session.spawnIntent.cancelRequested);
+      // A session another window of this process already presents is joined as a per-window
+      // viewer: the pane adopts the live attach tuple verbatim instead of minting a newer attempt,
+      // so the other window keeps its binding and both windows render and drive the same PTY.
+      // This also runs when this webview already holds an older binding (a tab shown again after
+      // the other window took the session while it was hidden), so windows never ping-pong.
+      const viewerReceipt = session?.backendSessionId === targetId && completedSpawn
+        ? await run(invoke<NativeTerminalViewerReceipt>("cmd_native_terminal_attach_viewer", {
+            sessionId: targetId,
+            ...(initialGeometry
+              ? { bounds: initialGeometry.bounds, scaleFactor: initialGeometry.scaleFactor }
+              : {}),
+          }))
+        : null;
+      if (signal?.aborted || attachmentOwnerRef.current !== owner) return false;
+      const viewerTuple = viewerReceipt?.viewer ? viewerReceipt.attachTuple ?? null : null;
+      if (viewerTuple && !registerDurableNativeBinding(viewerTuple)) throw new Error("Stale native binding");
       if (!getDurableNativeBinding(targetId) && session?.backendSessionId === targetId && completedSpawn) {
         const savedTuple = session.attachTuple ?? session.spawnIntent?.attachTuple;
         const currentTuple: PaneAttachTuple = {
@@ -1516,7 +1555,7 @@ export function NativeTerminalPane({
         previousTuple.incarnation !== (session.incarnation ?? null) ||
         previousTuple.bindingKey !== (owner.bindingKey ?? "")
       );
-      if ((force || bindingChanged || identityChanged) && previousTuple && session && completedSpawn) {
+      if (!viewerTuple && (force || bindingChanged || identityChanged) && previousTuple && session && completedSpawn) {
         const attachTuple = { ...previousTuple, incarnation: session.incarnation ?? null,
           daemonEpoch: session.daemonEpoch ?? "", bindingKey: owner.bindingKey ?? "",
           attemptGeneration: previousTuple.attemptGeneration + 1 };
@@ -1544,7 +1583,8 @@ export function NativeTerminalPane({
       // in flight; never start the next same-ID attach until that IPC settles.
       await run(nativeTerminalAttachIpcSettled(targetId));
       if (signal?.aborted || attachmentOwnerRef.current !== owner) return false;
-      const attachIpc = invoke("cmd_native_terminal_attach", {
+      // A viewer already presents through the live attachment; attaching again would fence it.
+      const attachIpc = viewerTuple ? Promise.resolve() : invoke("cmd_native_terminal_attach", {
         sessionId: targetId,
         attachTuple,
         remainingMs: Math.floor(nativeBindingRemainingMs(targetId, 4_000)),
