@@ -20,6 +20,10 @@ pub struct PairedSessionRetryResult {
     pub stale_tuple: bool,
     pub blocked: bool,
     pub affirmative_exit: bool,
+    /// The owner's own block reason, so the pane can show the real failure instead of a
+    /// generic identity conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_code: Option<String>,
     pub actor_identity: Option<PairedSessionActorIdentity>,
 }
 
@@ -46,8 +50,8 @@ pub async fn cmd_retry_paired_session<R: tauri::Runtime>(
     let res = daemon.retry_paired_session(backend_session_id.clone(), daemon_epoch.clone(), incarnation.clone()).await?;
     let retry_res = match res {
         DaemonResponse::RetryPairedSessionResult {
-            admitted, owner_unavailable, stale_tuple, blocked, affirmative_exit,
-        } => PairedSessionRetryResult { admitted, owner_unavailable, stale_tuple, blocked, affirmative_exit, actor_identity: None },
+            admitted, owner_unavailable, stale_tuple, blocked, affirmative_exit, blocked_code,
+        } => PairedSessionRetryResult { admitted, owner_unavailable, stale_tuple, blocked, affirmative_exit, blocked_code, actor_identity: None },
         other => return Err(crate::ipc::IpcError::internal(format!("Unexpected daemon response: {other:?}"))),
     };
 

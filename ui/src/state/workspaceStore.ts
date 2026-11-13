@@ -89,6 +89,24 @@ export type LocalRecoveryAdmissionResult =
       "PAIRED_HOST_INVALID_RESPONSE" | "PAIRED_HOST_MIGRATION_PENDING" | "UNSUPPORTED_PROTOCOL" }
   | { kind: "exited" }
   | { kind: "cancelled" };
+/** The block reasons `retry_owned` can report from a paired owner, verbatim from the daemon. */
+const PAIRED_BLOCK_REASONS = [
+  "SESSION_EXPIRED", "CONTROL_CONFLICT", "STALE_GENERATION", "PAIRED_HOST_STALE_GENERATION",
+  "PAIRED_HOST_UNAUTHORIZED", "UNAUTHORIZED", "PERMISSION_DENIED", "PAIRED_HOST_WRONG_MACHINE",
+  "PAIRED_HOST_INVALID_RESPONSE", "PAIRED_HOST_MIGRATION_PENDING", "UNSUPPORTED_PROTOCOL",
+] as const;
+type LocalRecoveryBlockReason = Extract<LocalRecoveryAdmissionResult, { kind: "blocked" }>["reason"];
+/**
+ * Map an owner's raw block code onto a block reason. A code this build does not know is still a
+ * real failure, so it keeps its own name rather than collapsing into `identity_conflict`; the
+ * pane shows whatever it is given.
+ */
+export function localRecoveryBlockReason(code: string | null | undefined): LocalRecoveryBlockReason {
+  if (!code) return "identity_conflict";
+  return (PAIRED_BLOCK_REASONS as readonly string[]).includes(code)
+    ? (code as LocalRecoveryBlockReason)
+    : "identity_conflict";
+}
 type LocalRecoveryOwner = { workspaceId: string; sessionId: string; captured: TerminalSession;
   scheduler: RecoveryScheduler; admitting: boolean; requesters: Set<(result: LocalRecoveryAdmissionResult) => void> };
 const localRecoveryOwners = new Map<string, LocalRecoveryOwner>();

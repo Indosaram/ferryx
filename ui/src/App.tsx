@@ -189,7 +189,7 @@ import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
 import { reconnectLocalSession, replaceExitedShellSession, restartPaneSession } from "./lib/shellReplacement";
 import { initialGridFields, measureInitialGeometry } from "./lib/initialPtyGeometry";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
-import { workspaceReducer, requestLocalRecoveryAdmission, type LocalRecoveryAdmissionResult } from "./state/workspaceStore";
+import { workspaceReducer, requestLocalRecoveryAdmission, localRecoveryBlockReason, type LocalRecoveryAdmissionResult } from "./state/workspaceStore";
 import type { NotificationTarget, PersistedWorkspaceSession, SystemPermissionsStatus } from "./lib/types";
 import { staticTabLabel } from "./lib/tabTitle";
 import { subscribeNotificationActivations } from "./lib/notificationActivation";
@@ -2127,7 +2127,12 @@ function WorkspaceApp({
         }).then((outcome) => {
           if (!outcome || !live || settled || !checkCurrent()) return;
           if (outcome.blocked || outcome.staleTuple) {
-            settle({ kind: "blocked", reason: "identity_conflict" });
+            // A block carries the owner's own reason (a revoked pairing, a control conflict, a
+            // protocol rejection); a stale tuple is a genuine identity mismatch. Naming the real
+            // cause is the difference between an actionable message and "identity conflict" for
+            // every distinct failure.
+            const reason = localRecoveryBlockReason(outcome.blockedCode);
+            settle({ kind: "blocked", reason });
           } else if (outcome.affirmativeExit) {
             // retry_owned matched the exact (backend, epoch, incarnation) tuple before reporting
             // exit: the remote process is gone. Recover the pane on the same host.
