@@ -443,6 +443,22 @@ export function migrateLegacyAgentType(agentType: string | null | undefined): st
   return agentType;
 }
 
+/// Restore-time correction of a record persisted before the omo/maho split settled.
+///
+/// A pane running the native `mhc` binary used to be recorded as `omo`. The record itself carries
+/// the witness that settles it: `mhc` is maho's launcher, and omo never had one. Only records that
+/// already carry that witness are migrated; a record with no launcher keeps its identity and is
+/// corrected by the daemon's reconciliation followed by the reducer, not by disk. Idempotent.
+export function migrateOmoLaunchedByMhc(
+  agentType: string | null | undefined,
+  providerSession: { launcher?: string | null } | null | undefined,
+): string | null | undefined {
+  if (agentType == null) return agentType;
+  if (agentType.trim().toLowerCase() !== "omo") return agentType;
+  if (providerSession?.launcher !== "mhc") return agentType;
+  return "maho";
+}
+
 export type LiveSessionInventoryItem =
   | string
   | {
@@ -772,11 +788,15 @@ export function deserializeWorkspaceState(
     const agentSessionId = sess.agentSessionId ?? null;
     const legacyProviderKey = agentType ? providerSessionKeyForAgent(agentType) : null;
     const normalizedLegacyId = agentSessionId ? normalizeSessionId(agentSessionId) : null;
-    const providerSession = sess.providerSession ?? (
+    const restoredProviderSession = sess.providerSession ?? (
       legacyProviderKey && normalizedLegacyId
         ? { key: legacyProviderKey, id: normalizedLegacyId }
         : null
     );
+    // Records written before the split settled say `omo` while their own launcher witness says the
+    // native `mhc` owned the conversation; migrate on the witness, never on the label alone.
+    const migratedAgentType =
+      migrateOmoLaunchedByMhc(agentType, restoredProviderSession) ?? agentType;
     restoreSessionRecentScrollback(localSessionId, sess.recentScrollback);
     // A cwd persisted before the value was validated can be probe output rather than a path
     // (`cwd|rtd info error: …`); such a value must never become a pane's cwd again.
@@ -795,9 +815,9 @@ export function deserializeWorkspaceState(
       lastOutputSequence,
       incarnation: isPreBootLocal ? null : sess.incarnation ?? null,
       attachTuple: sess.attachTuple,
-      agentType,
+      agentType: migratedAgentType,
       agentSessionId,
-      providerSession,
+      providerSession: restoredProviderSession,
       reconnectLifecycle: isBlockedConflict ? "failed" : "idle",
       reconnectError: isBlockedConflict
         ? {

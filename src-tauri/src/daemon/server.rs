@@ -7,8 +7,11 @@ mod control_server;
 #[cfg(any(unix, test))]
 use super::handover::HandoverManager;
 use super::session_service::*;
-use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
-use crate::daemon::protocol::AgentProviderSessionKey;
+use crate::agent_detect::OwnerProof;
+use crate::daemon::agent_state::{
+    AgentState, AgentStateHub, AgentStateSubscription, IdentityCorrection,
+};
+use crate::daemon::protocol::{store_semantics, AgentProviderSessionKey, StoreSemantics};
 use crate::daemon::protocol::{
     AgentProviderSession, AgentStateReport, DaemonRemoteEvent, DaemonRemoteStatus, DaemonRequest,
     DaemonResponse, DaemonStreamMessage, HistorySegmentWire,
@@ -2078,6 +2081,98 @@ pub(crate) fn binding_discovery(
 ) -> Option<String> {
     let launch_only = source == crate::ipc::agents::DiscoverySource::LaunchArgv;
     (!(launch_only && agent_has_no_process_bound_session(agent))).then_some(found)
+}
+
+/// What one attempt to apply a corrected identity achieved.
+enum Correction {
+    Applied,
+    /// The retained identity moved under the compare-and-swap; the caller re-reads.
+    Stale,
+    /// Admission rejected the correction outright.
+    Refused,
+}
+
+/// What a wire report resolves to once this daemon's own process walk is applied.
+pub(crate) struct EffectiveReport {
+    pub agent: String,
+    pub provider: Option<AgentProviderSession>,
+    /// This daemon proved an `mhc` owner for this pane, so `launcher = Mhc` is its own finding
+    /// rather than a witness carried in from elsewhere.
+    pub launcher_proven: bool,
+}
+
+/// Resolve a report's agent against the owner this daemon proved for the pane.
+///
+/// `mhc` is both the pre-split `omo` launcher and today's `maho` binary, so a pane whose agent
+/// still calls itself `omo` is relabelled `maho` when the process walk proves `mhc` owns it - that
+/// is the whole point of the split, and it is what makes a reloaded pane stop reporting the old
+/// name. The inverse direction clears a launcher this daemon cannot prove, so a replayed or
+/// hand-written `maho`+`mhc` report cannot claim omo's store semantics on the strength of the field
+/// alone; admission re-derives it from the pane's own process when the pane really is `mhc`-owned.
+pub(crate) fn effective_report(
+    reported_agent: &str,
+    provider: Option<AgentProviderSession>,
+    owner: OwnerProof,
+) -> EffectiveReport {
+    let agent = reported_agent.trim().to_ascii_lowercase();
+    let owns = matches!(owner, OwnerProof::Mhc);
+    match agent.as_str() {
+        "omo" if owns => EffectiveReport {
+            agent: "maho".into(),
+            provider: provider.map(with_mhc_launcher),
+            launcher_proven: true,
+        },
+        "maho" if owns => EffectiveReport {
+            agent,
+            provider: provider.map(with_mhc_launcher),
+            launcher_proven: true,
+        },
+        "maho" => EffectiveReport {
+            agent,
+            provider: provider.map(without_launcher),
+            launcher_proven: false,
+        },
+        _ => EffectiveReport {
+            agent,
+            provider,
+            launcher_proven: false,
+        },
+    }
+}
+
+fn with_mhc_launcher(mut provider: AgentProviderSession) -> AgentProviderSession {
+    provider.launcher = Some(crate::daemon::protocol::AgentLauncher::Mhc);
+    provider
+}
+
+fn without_launcher(mut provider: AgentProviderSession) -> AgentProviderSession {
+    provider.launcher = None;
+    provider
+}
+
+/// The provider the ingress hands to admission, given its own verdict.
+///
+/// Split out from `ingress_identity_for_admission` so the pass-through rule is provable without a
+/// daemon: a machine pane has an owner that can still prove a report from its own process walk, so
+/// a `Refused` there must not destroy the provider. Every verdict the ingress can already answer
+/// keeps its answer, so no other agent's route changes - which is what makes the fix one agent's
+/// repair rather than six agents' regression.
+fn ingress_provider_for_admission(
+    provider: &AgentProviderSession,
+    decision: Result<IngressAdmissionIdentity, crate::ipc::error::IpcError>,
+    machine_owned: bool,
+) -> Option<AgentProviderSession> {
+    match decision {
+        Ok(IngressAdmissionIdentity::WithoutPath) => Some(AgentProviderSession {
+            launcher: provider.launcher,
+            key: provider.key,
+            id: provider.id.clone(),
+            transcript_path: None,
+        }),
+        Ok(IngressAdmissionIdentity::AsReported) => Some(provider.clone()),
+        Ok(IngressAdmissionIdentity::Refused) | Err(_) if machine_owned => Some(provider.clone()),
+        Ok(IngressAdmissionIdentity::Refused) | Err(_) => None,
+    }
 }
 
 /// The admission decision for one report's provider claim.
@@ -4665,26 +4760,46 @@ impl DaemonServer {
             .and_then(|pty| pty.pid())
     }
 
-    /// Is `claimed` the OMO store `provider_id` resolves to under this host's HOME?
+    /// Is `claimed` the record `provider_id` has in the stores `agent` may be read from?
     ///
     /// Both sides are canonicalized and the claim must be a regular file, so a symlink or a
-    /// directory cannot pass by spelling alone.
-    fn ingress_path_is_own_store(provider_id: &str, claimed: &str) -> bool {
+    /// directory cannot pass by spelling alone. The roots come from `registry::readable_store_markers`
+    /// - the same table `resolve_agent_resume_cwd` searches - so ingress and resume can never
+    /// disagree about where a session may live. Only the per-agent session directories count: the
+    /// legacy flat `~/.omo/sessions` root is a search root the builder knows, but no
+    /// `transcript_path_for_session` layout produces a path under it, so a claim there stays
+    /// refused exactly as the pre-split daemon refused it.
+    fn ingress_path_is_own_store(provider_id: &str, claimed: &str, agent: &str) -> bool {
         let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
             return false;
         };
-        let Some(expected) =
-            crate::agent_transcript::transcript_path_for_session(Path::new(&home), provider_id)
-        else {
+        Self::ingress_path_is_own_store_in(Path::new(&home), provider_id, claimed, agent)
+    }
+
+    /// `ingress_path_is_own_store` against an explicit home: the injection seam for tests, so they
+    /// never have to move the process-wide `HOME` out from under a concurrent test.
+    fn ingress_path_is_own_store_in(
+        home: &Path,
+        provider_id: &str,
+        claimed: &str,
+        agent: &str,
+    ) -> bool {
+        let Ok(claimed_path) = std::fs::canonicalize(Path::new(claimed)) else {
             return false;
         };
-        let (Ok(claimed_path), Ok(expected_path)) = (
-            std::fs::canonicalize(Path::new(claimed)),
-            std::fs::canonicalize(&expected),
-        ) else {
+        if !claimed_path.is_file() {
             return false;
-        };
-        claimed_path.is_file() && claimed_path == expected_path
+        }
+        crate::agent_detect::registry::readable_store_markers(agent)
+            .iter()
+            .filter(|marker| marker.ends_with("agent/sessions/"))
+            .filter_map(|marker| {
+                crate::agent_transcript::transcript_path_in(
+                    &home.join(marker.trim_matches('/')),
+                    provider_id,
+                )
+            })
+            .any(|expected| std::fs::canonicalize(&expected).is_ok_and(|path| path == claimed_path))
     }
 
     /// The identity admission must see for one report, or `None` when none may be admitted.
@@ -4697,6 +4812,7 @@ impl DaemonServer {
         session_id: &str,
         agent: Option<&str>,
         reported: Option<&AgentProviderSession>,
+        machine_owned: bool,
     ) -> Option<AgentProviderSession> {
         let provider = reported?;
         let Some(agent) = agent else {
@@ -4712,6 +4828,7 @@ impl DaemonServer {
         let agent = agent.to_string();
         let id = provider.id.clone();
         let claimed = provider.transcript_path.clone().unwrap_or_default();
+        let launcher = provider.launcher;
         let store_proof_only = provider_has_no_process_bound_session(&agent, provider);
         let decision = crate::ipc::run_blocking(move || {
             let discovered = server
@@ -4724,9 +4841,8 @@ impl DaemonServer {
                 store_proof_only.then(|| id.trim().to_string())
             });
             let path_is_own_store = store_id.as_deref().is_some_and(|found| {
-                if agent == "omo" {
-                    // omo keeps its own resolver, which also searches the legacy flat store.
-                    Self::ingress_path_is_own_store(found, &claimed)
+                if store_semantics(&agent, launcher) == StoreSemantics::OmoCompatible {
+                    Self::ingress_path_is_own_store(found, &claimed, &agent)
                 } else {
                     crate::ipc::file_link::home_dir().is_some_and(|home| {
                         ingress_path_is_agent_store(
@@ -4750,15 +4866,125 @@ impl DaemonServer {
             ))
         })
         .await;
-        match decision {
-            Ok(IngressAdmissionIdentity::WithoutPath) => Some(AgentProviderSession {
-                launcher: provider.launcher,
-                key: provider.key,
-                id: provider.id.clone(),
-                transcript_path: None,
-            }),
-            Ok(IngressAdmissionIdentity::AsReported) => Some(provider.clone()),
-            Ok(IngressAdmissionIdentity::Refused) | Err(_) => None,
+        ingress_provider_for_admission(provider, decision, machine_owned)
+    }
+    /// Corrects a retained identity that the pane's own process contradicts, once per reload.
+    ///
+    /// Nothing re-reports when a pane is reloaded: attach replays the retained state and discovery
+    /// deliberately leaves an agent-reported provider alone. So a pane that reported `omo` before
+    /// the binary split keeps that name forever, even after its process became `mhc`. This walks the
+    /// process table, rebuilds the identity the pane must carry, and applies it through the hub's
+    /// compare-and-swap so a report that landed during the walk is never overwritten.
+    ///
+    /// Returns whether the retained identity changed. Never invents an identity: with no proof, or a
+    /// pane whose agent is not the `omo`/`maho` pair this split renamed, it changes nothing.
+    async fn reconcile_retained_identity(self: &Arc<Self>, session_id: &str) -> bool {
+        // A compare-and-swap failure means the retained identity moved between the read and the
+        // write, so the next attempt recomputes against the value that replaced it. Three attempts
+        // cover every mover (protocol publication, discovery, removal); a source that genuinely
+        // flaps is bounded to one attempt per call rather than being allowed to spin here.
+        for _ in 0..3 {
+            let Some(previous) = self.agent_states.current(session_id) else {
+                return false;
+            };
+            let Some(reported_agent) = previous.agent.clone() else {
+                return false;
+            };
+            if reported_agent != "omo" && reported_agent != "maho" {
+                return false;
+            }
+            let Some(pid) = self.ingress_pty_pid(session_id) else {
+                return false;
+            };
+            let owner = match crate::ipc::run_blocking(move || {
+                Ok(crate::ipc::agents::prove_pane_owner(pid))
+            })
+            .await
+            {
+                Ok(owner) => owner,
+                Err(_) => return false,
+            };
+            // The walk reads a live process table, so the pane may have been replaced while it ran;
+            // a proof taken against a dead pid says nothing about the pane that exists now.
+            if self.ingress_pty_pid(session_id) != Some(pid) {
+                return false;
+            }
+            let local = effective_report(&reported_agent, previous.provider_session.clone(), owner);
+            let unchanged = local.agent == reported_agent
+                && local.provider == previous.provider_session;
+            if unchanged {
+                return false;
+            }
+            match self
+                .admit_corrected_identity(session_id, &previous, local)
+                .await
+            {
+                Correction::Applied => return true,
+                Correction::Stale => continue,
+                Correction::Refused => return false,
+            }
+        }
+        false
+    }
+
+    /// Feeds one corrected identity back through admission and applies the owner's answer.
+    ///
+    /// A machine pane must be re-admitted rather than published to directly, because its owner
+    /// wrote the session and only it can rewrite the identity on its own side. The replacement value
+    /// is built from what that call resolved, never from the walk that proposed it - a second walk
+    /// may legitimately have cleared the launcher the first one proved.
+    async fn admit_corrected_identity(
+        self: &Arc<Self>,
+        session_id: &str,
+        previous: &AgentState,
+        local: EffectiveReport,
+    ) -> Correction {
+        let expected_agent = previous.agent.clone();
+        let report = (
+            session_id.to_string(),
+            previous.state.clone(),
+            Some(local.agent.clone()),
+            local.provider.clone(),
+            previous.detail.clone(),
+        );
+        // The pane's own epoch, not a placeholder: an epoch this daemon does not own would make the
+        // owner read the session as `Expired` and silently drop the correction.
+        let Some((outcome, resolved)) = self
+            .resolve_agent_state_report(
+                &self.session_service,
+                crate::scoped_contracts::Epoch(self.session_service.epoch),
+                report,
+                previous.origin,
+            )
+            .await
+        else {
+            return Correction::Refused;
+        };
+        let correction = match outcome {
+            // A machine pane: its owner wrote the session, so only its answer may be published.
+            IngressOutcome::Admitted => IdentityCorrection {
+                expected_agent,
+                expected_provider: previous.provider_session.clone(),
+                agent: resolved.agent.unwrap_or_default(),
+                provider: resolved.provider_session,
+            },
+            // The pane is local after all, and this daemon's own walk is the whole authority here:
+            // admission found no owner to ask, so its output is only a re-run of the same rules.
+            IngressOutcome::Local => IdentityCorrection {
+                expected_agent,
+                expected_provider: previous.provider_session.clone(),
+                agent: local.agent,
+                provider: local.provider,
+            },
+            IngressOutcome::Refused => return Correction::Refused,
+        };
+        if correction.agent.is_empty() {
+            return Correction::Refused;
+        }
+        if self.agent_states.correct_identity(session_id, correction) {
+            Correction::Applied
+        } else {
+            Correction::Stale
         }
     }
 
@@ -4797,11 +5023,47 @@ impl DaemonServer {
         origin: crate::daemon::protocol::AgentStateOrigin,
     ) -> Option<(IngressOutcome, AgentState)> {
         let (session_id, state, agent, reported, detail) = report;
+        // Ownership is decided before the ingress runs: the ingress must know whether this pane is
+        // machine-owned to choose its answer, and it cannot ask without recursing into this call.
+        let machine = match sessions.machine_detail_routed(&session_id, epoch).await {
+            Ok(crate::remote::machine_protocol::SessionDetail::Running { session }) => Some(session),
+            // An exited or expired session, or an unreachable owner, publishes nothing.
+            Ok(_) => return None,
+            Err(error) if error == "SESSION_NOT_FOUND" => None,
+            Err(error) => {
+                tracing::debug!(%error, "Machine agent owner unavailable");
+                return None;
+            }
+        };
+        // The pane's own process decides which program it runs. This runs before admission because
+        // admission's store rules read the resolved name, and after the machine check because a
+        // machine pane has no local PTY to walk.
+        let owner = match (machine.is_none(), self.ingress_pty_pid(&session_id)) {
+            (true, Some(pid)) => crate::ipc::run_blocking(move || {
+                Ok(crate::ipc::agents::prove_pane_owner(pid))
+            })
+            .await
+            .unwrap_or(OwnerProof::None),
+            _ => OwnerProof::None,
+        };
+        let resolved = agent.as_deref().map(|reported_agent| {
+            effective_report(reported_agent, reported.clone(), owner)
+        });
+        let (agent, reported) = match resolved {
+            Some(resolved) => (Some(resolved.agent), resolved.provider),
+            // No agent reported: nothing to resolve, and an empty name must never be published.
+            None => (None, reported),
+        };
         let admitted = self
-            .ingress_identity_for_admission(&session_id, agent.as_deref(), reported.as_ref())
+            .ingress_identity_for_admission(
+                &session_id,
+                agent.as_deref(),
+                reported.as_ref(),
+                machine.is_some(),
+            )
             .await;
-        let outcome = match sessions.machine_detail_routed(&session_id, epoch).await {
-            Ok(crate::remote::machine_protocol::SessionDetail::Running { session }) => {
+        let outcome = match machine {
+            Some(session) => {
                 let hint = AgentStateReport {
                     session_id: session_id.clone(),
                     state: state.clone(),
@@ -4819,13 +5081,7 @@ impl DaemonServer {
                     }
                 }
             }
-            // An exited or expired session, or an unreachable owner, publishes nothing.
-            Ok(_) => return None,
-            Err(error) if error == "SESSION_NOT_FOUND" => IngressOutcome::Local,
-            Err(error) => {
-                tracing::debug!(%error, "Machine agent owner unavailable");
-                return None;
-            }
+            None => IngressOutcome::Local,
         };
         Some((
             outcome,
@@ -4954,6 +5210,24 @@ impl DaemonServer {
             self.agent_states.current(session_id).as_ref(),
             probe.baseline.as_ref(),
         ) {
+            // A held identity is normally left alone, but a pane whose retained label contradicts
+            // its own process is exactly the case this probe exists for: without a correction here
+            // an idle `mhc` pane keeps the name it reported before the reload and never converges.
+            // The correction is owner-proven and compare-and-swapped, so it cannot overwrite a
+            // newer report. This tick runs on the reactor thread that dispatches it, so the walk
+            // goes out as its own task - and only for the pair the split renamed, since no other
+            // agent has an owner-derived identity to converge to.
+            let retained_is_pair = self
+                .agent_states
+                .current(session_id)
+                .is_some_and(|state| matches!(state.agent.as_deref(), Some("omo" | "maho")));
+            if retained_is_pair {
+                let server = Arc::clone(self);
+                let reconcile_session = session_id.to_string();
+                tokio::spawn(async move {
+                    server.reconcile_retained_identity(&reconcile_session).await;
+                });
+            }
             probe.finished = true;
             return;
         }
@@ -6615,7 +6889,7 @@ impl DaemonServer {
     }
 
     pub async fn handle_client_with_origin<S>(
-        self: Arc<Self>,
+        self: &Arc<Self>,
         stream: S,
         origin: super::supervisor_peer::PeerOrigin,
     ) where
@@ -7605,6 +7879,18 @@ impl DaemonServer {
                     session_id,
                     after_sequence,
                 }) => {
+                    // Correct a retained identity the pane's process contradicts before the
+                    // subscriber's snapshot is taken, so a reloaded `mhc` pane is labelled correctly
+                    // on its first event instead of after the probe converges. Only the `omo`/`maho`
+                    // pair is ever corrected, and the CAS makes a no-op of a correct identity. The
+                    // subscription captures its snapshot at subscribe time, so this must finish
+                    // first - it is awaited only when there is something to reconcile.
+                    let needs_reconcile = self.agent_states.current(&session_id).is_some_and(|state| {
+                        matches!(state.agent.as_deref(), Some("omo" | "maho"))
+                    });
+                    if needs_reconcile {
+                        self.reconcile_retained_identity(&session_id).await;
+                    }
                     let agent_subscription = self.agent_states.subscribe(&session_id);
                     if let Err(error) = self.validate_session_ssh_target(&session_id).await {
                         daemon_error(error.to_string())
@@ -7662,6 +7948,18 @@ impl DaemonServer {
                                 resp_json.push('\n');
                                 let _ = write_half.write_all(resp_json.as_bytes()).await;
                                 let _ = write_half.flush().await;
+
+                                // The attach answer above carries whatever identity the hub held a
+                                // moment ago; a report can land between that read and this point. This
+                                // second pass is a no-op when the first one already won, and the pump
+                                // blocks for the life of the stream, so it runs on its own task.
+                                let reconcile = Arc::clone(self);
+                                let reconcile_id = session_id.clone();
+                                tokio::spawn(async move {
+                                    reconcile
+                                        .reconcile_retained_identity(&reconcile_id)
+                                        .await;
+                                });
 
                                 self.pump_session_stream(
                                     SequencedStream { session_id, rx: attachment.receiver, hub },
@@ -11800,7 +12098,13 @@ mod tests {
                 }),
             )
             .await;
-        assert!(matches!(result, Err(SpawnError::Other(_))));
+        // The transcript path is self-certifying only if something else vouches for it, so the
+        // refusal now happens at store containment rather than later at the workspace jail. Both
+        // layers refuse; neither may create a session, which is the property this test owns.
+        assert!(
+            result.is_err(),
+            "a transcript outside every admitted store root must not spawn"
+        );
         assert!(server.terminal_service().list_sessions().is_empty());
     }
 
@@ -13457,6 +13761,82 @@ mod tests {
         }
     }
 
+    /// A machine pane's refusal must not destroy the provider, and must not change anyone else's
+    /// answer.
+    ///
+    /// Today `claude`/`codex`/`kimi`/`copilot`/`gjc`/`pi` reach the owner pathless: the ingress
+    /// verifies the path and answers `WithoutPath`. Only the arm where the ingress can positively
+    /// contradict a report (`Refused`) changes on a machine pane, because an owner still walks
+    /// that pane's process and may prove what this daemon could not. If the pass-through widened
+    /// to the other two verdicts it would strip the path from six agents that are admitted fine
+    /// today; if it were absent entirely, the `mhc` pane this fix exists for would keep losing its
+    /// provider. Both directions are pinned here.
+    #[test]
+    fn a_machine_refusal_is_passed_through_and_nothing_else_changes() {
+        let provider = AgentProviderSession {
+            launcher: Some(crate::daemon::protocol::AgentLauncher::Mhc),
+            key: AgentProviderSessionKey::SessionId,
+            id: "abc".into(),
+            transcript_path: Some("/tmp/claimed/abc.jsonl".into()),
+        };
+        // Refused on a machine pane: the provider survives with its path intact, so the owner can
+        // derive the identity and re-admit it pathless itself.
+        let passed = ingress_provider_for_admission(
+            &provider,
+            Ok(IngressAdmissionIdentity::Refused),
+            true,
+        )
+        .expect("a refused machine report is not destroyed");
+        assert_eq!(passed.transcript_path, provider.transcript_path);
+        assert_eq!(
+            passed.launcher,
+            Some(crate::daemon::protocol::AgentLauncher::Mhc)
+        );
+        // Refused on a local pane: unchanged - nothing else can prove it, so it stays refused.
+        assert!(ingress_provider_for_admission(
+            &provider,
+            Ok(IngressAdmissionIdentity::Refused),
+            false
+        )
+        .is_none());
+        // An ingress error is the same distinction: a machine owner may still prove it.
+        assert!(
+            ingress_provider_for_admission(
+                &provider,
+                Err(crate::ipc::error::IpcError::internal("boom")),
+                true
+            )
+            .is_some()
+        );
+        assert!(
+            ingress_provider_for_admission(
+                &provider,
+                Err(crate::ipc::error::IpcError::internal("boom")),
+                false
+            )
+            .is_none()
+        );
+        // The two answers the ingress already gives keep their exact shape on both pane kinds, so
+        // no agent admitted today is routed differently by this change.
+        for machine_owned in [true, false] {
+            let stripped = ingress_provider_for_admission(
+                &provider,
+                Ok(IngressAdmissionIdentity::WithoutPath),
+                machine_owned,
+            )
+            .expect("a verified path is still stripped, never refused");
+            assert!(stripped.transcript_path.is_none());
+            assert_eq!(stripped.id, provider.id);
+            let reported = ingress_provider_for_admission(
+                &provider,
+                Ok(IngressAdmissionIdentity::AsReported),
+                machine_owned,
+            )
+            .expect("an unjudged report is still admitted as reported");
+            assert_eq!(reported.transcript_path, provider.transcript_path);
+        }
+    }
+
     #[test]
     fn ingress_drops_a_verified_path_for_every_machine_published_family() {
         let id = "01a112e9-02b1-7857-b11d-967060362583";
@@ -13617,6 +13997,70 @@ mod tests {
             &crush_db,
             &[(CanonicalProvider::Crush, home.join(".local/share/crush"))]
         ));
+    }
+
+    /// The ingress checker's own union: both pre-split roots prove the same id for `maho`, a root
+    /// it may not read proves nothing, and neither spelling reads the other's own root.
+    #[cfg(unix)]
+    #[test]
+    fn ingress_own_store_proves_the_pre_split_roots_for_maho() {
+        let home = tempfile::tempdir().unwrap();
+        let id = "01a16281-1b66-764d-87a3-4ea9321c5bd8";
+        let session = |root: &str| {
+            let path = home
+                .path()
+                .join(root)
+                .join("encoded-project")
+                .join(format!("2026-11-12T10-00-00-000Z_{id}.jsonl"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"{}\n").unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let store = |agent: &str, claimed: &str| {
+            DaemonServer::ingress_path_is_own_store_in(home.path(), id, claimed, agent)
+        };
+        let pre_split = session(".omo/agent/sessions");
+        let own = session(".maho/agent/sessions");
+        let elsewhere = session(".claude/projects");
+
+        assert!(store("maho", &pre_split), "omo's pre-split root");
+        assert!(store("maho", &own), "maho's own root");
+        assert!(!store("maho", &elsewhere), "a foreign root");
+        assert!(store("omo", &pre_split));
+        assert!(!store("omo", &own), "omo does not read maho's root");
+
+        // The flat root is only searched when `agent/sessions` *is* it: on a real install
+        // `~/.omo/agent/sessions` symlinks to `~/.omo/sessions` (measured 2026-11-12), so the two
+        // spellings are one store and a claim under either names the same file. Modelled here with
+        // a real symlink, because a fixture that made them two unrelated directories would be
+        // asserting a layout no install has.
+        let flat_home = tempfile::tempdir().unwrap();
+        let flat = flat_home.path().join(".omo");
+        std::fs::create_dir_all(flat.join("sessions/encoded-project")).unwrap();
+        let flat_file = flat
+            .join("sessions/encoded-project")
+            .join(format!("2026-11-12T10-00-00-000Z_{id}.jsonl"));
+        std::fs::write(&flat_file, b"{}\n").unwrap();
+        assert!(
+            !DaemonServer::ingress_path_is_own_store_in(
+                flat_home.path(),
+                id,
+                &flat_file.to_string_lossy(),
+                "maho"
+            ),
+            "with no `agent/sessions` link the flat store is not searched"
+        );
+        std::fs::create_dir_all(flat.join("agent")).unwrap();
+        std::os::unix::fs::symlink(flat.join("sessions"), flat.join("agent/sessions")).unwrap();
+        assert!(
+            DaemonServer::ingress_path_is_own_store_in(
+                flat_home.path(),
+                id,
+                &flat_file.to_string_lossy(),
+                "maho"
+            ),
+            "the linked spelling names the same file"
+        );
     }
 
     #[cfg(unix)]
@@ -14979,5 +15423,317 @@ mod instance_lock_deadline_tests {
             other => panic!("expected RemoteStatus, got: {other:?}"),
         }
         pump_task.abort();
+    }
+}
+
+#[cfg(test)]
+mod identity_admission_tests {
+    use super::*;
+    use crate::daemon::protocol::AgentLauncher;
+
+    fn report_provider(launcher: Option<AgentLauncher>) -> AgentProviderSession {
+        AgentProviderSession {
+            launcher,
+            key: AgentProviderSessionKey::SessionId,
+            id: "0c7ba39e-4c8f-4a53-9d32-5a0f1e2d3c4b".into(),
+            transcript_path: Some("/home/u/.omo/agent/sessions/p/0c7ba39e.jsonl".into()),
+        }
+    }
+
+    #[test]
+    fn an_omo_report_from_an_mhc_owned_pane_becomes_maho() {
+        // The bug: a reloaded pane's stored report still says `omo`, and `mhc` is what owns it.
+        let resolved = effective_report("omo", Some(report_provider(None)), OwnerProof::Mhc);
+        assert_eq!(resolved.agent, "maho");
+        assert!(resolved.launcher_proven);
+        let provider = resolved.provider.expect("the provider is preserved");
+        assert_eq!(provider.launcher, Some(AgentLauncher::Mhc));
+        // Only the identity moves: the conversation it names is untouched.
+        assert_eq!(
+            (provider.key, provider.id.as_str(), provider.transcript_path),
+            (
+                AgentProviderSessionKey::SessionId,
+                "0c7ba39e-4c8f-4a53-9d32-5a0f1e2d3c4b",
+                Some("/home/u/.omo/agent/sessions/p/0c7ba39e.jsonl".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn an_omo_report_from_any_other_owner_stays_omo() {
+        for owner in [OwnerProof::Other("zsh"), OwnerProof::None] {
+            let resolved = effective_report("omo", Some(report_provider(None)), owner);
+            assert_eq!(resolved.agent, "omo");
+            assert!(!resolved.launcher_proven);
+            assert_eq!(resolved.provider.unwrap().launcher, None);
+        }
+    }
+
+    #[test]
+    fn a_maho_claim_keeps_a_launcher_only_when_this_daemon_proved_it() {
+        // Proven: the pane really is mhc, so the launcher stands.
+        let proven = effective_report(
+            "maho",
+            Some(report_provider(Some(AgentLauncher::Mhc))),
+            OwnerProof::Mhc,
+        );
+        assert_eq!(proven.agent, "maho");
+        assert!(proven.launcher_proven);
+        assert_eq!(proven.provider.unwrap().launcher, Some(AgentLauncher::Mhc));
+        // Unproven: the field alone may not claim omo's store semantics. Still admitted.
+        let unproven = effective_report(
+            "maho",
+            Some(report_provider(Some(AgentLauncher::Mhc))),
+            OwnerProof::Other("claude"),
+        );
+        assert_eq!(unproven.agent, "maho");
+        assert!(!unproven.launcher_proven);
+        assert_eq!(unproven.provider.unwrap().launcher, None);
+    }
+
+    #[test]
+    fn every_other_agent_is_returned_exactly_as_reported() {
+        // The regression guard: this change must not touch any other agent's identity.
+        for agent in ["claude", "codex", "kimi", "copilot", "gjc", "pi", "crush"] {
+            let reported = report_provider(None);
+            let resolved = effective_report(agent, Some(reported.clone()), OwnerProof::Mhc);
+            assert_eq!(resolved.agent, agent);
+            assert!(!resolved.launcher_proven);
+            assert_eq!(resolved.provider, Some(reported));
+        }
+        // And a pane with no provider at all still resolves, without inventing one.
+        let bare = effective_report("omo", None, OwnerProof::Mhc);
+        assert_eq!(bare.agent, "maho");
+        assert_eq!(bare.provider, None);
+    }
+
+    #[test]
+    fn store_semantics_names_the_pre_split_store_for_both_spellings() {
+        assert_eq!(store_semantics("omo", None), StoreSemantics::OmoCompatible);
+        assert_eq!(
+            store_semantics("omo", Some(AgentLauncher::Mhc)),
+            StoreSemantics::OmoCompatible
+        );
+        assert_eq!(
+            store_semantics("maho", Some(AgentLauncher::Mhc)),
+            StoreSemantics::OmoCompatible
+        );
+        // A maho pane no launcher proved keeps maho's own store, and no other agent moves.
+        assert_eq!(store_semantics("maho", None), StoreSemantics::Own);
+        for agent in ["claude", "codex", "kimi", "copilot", "gjc", "pi", "crush"] {
+            assert_eq!(store_semantics(agent, None), StoreSemantics::Own);
+            assert_eq!(store_semantics(agent, Some(crate::daemon::protocol::AgentLauncher::Mhc)), StoreSemantics::Own);
+        }
+    }
+
+    #[test]
+    fn a_store_file_alone_never_raises_a_report_to_an_admitted_identity() {
+        // `maho` is the family where a store-only escape would be widest: its launcher variant
+        // makes `provider_has_no_process_bound_session` true, so "no discovery" and "discovery
+        // found nothing" would be indistinguishable if the id were taken on faith. A report that
+        // names some other session's real record must therefore be refused, not elevated.
+        assert_eq!(
+            ingress_admission_identity("maho", "theirs", true, None, true),
+            IngressAdmissionIdentity::Refused
+        );
+        // The same report is admitted once discovery reads *this* id off the pane's own process.
+        assert_eq!(
+            ingress_admission_identity("maho", "theirs", true, Some("theirs"), true),
+            IngressAdmissionIdentity::WithoutPath
+        );
+        // And a discovered id that differs is still refused, path or no path.
+        assert_eq!(
+            ingress_admission_identity("maho", "theirs", true, Some("mine"), true),
+            IngressAdmissionIdentity::Refused
+        );
+        // Store evidence is required in its own right: discovery plus a foreign path is refused.
+        assert_eq!(
+            ingress_admission_identity("maho", "theirs", true, Some("theirs"), false),
+            IngressAdmissionIdentity::Refused
+        );
+        // A pathless report keeps its identity: there is no path to prove or destroy.
+        assert_eq!(
+            ingress_admission_identity("maho", "theirs", false, None, false),
+            IngressAdmissionIdentity::AsReported
+        );
+        // An agent whose CLI keeps no process-bound record may prove itself by its own store
+        // file for the reported id - that is the case this escape exists for, and it is decided
+        // by the registry entry, not by the launcher.
+        let store_only = crate::agent_detect::registry::ids().find(|agent| {
+            agent_has_no_process_bound_session(agent)
+                && crate::terminal::resume_cwd::machine_admits_agent(agent)
+                && crate::agent_detect::registry::launch_binary(agent, "mhc").is_some()
+        });
+        if let Some(agent) = store_only {
+            assert_eq!(
+                ingress_admission_identity(agent, "mine", true, None, true),
+                IngressAdmissionIdentity::WithoutPath,
+                "{agent}: its own store file is the proof when nothing else can be"
+            );
+        }
+    }
+
+    /// Registers a workspace and spawns one pane whose PTY root really is `mhc`, so the process
+    /// walk proves ownership the way it does in production rather than through a stub. The
+    /// returned directories are keep-alives: the workspace and the launcher's own directory must
+    /// outlive the pane, because the child resolves `mhc` from it at exec time.
+    #[cfg(unix)]
+    async fn server_with_mhc_owned_pane(
+        request_id: &str,
+    ) -> (
+        std::sync::Arc<DaemonServer>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        String,
+    ) {
+        let server = std::sync::Arc::new(DaemonServer::new_with_paths(None, None));
+        let repo = tempfile::tempdir().unwrap();
+        let _ = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        // A symlink keeps `argv[0]` spelled `mhc` while the body is a real program that idles.
+        let bin = tempfile::tempdir().unwrap();
+        let mhc = bin.path().join("mhc");
+        std::os::unix::fs::symlink("/bin/sleep", &mhc).unwrap();
+        let mut command = portable_pty::CommandBuilder::new(&mhc);
+        command.arg("300");
+        server.session_service().set_test_shell_command(command);
+        let session_id = server
+            .handle_spawn(
+                request_id,
+                "default",
+                crate::daemon::session_service::SpawnOptions {
+                    worktree: None,
+                    cwd: None,
+                    cols: 80,
+                    rows: 24,
+                    shell: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        (server, repo, bin, session_id)
+    }
+
+    fn reloaded_omo_state(session_id: &str) -> crate::daemon::agent_state::AgentState {
+        crate::daemon::agent_state::AgentState {
+            session_id: session_id.to_string(),
+            state: "idle".to_string(),
+            agent: Some("omo".to_string()),
+            provider_session: Some(AgentProviderSession {
+                launcher: None,
+                key: AgentProviderSessionKey::SessionId,
+                id: "0c7ba39e-4c8f-4a53-9d32-5a0f1e2d3c4b".to_string(),
+                transcript_path: Some(
+                    "/home/u/.omo/agent/sessions/p/0c7ba39e.jsonl".to_string(),
+                ),
+            }),
+            detail: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
+        }
+    }
+
+    // The whole point of the split, executed: a pane reloaded after the binary rename replays the
+    // name it reported before, and nothing re-reports on its own. Only a walk of the pane's own
+    // process can retire `omo`, so this drives the production reconcile path over a real PTY.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reloaded_omo_pane_owned_by_mhc_is_corrected_and_keeps_its_conversation() {
+        let (server, _repo, _bin, session_id) = server_with_mhc_owned_pane("reconcile-qa-mhc").await;
+        let retained = reloaded_omo_state(&session_id);
+        server.agent_states.publish_canonical(retained.clone());
+
+        assert!(server.reconcile_retained_identity(&session_id).await);
+
+        let corrected = server.agent_states.current(&session_id).unwrap();
+        assert_eq!(corrected.agent.as_deref(), Some("maho"));
+        let provider = corrected.provider_session.as_ref().unwrap();
+        assert_eq!(provider.launcher, Some(AgentLauncher::Mhc));
+        // Identity only: the conversation and the activity are the pane's, not the correction's.
+        let before = retained.provider_session.as_ref().unwrap();
+        assert_eq!(provider.id, before.id);
+        assert_eq!(provider.transcript_path, before.transcript_path);
+        assert_eq!(corrected.state, retained.state);
+        assert!(matches!(
+            corrected.origin,
+            crate::daemon::protocol::AgentStateOrigin::Agent
+        ));
+
+        // A second pass recomputes an already-equal correction and emits nothing.
+        assert!(!server.reconcile_retained_identity(&session_id).await);
+        server
+            .terminal_service()
+            .close_session(&session_id)
+            .await
+            .unwrap();
+    }
+
+    // The correction is a proof, never an assumption: a pane whose process the walk cannot call
+    // `mhc` keeps exactly what it reported.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pane_whose_process_is_not_mhc_keeps_the_name_it_reported() {
+        let server = std::sync::Arc::new(DaemonServer::new_with_paths(None, None));
+        let repo = tempfile::tempdir().unwrap();
+        let _ = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo.path())
+            .output();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        let session_id = server
+            .handle_spawn(
+                "reconcile-qa-shell",
+                "default",
+                crate::daemon::session_service::SpawnOptions {
+                    worktree: None,
+                    cwd: None,
+                    cols: 80,
+                    rows: 24,
+                    shell: Some("/bin/sh".to_string()),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let retained = reloaded_omo_state(&session_id);
+        server.agent_states.publish_canonical(retained.clone());
+
+        assert!(!server.reconcile_retained_identity(&session_id).await);
+        assert_eq!(server.agent_states.current(&session_id).unwrap(), retained);
+        server
+            .terminal_service()
+            .close_session(&session_id)
+            .await
+            .unwrap();
+    }
+
+    // A pane owned by `mhc` but running some other agent is out of this correction's scope: the
+    // walk proves the launcher, not the agent, and only the `omo`/`maho` pair was renamed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_foreign_agent_in_an_mhc_pane_is_never_renamed() {
+        let (server, _repo, _bin, session_id) =
+            server_with_mhc_owned_pane("reconcile-qa-foreign").await;
+        let mut retained = reloaded_omo_state(&session_id);
+        retained.agent = Some("claude".to_string());
+        retained.provider_session.as_mut().unwrap().launcher = None;
+        server.agent_states.publish_canonical(retained.clone());
+
+        assert!(!server.reconcile_retained_identity(&session_id).await);
+        assert_eq!(server.agent_states.current(&session_id).unwrap(), retained);
+        server
+            .terminal_service()
+            .close_session(&session_id)
+            .await
+            .unwrap();
     }
 }

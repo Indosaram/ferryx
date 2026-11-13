@@ -75,6 +75,13 @@ pub struct AgentSpec {
     pub no_process_bound_session: bool,
     /// Path segments that identify this agent's transcript store on disk.
     pub store_markers: &'static [&'static str],
+    /// Other agents' store roots this one may read a session from without owning them.
+    ///
+    /// Only `maho` fills this in: `mhc` is what launches it, and until the split that binary wrote
+    /// `omo`'s store, so a pathless `maho` session may be found under either. Kept apart from
+    /// `store_markers` so `store_markers` keeps naming the store this agent *owns* - the read-only
+    /// search roots and the store's own owner must not be conflated.
+    pub store_aliases: &'static [&'static str],
     /// The binary a resume spawns when the session arrives without a launcher.
     pub resume_program: &'static str,
     /// The flags a resume passes before the id.
@@ -99,6 +106,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: true,
         store_markers: &["/.claude/projects/"],
+        store_aliases: &[],
         resume_program: "claude",
         resume_args: &["--resume"],
         launch_variants: &[],
@@ -118,6 +126,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &["/.codex/sessions/"],
+        store_aliases: &[],
         resume_program: "codex",
         resume_args: &["resume"],
         launch_variants: &[],
@@ -137,6 +146,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &["/.copilot/session-state/"],
+        store_aliases: &[],
         resume_program: "copilot",
         resume_args: &["--resume"],
         launch_variants: &[],
@@ -158,6 +168,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &["/.cursor/chats/"],
+        store_aliases: &[],
         resume_program: "cursor-agent",
         resume_args: &["--resume"],
         launch_variants: &[],
@@ -177,6 +188,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &["/.kimi/sessions/"],
+        store_aliases: &[],
         resume_program: "kimi",
         resume_args: &["--session"],
         launch_variants: &[],
@@ -196,6 +208,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &["/.omo/agent/sessions/", "/.omo/sessions/"],
+        store_aliases: &[],
         resume_program: "omo",
         resume_args: &["--session"],
         launch_variants: &[("mhc", "mhc")],
@@ -215,6 +228,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &["/.maho/agent/sessions/"],
+        store_aliases: &["/.omo/agent/sessions/", "/.omo/sessions/"],
         resume_program: "mhc",
         resume_args: &["--session"],
         launch_variants: &[("mhc", "mhc")],
@@ -234,6 +248,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Hex16,
         no_process_bound_session: false,
         store_markers: &[],
+        store_aliases: &[],
         resume_program: "gjc",
         resume_args: &["--resume"],
         launch_variants: &[],
@@ -253,6 +268,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &["/.gemini/antigravity-cli/conversations/"],
+        store_aliases: &[],
         resume_program: "agy",
         resume_args: &["--conversation"],
         launch_variants: &[],
@@ -272,6 +288,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &[],
+        store_aliases: &[],
         resume_program: "opencode",
         resume_args: &["--session"],
         launch_variants: &[],
@@ -291,6 +308,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &[],
+        store_aliases: &[],
         resume_program: "pi",
         resume_args: &["--session"],
         launch_variants: &[],
@@ -310,6 +328,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::OmpPathOrUuid,
         no_process_bound_session: true,
         store_markers: &[],
+        store_aliases: &[],
         resume_program: "omp",
         resume_args: &["--resume"],
         launch_variants: &[],
@@ -329,6 +348,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &[],
+        store_aliases: &[],
         resume_program: "grok",
         resume_args: &["--resume"],
         launch_variants: &[],
@@ -348,6 +368,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &[],
+        store_aliases: &[],
         resume_program: "droid",
         resume_args: &["--resume"],
         launch_variants: &[],
@@ -367,6 +388,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::ClineSession,
         no_process_bound_session: true,
         store_markers: &[],
+        store_aliases: &[],
         resume_program: "cline",
         resume_args: &["--id"],
         launch_variants: &[],
@@ -386,6 +408,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::CrushHashOrUuid,
         no_process_bound_session: true,
         store_markers: &[],
+        store_aliases: &[],
         resume_program: "crush",
         resume_args: &["--session"],
         launch_variants: &[],
@@ -405,6 +428,7 @@ pub const AGENTS: &[AgentSpec] = &[
         session_id_shape: SessionIdShape::Uuid,
         no_process_bound_session: false,
         store_markers: &[],
+        store_aliases: &[],
         resume_program: "aider",
         resume_args: &[],
         launch_variants: &[],
@@ -458,6 +482,22 @@ pub fn store_markers(id: &str) -> Option<&'static [&'static str]> {
         .filter(|markers| !markers.is_empty())
 }
 
+/// Every store root `id` may read a session from: its own markers, then its aliases.
+///
+/// This is the read-only search set the resume builder and the ingress store check both use, so
+/// the two can never disagree about where a session may be found. It is not the set of roots the
+/// agent owns - writing or resuming a record places it in `store_markers` only.
+pub fn readable_store_markers(id: &str) -> Vec<&'static str> {
+    let Some(spec) = by_id(id) else {
+        return Vec::new();
+    };
+    spec.store_markers
+        .iter()
+        .chain(spec.store_aliases)
+        .copied()
+        .collect()
+}
+
 /// The (program, args) a resume spawns when the caller has no launcher binary of its own.
 pub fn resume_plan(id: &str) -> Option<(&'static str, &'static [&'static str])> {
     let spec = by_id(id)?;
@@ -487,10 +527,48 @@ mod tests {
         assert_eq!(maho.command_names, ["mhc"]);
         assert_eq!(maho.store_markers, ["/.maho/agent/sessions/"]);
         assert!(!maho.store_markers.iter().any(|marker| marker.contains("/.omo")));
-        assert_eq!(maho.launch_variants, [("mhc", "mhc")]);
-        // The split is the point: the mhc binary is maho's, and omo only keeps the launcher so a
+        assert_eq!(maho.launch_variants, [("mhc", "mhc")]);        // The split is the point: the mhc binary is maho's, and omo only keeps the launcher so a
         // session recorded before the split still resumes.
         assert!(resolve("mhc").is_some_and(|spec| spec.id == "maho"));
+    }
+
+    #[test]
+    fn only_maho_reads_another_agents_store_and_never_owns_it() {
+        // The split's carrier: `mhc` wrote omo's store before the split, so a pathless maho session
+        // may be found under either root - read-only, and separately declared.
+        assert_eq!(
+            readable_store_markers("maho"),
+            [
+                "/.maho/agent/sessions/",
+                "/.omo/agent/sessions/",
+                "/.omo/sessions/"
+            ]
+        );
+        // Ownership does not move: the alias roots stay out of every agent's own markers.
+        for spec in AGENTS {
+            let owns_omo = spec.store_markers.iter().any(|marker| marker.contains("/.omo"));
+            assert_eq!(owns_omo, spec.id == "omo", "{}: omo's store has one owner", spec.id);
+        }
+        // Every other agent reads exactly the roots it owns, aliases empty.
+        for spec in AGENTS {
+            if spec.id == "maho" {
+                continue;
+            }
+            assert_eq!(spec.store_aliases, &[] as &[&str], "{}", spec.id);
+            assert_eq!(
+                readable_store_markers(spec.id),
+                spec.store_markers.to_vec(),
+                "{}",
+                spec.id
+            )
+        }
+        // `maho` is the one carrier: its readable set is its own root plus omo's two spellings,
+        // and the alias list is what widens it.
+        let maho = by_id("maho").expect("maho must be a first-class agent");
+        assert_eq!(
+            maho.store_aliases,
+            ["/.omo/agent/sessions/", "/.omo/sessions/"]
+        );
     }
 
     #[test]

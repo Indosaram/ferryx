@@ -12,6 +12,7 @@ import {
   getAgentResumeArgv,
   hasUnsafeProviderSessionIdChars,
   isResumableTuiAgent,
+  isIdentityCorrection,
   normalizeAgentProviderSession,
   normalizeSessionId,
   PROVIDER_SESSION_ID_MAX_LENGTH,
@@ -299,6 +300,38 @@ describe("agentResume adapter module", () => {
   });
 
   describe("getAgentResumeArgv & buildResumeArgv", () => {
+    describe("launcher pairs", () => {
+      it("lets maho resume through the mhc launcher", () => {
+        expect(getAgentResumeArgv("maho", { key: "session_id", id: "mhc-conv-1", launcher: "mhc" })).toEqual([
+          "mhc",
+          "--session",
+          "mhc-conv-1",
+        ]);
+      });
+
+      it("keeps omo resuming through mhc, as before the split", () => {
+        expect(getAgentResumeArgv("omo", { key: "session_id", id: "omo-conv-1", launcher: "mhc" })).toEqual([
+          "mhc",
+          "--session",
+          "omo-conv-1",
+        ]);
+      });
+
+      it("still builds omo's own argv when no launcher is named", () => {
+        expect(getAgentResumeArgv("omo", { key: "session_id", id: "omo-conv-2" })).toEqual([
+          "omo",
+          "--session",
+          "omo-conv-2",
+        ]);
+      });
+
+      it("rejects a launcher that does not belong to the agent", () => {
+        expect(getAgentResumeArgv("maho", { key: "session_id", id: "x", launcher: "omo" })).toBeNull();
+        expect(getAgentResumeArgv("claude", { key: "session_id", id: "x", launcher: "mhc" })).toBeNull();
+        expect(getAgentResumeArgv("omo", { key: "session_id", id: "x", launcher: "maho" })).toBeNull();
+      });
+    });
+
     describe("builds exact provider-native reconnect argv", () => {
       it("produces exact argv for claude: claude --resume <id>", () => {
         const providerSession: AgentProviderSession = { key: "session_id", id: "c18f-uuid-456" };
@@ -563,4 +596,27 @@ describe("agentResume adapter module", () => {
     });
   });
 
+  describe("isIdentityCorrection", () => {
+    const mhc = { key: "session_id" as const, id: "conv-1", launcher: "mhc" };
+
+    it("corrects omo -> maho only with the mhc launcher on the same report", () => {
+      expect(isIdentityCorrection("omo", "maho", mhc)).toBe(true);
+      expect(isIdentityCorrection(" OMO ", "Maho", mhc)).toBe(true);
+    });
+
+    it("refuses without the launcher witness", () => {
+      expect(isIdentityCorrection("omo", "maho", { key: "session_id", id: "conv-1" })).toBe(false);
+      expect(isIdentityCorrection("omo", "maho", null)).toBe(false);
+      expect(isIdentityCorrection("omo", "maho", undefined)).toBe(false);
+    });
+
+    it("refuses an unrelated pair in either direction", () => {
+      expect(isIdentityCorrection("maho", "omo", mhc)).toBe(false);
+      expect(isIdentityCorrection("claude", "maho", mhc)).toBe(false);
+      expect(isIdentityCorrection("omo", "claude", mhc)).toBe(false);
+      expect(isIdentityCorrection("maho", "maho", mhc)).toBe(false);
+      expect(isIdentityCorrection(null, "maho", mhc)).toBe(false);
+      expect(isIdentityCorrection("omo", null, mhc)).toBe(false);
+    });
+  });
 });

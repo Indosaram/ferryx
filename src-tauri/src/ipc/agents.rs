@@ -144,6 +144,16 @@ pub(crate) fn discover_agent_session(
     }
 }
 
+/// The pane's owning agent, proved from the process table rather than from what the agent reports
+/// about itself. `pty_pid` is the pane's own PTY process. Call from `run_blocking`: it reads the
+/// process table.
+pub fn prove_pane_owner(pty_pid: u32) -> crate::agent_detect::OwnerProof {
+    match process_table_entries() {
+        Some(entries) => crate::agent_detect::owner_proof(&entries, pty_pid),
+        None => crate::agent_detect::OwnerProof::None,
+    }
+}
+
 #[cfg(not(windows))]
 fn process_table_entries() -> Option<Vec<(u32, u32, String)>> {
     let ps = resolve_tool("ps")?;
