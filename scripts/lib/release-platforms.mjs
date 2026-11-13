@@ -723,7 +723,8 @@ export function createWindowsBuildScript({ workspaceDir, plan, hostConfig, signi
   const ffmpegCache = hostConfig.root
     ? `Join-Path ${quotePowerShell(hostConfig.root)} 'ffmpeg-cache'`
     : `Join-Path $workspace 'ffmpeg-cache'`;
-  const ffmpegPrelude = `$msysRoot = if ($env:FERRYX_MSYS2_ROOT) { $env:FERRYX_MSYS2_ROOT } else { 'C:\\msys64' }
+  const ffmpegPrelude = `$workspace = ${quotePowerShell(workspaceDir)}
+$msysRoot = if ($env:FERRYX_MSYS2_ROOT) { $env:FERRYX_MSYS2_ROOT } else { 'C:\\msys64' }
 $msysBash = Join-Path $msysRoot 'usr\\bin\\bash.exe'
 if (-not (Test-Path -LiteralPath $msysBash)) { throw "MSYS2 bash not found at $msysBash (set FERRYX_MSYS2_ROOT); required to build FFmpeg" }
 $ffmpegCache = ${ffmpegCache}
@@ -731,11 +732,11 @@ New-Item -ItemType Directory -Path $ffmpegCache -Force | Out-Null
 $ffmpegScript = Join-Path $sourceDir 'scripts/build-ffmpeg-lgpl.sh'
 $ffmpegKey = (Get-FileHash -LiteralPath $ffmpegScript -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 16)
 $ffmpegPrefix = Join-Path $ffmpegCache "lgpl-$ffmpegKey-win64"
-// The MSVC x64 developer environment is imported for the whole script, not only when FFmpeg
-// has to be rebuilt: bindgen needs the Windows SDK headers and link.exe. The FFmpeg cache lives
-// at the host root and survives a workspace cleanup, so on a second run this block is skipped --
-// with vcvars inside it, cargo would run without VCINSTALLDIR/WindowsSdkDir and ffmpeg-sys-next
-// would die with STATUS_STACK_OVERFLOW. MSYS2 also inherits cl.exe/link.exe from here.
+# The MSVC x64 developer environment is imported for the whole script, not only when FFmpeg
+# has to be rebuilt: bindgen needs the Windows SDK headers and link.exe. The FFmpeg cache lives
+# at the host root and survives a workspace cleanup, so on a second run this block is skipped --
+# with vcvars inside it, cargo would run without VCINSTALLDIR/WindowsSdkDir and ffmpeg-sys-next
+# would die with STATUS_STACK_OVERFLOW. MSYS2 also inherits cl.exe/link.exe from here.
   $vswhere = Join-Path \${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
   $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
   if (-not $vsInstall) { throw 'Visual Studio C++ build tools not found (vswhere)' }
@@ -832,7 +833,7 @@ $versions = [ordered]@{ node = ((node --version) -replace '^v',''); bun = (bun -
 Write-Output '---BUILD_RESULT---'
 Write-Output ($versions | ConvertTo-Json -Compress)
 } finally {
-  Remove-Item -LiteralPath $signingSecretFile -Force -ErrorAction SilentlyContinue
+  if ($signingSecretFile) { Remove-Item -LiteralPath $signingSecretFile -Force -ErrorAction SilentlyContinue }
   Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
   Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
 }

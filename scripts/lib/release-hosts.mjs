@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { normalize } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, normalize } from "node:path";
 
 export const ALLOWED_ROOT_KEYS = Object.freeze([
   "schemaVersion",
@@ -524,6 +525,7 @@ export function runHostScript(host, scripts = {}, options = {}) {
   const { posix, powershell } = scripts;
   const { timeoutMs, input } = options;
   const sshCommand = options.sshCommand || process.env.FERRYX_SSH_COMMAND || "ssh";
+  const scpCommand = options.scpCommand || process.env.FERRYX_SCP_COMMAND || "scp";
 
   if (host.platform === "darwin") {
     if (typeof posix !== "string" || posix.trim() === "") {
@@ -582,6 +584,8 @@ export function runHostScript(host, scripts = {}, options = {}) {
       "-o", "ServerAliveCountMax=20",
       host.ssh,
     ];
+    // scp takes the destination itself, so it must not inherit `host.ssh` here.
+    const scpPrefix = sshPrefix.slice(0, -1);
 
     // Write the script to a temp file on the host, then run it with -File.
     //
@@ -593,15 +597,26 @@ export function runHostScript(host, scripts = {}, options = {}) {
     // PowerShell 5.1 parses stdin line by line and silently drops multi-line
     // braces, so a wrapped `try { ... }` produces no output and no error.
     // A temp file gets full script semantics and keeps the command line short.
-    const remoteScript = `${(host.root ?? "C:/Windows/Temp").replace(/\\/g, "/")}`
-      + `/ferryx-host-script-${process.pid}.ps1`;
+    //
+    // The file is delivered over scp rather than piped into
+    // `[Console]::In.ReadToEnd()`. That reader does not reliably observe EOF on
+    // a non-interactive Win32-OpenSSH session: the same payload stages in ~2.4s
+    // or hangs until the timeout depending on chunking (measured: 5 KB ok,
+    // 19 KB hung past 120s, 40 KB ok), which surfaced as a bare
+    // "Command timed out after 120000ms: ssh" with no compiler output.
+    const remoteDir = (host.root ?? "C:/Windows/Temp").replace(/\\/g, "/");
+    const remoteScript = `${remoteDir}/ferryx-host-script-${process.pid}.ps1`;
+    const staging = mkdtempSync(join(tmpdir(), "ferryx-host-script-"));
+    const localScript = join(staging, "stage.ps1");
+    // A UTF-8 BOM makes PowerShell 5.1 read the file as UTF-8 instead of ANSI.
+    writeFileSync(localScript, `\uFEFF${wrappedScript}\r\n`, "utf8");
 
     return runProcess(
-      sshCommand,
-      [...sshPrefix, "powershell", "-NoProfile", "-NonInteractive", "-Command",
-        `$in = [Console]::In.ReadToEnd(); Set-Content -LiteralPath '${remoteScript}' -Value $in -Encoding UTF8`],
-      { input: `${wrappedScript}\r\n`, timeoutMs: 120000 },
+      scpCommand,
+      [...scpPrefix, "-q", localScript, `${host.ssh}:${remoteScript}`],
+      { timeoutMs },
     ).then((written) => {
+      rmSync(staging, { recursive: true, force: true });
       if (written.exitCode !== 0) {
         throw new Error(
           `Failed to stage the host script on '${host.ssh}': ${(written.stderr || written.stdout).trim()}`,
