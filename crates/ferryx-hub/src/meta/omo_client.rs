@@ -1150,6 +1150,20 @@ enum Settle {
 async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle> {
     let until = tokio::time::Instant::now() + LIFECYCLE_SETTLE_WINDOW;
     loop {
+        // Frames the engine already wrote come before the record: a completion wake that ran to
+        // its own end leaves a 'done' record while its reply is still unread in the pipe, and
+        // closing on that record would drop the reply the holder exists to deliver. Draining
+        // first makes such a wake this holder's follow-up turn instead.
+        tokio::select! {
+            frame = rpc.read() => {
+                let frame = frame?;
+                rpc.ui(&frame, cwd).await?;
+                if frame["type"] == "agent_start" {
+                    return Ok(Settle::Started);
+                }
+            }
+            _ = tokio::time::sleep(LIFECYCLE_POLL) => {}
+        }
         match latest_lifecycle(thread).await {
             None => return Ok(Settle::Done),
             Some(lifecycle) if !lifecycle.run_active => {
@@ -1161,16 +1175,6 @@ async fn settle(rpc: &mut Rpc, thread: &str, cwd: Option<&str>) -> Result<Settle
             }
             Some(_) if tokio::time::Instant::now() >= until => return Ok(Settle::Done),
             Some(_) => {}
-        }
-        tokio::select! {
-            frame = rpc.read() => {
-                let frame = frame?;
-                rpc.ui(&frame, cwd).await?;
-                if frame["type"] == "agent_start" {
-                    return Ok(Settle::Started);
-                }
-            }
-            _ = tokio::time::sleep(LIFECYCLE_POLL) => {}
         }
     }
 }

@@ -654,6 +654,18 @@ async fn notify_ack_failure_for(
         Ok(done) if done.rows_affected() == 0 => return Some(AckNotice::Duplicate),
         Ok(_) => {}
         Err(error) => {
+            // A failed claim does not prove the notice is unclaimed: a store that refuses the
+            // claim (a trigger rejecting the insert) refuses it for a turn that is already
+            // recorded too, and a row written by an earlier attempt makes this a duplicate.
+            match sqlx::query_scalar::<_, String>(
+                "SELECT state FROM turn_failure_notices WHERE session_key = ? AND turn_seq = ? AND kind = 'ack_timeout'",
+            )
+            .bind(&session_key).bind(turn_seq)
+            .fetch_optional(pool).await {
+                Ok(Some(_)) => return Some(AckNotice::Duplicate),
+                Ok(None) => {}
+                Err(check) => tracing::error!(%check, session = %session_key, "ack failure notice claim state could not be read"),
+            }
             tracing::error!(%error, session = %session_key, "ack failure notice could not be claimed; owner notice uncertain");
             // Durable trace: a best-effort 'uncertain' row in the same table, so the store
             // shows this owner turn's notice as unconfirmed (never 'queued') and a later
