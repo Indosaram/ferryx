@@ -731,8 +731,11 @@ New-Item -ItemType Directory -Path $ffmpegCache -Force | Out-Null
 $ffmpegScript = Join-Path $sourceDir 'scripts/build-ffmpeg-lgpl.sh'
 $ffmpegKey = (Get-FileHash -LiteralPath $ffmpegScript -Algorithm SHA256).Hash.ToLowerInvariant().Substring(0, 16)
 $ffmpegPrefix = Join-Path $ffmpegCache "lgpl-$ffmpegKey-win64"
-if (-not (Test-Path -LiteralPath (Join-Path $ffmpegPrefix 'build-receipt.txt'))) {
-  Remove-Item -LiteralPath $ffmpegPrefix, "$ffmpegPrefix.build" -Recurse -Force -ErrorAction SilentlyContinue
+// The MSVC x64 developer environment is imported for the whole script, not only when FFmpeg
+// has to be rebuilt: bindgen needs the Windows SDK headers and link.exe. The FFmpeg cache lives
+// at the host root and survives a workspace cleanup, so on a second run this block is skipped --
+// with vcvars inside it, cargo would run without VCINSTALLDIR/WindowsSdkDir and ffmpeg-sys-next
+// would die with STATUS_STACK_OVERFLOW. MSYS2 also inherits cl.exe/link.exe from here.
   $vswhere = Join-Path \${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
   $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
   if (-not $vsInstall) { throw 'Visual Studio C++ build tools not found (vswhere)' }
@@ -741,6 +744,9 @@ if (-not (Test-Path -LiteralPath (Join-Path $ffmpegPrefix 'build-receipt.txt')))
   foreach ($line in (cmd.exe /d /c "\`"$vcvars\`" >nul && set")) {
     if ($line -match '^([^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) }
   }
+
+if (-not (Test-Path -LiteralPath (Join-Path $ffmpegPrefix 'build-receipt.txt'))) {
+  Remove-Item -LiteralPath $ffmpegPrefix, "$ffmpegPrefix.build" -Recurse -Force -ErrorAction SilentlyContinue
   $env:MSYSTEM = 'MINGW64'
   $env:MSYS2_PATH_TYPE = 'inherit'
   $env:CHERE_INVOKING = '1'
