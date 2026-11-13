@@ -348,18 +348,46 @@ impl WatchRetryBudget {
     }
 }
 
-/// Backoff cap for the paired DAG watcher.
+/// Backoff cap for the paired DAG watcher's own host-resolution step, which reads local
+/// daemon state and never reaches the relay.
 const PAIRED_WATCH_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Cancellable retry sleep, delegated to the shared SSH capability-retry helper so both
-/// watchers use one backoff implementation. Returns false when the watcher was cancelled,
-/// so no frame and no status can be emitted after an unwatch under this generation.
+/// Backoff cap once a subscribe attempt reaches the relay. Every attempt allocates a fresh
+/// end-to-end session, and the relay admits 30 of those per minute per source address, so a
+/// fixed one-second retry keeps that budget empty and refuses unrelated work (a pane spawn)
+/// with RATE_LIMITED. Capped below the relay's 60 s window so an idle watcher still recovers.
+const PAIRED_WATCH_SUBSCRIBE_MAX_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+/// One backoff step. Pure so the escalation is testable without sleeping.
+fn escalated_retry_delay(
+    current: std::time::Duration,
+    max_retry_delay: std::time::Duration,
+) -> std::time::Duration {
+    std::cmp::min(current.saturating_mul(2), max_retry_delay)
+}
+
+/// Cancellable retry sleep. Returns false when the watcher was cancelled, so no frame and no
+/// status can be emitted after an unwatch under this generation.
 async fn paired_watch_retry_sleep(
     cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
     retry_delay: &mut tokio::time::Duration,
+    max_retry_delay: std::time::Duration,
 ) -> bool {
-    wait_ssh_capability_retry(cancel_rx, retry_delay, PAIRED_WATCH_MAX_RETRY_DELAY).await
-        == SshCapabilityRetryAction::Retry
+    if *cancel_rx.borrow() {
+        return false;
+    }
+    tokio::select! {
+        biased;
+        changed = cancel_rx.changed() => {
+            if changed.is_err() || *cancel_rx.borrow() {
+                return false;
+            }
+        }
+        _ = tokio::time::sleep(*retry_delay) => {}
+    }
+    *retry_delay = escalated_retry_delay(*retry_delay, max_retry_delay);
+    true
 }
 
 #[tauri::command]
@@ -495,7 +523,13 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
                         }
                         // A bounded transient failure must not kill the watch: keep retrying
                         // while the reported failure stays visible to the pane.
-                        if !paired_watch_retry_sleep(&mut cancel_rx, &mut retry_delay).await {
+                        if !paired_watch_retry_sleep(
+                            &mut cancel_rx,
+                            &mut retry_delay,
+                            PAIRED_WATCH_MAX_RETRY_DELAY,
+                        )
+                        .await
+                        {
                             break 'outer;
                         }
                         continue;
@@ -512,9 +546,11 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
 
                 match attempt {
                     Ok(mut rx) => {
-                        retry_delay = tokio::time::Duration::from_millis(1000);
-                        // Only an accepted subscription proves the stream works.
-                        budget.clear();
+                        // The daemon acknowledges SubscribeDag before it attaches to the paired
+                        // host, so this Ok means "accepted", not "streaming". Resetting the
+                        // backoff here made a refused attach retry once per second forever.
+                        // Only a frame proves the stream works; see the receive arm below.
+                        let mut saw_frame = false;
                         loop {
                             // Biased on cancellation so a queued frame can never be
                             // emitted after unwatch under this watcher generation.
@@ -529,7 +565,11 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
                                     match maybe_msg {
                                         Some(msg) => {
                                             // An accepted frame proves the stream works: only
-                                            // this and a successful subscribe clear the budget.
+                                            // this clears the budget and the backoff.
+                                            if !saw_frame {
+                                                saw_frame = true;
+                                                retry_delay = std::time::Duration::from_millis(1000);
+                                            }
                                             budget.clear();
                                             match msg {
                                                 crate::daemon::protocol::DaemonStreamMessage::DagInventory {
@@ -562,7 +602,32 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
                                             }
                                         }
                                         None => {
-                                            tracing::info!(workspace_id = %ws_id, "Paired DAG stream disconnected, will reconnect");
+                                            if saw_frame {
+                                                // A working stream dropped: reconnect promptly.
+                                                tracing::info!(workspace_id = %ws_id, "Paired DAG stream disconnected, will reconnect");
+                                                retry_delay = std::time::Duration::from_millis(1000);
+                                            } else {
+                                                // The attach was refused and the daemon closed
+                                                // the stream without a frame. Counting it is
+                                                // what makes the budget and the backoff bound
+                                                // real instead of resetting them per attempt.
+                                                tracing::warn!(workspace_id = %ws_id, "Paired DAG stream closed before its first frame");
+                                                let failure = SshWatchFailureKind::Transport(
+                                                    "paired DAG stream closed before its first frame".to_string(),
+                                                );
+                                                // Recorded unconditionally: an unwatch is
+                                                // handled by the biased cancellation arm above,
+                                                // which wins before this branch can run.
+                                                if let Some(payload) = budget.record(
+                                                    false,
+                                                    &failure,
+                                                    &binding_host_id,
+                                                    &watched_key,
+                                                    generation,
+                                                ) {
+                                                    let _ = app_clone.emit("dag-watch-status", &payload);
+                                                }
+                                            }
                                             break;
                                         }
                                     }
@@ -585,7 +650,13 @@ pub async fn dag_watch_paired_project<R: tauri::Runtime>(
                     }
                 }
 
-                if !paired_watch_retry_sleep(&mut cancel_rx, &mut retry_delay).await {
+                if !paired_watch_retry_sleep(
+                    &mut cancel_rx,
+                    &mut retry_delay,
+                    PAIRED_WATCH_SUBSCRIBE_MAX_RETRY_DELAY,
+                )
+                .await
+                {
                     break 'outer;
                 }
             }
@@ -2146,6 +2217,78 @@ mod tests {
         assert!(budget
             .record(true, &grant_failure, host_id, project_path, 11)
             .is_none());
+    }
+
+    /// A subscribe that the daemon acknowledges and then refuses allocates a fresh relay
+    /// session per attempt. At a fixed one-second delay that kept the relay's 30-per-minute
+    /// admission budget empty and refused unrelated work with RATE_LIMITED, so the delay must
+    /// escalate and be capped below the relay window instead of resetting per attempt.
+    #[test]
+    fn test_paired_watch_subscribe_backoff_escalates_to_its_cap() {
+        let cap = PAIRED_WATCH_SUBSCRIBE_MAX_RETRY_DELAY;
+        let mut delay = std::time::Duration::from_millis(1000);
+        let mut steps = Vec::new();
+        for _ in 0..8 {
+            delay = escalated_retry_delay(delay, cap);
+            steps.push(delay);
+        }
+        // 1s -> 2s -> 4s -> 8s -> 16s -> 30s (capped), never back to one second.
+        assert_eq!(steps[0], std::time::Duration::from_millis(2000));
+        assert_eq!(steps[1], std::time::Duration::from_millis(4000));
+        assert_eq!(steps[2], std::time::Duration::from_millis(8000));
+        assert_eq!(steps[3], std::time::Duration::from_millis(16000));
+        assert_eq!(steps[4], cap);
+        assert_eq!(steps[7], cap);
+        // The cap stays inside the relay's 60s admission window, so an idle watcher recovers.
+        assert!(cap <= std::time::Duration::from_secs(60));
+        // A zero or already-capped value never exceeds the cap.
+        assert_eq!(escalated_retry_delay(std::time::Duration::ZERO, cap), std::time::Duration::ZERO);
+        assert_eq!(escalated_retry_delay(cap, cap), cap);
+    }
+
+    /// Six refused attempts at the observed cadence must not spend the relay's per-minute
+    /// admission budget; the old fixed 1s loop spent 60 of them.
+    #[test]
+    fn test_paired_watch_subscribe_backoff_spends_at_most_six_attempts_per_minute() {
+        let cap = PAIRED_WATCH_SUBSCRIBE_MAX_RETRY_DELAY;
+        let mut delay = std::time::Duration::from_millis(1000);
+        let mut elapsed = std::time::Duration::ZERO;
+        let mut attempts = 0u32;
+        while elapsed < std::time::Duration::from_secs(60) && attempts < 100 {
+            attempts += 1;
+            elapsed += delay;
+            delay = escalated_retry_delay(delay, cap);
+        }
+        assert!(
+            attempts <= 6,
+            "escalating backoff must stay under the relay's 30/min admission budget, got {attempts}"
+        );
+    }
+
+    /// The daemon acknowledges `SubscribeDag` before attaching, so a closed stream with no
+    /// frame is a failed attach. It must count against the budget, otherwise the counters and
+    /// the terminal report can never be reached.
+    #[test]
+    fn test_paired_watch_counts_a_stream_closed_before_its_first_frame() {
+        let host_id = "paired-host-3";
+        let project_path = "paired:ws-7:/repo";
+        let closed_early = SshWatchFailureKind::Transport(
+            "paired DAG stream closed before its first frame".to_string(),
+        );
+        assert!(matches!(closed_early, SshWatchFailureKind::Transport(_)));
+
+        let mut budget = WatchRetryBudget::new();
+        for expected in 1..DEFAULT_TRANSPORT_FAILURE_BUDGET {
+            assert!(budget
+                .record(false, &closed_early, host_id, project_path, 5)
+                .is_none());
+            assert_eq!(budget.transport, expected);
+        }
+        let payload = budget
+            .record(false, &closed_early, host_id, project_path, 5)
+            .expect("a stream refused before its first frame must reach the transport bound");
+        assert_eq!(payload.code, DagWatchFailureCode::Unavailable);
+        assert_eq!(payload.generation, Some(5));
     }
 
     #[test]
