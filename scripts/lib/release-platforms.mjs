@@ -814,8 +814,17 @@ $executables = @(Get-ChildItem -Path (Join-Path $cargoTarget 'release') -Filter 
 if ($executables.Count -ne 1) { throw "Expected exactly one Ferryx executable, found $($executables.Count)" }
 # The remote-desktop client is its own workspace (crates/ferryx-rd) and needs the "cli" feature.
 # It links FFmpeg dynamically, so the client ships next to the same DLLs the daemon stages.
-cargo build --manifest-path (Join-Path $sourceDir 'crates/ferryx-rd/Cargo.toml') --release -p ferryx-rd-app --features cli --bin ferryx-rd-client; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-$rdClient = @(Get-ChildItem -Path (Join-Path $cargoTarget 'release') -Filter 'ferryx-rd-client.exe' -File)
+# crates/ferryx-rd resolves openssl-src to a different build-script hash than src-tauri does, so
+# sharing CARGO_TARGET_DIR makes the two workspaces fight over the same openssl-sys output and
+# nmake depend fails with exit code 2. Give it the workspace's own target dir, as the Linux script
+# already does.
+$rdTargetDir = Join-Path $sourceDir 'crates/ferryx-rd/target'
+$savedTargetDir = $env:CARGO_TARGET_DIR
+$env:CARGO_TARGET_DIR = $rdTargetDir
+cargo build --manifest-path (Join-Path $sourceDir 'crates/ferryx-rd/Cargo.toml') --release -p ferryx-rd-app --features cli --bin ferryx-rd-client; $rdExit = $LASTEXITCODE
+$env:CARGO_TARGET_DIR = $savedTargetDir
+if ($rdExit -ne 0) { exit $rdExit }
+$rdClient = @(Get-ChildItem -Path (Join-Path $rdTargetDir 'release') -Filter 'ferryx-rd-client.exe' -File)
 if ($rdClient.Count -ne 1) { throw "Expected exactly one ferryx-rd-client.exe, found $($rdClient.Count)" }
 Copy-Item -LiteralPath $rdClient[0].FullName -Destination (Join-Path $outDir 'ferryx-rd-client-windows-amd64.exe')
 foreach ($pattern in @('avcodec-*.dll', 'avutil-*.dll', 'swscale-*.dll', 'swresample-*.dll')) {

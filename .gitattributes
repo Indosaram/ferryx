@@ -9,3 +9,15 @@ src-tauri/resources/agent-skills/**/*.md text eol=lf
 src-tauri/src/remote/reference_chat/fixtures/** text eol=lf
 # Signed engine manifest fixture: the signature covers these exact bytes, so never convert them.
 src-tauri/src/browser/fixtures/engine-release/** -text
+# The bundled remote-helper manifest is keyed by the SHA-256 of every file in
+# computeHelperSourceClosure (scripts/build-remote-helpers.mjs). A CRLF checkout on
+# Windows hashes differently from the LF checkout the artifacts were built from, so
+# src-tauri/build.rs rejects the staged manifest as stale ('stale bundled helper
+# assets detected') and every Windows build dies before compiling anything. Pin the
+# closure to LF on all platforms.
+remote-helper/Cargo.toml text eol=lf
+remote-helper/Cargo.lock text eol=lf
+src-tauri/src/dag/journal.rs text eol=lf
+src-tauri/src/dag/paths.rs text eol=lf
+src-tauri/src/scoped_contracts.rs text eol=lf
+src-tauri/src/ferryx_scope/ssh/**/*.rs text eol=lf
