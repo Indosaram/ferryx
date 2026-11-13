@@ -576,6 +576,21 @@ impl PairedHostService {
     pub async fn list(&self) -> Result<Vec<HostView>> {
         self.run(|store| Ok(store.list())).await
     }
+    /// Records the origins `host_id` reported for itself, under the generation that observed them.
+    ///
+    /// The caller is the machine's own gateway announcing where it can be reached, so the entries
+    /// are a hint for racing paths and never grounds for trust: the attach handshake still proves
+    /// identity. A publication against a stale generation is refused, which is what stops a
+    /// forgotten or re-paired host from keeping reachability it no longer owns.
+    pub async fn publish_origins(
+        &self,
+        host_id: String,
+        generation: Epoch,
+        origins: Vec<crate::paired_host::inventory::PublishedOrigin>,
+    ) -> Result<()> {
+        self.run(move |store| store.publish_origins(&host_id, generation, origins))
+            .await
+    }
     pub async fn read(&self, request: MigrationReceipt) -> Result<HostView> {
         self.run(move |store| store.read_verified(&request.host_id, request.generation))
             .await

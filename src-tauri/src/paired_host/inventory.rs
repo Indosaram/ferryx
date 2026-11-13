@@ -164,6 +164,12 @@ struct Record {
     /// Absent on every older row, which keeps loading unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     attach: Option<HostAttach>,
+    /// Origins this host reported for itself, newest observation per origin.
+    ///
+    /// A routing hint only: a stale or wrong entry costs a failed connect, never trust. Absent
+    /// on every row written before publication existed, which keeps older stores loading.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    published_origins: Vec<PublishedOrigin>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +357,8 @@ fn pairing_record(
             ssh_host_id: None,
             device_id: None,
             attach: None,
+            // Pairing learns no reachability: the host publishes its own origins later.
+            published_origins: Vec::new(),
         },
     ))
 }
@@ -453,9 +461,10 @@ impl Inventory {
                     ssh_host_id: row.ssh_host_id.clone(),
                     device_id: row.device_id.clone(),
                     unavailable_reason,
-                    // Filled by the host's own origin publication once it lands; until then
-                    // every saved host is relay-only, which is what it already was.
-                    published_origins: Vec::new(),
+                    // A routing hint carried through from the host's own publication. Empty
+                    // means relay only, which is exactly how this projection behaved before
+                    // the field existed.
+                    published_origins: row.published_origins.clone(),
                 }
             })
             .collect()
@@ -672,6 +681,41 @@ impl Inventory {
             .generations
             .insert(id.to_owned(), self.next_generation(id)?);
         self.commit(candidate, id)
+    }
+    /// Records the origins a host reported for itself, replacing whatever it reported before.
+    ///
+    /// Bound to the generation the publisher held when it observed them: once a host is
+    /// forgotten or re-paired, its old generation stops matching and the publication is
+    /// refused rather than reviving reachability for an identity that no longer exists.
+    /// Only an authenticated machine may call this, and the entries stay a routing hint -
+    /// attach still proves identity through the handshake before anything is trusted.
+    pub fn publish_origins(
+        &mut self,
+        id: &str,
+        generation: Epoch,
+        origins: Vec<PublishedOrigin>,
+    ) -> Result<()> {
+        self.validate_generation(id, generation)?;
+        let mut candidate = self.disk.clone();
+        let row = candidate
+            .hosts
+            .get_mut(id)
+            .ok_or(InventoryError::StaleGeneration)?;
+        // Freshest record per origin wins; a host that moved keeps one entry per origin.
+        let mut merged: Vec<PublishedOrigin> = Vec::with_capacity(origins.len());
+        for origin in origins {
+            if origin.origin.trim().is_empty() {
+                continue;
+            }
+            match merged.iter_mut().find(|kept| kept.origin == origin.origin) {
+                Some(kept) if kept.observed_at <= origin.observed_at => *kept = origin,
+                Some(_) => {}
+                None => merged.push(origin),
+            }
+        }
+        row.published_origins = merged;
+        let id = id.to_owned();
+        self.commit(candidate, &id)
     }
     /// Auth failure must name a captured generation; an old 401 cannot revoke a re-pair.
     pub fn mark_auth_unavailable(
