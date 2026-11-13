@@ -751,7 +751,7 @@ $ffmpegPrefix = Join-Path $ffmpegCache "lgpl-$ffmpegKey-win64"
   # and openssl-src failed under nmake. Force COMSPEC to the real cmd.exe for the import, and
   # run vcvars through a temporary .bat so no quoting survives the ssh hop.
   $comspecBackup = $env:COMSPEC
-  $env:COMSPEC = Join-Path $env:SystemRoot 'System32\cmd.exe'
+  $env:COMSPEC = Join-Path $env:SystemRoot 'System32\\cmd.exe'
   $vcImportBat = Join-Path $env:TEMP 'ferryx-vcvars-import.bat'
   Set-Content -LiteralPath $vcImportBat -Encoding ASCII -Value @(
     '@echo off',
@@ -763,7 +763,6 @@ $ffmpegPrefix = Join-Path $ffmpegCache "lgpl-$ffmpegKey-win64"
   }
   Remove-Item -LiteralPath $vcImportBat -Force -ErrorAction SilentlyContinue
   $env:COMSPEC = $comspecBackup
-  }
 
 if (-not (Test-Path -LiteralPath (Join-Path $ffmpegPrefix 'build-receipt.txt'))) {
   Remove-Item -LiteralPath $ffmpegPrefix, "$ffmpegPrefix.build" -Recurse -Force -ErrorAction SilentlyContinue
