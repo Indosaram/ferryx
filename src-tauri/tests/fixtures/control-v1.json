@@ -45,7 +45,9 @@
       "responses": [
         { "ok": true, "accepted": true },
         { "ok": false, "code": "UPGRADE_UNSUPPORTED" },
-        { "ok": false, "code": "HANDOVER_WIRE_UNSUPPORTED" }
+        { "ok": false, "code": "HANDOVER_WIRE_UNSUPPORTED" },
+        { "ok": false, "code": "UPGRADE_REFUSED", "live": 1 },
+        { "ok": false, "code": "UPGRADE_REFUSED", "reason": "SUCCESSOR_EXITED" }
       ]
     },
     {

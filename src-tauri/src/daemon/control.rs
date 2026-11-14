@@ -56,6 +56,11 @@ pub const CODE_SPAWN_IN_FLIGHT: &str = "SPAWN_IN_FLIGHT";
 pub const CODE_NOT_ACTIVE_OWNER: &str = "NOT_ACTIVE_OWNER";
 pub const CODE_COUNT_CHANGED: &str = "COUNT_CHANGED";
 pub const CODE_DAEMON_RETIRING: &str = "DAEMON_RETIRING";
+/// UPGRADE_REFUSED reasons of an idle upgrade (todo 27): the successor could not be started,
+/// ended before announcing its lock wait, or did not announce it in time.
+pub const REASON_SUCCESSOR_NOT_STARTED: &str = "SUCCESSOR_NOT_STARTED";
+pub const REASON_SUCCESSOR_EXITED: &str = "SUCCESSOR_EXITED";
+pub const REASON_SUCCESSOR_NOT_READY: &str = "SUCCESSOR_NOT_READY";
 
 /// One decoded control request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,12 +132,16 @@ impl InventoryReply {
     }
 }
 
-/// A failed reply. live is present only for COUNT_CHANGED.
+/// A failed reply. live is present only for COUNT_CHANGED and for UPGRADE_REFUSED from a daemon
+/// without session transfer that has live sessions (todo 27). reason (additive, todo 27) names
+/// why an idle upgrade's successor was not accepted (REASON_SUCCESSOR_*).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlFailure {
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl ControlFailure {
@@ -140,6 +149,7 @@ impl ControlFailure {
         Self {
             code: code.to_string(),
             live: None,
+            reason: None,
         }
     }
 }

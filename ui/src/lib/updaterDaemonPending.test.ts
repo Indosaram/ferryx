@@ -27,6 +27,12 @@ describe("daemon update pending state", () => {
     );
     expect(restartConfirmMessage(3)).toContain("3 running terminals");
     expect(daemonUpdatePendingFrom({ code: "DAEMON_PROTOCOL_MISMATCH", details: {} })).toBeNull();
+    expect(
+      daemonUpdatePendingFrom({
+        code: "DAEMON_UPDATE_PENDING",
+        details: { runningVersion: "2026.1027.5", liveSessions: 1, retireRequested: false, restartRequired: true },
+      }),
+    ).toEqual({ runningVersion: "2026.1027.5", liveSessions: 1, restartRequired: true });
   });
 
   it("an unknown count disables restart and never reaches the backend", async () => {

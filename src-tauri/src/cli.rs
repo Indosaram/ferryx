@@ -3906,7 +3906,9 @@ pub fn run_daemon_headless(
         match ready_rx.await {
             Ok(()) => {
                 if announce_readiness {
-                    println!("FERRYX_DAEMON_READY");
+                    // Never panics: an idle-upgrade successor's predecessor (todo 27) has
+                    // closed this pipe by now.
+                    let _ = writeln!(std::io::stdout(), "FERRYX_DAEMON_READY");
                     let _ = std::io::stdout().flush();
                     #[cfg(unix)]
                     crate::daemon::supervisor_linux::notify_ready();

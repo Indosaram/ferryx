@@ -133,6 +133,7 @@ fn standard_answer(live: u32) -> impl Fn(&ControlRequest) -> ControlReply + Send
         ControlRequest::Shutdown { .. } => ControlReply::Failed(ControlFailure {
             code: CODE_COUNT_CHANGED.to_string(),
             live: Some(live),
+            reason: None,
         }),
         _ => ControlReply::Failed(ControlFailure::code(control::CODE_UNSUPPORTED_OP)),
     }
@@ -514,4 +515,120 @@ fn newest_generation_starts_once_only_after_old_owner_and_watchdog_are_gone() {
     assert!(matches!(result, Admission::Started { .. }));
     assert_eq!(runner.0.get(), 1);
     assert!(paths.starting.exists(), "the start is recorded so concurrent callers see row 5b");
+}
+
+/// Todo 27: a same-protocol owner without session transfer refused the idle upgrade because one
+/// session is live. The GUI is signalled once with restartRequired, the banner's re-read reads
+/// only Inventory (never RetireWhenIdle: the owner keeps serving new terminals), and an accepted
+/// confirmed restart clears the signal.
+#[tokio::test]
+async fn update_pending_restart_required_signals_rereads_inventory_only_and_clears_on_restart() {
+    static SIGNALS: std::sync::Mutex<Vec<IpcError>> = std::sync::Mutex::new(Vec::new());
+    set_restart_required_notifier(|signal| SIGNALS.lock().unwrap().push(signal));
+    let dir = tempfile::tempdir().unwrap();
+    let version = format!("2026.1028.1-{}", dir.path().display());
+    let ops = serve_control(bind_control(dir.path()).await, standard_answer(1));
+
+    note_restart_required(dir.path(), Some(version.clone()), 1);
+    let signal = restart_required_signal(dir.path()).expect("signal recorded for this owner");
+    assert_eq!(signal.code, IpcErrorCode::DaemonUpdatePending);
+    let details = signal.details.clone().unwrap();
+    assert_eq!(details["restartRequired"], true);
+    assert_eq!(details["liveSessions"], 1);
+    assert_eq!(details["retireRequested"], false);
+    assert_eq!(details["runningVersion"], version.as_str());
+    let emitted: Vec<IpcError> = SIGNALS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|emitted| {
+            emitted
+                .details
+                .as_ref()
+                .is_some_and(|d| d["runningVersion"] == version.as_str())
+        })
+        .cloned()
+        .collect();
+    assert_eq!(emitted, vec![signal], "the GUI is told exactly once");
+
+    let reread = status(dir.path()).await;
+    assert_eq!(reread.live_sessions, Some(1));
+    assert!(!reread.retire_requested);
+    assert_eq!(
+        op_names(&ops),
+        vec![OP_INVENTORY],
+        "a same-protocol owner is never asked to retire"
+    );
+
+    assert_eq!(
+        restart_terminals(dir.path(), 1).await.unwrap(),
+        RestartOutcome::Accepted { live: 1 }
+    );
+    assert!(
+        restart_required_signal(dir.path()).is_none(),
+        "the confirmed restart clears the signal"
+    );
+}
+
+/// Todo 27: RequestUpgrade refused with a live count is the restart-required outcome; a refusal
+/// without one stays a plain refusal. Without session transfer RequestUpgrade alone routes the
+/// upgrade; with it handover-v1 is still required.
+#[tokio::test]
+async fn update_pending_idle_upgrade_refusal_with_live_sessions_maps_to_restart_required() {
+    use crate::daemon::client::{
+        request_upgrade_via_control, upgrade_route_on, ControlUpgradeOutcome, UpgradeRoute,
+    };
+    let refused = |live| {
+        ControlReply::Failed(ControlFailure {
+            code: control::CODE_UPGRADE_REFUSED.to_string(),
+            live,
+            reason: None,
+        })
+    };
+    for (reply, expected) in [
+        (
+            refused(Some(1)),
+            ControlUpgradeOutcome::SessionsLive { live: 1 },
+        ),
+        (
+            refused(None),
+            ControlUpgradeOutcome::Refused(control::CODE_UPGRADE_REFUSED.into()),
+        ),
+        (
+            refused(Some(0)),
+            ControlUpgradeOutcome::Refused(control::CODE_UPGRADE_REFUSED.into()),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = serve_control(bind_control(dir.path()).await, upgrade_answer(1, reply));
+        let outcome = request_upgrade_via_control(dir.path(), fake_stage)
+            .await
+            .unwrap();
+        assert_eq!(outcome, expected);
+        assert_eq!(
+            op_names(&ops),
+            vec![control::OP_HELLO, control::OP_REQUEST_UPGRADE]
+        );
+    }
+    let windows_hello = control::HelloReply {
+        daemon_version: "2026.1028.1".into(),
+        protocol_version: DAEMON_PROTOCOL_VERSION,
+        pid: 1,
+        start_time: 1,
+        generation_key: None,
+        epoch: 1,
+        ops: control::FROZEN_OPS
+            .iter()
+            .map(|op| op.to_string())
+            .collect(),
+    };
+    assert_eq!(
+        upgrade_route_on(Some(&windows_hello), false),
+        UpgradeRoute::RequestUpgrade
+    );
+    assert_eq!(
+        upgrade_route_on(Some(&windows_hello), true),
+        UpgradeRoute::Unsupported
+    );
+    assert_eq!(upgrade_route_on(None, false), UpgradeRoute::LegacyDaemon);
 }

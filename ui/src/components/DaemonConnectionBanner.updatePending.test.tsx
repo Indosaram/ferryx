@@ -61,4 +61,20 @@ describe("DaemonConnectionBanner update pending", () => {
       "cmd_daemon_update_pending_status",
     ]);
   });
+  it("restart required on the same protocol: offers the confirmed restart and sends Shutdown once", async () => {
+    invoke.mockResolvedValueOnce({ outcome: "accepted", live: 1 });
+    const onRetry = vi.fn();
+    const error = pendingError(1);
+    render(
+      <DaemonConnectionBanner
+        error={{ ...error, details: { ...error.details, retireRequested: false, restartRequired: true } }}
+        onRetry={onRetry}
+      />,
+    );
+    expect(screen.getByTestId("daemon-restart-terminals")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("daemon-restart-terminals"));
+    fireEvent.click(screen.getByTestId("daemon-restart-confirm"));
+    await waitFor(() => expect(onRetry).toHaveBeenCalledTimes(1));
+    expect(invoke.mock.calls).toEqual([["cmd_daemon_restart_previous_terminals", { confirmLiveSessions: 1 }]]);
+  });
 });

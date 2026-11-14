@@ -1491,6 +1491,12 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
             )?;
             ipc::native_menu::register_menu_event_forwarder(app.handle());
             crate::browser::download::register_download_event_forwarder(app.handle());
+            // Todo 27: a same-protocol daemon that kept its live sessions through an update.
+            let restart_handle = app.handle().clone();
+            crate::daemon::update_pending::set_restart_required_notifier(move |signal| {
+                let event = crate::daemon::update_pending::RESTART_REQUIRED_EVENT;
+                let _ = restart_handle.emit(event, signal);
+            });
             start_remote_event_bridge(app.handle().clone(), Arc::clone(&bridge_daemon_client));
             // P10/P11: schedule the ambiguous-close and pending-create reapers
             // for the whole app lifetime. Both run their first pass immediately
@@ -1772,6 +1778,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::agent_integration::cmd_daemon_supervisor_set,
         ipc::daemon_update::cmd_daemon_update_pending_status,
         ipc::daemon_update::cmd_daemon_restart_previous_terminals,
+        ipc::daemon_update::cmd_daemon_restart_required,
         ipc::agent_integration::cmd_agent_integration_set,
         ipc::agent_integration::cmd_agent_integration_remove_local,
         ipc::supervisor::cmd_supervisor_snapshot,

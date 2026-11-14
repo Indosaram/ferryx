@@ -1368,6 +1368,18 @@ impl DaemonSessionService {
             .transpose()
     }
 
+    /// Spawn-gate claim for a session created outside spawn_session (the headless gateway's
+    /// default shell): a retiring daemon refuses it with DAEMON_RETIRING, so no session can
+    /// appear after a zero-session retirement or idle upgrade was decided.
+    pub(crate) fn retain_spawn_owner(
+        &self,
+    ) -> Result<Option<super::handover::SpawnOwnerGuard>, String> {
+        self.handover_manager
+            .upgrade()
+            .map(|manager| manager.retain_spawn_owner())
+            .transpose()
+    }
+
     pub(crate) fn router(&self) -> &super::proxy::SessionRouter {
         &self.session_router
     }

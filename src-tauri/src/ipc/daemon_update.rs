@@ -38,3 +38,12 @@ pub async fn cmd_daemon_restart_previous_terminals(
         .restart_previous_version_terminals(confirm_live_sessions)
         .await
 }
+
+/// The same-protocol restart-required signal (todo 27) for a window that mounted after the
+/// RESTART_REQUIRED_EVENT fired; None when no update is waiting for a restart. Sends nothing.
+#[tauri::command]
+pub async fn cmd_daemon_restart_required(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+) -> Result<Option<IpcError>, IpcError> {
+    Ok(daemon_client.restart_required_signal())
+}

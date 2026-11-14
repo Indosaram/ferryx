@@ -1038,21 +1038,31 @@ pub(crate) enum UpgradeRoute {
     /// No control-v1 endpoint: a pre-plan daemon. It is never sent UpgradeBinary or any control
     /// op; it stays the Alive owner until it exits on its own (todo 14).
     LegacyDaemon,
-    /// The daemon serves control-v1 but does not list RequestUpgrade and handover-v1 (e.g.
-    /// Windows): nothing is requested.
+    /// The daemon serves control-v1 but does not list the ops this platform needs (RequestUpgrade,
+    /// plus handover-v1 where sessions can be transferred): nothing is requested.
     Unsupported,
-    /// The daemon lists RequestUpgrade and handover-v1: stage this build and send RequestUpgrade.
+    /// The daemon lists those ops: stage this build and send RequestUpgrade.
     RequestUpgrade,
 }
 
 /// Pure route decision from the daemon's control Hello (None: no control endpoint).
 pub(crate) fn upgrade_route(hello: Option<&crate::daemon::control::HelloReply>) -> UpgradeRoute {
+    upgrade_route_on(hello, cfg!(unix))
+}
+
+/// upgrade_route for a platform with or without session transfer. Without it (Windows, todo 27)
+/// RequestUpgrade alone is enough: the daemon decides the idle upgrade itself and refuses while
+/// any session is live, so handover-v1 is never required there.
+pub(crate) fn upgrade_route_on(
+    hello: Option<&crate::daemon::control::HelloReply>,
+    session_transfer: bool,
+) -> UpgradeRoute {
     use crate::daemon::control::{HANDOVER_V1_OP, OP_REQUEST_UPGRADE};
     let Some(hello) = hello else {
         return UpgradeRoute::LegacyDaemon;
     };
     let lists = |op: &str| hello.ops.iter().any(|listed| listed == op);
-    if lists(OP_REQUEST_UPGRADE) && lists(HANDOVER_V1_OP) {
+    if lists(OP_REQUEST_UPGRADE) && (lists(HANDOVER_V1_OP) || !session_transfer) {
         UpgradeRoute::RequestUpgrade
     } else {
         UpgradeRoute::Unsupported
@@ -1070,6 +1080,9 @@ pub(crate) enum ControlUpgradeOutcome {
     Accepted,
     /// RequestUpgrade answered with this failure code; the daemon keeps serving.
     Refused(String),
+    /// RequestUpgrade refused because this many sessions are live on a daemon that cannot
+    /// transfer them (todo 27): the update finishes only after a restart.
+    SessionsLive { live: u32 },
 }
 
 /// Sends an upgrade request only through the control channel in `runtime_dir` (todo 8): Hello
@@ -1107,7 +1120,12 @@ where
     };
     match client.call(&request).await {
         Ok(ControlReply::UpgradeAccepted) => Ok(ControlUpgradeOutcome::Accepted),
-        Ok(ControlReply::Failed(failure)) => Ok(ControlUpgradeOutcome::Refused(failure.code)),
+        Ok(ControlReply::Failed(failure)) => Ok(match failure.live {
+            Some(live) if live > 0 && failure.code == control::CODE_UPGRADE_REFUSED => {
+                ControlUpgradeOutcome::SessionsLive { live }
+            }
+            _ => ControlUpgradeOutcome::Refused(failure.code),
+        }),
         Ok(other) => Err(format!("unexpected RequestUpgrade reply: {other:?}")),
         Err(error) => Err(format!("RequestUpgrade failed: {error}")),
     }
@@ -2407,7 +2425,8 @@ impl DaemonClient {
             ControlUpgradeOutcome::Accepted => DaemonResponse::UpgradeScheduled,
             ControlUpgradeOutcome::LegacyDaemonLeftAlone
             | ControlUpgradeOutcome::Unsupported
-            | ControlUpgradeOutcome::Refused(_) => DaemonResponse::UpgradeUnsupported,
+            | ControlUpgradeOutcome::Refused(_)
+            | ControlUpgradeOutcome::SessionsLive { .. } => DaemonResponse::UpgradeUnsupported,
         })
     }
 
@@ -2644,6 +2663,17 @@ impl DaemonClient {
                 }
                 Ok(ControlUpgradeOutcome::Refused(code)) => {
                     tracing::info!(%code, "Daemon refused the upgrade request; it keeps serving every session.");
+                }
+                Ok(ControlUpgradeOutcome::SessionsLive { live }) => {
+                    tracing::info!(
+                        live,
+                        "Daemon keeps its live sessions; restart Ferryx to finish updating."
+                    );
+                    crate::daemon::update_pending::note_restart_required(
+                        &control_dir,
+                        daemon_version,
+                        live,
+                    );
                 }
                 Err(e) => {
                     tracing::warn!("Failed to send daemon upgrade request: {e}");
@@ -3101,7 +3131,12 @@ impl DaemonClient {
 
     /// Re-reads the pending state (after CountChanged) without sending RetireWhenIdle twice.
     pub async fn update_pending_status(&self) -> crate::daemon::update_pending::UpdatePending {
-        crate::daemon::update_pending::enter(&self.control_runtime_dir(), None).await
+        crate::daemon::update_pending::status(&self.control_runtime_dir()).await
+    }
+
+    /// The same-protocol restart-required signal (todo 27), if the owner refused an idle upgrade.
+    pub fn restart_required_signal(&self) -> Option<IpcError> {
+        crate::daemon::update_pending::restart_required_signal(&self.control_runtime_dir())
     }
 
     /// Interactive requests (keystroke writes, resizes) use a dedicated connection so

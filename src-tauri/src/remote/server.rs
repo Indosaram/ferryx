@@ -1121,7 +1121,23 @@ async fn get_workspace_state(
                 }];
             }
         } else if raw_backend_empty && raw_terminal_empty {
-            if let Ok((session_id, _)) = state.terminal_service.spawn_shell(80, 24) {
+            // Held across the spawn so a zero-session retirement (control-v1 Shutdown, Windows
+            // idle upgrade) cannot decide while this shell is being created; a retiring daemon
+            // refuses the claim and no shell is spawned.
+            let spawned = match state
+                .machine_services
+                .as_ref()
+                .map(|services| services.sessions.retain_spawn_owner())
+                .transpose()
+            {
+                // The claim (if any) drops at the end of this arm, after the session exists.
+                Ok(_spawn_owner) => state.terminal_service.spawn_shell(80, 24).ok(),
+                Err(refusal) => {
+                    tracing::info!(%refusal, "Headless remote gateway default shell not spawned");
+                    None
+                }
+            };
+            if let Some((session_id, _)) = spawned {
                 tracing::info!(
                     "Auto-spawned default shell session {session_id} for headless remote gateway"
                 );
