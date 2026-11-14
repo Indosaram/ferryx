@@ -99,11 +99,11 @@ class ConfigurationTest(unittest.TestCase):
             out = Path(tmp) / 'out'
             result = subprocess.run(['/bin/sh', '-c', command, '--', str(out), '3', 'fresh-nonce'], capture_output=True)
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertIn('ferryx-buildbarn-3-fresh-nonce', out.read_text())
+            self.assertIn('buildbarn-smoke-3-fresh-nonce', out.read_text())
             # A missing hostname command must fail, not produce a success marker.
             result = subprocess.run(['/bin/sh', '-c', command, '--', str(out), '3', 'fresh-nonce'], env=dict(os.environ, PATH=tmp), capture_output=True)
             self.assertNotEqual(0, result.returncode)
-            self.assertNotIn('ferryx-buildbarn', out.read_text())
+            self.assertNotIn('buildbarn-smoke', out.read_text())
 
     def test_atomic_output_refuses_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,7 +119,7 @@ class ConfigurationTest(unittest.TestCase):
         import os
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / 'rendered'
-            command = [sys.executable, str(HERE / 'configure.py'), '--profile', str(HERE / 'profile.example.json'), '--output', str(out)]
+            command = [sys.executable, str(HERE / 'configure.py'), '--ferryx-inventory', '--profile', str(HERE / 'profile.example.json'), '--output', str(out)]
             env = dict(os.environ, FERRYX_BUILD_HOSTS_FILE=str(HERE / 'hosts.example'))
             first = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertEqual(0, first.returncode, first.stderr)
@@ -127,6 +127,39 @@ class ConfigurationTest(unittest.TestCase):
             second = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertEqual(2, second.returncode)
             self.assertIn('output already exists', second.stderr)
+
+    def test_standalone_profile_needs_no_ferryx_inventory(self):
+        f = c.render(None, self.profile)
+        self.assertFalse(f['manifest.json']['inventory_supplied'])
+        self.assertEqual([], f['manifest.json']['excluded'])
+        self.assertEqual(3, len(f['manifest.json']['workers']))
+        self.assertNotIn('target', f['manifest.json']['workers']['linux-a'])
+        self.assertIn('toolchain-id', f['manifest.json']['workers']['linux-a']['properties'])
+
+    def test_standalone_cli_ignores_ferryx_environment(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, FERRYX_BUILD_HOSTS_FILE=str(Path(tmp) / 'missing'))
+            env.pop('BUILDBARN_HOSTS_FILE', None)
+            command = [sys.executable, str(HERE / 'configure.py'), '--profile', str(HERE / 'profile.example.json'), '--output', str(Path(tmp) / 'output')]
+            result = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_generic_inventory_environment(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, BUILDBARN_HOSTS_FILE=str(HERE / 'hosts.example'))
+            output = Path(tmp) / 'output'
+            command = [sys.executable, str(HERE / 'configure.py'), '--profile', str(HERE / 'profile.example.json'), '--output', str(output)]
+            result = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(json.loads((output / 'manifest.json').read_text())['inventory_supplied'])
+
+    def test_standalone_rejects_path_traversal_worker_name(self):
+        profile = copy.deepcopy(self.profile)
+        profile['workers']['../escape'] = profile['workers'].pop('linux-a')
+        with self.assertRaises(ValueError):
+            c.render(None, profile)
 
     def test_validation_failure_leaves_no_output(self):
         with tempfile.TemporaryDirectory() as tmp:
