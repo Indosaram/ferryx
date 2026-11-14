@@ -252,7 +252,7 @@ export type SessionRecoveryState =
   | { phase: "blocked"; reason: string }
   | { phase: "exited"; reason: string | null };
 export type RemoteFailure = {
-  kind: "network" | "transport" | "authentication" | "missing" | "expired" | "protocol" | "busy" | "staleGeneration" | "disconnected";
+  kind: "network" | "transport" | "authentication" | "hostKey" | "missing" | "expired" | "protocol" | "busy" | "staleGeneration" | "disconnected";
   message: string;
 };
 export type RemoteReplayGap = { requestedAfterCursor: string; availableFromCursor: string };

@@ -21,6 +21,7 @@ async fn browse_home_child_parent_and_register_without_remote_writes() {
             source: SshHostSource::Manual,
             auth_method: SshAuthMethod::Agent,
             disabled: None,
+            system_config_alias: None,
         };
         std::fs::write(
             &store,

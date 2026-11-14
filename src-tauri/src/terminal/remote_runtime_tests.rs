@@ -416,6 +416,16 @@ async fn ssh_reconnect_safety_setup_classifies_structured_transport_and_authenti
         ),
         (
             IpcErrorCode::IoError,
+            serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Host key verification failed."}),
+            RemoteFailureKind::HostKey,
+        ),
+        (
+            IpcErrorCode::HostKeyChanged,
+            serde_json::json!({"stage": "host_key", "exitCode": 255}),
+            RemoteFailureKind::HostKey,
+        ),
+        (
+            IpcErrorCode::IoError,
             serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Connection refused"}),
             RemoteFailureKind::Transport,
         ),

@@ -1573,6 +1573,7 @@ export type DagWatchFailureCode =
   | "helper_missing"
   | "capability_missing"
   | "authentication"
+  | "host_key"
   | "unavailable";
 
 /** Terminal DAG-watch outcome pushed by the backend when retrying stopped for good. */

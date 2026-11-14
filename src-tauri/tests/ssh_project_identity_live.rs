@@ -16,6 +16,7 @@ async fn remote_registration_preserves_git_identity_and_execution_path() {
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Agent,
         disabled: None,
+        system_config_alias: None,
     };
     let path = std::env::var("FERRYX_IDENTITY_PATH").unwrap();
     let environment = runtime::detect(&host).await.unwrap();

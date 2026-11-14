@@ -5140,6 +5140,7 @@ mod local_control_isolation_tests {
                                     source: crate::ssh::SshHostSource::Config,
                                     auth_method: crate::ssh::SshAuthMethod::Agent,
                                     disabled: None,
+                                    system_config_alias: None,
                                 },
                                 environment: crate::ssh::runtime::RemoteEnvironment {
                                     platform: crate::ssh::runtime::RemotePlatform::Posix,

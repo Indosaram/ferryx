@@ -353,6 +353,7 @@ async fn direct_ssh_real_transport_registration_and_pty() {
             source: SshHostSource::Manual,
             auth_method: SshAuthMethod::Key,
             disabled: None,
+            system_config_alias: None,
         },
         known_hosts_file: known_hosts,
         repo_path: dir.path().join("alias").to_str().unwrap().into(),
@@ -472,6 +473,7 @@ async fn exercise_child(root: &Path) {
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Key,
         disabled: None,
+        system_config_alias: None,
     };
     let host_store = root.join("ssh_hosts.json");
     write_hosts(&host_store, vec![host.clone()]);
@@ -1095,6 +1097,7 @@ async fn remote_ssh_first_spawn_provisions_qualified_helper_child() {
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Key,
         disabled: None,
+        system_config_alias: None,
     };
     let host_store = root.join("ssh_hosts.json");
     write_hosts(&host_store, vec![host.clone()]);

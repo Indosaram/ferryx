@@ -754,6 +754,7 @@ mod tests {
             source: SshHostSource::Config,
             auth_method: SshAuthMethod::Agent,
             disabled: None,
+            system_config_alias: None,
         };
         let env = RemoteEnvironment {
             platform: RemotePlatform::Posix,

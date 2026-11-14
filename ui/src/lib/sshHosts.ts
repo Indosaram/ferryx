@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import { SSH_CONFIG_PATH_STORAGE_KEY } from "./storageKeys";
 
@@ -187,11 +188,18 @@ export async function listSshHosts(): Promise<SshHost[]> {
   return inflightFetch;
 }
 
-export async function importSshConfig(configText: string): Promise<SshHost[]> {
+/**
+ * `configPath` names the file `configText` was read from. The backend lets hosts connect by their
+ * alias only when that is the ssh client's default config; pasted text omits it.
+ */
+export async function importSshConfig(configText: string, configPath?: string): Promise<SshHost[]> {
   if (!isTauri()) {
     throw new Error("SSH host changes are available only in the Ferryx desktop runtime");
   }
-  const hosts = await invoke<SshHost[]>("cmd_ssh_import_config", { configText });
+  const hosts = await invoke<SshHost[]>(
+    "cmd_ssh_import_config",
+    configPath ? { configText, configPath } : { configText },
+  );
   return notifyListeners(hosts);
 }
 
@@ -254,9 +262,72 @@ export async function clearSshPassword(host: SshHost): Promise<void> {
   return invoke<void>("cmd_ssh_clear_password", { host: cleanHostForIpc(host) });
 }
 
+export type SshAuthPromptKind = "password" | "passphrase" | "code" | "other";
+
+/** An interactive question OpenSSH asked during a connection (password, key passphrase, 2FA code, ...). */
+export interface SshAuthPrompt {
+  id: string;
+  /** The user@host (or connection target) the prompt is for. */
+  host: string;
+  /** OpenSSH's question text, verbatim. */
+  prompt: string;
+  kind: SshAuthPromptKind;
+  expiresInMs: number;
+}
+
+export const SSH_AUTH_PROMPT_EVENT = "ssh_auth_prompt";
+
+/** Answers a pending SSH auth prompt; `null` cancels it. Rejects when the prompt already expired. */
+export async function answerSshAuthPrompt(id: string, answer: string | null): Promise<void> {
+  return invoke<void>("cmd_ssh_answer_auth_prompt", { id, answer });
+}
+
+/**
+ * Subscribes to SSH auth prompts and tells the backend a prompt UI is listening
+ * (it fails prompts immediately when nobody listens). Returns the unsubscribe function.
+ */
+export async function listenSshAuthPrompts(onPrompt: (prompt: SshAuthPrompt) => void): Promise<() => void> {
+  if (!isTauri()) {
+    return () => {};
+  }
+  const unlisten = await listen<SshAuthPrompt>(SSH_AUTH_PROMPT_EVENT, event => onPrompt(event.payload));
+  try {
+    await invoke<void>("cmd_ssh_auth_prompt_listeners", { active: true });
+  } catch (err) {
+    unlisten();
+    throw err;
+  }
+  return () => {
+    unlisten();
+    void (async () => {
+      try {
+        await invoke<void>("cmd_ssh_auth_prompt_listeners", { active: false });
+      } catch (err) {
+        console.warn("Failed to unregister the SSH auth prompt listener", err);
+      }
+    })();
+  };
+}
+
 export async function testSshConnection(host: SshHost): Promise<SshTargetSummary> {
   const cleaned = cleanHostForIpc(host);
   return invoke<SshTargetSummary>("cmd_ssh_test_connection", { host: cleaned });
+}
+
+export interface SshScannedHostKey {
+  keyType: string;
+  fingerprintSha256: string;
+  line: string;
+}
+
+/** Reads the host keys the server presents, without trusting any of them. */
+export async function scanSshHostKey(host: SshHost): Promise<{ keys: SshScannedHostKey[] }> {
+  return invoke<{ keys: SshScannedHostKey[] }>("cmd_ssh_scan_host_key", { host: cleanHostForIpc(host) });
+}
+
+/** Pins the host key; the backend refuses when the server no longer presents this fingerprint. */
+export async function trustSshHostKey(host: SshHost, fingerprintSha256: string): Promise<void> {
+  return invoke<void>("cmd_ssh_trust_host_key", { host: cleanHostForIpc(host), fingerprintSha256 });
 }
 
 export async function prepareSshIntegration(host: SshHost): Promise<void> {

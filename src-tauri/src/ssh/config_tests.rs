@@ -9,7 +9,10 @@ fn p10_identity_file_import_preserves_semantic_argv() {
     );
     let parsed = parse_ssh_config(&text);
     assert_eq!(parsed[0].identity_file.as_deref(), Some(key));
-    let imported = import_aliases(&parsed, &[]);
+    let mut imported = import_aliases(&parsed, &[]);
+    // Import still records the key; the launched ssh reads it from the user's own Host block.
+    assert_eq!(imported[0].identity_file.as_deref(), Some(key));
+    // Pasted or custom-path text: ssh cannot resolve the alias, so the key stays on the command line.
     let plan = crate::ssh::direct::ssh_plan(&imported[0], "true".into(), false).unwrap();
     let values: Vec<_> = plan
         .args
@@ -18,6 +21,81 @@ fn p10_identity_file_import_preserves_semantic_argv() {
         .map(|pair| pair[1].as_str())
         .collect();
     assert_eq!(values, vec![key]);
+    imported[0].system_config_alias = Some("fixture".into());
+    let plan = crate::ssh::direct::ssh_plan(&imported[0], "true".into(), false).unwrap();
+    assert!(!plan.args.iter().any(|arg| arg == "-i"), "{:?}", plan.args);
+    assert_eq!(plan.args[plan.args.len() - 2], "fixture");
+}
+
+#[test]
+fn config_host_connects_by_alias_without_explicit_flags() {
+    let text = "Host work-box\n HostName 10.9.8.7\n User dev\n Port 2200\n IdentityFile /keys/id\n ProxyJump bastion\n ProxyCommand nc %h %p\n";
+    let mut imported = import_aliases(&parse_ssh_config(text), &[]);
+    imported[0].system_config_alias = Some("work-box".into());
+    let host = &imported[0];
+    assert_eq!(host.id, "ssh-work-box");
+    assert_eq!(host.config_alias(), Some("work-box"));
+    assert_eq!(host.hostname, "10.9.8.7");
+    for argv in [
+        crate::ssh::exec::interactive_argv(host),
+        crate::ssh::exec::probe_argv(host),
+        crate::ssh::direct::ssh_plan(host, "true".into(), false).unwrap().args,
+    ] {
+        for flag in ["-p", "-i", "-J"] {
+            assert!(!argv.iter().any(|arg| arg == flag), "{flag} in {argv:?}");
+        }
+        assert!(argv.iter().any(|arg| arg == "dev@work-box"), "{argv:?}");
+        assert!(!argv.iter().any(|arg| arg.contains("10.9.8.7")), "{argv:?}");
+    }
+    // A renamed label does not change the connect target.
+    let mut renamed = host.clone();
+    renamed.label = "My box".into();
+    assert_eq!(renamed.connect_target(), "dev@work-box");
+}
+
+#[test]
+fn config_alias_is_validated_as_a_host_token() {
+    let mut host = import_aliases(&parse_ssh_config("Host ok\n"), &[]).remove(0);
+    host.system_config_alias = Some("ok".into());
+    assert!(crate::ssh::direct::validate_host(&host).is_ok());
+    for bad in ["-oProxyCommand=x", "a b", "a;b"] {
+        host.system_config_alias = Some(bad.into());
+        assert!(crate::ssh::direct::validate_host(&host).is_err(), "{bad}");
+    }
+}
+
+/// D1: only a default-`~/.ssh/config` import connects by alias. A pasted or custom-path import
+/// carries no provenance and keeps every endpoint field on the command line, which is also what a
+/// store written before provenance existed gets.
+#[test]
+fn pasted_or_custom_path_import_keeps_explicit_endpoint_flags() {
+    let text = "Host pasted-box\n HostName 10.9.8.7\n User dev\n Port 2200\n IdentityFile /keys/id\n ProxyJump bastion\n";
+    let host = import_aliases(&parse_ssh_config(text), &[]).remove(0);
+    assert_eq!(host.id, "ssh-pasted-box");
+    assert_eq!(host.source, SshHostSource::Config);
+    assert_eq!(host.config_alias(), None);
+    let argv = crate::ssh::direct::ssh_plan(&host, "true".into(), false).unwrap().args;
+    for pair in [["-p", "2200"], ["-i", "/keys/id"], ["-J", "bastion"]] {
+        assert!(argv.windows(2).any(|w| w == pair), "{pair:?} missing: {argv:?}");
+    }
+    assert_eq!(argv[argv.len() - 2], "dev@10.9.8.7");
+    assert!(!argv.iter().any(|arg| arg.contains("pasted-box")), "{argv:?}");
+
+    // An older store entry (id ssh-<alias>, source config, no provenance) behaves the same.
+    let legacy: crate::ssh::SshHost = serde_json::from_value(serde_json::json!({
+        "id": "ssh-pasted-box", "label": "pasted-box", "hostname": "10.9.8.7", "username": "dev",
+        "port": 2200, "source": "config", "authMethod": "agent"
+    }))
+    .unwrap();
+    assert_eq!(legacy.config_alias(), None);
+    assert_eq!(legacy.connect_target(), "dev@10.9.8.7");
+    // Provenance round-trips through the store format.
+    let mut marked = legacy.clone();
+    marked.system_config_alias = Some("pasted-box".into());
+    let back: crate::ssh::SshHost =
+        serde_json::from_str(&serde_json::to_string(&marked).unwrap()).unwrap();
+    assert_eq!(back.config_alias(), Some("pasted-box"));
+    assert!(!serde_json::to_string(&legacy).unwrap().contains("systemConfigAlias"));
 }
 
 #[test]
@@ -199,4 +277,58 @@ Host server
         "%d must not expand to the config directory: {expected_key}"
     );
     assert_eq!(srv.jump_host.as_deref(), Some("bastion:srv.example.com"));
+}
+
+/// Live check against a real sshd, run with HOME pointing at a temporary home whose
+/// `~/.ssh/config` holds FERRYX_ALIAS_QA_ALIAS (reaching the server only through its
+/// ProxyCommand) and FERRYX_ALIAS_QA_PASTED (HostName/Port/IdentityFile straight to the server).
+/// No ssh wrapper: the real ssh reads the default config itself. The default-config import connects
+/// by alias; a pasted import of the same blocks has no provenance and connects with explicit flags.
+#[tokio::test]
+#[ignore = "requires a live sshd on 127.0.0.1 and FERRYX_ALIAS_QA_*"]
+async fn live_config_alias_connects_through_proxy_command() {
+    let var = |name: &str| std::env::var(format!("FERRYX_ALIAS_QA_{name}")).unwrap();
+    let config = std::path::PathBuf::from(var("HOME")).join(".ssh").join("config");
+    let text = std::fs::read_to_string(&config).unwrap();
+    let find = |alias: String| {
+        import_aliases(&parse_ssh_config(&text), &[])
+            .into_iter()
+            .find(|host| host.label == alias)
+            .expect("alias imported")
+    };
+    // What `cmd_ssh_import_config` records for an import of the default config file.
+    let mut host = find(var("ALIAS"));
+    host.system_config_alias = Some(var("ALIAS"));
+    let argv = crate::ssh::direct::ssh_plan(&host, "true".into(), false).unwrap().args;
+    println!("QA system-config argv: {argv:?}");
+    let summary = crate::ipc::ssh::ssh_test_connection_summary(host.clone()).await;
+    println!(
+        "QA system-config host: reachable={} diagnostic={:?}",
+        summary.reachable, summary.diagnostic
+    );
+    assert!(summary.reachable, "{:?}", summary.diagnostic);
+
+    // A pasted import of the ProxyCommand-only block cannot use the block: it dials HostName.
+    let pasted_proxy = find(var("ALIAS"));
+    assert_eq!(pasted_proxy.config_alias(), None);
+    let summary = crate::ipc::ssh::ssh_test_connection_summary(pasted_proxy).await;
+    println!(
+        "QA pasted proxy-only host: reachable={} code={:?}",
+        summary.reachable,
+        summary.diagnostic.as_ref().map(|d| d.code.to_string())
+    );
+    assert!(!summary.reachable, "a pasted host must not pick up the alias block");
+
+    // A pasted import of a direct block connects through its explicit -p/-i.
+    let pasted = find(var("PASTED"));
+    let argv = crate::ssh::direct::ssh_plan(&pasted, "true".into(), false).unwrap().args;
+    println!("QA pasted argv: {argv:?}");
+    assert!(argv.windows(2).any(|pair| pair[0] == "-p"));
+    assert!(argv.windows(2).any(|pair| pair[0] == "-i"));
+    let summary = crate::ipc::ssh::ssh_test_connection_summary(pasted).await;
+    println!(
+        "QA pasted host: reachable={} diagnostic={:?}",
+        summary.reachable, summary.diagnostic
+    );
+    assert!(summary.reachable, "{:?}", summary.diagnostic);
 }

@@ -42,6 +42,9 @@ pub fn validate_host(host: &SshHost) -> Result<(), IpcError> {
     {
         return Err(invalid("Invalid or missing SSH identity file"));
     }
+    if host.config_alias().is_some_and(|alias| !token(alias, "._-:[]")) {
+        return Err(invalid("Invalid SSH config host alias"));
+    }
     Ok(())
 }
 
@@ -115,13 +118,11 @@ pub fn ssh_plan(
     if !interactive {
         args[0] = "-T".into();
     }
-    // These precede user config and prevent prompts, forwarding, or connection reuse.
+    // These precede user config and prevent forwarding or connection reuse. Prompts are allowed:
+    // the askpass helper (password::environment) routes each one to the stored password or the
+    // UI, so passphrase keys, keyboard-interactive and OTP challenges can be answered.
     let mut options = vec![
-        if host.auth_method == SshAuthMethod::Password {
-            "BatchMode=no"
-        } else {
-            "BatchMode=yes"
-        },
+        "BatchMode=no",
         "StrictHostKeyChecking=yes",
         "UpdateHostKeys=no",
         "ConnectTimeout=3",
@@ -138,10 +139,10 @@ pub fn ssh_plan(
     }
     if host.auth_method == SshAuthMethod::Password {
         options.extend([
-            "PreferredAuthentications=password",
+            "PreferredAuthentications=password,keyboard-interactive",
             "PasswordAuthentication=yes",
             "PubkeyAuthentication=no",
-            "KbdInteractiveAuthentication=no",
+            "KbdInteractiveAuthentication=yes",
             "NumberOfPasswordPrompts=1",
         ]);
     }
@@ -161,22 +162,64 @@ pub fn ssh_plan(
     })
 }
 
+/// Longest remote agent-socket path placed in the private directory; macOS caps `sun_path` at
+/// 104 bytes and Linux at 108, so longer homes keep the legacy shared-`/tmp` path.
+const REMOTE_AGENT_SOCKET_MAX: usize = 100;
+
+/// Where a pane's forwarded agent-state socket lives on the remote: `(directory, socket)`.
+///
+/// With the remote home known it is `<home>/.ferryx/a/<sid>.sock`, inside a 0700 directory only
+/// the user can create entries in, so no other local user can pre-bind or squat the name the way
+/// a predictable `/tmp` path allows. Without a home, or when the path would overflow the Unix
+/// socket limit, the legacy `/tmp/ferryx-agent-<sid>.sock` is kept.
+pub(crate) fn remote_agent_socket(remote_home: Option<&str>, sid: &str) -> (Option<String>, String) {
+    if let Some(home) = remote_home.map(|h| h.trim_end_matches('/')).filter(|h| h.starts_with('/')) {
+        let dir = format!("{home}/.ferryx/a");
+        let sock = format!("{dir}/{sid}.sock");
+        if sock.len() <= REMOTE_AGENT_SOCKET_MAX {
+            return (Some(dir), sock);
+        }
+    }
+    (None, format!("/tmp/ferryx-agent-{sid}.sock"))
+}
+
+/// POSIX `sh` fragment that creates `$HOME/.ferryx/a` (umask 077, mode 0700) ahead of the first
+/// pane. sshd binds a pane's `-R` StreamLocal forward before the pane command runs, so the
+/// environment-detect probe, which precedes every pane, runs this. It never fails the caller,
+/// prints nothing, and leaves a symlink or a non-directory at that path untouched.
+pub(crate) const REMOTE_AGENT_DIR_PREFLIGHT: &str = "case \"$HOME\" in /*) d=\"$HOME/.ferryx/a\"; \
+     if [ ! -L \"$d\" ] && { [ -d \"$d\" ] || [ ! -e \"$d\" ]; }; then \
+     (umask 077; mkdir -p \"$d\" && chmod 700 \"$d\") >/dev/null 2>&1; fi;; esac; ";
+
 pub fn shell_plan_with_session(
     host: &SshHost,
     root: &str,
     session_id: Option<&str>,
     local_agent_socket: Option<&str>,
+    remote_home: Option<&str>,
 ) -> Result<ShellCommandPlan, IpcError> {
     validate_remote_path(root)?;
     let remote_command = match (session_id, local_agent_socket) {
         (Some(sid), Some(_)) => {
-            let remote_sock = format!("/tmp/ferryx-agent-{sid}.sock");
+            let (dir, remote_sock) = remote_agent_socket(remote_home, sid);
+            // sshd binds the forward before this command runs; the detect probe already ran
+            // REMOTE_AGENT_DIR_PREFLIGHT, this is a backstop for the panes that follow.
+            let mkdir = dir
+                .map(|dir| {
+                    // Same guard as the preflight: a symlink or non-directory is never followed.
+                    format!(
+                        "d={dir}; if [ ! -L \"$d\" ] && {{ [ -d \"$d\" ] || [ ! -e \"$d\" ]; }}; then \
+                         (umask 077; mkdir -p \"$d\" && chmod 700 \"$d\") >/dev/null 2>&1; fi; ",
+                        dir = quote_posix(&dir)
+                    )
+                })
+                .unwrap_or_default();
             // The forward ends at the daemon's unix agent-state listener, which also answers herdr
             // `pane.report_agent` lines (server.rs `serve_agent_state_connection`), so crush's
             // built-in herdr reporter can use it as on a local pane (pty.rs `apply_herdr_env`). A
             // remote shell that already has HERDR_ENV runs real herdr and keeps its own variables.
             format!(
-                "export FERRYX_SESSION_ID={sid} FERRYX_AGENT_STATE_SOCKET={sock}; \
+                "{mkdir}export FERRYX_SESSION_ID={sid} FERRYX_AGENT_STATE_SOCKET={sock}; \
                  [ -n \"${{HERDR_ENV:-}}\" ] || export HERDR_ENV=1 HERDR_SOCKET_PATH={sock} HERDR_PANE_ID={sid}; \
                  cd {} && exec \"${{SHELL:-/bin/sh}}\" -l",
                 quote_posix(root),
@@ -202,7 +245,7 @@ pub fn shell_plan_with_session(
     let mut plan = ssh_plan(host, remote_command, true)?;
 
     if let (Some(sid), Some(local_sock)) = (session_id, local_agent_socket) {
-        let remote_sock = format!("/tmp/ferryx-agent-{sid}.sock");
+        let (_, remote_sock) = remote_agent_socket(remote_home, sid);
         plan.args.splice(
             0..0,
             [
@@ -217,7 +260,7 @@ pub fn shell_plan_with_session(
 }
 
 pub fn shell_plan(host: &SshHost, root: &str) -> Result<ShellCommandPlan, IpcError> {
-    shell_plan_with_session(host, root, None, None)
+    shell_plan_with_session(host, root, None, None, None)
 }
 
 pub async fn ensure_remote_extension_installed(host: &SshHost) -> Result<(), IpcError> {
@@ -476,11 +519,11 @@ pub(crate) async fn bounded_output_with_stdin(
             stdin.write_all(&input).await?;
             stdin.shutdown().await
         };
-        let result = tokio::time::timeout(deadline, async {
+        let result = super::password::with_prompt_deadline(deadline, async {
             let output = collect_pipe_output(child, deadline, PROBE_OUTPUT_LIMIT);
             let write = async { write.await.map_err(|error| IpcError::new(IpcErrorCode::IoError, error.to_string())) };
             tokio::try_join!(write, output).map(|(_, bytes)| bytes)
-        }).await;
+        }).await.ok_or(());
         match result {
             Ok(Ok(bytes)) => Ok(bytes),
             Ok(Err(error)) => Err(error),
@@ -519,6 +562,21 @@ async fn bounded_output_with_stdin_limit(
 pub(crate) const PROBE_OUTPUT_LIMIT: usize = 16 * 1024;
 
 async fn collect_finite_output(
+    plan: &ShellCommandPlan,
+    stdin: Stdio,
+    deadline: Duration,
+    max_bytes: usize,
+) -> Result<Vec<u8>, IpcError> {
+    let result = collect_finite_output_inner(plan, stdin, deadline, max_bytes).await;
+    // An auth prompt nobody answered surfaces as its own typed error, not as a generic
+    // authentication or transport failure.
+    if result.is_err() && super::password::take_prompt_timeout(&plan.args) {
+        return Err(super::password::prompt_timeout_error());
+    }
+    result
+}
+
+async fn collect_finite_output_inner(
     plan: &ShellCommandPlan,
     stdin: Stdio,
     deadline: Duration,
@@ -573,10 +631,11 @@ async fn collect_pipe_output(
         }
         Ok::<_, std::io::Error>(bytes)
     };
-    let result = tokio::time::timeout(deadline, async {
+    let result = super::password::with_prompt_deadline(deadline, async {
         tokio::try_join!(child.wait(), read(Box::new(stdout)), read(Box::new(stderr)))
     })
-    .await;
+    .await
+    .ok_or(());
     let error = match result {
         Ok(Ok((status, stdout, stderr))) => {
             return if status.success() {
@@ -671,7 +730,7 @@ async fn collect_windows_output(
     let mut stdin_write = stdin_write;
     let mut stderr_bytes = None;
     let mut stdin_done = stdin_write.is_none();
-    let result = tokio::time::timeout(deadline, async {
+    let result = super::password::with_prompt_deadline(deadline, async {
         let mut interval = tokio::time::interval(WINDOWS_STDOUT_CHECK_INTERVAL);
         let mut status = None;
         loop {
@@ -714,7 +773,7 @@ async fn collect_windows_output(
         }).await.map_err(|error| std::io::Error::other(error.to_string()))?;
         if stdout.len() > max_bytes { return Err(std::io::Error::other(format!("SSH output exceeds {max_bytes} bytes"))); }
         Ok((status, stderr, stdout))
-    }).await;
+    }).await.ok_or(());
     match result {
         Ok(Ok((status, stderr, stdout))) => {
             if status.success() { return Ok(stdout); }

@@ -16,6 +16,7 @@ fn host() -> SshHost {
         source: SshHostSource::Manual,
         auth_method: SshAuthMethod::Agent,
         disabled: None,
+        system_config_alias: None,
     }
 }
 

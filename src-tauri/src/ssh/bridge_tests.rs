@@ -47,6 +47,7 @@ fn sample_host(id: &str) -> SshHost {
         source: SshHostSource::Config,
         auth_method: SshAuthMethod::Agent,
         disabled: None,
+        system_config_alias: None,
     }
 }
 
@@ -1014,6 +1015,7 @@ fn live_loopback_host(fixture: &TestFixture, root: &Path) -> SshHost {
             source: SshHostSource::Manual,
             auth_method: SshAuthMethod::Key,
             disabled: None,
+            system_config_alias: None,
         }
     }
     #[cfg(not(unix))]

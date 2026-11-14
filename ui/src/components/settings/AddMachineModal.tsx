@@ -33,14 +33,17 @@ import {
   importSshConfig,
   installFerryxNode,
   readSystemSshConfig,
+  scanSshHostKey,
   setSshConfigPathOverride,
   setSshPassword,
   testSshConnection,
+  trustSshHostKey,
   updateSshHost,
   type SshAuthMethod,
   type SshHost,
   type SshNodeInstallReport,
   type SshRemoteEnvironment,
+  type SshScannedHostKey,
   type SystemSshConfig,
 } from "../../lib/sshHosts";
 import {
@@ -57,6 +60,7 @@ import { Card } from "../ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { SshAuthPromptCard } from "./SshAuthPromptCard";
 import { EnrollmentStep } from "./remote/EnrollmentStep";
 import { MachineApprovalCard, machineApprovalErrorMessage } from "./remote/MachineApprovalCard";
 
@@ -116,6 +120,10 @@ export function getModalErrorMessage(error: PairedHostError | string): string {
       return "Authorization rejected. Check machine permissions and retry.";
     case "NATIVE_CONTEXT_REQUIRED":
       return "Native host inventory is unavailable. Use the desktop app with a compatible local daemon.";
+    case "HOST_KEY_UNKNOWN":
+      return "This server's host key is not trusted yet. Compare its fingerprint with the one the server reports before trusting it.";
+    case "HOST_KEY_CHANGED":
+      return "The server's host key does not match the trusted one. The server may have been reinstalled, or the connection may be intercepted. Confirm the new key with the server's owner, remove the old entry with 'ssh-keygen -R <host>', then retry.";
     case "PAIR_FAILED":
     default:
       if (typeof error === "object" && error.message && error.message !== code && error.message !== "PAIRED_HOST_UNAVAILABLE") {
@@ -351,6 +359,8 @@ function AddMachineWizard({
 
   const [sshForm, setSshForm] = useState<HostFormData>(DEFAULT_SSH_FORM);
   const [sshPassword, setSshPasswordInput] = useState("");
+  // First contact with an unknown host key: the scanned keys wait for explicit confirmation.
+  const [hostKeyPrompt, setHostKeyPrompt] = useState<{ host: SshHost; keys: SshScannedHostKey[] } | null>(null);
   const [showAdvancedSsh, setShowAdvancedSsh] = useState(false);
 
   // Config Import state
@@ -502,29 +512,66 @@ function AddMachineWizard({
       if (candidateHost.authMethod === "password") {
         await setSshPassword(candidateHost, sshPassword);
       }
-      const summary = await testSshConnection(candidateHost);
-      if (!alive()) return;
-
-      if (!summary.reachable) {
-        showError(summary.lastError || "SSH connection test failed. Check host, credentials, and network reachability.");
-        return;
-      }
-
-      await updateSshHost(candidateHost);
-      if (!alive()) return;
-
-      const target: MachineProjectTarget = { kind: "ssh", hostId: candidateHost.id };
-      setSshPasswordInput("");
-      setSuccessTarget({ target, name: candidateHost.label });
-      onSuccess({
-        kind: "ssh",
-        hostId: candidateHost.id,
-        name: candidateHost.label,
-        summary: { reachable: true, environment: summary.environment },
-      });
+      await verifyAndSaveSshHost(candidateHost);
     } catch (err) {
       if (!alive()) return;
       reportError(err, "SSH connection test failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verifyAndSaveSshHost = async (candidateHost: SshHost) => {
+    const summary = await testSshConnection(candidateHost);
+    if (!alive()) return;
+
+    if (!summary.reachable) {
+      const code = summary.diagnostic?.code;
+      if (code === "HOST_KEY_UNKNOWN") {
+        const scan = await scanSshHostKey(candidateHost);
+        if (!alive()) return;
+        if (scan.keys.length > 0) {
+          setHostKeyPrompt({ host: candidateHost, keys: scan.keys });
+          return;
+        }
+      }
+      if (code === "HOST_KEY_UNKNOWN" || code === "HOST_KEY_CHANGED") {
+        const structured: PairedHostError = { code, message: summary.diagnostic?.message ?? code, retryable: false };
+        showError(getModalErrorMessage(code), structured);
+        return;
+      }
+      showError(summary.lastError || "SSH connection test failed. Check host, credentials, and network reachability.");
+      return;
+    }
+
+    await updateSshHost(candidateHost);
+    if (!alive()) return;
+
+    const target: MachineProjectTarget = { kind: "ssh", hostId: candidateHost.id };
+    setSshPasswordInput("");
+    setSuccessTarget({ target, name: candidateHost.label });
+    onSuccess({
+      kind: "ssh",
+      hostId: candidateHost.id,
+      name: candidateHost.label,
+      summary: { reachable: true, environment: summary.environment },
+    });
+  };
+
+  const handleTrustHostKey = async () => {
+    if (busy || !hostKeyPrompt) return;
+    const { host, keys } = hostKeyPrompt;
+    setBusy(true);
+    clearError();
+    try {
+      await trustSshHostKey(host, keys[0].fingerprintSha256);
+      if (!alive()) return;
+      setHostKeyPrompt(null);
+      await verifyAndSaveSshHost(host);
+    } catch (err) {
+      if (!alive()) return;
+      setHostKeyPrompt(null);
+      reportError(err, "Could not trust the SSH host key.");
     } finally {
       setBusy(false);
     }
@@ -564,7 +611,7 @@ function AddMachineWizard({
     setError(null);
 
     try {
-      const importedHosts = await importSshConfig(systemConfig.rawText);
+      const importedHosts = await importSshConfig(systemConfig.rawText, systemConfig.path);
       if (!alive()) return;
 
       if (Array.isArray(importedHosts) && importedHosts.length > 0) {
@@ -806,7 +853,43 @@ function AddMachineWizard({
           />
         ) : null}
 
-        {!showingResult && step === "details" && method === "ssh" ? (
+        {!showingResult && step === "details" && method === "ssh" ? <SshAuthPromptCard /> : null}
+
+        {!showingResult && step === "details" && method === "ssh" && hostKeyPrompt ? (
+          <div className="space-y-3" data-testid="ssh-host-key-confirm">
+            <div className="flex items-start gap-2">
+              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+              <div className="space-y-1">
+                <p className="text-[13px] font-medium text-foreground">Trust this host key?</p>
+                <p className="text-[12px] text-muted-foreground">
+                  {hostKeyPrompt.host.hostname} is not in your known_hosts yet. Compare the fingerprint below with
+                  the one the server reports (for example <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> on
+                  the server) before trusting it.
+                </p>
+              </div>
+            </div>
+            <ul className="space-y-1">
+              {hostKeyPrompt.keys.map(key => (
+                <li key={key.line} className="rounded-md border border-border bg-muted/40 p-2 text-[12px]">
+                  <span className="text-muted-foreground">{key.keyType}</span>{" "}
+                  <code data-testid="ssh-host-key-fingerprint" className="break-all font-mono">{key.fingerprintSha256}</code>
+                </li>
+              ))}
+            </ul>
+            <div className="flex items-center gap-2 border-t border-border pt-3">
+              <span className="flex-1" />
+              <Button type="button" variant="outline" size="sm" className="text-[12px]" disabled={busy}
+                onClick={() => setHostKeyPrompt(null)}>
+                Cancel
+              </Button>
+              <Button type="button" size="sm" className="text-[12px]" disabled={busy} onClick={() => void handleTrustHostKey()}>
+                {busy ? "Trusting & Connecting…" : "Trust and Connect"}
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {!showingResult && step === "details" && method === "ssh" && !hostKeyPrompt ? (
           <form className="space-y-3" onSubmit={handleSshSubmit}>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="space-y-1">

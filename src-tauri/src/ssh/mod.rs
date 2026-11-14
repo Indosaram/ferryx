@@ -7,6 +7,7 @@ pub mod helper_assets;
 #[path = "../ferryx_scope/ssh/mod.rs"]
 pub mod helper_runtime;
 pub mod helper_setup;
+pub mod host_key;
 pub mod manual;
 pub mod operations;
 pub mod password;
@@ -40,6 +41,12 @@ pub struct SshHost {
     pub auth_method: SshAuthMethod,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+    /// The `Host` alias, recorded only when the host was imported from the ssh client's default
+    /// config (`~/.ssh/config`), the one file a bare `ssh <alias>` reads. Pasted and custom-path
+    /// imports, manual and Tailscale hosts, and stores written before this field existed have
+    /// none and keep explicit `-p/-i/-J`. See [`Self::config_alias`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_config_alias: Option<String>,
 }
 
 fn deserialize_optional_string_lenient<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -106,6 +113,8 @@ impl<'de> Deserialize<'de> for SshHost {
             source: Option<SshHostSource>,
             auth_method: Option<SshAuthMethod>,
             disabled: Option<bool>,
+            #[serde(default, deserialize_with = "deserialize_optional_string_lenient")]
+            system_config_alias: Option<String>,
         }
 
         let raw = RawSshHost::deserialize(deserializer)?;
@@ -177,6 +186,7 @@ impl<'de> Deserialize<'de> for SshHost {
             source,
             auth_method,
             disabled: raw.disabled,
+            system_config_alias: raw.system_config_alias.filter(|alias| !alias.is_empty()),
         })
     }
 }
@@ -213,6 +223,36 @@ impl SshHost {
         }
     }
 
+    /// The ssh_config `Host` alias an imported host connects through, so the user's own block
+    /// (ProxyCommand, Match, HostKeyAlias, CertificateFile, ...) applies. Only a host imported from
+    /// the default `~/.ssh/config` has one ([`Self::system_config_alias`]): ssh resolves a bare
+    /// alias from that file alone, so any other host would dial the alias name itself.
+    pub fn config_alias(&self) -> Option<&str> {
+        if self.source != SshHostSource::Config {
+            return None;
+        }
+        self.system_config_alias.as_deref().filter(|alias| !alias.is_empty())
+    }
+
+    /// Whether `other` dials the same endpoint fields. An edit that changes any of them must drop
+    /// the alias, or the edited values would be ignored in favor of the Host block.
+    pub fn same_endpoint_fields(&self, other: &SshHost) -> bool {
+        self.hostname == other.hostname
+            && self.port == other.port
+            && self.identity_file == other.identity_file
+            && self.jump_host == other.jump_host
+    }
+
+    /// Target of the launched ssh command: `[user@]alias` for an ssh_config host, else
+    /// [`Self::target`].
+    pub fn connect_target(&self) -> String {
+        match (self.config_alias(), &self.username) {
+            (Some(alias), Some(user)) if !user.is_empty() => format!("{user}@{alias}"),
+            (Some(alias), _) => alias.to_string(),
+            (None, _) => self.target(),
+        }
+    }
+
     /// Tombstone/dedupe key: `user@hostname:port` or `hostname:port`.
     pub fn key(&self) -> String {
         let port = self.port.unwrap_or(22);
@@ -239,6 +279,7 @@ mod tests {
             source: SshHostSource::Manual,
             auth_method: SshAuthMethod::Agent,
             disabled: None,
+            system_config_alias: None,
         }
     }
 

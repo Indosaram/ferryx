@@ -389,6 +389,7 @@ mod memo_tests {
             source: crate::ssh::SshHostSource::Manual,
             auth_method: crate::ssh::SshAuthMethod::Agent,
             disabled: None,
+            system_config_alias: None,
         };
         let hosts_json = serde_json::to_vec(&SshHostStore {
             hosts: vec![host.clone()],

@@ -766,6 +766,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("cmd_ssh_import_config", {
       configText: "Host sys-box\n  HostName 10.0.0.2",
+      configPath: "/Users/test/.ssh/config",
     });
   });
 
