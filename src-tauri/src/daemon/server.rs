@@ -10766,7 +10766,9 @@ mod protocol_release_tests {
                         match output.recv().await {
                             Ok(chunk) => text.push_str(&String::from_utf8_lossy(&chunk)),
                             Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                            Err(broadcast::error::RecvError::Closed) => panic!("PTY closed before {marker}"),
+                            Err(broadcast::error::RecvError::Closed) => {
+                                panic!("PTY closed before {}", marker)
+                            }
                         }
                         if text.contains(marker) {
                             return text;
@@ -10854,7 +10856,7 @@ mod protocol_release_tests {
                     Ok(chunk) => seen.extend(chunk),
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => {
-                        panic!("PTY closed before {marker}")
+                        panic!("PTY closed before {}", marker)
                     }
                 }
                 if String::from_utf8_lossy(&seen).contains(marker) {

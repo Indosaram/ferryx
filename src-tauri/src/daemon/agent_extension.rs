@@ -1004,7 +1004,7 @@ mod p09_tests {
             "FERRYX_AGENT_STATE_TOKEN",
             "FERRYX_SESSION_ID",
         ] {
-            assert!(PLUGIN_SOURCE.contains(marker), "the plugin must use {marker}");
+            assert!(PLUGIN_SOURCE.contains(marker), "the plugin must use {}", marker);
         }
         // It captures the session a fresh opencode pane opens with, under the key the resume plan
         // requires, and it ignores child sessions.
