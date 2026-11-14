@@ -478,6 +478,84 @@ fn test_resolve_dist_dir_packaged_windows_or_linux_bundle_layout() {
 }
 
 #[test]
+fn test_resolve_dist_dir_staged_daemon_runtime_layout() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let generation = dir.path().join("daemon-runtime/2026.1027.1-0a1b2c3d");
+    let staged_ui_dist = generation.join("ui/dist");
+    std::fs::create_dir_all(&staged_ui_dist).unwrap();
+    std::fs::write(
+        staged_ui_dist.join("index.html"),
+        "<!doctype html><html><body><div id=\"root\"></div></body></html>",
+    )
+    .unwrap();
+    let isolated_cwd = dir.path().join("isolated_cwd");
+    std::fs::create_dir_all(&isolated_cwd).unwrap();
+    let expected = staged_ui_dist.canonicalize().unwrap();
+
+    // Linux/Windows generation: `<key>/ferryx`; macOS: the sealed helper bundle inside `<key>`.
+    for exe_path in [
+        generation.join("ferryx"),
+        generation.join("Ferryx Daemon.app/Contents/MacOS/ferryx"),
+    ] {
+        let resolved = crate::remote::server::resolve_dist_dir_from(
+            Some(&isolated_cwd),
+            Some(&exe_path),
+            None,
+        );
+        assert_eq!(
+            resolved.as_deref(),
+            Some(expected.as_path()),
+            "{}",
+            exe_path.display()
+        );
+    }
+}
+
+#[test]
+fn test_resolve_dist_dir_release_uses_only_executable_relative_candidates() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    // A checkout: `<checkout>/src-tauri` is the manifest dir and `<checkout>/ui/dist` is built;
+    // the cwd is the checkout too, so every dev candidate would find a UI.
+    let checkout = dir.path().join("checkout");
+    let manifest_dir = checkout.join("src-tauri");
+    let checkout_dist = checkout.join("ui/dist");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::create_dir_all(&checkout_dist).unwrap();
+    std::fs::write(checkout_dist.join("index.html"), "<div id=\"root\"></div>").unwrap();
+    let generation = dir.path().join("daemon-runtime/2026.1027.1-0a1b2c3d");
+    std::fs::create_dir_all(&generation).unwrap();
+    let exe = generation.join("ferryx");
+
+    // Staged dist gone: release resolves nothing (the fallback page), debug finds the checkout.
+    let release = crate::remote::server::resolve_dist_dir_with(
+        Some(&checkout),
+        Some(&exe),
+        Some(&manifest_dir),
+        false,
+    );
+    assert_eq!(release, None);
+    let debug = crate::remote::server::resolve_dist_dir_with(
+        Some(&checkout),
+        Some(&exe),
+        Some(&manifest_dir),
+        true,
+    );
+    assert_eq!(debug, Some(checkout_dist.canonicalize().unwrap()));
+
+    // Staged dist present: release serves the generation's own copy.
+    let staged_ui_dist = generation.join("ui/dist");
+    std::fs::create_dir_all(&staged_ui_dist).unwrap();
+    std::fs::write(staged_ui_dist.join("index.html"), "<div id=\"root\"></div>").unwrap();
+    let release = crate::remote::server::resolve_dist_dir_with(
+        Some(&checkout),
+        Some(&exe),
+        Some(&manifest_dir),
+        false,
+    );
+    assert_eq!(release, Some(staged_ui_dist.canonicalize().unwrap()));
+}
+
+#[test]
 fn test_resolve_dist_dir_isolated_runtime_debug_fallback() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let isolated_cwd = dir.path().join("isolated_cwd");
@@ -489,10 +567,11 @@ fn test_resolve_dist_dir_isolated_runtime_debug_fallback() {
     let expected_dist = manifest_dir.join("../ui/dist");
 
     if expected_dist.join("index.html").exists() {
-        let resolved = crate::remote::server::resolve_dist_dir_from(
+        let resolved = crate::remote::server::resolve_dist_dir_with(
             Some(&isolated_cwd),
             Some(&fake_exe),
             Some(&manifest_dir),
+            true,
         );
         let expected = expected_dist.canonicalize().unwrap();
         assert_eq!(resolved.as_deref(), Some(expected.as_path()));

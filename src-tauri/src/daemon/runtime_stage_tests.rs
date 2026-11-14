@@ -226,6 +226,146 @@ fn gc_removes_nothing_when_the_process_table_is_unreadable() {
     assert_eq!(dir_names(root).len(), 3);
 }
 
+fn keys(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+#[test]
+fn superseded_jobs_are_all_but_the_newest_two_and_their_runtimes_are_then_collected() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let generations: Vec<PathBuf> = (1..=4)
+        .map(|index| fake_generation(root, &format!("1.0.0-0000000{index}"), index))
+        .collect();
+    // Every generation still has a job, plus one whose runtime was already removed.
+    let jobs = keys(&[
+        "1.0.0-00000001",
+        "1.0.0-00000002",
+        "1.0.0-00000003",
+        "1.0.0-00000004",
+        "0.9.0-0000000f",
+    ]);
+    let usage = FakeUsage::new(Some(Vec::new()), Vec::new());
+
+    let mut superseded = superseded_job_keys(root, &jobs, "1.0.0-00000004", &usage);
+
+    superseded.sort();
+    assert_eq!(
+        superseded,
+        keys(&["0.9.0-0000000f", "1.0.0-00000001", "1.0.0-00000002"])
+    );
+    // While every job is registered nothing old can be collected; once the superseded jobs are
+    // deleted, their runtimes go and two generations with two jobs remain.
+    let all_jobs: Vec<PathBuf> = generations
+        .iter()
+        .map(|dir| dir.join(DAEMON_FILE_NAME))
+        .collect();
+    assert!(
+        collect_garbage(root, &FakeUsage::new(Some(Vec::new()), all_jobs.clone()))
+            .unwrap()
+            .is_empty()
+    );
+    let remaining_jobs = all_jobs[2..].to_vec();
+    let mut removed =
+        collect_garbage(root, &FakeUsage::new(Some(Vec::new()), remaining_jobs)).unwrap();
+    removed.sort();
+    assert_eq!(removed, keys(&["1.0.0-00000001", "1.0.0-00000002"]));
+    assert_eq!(dir_names(root), keys(&["1.0.0-00000003", "1.0.0-00000004"]));
+}
+
+#[test]
+fn a_job_whose_generation_has_a_live_process_is_never_superseded() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let live = fake_generation(root, "1.0.0-00000001", 1);
+    fake_generation(root, "1.0.0-00000002", 2);
+    fake_generation(root, "1.0.0-00000003", 3);
+    fake_generation(root, "1.0.0-00000004", 4);
+    let jobs = keys(&[
+        "1.0.0-00000001",
+        "1.0.0-00000002",
+        "1.0.0-00000003",
+        "1.0.0-00000004",
+    ]);
+
+    let usage = FakeUsage::new(Some(vec![live.join(DAEMON_FILE_NAME)]), Vec::new());
+    assert_eq!(
+        superseded_job_keys(root, &jobs, "1.0.0-00000004", &usage),
+        keys(&["1.0.0-00000002"])
+    );
+
+    // `current` is kept even when it is not the newest staged generation, besides the newest two.
+    let usage = FakeUsage::new(Some(Vec::new()), Vec::new());
+    assert_eq!(
+        superseded_job_keys(root, &jobs, "1.0.0-00000001", &usage),
+        keys(&["1.0.0-00000002"])
+    );
+
+    // An unreadable process table supersedes nothing; with nothing to supersede it is not read.
+    let unreadable = FakeUsage::new(None, Vec::new());
+    assert!(superseded_job_keys(root, &jobs, "1.0.0-00000004", &unreadable).is_empty());
+    assert_eq!(unreadable.running_calls.get(), 1);
+    let unread = FakeUsage::new(None, Vec::new());
+    assert!(superseded_job_keys(root, &jobs[2..], "1.0.0-00000004", &unread).is_empty());
+    assert_eq!(unread.running_calls.get(), 0);
+}
+
+#[test]
+fn an_older_generation_registering_keeps_both_newer_jobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fake_generation(root, "1.0.0-00000002", 2);
+    fake_generation(root, "1.0.0-00000003", 3);
+    // An older app (staged before both) registers after the two newer generations exist.
+    fake_generation(root, "1.0.0-00000001", 1);
+    let jobs = keys(&["1.0.0-00000002", "1.0.0-00000003", "1.0.0-00000001"]);
+    let usage = FakeUsage::new(Some(Vec::new()), Vec::new());
+
+    assert!(superseded_job_keys(root, &jobs, "1.0.0-00000001", &usage).is_empty());
+
+    // Staged-at is compared as a number, not as text ("10" is newer than "9").
+    fake_generation(root, "1.0.0-0000000a", 10);
+    fake_generation(root, "1.0.0-00000009", 9);
+    let jobs = keys(&[
+        "1.0.0-00000001",
+        "1.0.0-00000002",
+        "1.0.0-00000003",
+        "1.0.0-00000009",
+        "1.0.0-0000000a",
+    ]);
+    let mut superseded = superseded_job_keys(root, &jobs, "1.0.0-00000001", &usage);
+    superseded.sort();
+    assert_eq!(superseded, keys(&["1.0.0-00000002", "1.0.0-00000003"]));
+}
+
+#[test]
+fn windows_generation_paths_are_compared_without_case_or_verbatim_prefix() {
+    let running = comparison_form(
+        Path::new(r"\\?\C:\Users\Me\AppData\Ferryx\daemon-runtime\2026.1027.5-ABCDEF01\ferryx.exe"),
+        true,
+    );
+    assert_eq!(
+        running,
+        PathBuf::from(r"c:\users\me\appdata\ferryx\daemon-runtime\2026.1027.5-abcdef01\ferryx.exe")
+    );
+    // A generation key with an uppercase version tag, joined onto the already folded root, is
+    // folded the same way, so a live process inside it is matched.
+    let root = comparison_form(
+        Path::new(r"\\?\C:\Users\Me\AppData\Ferryx\daemon-runtime"),
+        true,
+    );
+    let dir = comparison_form(
+        Path::new(&format!(r"{}\2026.1027.5-ABCDEF01", root.display())),
+        true,
+    );
+    assert!(running
+        .to_string_lossy()
+        .starts_with(dir.to_string_lossy().as_ref()));
+    // Elsewhere paths are compared as they are.
+    let unix = Path::new("/home/me/.local/share/ferryx/daemon-runtime/2026.1027.5-ABCDEF01");
+    assert_eq!(comparison_form(unix, false), unix);
+}
+
 /// Child mode for [`gc_leaves_a_generation_with_a_running_process_intact`]: blocks until its stdin
 /// closes, so the parent decides exactly when it exits. A plain run returns at once.
 #[test]
@@ -360,6 +500,49 @@ fn staged_helper_binaries_stay_executable() {
 
     let mode = fs::metadata(generation.join(HELPER_ASSETS_DIR).join(binary)).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
+}
+
+#[test]
+fn the_web_ui_is_staged_into_a_generation_and_resolved_by_its_daemon() {
+    let temp = tempfile::tempdir().unwrap();
+    let gui = temp.path().join("usr/bin/ferryx");
+    write_exe(&gui, b"gui");
+    let dist = temp.path().join("usr/lib/Ferryx/ui/dist");
+    write_exe(&dist.join("index.html"), b"<div id=\"root\"></div>");
+    write_exe(&dist.join("assets/index.js"), b"app");
+    assert_eq!(
+        fs::canonicalize(ui_dist_dir_near(&gui).unwrap()).unwrap(),
+        fs::canonicalize(&dist).unwrap()
+    );
+    let generation = fake_generation(&temp.path().join("runtime"), "1.0.0-00000001", 1);
+
+    ensure_ui_dist(&generation, &dist).unwrap();
+
+    let staged = generation.join(UI_DIST_DIR);
+    assert_eq!(fs::read(staged.join("assets/index.js")).unwrap(), b"app");
+    let mut names = dir_names(&generation.join("ui"));
+    names.retain(|name| name.contains(TMP_MARKER));
+    assert!(names.is_empty(), "leftover temp dirs: {names:?}");
+    // Both staged layouts resolve the generation's own copy.
+    assert_eq!(
+        ui_dist_dir_near(&generation.join(DAEMON_FILE_NAME)),
+        Some(staged.clone())
+    );
+    let bundled = generation
+        .join(HELPER_BUNDLE_NAME)
+        .join("Contents/MacOS")
+        .join(HELPER_EXECUTABLE);
+    write_exe(&bundled, b"helper exe");
+    assert_eq!(
+        fs::canonicalize(ui_dist_dir_near(&bundled).unwrap()).unwrap(),
+        fs::canonicalize(&staged).unwrap()
+    );
+    // A later app's UI never replaces a staged copy.
+    write_exe(&dist.join("assets/index.js"), b"other build");
+    ensure_ui_dist(&generation, &dist).unwrap();
+    assert_eq!(fs::read(staged.join("assets/index.js")).unwrap(), b"app");
+    write_exe(&temp.path().join("bare/ferryx"), b"exe");
+    assert_eq!(ui_dist_dir_near(&temp.path().join("bare/ferryx")), None);
 }
 
 #[test]
