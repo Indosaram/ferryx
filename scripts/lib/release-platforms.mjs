@@ -1088,6 +1088,22 @@ export function finalizeMacosBundle({
   refreshBundledHelperManifest(appPath);
 
   const notarizations = [];
+  // A signed-but-unnotarized macOS build is rejected by Gatekeeper on end-user machines
+  // ("Unnotarized Developer ID"), and the updater tar/DMG then ship without a ticket. Silently
+  // skipping notarization produced exactly that: a green build whose artifacts were unusable.
+  // Refuse to continue unless the caller explicitly opted out.
+  if (approveNotarization && !notaryProfile) {
+    throw new Error(
+      "approveNotarization is set but no notaryProfile is configured for this host; " +
+        "add notaryProfile to the host entry in the release hosts config",
+    );
+  }
+  if (!approveNotarization && signingIdentity) {
+    throw new Error(
+      "Refusing to produce an unnotarized macOS release: pass --approve-notarization " +
+        "(or set approveNotarization) so the app, DMG and updater tar carry a notarization ticket",
+    );
+  }
   if (approveNotarization && notaryProfile) {
     const appZipPath = join(workspaceDir, "Ferryx-notary.zip");
     exec("rm", ["-f", appZipPath]);
