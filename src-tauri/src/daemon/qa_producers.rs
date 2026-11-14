@@ -989,6 +989,46 @@ pub fn adopted_reader_live(
         .is_some_and(|session| !session.is_reader_finished())
 }
 
+/// Generic QA fault seam (adoption todo 15, Q03b failure case). `FERRYX_QA_FAULT` is read only by
+/// a `local-split-qa` build and honored only beside the QA marker env [`QA_MARKER_ENV`], which the
+/// runner exports for every QA process and a job forwards only into a QA-named job.
+pub const QA_FAULT_ENV: &str = "FERRYX_QA_FAULT";
+/// The committed successor SIGKILLs the child of every session it adopted, so Q03b's "every
+/// adopted child pid is alive after the quit" must FAIL with per-pid evidence.
+pub const QA_FAULT_KILL_ADOPTED: &str = "kill-adopted";
+const QA_MARKER_ENV: &str = "FERRYX_QA_RUN_ID";
+
+fn qa_fault_selected(fault: Option<&str>, marker: Option<&str>, wanted: &str) -> bool {
+    marker.is_some_and(|marker| !marker.trim().is_empty()) && fault.map(str::trim) == Some(wanted)
+}
+
+/// True only when the runner selected `kill-adopted` and the QA marker env is present.
+pub fn kill_adopted_requested() -> bool {
+    qa_fault_selected(
+        std::env::var(QA_FAULT_ENV).ok().as_deref(),
+        std::env::var(QA_MARKER_ENV).ok().as_deref(),
+        QA_FAULT_KILL_ADOPTED,
+    )
+}
+
+/// Applies `kill-adopted`: SIGKILL to the child of each adopted session, one log line per pid.
+#[cfg(unix)]
+pub fn kill_adopted_children(
+    terminal_service: &Arc<crate::terminal::TerminalService>,
+    session_ids: &[String],
+) {
+    for session_id in session_ids {
+        let Some(pid) = terminal_service.get_session(session_id).and_then(|session| session.pid()) else {
+            tracing::warn!(%session_id, "FERRYX_QA_FAULT=kill-adopted: adopted session has no child pid");
+            continue;
+        };
+        // SAFETY: plain kill(2) on the child pid of a session this daemon adopted.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        let error = (rc != 0).then(|| std::io::Error::last_os_error().to_string());
+        tracing::warn!(%session_id, pid, ?error, "FERRYX_QA_FAULT=kill-adopted: killed adopted session child");
+    }
+}
+
 /// Refreshes the reader fields of every record from THIS daemon's own registry at
 /// settlement time, so a relinquishment is reported only when the session really
 /// left this daemon's ownership (and never because a flag was set by hand).
@@ -1272,6 +1312,18 @@ mod tests {
 
     const TEST_RUN_ID: &str = "qa-run-daemon";
     const TEST_OPERATION_ID: &str = "qa-op-daemon";
+
+    #[test]
+    fn kill_adopted_fault_is_honored_only_with_the_qa_marker_env() {
+        let wanted = QA_FAULT_KILL_ADOPTED;
+        assert!(qa_fault_selected(Some("kill-adopted"), Some("run-1"), wanted));
+        assert!(qa_fault_selected(Some(" kill-adopted\n"), Some("run-1"), wanted));
+        assert!(!qa_fault_selected(Some("kill-adopted"), None, wanted), "no QA marker, no fault");
+        assert!(!qa_fault_selected(Some("kill-adopted"), Some("  "), wanted), "blank QA marker, no fault");
+        assert!(!qa_fault_selected(None, Some("run-1"), wanted));
+        assert!(!qa_fault_selected(Some("abort-after-adopt"), Some("run-1"), wanted));
+        assert_eq!(QA_FAULT_ENV, "FERRYX_QA_FAULT");
+    }
 
     /// todo 8's three predecessor-side transfer failure variants: each armed fault, applied to a
     /// real authority and sent over a real socketpair, is refused by the candidate's own

@@ -180,7 +180,7 @@ export async function stageGeneration(ctx, artifact, { deadlineMs = STAGE_TIMEOU
 }
 
 /** One control RequestUpgrade from the current owner to artifact; asserts the Q08 contract. */
-async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven = false } = {}) {
+export async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven = false } = {}) {
   // Q08's GUI-end round trips between A_B and B_C interrupt the pair's local counter and start a
   // QA_A counter instead (rerun2b: B_C local max 297); every step starts from fresh pair counters.
   await restartCounters(ctx, ctx.state.conn, pair);

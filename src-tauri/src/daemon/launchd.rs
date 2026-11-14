@@ -367,10 +367,15 @@ pub(crate) mod generation {
     ];
 
     /// QA barrier channel of a `local-split-qa` build, forwarded with the isolation variables so
-    /// the job's daemon installs the runner's QA channel (listener stall, write-ack hold).
+    /// the job's daemon installs the runner's QA channel (listener stall, write-ack hold), and the
+    /// runner's FERRYX_QA_FAULT selection (adoption todo 15, kill-adopted).
     #[cfg(feature = "local-split-qa")]
-    pub(crate) const QA_JOB_BARRIER_ENV: [&str; 3] =
-        ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID", crate::ssh::direct::QA_SSH_KNOWN_HOSTS_ENV];
+    pub(crate) const QA_JOB_BARRIER_ENV: [&str; 4] = [
+        "FERRYX_QA_BARRIER_DIR",
+        "FERRYX_QA_RUN_ID",
+        crate::ssh::direct::QA_SSH_KNOWN_HOSTS_ENV,
+        "FERRYX_QA_FAULT",
+    ];
     #[cfg(not(feature = "local-split-qa"))]
     pub(crate) const QA_JOB_BARRIER_ENV: [&str; 0] = [];
 
@@ -914,13 +919,14 @@ mod tests {
                 ("FERRYX_AGENT_STATE_TOKEN", "secret"),
                 ("FERRYX_QA_BARRIER_DIR", "/qa/barrier"),
                 ("FERRYX_QA_RUN_ID", "run-1"),
+                ("FERRYX_QA_FAULT", "kill-adopted"),
                 ("PATH", "/usr/bin"),
             ];
             let environment = qa_job_environment(&env_from(QA));
             let keys: Vec<&str> = environment.iter().map(|(k, _)| k.as_str()).collect();
             let mut expected = vec!["FERRYX_DATA_DIR", "FERRYX_RUNTIME_DIR", "FERRYX_DAEMON_SUPERVISOR_NAME"];
             if cfg!(feature = "local-split-qa") {
-                expected.extend(["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
+                expected.extend(["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID", "FERRYX_QA_FAULT"]);
             }
             assert_eq!(keys, expected, "only the allowlist, empty values dropped");
 

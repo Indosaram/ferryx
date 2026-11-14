@@ -213,9 +213,15 @@ fn forwarded_key(key: &str) -> bool {
 }
 
 /// QA barrier channel of a `local-split-qa` build (todo 12): forwarded only into a QA-named unit,
-/// so the job's daemon installs the runner's QA channel and pins the private sshd's host key.
+/// so the job's daemon installs the runner's QA channel and pins the private sshd's host key, and
+/// sees the runner's FERRYX_QA_FAULT selection (adoption todo 15, kill-adopted).
 #[cfg(feature = "local-split-qa")]
-const QA_BARRIER_KEYS: [&str; 3] = ["FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID", crate::ssh::direct::QA_SSH_KNOWN_HOSTS_ENV];
+const QA_BARRIER_KEYS: [&str; 4] = [
+    "FERRYX_QA_BARRIER_DIR",
+    "FERRYX_QA_RUN_ID",
+    crate::ssh::direct::QA_SSH_KNOWN_HOSTS_ENV,
+    "FERRYX_QA_FAULT",
+];
 #[cfg(not(feature = "local-split-qa"))]
 const QA_BARRIER_KEYS: [&str; 0] = [];
 
@@ -954,11 +960,12 @@ mod tests {
             ("FERRYX_DATA_DIR", "/qa"),
             ("FERRYX_DAEMON_SUPERVISOR_NAME", "ferryx-qa-r1"),
             ("FERRYX_QA_BARRIER_DIR", "/qa/b"),
+            ("FERRYX_QA_FAULT", "kill-adopted"),
             ("FERRYX_QA_RUN_ID", "r1"),
         ]);
         let keys: Vec<String> = forwarded_env(&qa).into_iter().map(|(key, _)| key).collect();
         if cfg!(feature = "local-split-qa") {
-            assert_eq!(keys, ["FERRYX_DAEMON_SUPERVISOR_NAME", "FERRYX_DATA_DIR", "FERRYX_QA_BARRIER_DIR", "FERRYX_QA_RUN_ID"]);
+            assert_eq!(keys, ["FERRYX_DAEMON_SUPERVISOR_NAME", "FERRYX_DATA_DIR", "FERRYX_QA_BARRIER_DIR", "FERRYX_QA_FAULT", "FERRYX_QA_RUN_ID"]);
         } else {
             assert_eq!(keys, ["FERRYX_DAEMON_SUPERVISOR_NAME", "FERRYX_DATA_DIR"]);
         }
