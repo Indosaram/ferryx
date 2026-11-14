@@ -218,6 +218,54 @@ receipt-listed outputs back into `$RUN/artifacts`, and writes one receipt per ho
 restarts or kills `ferryx --daemon`, or launches a release/debug binary or GUI. Those actions can
 destroy active terminal sessions or contaminate acceptance evidence.
 
+### Release floor gate
+
+`buildHost` (`scripts/lib/release-platforms.mjs`) measures each host's artifacts and refuses to
+write a receipt when any artifact breaks an advertised floor. The error starts with
+`Release floor gate failed on host '<host>':` and names each failing artifact kind, check, and
+reason. Checks per host:
+
+- `omaki` (Linux): the highest `GLIBC_` symbol version needed by any ELF file inside the artifact,
+  measured with `objdump -T` inside the Ubuntu 22.04 bundle image (the AppImage is extracted with
+  `--appimage-extract`, the deb with `dpkg-deb -x`). Limits: `ferryx-cli-linux-amd64` <=
+  `GLIBC_2.17`; AppImage and deb <= `GLIBC_2.35`.
+- `macbook` (macOS): minos is read per architecture. `lipo -archs` lists each file's slices, and
+  `otool -arch <arch> -l` reads that slice's `LC_BUILD_VERSION` `minos` (or
+  `LC_VERSION_MIN_MACOSX`). The highest value per architecture over `Ferryx.app` and the universal
+  CLI is recorded, for example `{ "x86_64": "10.15", "arm64": "11.0" }`. x86_64 slices must not
+  exceed `bundle.macOS.minimumSystemVersion` in `src-tauri/tauri.conf.json` (currently 10.15).
+  arm64 slices are held to 11.0, the first macOS release on Apple Silicon (the linker never emits a
+  lower arm64 minos), so a universal build with arm64 minos 11.0 passes. The app and the DMG must
+  also pass `spctl -a -vvv -t install` with "Notarized Developer ID" and
+  `xcrun stapler validate`. This check runs in `buildHost` after `finalizeMacosBundle`, not inside
+  it, because QA harnesses finalize ad-hoc signed bundles on purpose. So a `macbook` build without
+  `--approve-notarization` fails the gate unless it is waived.
+- `maho-win` (Windows): `dumpbin /dependents` of `ferryx.exe` (packed in the MSIX, and in the NSIS
+  installer when selected) and of `ferryx-cli.exe` is captured into the receipt. Any Visual C++
+  redistributable DLL (`vcruntime*`, `msvcp*`, `vccorlib*`, `concrt*`, `vcomp*`, `mfc*`) fails the
+  check: a clean Windows doesn't have it and the MSIX declares no VCLibs dependency. `dumpbin` is
+  taken from `PATH` or found with `vswhere`, so the MSVC build tools are required on `maho-win`.
+
+Every result is recorded in the receipt's additive `floors` field:
+`{ "waiver": null | "<reason>", "checks": [ { kind, check, limit, measured, pass, reason? } ] }`.
+
+`assembleRelease` (`scripts/build-latest-json.mjs`) re-evaluates every recorded measurement against
+the same limits; it doesn't trust the recorded `pass` flag. It refuses with `Release floor gate
+failed: ...` when a measurement violates a floor, a required check is missing, a receipt has no
+`floors` field, or a receipt was built under a waiver. `verify` re-runs assembly, so the same
+applies there.
+
+For local dev/test releases only, there is an explicit opt-out: set
+`FERRYX_RELEASE_FLOOR_WAIVER="<reason>"` in the environment of the build command, and again for
+`assemble` and `verify`. The build then records the waiver and the failing results in the receipt
+instead of failing, and prints a warning. Assembling a receipt built under a waiver needs the
+variable as well. A waived run must never be published.
+
+```bash
+FERRYX_RELEASE_FLOOR_WAIVER="local QA build, not for publishing" \
+  bun scripts/release-local.mjs build --config "$RELEASE_CONFIG" --run "$RUN" --host macbook
+```
+
 ### 4. Assemble and verify locally
 
 For a production release, use the public key from committed Tauri configuration (do not pass the
@@ -232,10 +280,11 @@ bun scripts/release-local.mjs verify --run "$RUN"
 ```
 
 Assembly requires the macOS updater + DMG + universal CLI, Linux AppImage + DEB + x86_64 CLI,
-Windows MSIX, and, when selected, NSIS. It verifies receipt identity, paths, sizes, hashes, updater signatures, target uniqueness,
+Windows MSIX + x86_64 CLI (`ferryx-cli-windows-amd64.exe`), and, when selected, NSIS. It verifies receipt identity, paths, sizes, hashes, updater signatures, target uniqueness,
 and the selected channel matrix before creating stable aliases, `latest.json`, and
 `SHA256SUMS.txt`. `verify` checks listed bytes and independently re-derives the publish directory.
 Inspect the final inventory; no MSI or architecture-specific macOS DMG is part of this contract.
+Assembly also re-checks every receipt's recorded floor results (see "Release floor gate").
 
 ### Release provenance
 

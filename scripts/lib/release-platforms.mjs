@@ -13,6 +13,9 @@ import {
   sameEntitlements,
 } from "../macos-daemon-helper.mjs";
 import {
+  compareDottedVersions,
+  describeFloorFailures,
+  evaluateFloors,
   parseReceipt,
   parsePlan,
   validateToolchains,
@@ -497,7 +500,7 @@ export function createGitBundles({ repoDir, ghosttyRepoDir, commitSha, ghosttyPi
 /**
  * Creates a build receipt conforming to the release contract.
  */
-export function createBuildReceipt({ host, runId, commitSha, appVersion, exitCode = 0, artifacts, toolchains }) {
+export function createBuildReceipt({ host, runId, commitSha, appVersion, exitCode = 0, artifacts, toolchains, floors = null }) {
   const receipt = {
     schemaVersion: 1,
     runId,
@@ -508,6 +511,7 @@ export function createBuildReceipt({ host, runId, commitSha, appVersion, exitCod
     exitCode,
     artifacts,
     ...(toolchains ? { toolchains } : {}),
+    ...(floors ? { floors } : {}),
   };
 
   return receipt;
@@ -586,6 +590,152 @@ function parseBuildResult(stdout) {
   return validateToolchains(JSON.parse(match[1]), { required: ["node", "bun", "zig", "rust"] });
 }
 
+/** Reads the floor measurements a remote build script printed after `---FLOOR_RESULT---`. */
+export function parseFloorResult(stdout) {
+  const match = stdout.match(/---FLOOR_RESULT---\s*({[^\r\n]+})/);
+  if (!match) throw new Error("Remote builder did not return floor measurements");
+  const measurements = JSON.parse(match[1]);
+  if (!measurements || typeof measurements !== "object" || Array.isArray(measurements)) {
+    throw new Error("Remote floor measurements must be a JSON object");
+  }
+  return measurements;
+}
+
+/**
+ * Shell fragment for createLinuxBuildScript that measures, inside the bundle image (binutils and
+ * dpkg), the highest GLIBC_ symbol version needed by any ELF file of each Linux artifact, and
+ * prints it after `---FLOOR_RESULT---`. Needs $workspace, $out_dir and $bundle_image.
+ */
+export function createLinuxFloorScanScript() {
+  return `floor_dir="$workspace/floor-scan"
+rm -rf "$floor_dir"
+mkdir -p "$floor_dir"
+cat > "$floor_dir/scan.sh" <<'FERRYX_FLOOR_SCAN'
+set -euo pipefail
+max_glibc() {
+  find "$@" -type f -print0 | while IFS= read -r -d '' f; do
+    if [ "$(head -c 4 "$f" | od -An -c | tr -d ' \\n')" = '177ELF' ]; then
+      objdump -T "$f" 2>/dev/null || true
+    fi
+  done | { grep -o 'GLIBC_[0-9][0-9.]*' || true; } | sed 's/^GLIBC_//' | sort -Vu | tail -n 1
+}
+cd "$FLOOR_DIR"
+"$OUT_DIR/Ferryx_amd64.AppImage" --appimage-extract >/dev/null
+dpkg-deb -x "$OUT_DIR/Ferryx_amd64.deb" deb-root
+cli_glibc="$(max_glibc "$OUT_DIR/ferryx-cli-linux-amd64")"
+appimage_glibc="$(max_glibc squashfs-root)"
+deb_glibc="$(max_glibc deb-root)"
+printf '%s\\n' '---FLOOR_RESULT---' "{\\"cli-linux-amd64\\":{\\"glibc\\":\\"$cli_glibc\\"},\\"appimage\\":{\\"glibc\\":\\"$appimage_glibc\\"},\\"deb\\":{\\"glibc\\":\\"$deb_glibc\\"}}"
+FERRYX_FLOOR_SCAN
+docker run --rm --user "$(id -u):$(id -g)" -v "$out_dir:$out_dir:ro" -v "$floor_dir:$floor_dir" \\
+  -e HOME=/tmp -e OUT_DIR="$out_dir" -e FLOOR_DIR="$floor_dir" "$bundle_image" bash "$floor_dir/scan.sh"
+chmod -R u+w "$floor_dir"
+rm -rf "$floor_dir"
+`;
+}
+
+/**
+ * PowerShell fragment for createWindowsBuildScript that captures `dumpbin /dependents` of the
+ * shipped Ferryx and CLI executables and prints the DLL lists after `---FLOOR_RESULT---`. Needs
+ * $msixAppExe (the ferryx.exe the MSIX packaged), $executables (the ferryx.exe the NSIS build
+ * packaged) and $outDir (the shipped CLI copy); a preset $dumpbin skips the MSVC tools lookup.
+ */
+export function createWindowsFloorScanScript({ nsisMigration = false } = {}) {
+  return `if (-not $dumpbin) { $dumpbin = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+if (-not $dumpbin) {
+  $vswhere = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio\\Installer\\vswhere.exe'
+  if (Test-Path -LiteralPath $vswhere) { $dumpbin = & $vswhere -latest -products '*' -find 'VC\\Tools\\MSVC\\**\\bin\\Hostx64\\x64\\dumpbin.exe' | Select-Object -First 1 }
+}
+if (-not $dumpbin) { throw 'dumpbin.exe not found: install the MSVC build tools (the CRT floor check needs it)' }
+function Get-FerryxDependents([string]$Path) {
+  $lines = & $dumpbin /nologo /dependents $Path
+  if ($LASTEXITCODE -ne 0) { throw "dumpbin /dependents failed for $Path" }
+  ,@($lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9_.+-]+\\.dll$' })
+}
+$appDependents = Get-FerryxDependents $msixAppExe
+$cliDependents = Get-FerryxDependents (Join-Path $outDir 'ferryx-cli-windows-amd64.exe')
+$floors = [ordered]@{ 'msix' = @{ dependents = $appDependents }; 'cli-windows-amd64' = @{ dependents = $cliDependents } }
+${nsisMigration ? "$floors['nsis'] = @{ dependents = (Get-FerryxDependents $executables[0].FullName) }\n" : ""}Write-Output '---FLOOR_RESULT---'
+Write-Output ($floors | ConvertTo-Json -Compress -Depth 4)
+`;
+}
+
+/** Highest minos over every LC_BUILD_VERSION / LC_VERSION_MIN_MACOSX in `otool -l` output, or null. */
+function maxMinosFromOtool(output) {
+  let pending = null;
+  let max = null;
+  for (const raw of output.split("\n")) {
+    const line = raw.trim();
+    if (line === "cmd LC_BUILD_VERSION") pending = "minos";
+    else if (line === "cmd LC_VERSION_MIN_MACOSX") pending = "version";
+    else if (line.startsWith("cmd ")) pending = null;
+    else if (pending && line.startsWith(`${pending} `)) {
+      const version = line.slice(pending.length + 1).trim();
+      if (max === null || compareDottedVersions(version, max) > 0) max = version;
+      pending = null;
+    }
+  }
+  return max;
+}
+
+/**
+ * Highest minos per architecture over the given Mach-O files ({ x86_64: "10.15", arm64: "11.0" }).
+ * A slice without a version load command makes the result null, so the floor check fails closed.
+ */
+function measureMinos(paths, exec) {
+  const byArch = {};
+  for (const path of paths) {
+    for (const arch of exec("lipo", ["-archs", path]).stdout.trim().split(/\s+/).filter(Boolean)) {
+      const minos = maxMinosFromOtool(exec("otool", ["-arch", arch, "-l", path]).stdout);
+      if (minos === null) return null;
+      if (!byArch[arch] || compareDottedVersions(minos, byArch[arch]) > 0) byArch[arch] = minos;
+    }
+  }
+  return Object.keys(byArch).length === 0 ? null : byArch;
+}
+
+function probeNotarization(target, path, exec) {
+  const spctl = exec("spctl", ["-a", "-vvv", "-t", "install", path], { allowFailure: true });
+  const stapler = exec("xcrun", ["stapler", "validate", path], { allowFailure: true });
+  return {
+    target,
+    spctlStatus: spctl.status,
+    spctl: `${spctl.stdout}\n${spctl.stderr}`.trim(),
+    staplerStatus: stapler.status,
+  };
+}
+
+/**
+ * Measures the macOS floors of a finished build: minos of every Mach-O file in the app and of the
+ * standalone CLI, and the Gatekeeper/stapler state of the app and DMG. Runs after
+ * finalizeMacosBundle and outside it, because QA harnesses finalize ad-hoc signed bundles.
+ */
+export function measureMacosFloors({ appPath, dmgPath = null, cliPath = null, exec = macExec }) {
+  const machos = [];
+  for (const itemPath of exec("find", [appPath, "-type", "f"]).stdout.trim().split("\n")) {
+    if (itemPath && exec("file", ["-b", itemPath]).stdout.includes("Mach-O")) machos.push(itemPath);
+  }
+  const appMinos = machos.length === 0 ? null : measureMinos(machos, exec);
+  const appProbe = probeNotarization("app", appPath, exec);
+  const measurements = {
+    "macos-updater": { minos: appMinos, notarization: [appProbe] },
+  };
+  if (dmgPath) {
+    measurements.dmg = { minos: appMinos, notarization: [appProbe, probeNotarization("dmg", dmgPath, exec)] };
+  }
+  if (cliPath) {
+    measurements["cli-darwin-universal"] = { minos: measureMinos([cliPath], exec) };
+  }
+  return measurements;
+}
+
+/** bundle.macOS.minimumSystemVersion of a source checkout, or null when it cannot be read. */
+function readMacosMinimum(sourceDir) {
+  const confPath = join(sourceDir, "src-tauri", "tauri.conf.json");
+  if (!existsSync(confPath)) return null;
+  return JSON.parse(readFileSync(confPath, "utf8")).bundle?.macOS?.minimumSystemVersion ?? null;
+}
+
 export function createLinuxBuildScript({ workspaceDir, plan, hostConfig }) {
   const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY;
   const signingPassword = process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
@@ -597,6 +747,10 @@ export function createLinuxBuildScript({ workspaceDir, plan, hostConfig }) {
   const targetDirCode = hostConfig.root
     ? `export CARGO_TARGET_DIR=${quoteSh(targetDir)}\nmkdir -p "$CARGO_TARGET_DIR"`
     : `export CARGO_TARGET_DIR="$workspace/cargo-target"`;
+  // Registry, Zig and linuxdeploy caches for the bundle container survive across runs.
+  const bundleCacheCode = hostConfig.root
+    ? `bundle_cache=${quoteSh(`${hostConfig.root}/linux-bundle-cache`)}`
+    : `bundle_cache="$workspace/linux-bundle-cache"`;
   return `set -euo pipefail
 umask 077
 ${pathPrefix}workspace=${quoteSh(workspaceDir)}
@@ -627,26 +781,51 @@ mkdir "$out_dir"
 ${targetDirCode}
 export SOURCE_DATE_EPOCH=${quoteSh(String(plan.sourceDateEpoch))}
 export NO_STRIP=true
-rm -rf "$CARGO_TARGET_DIR/release/bundle"
 cd "$source_dir"
-bun tauri build --bundles appimage,deb
-cargo build --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --no-default-features --bin ferryx-cli
-cp "$CARGO_TARGET_DIR/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64" || cp "$source_dir/src-tauri/target/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64"
+# The desktop bundles link the build system's WebKitGTK and glibc, so they are built in an
+# Ubuntu 22.04 container (glibc 2.35, webkit2gtk-4.1) carrying this host's Rust, Zig, Bun and
+# tauri-cli versions. The container keeps its own target dir: its objects must not mix with
+# host-built ones.
+rust_v="$(rustc --version | awk '{print $2}')"
+zig_v="$(zig version)"
+bun_v="$(bun --version)"
+tauri_v="$(cargo tauri --version | awk '{print $2}')"
+bundle_image="ferryx-linux-bundle:ubuntu-22.04-rust-$rust_v-zig-$zig_v-bun-$bun_v-tauri-$tauri_v"
+docker build --quiet --tag "$bundle_image" --file "$source_dir/packaging/linux/bundle.Dockerfile" --build-arg RUST_VERSION="$rust_v" --build-arg ZIG_VERSION="$zig_v" --build-arg BUN_VERSION="$bun_v" --build-arg TAURI_CLI_VERSION="$tauri_v" "$source_dir/packaging/linux"
+bundle_image_id="$(docker image inspect --format '{{.Id}}' "$bundle_image")"
+bundle_target_dir="$CARGO_TARGET_DIR-ubuntu-22.04"
+${bundleCacheCode}
+mkdir -p "$bundle_target_dir" "$bundle_cache/cargo-home" "$bundle_cache/xdg-cache"
+rm -rf "$bundle_target_dir/release/bundle"
+docker run --rm --user "$(id -u):$(id -g)" \\
+  -v "$source_dir:$source_dir" -v "$bundle_target_dir:$bundle_target_dir" -v "$bundle_cache:$bundle_cache" \\
+  -w "$source_dir" -e HOME=/tmp \\
+  -e CARGO_HOME="$bundle_cache/cargo-home" -e XDG_CACHE_HOME="$bundle_cache/xdg-cache" \\
+  -e CARGO_TARGET_DIR="$bundle_target_dir" -e SOURCE_DATE_EPOCH -e NO_STRIP \\
+  -e APPIMAGE_EXTRACT_AND_RUN=1 -e TAURI_SIGNING_PRIVATE_KEY -e TAURI_SIGNING_PRIVATE_KEY_PASSWORD \\
+  "$bundle_image" bun tauri build --bundles appimage,deb
+# The standalone CLI is cross-linked by cargo-zigbuild against glibc 2.17 symbol stubs. An empty
+# RUSTFLAGS keeps a host config's linker flags for the plain triple (for example mold through
+# clang) away from zig cc.
+RUSTFLAGS= cargo zigbuild --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --no-default-features --bin ferryx-cli --target x86_64-unknown-linux-gnu.2.17
+cp "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64"
 test -s "$out_dir/ferryx-cli-linux-amd64"
 appimages=()
 while IFS= read -r f; do
   [ -n "$f" ] && appimages+=("$f")
-done < <(find "$CARGO_TARGET_DIR/release/bundle/appimage" -maxdepth 1 -type f -name '*.AppImage')
+done < <(find "$bundle_target_dir/release/bundle/appimage" -maxdepth 1 -type f -name '*.AppImage')
 debs=()
 while IFS= read -r f; do
   [ -n "$f" ] && debs+=("$f")
-done < <(find "$CARGO_TARGET_DIR/release/bundle/deb" -maxdepth 1 -type f -name '*.deb')
+done < <(find "$bundle_target_dir/release/bundle/deb" -maxdepth 1 -type f -name '*.deb')
 test "${"${#appimages[@]}"}" -eq 1 && test "${"${#debs[@]}"}" -eq 1
 test -s "${"${appimages[0]}"}" && test -s "${"${debs[0]}"}"
 cp "${"${appimages[0]}"}" "$out_dir/Ferryx_amd64.AppImage"
 cp "${"${debs[0]}"}" "$out_dir/Ferryx_amd64.deb"
 test -s "$out_dir/Ferryx_amd64.AppImage" && test -s "$out_dir/Ferryx_amd64.deb"
-printf '%s\\n' '---BUILD_RESULT---' "{\\"node\\":\\"$(node --version | sed 's/^v//')\\",\\"bun\\":\\"$(bun --version)\\",\\"zig\\":\\"$(zig version)\\",\\"rust\\":\\"$(rustc --version | awk '{print $2}')\\"}"
+# Release floor gate input (buildHost enforces it): highest GLIBC_ symbol per artifact.
+${createLinuxFloorScanScript()}linux_builder="bundles=ubuntu-22.04 glibc-2.35 image=$bundle_image_id; cli=cargo-zigbuild x86_64-unknown-linux-gnu.2.17"
+printf '%s\\n' '---BUILD_RESULT---' "{\\"node\\":\\"$(node --version | sed 's/^v//')\\",\\"bun\\":\\"$bun_v\\",\\"zig\\":\\"$zig_v\\",\\"rust\\":\\"$rust_v\\",\\"tauri\\":\\"$tauri_v\\",\\"linuxBuilder\\":\\"$linux_builder\\"}"
 `;
 }
 
@@ -658,7 +837,10 @@ export function createWindowsBuildScript({ workspaceDir, plan, hostConfig, signi
     ? `$cargoTarget = Join-Path ${quotePowerShell(hostConfig.root)} 'cargo-target'\nif (-not (Test-Path $cargoTarget)) { New-Item -ItemType Directory -Path $cargoTarget -Force | Out-Null }\n$env:CARGO_TARGET_DIR = $cargoTarget`
     : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget`;
   const nsisBuild = plan.channels.nsisMigration
-    ? `Remove-Item -Path (Join-Path $cargoTarget 'release\\bundle') -Recurse -Force -ErrorAction SilentlyContinue
+    ? `# The NSIS build rebuilds every bin in target\\release; keep the ferryx.exe the MSIX packaged for the floor check.
+$msixAppExe = Join-Path $workspace 'floor-msix-ferryx.exe'
+Copy-Item -LiteralPath $executables[0].FullName -Destination $msixAppExe
+Remove-Item -Path (Join-Path $cargoTarget 'release\\bundle') -Recurse -Force -ErrorAction SilentlyContinue
 bun tauri build --bundles nsis -c '{"build":{"beforeBuildCommand":""}}'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $nsis = @(Get-ChildItem -Path $cargoTarget -Filter '*-setup.exe' -File -Recurse)
 if ($nsis.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($nsis.Count)" }
@@ -700,17 +882,37 @@ bun install --cwd (Join-Path $sourceDir 'ui') --frozen-lockfile; if ($LASTEXITCO
 New-Item -ItemType Directory -Path $outDir | Out-Null
 ${targetDirCode}
 $env:SOURCE_DATE_EPOCH = ${quotePowerShell(String(plan.sourceDateEpoch))}
+# CARGO_ENCODED_RUSTFLAGS, even set to an empty string, makes cargo ignore RUSTFLAGS and would
+# silently drop +crt-static from the CLI build below; refuse before any build starts.
+if (Test-Path Env:CARGO_ENCODED_RUSTFLAGS) { throw 'CARGO_ENCODED_RUSTFLAGS is set on this host; it overrides RUSTFLAGS and would drop +crt-static from ferryx-cli.exe. Unset it for release builds.' }
 Push-Location $sourceDir
 bun tauri build --no-bundle; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $executables = @(Get-ChildItem -Path (Join-Path $cargoTarget 'release') -Filter 'ferryx.exe' -File)
 if ($executables.Count -ne 1) { throw "Expected exactly one Ferryx executable, found $($executables.Count)" }
+# The desktop-free CLI skips tauri-build (src-tauri/build.rs), so it does not get tauri's static
+# VC runtime. Link the CRT statically for this one build only, so ferryx-cli.exe needs no
+# VCRUNTIME140.dll on a clean Windows; RUSTFLAGS is restored right after.
+$prevRustflags = $env:RUSTFLAGS
+$env:RUSTFLAGS = (@($prevRustflags, '-C target-feature=+crt-static') | Where-Object { $_ }) -join ' '
+try {
+  cargo build --manifest-path (Join-Path $sourceDir 'src-tauri/Cargo.toml') --release --no-default-features --bin ferryx-cli
+  $cliBuildExit = $LASTEXITCODE
+} finally {
+  if ($null -eq $prevRustflags) { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue } else { $env:RUSTFLAGS = $prevRustflags }
+}
+if ($cliBuildExit -ne 0) { exit $cliBuildExit }
+$cliExe = Join-Path $cargoTarget 'release\\ferryx-cli.exe'
+if (-not (Test-Path -LiteralPath $cliExe) -or (Get-Item -LiteralPath $cliExe).Length -le 0) { throw "Expected a non-empty ferryx-cli.exe at $cliExe" }
+Copy-Item -LiteralPath $cliExe -Destination (Join-Path $outDir 'ferryx-cli-windows-amd64.exe')
 & (Join-Path $sourceDir 'scripts/build-msix.ps1') -ExePath $executables[0].FullName -Version ${quotePowerShell(plan.msixVersion)} -OutputDir $outDir -SkipSigning
 if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$msixAppExe = $executables[0].FullName
 ${nsisBuild}Pop-Location
 $msix = @(Get-ChildItem -Path $outDir -Filter '*.msix' -File)
 if ($msix.Count -ne 1 -or $msix[0].Length -le 0) { throw 'Expected exactly one non-empty MSIX' }
 if ($msix[0].Name -ne 'Ferryx_x64.msix') { Move-Item $msix[0].FullName (Join-Path $outDir 'Ferryx_x64.msix') }
-$versions = [ordered]@{ node = ((node --version) -replace '^v',''); bun = (bun --version); zig = (zig version); rust = ((rustc --version) -split ' ')[1] }
+# Release floor gate input (buildHost enforces it): DLL dependencies of the shipped executables.
+${createWindowsFloorScanScript({ nsisMigration: plan.channels.nsisMigration })}$versions = [ordered]@{ node = ((node --version) -replace '^v',''); bun = (bun --version); zig = (zig version); rust = ((rustc --version) -split ' ')[1] }
 Write-Output '---BUILD_RESULT---'
 Write-Output ($versions | ConvertTo-Json -Compress)
 } finally {
@@ -961,6 +1163,10 @@ export async function buildHost({
   approveNotarization = false,
   runner = null,
   timeoutMs = Number(process.env.FERRYX_BUILD_TIMEOUT_MS) || 1800000,
+  // Explicit opt-out of the release floor gate for local dev/test builds: a non-empty reason.
+  floorWaiver = process.env.FERRYX_RELEASE_FLOOR_WAIVER || null,
+  // bundle.macOS.minimumSystemVersion; read from the checkout being built when not given.
+  macosMinimum = null,
 }) {
   if (!VALID_HOSTS.includes(hostName)) {
     throw new Error(`Unknown host: '${hostName}'. Valid hosts: ${VALID_HOSTS.join(", ")}`);
@@ -1068,6 +1274,7 @@ export async function buildHost({
 
   let toolchains = null;
   let exitCode = 0;
+  let floorMeasurements = null;
 
   if (runner) {
     mkdirSync(workspaceDir, { recursive: true });
@@ -1084,6 +1291,7 @@ export async function buildHost({
     }
     exitCode = runResult.exitCode;
     toolchains = runResult.toolchains ?? null;
+    floorMeasurements = runResult.floors ?? null;
   } else {
     // Real build dispatch
     if (hostName === "macbook") {
@@ -1267,6 +1475,12 @@ export async function buildHost({
       if (existsSync(universalCli)) {
         execFileSync("cp", [universalCli, join(artifactsOutDir, "ferryx-cli-darwin-universal")]);
       }
+      floorMeasurements = measureMacosFloors({
+        appPath,
+        dmgPath: dmgPath && existsSync(dmgPath) ? dmgPath : null,
+        cliPath: existsSync(universalCli) ? universalCli : null,
+      });
+      macosMinimum ??= readMacosMinimum(isolatedSource);
     } else {
       const scpCommand = process.env.FERRYX_SCP_COMMAND || "scp";
       // Bundle transfer and artifact retrieval can be silent for minutes on a
@@ -1297,6 +1511,7 @@ export async function buildHost({
         const script = createLinuxBuildScript({ workspaceDir, plan, hostConfig });
         const result = await runHostScript(hostConfig, { posix: script }, { timeoutMs });
         toolchains = parseBuildResult(result.stdout);
+        floorMeasurements = parseFloorResult(result.stdout);
         for (const name of ["Ferryx_amd64.AppImage", "Ferryx_amd64.deb", "ferryx-cli-linux-amd64"]) {
           await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir}/out/${name}`, artifactsOutDir], { timeoutMs });
         }
@@ -1320,7 +1535,8 @@ export async function buildHost({
           });
           const result = await runHostScript(hostConfig, { powershell: script }, { timeoutMs });
           toolchains = parseBuildResult(result.stdout);
-          const names = ["Ferryx_x64.msix"];
+          floorMeasurements = parseFloorResult(result.stdout);
+          const names = ["Ferryx_x64.msix", "ferryx-cli-windows-amd64.exe"];
           if (plan.channels.nsisMigration) names.push("Ferryx_x64-setup.exe");
           for (const name of names) {
             await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir.replaceAll("\\", "/")}/out/${name}`, artifactsOutDir], { timeoutMs });
@@ -1369,6 +1585,24 @@ export async function buildHost({
     }
   }
 
+  // Release floor gate: glibc symbol floors, macOS minos, notarization and the Windows CRT. A
+  // waiver (local dev/test builds only) is recorded with the failing results, and assembleRelease
+  // refuses such a receipt unless it is given a waiver as well.
+  const floorChecks = evaluateFloors({
+    kinds: artifacts.map((artifact) => artifact.kind),
+    measurements: floorMeasurements,
+    macosMinimum: hostName === "macbook" ? macosMinimum ?? readMacosMinimum(config.repository) : null,
+  });
+  const floorFailures = describeFloorFailures(floorChecks);
+  if (floorFailures) {
+    if (!floorWaiver) {
+      throw new Error(
+        `Release floor gate failed on host '${hostName}': ${floorFailures}. Only a local dev/test build may opt out, with FERRYX_RELEASE_FLOOR_WAIVER="<reason>".`,
+      );
+    }
+    console.warn(`Release floor gate waived on host '${hostName}' (${floorWaiver}): ${floorFailures}`);
+  }
+
   const receipt = createBuildReceipt({
     host: hostName,
     runId: plan.runId,
@@ -1377,6 +1611,7 @@ export async function buildHost({
     exitCode: 0,
     artifacts,
     toolchains,
+    floors: { waiver: floorFailures ? floorWaiver : null, checks: floorChecks },
   });
 
   // Strict validation against release contract

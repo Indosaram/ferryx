@@ -269,6 +269,8 @@ export function buildProvenance({ plan, state = {}, receipts, sbomTools }) {
         host: receipt.host,
         completedAt: receipt.completedAt,
         toolchains: receipt.toolchains ?? null,
+        // Non-null only for local dev/test runs; publishRelease refuses waived receipts.
+        floorWaiver: receipt.floors?.waiver ?? null,
         assets: receipt.artifacts.map((artifact) => ({
           name: artifact.name,
           kind: artifact.kind,
