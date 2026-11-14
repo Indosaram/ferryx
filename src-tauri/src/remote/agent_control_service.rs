@@ -50,10 +50,21 @@ pub(crate) fn acknowledge_read(state: &RemoteGatewayState, session_id: &str) -> 
 }
 
 fn refuse_if_human_typing(session_id: &str) -> Result<(), ScopeError> {
-    let Some(typed_at) = reference_chat_runtime().input.last_raw_input_ms(session_id) else {
+    refuse_if_human_typing_at(
+        &reference_chat_runtime().input,
+        session_id,
+        reference_input::SystemReferenceClock.now_ms(),
+    )
+}
+
+fn refuse_if_human_typing_at(
+    input: &reference_input::ReferenceInputQueue,
+    session_id: &str,
+    now: u64,
+) -> Result<(), ScopeError> {
+    let Some(typed_at) = input.last_raw_input_ms(session_id) else {
         return Ok(());
     };
-    let now = reference_input::SystemReferenceClock.now_ms();
     if now.saturating_sub(typed_at) < policy::HUMAN_TYPING_WINDOW_MS {
         return Err(reference_chat_scope(
             ScopeErrorCode::ControlConflict,
@@ -3615,6 +3626,54 @@ mod tests {
             0
         );
         assert!(backend.writes.lock().expect("writes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn typing_in_another_pane_does_not_allow_a_supervisor_send_after_500ms() {
+        let session_id = "agent-control-human-cross-pane";
+        let (backend, state) = pane(session_id, "$ ");
+        let now = reference_input::SystemReferenceClock.now_ms();
+        let input = &reference_chat_runtime().input;
+        // Model A's key, then B's key 500ms later without sleeping. B's note used to prune
+        // A's stamp, letting the real Send path write into a pane a person was still using.
+        input.note_raw_input(session_id, now - 500);
+        input.note_raw_input("agent-control-human-cross-pane-other", now);
+
+        let error = handle(&state, send_op(session_id, "human-cross-pane-send"))
+            .await
+            .expect_err("another pane's input must not bypass the human-typing guard");
+
+        assert_eq!(error.code, ScopeErrorCode::ControlConflict, "{}", error.message);
+        assert_eq!(
+            backend.write_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the supervisor must never reach the backend writer"
+        );
+        assert!(backend.writes.lock().expect("writes").is_empty());
+        assert!(backend.signals.lock().expect("signals").is_empty());
+    }
+
+    #[test]
+    fn the_cross_pane_human_typing_guard_expires_at_exactly_its_window() {
+        let input = reference_input::ReferenceInputQueue::new();
+        let typed_at = 1_000;
+        input.note_raw_input("human-boundary-a", typed_at);
+        input.note_raw_input("human-boundary-b", typed_at + 500);
+
+        for elapsed in [500, policy::HUMAN_TYPING_WINDOW_MS - 1] {
+            let error = refuse_if_human_typing_at(&input, "human-boundary-a", typed_at + elapsed)
+                .expect_err("A remains protected even though B was typed into");
+            assert_eq!(error.code, ScopeErrorCode::ControlConflict, "elapsed={elapsed}");
+        }
+        // No new note prunes A here: the guard itself must stop refusing at the boundary.
+        assert_eq!(input.last_raw_input_ms("human-boundary-a"), Some(typed_at));
+        for elapsed in [policy::HUMAN_TYPING_WINDOW_MS, policy::HUMAN_TYPING_WINDOW_MS + 1] {
+            assert!(
+                refuse_if_human_typing_at(&input, "human-boundary-a", typed_at + elapsed).is_ok(),
+                "elapsed={elapsed}"
+            );
+        }
+        assert!(refuse_if_human_typing_at(&input, "never-typed", typed_at).is_ok());
     }
 
     #[tokio::test]
