@@ -29,6 +29,21 @@ class ConfigurationTest(unittest.TestCase):
         self.assertEqual(2, sum(p.endswith('/.buckroot') for p in f))
         self.assertEqual(['windows-a'], f['manifest.json']['excluded'])
 
+    def test_legacy_command_platform_routes_by_capability_instance(self):
+        files = c.render(self.hosts, self.profile)
+        router = files['coordinator/scheduler.json']['actionRouter']['demultiplexing']
+        routes = {r['instanceNamePrefix']: r for r in router['backends']}
+        self.assertEqual(len(routes), 2)  # Linux workers share one capability.
+        self.assertEqual(router['platformKeyExtractor'], {'action': {}})
+        self.assertEqual(router['defaultActionRouter']['simple']['platformKeyExtractor'], {'action': {}})
+        for name in self.profile['workers']:
+            runner = files[f'workers/{name}/worker.json']['buildDirectories'][0]['runners'][0]
+            instance = runner['instanceNamePrefix']
+            self.assertEqual(routes[instance]['platform'], {})
+            self.assertEqual(routes[instance]['actionRouter']['simple']['platformKeyExtractor']['static'], runner['platform'])
+            self.assertIn('instance_name = ' + instance + '\n', files[f'buck2/{instance}/.buckconfig'])
+        self.assertNotIn('', routes)  # Unknown/empty instances do not get a compatibility route.
+
     def test_endpoints_and_storage_graph(self):
         self.profile['coordinator']['address'] = '100.100.1.2'
         f = c.render(self.hosts, self.profile)
@@ -87,7 +102,7 @@ class ConfigurationTest(unittest.TestCase):
                 self.assertIn('range(8)', content)
                 self.assertNotIn('local_only = True', content)
             if name.endswith('.buckconfig'):
-                self.assertIn('instance_name =\n', content)
+                self.assertIn('instance_name = ' + name.split('/')[1] + '\n', content)
                 self.assertIn('execution_platforms = root//:platforms', content)
 
     def test_rendered_shell_command_success_and_failure(self):

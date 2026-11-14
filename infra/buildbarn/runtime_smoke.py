@@ -12,6 +12,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -50,6 +51,22 @@ def cleanup_processes(processes, logs):
         except Exception as error:
             errors.append(f'log close: {error}')
     return errors
+
+
+def print_failure_tails(evidence):
+    # Bound memory/output, including unusually large daemon logs. All logs are
+    # from this isolated no-credentials fixture, never host/user inventories.
+    for path in sorted(evidence.glob('*.log')):
+        if path.name in {'build-storage.log', 'build-execution.log'}:
+            continue
+        try:
+            with path.open('rb') as stream:
+                stream.seek(0, 2)
+                stream.seek(max(0, stream.tell() - 8192))
+                tail = stream.read().decode('utf-8', errors='replace')
+            print(f'--- {path.name} (last 8 KiB) ---\n{tail}', file=sys.stderr)
+        except OSError as error:
+            print(f'Cannot read {path.name}: {error}', file=sys.stderr)
 
 
 def marker_indices(cell, nonce):
@@ -117,7 +134,7 @@ def main():
             raise RuntimeError(f'service readiness timeout: {endpoint}')
 
         def build(label, nonce):
-            with (evidence / f'{label}.log').open('w') as log:
+            with (evidence / f'build-{label}.log').open('w') as log:
                 p = subprocess.Popen([str(bins / 'buck2'), 'build', '//:smoke', '--remote-only',
                                       '--no-remote-cache', '--materializations', 'all', '-c', f'smoke.nonce={nonce}'],
                                      cwd=cell, env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -162,6 +179,8 @@ def main():
                 stop(runner)
             nonce = uuid.uuid4().hex
             code = build('no-workers', nonce)
+            if 'No workers exist for instance name prefix' not in (evidence / 'build-no-workers.log').read_text():
+                raise RuntimeError('negative check failed for an unrelated reason; expected scheduler no-workers error')
             if code == 0 or marker_indices(cell, nonce):
                 raise RuntimeError('remote-only build unexpectedly succeeded/materialized outputs without workers')
             if any(p.poll() is not None for p in (storage, scheduler, frontend)):
@@ -187,6 +206,8 @@ def main():
                 result['cleanup_errors'] = cleanup_errors
                 result['status'] = 'failed'
             (evidence / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+            if result['status'] != 'passed':
+                print_failure_tails(evidence)
             if cleanup_errors:
                 raise RuntimeError('cleanup incomplete; see result.json; discard ephemeral runner')
 

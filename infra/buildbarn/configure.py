@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline, opt-in Buildbarn configuration renderer. Never contacts a build host."""
 import argparse
+import copy
 import ipaddress
 import json
 import os
@@ -120,7 +121,8 @@ def render(hosts, cfg):
         if len(socket.encode()) > 100:
             fail(f'{name}: runner socket path exceeds portable limit')
         properties = {'OSFamily': w['os'], 'ISA': w['arch'], 'toolchain-id': token(w['toolchain'], 'toolchain')}
-        runner = {'endpoint': {'address': 'unix:' + socket}, 'concurrency': w['concurrency'], 'maximumFilePoolFileCount': 10000, 'maximumFilePoolSizeBytes': GIB, 'platform': {'properties': [{'name': key, 'value': val} for key, val in sorted(properties.items())]}, 'workerId': {'hostname': name}}
+        instance = f"{w['os']}-{w['arch']}-{w['toolchain']}"
+        runner = {'instanceNamePrefix': instance, 'endpoint': {'address': 'unix:' + socket}, 'concurrency': w['concurrency'], 'maximumFilePoolFileCount': 10000, 'maximumFilePoolSizeBytes': GIB, 'platform': {'properties': [{'name': key, 'value': val} for key, val in sorted(properties.items())]}, 'workerId': {'hostname': name}}
         files[f'workers/{name}/runner.json'] = {'buildDirectoryPath': root + '/build', 'grpcServers': [{'listenPaths': [socket], 'authenticationPolicy': ALLOW}]}
         files[f'workers/{name}/worker.json'] = dict(base, blobstore={'actionCache': ac, 'contentAddressableStorage': cas}, scheduler={'address': f'{address}:8983'}, buildDirectories=[{'native': {'buildDirectoryPath': root + '/build', 'cacheDirectoryPath': root + '/cache', 'maximumCacheFileCount': 10000, 'maximumCacheSizeBytes': GIB, 'cacheReplacementPolicy': 'LEAST_RECENTLY_USED'}, 'runners': [runner]}], filePool={'blockDevice': {'file': {'path': root + '/filepool', 'sizeBytes': GIB}}}, inputDownloadConcurrency=10, outputUploadConcurrency=10, directoryCache={'maximumCount': 1000, 'maximumSizeBytes': MIB, 'cacheReplacementPolicy': 'LEAST_RECENTLY_USED'})
         manifest['workers'][name] = dict(hosts[name], directories=[root + '/build', root + '/cache'], properties=properties)
@@ -129,9 +131,27 @@ def render(hosts, cfg):
         profile = f"{w['os']}-{w['arch']}-{w['toolchain']}"
         prefix = f'buck2/{profile}/'
         files[prefix + '.buckroot'] = ''
-        files[prefix + '.buckconfig'] = f'[cells]\nroot = .\n\n[buck2_re_client]\naction_cache_address = grpc://{address}:8980\nengine_address = grpc://{address}:8980\ncas_address = grpc://{address}:8980\ntls = false\ninstance_name =\n\n[build]\nexecution_platforms = root//:platforms\n'
+        files[prefix + '.buckconfig'] = f'[cells]\nroot = .\n\n[buck2_re_client]\naction_cache_address = grpc://{address}:8980\nengine_address = grpc://{address}:8980\ncas_address = grpc://{address}:8980\ntls = false\ninstance_name = {profile}\n\n[build]\nexecution_platforms = root//:platforms\n'
         files[prefix + 'BUCK'] = 'load(":defs.bzl", "platforms", "smoke")\nplatforms(name = "platforms")\nsmoke(name = "smoke", nonce = read_config("smoke", "nonce", "initial"))\n'
         files[prefix + 'defs.bzl'] = buck_rules(properties)
+    # Pinned Buck2 sends Command.platform, while current Buildbarn reads only
+    # Action.platform. Bind each capability cell to its own RE instance prefix
+    # and rewrite only that prefix's empty platform to its declared capabilities.
+    # Workers share a queue per capability, never a host-specific destination.
+    simple = files['coordinator/scheduler.json']['actionRouter']
+    routes = {}
+    for worker in manifest['workers'].values():
+        props = worker['properties']
+        instance = f"{props['OSFamily']}-{props['ISA']}-{props['toolchain-id']}"
+        route = copy.deepcopy(simple)
+        route['simple']['platformKeyExtractor'] = {'static': {'properties': [
+            {'name': key, 'value': value} for key, value in sorted(props.items())]}}
+        routes[instance] = {'instanceNamePrefix': instance, 'platform': {}, 'actionRouter': route}
+    files['coordinator/scheduler.json']['actionRouter'] = {'demultiplexing': {
+        'platformKeyExtractor': {'action': {}},
+        'backends': [routes[key] for key in sorted(routes)],
+        'defaultActionRouter': simple,
+    }}
     files['manifest.json'] = manifest
     return files
 

@@ -1,11 +1,13 @@
 """Harness-only tests. Passing these is NOT a passing Buildbarn integration run."""
 from pathlib import Path
 import subprocess
+import io
+from contextlib import redirect_stderr
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from runtime_smoke import cleanup_processes, marker_indices, stop
+from runtime_smoke import cleanup_processes, marker_indices, print_failure_tails, stop
 
 
 class RuntimeHarnessTests(unittest.TestCase):
@@ -27,6 +29,20 @@ class RuntimeHarnessTests(unittest.TestCase):
             (out / 'worker-0.txt').write_text('\nbuildbarn-smoke-0-fresh\n')
             (out / 'worker-1.txt').write_text('host\nbuildbarn-smoke-1-fresh-more\n')
             self.assertEqual(marker_indices(cell, 'fresh'), set())
+
+    def test_failure_tails_are_bounded_and_exclude_build_tool_logs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            evidence = Path(temp)
+            (evidence / 'worker-a.log').write_text('OLD' + 'x' * 10000 + 'TAIL')
+            (evidence / 'build-storage.log').write_text('excluded')
+            output = io.StringIO()
+            with redirect_stderr(output):
+                print_failure_tails(evidence)
+            text = output.getvalue()
+            self.assertIn('TAIL', text)
+            self.assertNotIn('OLD', text)
+            self.assertNotIn('excluded', text)
+            self.assertLess(len(text), 8300)
 
     def test_exit_race_is_reaped(self):
         process = Mock(pid=123, poll=Mock(return_value=None))
