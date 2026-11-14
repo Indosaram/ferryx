@@ -2,14 +2,16 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { PanelActions } from "../../lib/supervisorPanel/actions";
-import type { PanelEvent, PanelSnapshot } from "../../lib/supervisorPanel/contract";
+import type { PanelEvent, PanelSnapshot, PrLane } from "../../lib/supervisorPanel/contract";
 import { emptyPanelSnapshot } from "../../lib/supervisorPanel/emptySnapshot";
 import { panelSnapshotFixture } from "../../lib/supervisorPanel/fixtures";
+import * as tauri from "../../lib/tauri";
 import { SupervisorPanelHost, type SupervisorPanelHostProps } from "./SupervisorPanelHost";
 
 afterEach(cleanup);
 
 const NOW = Date.UTC(2026, 10, 2, 14, 17, 0);
+const PR_LANE: PrLane = { prs: [], outage: null, refreshedAtMs: NOW };
 
 function actionsMock(overrides: Partial<PanelActions> = {}): PanelActions {
   return {
@@ -207,5 +209,34 @@ describe("SupervisorPanelHost", () => {
       }),
     );
     expect(screen.getByRole("button", { name: /Killed agent/ }).getAttribute("data-state")).toBe("failed");
+  });
+
+  // The panel lists the active project's worktrees for a PR hand-off. That read must wait for
+  // the backend registry: a rejected SSH host is never registered, so asking anyway fails with
+  // WORKSPACE_NOT_FOUND and reads as a local listing rather than "unavailable".
+  it("holds the worktree read until the backend accepts the workspace", async () => {
+    const listWorktrees = vi.spyOn(tauri, "listWorktrees").mockResolvedValue([]);
+    const loadPrs = vi.fn(async () => PR_LANE);
+    const load = vi.fn(() => Promise.resolve(panelSnapshotFixture));
+    const subscribe = vi.fn(() => Promise.resolve(() => undefined));
+    const panel = (registeredWorkspaceId: string | null) => (
+      <SupervisorPanelHost
+        onFocusSession={vi.fn()}
+        load={load}
+        subscribe={subscribe}
+        actionsFor={vi.fn(() => actionsMock())}
+        now={() => NOW}
+        workspaceId="ssh:remote"
+        registeredWorkspaceId={registeredWorkspaceId}
+        loadPrs={loadPrs}
+      />
+    );
+    const view = render(panel(null));
+    await waitFor(() => expect(loadPrs).toHaveBeenCalled());
+    expect(listWorktrees).not.toHaveBeenCalled();
+
+    view.rerender(panel("ssh:remote"));
+    await waitFor(() => expect(listWorktrees).toHaveBeenCalledWith("ssh:remote"));
+    listWorktrees.mockRestore();
   });
 });

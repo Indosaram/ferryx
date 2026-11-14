@@ -4731,6 +4731,7 @@ function WorkspaceApp({
           open={true}
           projects={projects}
           activeProjectId={activeProject.workspaceId}
+          registeredProjectId={registeredProjectId}
           worktrees={state.worktrees}
           inactiveProjectWorktrees={inactiveProjectWorktrees}
           emptyWorkspaceIds={emptySidebarWorkspaceIds(projects, activeProject.workspaceId, state, listWorkspaceSnapshots())}
