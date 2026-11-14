@@ -528,17 +528,29 @@ export function createBuildReceipt({ host, runId, commitSha, appVersion, exitCod
 /**
  * Identifies the artifact kind from a filename and host.
  */
-function identifyKind(filename, hostName) {
+export function identifyKind(filename, hostName) {
+  if (filename.endsWith(".sig")) return null;
+
+  // Exact stable alias first: it is unique per kind, so shared suffixes such as
+  // `ferryx-cli-darwin-universal` vs `ferryx-rd-client-darwin-universal` (both end
+  // with `-darwin-universal`) cannot collide.
   for (const [kind, def] of Object.entries(KIND_DEFINITIONS)) {
-    if (def.permittedHost === hostName) {
-      for (const ext of def.allowedExtensions) {
-        if (filename.endsWith(ext) && !filename.endsWith(".sig")) {
-          return kind;
-        }
-      }
+    if (def.permittedHost === hostName && def.stableAlias && filename === def.stableAlias) {
+      return kind;
     }
   }
-  return null;
+
+  let best = null;
+  let bestLen = -1;
+  for (const [kind, def] of Object.entries(KIND_DEFINITIONS)) {
+    if (def.permittedHost !== hostName) continue;
+    for (const ext of def.allowedExtensions) {
+      if (!filename.endsWith(ext) || ext.length <= bestLen) continue;
+      best = kind;
+      bestLen = ext.length;
+    }
+  }
+  return best;
 }
 
 /**
