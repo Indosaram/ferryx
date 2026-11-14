@@ -1085,7 +1085,15 @@ export function finalizeMacosBundle({
   // aarch64 1590640 -> 1599648) and its sha256. helper_assets::resolve_helper_asset compares the
   // bundled bytes against manifest.json byteLength/sha256, so a stale manifest makes every SSH
   // spawn fail with helper_asset_length_mismatch. Re-derive the manifest from the signed bytes.
-  refreshBundledHelperManifest(appPath);
+  const manifestChanged = refreshBundledHelperManifest(appPath);
+  if (manifestChanged > 0 && signingIdentity) {
+    // Rewriting the manifest after signing breaks the app's code-signature seal
+    // (`codesign --verify` reports `a sealed resource is missing or invalid`), which also makes
+    // the notarization ticket unusable. The manifest sits inside Contents/Resources, so its
+    // hash is part of CodeResources: re-seal the app after writing it.
+    exec("codesign", [...codesignArgs(signingIdentity, bundleEntitlements), appPath]);
+    exec("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath]);
+  }
 
   const notarizations = [];
   // A signed-but-unnotarized macOS build is rejected by Gatekeeper on end-user machines
