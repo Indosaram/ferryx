@@ -1,6 +1,6 @@
 [
   {
-    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-50-08-015Z_01a0817f-710f-7f2f-bf80-5b19a379b312.jsonl",
+    "source": "~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-50-08-015Z_01a0817f-710f-7f2f-bf80-5b19a379b312.jsonl",
     "event": {
       "type": "custom_message",
       "customType": "senpi-monitor:notification",
@@ -12,7 +12,7 @@
     }
   },
   {
-    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-41-12-637Z_01a08177-45bd-7ca1-a304-48e3d9275703.jsonl",
+    "source": "~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-41-12-637Z_01a08177-45bd-7ca1-a304-48e3d9275703.jsonl",
     "event": {
       "type": "custom_message",
       "customType": "senpi-monitor:notification",
@@ -24,7 +24,7 @@
     }
   },
   {
-    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-41-12-637Z_01a08177-45bd-7ca1-a304-48e3d9275703.jsonl",
+    "source": "~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-41-12-637Z_01a08177-45bd-7ca1-a304-48e3d9275703.jsonl",
     "event": {
       "type": "custom_message",
       "customType": "senpi-monitor:notification",
@@ -36,7 +36,7 @@
     }
   },
   {
-    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl",
+    "source": "~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl",
     "event": {
       "type": "custom_message",
       "customType": "senpi-monitor:notification",
@@ -48,7 +48,7 @@
     }
   },
   {
-    "source": "/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl",
+    "source": "~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl",
     "event": {
       "type": "custom_message",
       "customType": "senpi-monitor:notification",

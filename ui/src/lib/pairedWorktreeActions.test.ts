@@ -2,8 +2,8 @@ import { expect, it, vi } from "vitest";
 import { createPairedWorktreeActions } from "./pairedWorktreeActions";
 import { PairedOperationError, type PairedDaemonProjectAdapter } from "./pairedDaemonProject";
 import type { RegisteredProject } from "./types";
-import fixtures from "../../../docs/evidence/paired-daemon/fixtures/contracts.json";
-import lifecycle from "../../../docs/evidence/paired-daemon/fixtures/lifecycle.json";
+import fixtures from "../../../src-tauri/tests/fixtures/paired-daemon/contracts.json";
+import lifecycle from "../../../src-tauri/tests/fixtures/paired-daemon/lifecycle.json";
 import { decodeMachineJson } from "./pairedDaemonContracts";
 const project: RegisteredProject = { workspaceId: `daemon:${"a".repeat(64)}`, remoteWorkspaceId: "project-a", target: { kind: "pairedDaemon", hostId: "host-a" }, repoRoot: "/srv/repo", gitRoot: "/srv/repo" };
 function fixture(kind: string) {

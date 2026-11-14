@@ -4,7 +4,7 @@
 
 **Native RED -> GREEN captured at the real `WindowsCompositorTarget::drop`.**
 The repair is uncommitted in
-`/Users/indo/code/project/orca-lite-rendering-20260906/src-tauri/src/native_terminal/platform/windows.rs`.
+`<worktree-root>/orca-lite-rendering-20260906/src-tauri/src/native_terminal/platform/windows.rs`.
 Only that source file, this report, and D6 QA artifacts were authored by task
 `st_01a0773f`. Main-checkout Windows source remains unchanged. No host/IPC,
 renderer, Linux, frontend source, Cargo/build manifest, vendor, or dependency

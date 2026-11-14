@@ -8,7 +8,7 @@ The separate Herdr entry was preserved.
 
 ## Removed
 
-All paths below were under `/Users/indo/code/project/orca-lite-wt/`:
+All paths below were under `<worktree-root>/`:
 
 - `dag-viewport-wave1`
 - `dag-viewport-wave2`

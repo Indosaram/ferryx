@@ -1,12 +1,17 @@
 """Opt-in isolated native protocol evidence. No existing thread or auth store is read."""
-import asyncio, json, os, tempfile
+import asyncio, json, os, shutil, tempfile
 from pathlib import Path
+
+# The codex binary comes from CODEX_BIN, else PATH; the probe workspace from FERRYX_PROBE_CWD, else a fresh temp dir.
+CODEX = os.environ.get('CODEX_BIN') or shutil.which('codex') or os.path.expanduser('~/.local/bin/codex')
 
 async def main():
     with tempfile.TemporaryDirectory(prefix='ferryx-chat-provider-') as root:
         env = dict(os.environ, HOME=root, CODEX_HOME=root + '/codex')
         Path(env['CODEX_HOME']).mkdir(mode=0o700)
-        child = await asyncio.create_subprocess_exec('/Users/indo/.local/bin/codex', 'app-server', '--listen', 'stdio://', cwd='/tmp/ferryx-scope-ssh.Tody5Z/qa-one', env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        workdir = os.environ.get('FERRYX_PROBE_CWD') or root + '/work'
+        Path(workdir).mkdir(mode=0o700, exist_ok=True)
+        child = await asyncio.create_subprocess_exec(CODEX, 'app-server', '--listen', 'stdio://', cwd=workdir, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         async def send(v):
             child.stdin.write((json.dumps(v)+'\n').encode()); await child.stdin.drain()
         async def receive():
@@ -24,7 +29,7 @@ async def main():
             result=await request(1,'initialize',{'clientInfo':{'name':'ferryx_chat_boundary','version':'1'},'capabilities':{'experimentalApi':True}})
             print('INITIALIZED',json.dumps(result),flush=True)
             await send({'method':'initialized'})
-            thread=await request(2,'thread/start',{'cwd':'/tmp/ferryx-scope-ssh.Tody5Z/qa-one','ephemeral':True,'approvalPolicy':'untrusted','sandbox':'read-only'})
+            thread=await request(2,'thread/start',{'cwd':workdir,'ephemeral':True,'approvalPolicy':'untrusted','sandbox':'read-only'})
             tid=thread['thread']['id'];print('EPHEMERAL_THREAD',tid,flush=True)
             await request(3,'turn/start',{'threadId':tid,'input':[{'type':'text','text':'Reply exactly FERRYX_SCOPE_PROVIDER_OK. Then request permission to run the harmless command true, and ask me a question with request_user_input if available. Do not read or modify any files.'}]})
             approvals=questions=0;sentinel=False

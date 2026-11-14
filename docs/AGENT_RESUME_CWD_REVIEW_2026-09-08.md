@@ -51,7 +51,7 @@ The supplied documentation's pre-commit re-review section explicitly describes t
 
 ## Checked artifact paths
 
-Ferryx root: `/Users/indo/code/project/orca-lite`
+Ferryx root: `<repo>`
 
 - `src-tauri/resources/agent-extensions/ferryx-agent-state.ts`
 - `src-tauri/src/daemon/server.rs` (current 36-line diff and adjacent spawn/jail context)
@@ -64,7 +64,7 @@ Ferryx root: `/Users/indo/code/project/orca-lite`
 - `scripts/qa/verify-omo-fork-confirmation.mjs`
 - `docs/AGENT_RESUME_CWD_FIX_2026-09-08.md`
 
-Senpi root: `/Users/indo/code/senpi-ferryx-confirm-fix`
+Senpi root: `~/code/senpi-ferryx-confirm-fix`
 
 - `packages/coding-agent/src/main.ts` (four-line diff and session bootstrap context)
 - `packages/coding-agent/src/changes.md` (actual changed path corresponding to the task's abbreviated `src/changes.md`)

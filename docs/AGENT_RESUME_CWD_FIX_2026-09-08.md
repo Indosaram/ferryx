@@ -19,7 +19,7 @@
 - Other agents retain their existing directory resolution behavior.
 
 The independent OMO confirmation defect was fixed in the Senpi source worktree
-`/Users/indo/code/senpi-ferryx-confirm-fix`:
+`~/code/senpi-ferryx-confirm-fix`:
 `packages/coding-agent/src/main.ts` settles the answer before `rl.close()` can
 emit the EOF/cancellation event. The same two-line ordering correction was
 applied to the installed global Senpi `dist/main.js`.

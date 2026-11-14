@@ -813,7 +813,7 @@ describe("WorktreeList actions", () => {
     // Case-insensitivity when enabled (Windows and macOS)
     expect(normalizeWorktreePath("C:\\Projects\\Ferryx", true)).toBe("c:/projects/ferryx");
     expect(isSameWorktreePath("C:\\Projects\\Ferryx", "c:/projects/ferryx", true)).toBe(true);
-    expect(isSameWorktreePath("/Volumes/T9-Mac/Repo", "/volumes/t9-mac/repo", true)).toBe(true);
+    expect(isSameWorktreePath("/Volumes/Data/Repo", "/volumes/data/repo", true)).toBe(true);
 
     // Case-preservation when disabled (Linux)
     expect(normalizeWorktreePath("/home/user/Repo", false)).toBe("/home/user/Repo");

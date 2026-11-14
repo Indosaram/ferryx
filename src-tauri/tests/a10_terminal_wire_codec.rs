@@ -47,7 +47,7 @@ mod corpus {
     }
     #[test]
     fn a02_u64_and_all_fragment_boundaries() {
-        let fixtures: serde_json::Value = serde_json::from_str(include_str!("../../docs/evidence/paired-daemon/fixtures/contracts.json")).unwrap();
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!("fixtures/paired-daemon/contracts.json")).unwrap();
         let session = &fixtures.as_array().unwrap().iter().find(|f| f["kind"] == "session").unwrap()["value"];
         let values = [0, 1, 9_007_199_254_740_992, session["target"]["daemonEpoch"].as_str().unwrap().parse().unwrap(), session["endSequence"].as_str().unwrap().parse().unwrap()];
         assert_eq!(values[3], 9_007_199_254_740_993);

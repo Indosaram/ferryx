@@ -1,6 +1,6 @@
-$ env -u CI -u GITHUB_ACTIONS bun run release:local prepare --config scripts/release-hosts.example.json --tag v2026.09.08.65000 --commit HEAD --out /Users/indo/code/project/orca-lite/docs/releases/local-release-hardening-evidence/artifacts/st_01a080e7-prepare-run
-$ node scripts/release-local.mjs prepare --config scripts/release-hosts.example.json --tag "v2026.09.08.65000" --commit HEAD --out "/Users/indo/code/project/orca-lite/docs/releases/local-release-hardening-evidence/artifacts/st_01a080e7-prepare-run"
-Release run prepared successfully at /Users/indo/code/project/orca-lite/docs/releases/local-release-hardening-evidence/artifacts/st_01a080e7-prepare-run
+$ env -u CI -u GITHUB_ACTIONS bun run release:local prepare --config scripts/release-hosts.example.json --tag v2026.09.08.65000 --commit HEAD --out <repo>/docs/releases/local-release-hardening-evidence/artifacts/st_01a080e7-prepare-run
+$ node scripts/release-local.mjs prepare --config scripts/release-hosts.example.json --tag "v2026.09.08.65000" --commit HEAD --out "<repo>/docs/releases/local-release-hardening-evidence/artifacts/st_01a080e7-prepare-run"
+Release run prepared successfully at <repo>/docs/releases/local-release-hardening-evidence/artifacts/st_01a080e7-prepare-run
 {
   "schemaVersion": 1,
   "runId": "rel-2026.09.08.65000-c85f17ea",

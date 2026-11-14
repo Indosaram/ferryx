@@ -8,7 +8,7 @@ import { MachineApprovalCard } from "../components/settings/remote/MachineApprov
 import { PairedDaemonProjectForm } from "../components/PairedDaemonProjectForm";
 import { remoteHostStore, remoteHostKey, type HostEndpoint } from "../state/remoteHostStore";
 import discoveryFixtureJson from "./discoveryQaFixture.json";
-import contractFixtures from "../../../docs/evidence/paired-daemon/fixtures/contracts.json";
+import contractFixtures from "../../../src-tauri/tests/fixtures/paired-daemon/contracts.json";
 import type { DiscoveredRepositories } from "../lib/pairedDaemonContracts";
 
 // Recorded from the real discovery route on the QA host (see the C5 transcript).

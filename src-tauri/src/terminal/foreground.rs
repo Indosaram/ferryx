@@ -742,10 +742,10 @@ mod tests {
         // cursor-agent: the launcher's `exec -a` keeps the symlink path as argv[0] while the
         // real executable is the bundled node (.omo-parity/facts/local-3.md:149-152).
         assert!(is_agent(
-            "/Users/indo/.local/bin/cursor-agent --use-system-ca /Users/indo/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js"
+            "/Users/example/.local/bin/cursor-agent --use-system-ca /Users/example/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js"
         ));
         assert!(is_agent(
-            "/Users/indo/.local/bin/cursor-agent --use-system-ca /Users/indo/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js --resume 9371cc0a-d5c0-4cca-bcae-cae24632e1b5"
+            "/Users/example/.local/bin/cursor-agent --use-system-ca /Users/example/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js --resume 9371cc0a-d5c0-4cca-bcae-cae24632e1b5"
         ));
         // grok: the ~/.grok/bin symlink, fresh and resumed (.omo-parity/facts/remote-grok.md:54-55).
         assert!(is_agent("/home/indo/.grok/bin/grok"));
@@ -754,10 +754,10 @@ mod tests {
         ));
         // kimi: the uv tool's python runs the ~/.local/bin/kimi script (.omo-parity/facts/local-2.md:212,216).
         assert!(is_agent(
-            "/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi"
+            "/Users/example/.local/share/uv/tools/kimi-cli/bin/python /Users/example/.local/bin/kimi"
         ));
         assert!(is_agent(
-            "/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi -S eca66b4f-a89b-4979-9f13-cbe3f35b5991"
+            "/Users/example/.local/share/uv/tools/kimi-cli/bin/python /Users/example/.local/bin/kimi -S eca66b4f-a89b-4979-9f13-cbe3f35b5991"
         ));
         // cline: native binary, its resume form, and the hub-daemon child (.omo-parity/facts/local.md:107).
         assert!(is_agent("cline"));
@@ -775,8 +775,8 @@ mod tests {
         // published family must come back under the id discovery and resume use.
         for (command, agent) in [
             // kimi: uv's python runs ~/.local/bin/kimi (local-2.md:212,216).
-            ("/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi", "kimi"),
-            ("/Users/indo/.local/share/uv/tools/kimi-cli/bin/python /Users/indo/.local/bin/kimi -S eca66b4f-a89b-4979-9f13-cbe3f35b5991", "kimi"),
+            ("/Users/example/.local/share/uv/tools/kimi-cli/bin/python /Users/example/.local/bin/kimi", "kimi"),
+            ("/Users/example/.local/share/uv/tools/kimi-cli/bin/python /Users/example/.local/bin/kimi -S eca66b4f-a89b-4979-9f13-cbe3f35b5991", "kimi"),
             // copilot: the Mach-O binary itself (local-3.md:17, local.md:124).
             ("copilot", "copilot"),
             ("copilot --resume 5793c06c-5bee-4b34-883b-589051286cfd", "copilot"),
@@ -786,7 +786,7 @@ mod tests {
             ("claude --resume id", "claude"),
             ("/home/indo/.grok/bin/grok", "grok"),
             ("bun /home/indo/.bun/bin/omp", "omp"),
-            ("/Users/indo/.local/bin/agent --resume id", "cursor-agent"),
+            ("/Users/example/.local/bin/agent --resume id", "cursor-agent"),
             ("/Users/x/.local/bin/agy", "antigravity"),
         ] {
             assert_eq!(agent_identity(command), Some(agent), "{command}");

@@ -4,7 +4,7 @@
  *
  * Task 9 End-to-End Recovery Consistency Harness
  * Plan: .omo/plans/consistent-session-recovery-20261013.md (Task 9, IS-1 - IS-7)
- * Worktree: /Volumes/T9-Mac/project/ferryx-wt/consistent-session-recovery-20261013
+ * Worktree: <worktree-root>/consistent-session-recovery-20261013
  *
  * PROVES (when candidate is built and dependencies are satisfied):
  *   1. Local outage > 30s and > 5 failures recovers same live process/identity without click.
@@ -45,7 +45,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { join, resolve, dirname, extname } from 'node:path';
-import { tmpdir, platform } from 'node:os';
+import { tmpdir, platform, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -755,7 +755,7 @@ export class WebGatewayFixture extends EventEmitter {
  * ========================================================================== */
 
 export async function captureRemoteDesktopFrame({ host, pairingId, timeoutSecs = 10 }) {
-  const mahoClientPath = '/Users/indo/.cargo/bin/maho-client';
+  const mahoClientPath = process.env.MAHO_CLIENT ?? join(homedir(), '.cargo/bin/maho-client');
   if (!existsSync(mahoClientPath)) {
     return { ok: false, barrier: 'MAHO_CLIENT_MISSING', detail: `${mahoClientPath} does not exist` };
   }

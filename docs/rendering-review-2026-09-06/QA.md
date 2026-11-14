@@ -80,7 +80,7 @@ orca computer list-windows --app pid:60274 --json
 
 Observed: `orca status` reported `app.running=false` and
 `runtime.state=not_running`. The computer calls returned `runtime_unavailable`
-because `/Users/indo/Library/Application Support/orca/orca-runtime.json` was
+because `~/Library/Application Support/orca/orca-runtime.json` was
 absent. No alternate Orca executable was selected.
 
 Read-only native fallback:

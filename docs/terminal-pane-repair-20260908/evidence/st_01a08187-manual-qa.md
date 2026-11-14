@@ -8,7 +8,7 @@ Evidence directory is the caller-provided directory. The task restricts executab
 
 | Scenario id | Criterion reference | Surface | Exact invocation | Verdict | artifactRefs |
 | --- | --- | --- | --- | --- | --- |
-| BUILD-1 | Frontend compilation exit 0 | Actual CLI, executed once | `bun run --cwd /Users/indo/code/project/orca-lite/ui build > /Users/indo/code/project/orca-lite/docs/terminal-pane-repair-20260908/evidence/ui-build.log 2>&1` | FAIL: exit 2; tsc rejects Promise.withResolvers at NativeTerminalPane.test.tsx(648,36) and RemoteDirectoryPicker.test.tsx(88,29), TS2550. Vite build not reached. | BUILD |
+| BUILD-1 | Frontend compilation exit 0 | Actual CLI, executed once | `bun run --cwd <repo>/ui build > <repo>/docs/terminal-pane-repair-20260908/evidence/ui-build.log 2>&1` | FAIL: exit 2; tsc rejects Promise.withResolvers at NativeTerminalPane.test.tsx(648,36) and RemoteDirectoryPicker.test.tsx(88,29), TS2550. Vite build not reached. | BUILD |
 | C1-RED | Backing assertion existed and failed before removal | Existing Vitest log; inspected, not rerun | Captured: `vitest run --maxWorkers=1 src/components/NativeTerminalPane.test.tsx -t "keeps the terminal uncovered when a bounds failure is shown"` | PASS (evidence classification only): assertion expected null but received full-pane native-terminal-error-backing; 1 failed, 149 skipped, exit 1. Skipped tests are not credited. | RED |
 | C1-MAIN | Main NativeTerminalPane suite passes after removal | Existing Vitest combined log; inspected, not rerun | Captured: `vitest run --maxWorkers=1 src/components/NativeTerminalPane.test.tsx src/components/NativeTerminalPane.lifecycle.test.tsx` | PASS (captured main suite only): NativeTerminalPane.test.tsx has 150 passing tests. Current source retains uncovered-bounds assertion and localized alert, with no error-backing match. Not fresh runtime or desktop proof. | GREEN, PANE, TEST |
 | C1-COMBINED | Explicitly classify overlay failures; no total GREEN | Existing Vitest combined log; inspected, not rerun | Same captured combined invocation as C1-MAIN | FAIL: 177 passed, 3 failed, exit 1. Existing Settings, New Tab dialog, and Terminal search lifecycle cases expect detach but receive attach only; panes remain visible. | GREEN |
@@ -27,9 +27,9 @@ No skipped, inferred, partial, or desktop execution is credited as an executable
 
 | Id | Kind | Description | Path |
 | --- | --- | --- | --- |
-| BUILD | CLI stdout/stderr | Non-empty build output; invocation tool returned exit 2 | /Users/indo/code/project/orca-lite/docs/terminal-pane-repair-20260908/evidence/ui-build.log |
-| RED | Captured test log | Backing received instead of null; targeted failure and exit 1 | /Users/indo/code/project/orca-lite/docs/terminal-pane-repair-20260908/evidence/c1-red.log |
-| GREEN | Captured test log | Main 150 pass; lifecycle 27 pass / 3 fail; combined exit 1 | /Users/indo/code/project/orca-lite/docs/terminal-pane-repair-20260908/evidence/c1-green.log |
-| PANE | Source | Explicit inputWritten=false recovery guard and localized retry alert | /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx |
-| TEST | Source | Uncovered-bounds regression assertion, inspected lines 382-405 | /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.test.tsx |
-| VISIBILITY | Source | macOS visible/noninteractive overlay policy | /Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalVisibility.tsx |
+| BUILD | CLI stdout/stderr | Non-empty build output; invocation tool returned exit 2 | <repo>/docs/terminal-pane-repair-20260908/evidence/ui-build.log |
+| RED | Captured test log | Backing received instead of null; targeted failure and exit 1 | <repo>/docs/terminal-pane-repair-20260908/evidence/c1-red.log |
+| GREEN | Captured test log | Main 150 pass; lifecycle 27 pass / 3 fail; combined exit 1 | <repo>/docs/terminal-pane-repair-20260908/evidence/c1-green.log |
+| PANE | Source | Explicit inputWritten=false recovery guard and localized retry alert | <repo>/ui/src/components/NativeTerminalPane.tsx |
+| TEST | Source | Uncovered-bounds regression assertion, inspected lines 382-405 | <repo>/ui/src/components/NativeTerminalPane.test.tsx |
+| VISIBILITY | Source | macOS visible/noninteractive overlay policy | <repo>/ui/src/lib/nativeTerminalVisibility.tsx |

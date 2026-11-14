@@ -1,4 +1,4 @@
-   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite/src-tauri)
+   Compiling ferryx v2026.908.1 (<repo>/src-tauri)
 warning: unnecessary `unsafe` block
   --> src/macos_file_drop.rs:79:28
    |
@@ -263,7 +263,7 @@ test daemon::manifest::tests::handover_manifest_update_excludes_other_file_handl
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 759 filtered out; finished in 0.00s
 
-   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite/src-tauri)
+   Compiling ferryx v2026.908.1 (<repo>/src-tauri)
 warning: unused import: `Manager`
   --> src/ipc/notifications.rs:21:24
    |

@@ -16,8 +16,8 @@ contract" and "Verification corrections A1-A3" sections of
 
 Paths used below:
 
-- `W`: `/Users/indo/code/project/orca-lite-atlas-20260906`.
-- `E`: `/Users/indo/code/project/orca-lite/.omo/evidence/ulw/rendering-review-20260906/atlas`.
+- `W`: `<worktree-root>/orca-lite-atlas-20260906`.
+- `E`: `<repo>/.omo/evidence/ulw/rendering-review-20260906/atlas`.
 - Renderer source references are relative to `W/src-tauri/src/native_terminal/renderer`.
 - Contract references are relative to `W/src-tauri/tests/native_terminal_renderer_contract`.
 
@@ -127,7 +127,7 @@ is accepted as RED. The three `*-setup-failure.log` files are explicitly exclude
 Executed once each, in `W`, with the author's documented shell-only prerequisite:
 
 ```sh
-export CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite/src-tauri/target
+export CARGO_TARGET_DIR=<repo>/src-tauri/target
 export CARGO_BUILD_JOBS=8
 export TAURI_CONFIG='{"bundle":{"resources":[]}}'
 unset ATLAS_EVIDENCE_DIR
@@ -260,7 +260,7 @@ Actual tool versions match the base receipt: Rust/Cargo 1.92.0, Zig 0.16.0,
 Darwin arm64, Apple M4 Max / Metal. The existing Ghostty checkout is clean and at
 `6a508fd5e34c7e222c052a6d00bb3891ff3feace`; its pinned source-lock/build receipts
 agree. The repair manifest uses wgpu 24, with no added local HAL patch. Shared
-Cargo target is `/Users/indo/code/project/orca-lite/src-tauri/target`, not an
+Cargo target is `<repo>/src-tauri/target`, not an
 unidentified installed Ferryx binary. The POC executable path is that target's
 `debug/examples/native_terminal_renderer_poc`.
 

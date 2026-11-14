@@ -1,4 +1,4 @@
-   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite/src-tauri)
+   Compiling ferryx v2026.908.1 (<repo>/src-tauri)
 warning: unnecessary `unsafe` block
   --> src/macos_file_drop.rs:79:28
    |

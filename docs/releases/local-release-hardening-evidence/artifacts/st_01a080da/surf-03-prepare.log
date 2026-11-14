@@ -68,7 +68,7 @@ drwxr-xr-x@ 2 indo  wheel   64 Sep  8 20:53 receipts
   "runId": "rel-2026.09.08.1-3a19bdf7",
   "planDigest": "2eaaf2c339b5e541ed8eb6580712e44a5db8e6ef68d6982f4828c004cb246d04",
   "configDigest": "974abae3b11455f62c1580a0a86230c9839d9caf5664f321f9241302a1ba301a",
-  "configPath": "/Users/indo/code/project/orca-lite/scripts/release-hosts.example.json",
+  "configPath": "<repo>/scripts/release-hosts.example.json",
   "commitSha": "3a19bdf727870fd28a75866123ac06f80e443076",
   "sourceDateEpoch": 1788849930,
   "ghosttyPin": "6a508fd5e34c7e222c052a6d00bb3891ff3feace",

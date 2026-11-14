@@ -1,6 +1,6 @@
 # Documentation implementation-claim coverage audit
 
-Audited 2026-09-13 in `/Users/indo/code/project/orca-lite-wt/sa-docs` for task `st_01a09a82`.
+Audited 2026-09-13 in `<worktree-root>/sa-docs` for task `st_01a09a82`.
 This is a coverage ledger, not a replacement guide or a deployment receipt. Document line numbers refer to the 709-line guide and 111-line privacy page read in this session. Source ranges below were read directly; searches are identified as searches, not execution evidence. No builds, tests, application launches, network requests, or deployment commands were run.
 
 `G` means `docs/HEADLESS_LINUX_SERVER_DEPLOYMENT_GUIDE.md`; `P` means `site/src/content/docs/privacy.md`. Source paths are repository-relative. **Supported** means the inspected implementation supports the scoped claim, not that a deployment was tested. **Correct** identifies wrong or materially incomplete assertions. **Recommendation/example** requires operator adaptation, not a production-code implementation. **Unsupported** means remove the guarantee or supply evidence outside this audit.

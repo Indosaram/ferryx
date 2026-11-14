@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { decodeMachineJson } from "./pairedDaemonContracts";
 
 function fixtures(name: string): { name: string; kind: string; value: unknown }[] {
-  const path = resolve(dirname(fileURLToPath(import.meta.url)), "../../../docs/evidence/paired-daemon/fixtures", `${name}.json`);
+  const path = resolve(dirname(fileURLToPath(import.meta.url)), "../../../src-tauri/tests/fixtures/paired-daemon", `${name}.json`);
   return JSON.parse(readFileSync(path, "utf8"));
 }
 const validFixtures = fixtures("parity-valid");

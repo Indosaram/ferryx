@@ -24,7 +24,7 @@ not attributed to the Windows repair or approved by this report.
 Evidence root, relative to the main checkout:
 `.omo/evidence/ulw/rendering-review-20260906/D6/` (abbreviated `E/` below).
 Source references below are relative to
-`/Users/indo/code/project/orca-lite-rendering-20260906/src-tauri/src/`.
+`<worktree-root>/orca-lite-rendering-20260906/src-tauri/src/`.
 
 ## Criterion dispositions
 

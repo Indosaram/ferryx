@@ -44,7 +44,7 @@ The next phase is defined from this phase's checked results, not pre-scheduled.
 
 ## Isolated worktree
 
-`/Users/indo/code/project/orca-lite-rendering-20260906`
+`<worktree-root>/orca-lite-rendering-20260906`
 
 Branch: `fix/rendering-review-20260906`.
 Base: `b8f82d707f0cb99907e3d79c0c9cdc75053ef931`.

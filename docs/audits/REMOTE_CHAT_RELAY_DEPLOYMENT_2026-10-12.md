@@ -154,7 +154,7 @@ the recorded leftover PID observation, not production deployment or sending.
 
 The following receipts were recovered from the original session record without
 rerunning builds, tests, or live requests. The local JSONL record is
-`/Users/indo/.omo/agent/sessions/--Volumes-T9-Mac-project-ferryx--/2026-10-12T01-23-35-674Z_01a12db5-407a-7644-84e2-467b2d469998.jsonl`.
+`~/.omo/agent/sessions/--Volumes-T9-Mac-project-ferryx--/2026-10-12T01-23-35-674Z_01a12db5-407a-7644-84e2-467b2d469998.jsonl`.
 Line numbers identify historical evidence, not validation of a later revision.
 
 | Record line | Observed receipt | Scope |

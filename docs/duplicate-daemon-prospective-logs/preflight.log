@@ -1,5 +1,5 @@
 + pwd
-/Users/indo/code/project/orca-lite-wt/sa-tests
+<worktree-root>/sa-tests
 + printf 'exit=%s\n' 0
 exit=0
 + git rev-parse HEAD
@@ -28,7 +28,7 @@ BEFORE read-only process identity check
 + ps -p 1010,21591 -o pid,ppid,lstart,command
   PID  PPID STARTED                      COMMAND
  1010   680 Sun Sep 13 07:55:43 2026     /Applications/Ferryx.app/Contents/MacOS/ferryx --daemon
-21591 21210 Sun Sep 13 19:27:52 2026     /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
+21591 21210 Sun Sep 13 19:27:52 2026     <worktree-root>/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
 + printf 'exit=%s\n' 0
 exit=0
 + shasum -a 256 src-tauri/src/daemon/server.rs src-tauri/tests/daemon_duplicate_prevention.rs
@@ -45,7 +45,7 @@ AFTER read-only process identity check
 + ps -p 1010,21591 -o pid,ppid,lstart,command
   PID  PPID STARTED                      COMMAND
  1010   680 Sun Sep 13 07:55:43 2026     /Applications/Ferryx.app/Contents/MacOS/ferryx --daemon
-21591 21210 Sun Sep 13 19:27:52 2026     /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
+21591 21210 Sun Sep 13 19:27:52 2026     <worktree-root>/dag-viewport-wave3/src-tauri/target/debug/Ferryx.app/Contents/MacOS/ferryx --daemon
 + printf 'exit=%s\n' 0
 exit=0
 + shasum -a 256 src-tauri/src/daemon/server.rs src-tauri/tests/daemon_duplicate_prevention.rs

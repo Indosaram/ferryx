@@ -99,7 +99,7 @@ non-generic `AppHandle` command argument. Those files were not changed by this
 repair.
 
 An isolated verification worktree was created at
-`/Users/indo/code/project/orca-lite-render-root-qa-20260908`, based on `799e0e4`,
+`<worktree-root>/orca-lite-render-root-qa-20260908`, based on `799e0e4`,
 with only this repair applied. The unrelated SSH command registration hunk in
 `src-tauri/src/lib.rs` was explicitly excluded from that copy.
 

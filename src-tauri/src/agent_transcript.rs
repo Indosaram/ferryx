@@ -602,8 +602,8 @@ mod tests {
     #[test]
     fn test_slug_for_cwd() {
         assert_eq!(
-            slug_for_cwd("/Volumes/T9-Mac/project/ferryx"),
-            "--Volumes-T9-Mac-project-ferryx--"
+            slug_for_cwd("/Volumes/Data/project/ferryx"),
+            "--Volumes-Data-project-ferryx--"
         );
         assert_eq!(slug_for_cwd("/private/tmp"), "--private-tmp--");
         assert_eq!(

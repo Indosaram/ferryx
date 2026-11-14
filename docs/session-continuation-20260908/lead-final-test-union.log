@@ -1,7 +1,7 @@
 status: exited_1 exit_code: 1
 $ vitest run --maxWorkers=1 src/components/Sidebar.test.tsx src/components/Sidebar.activity.test.tsx src/components/Sidebar.dnd.test.tsx src/components/Sidebar.remote.test.tsx src/state/sidebarWorkspaceState.test.ts src/lib/projectGrouping.test.ts src/components/NativeTerminalPane.test.tsx src/components/NativeTerminalPane.lifecycle.test.tsx src/components/TerminalPane.test.tsx src/components/TerminalSplitView.paneHandleReach.test.tsx src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx src/components/TerminalSplitView.dragFeedbackVisibility.test.tsx src/components/NativeTerminalPane.presentation.test.tsx src/components/RemoteDirectoryPicker.test.tsx src/components/ProjectDialogs.test.tsx src/lib/remoteProject.test.ts src/components/settings/SshSection.test.tsx src/components/SettingsDialog.ssh.test.tsx
 
- RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+ RUN  v3.2.7 <repo>/ui
 
 
  ❯ src/components/Sidebar.remote.test.tsx [queued]
@@ -352,32 +352,32 @@ stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon 
 Native terminal IPC command failed {
   command: 'cmd_native_terminal_attach',
   error: Error: mount attach failed
-      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.test.tsx:5067:19
-      at mockCall (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/spy/dist/index.js:96:15)
-      at spy (file:///Users/indo/code/project/orca-lite/ui/node_modules/tinyspy/dist/index.js:47:80)
-      at Object.operation (/Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:754:13)
-      at /Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:242:19
-      at startLifecycleOperation (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:157:30)
-      at enqueueNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:325:12)
-      at attachNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:240:22)
-      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:752:12
-      at attemptAttach (/Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:1806:15)
+      at <repo>/ui/src/components/NativeTerminalPane.test.tsx:5067:19
+      at mockCall (file://<repo>/ui/node_modules/@vitest/spy/dist/index.js:96:15)
+      at spy (file://<repo>/ui/node_modules/tinyspy/dist/index.js:47:80)
+      at Object.operation (<repo>/ui/src/components/NativeTerminalPane.tsx:754:13)
+      at <repo>/ui/src/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation (<repo>/ui/src/lib/nativeTerminalLifecycle.ts:157:30)
+      at enqueueNativeTerminalLifecycle (<repo>/ui/src/lib/nativeTerminalLifecycle.ts:325:12)
+      at attachNativeTerminalLifecycle (<repo>/ui/src/lib/nativeTerminalLifecycle.ts:240:22)
+      at <repo>/ui/src/components/NativeTerminalPane.tsx:752:12
+      at attemptAttach (<repo>/ui/src/components/NativeTerminalPane.tsx:1806:15)
 }
 
 stderr | src/components/NativeTerminalPane.test.tsx > NativeTerminalPane daemon and session identity mapping > retries mount attach on rejection with exponential backoff and attaches on eventual success
 Native terminal IPC command failed {
   command: 'cmd_native_terminal_attach',
   error: Error: mount attach failed
-      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.test.tsx:5067:19
-      at mockCall (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/spy/dist/index.js:96:15)
-      at spy (file:///Users/indo/code/project/orca-lite/ui/node_modules/tinyspy/dist/index.js:47:80)
-      at Object.operation (/Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:754:13)
-      at /Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:242:19
-      at startLifecycleOperation (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:157:30)
-      at enqueueNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:325:12)
-      at attachNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:240:22)
-      at reattachNativeTerminalLifecycle (/Users/indo/code/project/orca-lite/ui/src/lib/nativeTerminalLifecycle.ts:269:10)
-      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.tsx:752:12
+      at <repo>/ui/src/components/NativeTerminalPane.test.tsx:5067:19
+      at mockCall (file://<repo>/ui/node_modules/@vitest/spy/dist/index.js:96:15)
+      at spy (file://<repo>/ui/node_modules/tinyspy/dist/index.js:47:80)
+      at Object.operation (<repo>/ui/src/components/NativeTerminalPane.tsx:754:13)
+      at <repo>/ui/src/lib/nativeTerminalLifecycle.ts:242:19
+      at startLifecycleOperation (<repo>/ui/src/lib/nativeTerminalLifecycle.ts:157:30)
+      at enqueueNativeTerminalLifecycle (<repo>/ui/src/lib/nativeTerminalLifecycle.ts:325:12)
+      at attachNativeTerminalLifecycle (<repo>/ui/src/lib/nativeTerminalLifecycle.ts:240:22)
+      at reattachNativeTerminalLifecycle (<repo>/ui/src/lib/nativeTerminalLifecycle.ts:269:10)
+      at <repo>/ui/src/components/NativeTerminalPane.tsx:752:12
 }
 
 
@@ -507,16 +507,16 @@ stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPa
 Native terminal IPC command failed {
   command: 'cmd_native_terminal_send_input',
   error: Error: Input receipt failed after delivery
-      at /Users/indo/code/project/orca-lite/ui/src/components/NativeTerminalPane.lifecycle.test.tsx:447:5
-      at file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:734:40
-      at runWithSuite (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:1849:8)
-      at Object.collect (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:734:10)
-      at Object.collect (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:738:54)
+      at <repo>/ui/src/components/NativeTerminalPane.lifecycle.test.tsx:447:5
+      at file://<repo>/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:734:40
+      at runWithSuite (file://<repo>/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:1849:8)
+      at Object.collect (file://<repo>/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:734:10)
+      at Object.collect (file://<repo>/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:738:54)
       at processTicksAndRejections (node:internal/process/task_queues:103:5)
-      at collectTests (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:1179:25)
-      at startTests (file:///Users/indo/code/project/orca-lite/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:1817:17)
-      at file:///Users/indo/code/project/orca-lite/ui/node_modules/vitest/dist/chunks/runBaseTests.9Ij9_de-.js:117:26
-      at withEnv (file:///Users/indo/code/project/orca-lite/ui/node_modules/vitest/dist/chunks/runBaseTests.9Ij9_de-.js:84:3)
+      at collectTests (file://<repo>/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:1179:25)
+      at startTests (file://<repo>/ui/node_modules/@vitest/runner/dist/chunk-hooks.js:1817:17)
+      at file://<repo>/ui/node_modules/vitest/dist/chunks/runBaseTests.9Ij9_de-.js:117:26
+      at withEnv (file://<repo>/ui/node_modules/vitest/dist/chunks/runBaseTests.9Ij9_de-.js:84:3)
 }
 
 stderr | src/components/NativeTerminalPane.lifecycle.test.tsx > NativeTerminalPane compositor ownership lifecycle > does not replay Ctrl+C when delivery is ambiguous: {"code":"INTERNAL_ERROR","message":"Receipt unavailable"}

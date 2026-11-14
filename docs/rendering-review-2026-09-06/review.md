@@ -31,7 +31,7 @@ uncommitted work. In particular:
   `2446f6d` (invalid initial bounds), `faad966` (host ownership and scheduled
   completion guards), `8ed71b3` (shared attach readiness), `076e429` (density
   updates), and `2aef606` (masking). Existing fixes are not new findings.
-- The lead's repair worktree `/Users/indo/code/project/orca-lite-rendering-20260906`
+- The lead's repair worktree `<worktree-root>/orca-lite-rendering-20260906`
   was independently observed clean at the same HEAD. **It is not the reviewed
   atlas baseline.** Before atlas RED/repair, the lead must explicitly arrange
   the approved foreign baseline in an isolated repair tree and record its diff

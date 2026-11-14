@@ -1,5 +1,5 @@
 status: completed exit_code: 0
-   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/sa-tests/src-tauri)
+   Compiling ferryx v2026.908.1 (<worktree-root>/sa-tests/src-tauri)
 warning: unused import: `Manager`====> ] 601/606: ferryx                                                              
   --> src/ipc/notifications.rs:21:24
    |
@@ -130,19 +130,19 @@ warning: `ferryx` (lib) generated 16 warnings (run `cargo fix --lib -p ferryx` t
      Running tests/daemon_duplicate_prevention.rs (target/debug/deps/daemon_duplicate_prevention-69c360641622c1b3)
 
 running 1 test
-isolated runtime=/Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-aBUMwr/run data=/Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-aBUMwr/data
+isolated runtime=<worktree-root>/sa-tests/.dup-tmp/fx-dup-aBUMwr/run data=<worktree-root>/sa-tests/.dup-tmp/fx-dup-aBUMwr/data
 spawned isolated daemon pid=36305
 spawned isolated daemon pid=36322
 Ferryx daemon error: Another daemon instance is already holding the lock.
 duplicate refused startup: exit status: 1; no readiness token
 reaped isolated daemon pid=36322 status=exit status: 1
 reaped isolated daemon pid=36305 status=exit status: 0
-cleanup verified: children reaped and /Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-aBUMwr removed
+cleanup verified: children reaped and <worktree-root>/sa-tests/.dup-tmp/fx-dup-aBUMwr removed
 test second_daemon_refuses_already_locked_socket_directory ... ok
 
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.09s
 
 DUP_RESTORED_GREEN_EXIT=0
  1010 Sun Sep 13 07:55:43 2026     /Applications/Ferryx.app/Contents/MacOS/ferryx --daemon
-21591 Sun Sep 13 19:27:52 2026     /Users/indo/code/project/orca-lite-wt/dag-viewport-wave3/src-tauri/target/debug/Ferr
+21591 Sun Sep 13 19:27:52 2026     <worktree-root>/dag-viewport-wave3/src-tauri/target/debug/Ferr
 DUP_TEMP_PARENT_CLEANUP_EXIT=0

@@ -3999,7 +3999,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         listener({
           payload: {
             type: "drop",
-            paths: ["/Users/indo/divider file.txt"],
+            paths: ["/Users/example/divider file.txt"],
             position: { x: 400, y: 100 },
           },
         });
@@ -4012,7 +4012,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     expect(pastes).toHaveLength(1);
     expect(pastes[0]?.[1]).toEqual({
       sessionId: "daemon-drop-right",
-      text: "'/Users/indo/divider file.txt' ",
+      text: "'/Users/example/divider file.txt' ",
     });
   });
 
@@ -4045,7 +4045,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           listener?.({
             payload: {
               type: "drop",
-              paths: ["/Users/indo/Inside/file.txt"],
+              paths: ["/Users/example/Inside/file.txt"],
               position: insidePayload,
             },
           });
@@ -4054,7 +4054,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         await waitFor(() => {
           expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
             sessionId: "term-session-tauri-dnd",
-            text: "/Users/indo/Inside/file.txt ",
+            text: "/Users/example/Inside/file.txt ",
           });
         });
 
@@ -4065,7 +4065,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           listener?.({
             payload: {
               type: "drop",
-              paths: ["/Users/indo/Boundary/file.txt"],
+              paths: ["/Users/example/Boundary/file.txt"],
               position: boundaryPayload,
             },
           });
@@ -4074,7 +4074,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         await waitFor(() => {
           expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
             sessionId: "term-session-tauri-dnd",
-            text: "/Users/indo/Boundary/file.txt ",
+            text: "/Users/example/Boundary/file.txt ",
           });
         });
 
@@ -4091,7 +4091,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
           listener?.({
             payload: {
               type: "drop",
-              paths: ["/Users/indo/Documents/project report.pdf", "/Users/indo/file2.txt"],
+              paths: ["/Users/example/Documents/project report.pdf", "/Users/example/file2.txt"],
               position: { x: 100, y: 100 },
             },
           });
@@ -4100,7 +4100,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         await waitFor(() => {
           expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
             sessionId: "term-session-tauri-dnd",
-            text: "'/Users/indo/Documents/project report.pdf' /Users/indo/file2.txt ",
+            text: "'/Users/example/Documents/project report.pdf' /Users/example/file2.txt ",
           });
         });
 
@@ -4193,7 +4193,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     withMacHost(async () => {
       const session = {
         ...createSession("term-session-file-click", "daemon-file-click"),
-        cwd: "/Users/indo/code/project",
+        cwd: "/Users/example/code/project",
       };
       tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
         if (command === "cmd_native_terminal_attach") {
@@ -4261,7 +4261,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         expect(openCalls.length).toBeGreaterThanOrEqual(1);
         expect(openCalls[0]?.[1]).toEqual({
           path: "src/components/App.tsx",
-          cwd: "/Users/indo/code/project",
+          cwd: "/Users/example/code/project",
           sessionId: "daemon-file-click",
           workspaceId: "ws-main",
           editor: "system",
@@ -4279,7 +4279,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
       window.addEventListener("ferryx:open-file-preview", onOpen);
       const session = {
         ...createSession("term-session-preview-click", "daemon-preview-click"),
-        cwd: "/Users/indo/code/project",
+        cwd: "/Users/example/code/project",
       };
       tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
         if (command === "cmd_native_terminal_attach") {
@@ -4382,7 +4382,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     withMacHost(async () => {
       const session = {
         ...createSession("term-session-indented-click", "daemon-indented-click"),
-        cwd: "/Users/indo/code/project",
+        cwd: "/Users/example/code/project",
       };
       tauriCoreMocks.invoke.mockImplementation(async (command, args: any) => {
         if (command === "cmd_native_terminal_attach") {
@@ -4450,7 +4450,7 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
         expect(openCalls.length).toBeGreaterThanOrEqual(1);
         expect(openCalls[0]?.[1]).toEqual({
           path: "alpha/one.ts",
-          cwd: "/Users/indo/code/project",
+          cwd: "/Users/example/code/project",
           sessionId: "daemon-indented-click",
           workspaceId: "ws-main",
           editor: "system",

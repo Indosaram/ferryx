@@ -20,7 +20,7 @@
 
 ### A. Historical User Defect (Pre-Change Transcript Failure)
 - **Captured Original RED:** Notification `c27d8599`, `2026-09-08T14:54:02.783Z`, is a `custom_message` / `senpi-monitor:notification` event in the source transcript. It records three failures for empty chevron clicks, empty project-name clicks and the final-tab lifecycle, with exit code 1. The exact event is archived in `../original-red-notifications.json`.
-- **Source Transcript:** `/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-50-08-015Z_01a0817f-710f-7f2f-bf80-5b19a379b312.jsonl` (Timestamp: 2026-09-08T14:50:24.149Z)
+- **Source Transcript:** `~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-50-08-015Z_01a0817f-710f-7f2f-bf80-5b19a379b312.jsonl` (Timestamp: 2026-09-08T14:50:24.149Z)
 - **Reported Defect:** User reported: `"아무 활성 탭 없으면 좌측 워크트리에서 닫히도록 하라고했는데 왜 해결이 안됨?"`
 - **Pre-change Behavior:** In the original code, closing all tabs hid child worktrees via `{expanded && !emptyGroupIds.has(...) ? ... : null}`, but `expanded` remained `true`. Clicking the toggle or title set `aria-expanded="true"`, causing the arrow to rotate down as expanded over an empty area. The previous unit test explicitly encoded this incorrect behavior:
   ```tsx
@@ -98,7 +98,7 @@ bun run --cwd ui test src/components/Sidebar.test.tsx src/components/Sidebar.act
 
 Output:
 ```
- RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+ RUN  v3.2.7 <repo>/ui
 
  ✓ src/components/Sidebar.test.tsx (35 tests) 528ms
  ✓ src/components/Sidebar.dnd.test.tsx (7 tests) 171ms

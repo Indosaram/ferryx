@@ -38,7 +38,7 @@ test('launchPairedIsolatedHarness structure validates required contract properti
 
 test('regression: paired provisioning registers existing task repo without authoring files or committing', () => {
   // Verifies task-owned repo registration payload matches wire schema without scratch writes
-  const repoDir = '/Volumes/T9-Mac/project/ferryx';
+  const repoDir = '/Volumes/Data/project/ferryx';
   const operation = {
     kind: 'registerProject',
     request: { requestId: 'req-1', repoPath: repoDir },
@@ -352,14 +352,14 @@ test('probeDarwin matches contract signature (pid, binary, signal, invoke) and v
     invoked.push({ binary, args, signal });
     return JSON.stringify({
       exited: false,
-      executable: '/Volumes/T9-Mac/project/ferryx/target/debug/ferryx',
+      executable: '/Volumes/Data/project/ferryx/target/debug/ferryx',
       processStart: '1700000000:000007',
     });
   };
 
-  const actual = await probeDarwin(42, '/Volumes/T9-Mac/project/ferryx/target/debug/ferryx', undefined, mockInvoke);
+  const actual = await probeDarwin(42, '/Volumes/Data/project/ferryx/target/debug/ferryx', undefined, mockInvoke);
   assert.equal(actual.exited, false);
-  assert.equal(actual.executable, '/Volumes/T9-Mac/project/ferryx/target/debug/ferryx');
+  assert.equal(actual.executable, '/Volumes/Data/project/ferryx/target/debug/ferryx');
   assert.equal(actual.processStart, '1700000000:000007');
   assert.equal(invoked.length, 1);
   assert.deepEqual(invoked[0].args, ['qa-exact-pid-probe', '42']);
@@ -406,7 +406,7 @@ test('wire schema: OperationResponse result carries tagged kind and data for reg
         kind: 'registerProject',
         data: {
           remoteWorkspaceId: 'project-0123456789abcdef0123456789abcdef',
-          repoRoot: '/Volumes/T9-Mac/project/ferryx',
+          repoRoot: '/Volumes/Data/project/ferryx',
           target: { kind: 'pairedDaemon', hostId: 'host-1' },
         },
       },
@@ -428,7 +428,7 @@ test('wire schema: OperationResponse result carries tagged kind and data for cre
         data: {
           workspaceId: 'project-0123456789abcdef0123456789abcdef',
           worktree: null,
-          cwd: '/Volumes/T9-Mac/project/ferryx',
+          cwd: '/Volumes/Data/project/ferryx',
           cols: 80,
           rows: 24,
           running: true,

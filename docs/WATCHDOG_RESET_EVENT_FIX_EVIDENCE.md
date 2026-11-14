@@ -15,7 +15,7 @@ Tests invoke the actual generic Tauri command with managed DaemonClient and Nati
 After the logging owner corrected the compilation errors, the supervisor ran:
 
 ```sh
-cd /Users/indo/code/project/orca-lite-wt/sa-watchdog
+cd <worktree-root>/sa-watchdog
 cargo test --manifest-path src-tauri/Cargo.toml --lib ipc::agents::reset_event_tests -- --nocapture
 ```
 
@@ -55,14 +55,14 @@ LSP on agents.rs: only inactive-code hint at line 607 (unix configuration). LSP 
 
 ## Command transcripts
 
-All commands ran from `/Users/indo/code/project/orca-lite-wt/sa-watchdog`. Output is complete, including existing compiler warnings. The initial compile failure and zero-test harness attempt are NOT claimed as behavioral RED. Two apply_patch limitations (unsupported Move/Delete directives) required relocating the test via Add File and removing only the temporary file authored by this task.
+All commands ran from `<worktree-root>/sa-watchdog`. Output is complete, including existing compiler warnings. The initial compile failure and zero-test harness attempt are NOT claimed as behavioral RED. Two apply_patch limitations (unsupported Move/Delete directives) required relocating the test via Add File and removing only the temporary file authored by this task.
 
 ### Initial harness compile (not behavioral RED)
 
 Command: `cargo test --manifest-path src-tauri/Cargo.toml --test watchdog_reset_event_contract -- --nocapture`
 
 ```text
-   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/sa-watchdog/src-tauri)
+   Compiling ferryx v2026.908.1 (<worktree-root>/sa-watchdog/src-tauri)
 warning: unused import: `Manager`
   --> src/ipc/notifications.rs:21:24
    |
@@ -196,7 +196,7 @@ error[E0603]: function `run_blocking` is private
    |                                              ^^^^^^^^^^^^ private function
    |
 note: the function `run_blocking` is defined here
-  --> /Users/indo/code/project/orca-lite-wt/sa-watchdog/src-tauri/src/ipc/mod.rs:26:1
+  --> <worktree-root>/sa-watchdog/src-tauri/src/ipc/mod.rs:26:1
    |
 26 | / pub(crate) async fn run_blocking<T, F>(operation: F) -> Result<T, error::IpcError>
 27 | | where
@@ -385,7 +385,7 @@ EXIT_CODE=0
 Command: `cargo test --manifest-path src-tauri/Cargo.toml --lib ipc::agents::reset_event_tests -- --nocapture`
 
 ```text
-   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/sa-watchdog/src-tauri)
+   Compiling ferryx v2026.908.1 (<worktree-root>/sa-watchdog/src-tauri)
 warning: unnecessary `unsafe` block
   --> src/macos_file_drop.rs:79:28
    |
@@ -547,7 +547,7 @@ EXIT_CODE=101
 Command: `cargo test --manifest-path src-tauri/Cargo.toml --lib ipc::agents::reset_event_tests -- --nocapture`
 
 ```text
-   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/sa-watchdog/src-tauri)
+   Compiling ferryx v2026.908.1 (<worktree-root>/sa-watchdog/src-tauri)
 error[E0277]: `?` couldn't convert the error: `ipc::error::IpcError: StdError` is not satisfied
   --> src/daemon/logging.rs:36:17
    |

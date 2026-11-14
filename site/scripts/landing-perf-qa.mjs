@@ -11,10 +11,11 @@
 // Metrics come from the page's own PerformanceObserver (FCP, LCP, CLS, long tasks) plus CDP
 // network accounting, so every number below is observed, never modelled or scored.
 import path from "node:path";
+import { homedir } from "node:os";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 
 const playwrightEntry =
-  process.env.PLAYWRIGHT_MODULE ?? "/Users/indo/.bun/install/global/node_modules/playwright/index.mjs";
+  process.env.PLAYWRIGHT_MODULE ?? path.join(homedir(), ".bun/install/global/node_modules/playwright/index.mjs");
 const { chromium } = await import(playwrightEntry);
 
 const SITE_ROOT = path.resolve(import.meta.dir ?? path.dirname(new URL(import.meta.url).pathname), "..");

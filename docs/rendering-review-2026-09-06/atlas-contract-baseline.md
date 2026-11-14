@@ -4,7 +4,7 @@ The exact existing contract **failed**. It executed one test, not zero: **0 pass
 
 ## Invocation and execution
 
-Working directory: `/Users/indo/code/project/orca-lite`.
+Working directory: `<repo>`.
 
 Executed exactly once, without retries or extra flags:
 
@@ -56,7 +56,7 @@ The test source was read after execution to identify this assertion. The initial
 Artifact directory:
 
 ```text
-/Users/indo/code/project/orca-lite/.omo/ulw-loop/rendering-review-20260906/baseline/
+<repo>/.omo/ulw-loop/rendering-review-20260906/baseline/
 ```
 
 | Artifact | Evidence |

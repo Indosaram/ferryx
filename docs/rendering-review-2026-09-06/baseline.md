@@ -4,7 +4,7 @@ All four required invocations passed on the existing dirty working tree. Rust ex
 
 ## Capture identity and scope
 
-- Task: `st_01a07714`; working directory: `/Users/indo/code/project/orca-lite`.
+- Task: `st_01a07714`; working directory: `<repo>`.
 - Required commands ran once each, between `2026-09-06T14:19:48Z` and `2026-09-06T14:20:22Z` (local UTC+09:00: 23:19:48-23:20:22).
 - Host: Darwin 25.6.0, arm64; Bun 1.4.0; cargo/rustc 1.92.0. Exact versions: `environment.txt` below.
 - Existing Cargo cache reused at `src-tauri/target`; `CARGO_TARGET_DIR` and `RUSTFLAGS` unset. No clean, dependency installation, desktop launch, release-profile Cargo build, app restart, or user-data operation was issued.
@@ -16,7 +16,7 @@ All four required invocations passed on the existing dirty working tree. Rust ex
 All artifact filenames in this report are relative to:
 
 ```text
-/Users/indo/code/project/orca-lite/.omo/ulw-loop/rendering-review-20260906/baseline/
+<repo>/.omo/ulw-loop/rendering-review-20260906/baseline/
 ```
 
 This directory was already started when the lead supplied the newer criterion directory `.omo/evidence/ulw/rendering-review-20260906/G001-review-and-resolve-ferryx-intermitte/a1`; existing artifacts were retained rather than moved or duplicated.
@@ -56,7 +56,7 @@ vite v6.4.3 building for production...
 built in 2.56s
 ```
 
-The UI build's Vite production bundle is the explicitly requested frontend build, not a desktop release build. Generated bundle: `/Users/indo/code/project/orca-lite/ui/dist/index.html`; generated Rust test executable is the path in the excerpt. Full bundle filenames and sizes are retained in `ui-build.log`.
+The UI build's Vite production bundle is the explicitly requested frontend build, not a desktop release build. Generated bundle: `<repo>/ui/dist/index.html`; generated Rust test executable is the path in the excerpt. Full bundle filenames and sizes are retained in `ui-build.log`.
 
 ## Actual errors and warnings, without repairs or suppression
 

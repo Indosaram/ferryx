@@ -23,7 +23,7 @@ interaction, remote writes, or attribution of concurrent UI/Windows changes.
   `REPAIR_PHASE.md:95-125` (scope, RED ordering, host integration and native QA).
 - Repair report: `wayland-repair.md`, read in full and checked against code,
   raw logs, patch identity, and the repair worker's tool journal.
-- `W/` below means `/Users/indo/code/project/orca-lite-rendering-20260906/`;
+- `W/` below means `<worktree-root>/orca-lite-rendering-20260906/`;
   `N/` means `W/src-tauri/src/native_terminal/`; `T/` means `W/src-tauri/tests/`.
 - `E/` means main-tree `.omo/evidence/ulw/rendering-review-20260906/D3/`.
 - `J` means main-tree

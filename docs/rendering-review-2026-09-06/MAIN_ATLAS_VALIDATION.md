@@ -8,7 +8,7 @@ new GPU tests and direct contract changes in commit
 The renderer/API increment passes the evidence below. This is not a native
 application-window, display-switch, or main-integration approval.
 
-Worktree: `/Users/indo/code/project/orca-lite-atlas-20260906`.
+Worktree: `<worktree-root>/orca-lite-atlas-20260906`.
 Base: `e2a67859400e80c480de42a6ec687cda6235c275`.
 
 ## Default build resources, not a test-only override
@@ -34,11 +34,11 @@ With normal resources and `TAURI_CONFIG` unset, the lead ran:
 
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml --lib native_terminal::renderer::renderer::tests:: -- --nocapture --test-threads=1
-cargo run --manifest-path src-tauri/Cargo.toml --example native_terminal_renderer_poc -- --headless --output /Users/indo/code/project/orca-lite/.omo/evidence/ulw/rendering-review-20260906/atlas/main-poc-headless.png
+cargo run --manifest-path src-tauri/Cargo.toml --example native_terminal_renderer_poc -- --headless --output <repo>/.omo/evidence/ulw/rendering-review-20260906/atlas/main-poc-headless.png
 ```
 
 Shell-local build variables:
-`CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite/src-tauri/target`,
+`CARGO_TARGET_DIR=<repo>/src-tauri/target`,
 `CARGO_BUILD_JOBS=8`, and a new
 `ATLAS_EVIDENCE_DIR=.../atlas/main-reproduction`.
 Shared caches were not cleaned; existing artifacts were not overwritten.

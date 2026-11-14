@@ -10,15 +10,15 @@ not ok 2 - assembleRelease creates complete release inventory, latest.json first
   ---
   duration_ms: 20.72125
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:324:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:324:1'
   failureType: 'testCodeFailure'
   error: 'Receipt contains unexpected property: toolchains'
   code: 'ERR_TEST_FAILURE'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    assembleRelease (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.mjs:145:21)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:328:17)
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    assembleRelease (file://<repo>/scripts/build-latest-json.mjs:145:21)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:328:17)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -31,15 +31,15 @@ not ok 3 - assembleRelease supports NSIS migration channel with windows updater 
   ---
   duration_ms: 14.46125
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:380:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:380:1'
   failureType: 'testCodeFailure'
   error: 'Receipt contains unexpected property: toolchains'
   code: 'ERR_TEST_FAILURE'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    assembleRelease (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.mjs:145:21)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:384:17)
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    assembleRelease (file://<repo>/scripts/build-latest-json.mjs:145:21)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:384:17)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -58,7 +58,7 @@ not ok 5 - assembleRelease fails closed and leaves no partial output on signatur
   ---
   duration_ms: 10.84475
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:427:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:427:1'
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /minisign/i. Input:
@@ -71,19 +71,19 @@ not ok 5 - assembleRelease fails closed and leaves no partial output on signatur
   actual:
   error: 'Receipt contains unexpected property: toolchains'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    assembleRelease (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.mjs:145:21)
-    file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:438:9
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    assembleRelease (file://<repo>/scripts/build-latest-json.mjs:145:21)
+    file://<repo>/scripts/build-latest-json.test.mjs:438:9
     getActual (node:assert:609:5)
     Function.throws (node:assert:757:24)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:436:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:436:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:436:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:436:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -96,7 +96,7 @@ not ok 6 - assembleRelease fails closed and leaves no partial output on artifact
   ---
   duration_ms: 11.173125
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:455:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:455:1'
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /mismatch/i. Input:
@@ -109,19 +109,19 @@ not ok 6 - assembleRelease fails closed and leaves no partial output on artifact
   actual:
   error: 'Receipt contains unexpected property: toolchains'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    assembleRelease (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.mjs:145:21)
-    file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:466:9
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    assembleRelease (file://<repo>/scripts/build-latest-json.mjs:145:21)
+    file://<repo>/scripts/build-latest-json.test.mjs:466:9
     getActual (node:assert:609:5)
     Function.throws (node:assert:757:24)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:464:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:464:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:464:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:464:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -134,7 +134,7 @@ not ok 7 - assembleRelease fails closed if a receipt has mismatched commitSha or
   ---
   duration_ms: 10.502083
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:482:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:482:1'
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /commitSha mismatch/i. Input:
@@ -147,19 +147,19 @@ not ok 7 - assembleRelease fails closed if a receipt has mismatched commitSha or
   actual:
   error: 'Receipt contains unexpected property: toolchains'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    assembleRelease (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.mjs:145:21)
-    file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:495:9
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    assembleRelease (file://<repo>/scripts/build-latest-json.mjs:145:21)
+    file://<repo>/scripts/build-latest-json.test.mjs:495:9
     getActual (node:assert:609:5)
     Function.throws (node:assert:757:24)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:493:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:493:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:493:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:493:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -178,7 +178,7 @@ not ok 9 - assembleRelease rejects path traversal and symlink escape outside art
   ---
   duration_ms: 10.806209
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:535:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:535:1'
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /escapes artifacts directory/i. Input:
@@ -191,19 +191,19 @@ not ok 9 - assembleRelease rejects path traversal and symlink escape outside art
   actual:
   error: 'Receipt contains unexpected property: toolchains'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    assembleRelease (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.mjs:145:21)
-    file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:562:11
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    assembleRelease (file://<repo>/scripts/build-latest-json.mjs:145:21)
+    file://<repo>/scripts/build-latest-json.test.mjs:562:11
     getActual (node:assert:609:5)
     Function.throws (node:assert:757:24)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:560:14)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:560:14)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:560:14)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:560:14)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -216,7 +216,7 @@ not ok 10 - assembleRelease fails closed if macos-updater archive layout is inva
   ---
   duration_ms: 11.593708
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:580:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:580:1'
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /macOS updater archive layout validation failed/i. Input:
@@ -229,19 +229,19 @@ not ok 10 - assembleRelease fails closed if macos-updater archive layout is inva
   actual:
   error: 'Receipt contains unexpected property: toolchains'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    assembleRelease (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.mjs:145:21)
-    file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:599:9
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    assembleRelease (file://<repo>/scripts/build-latest-json.mjs:145:21)
+    file://<repo>/scripts/build-latest-json.test.mjs:599:9
     getActual (node:assert:609:5)
     Function.throws (node:assert:757:24)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:597:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:597:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:597:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:597:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -254,7 +254,7 @@ not ok 11 - assembleRelease fails closed and leaves no publishable output if dat
   ---
   duration_ms: 9.925083
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:614:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:614:1'
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /Post-copy checksum verification failed/i. Input:
@@ -267,19 +267,19 @@ not ok 11 - assembleRelease fails closed and leaves no publishable output if dat
   actual:
   error: 'Receipt contains unexpected property: toolchains'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    assembleRelease (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.mjs:145:21)
-    file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:629:9
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    assembleRelease (file://<repo>/scripts/build-latest-json.mjs:145:21)
+    file://<repo>/scripts/build-latest-json.test.mjs:629:9
     getActual (node:assert:609:5)
     Function.throws (node:assert:757:24)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:627:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:627:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:627:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:627:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -292,7 +292,7 @@ not ok 12 - assembleRelease CLI execution works end-to-end via subprocess
   ---
   duration_ms: 37.831125
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:645:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:645:1'
   failureType: 'testCodeFailure'
   error: |-
     stderr: assembleRelease error: Receipt contains unexpected property: toolchains
@@ -306,7 +306,7 @@ not ok 12 - assembleRelease CLI execution works end-to-end via subprocess
   actual: 1
   operator: 'strictEqual'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:667:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:667:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)

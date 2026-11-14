@@ -25,7 +25,7 @@ All constraints requested by user and acceptance ledgers are met:
 ## 2. Recovered RED Evidence
 
 The original failure proof was recovered directly from the source session transcript:
-`/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl`
+`~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl`
 
 *(Note: Per lead inspection, foreign error-overlay RED is excluded from this scope and documented separately).*
 
@@ -82,7 +82,7 @@ Output:
 ```text
 $ vitest run --maxWorkers=1 src/components/NativeTerminalPane.test.tsx src/components/NativeTerminalPane.lifecycle.test.tsx src/components/TerminalPane.test.tsx src/components/TerminalSplitView.paneHandleReach.test.tsx src/components/TerminalSplitView.paneHandleDrop.runtime.test.tsx src/components/TerminalSplitView.dragFeedbackVisibility.test.tsx src/components/NativeTerminalPane.presentation.test.tsx
 
- RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+ RUN  v3.2.7 <repo>/ui
 
  ✓ src/components/NativeTerminalPane.test.tsx (150 tests) 2537ms
  ✓ src/components/NativeTerminalPane.lifecycle.test.tsx (30 tests) 415ms

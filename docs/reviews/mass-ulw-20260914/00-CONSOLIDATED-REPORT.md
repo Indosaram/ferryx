@@ -1,6 +1,6 @@
 # Consolidated report — mass-ulw full code review and repair, 2026-09-14
 
-Repo: `/Users/indo/code/project/orca-lite` (Ferryx) · HEAD at start: `48ee5a9c`
+Repo: `<repo>` (Ferryx) · HEAD at start: `48ee5a9c`
 Workers: every review lane ran on `mahoquot/nekos-claude-opus-5`.
 
 Every finding below was **independently verified by the lead against the source** before any

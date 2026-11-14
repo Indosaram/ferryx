@@ -2,7 +2,7 @@
 
 Initial task `st_01a0780d`; test-first recovery `st_01a078bc`, review date
 2026-09-06. Implemented in
-`/Users/indo/code/project/orca-lite-rendering-20260906`, on `c349e3a` with
+`<worktree-root>/orca-lite-rendering-20260906`, on `c349e3a` with
 `bce59b4` immediately below it. No staging or commit occurred.
 
 The final fix has now been reapplied after a fresh, baseline-compatible wire and
@@ -26,7 +26,7 @@ Raw DPR 1.5, stored scale 2, cells 16x32, cursor (2,3) now gives the actual focu
 sink CSS left 16, top 48, width 8, height 16.
 
 Evidence root (`E`):
-`/Users/indo/code/project/orca-lite/.omo/evidence/ulw/rendering-review-20260906/D3/receipt-delta`.
+`<repo>/.omo/evidence/ulw/rendering-review-20260906/D3/receipt-delta`.
 `E/delta.patch` is the minimal four-file delta relative to entry, not HEAD (which
 also includes original D3 geometry work). `E/baseline/` preserves entry sources
 and diff. `E/scope-check.log` confirms other D3 file diffs are byte-identical and

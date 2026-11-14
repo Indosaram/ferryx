@@ -22,28 +22,28 @@ const EXAMPLE_CONFIG_PATH = join(__dirname, "release-hosts.example.json");
 function makeValidConfig(overrides = {}) {
   return {
     schemaVersion: 1,
-    repository: "/Users/indo/code/project/orca-lite",
-    ghosttyRepository: "/Users/indo/code/project/orca-lite/src-tauri/vendor/ghostty",
+    repository: "/path/to/ferryx",
+    ghosttyRepository: "/path/to/ferryx/src-tauri/vendor/ghostty",
     repo: "Indosaram/ferryx",
     hosts: {
       macbook: {
         ssh: null,
         platform: "darwin",
-        root: "/Users/indo/ferryx-release-builds",
+        root: "/path/to/ferryx-release-builds",
         minFreeBytes: 32212254720,
         notaryProfile: "FerryxNotary",
-        signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+        signingIdentity: "Developer ID Application: Example Developer (TEAMID0000)",
       },
       omaki: {
         ssh: "omaki",
         platform: "linux",
-        root: "/home/indo/ferryx-releases",
+        root: "/home/builder/ferryx-releases",
         minFreeBytes: 21474836480,
       },
       "maho-win": {
         ssh: "maho-win",
         platform: "win32",
-        root: "C:/Users/sook/ferryx-releases",
+        root: "C:/ferryx-releases",
         minFreeBytes: 21474836480,
       },
     },
@@ -60,7 +60,7 @@ test("validateHostConfig: accepts canonical valid host config", () => {
   const normalized = validateHostConfig(config);
   assert.equal(normalized.schemaVersion, 1);
   assert.equal(normalized.repo, "Indosaram/ferryx");
-  assert.equal(normalized.repository, "/Users/indo/code/project/orca-lite");
+  assert.equal(normalized.repository, "/path/to/ferryx");
   assert.equal(normalized.hosts.macbook.platform, "darwin");
   assert.equal(normalized.hosts.omaki.platform, "linux");
   assert.equal(normalized.hosts["maho-win"].platform, "win32");
@@ -156,7 +156,7 @@ test("validateHostConfig: rejects secrets, tokens, or credential fields in keys 
   assert.throws(() => validateHostConfig(withPrivateKeyVal), /Secret or credential pattern detected in value/);
 
   const withKeyPath = makeValidConfig();
-  withKeyPath.hosts.omaki.path = "/Users/indo/.ssh/id_ed25519";
+  withKeyPath.hosts.omaki.path = "/home/builder/.ssh/id_ed25519";
   assert.throws(() => validateHostConfig(withKeyPath), /Credential file path detected in config/);
 });
 

@@ -17,7 +17,7 @@ async function serveFixture(fetch) {
 }
 
 test('unsafe roots and authored pass evidence cannot certify a scenario', () => {
-  expect(() => validateRoot('/Users/indo')).toThrow();
+  expect(() => validateRoot('/Users/example')).toThrow();
   expect(() => validateEvidence('foundation', { status: 'passed' })).toThrow();
   expect(() => validateEvidence('push', { device: { physical: true, backgroundReceipt: 'invented' } })).toThrow();
 });

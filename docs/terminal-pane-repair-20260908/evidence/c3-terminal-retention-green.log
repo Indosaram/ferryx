@@ -1,6 +1,6 @@
 $ vitest run --maxWorkers=1 src/lib/nativeTerminalVisibility.test.tsx
 
- RUN  v3.2.7 /Users/indo/code/project/orca-lite/ui
+ RUN  v3.2.7 <repo>/ui
 
  ✓ src/lib/nativeTerminalVisibility.test.tsx (14 tests) 32ms
 

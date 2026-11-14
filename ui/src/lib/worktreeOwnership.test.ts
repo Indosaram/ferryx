@@ -85,7 +85,7 @@ describe("resolveWorktreeOwnerId", () => {
 
   it("recovers a missing owner id for a Windows SSH row from its unique registered remote root", () => {
     const projects = [
-      project("local-group", "/Users/indo/work/coinbase-scalper"),
+      project("local-group", "/Users/example/work/coinbase-scalper"),
       remoteProject("ssh:windows-project", "C:/Users/sook/work/coinbase-scalper", "maho-win"),
     ];
     const row = worktree("C:/Users/sook/work/coinbase-scalper", null);

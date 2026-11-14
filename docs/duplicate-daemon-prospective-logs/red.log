@@ -1,5 +1,5 @@
 status: exited_101 exit_code: 101
-   Compiling ferryx v2026.908.1 (/Users/indo/code/project/orca-lite-wt/sa-tests/src-tauri)
+   Compiling ferryx v2026.908.1 (<worktree-root>/sa-tests/src-tauri)
 warning: unused import: `Manager`====> ] 601/606: ferryx                                                              
   --> src/ipc/notifications.rs:21:24
    |
@@ -130,12 +130,12 @@ warning: `ferryx` (lib) generated 16 warnings (run `cargo fix --lib -p ferryx` t
      Running tests/daemon_duplicate_prevention.rs (target/debug/deps/daemon_duplicate_prevention-69c360641622c1b3)
 
 running 1 test
-isolated runtime=/Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-scNIxg/run data=/Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-scNIxg/data
+isolated runtime=<worktree-root>/sa-tests/.dup-tmp/fx-dup-scNIxg/run data=<worktree-root>/sa-tests/.dup-tmp/fx-dup-scNIxg/data
 spawned isolated daemon pid=35560
 spawned isolated daemon pid=35574
 reaped isolated daemon pid=35574 status=exit status: 0
 reaped isolated daemon pid=35560 status=exit status: 0
-cleanup verified: children reaped and /Users/indo/code/project/orca-lite-wt/sa-tests/.dup-tmp/fx-dup-scNIxg removed
+cleanup verified: children reaped and <worktree-root>/sa-tests/.dup-tmp/fx-dup-scNIxg removed
 
 thread 'second_daemon_refuses_already_locked_socket_directory' (4732262) panicked at tests/daemon_duplicate_prevention.rs:209:5:
 duplicate daemon reached readiness while owner held both locks

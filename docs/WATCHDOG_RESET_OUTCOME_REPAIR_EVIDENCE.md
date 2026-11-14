@@ -1,6 +1,6 @@
 # Manual agent reset outcome repair evidence
 
-Task: st_01a09a6b. Worktree: `/Users/indo/code/project/orca-lite-wt/sa-watchdog`.
+Task: st_01a09a6b. Worktree: `<worktree-root>/sa-watchdog`.
 Verified on 2026-09-13, Darwin arm64, Vitest 3.2.7.
 
 ## Contract and scope
@@ -114,7 +114,7 @@ the full TypeScript compiler check above verified the final source instead.
 The supervising session inspected the production diff and independently executed:
 
 ```sh
-cd /Users/indo/code/project/orca-lite-wt/sa-watchdog/ui
+cd <worktree-root>/sa-watchdog/ui
 bun run test --no-cache src/App.notifications.test.tsx src/state/workspaceStore.test.tsx src/state/workspaceActivity.test.tsx src/components/TabBar.test.tsx src/components/WorktreeList.test.tsx
 ```
 

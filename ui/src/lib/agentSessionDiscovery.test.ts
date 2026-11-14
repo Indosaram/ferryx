@@ -35,11 +35,11 @@ describe("agentSessionDiscovery", () => {
     it("matches Windows shim executables by stripping the executable suffix case-insensitively", () => {
       const snapshot: ProcessSnapshot = [
         { pid: 600, ppid: 1, command: "zsh" },
-        { pid: 601, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\claude.cmd" },
-        { pid: 602, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\codex.exe" },
-        { pid: 603, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\Copilot.CMD" },
-        { pid: 604, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\kimi.bat" },
-        { pid: 605, ppid: 600, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\omo.ps1" },
+        { pid: 601, ppid: 600, command: "C:\\Users\\example\\AppData\\Roaming\\npm\\claude.cmd" },
+        { pid: 602, ppid: 600, command: "C:\\Users\\example\\AppData\\Roaming\\npm\\codex.exe" },
+        { pid: 603, ppid: 600, command: "C:\\Users\\example\\AppData\\Roaming\\npm\\Copilot.CMD" },
+        { pid: 604, ppid: 600, command: "C:\\Users\\example\\AppData\\Roaming\\npm\\kimi.bat" },
+        { pid: 605, ppid: 600, command: "C:\\Users\\example\\AppData\\Roaming\\npm\\omo.ps1" },
       ];
 
       expect(findAgentPid(snapshot, 600, "claude")).toBe(601);
@@ -82,7 +82,7 @@ describe("agentSessionDiscovery", () => {
     it("keeps matching unquoted npm shims and POSIX executable paths", () => {
       const shimSnapshot: ProcessSnapshot = [
         { pid: 640, ppid: 1, command: "zsh" },
-        { pid: 641, ppid: 640, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\claude.cmd" },
+        { pid: 641, ppid: 640, command: "C:\\Users\\example\\AppData\\Roaming\\npm\\claude.cmd" },
       ];
       const posixSnapshot: ProcessSnapshot = [
         { pid: 650, ppid: 1, command: "zsh" },
@@ -98,7 +98,7 @@ describe("agentSessionDiscovery", () => {
     it("does not strip non-executable extensions or partial suffix fragments", () => {
       const snapshot: ProcessSnapshot = [
         { pid: 610, ppid: 1, command: "zsh" },
-        { pid: 611, ppid: 610, command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\claude.exe.bak" },
+        { pid: 611, ppid: 610, command: "C:\\Users\\example\\AppData\\Roaming\\npm\\claude.exe.bak" },
         { pid: 612, ppid: 610, command: "/usr/local/bin/claude.sh" },
       ];
 
@@ -210,11 +210,11 @@ describe("agentSessionDiscovery", () => {
       expect(
         extractSessionIdFromPath(
           "cline",
-          "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/1792653340197_ys4yu.messages.json",
+          "/Users/example/.cline/data/sessions/1792653340197_ys4yu/1792653340197_ys4yu.messages.json",
         ),
       ).toBe("1792653340197_ys4yu");
       expect(
-        extractSessionIdFromPath("cline", "/Users/indo/.cline/data/sessions/1792653340197_ys4yu/other.json"),
+        extractSessionIdFromPath("cline", "/Users/example/.cline/data/sessions/1792653340197_ys4yu/other.json"),
       ).toBeNull();
     });
 
@@ -225,7 +225,7 @@ describe("agentSessionDiscovery", () => {
         { pid: 12, ppid: 10, command: "bun /home/indo/.bun/bin/omp" },
         { pid: 20, ppid: 1, command: "/bin/zsh" },
         { pid: 21, ppid: 20, command: "/x/@cline/cli-darwin-arm64/bin/cline --cline-hub-daemon --cwd /private/tmp/parity-cline.HDLw --host 127.0.0.1 --port 25463 --pathname /hub" },
-        { pid: 22, ppid: 20, command: "/Users/indo/.bun/install/global/node_modules/@cline/cli-darwin-arm64/bin/cline --hooks-dir /tmp/parity-cline-hooks.2BXn" },
+        { pid: 22, ppid: 20, command: "/Users/example/.bun/install/global/node_modules/@cline/cli-darwin-arm64/bin/cline --hooks-dir /tmp/parity-cline-hooks.2BXn" },
       ];
       expect(findAgentPid(snapshot, 10, "omp")).toBe(12);
       expect(findAgentPid(snapshot, 20, "cline")).toBe(22);
@@ -245,7 +245,7 @@ describe("agentSessionDiscovery", () => {
 
     it("extracts session id for omo from real verified session path", () => {
       const realPath =
-        "/Users/indo/.omo/sessions/--Users-indo-code-project-orca-lite--/2026-08-27T12-37-18-566Z_01a04339-8665-7cf7-864f-2b0dd9f6678c.jsonl";
+        "/Users/example/.omo/sessions/--Users-example-code-project-orca-lite--/2026-08-27T12-37-18-566Z_01a04339-8665-7cf7-864f-2b0dd9f6678c.jsonl";
       expect(extractSessionIdFromPath("omo", realPath)).toBe(
         "01a04339-8665-7cf7-864f-2b0dd9f6678c",
       );
@@ -253,15 +253,15 @@ describe("agentSessionDiscovery", () => {
 
     it("returns null for omo when path is in -artifacts or missing uuid", () => {
       const artifactsDirPath =
-        "/Users/indo/.omo/sessions/--Users-indo-code-project-orca-lite--/2026-08-27T12-37-18-566Z_01a04339-8665-7cf7-864f-2b0dd9f6678c-artifacts";
+        "/Users/example/.omo/sessions/--Users-example-code-project-orca-lite--/2026-08-27T12-37-18-566Z_01a04339-8665-7cf7-864f-2b0dd9f6678c-artifacts";
       const artifactsSubfilePath =
-        "/Users/indo/.omo/sessions/--Users-indo-code-project-orca-lite--/2026-08-27T12-37-18-566Z_01a04339-8665-7cf7-864f-2b0dd9f6678c-artifacts/data.json";
+        "/Users/example/.omo/sessions/--Users-example-code-project-orca-lite--/2026-08-27T12-37-18-566Z_01a04339-8665-7cf7-864f-2b0dd9f6678c-artifacts/data.json";
       const noUuidPath =
-        "/Users/indo/.omo/sessions/--Users-indo-code-project-orca-lite--/2026-08-27T12-37-18-566Z.jsonl";
+        "/Users/example/.omo/sessions/--Users-example-code-project-orca-lite--/2026-08-27T12-37-18-566Z.jsonl";
       const timestampOnlyPath =
-        "/Users/indo/.omo/sessions/--Users-indo-code-project-orca-lite--/2026-08-27T12-37-18-566Z_not-a-uuid.jsonl";
+        "/Users/example/.omo/sessions/--Users-example-code-project-orca-lite--/2026-08-27T12-37-18-566Z_not-a-uuid.jsonl";
       const wrongDir =
-        `/Users/indo/.other/sessions/--slug--/2026-08-27T12-37-18-566Z_${UUID}.jsonl`;
+        `/Users/example/.other/sessions/--slug--/2026-08-27T12-37-18-566Z_${UUID}.jsonl`;
 
       expect(extractSessionIdFromPath("omo", artifactsDirPath)).toBeNull();
       expect(extractSessionIdFromPath("omo", artifactsSubfilePath)).toBeNull();
@@ -272,7 +272,7 @@ describe("agentSessionDiscovery", () => {
 
     it("extracts session id for pi from real verified session path", () => {
       const realPath =
-        "/Users/indo/.pi/agent/sessions/--Users-indo-code-project-orca-lite--/2026-08-27T12-37-18-566Z_01a04339-8665-7cf7-864f-2b0dd9f6678c.jsonl";
+        "/Users/example/.pi/agent/sessions/--Users-example-code-project-orca-lite--/2026-08-27T12-37-18-566Z_01a04339-8665-7cf7-864f-2b0dd9f6678c.jsonl";
       expect(extractSessionIdFromPath("pi", realPath)).toBe(
         "01a04339-8665-7cf7-864f-2b0dd9f6678c",
       );
@@ -297,7 +297,7 @@ describe("agentSessionDiscovery", () => {
       const pane2ClaudePid = 2002;
       const pane2SessionId = "22222222-2222-2222-2222-222222222222";
 
-      const sameCwdEscaped = "-Users-indo-code-project-orca-lite";
+      const sameCwdEscaped = "-Users-example-code-project-orca-lite";
 
       const snapshot: ProcessSnapshot = [
         // Pane 1 tree
@@ -314,11 +314,11 @@ describe("agentSessionDiscovery", () => {
       const openFilesMap: Record<number, string[]> = {
         [pane1ClaudePid]: [
           "/dev/ttys001",
-          `/Users/indo/.claude/projects/${sameCwdEscaped}/${pane1SessionId}.jsonl`,
+          `/Users/example/.claude/projects/${sameCwdEscaped}/${pane1SessionId}.jsonl`,
         ],
         [pane2ClaudePid]: [
           "/dev/ttys002",
-          `/Users/indo/.claude/projects/${sameCwdEscaped}/${pane2SessionId}.jsonl`,
+          `/Users/example/.claude/projects/${sameCwdEscaped}/${pane2SessionId}.jsonl`,
         ],
       };
 
@@ -355,7 +355,7 @@ describe("agentSessionDiscovery", () => {
         pid === cursorPid
           ? [
               "/dev/null",
-              `/Users/indo/.cursor/chats/project-abc/${cursorChatId}/store.db-wal`,
+              `/Users/example/.cursor/chats/project-abc/${cursorChatId}/store.db-wal`,
             ]
           : [];
 
@@ -377,14 +377,14 @@ describe("agentSessionDiscovery", () => {
         {
           pid: claudePid,
           ppid: 700,
-          command: "C:\\Users\\indo\\AppData\\Roaming\\npm\\claude.cmd --resume",
+          command: "C:\\Users\\example\\AppData\\Roaming\\npm\\claude.cmd --resume",
         },
       ];
       const openFiles: OpenFileProbe = (pid: number) =>
         pid === claudePid
           ? [
               "\\\\.\\pipe\\conpty",
-              `C:\\Users\\indo\\.claude\\projects\\-C-Users-indo-code-project\\${sessionId}.jsonl`,
+              `C:\\Users\\example\\.claude\\projects\\-C-Users-example-code-project\\${sessionId}.jsonl`,
             ]
           : [];
 
@@ -409,7 +409,7 @@ describe("agentSessionDiscovery", () => {
         pid === omoPid
           ? [
               "/dev/ttys003",
-              `/Users/indo/.omo/sessions/--Users-indo-code-project-orca-lite--/2026-08-27T12-37-18-566Z_${omoSessionId}.jsonl`,
+              `/Users/example/.omo/sessions/--Users-example-code-project-orca-lite--/2026-08-27T12-37-18-566Z_${omoSessionId}.jsonl`,
             ]
           : [];
 

@@ -99,7 +99,7 @@ restart without spawning replacements or minting session IDs.
 - Unnecessary optimized helper artifacts from the packaging worker were removed.
   `remote-helper/target/release` is absent; debug artifacts remain for isolated QA.
 - LSP daemon is unavailable at
-  `/Users/indo/.omo/lsp-daemon/v0.1.0/daemon.sock`.
+  `~/.omo/lsp-daemon/v0.1.0/daemon.sock`.
   This is not a clean diagnostics result.
 
 ## Execution record

@@ -2,13 +2,13 @@
 
 Verdict: PASS for the assigned compilation and captured-regression-evidence checks only. No desktop verdict.
 
-No ULW plan exists according to the supplied ownership notepad; caller evidence directory used. Task id used as goal identifier because none was supplied. Only the two authorized shell checks were executed, from /Users/indo/code/project/orca-lite. No tests rerun, source edits, commits, app launches, daemon launches, or process termination. LSP daemon unavailable per supplied constraint; not configured or independently probed.
+No ULW plan exists according to the supplied ownership notepad; caller evidence directory used. Task id used as goal identifier because none was supplied. Only the two authorized shell checks were executed, from <repo>. No tests rerun, source edits, commits, app launches, daemon launches, or process termination. LSP daemon unavailable per supplied constraint; not configured or independently probed.
 
 ## surfaceEvidence
 
 | scenario id | criterion reference | surface | exact invocation | verdict | artifactRefs |
 |---|---|---|---|---|---|
-| compile | C2/C4 native compilation | CLI | cargo check --manifest-path /Users/indo/code/project/orca-lite/src-tauri/Cargo.toml | PASS: exit 0; dev profile completed in 8.53s; 16 warnings emitted on stderr | check |
+| compile | C2/C4 native compilation | CLI | cargo check --manifest-path <repo>/src-tauri/Cargo.toml | PASS: exit 0; dev profile completed in 8.53s; 16 warnings emitted on stderr | check |
 | whitespace | patch hygiene | CLI | git diff --check | PASS: exit 0, no diagnostic output | check |
 | red-audit | C2 captured RED | saved test output, read directly | read docs/terminal-pane-repair-20260908/evidence/c2-red.log | PASS evidence audit: named regression fails with left 640.0/right 900.0; 0 passed, 1 failed. Numeric process exit is not recorded in this log; diagnosis claims 101, not independently verified | red |
 | green-audit | C2 captured GREEN | saved test output, read directly | read docs/terminal-pane-repair-20260908/evidence/c2-green.log | PASS evidence audit: deferred_bounds_retry_does_not_restore_obsolete_width is explicitly ok; 158 passed, 0 failed, 0 ignored, 597 filtered out. Numeric process exit not recorded; suite was not rerun | green |
@@ -21,7 +21,7 @@ No ULW plan exists according to the supplied ownership notepad; caller evidence 
 
 ## artifactRefs
 
-Paths below are relative to /Users/indo/code/project/orca-lite.
+Paths below are relative to <repo>.
 
 | id | kind | description | path |
 |---|---|---|---|

@@ -9,7 +9,7 @@ z-order, and the reported macOS incident remain unverified.**
 
 Commit: `bce59b45d6d2d43f46cc63e35a5fb9b1161ca145`
 (`fix(terminal): invalidate obsolete input recovery owners`).
-Worktree: `/Users/indo/code/project/orca-lite-rendering-20260906`.
+Worktree: `<worktree-root>/orca-lite-rendering-20260906`.
 Branch: `fix/rendering-review-20260906`; no upstream configured, no push/merge.
 Base: `b8f82d707f0cb99907e3d79c0c9cdc75053ef931`.
 
@@ -51,7 +51,7 @@ owner. No daemon PTY close or native detach policy was changed.
 ## Deterministic RED/GREEN
 
 Evidence directory, abbreviated `D2/` below:
-`/Users/indo/code/project/orca-lite/.omo/evidence/ulw/rendering-review-20260906/D2/`.
+`<repo>/.omo/evidence/ulw/rendering-review-20260906/D2/`.
 
 Each required command ran from the repair worktree using
 `bun run --cwd ui test -- src/components/NativeTerminalPane.lifecycle.test.tsx -t '<name>'`.

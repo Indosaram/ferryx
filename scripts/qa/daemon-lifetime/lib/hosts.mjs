@@ -6,15 +6,37 @@
 // (maho-client --host <ip> --pairing-id <id> --mcp). The user's own MacBook desktop is never
 // driven: on mac the harness only launches, quits and terminates the QA bundle it built.
 
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Mac paths come from the environment, defaulting to the canonical clone that owns this checkout
+// (the parent of git's common dir, so a linked worktree still resolves to the main clone) and its
+// sibling `<clone>-wt` worktree root. FERRYX_QA_CANONICAL, FERRYX_QA_WORKTREE_ROOT and
+// FERRYX_QA_EVIDENCE_ROOT override them.
+function canonicalClone() {
+  const here = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
+  try {
+    const common = execFileSync('git', ['-C', here, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return path.dirname(common);
+  } catch {
+    return here;
+  }
+}
+const MAC_CANONICAL = process.env.FERRYX_QA_CANONICAL ?? canonicalClone();
+const MAC_WORKTREE_ROOT = process.env.FERRYX_QA_WORKTREE_ROOT ?? `${MAC_CANONICAL}-wt`;
+const MAC_EVIDENCE_ROOT = process.env.FERRYX_QA_EVIDENCE_ROOT
+  ?? path.join(MAC_WORKTREE_ROOT, '.evidence', 'daemon-independent-lifetime-20261017');
+
 export const HOSTS = Object.freeze({
   mac: Object.freeze({
     platform: 'mac',
     name: 'this-mac',
     transport: { kind: 'local' },
-    canonical: '/Volumes/T9-Mac/project/ferryx',
-    worktreeRoot: '/Volumes/T9-Mac/project/ferryx-wt',
+    canonical: MAC_CANONICAL,
+    worktreeRoot: MAC_WORKTREE_ROOT,
     cargoTarget: '/tmp/ferryx-daemon-lifetime-qa-target',
-    evidenceRoot: '/Volumes/T9-Mac/project/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
+    evidenceRoot: MAC_EVIDENCE_ROOT,
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
     node: 'node',
     gui: { kind: 'mac-local' },

@@ -58,7 +58,7 @@ not ok 10 - assembleRelease fails closed if macos-updater archive layout is inva
   ---
   duration_ms: 18.606667
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:580:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:580:1'
   failureType: 'testCodeFailure'
   error: 'Missing expected exception.'
   code: 'ERR_ASSERTION'
@@ -66,7 +66,7 @@ not ok 10 - assembleRelease fails closed if macos-updater archive layout is inva
   expected:
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:597:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:597:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -79,7 +79,7 @@ not ok 11 - assembleRelease fails closed and leaves no publishable output if dat
   ---
   duration_ms: 13.964917
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:614:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:614:1'
   failureType: 'testCodeFailure'
   error: 'Missing expected exception.'
   code: 'ERR_ASSERTION'
@@ -87,7 +87,7 @@ not ok 11 - assembleRelease fails closed and leaves no publishable output if dat
   expected:
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:627:12)
+    TestContext.<anonymous> (file://<repo>/scripts/build-latest-json.test.mjs:627:12)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)

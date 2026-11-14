@@ -10,7 +10,7 @@ The final QA integration runner (`docs/session-continuation-20260908/integration
 ## 2. Execution Record
 
 - **Invocation**: `bun run docs/session-continuation-20260908/integration/qa-integration-runner.ts`
-- **Working Directory**: `/Users/indo/code/project/orca-lite`
+- **Working Directory**: `<repo>`
 - **Exit Code**: `0`
 - **Timestamp**: 2026-09-09T01:40:40Z
 
@@ -82,7 +82,7 @@ Webview closed.
 Vite server (PID 17127) sent SIGTERM, awaiting process exit...
 Vite server (PID 17127) exited.
 Port 5214 freed: true
-Cleaned Vite cache dir: /Users/indo/code/project/orca-lite/docs/session-continuation-20260908/integration/.vite-qa-integration
+Cleaned Vite cache dir: <repo>/docs/session-continuation-20260908/integration/.vite-qa-integration
 Written integration-qa-evidence.json
 ```
 

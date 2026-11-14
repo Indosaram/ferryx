@@ -48,7 +48,7 @@ image-capable reviewer tool was exposed to this child.
 ## D2 source and evidence audit
 
 Paths in this section are relative to
-`/Users/indo/code/project/orca-lite-rendering-20260906` unless stated otherwise.
+`<worktree-root>/orca-lite-rendering-20260906` unless stated otherwise.
 `D2/` denotes main-repository
 `.omo/evidence/ulw/rendering-review-20260906/D2/`.
 
@@ -123,7 +123,7 @@ bun run --cwd ui test -- src/components/NativeTerminalPane.lifecycle.test.tsx -t
 ```
 
 ```text
-RUN v3.2.7 /Users/indo/code/project/orca-lite-rendering-20260906/ui
+RUN v3.2.7 <worktree-root>/orca-lite-rendering-20260906/ui
 NativeTerminalPane.lifecycle.test.tsx (21 tests | 11 skipped) 68ms
 Test Files 1 passed (1)
 Tests 10 passed | 11 skipped (21)
@@ -485,7 +485,7 @@ No new source contradiction arose from these corrections, so no renderer source
 re-review was needed or performed.
 
 The adopted implementation worktree is
-`/Users/indo/code/project/orca-lite-atlas-20260906`; independently executing
+`<worktree-root>/orca-lite-atlas-20260906`; independently executing
 `git rev-parse HEAD` there returned
 `e2a67859400e80c480de42a6ec687cda6235c275`, matching the final contract.
 The locked-worktree, committed-baseline and no-foreign-import decisions are

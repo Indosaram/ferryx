@@ -9,7 +9,7 @@ after its VT state has changed.
 
 Use a separate worktree based on the verified atlas commit `17fb106`, so this
 host-only change can proceed independently of the active Wayland receipt delta:
-`/Users/indo/code/project/orca-lite-render-retry-20260906`, branch
+`<worktree-root>/orca-lite-render-retry-20260906`, branch
 `fix/rendering-retry-20260906`.
 The lead later resolves the small host overlap forward when preparing the
 combined integration; neither worker may overwrite the other's work.

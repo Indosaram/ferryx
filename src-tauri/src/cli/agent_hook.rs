@@ -17,9 +17,9 @@ mod tests {
     use crate::ssh::helper_runtime::agent_hook_core::fixtures::{fixture, EXPECTED};
 
     const CLAUDE_ID: &str = "d49fdc31-682a-40b4-811a-eea8a17f6cf9";
-    const CLAUDE_TRANSCRIPT: &str = "/Users/indo/.claude/projects/-private-tmp-parity-claude-59r7/d49fdc31-682a-40b4-811a-eea8a17f6cf9.jsonl";
+    const CLAUDE_TRANSCRIPT: &str = "/Users/example/.claude/projects/-private-tmp-parity-claude-59r7/d49fdc31-682a-40b4-811a-eea8a17f6cf9.jsonl";
     const CODEX_ID: &str = "01a1626f-f0db-75d0-b73c-2372a21d4cae";
-    const CODEX_TRANSCRIPT: &str = "/Users/indo/.codex/sessions/2026/10/22/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl";
+    const CODEX_TRANSCRIPT: &str = "/Users/example/.codex/sessions/2026/10/22/rollout-2026-10-22T16-07-46-01a1626f-f0db-75d0-b73c-2372a21d4cae.jsonl";
     const GROK_ID: &str = "01a16274-a688-7e73-b6fc-434bc7781be4";
     /// The Ctrl+C capture came from an earlier grok session than the rest.
     const GROK_CANCELLED_ID: &str = "01a16272-de6c-7ea0-8fe6-f9cc7a5bcf24";
@@ -27,7 +27,7 @@ mod tests {
         "/home/indo/.grok/sessions/%2Fhome%2Findo%2Fagent-parity-facts%2Fgrok%2Fproj";
     const CLINE_ID: &str = "1792653340197_ys4yu";
     const AGY_ID: &str = "76a07aec-16fc-4700-9d83-0726bad9de7f";
-    const AGY_TRANSCRIPT: &str = "/Users/indo/.gemini/antigravity-cli/brain/76a07aec-16fc-4700-9d83-0726bad9de7f/.system_generated/logs/transcript_full.jsonl";
+    const AGY_TRANSCRIPT: &str = "/Users/example/.gemini/antigravity-cli/brain/76a07aec-16fc-4700-9d83-0726bad9de7f/.system_generated/logs/transcript_full.jsonl";
     const CRUSH_ID: &str = "3df112d9-e56f-4f69-b8bb-c58b5d580e89";
     const CURSOR_ID: &str = "16b85941-4c42-45ff-b3d5-6e52e48d9e14";
 

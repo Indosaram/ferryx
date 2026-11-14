@@ -5,7 +5,7 @@
 Commit: `829fbe8e01e06418f329fa7022141b2fbab3e6e9`
 (`fix(native-terminal): rearm dropped direct frames after guard release (D5)`).
 Branch: `fix/rendering-retry-20260906`.
-Worktree: `/Users/indo/code/project/orca-lite-render-retry-20260906`.
+Worktree: `<worktree-root>/orca-lite-render-retry-20260906`.
 Parent: verified atlas `17fb10608ad31e0e60ae565e8dc686afdc4735f9`.
 Only committed file: `src-tauri/src/native_terminal/surface_host.rs`, including
 its internal tests. No main merge or push; active geometry/receipt worktrees

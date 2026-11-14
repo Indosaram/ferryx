@@ -3,7 +3,7 @@
 ## Outcome and boundary
 
 Implemented the scoped D3 repair in
-`/Users/indo/code/project/orca-lite-rendering-20260906`. Both required tests have
+`<worktree-root>/orca-lite-rendering-20260906`. Both required tests have
 right-reason RED receipts and final GREEN receipts. The actual presentation
 geometry resolver feeds the production host's cell density, stored grid/layout,
 renderer configuration, and child placement. Native Wayland GUI QA remains
@@ -67,7 +67,7 @@ implementation, vendor, or manifest edits are part of this repair.
 ## RED/GREEN evidence
 
 Artifacts are under
-`/Users/indo/code/project/orca-lite/.omo/evidence/ulw/rendering-review-20260906/D3/`.
+`<repo>/.omo/evidence/ulw/rendering-review-20260906/D3/`.
 Every command below ran from the isolated worktree. Each exact RED executed
 one test and exited 101 on the expected assertion, before production edits.
 

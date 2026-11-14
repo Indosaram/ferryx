@@ -5,7 +5,7 @@
 **Date:** 2026-09-08  
 **Auditor:** Manual QA Verification Executor (`omo-senpi-qa-executor`)  
 **Target Scope:** Verification of MSIX Identity Validation and Output-Preservation Delta (`scripts/build-msix.ps1`, `scripts/build-msix.test.mjs`, `scripts/test-build-msix.ps1`, and `docs/releases/local-release-hardening-evidence/msix-identity-delta.md`)  
-**Deliverable Path:** `/Users/indo/code/project/orca-lite/docs/releases/local-release-hardening-evidence/msix-identity-verification.md`  
+**Deliverable Path:** `<repo>/docs/releases/local-release-hardening-evidence/msix-identity-verification.md`  
 **Overall Verdict:** **PASS (Fully Verified with Live Windows RED/GREEN Evidence)**
 
 ---

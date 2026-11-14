@@ -111,7 +111,7 @@ fn test_local_filesystem_path_redaction() {
     // 4. Explicit verification of all required path patterns:
     // assert NO raw filesystem paths (/Users/, /home/, /private/, C:\, \\) leak
     let raw_paths = [
-        "/Users/indo/orca/file.txt",
+        "/Users/example/orca/file.txt",
         "/home/ubuntu/app/config.toml",
         "/private/tmp/socket.sock",
         r"C:\Windows\System32\cmd.exe",
@@ -152,13 +152,13 @@ fn test_local_filesystem_path_redaction() {
 
     // Raw paths are redacted
     assert_eq!(
-        sanitize_public_string("/Users/indo/file.txt"),
+        sanitize_public_string("/Users/example/file.txt"),
         "[redacted-path]"
     );
     assert_eq!(sanitize_public_string(r"C:\Users\foo"), "[redacted-path]");
 
     // Mixed sentence: URL preserved, local path redacted
-    let mixed = "Loaded https://example.com/Users/test from /Users/indo/file.txt";
+    let mixed = "Loaded https://example.com/Users/test from /Users/example/file.txt";
     assert_eq!(
         sanitize_public_string(mixed),
         "Loaded https://example.com/Users/test from [redacted-path]"
@@ -170,7 +170,7 @@ fn test_r5_json_sanitization_preserves_urls_and_redacts_keys_and_paths() {
     use crate::remote::browser_ws::sanitize_json_value;
 
     let input = serde_json::json!({
-        "/Users/indo/config.json": "safe value",
+        "/Users/example/config.json": "safe value",
         "https://example.com/Users/test": "url key preserved",
         "nested": {
             "webUrl": "http://localhost:3000/home/page",

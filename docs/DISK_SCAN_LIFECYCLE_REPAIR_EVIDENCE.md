@@ -1,7 +1,7 @@
 # Disk scan lifecycle repair evidence
 
 Date: 2026-09-13. Task: st_01a09a6a.
-Worktree: `/Users/indo/code/project/orca-lite-wt/sa-worktree-disk`.
+Worktree: `<worktree-root>/sa-worktree-disk`.
 
 ## Scope and mechanism
 

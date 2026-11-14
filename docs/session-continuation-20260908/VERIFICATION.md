@@ -5,7 +5,7 @@
 **Root Session**: `01a0819e-72f9-7b47-811b-7239f0ca96e3`
 **Model**: Gemini 3.8 Flash (`PI_MODEL=gemini-3.8-flash-high`)
 **Execution Date**: 2026-09-08 / 2026-09-09
-**Target Workspace**: `/Users/indo/code/project/orca-lite`
+**Target Workspace**: `<repo>`
 
 ---
 
@@ -44,7 +44,7 @@ This independent verification audit evaluated the deliverables from all three co
 Historical RED failure proof from the original source session transcripts was verified directly against `docs/session-continuation-20260908/original-red-notifications.json` and isolated reproduction logs.
 
 ### A. Sidebar Lane RED Verification
-- **Transcript**: `/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-50-08-015Z_01a0817f-710f-7f2f-bf80-5b19a379b312.jsonl`
+- **Transcript**: `~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-50-08-015Z_01a0817f-710f-7f2f-bf80-5b19a379b312.jsonl`
 - **Notification Event**: `c27d8599` at `2026-09-08T14:54:02.783Z` (`custom_message` / `senpi-monitor:notification`).
 - **Defect Output**:
   ```text
@@ -58,7 +58,7 @@ Historical RED failure proof from the original source session transcripts was ve
   2. Omission of empty click guard in `toggleProject` corrupts localStorage toggle parity upon even numbers of clicks (`expected aria-expanded="true", received "false"`).
 
 ### B. Terminal Lane RED Verification
-- **Transcript**: `/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl`
+- **Transcript**: `~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-43-54-791Z_01a08179-bf27-7632-b67b-5a61b889e8eb.jsonl`
 - **Notification Event 1**: `73305e94` at `2026-09-08T14:53:04.528Z`
   ```text
   FAIL  src/components/NativeTerminalPane.test.tsx > NativeTerminalPane geometry reporting contract > uses the entire pane height beneath the handle and bottom overlays
@@ -74,7 +74,7 @@ Historical RED failure proof from the original source session transcripts was ve
   ```
 
 ### C. SSH Remote Directory Picker RED Verification
-- **Transcript**: `/Users/indo/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-41-12-637Z_01a08177-45bd-7ca1-a304-48e3d9275703.jsonl`
+- **Transcript**: `~/.omo/agent/sessions/--Users-indo-code-project-orca-lite--/2026-09-08T14-41-12-637Z_01a08177-45bd-7ca1-a304-48e3d9275703.jsonl`
 - **Notification Event 1**: `837cd36f` at `2026-09-08T14:49:15.642Z`
   - 8 tests failed: `TestingLibraryElementError: Unable to find an accessible element with the role "option"` (separator, prefix, keyboard, path-separator, and stale-response scenarios).
 - **Notification Event 2**: `dce63196` at `2026-09-08T14:55:28.635Z`

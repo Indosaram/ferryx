@@ -2,8 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
-const projectRoot = "/Users/indo/code/project/orca-lite";
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const uiRoot = path.join(projectRoot, "ui");
 const here = path.join(projectRoot, "docs/session-continuation-20260908/integration");
 

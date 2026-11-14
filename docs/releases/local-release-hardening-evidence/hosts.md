@@ -68,8 +68,8 @@ export function runHostScript(
 ### 2.1 Schema Structure
 - **`schemaVersion`**: Integer `1`.
 - **`repo`**: Strictly string `'Indosaram/ferryx'`.
-- **`repository`**: Absolute local repository path (e.g. `/Users/indo/code/project/orca-lite`).
-- **`ghosttyRepository`**: Absolute local pinned Ghostty repository path (e.g. `/Users/indo/code/project/orca-lite/src-tauri/vendor/ghostty`).
+- **`repository`**: Absolute local repository path (e.g. `<repo>`).
+- **`ghosttyRepository`**: Absolute local pinned Ghostty repository path (e.g. `<repo>/src-tauri/vendor/ghostty`).
 - **`hosts`**: Object containing strictly the three required builders:
   1. `macbook`: Coordinator & macOS builder (`darwin`, `ssh: null`, local execution).
   2. `omaki`: Linux builder (`linux`, SSH destination string, `bash -s` transport).

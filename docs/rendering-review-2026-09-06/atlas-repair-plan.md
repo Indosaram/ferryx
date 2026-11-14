@@ -462,11 +462,11 @@ Step 5: tests/ ──► Wire regression assertions for Q2, Q3, Q-Readback, and 
 ### Worktree Scope & Isolation Rules
 
 - **Isolated Repair Worktree:**
-  `/Users/indo/code/project/orca-lite-rendering-20260906`
+  `<worktree-root>/orca-lite-rendering-20260906`
   Base: Clean HEAD commit `b8f82d707f0cb99907e3d79c0c9cdc75053ef931`.
   Status: Untouched, clean git tree.
 - **Main Working Tree:**
-  `/Users/indo/code/project/orca-lite`
+  `<repo>`
   Status: Read-only for this assignment; zero edits or commits.
 - **Strict Scope of Baseline:**
   The foreign baseline is strictly confined to the two renderer source files:
@@ -500,7 +500,7 @@ Verified Scoped Patch Diff SHA-256:
 2. **RED Artifact Capture:**
    RED verification receipts and failure logs are captured outside git tracking in `.omo/evidence/ulw/rendering-review-20260906/` before fixes are applied.
 3. **Atomic Green Repair Commit:**
-   In the isolated worktree `/Users/indo/code/project/orca-lite-rendering-20260906`, the repair increment lands as a single verified atomic commit:
+   In the isolated worktree `<worktree-root>/orca-lite-rendering-20260906`, the repair increment lands as a single verified atomic commit:
    - Message: `fix(native-terminal): bounded dynamic atlas growth and truthful accounting (D1, D4, D7)`
    - Body: Explicitly cites the imported baseline provenance (files `atlas.rs` and `row_cache.rs`, scoped diff SHA-256 `67e0ab44...`) and records the verified GREEN test passes.
 4. **Lead Sign-Off:**
@@ -512,7 +512,7 @@ This section supersedes stale worktree/provenance and execution-order details
 above. Main's atlas/cache baseline is now committed as `4cab8ab`; subsequent
 main commits include unrelated runner and onboarding work. Atlas implementation
 uses its own locked worktree:
-`/Users/indo/code/project/orca-lite-atlas-20260906`, branch
+`<worktree-root>/orca-lite-atlas-20260906`, branch
 `fix/rendering-atlas-20260906`, base
 `e2a67859400e80c480de42a6ec687cda6235c275`.
 Both renderer baseline files were read and matched main. No foreign uncommitted

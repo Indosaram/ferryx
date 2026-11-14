@@ -10,9 +10,9 @@ Error: incorrect header check
     at processChunkSync (node:zlib:430:12)
     at zlibBufferSync (node:zlib:180:12)
     at syncBufferWrapper (node:zlib:790:14)
-    at entries (file:///Users/indo/code/project/orca-lite/scripts/assert-updater-archive-layout.mjs:24:19)
-    at main (file:///Users/indo/code/project/orca-lite/scripts/assert-updater-archive-layout.mjs:54:26)
-    at file:///Users/indo/code/project/orca-lite/scripts/assert-updater-archive-layout.mjs:72:14
+    at entries (file://<repo>/scripts/assert-updater-archive-layout.mjs:24:19)
+    at main (file://<repo>/scripts/assert-updater-archive-layout.mjs:54:26)
+    at file://<repo>/scripts/assert-updater-archive-layout.mjs:72:14
     at ModuleJob.run (node:internal/modules/esm/module_job:343:25) {
   errno: -3,
   code: 'Z_DATA_ERROR'

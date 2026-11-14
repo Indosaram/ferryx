@@ -1,5 +1,5 @@
 TAP version 13
-# file:///Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:19
+# file://<repo>/scripts/build-latest-json.test.mjs:19
 # import { assembleRelease } from "./build-latest-json.mjs";
 #          ^^^^^^^^^^^^^^^
 # SyntaxError: The requested module './build-latest-json.mjs' does not provide an export named 'assembleRelease'
@@ -13,7 +13,7 @@ not ok 1 - scripts/build-latest-json.test.mjs
   ---
   duration_ms: 32.929042
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/build-latest-json.test.mjs:1:1'
+  location: '<repo>/scripts/build-latest-json.test.mjs:1:1'
   failureType: 'testCodeFailure'
   exitCode: 1
   signal: ~

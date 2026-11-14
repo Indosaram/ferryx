@@ -2,7 +2,7 @@ TAP version 13
 # node:internal/modules/esm/resolve:275
 #     throw new ERR_MODULE_NOT_FOUND(
 #           ^
-# Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs' imported from /Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs
+# Error [ERR_MODULE_NOT_FOUND]: Cannot find module '<repo>/scripts/lib/release-contract.mjs' imported from <repo>/scripts/release-contract.test.mjs
 #     at finalizeResolution (node:internal/modules/esm/resolve:275:11)
 #     at moduleResolve (node:internal/modules/esm/resolve:861:10)
 #     at defaultResolve (node:internal/modules/esm/resolve:985:11)
@@ -11,7 +11,7 @@ TAP version 13
 #     at ModuleLoader.getModuleJobForImport (node:internal/modules/esm/loader:320:38)
 #     at ModuleJob._link (node:internal/modules/esm/module_job:182:49) {
 #   code: 'ERR_MODULE_NOT_FOUND',
-#   url: 'file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs'
+#   url: 'file://<repo>/scripts/lib/release-contract.mjs'
 # }
 # Node.js v22.22.3
 # Subtest: scripts/release-contract.test.mjs
@@ -19,7 +19,7 @@ not ok 1 - scripts/release-contract.test.mjs
   ---
   duration_ms: 29.647834
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:1:1'
+  location: '<repo>/scripts/release-contract.test.mjs:1:1'
   failureType: 'testCodeFailure'
   exitCode: 1
   signal: ~

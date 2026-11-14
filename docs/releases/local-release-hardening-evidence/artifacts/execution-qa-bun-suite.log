@@ -25,7 +25,7 @@ AssertionError: The input did not match the regular expression /"ok":\s*false/. 
        diff: "simple",
        code: "ERR_ASSERTION"
 
-      at /Users/indo/code/project/orca-lite/scripts/release-local.test.mjs:180:12
+      at <repo>/scripts/release-local.test.mjs:180:12
       at run (node:async_hooks:99:29)
       at node:test:1445:26
       at executeTestNode (node:test:1448:45)

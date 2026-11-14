@@ -136,14 +136,14 @@ not ok 23 - parseReceipt accepts optional valid toolchains in receipt
   ---
   duration_ms: 0.075834
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:525:1'
+  location: '<repo>/scripts/release-contract.test.mjs:525:1'
   failureType: 'testCodeFailure'
   error: 'Receipt contains unexpected property: toolchains'
   code: 'ERR_TEST_FAILURE'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:527:19)
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    TestContext.<anonymous> (file://<repo>/scripts/release-contract.test.mjs:527:19)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -156,7 +156,7 @@ not ok 24 - parseReceipt rejects unknown toolchains property or credentials in r
   ---
   duration_ms: 0.280375
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:543:1'
+  location: '<repo>/scripts/release-contract.test.mjs:543:1'
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /unexpected toolchain property: apiToken/i. Input:
@@ -169,19 +169,19 @@ not ok 24 - parseReceipt rejects unknown toolchains property or credentials in r
   actual:
   error: 'Receipt contains unexpected property: toolchains'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:547:7
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    file://<repo>/scripts/release-contract.test.mjs:547:7
     getActual (node:assert:609:5)
     Function.throws (node:assert:757:24)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:545:10)
+    TestContext.<anonymous> (file://<repo>/scripts/release-contract.test.mjs:545:10)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
     Test.postRun (node:internal/test_runner/test:1173:19)
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:545:10)
+    TestContext.<anonymous> (file://<repo>/scripts/release-contract.test.mjs:545:10)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
@@ -194,7 +194,7 @@ not ok 25 - parseReceipt rejects invalid toolchain field types in receipt
   ---
   duration_ms: 0.098708
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:560:1'
+  location: '<repo>/scripts/release-contract.test.mjs:560:1'
   failureType: 'testCodeFailure'
   error: |-
     The input did not match the regular expression /toolchains\.node must be a non-empty string/i. Input:
@@ -207,19 +207,19 @@ not ok 25 - parseReceipt rejects invalid toolchain field types in receipt
   actual:
   error: 'Receipt contains unexpected property: toolchains'
   stack: |-
-    assertExactKeys (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:136:13)
-    parseReceipt (file:///Users/indo/code/project/orca-lite/scripts/lib/release-contract.mjs:337:3)
-    file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:564:7
+    assertExactKeys (file://<repo>/scripts/lib/release-contract.mjs:136:13)
+    parseReceipt (file://<repo>/scripts/lib/release-contract.mjs:337:3)
+    file://<repo>/scripts/release-contract.test.mjs:564:7
     getActual (node:assert:609:5)
     Function.throws (node:assert:757:24)
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:562:10)
+    TestContext.<anonymous> (file://<repo>/scripts/release-contract.test.mjs:562:10)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)
     Test.postRun (node:internal/test_runner/test:1173:19)
   operator: 'throws'
   stack: |-
-    TestContext.<anonymous> (file:///Users/indo/code/project/orca-lite/scripts/release-contract.test.mjs:562:10)
+    TestContext.<anonymous> (file://<repo>/scripts/release-contract.test.mjs:562:10)
     Test.runInAsyncScope (node:async_hooks:214:14)
     Test.run (node:internal/test_runner/test:1047:25)
     Test.processPendingSubtests (node:internal/test_runner/test:744:18)

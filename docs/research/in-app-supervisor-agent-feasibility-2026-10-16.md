@@ -111,7 +111,7 @@
 
 ## 8. 종합 결론 — 이미 있는 omon-gateway 기준 (2026-10-16 추가)
 
-대상: `/Users/indo/code/project/omon-gateway` (HEAD `e57b472`). 읽은 파일: `src/sessions/{control,probe,probe.py,watch,external,overview,registry}.rs`, `src/lanes/{runner,settle,signals,kibitzer,guard,state}.rs`, `src/judge/mod.rs`, `docs/AGENTS_DELEGATE.md`, `bot_profiles/blocks/lanes.md`, 커밋 `1bbe7e2` / `245a587`.
+대상: `~/code/project/omon-gateway` (HEAD `e57b472`). 읽은 파일: `src/sessions/{control,probe,probe.py,watch,external,overview,registry}.rs`, `src/lanes/{runner,settle,signals,kibitzer,guard,state}.rs`, `src/judge/mod.rs`, `docs/AGENTS_DELEGATE.md`, `bot_profiles/blocks/lanes.md`, 커밋 `1bbe7e2` / `245a587`.
 
 ### 8.1 핵심 판단
 

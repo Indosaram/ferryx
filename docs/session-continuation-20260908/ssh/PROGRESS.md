@@ -2,7 +2,7 @@
 
 **Task**: `st_01a081a7` (Child "hephaestus")
 **Timestamp**: 2026-09-08T15:52:00Z
-**Directory**: `/Users/indo/code/project/orca-lite/docs/session-continuation-20260908/ssh/`
+**Directory**: `<repo>/docs/session-continuation-20260908/ssh/`
 **Current Status**: **ALL WORK COMPLETED & VERIFIED GREEN** (No active blockers)
 
 ---

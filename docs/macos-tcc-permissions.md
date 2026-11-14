@@ -223,7 +223,7 @@ own log signature:
 
 ```
 Failed to match existing code requirement for subject
-  /Users/indo/code/project/omo-bridge/target/debug/gpt2omo
+  ~/code/project/omo-bridge/target/debug/gpt2omo
   and service kTCCServiceSystemPolicyAllFiles
 ```
 

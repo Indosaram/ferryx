@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import identities from "../../../docs/evidence/paired-daemon/fixtures/identities.json";
-import fixtures from "../../../docs/evidence/paired-daemon/fixtures/contracts.json";
+import identities from "../../../src-tauri/tests/fixtures/paired-daemon/identities.json";
+import fixtures from "../../../src-tauri/tests/fixtures/paired-daemon/contracts.json";
 import { decodeMachineJson, MachineDecodeError } from "./pairedDaemonContracts";
 import { createRemoteHostStore, remoteHostKey } from "../state/remoteHostStore";
 import { createPairedDaemonProjectAdapter, type PairedHostOperationRequest } from "./pairedDaemonProject";

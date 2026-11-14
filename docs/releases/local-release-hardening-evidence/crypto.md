@@ -87,7 +87,7 @@ not ok 1 - verifies authentic repo archive fixture with configured updater publi
   ---
   duration_ms: 1.655542
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/minisign-verify.test.mjs:101:1'
+  location: '<repo>/scripts/minisign-verify.test.mjs:101:1'
   failureType: 'testCodeFailure'
   error: 'verifyMinisign not implemented'
   code: 'ERR_TEST_FAILURE'

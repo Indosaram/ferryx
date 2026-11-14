@@ -2,10 +2,12 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import net from "node:net";
+import { fileURLToPath } from "node:url";
 
 const PORT = 5214;
 const URL = `http://127.0.0.1:${PORT}/qa-integration.html`;
-const BASE_DIR = "/Users/indo/code/project/orca-lite/docs/session-continuation-20260908/integration";
+const BASE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(BASE_DIR, "../../..");
 const SCREENSHOT_DIR = path.join(BASE_DIR, "screenshots");
 const CACHE_DIR = path.join(BASE_DIR, ".vite-qa-integration");
 
@@ -14,13 +16,13 @@ await fs.mkdir(SCREENSHOT_DIR, { recursive: true });
 console.log(`Starting isolated Node Vite server on port ${PORT}...`);
 const viteProcess = spawn(
   "node",
-  ["/Users/indo/code/project/orca-lite/ui/node_modules/vite/bin/vite.js", "--config", path.join(BASE_DIR, "qa-integration.config.mjs")],
+  [path.join(REPO_ROOT, "ui/node_modules/vite/bin/vite.js"), "--config", path.join(BASE_DIR, "qa-integration.config.mjs")],
   {
     cwd: BASE_DIR,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
-      NODE_PATH: "/Users/indo/code/project/orca-lite/ui/node_modules",
+      NODE_PATH: path.join(REPO_ROOT, "ui/node_modules"),
     },
   }
 );

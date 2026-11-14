@@ -15,6 +15,7 @@
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -95,7 +96,7 @@ function resolvePlaywrightCore() {
   } catch {
     /* fall through */
   }
-  const globalCandidate = "/Users/indo/.bun/install/global/node_modules/playwright-core";
+  const globalCandidate = join(homedir(), ".bun/install/global/node_modules/playwright-core");
   try {
     return { pw: createRequire(join(repo, "package.json"))(globalCandidate), source: globalCandidate };
   } catch {

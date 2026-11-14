@@ -73,7 +73,7 @@ not ok 1 - scripts/sync-version.test.mjs
   ---
   duration_ms: 388.738375
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/sync-version.test.mjs:1:1'
+  location: '<repo>/scripts/sync-version.test.mjs:1:1'
   failureType: 'testCodeFailure'
   exitCode: 2
   signal: ~
@@ -99,7 +99,7 @@ not ok 13 - toAppVersion and toMsixVersion map CalVer tags and legacy SemVer cor
   ---
   duration_ms: 0.481084
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/sync-version.test.mjs:275:1'
+  location: '<repo>/scripts/sync-version.test.mjs:275:1'
   failureType: 'testCodeFailure'
   error: 'Missing expected exception.'
   code: 'ERR_ASSERTION'
@@ -109,7 +109,7 @@ not ok 17 - syncVersion rolls back first file replacement on synchronous second 
   ---
   duration_ms: 0.874209
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/sync-version.test.mjs:374:1'
+  location: '<repo>/scripts/sync-version.test.mjs:374:1'
   failureType: 'testCodeFailure'
   error: 'Missing expected rejection.'
   code: 'ERR_ASSERTION'
@@ -119,7 +119,7 @@ not ok 18 - syncVersion surfaces AggregateError with original and rollback failu
   ---
   duration_ms: 0.7895
   type: 'test'
-  location: '/Users/indo/code/project/orca-lite/scripts/sync-version.test.mjs:402:1'
+  location: '<repo>/scripts/sync-version.test.mjs:402:1'
   failureType: 'testCodeFailure'
   error: 'Missing expected rejection.'
   code: 'ERR_ASSERTION'

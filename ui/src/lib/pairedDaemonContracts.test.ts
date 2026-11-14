@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { decodeRunTarget, decodeMachineJson, MachineDecodeError } from "./pairedDaemonContracts";
-import fixtures from "../../../docs/evidence/paired-daemon/fixtures/contracts.json";
-import invalidFixtures from "../../../docs/evidence/paired-daemon/fixtures/invalid.json";
-import lifecycle from "../../../docs/evidence/paired-daemon/fixtures/lifecycle.json";
-import descriptor from "../../../docs/evidence/paired-daemon/fixtures/descriptor.json";
-import identities from "../../../docs/evidence/paired-daemon/fixtures/identities.json";
+import fixtures from "../../../src-tauri/tests/fixtures/paired-daemon/contracts.json";
+import invalidFixtures from "../../../src-tauri/tests/fixtures/paired-daemon/invalid.json";
+import lifecycle from "../../../src-tauri/tests/fixtures/paired-daemon/lifecycle.json";
+import descriptor from "../../../src-tauri/tests/fixtures/paired-daemon/descriptor.json";
+import identities from "../../../src-tauri/tests/fixtures/paired-daemon/identities.json";
 import { createHash } from "node:crypto";
 
 describe("machine target boundary", () => {

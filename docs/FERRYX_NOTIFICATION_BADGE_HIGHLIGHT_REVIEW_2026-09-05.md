@@ -223,7 +223,7 @@ These probes demonstrate existing failures; they are not passing regression test
 
 ### Limits
 
-- LSP symbol/diagnostic requests failed because the daemon was unreachable at `/Users/indo/.omo/lsp-daemon/v0.1.0/daemon.sock`. Source traversal and compiler/test results were used instead. No LSP-clean claim is made.
+- LSP symbol/diagnostic requests failed because the daemon was unreachable at `~/.omo/lsp-daemon/v0.1.0/daemon.sock`. Source traversal and compiler/test results were used instead. No LSP-clean claim is made.
 - No full application build was required for this read-only review. Cargo compiled the test target; no release build was made.
 - No desktop automation was performed. The isolated DOM probe proves rendered element presence, not WGPU/compositor pixels. An attempted server render was unsuitable because `DagPaneBadge` uses `useSyncExternalStore` without a server snapshot; client rendering in JSDOM was used instead.
 - Actual macOS banner delivery, sound output, Dock appearance, Windows notifications, and Linux desktop behavior were not manually verified. The authorized desktop launch path remains exactly `bun tauri dev`; no alternate binary or app bundle was created. Native macOS banner submission is explicitly unavailable in the current unbundled dev runtime.

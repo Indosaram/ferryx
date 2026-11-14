@@ -60,8 +60,8 @@ describe("tabTitle module", () => {
 
     it("detects path-only titles", () => {
       expect(isShellPromptTitle("~/code/ferryx")).toBe(true);
-      expect(isShellPromptTitle("/Volumes/T9-Mac/project/ferryx")).toBe(true);
-      expect(isShellPromptTitle("C:\\Users\\indo\\project")).toBe(true);
+      expect(isShellPromptTitle("/Volumes/Data/project/ferryx")).toBe(true);
+      expect(isShellPromptTitle("C:\\Users\\example\\project")).toBe(true);
       expect(isShellPromptTitle("~")).toBe(true);
     });
 

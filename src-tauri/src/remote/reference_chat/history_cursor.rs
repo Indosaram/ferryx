@@ -326,7 +326,7 @@ mod tests {
         let root = cursor_meta_root(&meta).expect("meta names the root");
         assert_eq!(
             cursor_root_workspace(&blobs[&root]).as_deref(),
-            Some("/Users/indo/code/project/opencode-inflearn"),
+            Some("/Users/user/code/project/opencode-inflearn"),
             "field 21.1 of the root node is the chat's workspace"
         );
         assert_eq!(cursor_root_workspace(&[0x0a, 0x05, 0x01]), None, "a torn node names nothing");

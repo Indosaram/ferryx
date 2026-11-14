@@ -6,7 +6,7 @@
 `17fb10608ad31e0e60ae565e8dc686afdc4735f9` on
 `fix/rendering-atlas-20260906` completes representable current frames under atlas
 pressure and reports truthful tracked payload. The isolated repair worktree is
-`/Users/indo/code/project/orca-lite-atlas-20260906`; its index and working tree are
+`<worktree-root>/orca-lite-atlas-20260906`; its index and working tree are
 clean after the commit. No main merge or push was performed.
 
 **Native desktop acceptance remains PENDING for the lead.** These are real Metal
@@ -82,7 +82,7 @@ documentation path. Other owners' main/repair-tree work was not touched.
 ## Actual RED before production edits
 
 Evidence root (all paths below relative to it):
-`/Users/indo/code/project/orca-lite/.omo/evidence/ulw/rendering-review-20260906/atlas/`.
+`<repo>/.omo/evidence/ulw/rendering-review-20260906/atlas/`.
 
 | Case | Actual committed-base RED | Matching final GREEN |
 | --- | --- | --- |
@@ -109,11 +109,11 @@ Ghostty clone is pinned to `6a508fd5e34c7e222c052a6d00bb3891ff3feace` and was re
 Build/test environment (shell-only, no persistent configuration edits):
 
 ```sh
-cd /Users/indo/code/project/orca-lite-atlas-20260906
-export CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite/src-tauri/target
+cd <worktree-root>/orca-lite-atlas-20260906
+export CARGO_TARGET_DIR=<repo>/src-tauri/target
 export CARGO_BUILD_JOBS=8
 export TAURI_CONFIG='{"bundle":{"resources":[]}}'
-export ATLAS_EVIDENCE_DIR=/Users/indo/code/project/orca-lite/.omo/evidence/ulw/rendering-review-20260906/atlas/reproduction
+export ATLAS_EVIDENCE_DIR=<repo>/.omo/evidence/ulw/rendering-review-20260906/atlas/reproduction
 ```
 
 `TAURI_CONFIG` disables missing UI bundle-resource copying only; these tests do
@@ -155,7 +155,7 @@ Broader and runnable-entry gates:
 ```sh
 cargo build --manifest-path src-tauri/Cargo.toml --example native_terminal_renderer_poc
 export CARGO_BIN_EXE_native_terminal_renderer_poc="$CARGO_TARGET_DIR/debug/examples/native_terminal_renderer_poc"
-"$CARGO_BIN_EXE_native_terminal_renderer_poc" --headless --output /Users/indo/code/project/orca-lite/.omo/evidence/ulw/rendering-review-20260906/atlas/poc-headless.png
+"$CARGO_BIN_EXE_native_terminal_renderer_poc" --headless --output <repo>/.omo/evidence/ulw/rendering-review-20260906/atlas/poc-headless.png
 cargo test --manifest-path src-tauri/Cargo.toml --test native_terminal_renderer_contract -- --nocapture
 cargo test --manifest-path src-tauri/Cargo.toml --lib native_terminal -- --nocapture
 cargo check --manifest-path src-tauri/Cargo.toml

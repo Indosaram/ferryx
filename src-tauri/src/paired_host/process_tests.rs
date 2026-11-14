@@ -53,8 +53,6 @@ async fn with_process<T>(
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin")
-        .env("CARGO_HOME", "/Users/indo/.cargo")
-        .env("RUSTUP_HOME", "/Users/indo/.rustup")
         .args([
             "--exact",
             "daemon::server::paired_host_process_tests::paired_host_process_child",
@@ -77,8 +75,11 @@ async fn with_process<T>(
         .stdout(std::process::Stdio::null())
         .kill_on_drop(true);
     // Cargo supplies the build-local dynamic library search path for test binaries.
-    // Preserve only that loader seam after clearing inherited application settings.
+    // Preserve only that loader seam, plus the inherited toolchain homes, after clearing
+    // inherited application settings.
     for key in [
+        "CARGO_HOME",
+        "RUSTUP_HOME",
         "DYLD_FALLBACK_LIBRARY_PATH",
         "DYLD_LIBRARY_PATH",
         "LD_LIBRARY_PATH",

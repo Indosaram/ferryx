@@ -1002,7 +1002,7 @@ mod pane_liveness_diagnostics_tests {
             "clipboard": "sensitive clipboard content",
             "command": "rm -rf /",
             "preedit": "korean-text",
-            "error": "Error: /Users/indo/secret/file.rs:42: failed",
+            "error": "Error: /Users/example/secret/file.rs:42: failed",
             "nested": {
                 "command": "sh -c evil",
                 "operationId": "nested-req",

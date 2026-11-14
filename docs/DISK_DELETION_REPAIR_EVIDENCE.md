@@ -1,6 +1,6 @@
 # Disk deletion transaction repair evidence
 
-Captured 2026-09-13 in `/Users/indo/code/project/orca-lite-wt/sa-worktree-disk`.
+Captured 2026-09-13 in `<worktree-root>/sa-worktree-disk`.
 No commits were created, including fixture commits. Git fixtures clone existing
 repository objects with `--no-hardlinks --no-checkout`, then use existing HEAD and
 HEAD~1 to construct unmerged branches. All temporary directories, build output,

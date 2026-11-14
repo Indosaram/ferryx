@@ -1222,7 +1222,7 @@ mod tests {
         assert_eq!(skill.status, ReferenceSkillStatus::Loaded);
         assert_eq!(
             skill.path.as_deref(),
-            Some("/Users/indo/.agents/skills/code-review/SKILL.md")
+            Some("/Users/example/.agents/skills/code-review/SKILL.md")
         );
         // the legacy envelope form chips the same way
         assert_eq!(turns[2].parts.len(), 2);
@@ -1237,19 +1237,19 @@ mod tests {
         );
         assert_eq!(turns[3].parts.len(), 1, "a mention is not an invocation");
 
-        let prompt = "The user explicitly invoked the \"code-review\" skill. Follow the instructions in <skill-instruction> as binding for this request, while respecting higher-priority instructions.\n\n<skill-instruction name=\"code-review\" location=\"/Users/indo/.agents/skills/code-review/SKILL.md\">\n# Code review\nreview the diff\n</skill-instruction>\n\n<user-request>\nreview src/main.rs\n</user-request>";
+        let prompt = "The user explicitly invoked the \"code-review\" skill. Follow the instructions in <skill-instruction> as binding for this request, while respecting higher-priority instructions.\n\n<skill-instruction name=\"code-review\" location=\"/Users/example/.agents/skills/code-review/SKILL.md\">\n# Code review\nreview the diff\n</skill-instruction>\n\n<user-request>\nreview src/main.rs\n</user-request>";
         let invocation = omp_skill_invocation(prompt).expect("an instruction envelope is a skill");
         assert_eq!(invocation.request, "review src/main.rs");
         assert_eq!(invocation.skills.len(), 1);
         assert_eq!(invocation.skills[0].name, "code-review");
         assert_eq!(
             invocation.skills[0].path.as_deref(),
-            Some("/Users/indo/.agents/skills/code-review/SKILL.md")
+            Some("/Users/example/.agents/skills/code-review/SKILL.md")
         );
         assert_eq!(invocation.skills[0].evidence, ReferenceSkillEvidence::Instructions);
         assert_eq!(invocation.skills[0].status, ReferenceSkillStatus::Loaded);
 
-        let legacy = "<skill name=\"release\" location=\"/Users/indo/.agents/skills/release/SKILL.md\">\n# release\nsteps\n</skill>\n\nship 2026.10.7";
+        let legacy = "<skill name=\"release\" location=\"/Users/example/.agents/skills/release/SKILL.md\">\n# release\nsteps\n</skill>\n\nship 2026.10.7";
         let invocation = omp_skill_invocation(legacy).expect("the legacy envelope is a skill");
         assert_eq!(invocation.request, "ship 2026.10.7");
         assert_eq!(invocation.skills[0].name, "release");

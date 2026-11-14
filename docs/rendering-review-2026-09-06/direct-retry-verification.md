@@ -20,9 +20,9 @@ The mandated regression was run **once** in the isolated worktree on Darwin
 arm64, with normal resources and no `TAURI_CONFIG` override:
 
 ```sh
-cd /Users/indo/code/project/orca-lite-render-retry-20260906
+cd <worktree-root>/orca-lite-render-retry-20260906
 unset TAURI_CONFIG
-CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite/src-tauri/target \
+CARGO_TARGET_DIR=<repo>/src-tauri/target \
 CARGO_BUILD_JOBS=8 \
 cargo test --manifest-path src-tauri/Cargo.toml --lib native_terminal::surface_host::tests::one_shot_render_requeues_when_frame_is_dropped -- --exact --nocapture
 ```
@@ -194,7 +194,7 @@ Independent dispositions and execution results are above; neither section is a
 native visual review.
 
 Evidence directory:
-`/Users/indo/code/project/orca-lite/.omo/evidence/ulw/rendering-review-20260906/D5/`.
+`<repo>/.omo/evidence/ulw/rendering-review-20260906/D5/`.
 
 ## Ordinary build setup
 
@@ -202,11 +202,11 @@ Darwin arm64 / Apple M4 Max. Branch starts at atlas `17fb106`; prepared Ghostty
 clone observed at `6a508fd5e34c7e222c052a6d00bb3891ff3feace`.
 
 ```sh
-cd /Users/indo/code/project/orca-lite-render-retry-20260906
+cd <worktree-root>/orca-lite-render-retry-20260906
 bun install --frozen-lockfile
 bun install --cwd ui --frozen-lockfile
 bun run --cwd ui build
-export CARGO_TARGET_DIR=/Users/indo/code/project/orca-lite/src-tauri/target
+export CARGO_TARGET_DIR=<repo>/src-tauri/target
 export CARGO_BUILD_JOBS=8
 unset TAURI_CONFIG
 ```
@@ -262,8 +262,8 @@ and native desktop fault injection were not run.
 The final host-test executable was also invoked directly:
 
 ```sh
-DYLD_LIBRARY_PATH=/Users/indo/code/project/orca-lite/src-tauri/target/debug/build/ferryx-a6612c59d6d9c6ba/out/ghostty_vt/lib \
-  /Users/indo/code/project/orca-lite/src-tauri/target/debug/deps/ferryx_lib-c20491cebbac898a \
+DYLD_LIBRARY_PATH=<repo>/src-tauri/target/debug/build/ferryx-a6612c59d6d9c6ba/out/ghostty_vt/lib \
+  <repo>/src-tauri/target/debug/deps/ferryx_lib-c20491cebbac898a \
   native_terminal::surface_host::tests::one_shot_render_requeues_when_frame_is_dropped --exact --nocapture
 ```
 

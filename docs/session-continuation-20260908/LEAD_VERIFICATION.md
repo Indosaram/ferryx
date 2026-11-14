@@ -44,7 +44,7 @@ Cleanup: both monitor commands exited with code 0; the Rust test drops its tempo
 `lsp_diagnostics` on `ui/src/components/RemoteDirectoryPicker.tsx` returned:
 
 ```text
-LSP daemon unreachable: LSP daemon did not become reachable at /Users/indo/.omo/lsp-daemon/v0.1.0/daemon.sock.
+LSP daemon unreachable: LSP daemon did not become reachable at ~/.omo/lsp-daemon/v0.1.0/daemon.sock.
 ```
 
 This is an unavailable diagnostic service, not a clean LSP result. The combined compiler/build check remains a separate integration requirement.
