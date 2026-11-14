@@ -1,0 +1,53 @@
+name: Focused Rust fixture regressions
+
+on:
+  pull_request:
+    paths:
+      - 'src-tauri/src/test_support.rs'
+      - '.github/workflows/pr45-focused-regressions.yml'
+permissions:
+  contents: read
+jobs:
+  fixture-layout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Reproduce old staged-layout bug, then test corrected source
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CARGO_MANIFEST_DIR="$PWD/src-tauri"
+          export CARGO_PKG_NAME=ferryx CARGO_PKG_VERSION=0.0.0
+          export OUT_DIR="$RUNNER_TEMP/fixture-out"
+          export FERRYX_BUILD_TARGET=aarch64-apple-darwin
+          # Compile the actual std-only helper, without Tauri/native dependencies.
+          git show a2ced02772b1029a2098263bed93f4c268b80ee6:src-tauri/src/test_support.rs > "$RUNNER_TEMP/baseline.rs"
+          cat >> "$RUNNER_TEMP/baseline.rs" <<'RS'
+          #[test]
+          fn pr45_staged_layout_reproduction() {
+              let (command, _) = cli_build_command(
+                  std::ffi::OsStr::new("cargo"),
+                  std::path::Path::new("target/aarch64-apple-darwin/debug/build/ferryx/93ea01d10e1900a3/out/tests"),
+                  std::path::Path::new("src-tauri"), "aarch64-apple-darwin",
+              );
+              let args: Vec<_> = command.get_args().collect();
+              let profile = args.iter().position(|arg| *arg == "--profile").unwrap();
+              assert_eq!(args[profile + 1], "dev", "staged profile must be dev, not fingerprint");
+          }
+          RS
+          rustc --edition=2021 --test "$RUNNER_TEMP/baseline.rs" -o "$RUNNER_TEMP/baseline"
+          python3 - <<'PY'
+          import os, subprocess
+          result = subprocess.run([os.environ['RUNNER_TEMP'] + '/baseline', 'pr45_staged_layout_reproduction', '--exact'], capture_output=True, text=True)
+          print(result.stdout)
+          assert result.returncode == 101, result.stderr
+          assert 'staged profile must be dev, not fingerprint' in result.stdout
+          assert '93ea01d10e1900a3' in result.stdout
+          PY
+          rustc --edition=2021 --test src-tauri/src/test_support.rs -o "$RUNNER_TEMP/corrected"
+          "$RUNNER_TEMP/corrected" --test-threads=1

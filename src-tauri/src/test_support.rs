@@ -35,12 +35,7 @@ fn cli_build_command(
     manifest_dir: &Path,
     build_target: &str,
 ) -> (std::process::Command, PathBuf) {
-    // Native: <target-dir>/<profile>/deps/<test-binary>
-    // Explicit target: <target-dir>/<triple>/<profile>/deps/<test-binary>
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("test binary lives in <target-dir>/[<triple>/]<profile>/deps");
+    let profile_dir = test_profile_dir(exe);
     let profile_parent = profile_dir.parent().expect("profile directory has a parent");
     // Compare with Cargo's actual compile target, not a guess based on hyphens or
     // architecture names in arbitrary directories. Otherwise --target-dir gains a
@@ -88,6 +83,28 @@ fn cli_build_command(
     (command, binary)
 }
 
+/// Cargo can execute tests from `deps`, or from a package's build output
+/// directory. Do not mistake the package fingerprint for a Cargo profile.
+fn test_profile_dir(exe: &Path) -> &Path {
+    let directory = exe.parent().expect("test executable has a parent");
+    if directory.file_name() == Some(std::ffi::OsStr::new("deps")) {
+        return directory.parent().expect("deps lies under the profile directory");
+    }
+    if directory.file_name() == Some(std::ffi::OsStr::new("out")) {
+        // Both Cargo layouts occur: build/<package>-<hash>/out and
+        // build/<package>/<hash>/out. Match the build directory structurally,
+        // not a hyphen pattern in arbitrary custom profile/target names.
+        for depth in [2, 3] {
+            if let Some(build) = directory.ancestors().nth(depth) {
+                if build.file_name() == Some(std::ffi::OsStr::new("build")) {
+                    return build.parent().expect("build lies under the profile directory");
+                }
+            }
+        }
+    }
+    panic!("unsupported Cargo test executable layout: {}", exe.display());
+}
+
 /// A small example with no required features, built next to the CLI so feature
 /// resolution includes dev-dependencies (see `cli_build_command`).
 const CLI_FEATURE_PEER_EXAMPLE: &str = "remote_grid_frame_dump";
@@ -128,7 +145,10 @@ mod tests {
         expected[6] = Path::new("checkout/src-tauri").join("Cargo.toml").into_os_string();
         assert_eq!(command.get_args().collect::<Vec<_>>(),
             expected.iter().map(std::ffi::OsString::as_os_str).collect::<Vec<_>>());
-        assert_eq!(binary, Path::new(exe).parent().unwrap().parent().unwrap()
+        let mut expected_binary_dir = PathBuf::from(expected_root);
+        if explicit { expected_binary_dir.push(triple); }
+        expected_binary_dir.push(if expected_profile == "dev" { "debug" } else { expected_profile });
+        assert_eq!(binary, expected_binary_dir
             .join(format!("ferryx-cli{}", std::env::consts::EXE_SUFFIX)));
         assert_eq!(command.get_envs().any(|(key, value)| key == "CARGO_BUILD_TARGET" && value.is_none()), !explicit);
     }
@@ -136,6 +156,29 @@ mod tests {
     #[test]
     fn native_debug_reuses_the_existing_target_root() {
         assert_layout("target/debug/deps/tests", "target", "dev", false);
+    }
+
+    #[test]
+    fn staged_package_output_reuses_target_profile_not_fingerprint() {
+        assert_layout(
+            "target/aarch64-apple-darwin/debug/build/ferryx/93ea01d10e1900a3/out/tests",
+            "target", "dev", true,
+        );
+    }
+
+    #[test]
+    fn legacy_staged_output_and_custom_profiles_are_supported() {
+        assert_layout("target/debug/build/ferryx-abcd/out/tests", "target", "dev", false);
+        assert_layout(
+            "shared/aarch64-apple-darwin/custom/build/ferryx/abcd/out/tests",
+            "shared", "custom", true,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported Cargo test executable layout")]
+    fn unknown_layout_is_rejected_instead_of_building_into_an_arbitrary_directory() {
+        test_profile_dir(Path::new("unrelated/random/test-binary"));
     }
 
     #[test]
@@ -174,3 +217,4 @@ mod tests {
         assert_layout("my-target-dir/custom/deps/tests", "my-target-dir", "custom", false);
     }
 }
+
