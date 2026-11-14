@@ -21,6 +21,15 @@
 #                        (default: latest, must match ^[A-Za-z0-9._-]+$)
 #   FERRYX_INSTALL_KEY : install key (same as -Key)
 #
+# Every downloaded binary is checked against the SHA256SUMS of the same GitHub release
+# (FERRYX_VERSION, or the latest release); a source whose bytes do not match is skipped, and
+# the install fails when no source matches.
+#
+# Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported platform
+# (only windows/amd64 is supported; Windows ARM64 is not; a host whose Windows loader rejects
+# the published ferryx-cli, for example a missing DLL), otherwise the exit code of
+# "ferryx-cli up".
+#
 # Windows PowerShell 5.1 compatible; ASCII only.
 
 param(
@@ -31,6 +40,28 @@ param(
     [switch]$Json
 )
 
+$FerryxOrigin = $env:FERRYX_ORIGIN
+if ([string]::IsNullOrEmpty($FerryxOrigin)) {
+    $FerryxOrigin = "https://relay.ferryx.dev"
+}
+
+$FerryxVersion = $env:FERRYX_VERSION
+if ([string]::IsNullOrEmpty($FerryxVersion)) {
+    $FerryxVersion = "latest"
+}
+
+function Get-FerryxReleaseBaseUrl {
+    if ($FerryxVersion -eq "latest") {
+        return "https://github.com/Indosaram/ferryx/releases/latest/download"
+    }
+    return "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion
+}
+
+# Every failure names the download sources in use and the variables that override them.
+function Write-FerryxSourceOverrides {
+    [Console]::Error.WriteLine("    Download origin: " + $FerryxOrigin + " (override with FERRYX_ORIGIN); release: " + (Get-FerryxReleaseBaseUrl) + " (pin a tag with FERRYX_VERSION).")
+}
+
 $FerryxInstallKey = $Key
 if ([string]::IsNullOrEmpty($FerryxInstallKey)) {
     $FerryxInstallKey = $env:FERRYX_INSTALL_KEY
@@ -39,6 +70,7 @@ if ($KeyStdin) {
     $FerryxInstallKey = [Console]::In.ReadLine()
     if ([string]::IsNullOrWhiteSpace($FerryxInstallKey)) {
         [Console]::Error.WriteLine("Error: -KeyStdin found no install key on stdin.")
+        Write-FerryxSourceOverrides
         exit 2
     }
 }
@@ -200,7 +232,10 @@ function Test-FerryxUnrunnableExitCode {
 # Judges one '<Executable> --help' run. Measured contract: '--help exits 1 by design;
 # install.sh accepts that, so a non-zero exit alone is not a failure'. A run passes when the
 # process started, the platform loader did not reject the image, and the captured output
-# carries the Ferryx CLI usage banner ("ferryx-cli" or "Usage:"). Returns a result object
+# carries the Ferryx CLI version or usage banner at the start of a line ("Usage: ferryx-cli",
+# "Ferryx CLI is running" or "ferryx-cli <version>"; a crash message that merely contains the
+# exe path does not count). A crash (any other negative NTSTATUS exit, for example 0xC0000005)
+# fails even after the banner was printed, like a signal death in install.sh. Returns a result object
 # with Passed, the run's ExitCode, and Failure - a short phrase for the caller's error line.
 function Invoke-FerryxSelfCheck {
     param(
@@ -210,38 +245,182 @@ function Invoke-FerryxSelfCheck {
 
     $run = Invoke-FerryxSelfCheckRun -Executable $Executable -WorkDir $WorkDir
     if ($null -eq $run) {
-        return [pscustomobject]@{ Passed = $false; ExitCode = $null; Failure = "cannot start on this machine" }
+        return [pscustomobject]@{ Passed = $false; Unsupported = $true; ExitCode = $null; Failure = "cannot start on this machine" }
     }
     if (Test-FerryxUnrunnableExitCode -ExitCode $run.ExitCode) {
-        return [pscustomobject]@{ Passed = $false; ExitCode = $run.ExitCode; Failure = ("cannot run on this machine (--help exit " + $run.ExitCode + ")") }
+        $ntstatus = "0x{0:X8}" -f $run.ExitCode
+        $reason = "--help exit " + $run.ExitCode
+        if ($run.ExitCode -eq -1073741515) {
+            $reason = $reason + ", " + $ntstatus + " STATUS_DLL_NOT_FOUND: a DLL it needs, such as the Microsoft Visual C++ runtime (VCRUNTIME140.dll), is missing"
+        } elseif ($run.ExitCode -lt 0) {
+            $reason = $reason + ", Windows loader status " + $ntstatus
+        }
+        return [pscustomobject]@{ Passed = $false; Unsupported = $true; ExitCode = $run.ExitCode; Failure = ("cannot run on this machine (" + $reason + ")") }
     }
-    if (($run.Output -notmatch "ferryx-cli") -and ($run.Output -notmatch "Usage:")) {
-        return [pscustomobject]@{ Passed = $false; ExitCode = $run.ExitCode; Failure = ("failed its self-check (--help exit " + $run.ExitCode + ", output did not look like the Ferryx CLI usage)") }
+    if ($run.ExitCode -lt 0) {
+        return [pscustomobject]@{ Passed = $false; Unsupported = $false; ExitCode = $run.ExitCode; Failure = ("crashed during its self-check (--help exit " + $run.ExitCode + ", status " + ("0x{0:X8}" -f $run.ExitCode) + ")") }
     }
-    return [pscustomobject]@{ Passed = $true; ExitCode = $run.ExitCode; Failure = $null }
+    if ($run.Output -notmatch '(?m)^(Usage: ferryx-cli|Ferryx CLI is running|ferryx-cli \d)') {
+        return [pscustomobject]@{ Passed = $false; Unsupported = $false; ExitCode = $run.ExitCode; Failure = ("failed its self-check (--help exit " + $run.ExitCode + ", output did not look like the Ferryx CLI usage)") }
+    }
+    return [pscustomobject]@{ Passed = $true; Unsupported = $false; ExitCode = $run.ExitCode; Failure = $null }
 }
 
-$FerryxOrigin = $env:FERRYX_ORIGIN
-if ([string]::IsNullOrEmpty($FerryxOrigin)) {
-    $FerryxOrigin = "https://relay.ferryx.dev"
+# Removes the directories one install created: <InstallDir> and its parents up to $CreatedTop
+# (the topmost one that did not exist before). Only empty directories go; the first one that
+# cannot be removed (not empty, or in use) ends the walk, which is the intended stop.
+function Remove-FerryxCreatedDirectories {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallDir,
+        [string]$CreatedTop
+    )
+
+    if ([string]::IsNullOrEmpty($CreatedTop)) {
+        return
+    }
+    $dir = $InstallDir
+    while (-not [string]::IsNullOrEmpty($dir)) {
+        try {
+            [System.IO.Directory]::Delete($dir)
+        } catch {
+            return
+        }
+        if ($dir -eq $CreatedTop) {
+            return
+        }
+        $dir = Split-Path -Parent $dir
+    }
 }
 
-$FerryxVersion = $env:FERRYX_VERSION
-if ([string]::IsNullOrEmpty($FerryxVersion)) {
-    $FerryxVersion = "latest"
+# Installs the verified download $TempExe as <InstallDir>\ferryx-cli.exe and returns the exit
+# status for the caller: 0 installed, 2 the Windows loader rejected the candidate (unsupported),
+# 1 any other failure. The candidate must pass its self-check before the install directory is
+# created or anything is replaced, so a refusal leaves no new directory. The candidate is staged
+# and the previous exe kept under names unique to this run (.ferryx-cli.exe.new.<guid>,
+# .ferryx-cli.exe.old.<guid>), so a leftover or concurrent ferryx-cli.exe.new/.old - file or
+# directory - is never used or removed. The previous exe is kept until the installed copy passes
+# its own check; when that check fails, the previous exe is restored (or, on a fresh install, the
+# new one and the directories this call created are removed).
+function Install-FerryxCandidate {
+    param(
+        [Parameter(Mandatory = $true)][string]$TempExe,
+        [Parameter(Mandatory = $true)][string]$InstallDir,
+        [Parameter(Mandatory = $true)][string]$WorkDir
+    )
+
+    $targetExe = Join-Path $InstallDir "ferryx-cli.exe"
+    $runId = [System.Guid]::NewGuid().ToString("N")
+    $stagedExe = Join-Path $InstallDir (".ferryx-cli.exe.new." + $runId)
+    $backupExe = Join-Path $InstallDir (".ferryx-cli.exe.old." + $runId)
+
+    $candidateCheck = Invoke-FerryxSelfCheck -Executable $TempExe -WorkDir $WorkDir
+    if (-not $candidateCheck.Passed) {
+        Write-FerryxError ("downloaded executable " + $candidateCheck.Failure + ".")
+        Write-FerryxError "    Existing installation, if any, was left untouched."
+        Write-FerryxSourceOverrides
+        if ($candidateCheck.Unsupported) {
+            return 2
+        }
+        return 1
+    }
+
+    # The topmost missing ancestor of the install dir: what New-Item creates and a failure removes.
+    $createdTop = $null
+    $probe = $InstallDir
+    while ((-not [string]::IsNullOrEmpty($probe)) -and (-not (Test-Path -LiteralPath $probe))) {
+        $createdTop = $probe
+        $probe = Split-Path -Parent $probe
+    }
+    try {
+        New-Item -ItemType Directory -Force -Path $InstallDir -ErrorAction Stop | Out-Null
+    } catch {
+        Remove-FerryxCreatedDirectories -InstallDir $InstallDir -CreatedTop $createdTop
+        Write-FerryxError ('Cannot create the install directory ''{0}'': {1}' -f $InstallDir, $_.Exception.Message)
+        Write-FerryxSourceOverrides
+        return 1
+    }
+
+    # Stage beside the target, set the previous exe aside, then move the staged copy in.
+    $hadPrevious = Test-Path -LiteralPath $targetExe -PathType Leaf
+    try {
+        Copy-Item -LiteralPath $TempExe -Destination $stagedExe -Force -ErrorAction Stop
+        if ($hadPrevious) {
+            Move-Item -LiteralPath $targetExe -Destination $backupExe -Force -ErrorAction Stop
+            # A rename keeps the old timestamp; mark the backup as fresh so a concurrent run's
+            # age-guarded cleanup below leaves it alone. Best effort: the guard is only a safety margin.
+            try { (Get-Item -LiteralPath $backupExe -Force).LastWriteTime = Get-Date } catch { }
+        }
+        Move-Item -LiteralPath $stagedExe -Destination $targetExe -Force -ErrorAction Stop
+    } catch {
+        $installError = $_.Exception.Message
+        Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
+        if ($hadPrevious -and -not (Test-Path -LiteralPath $targetExe -PathType Leaf)) {
+            Move-Item -LiteralPath $backupExe -Destination $targetExe -Force -ErrorAction SilentlyContinue
+        }
+        Remove-FerryxCreatedDirectories -InstallDir $InstallDir -CreatedTop $createdTop
+        Write-FerryxError ('Cannot install to ''{0}'': {1}' -f $targetExe, $installError)
+        Write-FerryxError "    Existing installation, if any, was left untouched."
+        Write-FerryxSourceOverrides
+        return 1
+    }
+
+    # Confirm the installed path itself runs; otherwise put the previous state back.
+    $installedCheck = Invoke-FerryxSelfCheck -Executable $targetExe -WorkDir $WorkDir
+    if (-not $installedCheck.Passed) {
+        if ($hadPrevious -and -not (Test-Path -LiteralPath $backupExe -PathType Leaf)) {
+            # The backup is gone (a concurrent install replaced ferryx-cli.exe and cleaned up), so
+            # ferryx-cli.exe may now be that run's install: leave it rather than delete it.
+            $restoreNote = ('    The previous ferryx-cli.exe backup ''{0}'' is gone (another install may have replaced it); ''{1}'' was left as it is.' -f $backupExe, $targetExe)
+        } elseif ($hadPrevious) {
+            Remove-Item -LiteralPath $targetExe -Force -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $backupExe -Destination $targetExe -Force -ErrorAction SilentlyContinue
+            if ((Test-Path -LiteralPath $targetExe -PathType Leaf) -and -not (Test-Path -LiteralPath $backupExe)) {
+                $restoreNote = "    The previous ferryx-cli.exe was restored."
+            } else {
+                $restoreNote = ('    Restoring the previous ferryx-cli.exe failed; it was kept as ''{0}''.' -f $backupExe)
+            }
+        } else {
+            Remove-Item -LiteralPath $targetExe -Force -ErrorAction SilentlyContinue
+            Remove-FerryxCreatedDirectories -InstallDir $InstallDir -CreatedTop $createdTop
+            $restoreNote = "    Nothing was left installed."
+        }
+        Write-FerryxError ('installed ''{0}'' {1}.' -f $targetExe, $installedCheck.Failure)
+        Write-FerryxError $restoreNote
+        Write-FerryxSourceOverrides
+        if ($installedCheck.Unsupported) {
+            return 2
+        }
+        return 1
+    }
+    # A running previous exe cannot be deleted on Windows; it then stays as .ferryx-cli.exe.old.<guid>
+    # until a later successful install removes it here. Other runs' backups are removed only once they
+    # are over an hour old, so a concurrent run's live backup is kept.
+    Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue
+    $staleBefore = (Get-Date).AddMinutes(-60)
+    Get-ChildItem -LiteralPath $InstallDir -Filter ".ferryx-cli.exe.old.*" -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt $staleBefore } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+
+    Write-Host ("==> Successfully installed ferryx-cli to " + $targetExe)
+    Write-Host ("    Verified: " + $targetExe + " executes (--help exit " + $installedCheck.ExitCode + ").")
+    return 0
 }
 
 # Validate FERRYX_ORIGIN before anything is downloaded.
 if (-not (Test-FerryxOrigin -Origin $FerryxOrigin)) {
     Write-FerryxError ('Invalid FERRYX_ORIGIN ''{0}''. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1]).' -f $FerryxOrigin)
+    Write-FerryxSourceOverrides
     exit 1
 }
 
 # Validate FERRYX_VERSION: must match ^[A-Za-z0-9._-]+$.
 if ($FerryxVersion -notmatch '^[A-Za-z0-9._-]+$') {
     Write-FerryxError ('Invalid FERRYX_VERSION ''{0}''. Must match ^[A-Za-z0-9._-]+$.' -f $FerryxVersion)
+    Write-FerryxSourceOverrides
     exit 1
 }
+
+$releaseBaseUrl = Get-FerryxReleaseBaseUrl
 
 Write-Host "==> Ferryx CLI Installer"
 
@@ -254,11 +433,18 @@ if ([string]::IsNullOrEmpty($rawArch)) {
 }
 if ([string]::IsNullOrEmpty($rawArch)) {
     Write-FerryxError "Cannot detect the CPU architecture: neither PROCESSOR_ARCHITEW6432 nor PROCESSOR_ARCHITECTURE is set."
+    Write-FerryxSourceOverrides
     exit 1
 }
+if ($rawArch.ToUpperInvariant() -eq "ARM64") {
+    Write-FerryxError ('Windows ARM64 ({0}) is not supported; ferryx-cli ships for Windows x64 (AMD64) only.' -f $rawArch)
+    Write-FerryxSourceOverrides
+    exit 2
+}
 if ($rawArch.ToUpperInvariant() -ne "AMD64") {
-    Write-FerryxError ('Unsupported CPU architecture ''{0}''. The Ferryx CLI is published for windows/amd64 only.' -f $rawArch)
-    exit 1
+    Write-FerryxError ('Windows {0} is not supported; ferryx-cli ships for Windows x64 (AMD64) only.' -f $rawArch)
+    Write-FerryxSourceOverrides
+    exit 2
 }
 $platformOs = "windows"
 $platformArch = "amd64"
@@ -269,27 +455,60 @@ $artifactName = "ferryx-cli-windows-amd64.exe"
 # 3. Resolve the download URLs.
 $primaryUrl = $FerryxOrigin + "/download/" + $artifactName
 $secondaryUrl = $FerryxOrigin + "/download/ferryx-cli"
-if ($FerryxVersion -eq "latest") {
-    $githubUrl = "https://github.com/Indosaram/ferryx/releases/latest/download/" + $artifactName
-} else {
-    $githubUrl = "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion + "/" + $artifactName
-}
+$githubUrl = $releaseBaseUrl + "/" + $artifactName
 
 # 4. Temporary download location.
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ferryx-install-" + [System.Guid]::NewGuid().ToString("N"))
 $tempExe = Join-Path $tempDir "ferryx-cli.exe"
+$tempSums = Join-Path $tempDir "SHA256SUMS"
 
 try {
     try {
         New-Item -ItemType Directory -Force -Path $tempDir -ErrorAction Stop | Out-Null
     } catch {
         Write-FerryxError ('Cannot create a temporary directory ''{0}'': {1}' -f $tempDir, $_.Exception.Message)
+        Write-FerryxSourceOverrides
+        exit 1
+    }
+
+    # 4a. Fetch the release checksums. Releases publish SHA256SUMS; older ones SHA256SUMS.txt.
+    Write-Host ("--> Downloading SHA256SUMS from " + $releaseBaseUrl + " ...")
+    $sumsFound = $false
+    foreach ($sumsName in @("SHA256SUMS", "SHA256SUMS.txt")) {
+        try {
+            Invoke-FerryxDownload -Url ($releaseBaseUrl + "/" + $sumsName) -Destination $tempSums
+        } catch {
+            Remove-Item -LiteralPath $tempSums -Force -ErrorAction SilentlyContinue
+            continue
+        }
+        if ((Test-Path -LiteralPath $tempSums -PathType Leaf) -and ((Get-Item -LiteralPath $tempSums).Length -gt 0)) {
+            $sumsFound = $true
+            break
+        }
+    }
+    if (-not $sumsFound) {
+        Write-FerryxError ("could not download SHA256SUMS from " + $releaseBaseUrl + "; refusing to install an unverified binary.")
+        Write-FerryxSourceOverrides
+        exit 1
+    }
+    $expectedSha256 = $null
+    foreach ($line in (Get-Content -LiteralPath $tempSums)) {
+        $fields = $line.Trim() -split '\s+'
+        if ($fields.Count -ge 2 -and ($fields[1] -eq $artifactName -or $fields[1] -eq ("*" + $artifactName))) {
+            $expectedSha256 = $fields[0].ToLowerInvariant()
+            break
+        }
+    }
+    if ($null -eq $expectedSha256 -or $expectedSha256 -notmatch '^[0-9a-f]{64}$') {
+        Write-FerryxError ("SHA256SUMS from " + $releaseBaseUrl + " has no valid entry for " + $artifactName + ".")
+        Write-FerryxSourceOverrides
         exit 1
     }
 
     # 5. Download, rejecting any source whose payload is not a Windows executable.
     Write-Host ("--> Downloading ferryx-cli for " + $platformOs + "/" + $platformArch + "...")
     $downloadSucceeded = $false
+    $checksumMismatch = $false
     foreach ($url in @($primaryUrl, $secondaryUrl, $githubUrl)) {
         Write-Host ("    Trying " + $url + " ...")
         try {
@@ -308,6 +527,13 @@ try {
             continue
         }
         if (Test-FerryxWindowsExecutable -Path $tempExe) {
+            $actualSha256 = (Get-FileHash -LiteralPath $tempExe -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSha256 -ne $expectedSha256) {
+                Write-Host ("    Skipping: SHA256 mismatch (expected " + $expectedSha256 + ", got " + $actualSha256 + ")")
+                $checksumMismatch = $true
+                continue
+            }
+            Write-Host ("    SHA256 verified: " + $actualSha256)
             $downloadSucceeded = $true
             break
         }
@@ -315,7 +541,13 @@ try {
     }
 
     if (-not $downloadSucceeded) {
+        if ($checksumMismatch) {
+            Write-FerryxError ("no downloaded ferryx-cli matched the SHA256SUMS of the release (" + $artifactName + ").")
+            Write-FerryxSourceOverrides
+            exit 1
+        }
         Write-FerryxError "Failed to download ferryx-cli from available endpoints."
+        Write-FerryxSourceOverrides
         exit 1
     }
 
@@ -324,6 +556,7 @@ try {
     if (-not (Test-FerryxWindowsExecutable -Path $tempExe)) {
         Write-FerryxError ("no downloadable artifact matched " + $platformOs + "/" + $platformArch + ".")
         Write-FerryxError ("Detected header bytes: " + (Get-FerryxHeaderHex -Path $tempExe))
+        Write-FerryxSourceOverrides
         exit 1
     }
 
@@ -336,54 +569,22 @@ try {
             $installDir = Join-Path $env:USERPROFILE ".local\bin"
         } else {
             Write-FerryxError "Cannot determine an install directory: set FERRYX_INSTALL_DIR, or make sure LOCALAPPDATA or USERPROFILE is set."
+            Write-FerryxSourceOverrides
             exit 1
         }
     }
 
     $targetExe = Join-Path $installDir "ferryx-cli.exe"
-    $stagedExe = $targetExe + ".new"
 
-    try {
-        New-Item -ItemType Directory -Force -Path $installDir -ErrorAction Stop | Out-Null
-    } catch {
-        Write-FerryxError ('Cannot create the install directory ''{0}'': {1}' -f $installDir, $_.Exception.Message)
-        exit 1
+    # 8. Self-check the candidate, then create the directory and install it (see
+    #    Install-FerryxCandidate). A loader rejection is an unsupported platform: exit 2, like
+    #    install.sh; a refusal leaves no new directory and any existing installation untouched.
+    $installStatus = Install-FerryxCandidate -TempExe $tempExe -InstallDir $installDir -WorkDir $tempDir
+    if ($installStatus -ne 0) {
+        exit $installStatus
     }
 
-    # 8. Verify the candidate can execute BEFORE it replaces anything. Measured contract:
-    #    '--help exits 1 by design; install.sh accepts that, so a non-zero exit alone is not a
-    #    failure' - what must hold is that the process starts and prints the Ferryx CLI usage.
-    #    A payload that cannot run here must leave any existing installation byte-for-byte
-    #    untouched.
-    $candidateCheck = Invoke-FerryxSelfCheck -Executable $tempExe -WorkDir $tempDir
-    if (-not $candidateCheck.Passed) {
-        Write-FerryxError ("downloaded executable " + $candidateCheck.Failure + ".")
-        Write-FerryxError "    Existing installation, if any, was left untouched."
-        exit 1
-    }
-
-    # 9. Install: stage beside the target, then move over it.
-    Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
-    try {
-        Copy-Item -LiteralPath $tempExe -Destination $stagedExe -Force -ErrorAction Stop
-        Move-Item -LiteralPath $stagedExe -Destination $targetExe -Force -ErrorAction Stop
-    } catch {
-        Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
-        Write-FerryxError ('Cannot install to ''{0}'': {1}' -f $targetExe, $_.Exception.Message)
-        exit 1
-    }
-
-    # 10. Confirm the installed path itself runs.
-    $installedCheck = Invoke-FerryxSelfCheck -Executable $targetExe -WorkDir $tempDir
-    if (-not $installedCheck.Passed) {
-        Write-FerryxError ('installed ''{0}'' {1}.' -f $targetExe, $installedCheck.Failure)
-        exit 1
-    }
-
-    Write-Host ("==> Successfully installed ferryx-cli to " + $targetExe)
-    Write-Host ("    Verified: " + $targetExe + " executes (--help exit " + $installedCheck.ExitCode + ").")
-
-    # 11. Check PATH. Adding the directory to the user PATH must never fail the install.
+    # 9. Check PATH. Adding the directory to the user PATH must never fail the install.
     $environmentKey = $null
     try {
         $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
@@ -437,7 +638,7 @@ try {
         ""
     )
 
-    # 12. Link this machine and keep its daemon running. Progress uses Write-Host, so with -Json
+    # 10. Link this machine and keep its daemon running. Progress uses Write-Host, so with -Json
     #     the only stdout output is the JSON summary line of "ferryx-cli up --json".
     if ($NoUp) {
         foreach ($line in $nextStep) { Write-Host $line }
@@ -486,6 +687,7 @@ try {
         }
         Write-FerryxError ("ferryx-cli up failed (exit " + $upStatus + "): " + $upReason + ".")
         Write-FerryxError ("    ferryx-cli stays installed at " + $targetExe + "; rerun it with 'up --origin " + $FerryxOrigin + "' when ready.")
+        Write-FerryxSourceOverrides
         exit $upStatus
     }
 } finally {
