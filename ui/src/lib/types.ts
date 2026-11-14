@@ -819,6 +819,8 @@ export type NativeTerminalAgentStatePayload = {
   state: "working" | "blocked" | "idle";
   ruleId: string;
   manifestId: string;
+  /** The resolved agent identity on the same report; identity can change while activity does not. */
+  agent?: string | null;
   providerSession?: AgentProviderSession | null;
   detail?: string | null;
   isSnapshot?: boolean;

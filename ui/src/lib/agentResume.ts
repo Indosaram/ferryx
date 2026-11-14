@@ -26,6 +26,13 @@ type ResumeArgvBuilder = {
   readonly args: (id: string, s: AgentProviderSession, ompPath?: string) => string[];
 };
 
+/// Which launcher binary may carry a resume for an agent. `omo` and `maho` are separate agents
+/// reading separate stores, but the native `mhc` binary is the launcher for both: a pre-split
+/// `omo` pane resumes through it, and a corrected `maho` pane names it as its own launcher.
+/// Only the single launcher the wire can carry today is listed; a second one would have to
+/// derive both the normalization and this validation from one definition.
+const LAUNCHER_PAIRS: Readonly<Record<string, readonly string[]>> = { omo: ["mhc"], maho: ["mhc"] };
+
 const RESUME_BUILDERS: Readonly<Record<string, ResumeArgvBuilder>> = {
   claude: { key: "session_id", binary: "claude", args: (id) => ["--resume", id] },
   codex: { key: "session_id", binary: "codex", args: (id) => ["resume", id] },
@@ -154,6 +161,26 @@ function normalizeAgentType(agentType?: string | null): string {
   return agentType ? agentType.trim().toLowerCase() : "";
 }
 
+/// True when an incoming report corrects a pane's identity from `omo` to `maho`.
+///
+/// The two are separate agents with separate stores, and a reloaded pane is the shape that
+/// produces the mistake: the pane was typed `omo` before the split, and the report now carries
+/// the derived `maho` with the `mhc` launcher that owns the conversation. `next` is the incoming
+/// *resolved* identity, never the latched one, so a stale identity cannot re-certify itself, and
+/// the launcher witness has to ride the same report, so the correction cannot outlive its
+/// generation.
+///
+/// The reverse direction is deliberately absent: `maho` -> `omo` is a downgrade nothing derives.
+export function isIdentityCorrection(
+  previous: string | null,
+  next: string | null,
+  provider: AgentProviderSession | null | undefined,
+): boolean {
+  return normalizeAgentType(previous) === "omo"
+    && normalizeAgentType(next) === "maho"
+    && provider?.launcher === "mhc";
+}
+
 export function isResumableTuiAgent(value: unknown): value is ResumableTuiAgent {
   return typeof value === "string" && normalizeAgentType(value) in RESUME_BUILDERS;
 }
@@ -195,7 +222,7 @@ export function getAgentResumeArgv(
   const normAgent = normalizeAgentType(agent);
   const builder = RESUME_BUILDERS[normAgent];
   if (!builder || builder.key !== normSession.key) return null;
-  if (normSession.launcher && normAgent !== "omo") return null;
+  if (normSession.launcher && !(LAUNCHER_PAIRS[normAgent] ?? []).includes(normSession.launcher)) return null;
   const args = builder.args(normSession.id, normSession, ompResumeFilePath);
   return args.length > 0 ? [normSession.launcher ?? builder.binary, ...args] : null;
 }
