@@ -6291,7 +6291,7 @@ export const RemoteHostConnection: React.FC<{
                 });
                 focusSessionInput();
               }}
-              className="flex h-5 [@media(pointer:coarse)]:h-11 items-center gap-1 rounded bg-status-warning/15 px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium text-status-warning transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+              className="flex h-5 [@media(pointer:coarse)]:h-11 items-center gap-1 rounded bg-status-warning-container px-1.5 [@media(pointer:coarse)]:px-3 text-xs font-medium text-status-warning-on transition-colors hover:bg-status-warning/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
             >
               <span className="size-1.5 rounded-full bg-status-warning" aria-hidden="true" />
               <span className="truncate max-w-28 sm:max-w-40">{firstWaiting.label}</span>
