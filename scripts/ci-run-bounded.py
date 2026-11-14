@@ -28,6 +28,9 @@ def group_signal(pgid, signum):
         os.killpg(pgid, signum)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        return False
+    return True
 
 
 def group_exists(pgid):
@@ -36,6 +39,9 @@ def group_exists(pgid):
         return True
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # EPERM does not establish that the process group disappeared.
+        return True
 
 
 def resources(pgid):
@@ -111,6 +117,14 @@ def run(args):
                 diagnostic("spawn_failed error_type=" + type(error).__name__)
                 return 127
             pgid = child.pid
+            cleanup_denied = False
+
+            def signal_owned_group(signum):
+                nonlocal cleanup_denied
+                if not group_signal(pgid, signum):
+                    cleanup_denied = True
+                    diagnostic("cleanup_permission_denied leader_pid={} signal_number={}".format(pgid, signum))
+
             os.set_blocking(child.stdout.fileno(), False)
             selector.register(child.stdout, selectors.EVENT_READ)
             diagnostic("started leader_pid={} timeout_seconds={:g}".format(pgid, args.timeout))
@@ -135,10 +149,10 @@ def run(args):
                         reason = None
                     if reason:
                         diagnostic("shutdown reason=" + reason)
-                        group_signal(pgid, signal.SIGTERM)
+                        signal_owned_group(signal.SIGTERM)
                         shutdown_at = now
                 if shutdown_at is not None and killed_at is None and now - shutdown_at >= args.grace:
-                    group_signal(pgid, signal.SIGKILL)
+                    signal_owned_group(signal.SIGKILL)
                     diagnostic("kill_group leader_pid=" + str(pgid))
                     killed_at = now
                 if now >= next_heartbeat:
@@ -161,7 +175,15 @@ def run(args):
                     # Never let it extend this command's bounded cleanup indefinitely.
                     if killed_at is not None and time.monotonic() - killed_at >= 1:
                         break
-            child.wait(timeout=1)
+            try:
+                child.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                cleanup_denied = True
+                diagnostic("cleanup_incomplete leader_pid=" + str(pgid))
+            # Preserve timeout/interruption/command failures; never turn denied
+            # cleanup into success when the leader itself exited successfully.
+            if cleanup_denied and final_code == 0:
+                final_code = 125
             diagnostic("finished exit_code={} elapsed_seconds={:.1f}".format(
                 final_code, time.monotonic() - started))
             if console_dropped:
@@ -173,7 +195,12 @@ def run(args):
         try:
             if child is not None:
                 group_signal(child.pid, signal.SIGKILL)
-                child.wait(timeout=2)
+                try:
+                    child.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    # Do not mask the primary failure or wait indefinitely when
+                    # the OS refuses to signal the owned process group.
+                    pass
                 child.stdout.close()
         finally:
             selector.close()
@@ -203,3 +230,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
