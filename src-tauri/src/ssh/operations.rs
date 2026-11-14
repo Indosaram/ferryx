@@ -28,7 +28,12 @@ pub async fn probe(
     environment.platform.validate_path(path)?;
     let marker = format!("FERRYX_DIR_V2_{}", uuid::Uuid::new_v4().simple());
     let script = project_probe_script(environment.platform, path, &marker);
-    let plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    let mut plan = direct::ssh_plan(host, environment.executor.command(&script), false)?;
+    // A master is an optimisation, never a requirement: any failure to establish one keeps the
+    // cold path, and an operation that may already have been dispatched is never replayed.
+    if let Ok(Some(socket)) = super::master::acquire(host).await {
+        direct::use_master(&mut plan, &socket);
+    }
     let output = direct::bounded_output(&plan, Duration::from_secs(12))
         .await
         .map_err(|mut err| {

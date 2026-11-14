@@ -51,6 +51,28 @@ pub enum AuthStatus {
     Unknown,
 }
 
+/// A route by which a host's gateway can be reached without the relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PublishedOriginKind {
+    Lan,
+    Tailscale,
+    Direct,
+    SshForward,
+}
+
+/// One candidate origin published by the host itself, with the moment it was observed.
+///
+/// `observed_at` is an opaque marker from the publishing side; a client uses it only to prefer
+/// the freshest record of the same origin, never to judge reachability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedOrigin {
+    pub kind: PublishedOriginKind,
+    pub origin: String,
+    pub observed_at: u64,
+}
+
 /// The only serializable outward host projection; it cannot contain a credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -71,6 +93,13 @@ pub struct HostView {
     /// Omitted from the wire when none, so an older client still decodes a healthy list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
+    /// Origins this host published for direct attach. Empty means relay only.
+    ///
+    /// Defaulted and omitted when empty so a reader that never learned the field still decodes
+    /// the projection. The daemon protocol version was bumped with this field because a client
+    /// that predates it must not be handed a projection it will reject.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub published_origins: Vec<PublishedOrigin>,
 }
 
 // Deliberately no Debug or outward Serialize on inputs or credential leases.
@@ -424,6 +453,9 @@ impl Inventory {
                     ssh_host_id: row.ssh_host_id.clone(),
                     device_id: row.device_id.clone(),
                     unavailable_reason,
+                    // Filled by the host's own origin publication once it lands; until then
+                    // every saved host is relay-only, which is what it already was.
+                    published_origins: Vec::new(),
                 }
             })
             .collect()

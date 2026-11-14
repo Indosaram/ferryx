@@ -12,10 +12,10 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 #[cfg(not(feature = "qa-protocol-bump"))]
-pub const DAEMON_PROTOCOL_VERSION: u32 = 5;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 6;
 /// QA build only (feature qa-protocol-bump): a future protocol, to test the mismatch path.
 #[cfg(feature = "qa-protocol-bump")]
-pub const DAEMON_PROTOCOL_VERSION: u32 = 6;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 7;
 pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `PasteWrite`/`CancelPaste`.
 pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
@@ -2395,7 +2395,7 @@ mod tests {
         assert!(encoded.get("sessionId").is_none(), "absent id must not be serialized");
         let decoded: DaemonRequest = serde_json::from_value(encoded).expect("decode spawn without sessionId");
         assert!(matches!(decoded, DaemonRequest::Spawn { session_id: None, .. }));
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
     }
 
     #[test]
@@ -2410,7 +2410,7 @@ mod tests {
         assert!(matches!(&decoded, DaemonResponse::HandshakeOk {
             capabilities, admission_time_unix_ms: None, .. } if capabilities.is_empty()));
         assert_eq!(serde_json::to_value(decoded).expect("encode legacy handshake"), handshake);
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
     }
 
     #[test]
@@ -3739,7 +3739,7 @@ mod tests {
 
     #[test]
     fn test_protocol_v4_handshake_and_list_sessions_epoch() {
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
 
         let hs = DaemonResponse::HandshakeOk {
             version: DAEMON_PROTOCOL_VERSION,
@@ -3855,7 +3855,7 @@ mod tests {
             _ => panic!("Expected Spawn variant"),
         }
 
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 5);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
     }
 
     #[test]

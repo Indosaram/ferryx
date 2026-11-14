@@ -284,6 +284,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_candidate_naming_another_machine_is_rejected_before_it_connects() {
+        let candidate = CandidatePath::with_expected_machine_id(
+            AttachPath::Direct,
+            "http://127.0.0.1:1",
+            None,
+            "machine-a".into(),
+        );
+        assert!(super::super::attach::candidate_names_expected_machine_for_test(
+            &candidate,
+            "machine-a"
+        ));
+        assert!(!super::super::attach::candidate_names_expected_machine_for_test(
+            &candidate,
+            "machine-b"
+        ));
+    }
+
+    #[test]
+    fn a_candidate_without_an_identity_claim_is_still_eligible() {
+        let candidate = CandidatePath::new(AttachPath::Relay, "https://relay.test", None);
+        assert!(super::super::attach::candidate_names_expected_machine_for_test(
+            &candidate,
+            "any-machine"
+        ));
+    }
+
+    #[test]
     fn path_select_picks_fastest_authenticated() {
         let outcomes = [
             PathOutcome::reachable(AttachPath::Relay, Duration::from_millis(40)),

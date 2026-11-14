@@ -6424,6 +6424,7 @@ mod tests {
             ssh_host_id: None,
             device_id: None,
             unavailable_reason: None,
+            published_origins: Vec::new(),
         }
     }
 
