@@ -22,6 +22,20 @@ pub const INSTALL_READY_MARKER: &str = "FERRYX_INSTALL_OK";
 /// Stdout marker prefix printed when helper binary replacement was deferred.
 pub const INSTALL_DEFERRED_MARKER: &str = "FERRYX_INSTALL_DEFERRED:";
 
+/// Stderr marker printed by the POSIX base64 upload script when the remote has neither a
+/// `base64` decoder (`-d`/`-D`) nor `openssl enc -base64 -d`; `install` then retries with the
+/// octal (`od`-format) payload that only needs the shell's `printf`.
+pub const UPLOAD_DECODER_MISSING_MARKER: &str = "FERRYX_ERR_HELPER_DECODER_MISSING";
+
+/// Stderr marker printed when the uploaded file does not hash to the local helper's sha256.
+pub const UPLOAD_CHECKSUM_MARKER: &str = "FERRYX_ERR_HELPER_CHECKSUM";
+
+/// Stderr marker printed when no sha256 tool exists and the uploaded byte count is wrong.
+pub const UPLOAD_SIZE_MARKER: &str = "FERRYX_ERR_HELPER_SIZE";
+
+/// Decoders the POSIX base64 upload looks for, named in the error when none exists.
+const UPLOAD_DECODERS: [&str; 2] = ["base64", "openssl"];
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeferredPayload {
@@ -37,8 +51,8 @@ struct DeferredPayload {
 /// Honest Terminal Helper readiness from a bounded, non-installing remote check.
 ///
 /// `Installed` means the helper binary was observed present (and executable on
-/// POSIX) at the default location. `Missing` means the remote explicitly
-/// reported the binary absent or not executable. `Unknown` covers every other
+/// POSIX) and answered `--version`. `Missing` means the remote explicitly
+/// reported the binary absent, not executable, or unrunnable. `Unknown` covers every other
 /// outcome (timeout, transport failure, unexpected output): no claim is made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +64,9 @@ pub enum HelperProbeState {
 
 /// Stdout marker printed by the probe script when the helper binary checks out.
 const PROBE_READY_MARKER: &str = "FERRYX_HELPER_READY";
+
+/// Stderr marker printed by the probe script when the binary exists but `--version` fails.
+const PROBE_UNRUNNABLE_MARKER: &str = "FERRYX_ERR_HELPER_UNRUNNABLE";
 
 #[derive(Debug, Deserialize)]
 struct HelperReadyEvent {
@@ -205,18 +222,97 @@ fn windows_stdin_command(executor: RemoteExecutor) -> String {
 fn install_invocation(
     env: &RemoteEnvironment,
     location: &HelperLocation,
-    binary_data: Vec<u8>,
+    binary_data: &[u8],
 ) -> (String, Vec<u8>) {
     match env.platform {
         RemotePlatform::Posix => {
-            let script = build_posix_upload_script(location, &binary_data);
+            let script = build_posix_upload_script(location, binary_data);
             (env.executor.command("sh -s"), script.into_bytes())
         }
         RemotePlatform::Windows => {
-            let script = build_windows_upload_script(location, &binary_data);
+            let script = build_windows_upload_script(location, binary_data);
             (windows_stdin_command(env.executor), script.into_bytes())
         }
     }
+}
+
+fn error_stderr(err: &IpcError) -> &str {
+    err.details
+        .as_ref()
+        .and_then(|d| d.get("stderr"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+}
+
+/// True when the upload failed only because the remote has no base64 decoder.
+pub(crate) fn upload_decoder_missing(err: &IpcError) -> bool {
+    error_stderr(err).contains(UPLOAD_DECODER_MISSING_MARKER)
+        || err.message.contains(UPLOAD_DECODER_MISSING_MARKER)
+}
+
+/// Tags an upload failure with its stage and, when the remote verification rejected the
+/// uploaded bytes, the machine-readable reason.
+fn tag_install_error(mut err: IpcError, location: &HelperLocation) -> IpcError {
+    let text = format!("{} {}", err.message, error_stderr(&err));
+    let reason = if text.contains(UPLOAD_CHECKSUM_MARKER) {
+        Some("checksum_mismatch")
+    } else if text.contains(UPLOAD_SIZE_MARKER) {
+        Some("size_mismatch")
+    } else {
+        None
+    };
+    let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+    details["stage"] = "install".into();
+    details["executable"] = location.executable.clone().into();
+    if let Some(reason) = reason {
+        details["reason"] = reason.into();
+    }
+    err
+}
+
+/// Uploads `binary_data` through `run(command, stdin, deadline)`, with a deadline scaled to the
+/// payload size. A POSIX remote without any base64 decoder answers the first attempt with
+/// [`UPLOAD_DECODER_MISSING_MARKER`]; the upload is then repeated once with the octal payload.
+pub(super) async fn install_with<F, Fut>(
+    env: &RemoteEnvironment,
+    location: &HelperLocation,
+    binary_data: &[u8],
+    mut run: F,
+) -> Result<(), IpcError>
+where
+    F: FnMut(String, Vec<u8>, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    let (cmd, input_bytes) = install_invocation(env, location, binary_data);
+    let deadline = super::operations::upload_deadline_for_bytes(input_bytes.len());
+    let output = match run(cmd, input_bytes, deadline).await {
+        Ok(output) => output,
+        Err(err) if env.platform == RemotePlatform::Posix && upload_decoder_missing(&err) => {
+            tracing::warn!(
+                executable = %location.executable,
+                "Remote host has no base64 decoder (tried {}); uploading the helper as octal through printf",
+                UPLOAD_DECODERS.join(", ")
+            );
+            let script = build_posix_octal_upload_script(location, binary_data);
+            let input_bytes = script.into_bytes();
+            let deadline = super::operations::upload_deadline_for_bytes(input_bytes.len());
+            run(env.executor.command("sh -s"), input_bytes, deadline)
+                .await
+                .map_err(|mut err| {
+                    err.message = format!(
+                        "Remote host has no base64 decoder ({} missing) and the printf fallback upload failed: {}",
+                        UPLOAD_DECODERS.join(" and "),
+                        err.message
+                    );
+                    let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+                    details["decodersMissing"] = serde_json::json!(UPLOAD_DECODERS);
+                    tag_install_error(err, location)
+                })?
+        }
+        Err(err) => return Err(tag_install_error(err, location)),
+    };
+
+    parse_install_output(&output, location)
 }
 
 pub async fn install(
@@ -275,20 +371,16 @@ pub async fn install(
         )
     })??;
 
-    let (cmd, input_bytes) = install_invocation(env, location, binary_data);
-
-    let plan = direct::ssh_plan(host, cmd, false)?;
-    let output = direct::bounded_output_with_stdin(&plan, Duration::from_secs(60), input_bytes)
-        .await
-        .map_err(|mut err| {
-            if let Some(details) = err.details.as_mut() {
-                details["stage"] = "install".into();
-                details["executable"] = location.executable.clone().into();
-            }
-            err
-        })?;
-
-    parse_install_output(&output, location)
+    install_with(
+        env,
+        location,
+        &binary_data,
+        |cmd, input, deadline| async move {
+            let plan = direct::ssh_plan(host, cmd, false)?;
+            direct::bounded_output_with_stdin(&plan, deadline, input).await
+        },
+    )
+    .await
 }
 
 pub(crate) fn parse_ready_output(bytes: &[u8]) -> Result<(), IpcError> {
@@ -355,13 +447,38 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
         return err;
     }
 
-    let is_missing = exit_code == Some(127) || (exit_code == Some(1) && has_missing_marker);
+    // Exit 127 alone is not proof of absence: a shell also returns 127 when the binary exists
+    // but its ELF interpreter does not (a glibc helper on musl/Alpine). Only the explicit marker
+    // printed after the existence check means "not installed".
+    let is_missing = has_missing_marker && matches!(exit_code, Some(127) | Some(1));
     let is_permissions =
         exit_code == Some(126) || (exit_code == Some(1) && has_not_executable_marker);
+    let is_exec_failure = exit_code == Some(127) && !has_missing_marker;
 
     let cause = err.details.clone();
 
-    if is_missing {
+    if is_exec_failure {
+        let mut details = serde_json::json!({
+            "stage": "helper_exec_failed",
+            "operation": "helper_startup_readiness",
+            "executable": location.executable,
+            "root": location.root,
+            "exitCode": 127,
+            "stderr": stderr,
+        });
+        if let Some(c) = cause {
+            details["cause"] = c;
+        }
+        IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!(
+                "Remote helper at '{}' exists but could not be executed on this host: {}",
+                location.executable,
+                stderr.trim()
+            ),
+        )
+        .with_details(details)
+    } else if is_missing {
         let mut details = serde_json::json!({
             "stage": "helper_missing",
             "operation": "helper_startup_readiness",
@@ -410,29 +527,7 @@ pub async fn ensure_started(
     env.platform.validate_path(&location.executable)?;
     env.platform.validate_path(&location.root)?;
 
-    let script = match env.platform {
-        RemotePlatform::Posix => format!(
-            "exe={}; root={}; host_id={}; \
-             if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
-             if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
-             exec \"$exe\" start --root \"$root\" --host-id \"$host_id\"",
-            direct::quote_posix(&location.executable),
-            direct::quote_posix(&location.root),
-            direct::quote_posix(&host.id)
-        ),
-        RemotePlatform::Windows => format!(
-            "$exe = {}; $root = {}; $hostId = {}; \
-             if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
-             & $exe start --root $root --host-id $hostId 2>&1 | ForEach-Object {{ \
-                 if ($_ -is [System.Management.Automation.ErrorRecord]) {{ [Console]::Error.WriteLine($_.ToString()) }} \
-                 else {{ [Console]::Out.WriteLine($_.ToString()) }} \
-             }}; exit $LASTEXITCODE",
-            runtime::powershell_data(&location.executable),
-            runtime::powershell_data(&location.root),
-            runtime::powershell_data(&host.id)
-        ),
-    };
-
+    let script = ensure_started_script(host, env, location);
     let plan = direct::ssh_plan(host, env.executor.command(&script), false)?;
     let output = direct::bounded_output(&plan, Duration::from_secs(15))
         .await
@@ -450,6 +545,135 @@ pub async fn ensure_started(
         }),
         Err(err) => Err(map_ensure_started_error(err, location)),
     }
+}
+
+/// The remote start script. For a version-qualified location it also prunes, after a successful
+/// start only, the helper versions older than the newest two (see [`posix_prune_versions_script`]).
+pub(crate) fn ensure_started_script(
+    host: &SshHost,
+    env: &RemoteEnvironment,
+    location: &HelperLocation,
+) -> String {
+    let qualified = qualified_version_parts(env.platform, location);
+    match env.platform {
+        RemotePlatform::Posix => {
+            let start = match &qualified {
+                Some((versions, tag)) => format!(
+                    "\"$exe\" start --root \"$root\" --host-id \"$host_id\"; rc=$?; \
+                     if [ \"$rc\" -eq 0 ]; then ( {} ) >/dev/null 2>&1 </dev/null; fi; exit \"$rc\"",
+                    posix_prune_versions_script(versions, tag)
+                ),
+                None => "exec \"$exe\" start --root \"$root\" --host-id \"$host_id\"".to_string(),
+            };
+            format!(
+                "exe={}; root={}; host_id={}; \
+                 if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
+                 if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
+                 {start}",
+                direct::quote_posix(&location.executable),
+                direct::quote_posix(&location.root),
+                direct::quote_posix(&host.id)
+            )
+        }
+        RemotePlatform::Windows => {
+            let prune = match &qualified {
+                Some((versions, tag)) => format!(
+                    "if ($rc -eq 0) {{ try {{ {} }} catch {{}} }}; ",
+                    windows_prune_versions_script(versions, tag)
+                ),
+                None => String::new(),
+            };
+            format!(
+                "$exe = {}; $root = {}; $hostId = {}; \
+                 if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
+                 & $exe start --root $root --host-id $hostId 2>&1 | ForEach-Object {{ \
+                     if ($_ -is [System.Management.Automation.ErrorRecord]) {{ [Console]::Error.WriteLine($_.ToString()) }} \
+                     else {{ [Console]::Out.WriteLine($_.ToString()) }} \
+                 }}; $rc = $LASTEXITCODE; {prune}exit $rc",
+                runtime::powershell_data(&location.executable),
+                runtime::powershell_data(&location.root),
+                runtime::powershell_data(&host.id)
+            )
+        }
+    }
+}
+
+/// `(versions dir, version tag)` when `location` is a [`qualified_location`]
+/// (`<home>/.ferryx/versions/<calver>/bin/ferryx-remote-helper[.exe]`), else `None`.
+pub(crate) fn qualified_version_parts(
+    platform: RemotePlatform,
+    location: &HelperLocation,
+) -> Option<(String, String)> {
+    let (sep, suffix, marker) = match platform {
+        RemotePlatform::Posix => ('/', "/bin/ferryx-remote-helper", "/.ferryx/versions"),
+        RemotePlatform::Windows => (
+            '\\',
+            "\\bin\\ferryx-remote-helper.exe",
+            "\\.ferryx\\versions",
+        ),
+    };
+    let version_dir = location.executable.strip_suffix(suffix)?;
+    let (versions, tag) = version_dir.rsplit_once(sep)?;
+    if !versions.ends_with(marker) || parse_calver_version(tag).is_none() {
+        return None;
+    }
+    if tag.split('.').count() != 3 {
+        return None;
+    }
+    Some((versions.to_string(), tag.to_string()))
+}
+
+/// Removes `<versions>/<tag>` directories older than the newest two calver tags, never the
+/// `current` one, and never one that is still running: a process whose executable (`/proc/*/exe`)
+/// or command line lies inside it, or a live pid in one of that version's runtime roots
+/// (`<home>/.ferryx/r/<tag>/*/endpoint.json`), keeps the version on disk. Best effort: every
+/// failure leaves the directory in place.
+pub fn posix_prune_versions_script(versions: &str, current: &str) -> String {
+    format!(
+        "vb={}; cur={}; fx=\"${{vb%/*}}\"; \
+         tags=$(ls \"$vb\" 2>/dev/null | grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+$' | sort -t. -k1,1n -k2,2n -k3,3n); \
+         n=0; for t in $tags; do n=$((n+1)); done; \
+         procs=$(ps -A -o args= 2>/dev/null || ps -o args 2>/dev/null); \
+         i=0; \
+         for t in $tags; do \
+             i=$((i+1)); [ \"$i\" -le $((n-2)) ] || break; \
+             [ \"$t\" = \"$cur\" ] && continue; \
+             d=\"$vb/$t\"; if [ ! -d \"$d\" ] || [ -L \"$d\" ]; then continue; fi; \
+             live=0; \
+             for p in /proc/[0-9]*; do l=$(readlink \"$p/exe\" 2>/dev/null) || continue; case \"$l\" in \"$d\"/*) live=1; break;; esac; done; \
+             case \"$procs\" in *\"$d/\"*) live=1;; esac; \
+             for ep in \"$fx/r/$t\"/*/endpoint.json; do \
+                 [ -f \"$ep\" ] || continue; \
+                 pid=$(tr -d ' \\t\\r\\n' < \"$ep\" 2>/dev/null | sed -n 's/.*\"pid\":\\([0-9]\\{{1,\\}}\\).*/\\1/p'); \
+                 if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then live=1; fi; \
+             done; \
+             [ \"$live\" -eq 0 ] && rm -rf \"$d\"; \
+         done; :",
+        direct::quote_posix(versions),
+        direct::quote_posix(current)
+    )
+}
+
+/// Windows counterpart of [`posix_prune_versions_script`]: a version whose directory holds the
+/// image of a running `ferryx-remote-helper` process is kept (Windows also refuses to delete a
+/// running executable, so a failed removal leaves the directory in place).
+pub(crate) fn windows_prune_versions_script(versions: &str, current: &str) -> String {
+    format!(
+        "$vb = {}; $cur = {}; \
+         $tags = @(Get-ChildItem -LiteralPath $vb -Directory -ErrorAction SilentlyContinue | \
+             Where-Object {{ $_.Name -match '^\\d+\\.\\d+\\.\\d+$' -and -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) }} | \
+             Sort-Object {{ [version]$_.Name }}); \
+         $procs = @(Get-Process -Name 'ferryx-remote-helper' -ErrorAction SilentlyContinue | ForEach-Object {{ try {{ $_.Path }} catch {{ $null }} }} | Where-Object {{ $_ }}); \
+         for ($i = 0; $i -lt ($tags.Count - 2); $i++) {{ \
+             $d = $tags[$i]; \
+             if ($d.Name -eq $cur) {{ continue }}; \
+             $prefix = $d.FullName.TrimEnd('\\') + '\\'; \
+             if (@($procs | Where-Object {{ $_.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) }}).Count -gt 0) {{ continue }}; \
+             Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue \
+         }}",
+        runtime::powershell_data(versions),
+        runtime::powershell_data(current)
+    )
 }
 
 /// Pure classification of a probe outcome: no I/O, unit-testable.
@@ -495,6 +719,8 @@ fn classify_probe_error(err: &IpcError) -> HelperProbeState {
         || err.message.contains("FERRYX_ERR_HELPER_MISSING");
     let has_not_executable_marker = stderr.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE")
         || err.message.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE");
+    let has_unrunnable_marker =
+        stderr.contains(PROBE_UNRUNNABLE_MARKER) || err.message.contains(PROBE_UNRUNNABLE_MARKER);
 
     // Contradictory signals are untrustworthy: claim nothing.
     if (has_missing_marker && (has_not_executable_marker || exit_code == Some(126)))
@@ -505,9 +731,11 @@ fn classify_probe_error(err: &IpcError) -> HelperProbeState {
 
     // Windows sshd.exe normalizes child exit codes to 1, so the explicit
     // stderr sentinels are the reliable signal there; POSIX adds 127/126.
-    // Both sentinels mean the helper is not usable at its default location.
+    // Every sentinel means the helper is not usable at its default location;
+    // an unrunnable binary must be replaced just like a missing one.
     if has_missing_marker
         || has_not_executable_marker
+        || has_unrunnable_marker
         || exit_code == Some(127)
         || exit_code == Some(126)
     {
@@ -538,23 +766,72 @@ pub fn probe_locations(
 /// Tests existence (plus executability on POSIX) at candidate locations:
 /// first checks `qualified_location` for the current bundled helper version,
 /// falling back to unversioned `default_location` for legacy installs.
-/// It never writes, never installs, and never executes or spawns the helper,
-/// so no persistent remote process can linger. Remote platform dispatch and
-/// the bounded exec helper mirror `ensure_started`.
+/// It never writes or installs. In the same round trip it runs `--version`,
+/// which exits immediately and spawns nothing persistent, because a present
+/// binary can still be unrunnable (a glibc build on a musl host exits 127):
+/// that case prints `FERRYX_ERR_HELPER_UNRUNNABLE` and reads as Missing so the
+/// caller reinstalls. Remote platform dispatch and the bounded exec helper
+/// mirror `ensure_started`.
 fn probe_ready_script(environment: &RemoteEnvironment, location: &HelperLocation) -> String {
     match environment.platform {
         RemotePlatform::Posix => format!(
             "exe={}; \
              if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
              if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
+             out=$(\"$exe\" --version 2>&1); rc=$?; \
+             if [ \"$rc\" -ne 0 ]; then printf 'FERRYX_ERR_HELPER_UNRUNNABLE exit=%s %s\\n' \"$rc\" \"$(printf '%s\\n' \"$out\" | head -n 1)\" >&2; exit 1; fi; \
              printf 'FERRYX_HELPER_READY\\n'",
             direct::quote_posix(&location.executable)
         ),
         RemotePlatform::Windows => format!(
             "$exe = {}; \
              if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
+             try {{ $out = (& $exe --version 2>&1 | Out-String).Trim(); $rc = $LASTEXITCODE }} catch {{ $out = $_.Exception.Message; $rc = -1 }}; \
+             if ($rc -ne 0) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_UNRUNNABLE exit=' + $rc + ' ' + ($out -split '\\r?\\n')[0]); exit 1; }}; \
              [Console]::WriteLine('FERRYX_HELPER_READY')",
             runtime::powershell_data(&location.executable)
+        ),
+    }
+}
+
+/// User-facing reason a present helper failed its probe `--version` run, taken from the
+/// `FERRYX_ERR_HELPER_UNRUNNABLE exit=<code> <first output line>` sentinel. `None` when the
+/// probe did not observe a present-but-unrunnable binary (absent, not executable, transport).
+pub(crate) fn probe_exec_failure(err: &IpcError, location: &HelperLocation) -> Option<String> {
+    if classify_probe_error(err) != HelperProbeState::Missing {
+        return None;
+    }
+    let stderr = err
+        .details
+        .as_ref()
+        .and_then(|d| d.get("stderr"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let detail = stderr.lines().chain(err.message.lines()).find_map(|line| {
+        line.split_once(PROBE_UNRUNNABLE_MARKER)
+            .map(|(_, rest)| rest.trim().to_owned())
+    })?;
+    Some(format!(
+        "Remote helper at '{}' exists but could not be executed on this host ({detail}); reinstall it.",
+        location.executable
+    ))
+}
+
+async fn probe_ready_at_detailed_with<F, Fut>(
+    environment: &RemoteEnvironment,
+    location: &HelperLocation,
+    mut run: F,
+) -> (HelperProbeState, Option<String>)
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    let script = probe_ready_script(environment, location);
+    match run(environment.executor, script, Duration::from_secs(10)).await {
+        Ok(stdout) => (classify_probe_result(Ok(&stdout)), None),
+        Err(err) => (
+            classify_probe_result(Err(&err)),
+            probe_exec_failure(&err, location),
         ),
     }
 }
@@ -562,52 +839,63 @@ fn probe_ready_script(environment: &RemoteEnvironment, location: &HelperLocation
 pub(super) async fn probe_ready_at_with<F, Fut>(
     environment: &RemoteEnvironment,
     location: &HelperLocation,
-    mut run: F,
+    run: F,
 ) -> HelperProbeState
 where
     F: FnMut(RemoteExecutor, String, Duration) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
 {
-    let script = probe_ready_script(environment, location);
-    match run(environment.executor, script, Duration::from_secs(10)).await {
-        Ok(stdout) => classify_probe_result(Ok(&stdout)),
-        Err(err) => classify_probe_result(Err(&err)),
-    }
+    probe_ready_at_detailed_with(environment, location, run)
+        .await
+        .0
 }
 
-pub(super) async fn probe_ready_with<F, Fut>(
+pub(super) async fn probe_ready_detailed_with<F, Fut>(
     host: &SshHost,
     environment: &RemoteEnvironment,
     mut run: F,
-) -> HelperProbeState
+) -> (HelperProbeState, Option<String>)
 where
     F: FnMut(RemoteExecutor, String, Duration) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
 {
     let locations = match probe_locations(host, environment) {
         Ok(locs) => locs,
-        Err(_) => return HelperProbeState::Unknown,
+        Err(_) => return (HelperProbeState::Unknown, None),
     };
     let mut last_state = HelperProbeState::Missing;
+    let mut exec_failure = None;
     for location in &locations {
-        let state = probe_ready_at_with(environment, location, &mut run).await;
+        let (state, failure) = probe_ready_at_detailed_with(environment, location, &mut run).await;
         if state == HelperProbeState::Installed {
-            return HelperProbeState::Installed;
+            return (HelperProbeState::Installed, None);
         }
         last_state = state;
+        exec_failure = exec_failure.or(failure);
     }
-    last_state
+    (last_state, exec_failure)
 }
 
 pub async fn probe_ready(host: &SshHost, environment: &RemoteEnvironment) -> HelperProbeState {
-    probe_ready_with(host, environment, |executor, script, timeout| async move {
+    probe_ready_detailed(host, environment).await.0
+}
+
+/// `probe_ready` plus the exec-failure reason when a present helper binary could not run
+/// (see [`probe_exec_failure`]); same single round trip per location.
+pub async fn probe_ready_detailed(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+) -> (HelperProbeState, Option<String>) {
+    probe_ready_detailed_with(host, environment, |executor, script, timeout| async move {
         let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
-            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
-            details["operation"] = "helper_readiness_probe".into();
-            details["executor"] = executor.program().into();
-            err
-        })
+        direct::bounded_output(&plan, timeout)
+            .await
+            .map_err(|mut err| {
+                let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+                details["operation"] = "helper_readiness_probe".into();
+                details["executor"] = executor.program().into();
+                err
+            })
     })
     .await
 }
@@ -617,15 +905,21 @@ pub async fn probe_ready_at(
     environment: &RemoteEnvironment,
     location: &HelperLocation,
 ) -> HelperProbeState {
-    probe_ready_at_with(environment, location, |executor, script, timeout| async move {
-        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
-            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
-            details["operation"] = "helper_readiness_probe".into();
-            details["executor"] = executor.program().into();
-            err
-        })
-    })
+    probe_ready_at_with(
+        environment,
+        location,
+        |executor, script, timeout| async move {
+            let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+            direct::bounded_output(&plan, timeout)
+                .await
+                .map_err(|mut err| {
+                    let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+                    details["operation"] = "helper_readiness_probe".into();
+                    details["executor"] = executor.program().into();
+                    err
+                })
+        },
+    )
     .await
 }
 
@@ -780,17 +1074,77 @@ pub fn chunk_base64(bytes: &[u8], line_length: usize) -> String {
     chunked
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Base64 upload: the decoder is chosen by decoding a probe value first, so a remote without
+/// any decoder still consumes the payload and then reports [`UPLOAD_DECODER_MISSING_MARKER`]
+/// (exit 3) instead of leaving a partial file.
 pub fn build_posix_upload_script(location: &HelperLocation, binary_bytes: &[u8]) -> String {
     let chunked = chunk_base64(binary_bytes, 76);
-    format!(
-        "dest={}; root={}; \
-         parent=$(dirname \"$dest\"); mkdir -p \"$parent\" && chmod 700 \"$parent\"; \
-         tmp=\"${{dest}}.tmp.$$\"; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; \
-         (base64 -d 2>/dev/null || base64 -D 2>/dev/null || openssl enc -base64 -d 2>/dev/null) << 'FERRYX_HELPER_PAYLOAD_EOF' > \"$tmp\"\n\
-{}\
+    let decode = format!(
+        "dec=''; \
+         if [ \"$(printf 'QQ==\\n' | base64 -d 2>/dev/null)\" = A ]; then dec='base64 -d'; \
+         elif [ \"$(printf 'QQ==\\n' | base64 -D 2>/dev/null)\" = A ]; then dec='base64 -D'; \
+         elif [ \"$(printf 'QQ==\\n' | openssl enc -base64 -d 2>/dev/null)\" = A ]; then dec='openssl enc -base64 -d'; fi; \
+         {{ if [ -n \"$dec\" ]; then $dec; else :; fi; }} << 'FERRYX_HELPER_PAYLOAD_EOF' > \"$tmp\"\n\
+{chunked}\
 FERRYX_HELPER_PAYLOAD_EOF\n\
          decode_ok=$?; \
+         if [ -z \"$dec\" ]; then rm -f \"$tmp\"; \
+             printf '{UPLOAD_DECODER_MISSING_MARKER}: no base64 decoder on this host (tried base64 -d, base64 -D, openssl enc -base64 -d)\\n' >&2; exit 3; fi; "
+    );
+    posix_upload_script(location, binary_bytes, &decode)
+}
+
+/// Payload bytes per `printf` line of the octal upload.
+const OCTAL_UPLOAD_LINE_BYTES: usize = 1024;
+
+/// Pure-shell fallback for remotes without base64 or openssl: every byte travels as a
+/// three-digit octal escape (the `od -b` format) inside `printf` format strings, which every
+/// POSIX shell's `printf` decodes. Each line is parsed and executed on its own, so the shell
+/// never holds the whole payload. Four bytes on the wire per payload byte.
+pub fn build_posix_octal_upload_script(location: &HelperLocation, binary_bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut decode = String::with_capacity(binary_bytes.len() * 4 + binary_bytes.len() / 32 + 64);
+    decode.push_str("decode_ok=0; exec 3> \"$tmp\"\n");
+    for chunk in binary_bytes.chunks(OCTAL_UPLOAD_LINE_BYTES) {
+        decode.push_str("printf '");
+        for byte in chunk {
+            let _ = write!(decode, "\\{byte:03o}");
+        }
+        decode.push_str("' >&3 || decode_ok=1\n");
+    }
+    decode.push_str("exec 3>&-; ");
+    posix_upload_script(location, binary_bytes, &decode)
+}
+
+/// The upload body shared by both payload encodings. `decode` writes the payload to `$tmp` and
+/// sets `decode_ok`; the result is then checked against the local sha256 (or, on a remote with
+/// no sha256 tool, the byte count) before anything is moved into place.
+fn posix_upload_script(location: &HelperLocation, binary_bytes: &[u8], decode: &str) -> String {
+    format!(
+        "dest={}; root={}; want={}; want_len={}; \
+         parent=$(dirname \"$dest\"); mkdir -p \"$parent\" && chmod 700 \"$parent\"; \
+         tmp=\"${{dest}}.tmp.$$\"; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; \
+         {decode}\
          if [ \"$decode_ok\" -ne 0 ] || [ ! -s \"$tmp\" ]; then rm -f \"$tmp\"; exit 1; fi; \
+         got=''; \
+         if command -v sha256sum >/dev/null 2>&1; then set -- $(sha256sum < \"$tmp\"); got=\"${{1:-}}\"; \
+         elif command -v shasum >/dev/null 2>&1; then set -- $(shasum -a 256 < \"$tmp\"); got=\"${{1:-}}\"; \
+         elif command -v openssl >/dev/null 2>&1; then for w in $(openssl dgst -sha256 < \"$tmp\"); do got=\"$w\"; done; fi; \
+         if [ -n \"$got\" ]; then \
+             if [ \"$got\" != \"$want\" ]; then rm -f \"$tmp\"; \
+                 printf '{UPLOAD_CHECKSUM_MARKER} expected=%s actual=%s\\n' \"$want\" \"$got\" >&2; exit 1; fi; \
+         else \
+             set -- $(wc -c < \"$tmp\"); \
+             if [ \"${{1:-}}\" != \"$want_len\" ]; then rm -f \"$tmp\"; \
+                 printf '{UPLOAD_SIZE_MARKER} expected=%s actual=%s\\n' \"$want_len\" \"${{1:-}}\" >&2; exit 1; fi; \
+         fi; \
          chmod 700 \"$tmp\" && \
          daemon_pid=\"\" && \
          if [ -f \"$root/endpoint.json\" ]; then \
@@ -809,7 +1163,8 @@ FERRYX_HELPER_PAYLOAD_EOF\n\
          mv -f \"$tmp\" \"$dest\" && printf 'FERRYX_INSTALL_OK\\n'",
         direct::quote_posix(&location.executable),
         direct::quote_posix(&location.root),
-        chunked
+        sha256_hex(binary_bytes),
+        binary_bytes.len(),
     )
 }
 
@@ -831,6 +1186,9 @@ pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8
              $tmp = \"$dest.tmp.\" + [System.Guid]::NewGuid().ToString('N'); \
              $b64 = '{}'; \
              [System.IO.File]::WriteAllBytes($tmp, [System.Convert]::FromBase64String($b64.Trim())); \
+             $sha = [System.Security.Cryptography.SHA256]::Create(); \
+             try {{ $got = -join ($sha.ComputeHash([System.IO.File]::ReadAllBytes($tmp)) | ForEach-Object {{ $_.ToString('x2') }}) }} finally {{ $sha.Dispose() }}; \
+             if ($got -ne '{want}') {{ [System.IO.File]::Delete($tmp); throw \"{UPLOAD_CHECKSUM_MARKER} expected={want} actual=$got\" }}; \
              $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent(); \
              $userAcc = if ($identity.User) {{ '*' + $identity.User.Value }} else {{ \"$($env:USERDOMAIN)\\$($env:USERNAME)\" }}; \
              $aclRes = & icacls $tmp /inheritance:r /grant:r \"$($userAcc):(F)\" 2>&1; \
@@ -870,7 +1228,8 @@ pub fn build_windows_upload_script(location: &HelperLocation, binary_bytes: &[u8
          }}",
         runtime::powershell_data(&location.executable),
         runtime::powershell_data(&location.root),
-        encoded
+        encoded,
+        want = sha256_hex(binary_bytes),
     )
 }
 

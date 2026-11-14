@@ -135,6 +135,33 @@ test('stager still rejects a Mach-O artifact published under a linux target', as
   await assert.rejects(stage(root, { receipts: [{ ...r, target: 'aarch64-unknown-linux-gnu' }], requiredTargets: ['aarch64-unknown-linux-gnu'] }));
   assert.equal(existsSync(join(root, 'out/manifest.json')), false);
 });
+const ELF_MACHINE = { 'x86_64-unknown-linux-musl': 62, 'aarch64-unknown-linux-musl': 183 };
+function elfReceipt(root, elfTarget, { interpreter = false } = {}) {
+  const path = join(root, `helper-${elfTarget}`);
+  // Minimal ELF64 header with two program headers; PT_INTERP (3) marks a dynamic executable.
+  const bytes = Buffer.alloc(256);
+  Buffer.from([127, 69, 76, 70, 2, 1, 1]).copy(bytes, 0);
+  bytes.writeUInt16LE(3, 16);
+  bytes.writeUInt16LE(ELF_MACHINE[elfTarget], 18);
+  bytes.writeBigUInt64LE(64n, 32);
+  bytes.writeUInt16LE(56, 54);
+  bytes.writeUInt16LE(2, 56);
+  bytes.writeUInt32LE(6, 64);
+  bytes.writeUInt32LE(interpreter ? 3 : 1, 120);
+  writeFileSync(path, bytes);
+  const { fingerprint: sourceFingerprint, sources } = computeHelperSourceFingerprint(root);
+  return { target: elfTarget, profile: 'release', executable: path, sha256: computeSha256(bytes), helperVersion: FIXTURE_HELPER_VERSION, capabilities: [...REQUIRED_HELPER_CAPABILITIES], sourceFingerprint, sources };
+}
+for (const elfTarget of Object.keys(ELF_MACHINE)) test(`stager publishes static ${elfTarget} and rejects a dynamic one`, async t => {
+  const root = fixture(t);
+  await assert.rejects(stage(root, { receipts: [elfReceipt(root, elfTarget, { interpreter: true })], requiredTargets: [elfTarget] }), /statically linked/);
+  assert.equal(existsSync(join(root, 'out/manifest.json')), false);
+  const r = elfReceipt(root, elfTarget);
+  const manifest = await stage(root, { receipts: [r], requiredTargets: [elfTarget] });
+  assert.equal(manifest.artifacts[0].target, elfTarget);
+  assert.equal(manifest.artifacts[0].filename, 'ferryx-remote-helper');
+  assert.deepEqual(readFileSync(join(root, 'out', elfTarget, 'ferryx-remote-helper')), readFileSync(r.executable));
+});
 test('stager rejects a receipt missing dagSubscribeV1 evidence even with matching version', async t => {
   const root = fixture(t);
   const r = receipt(root, { capabilities: ['sshHelperV1', 'agentStateV1'] });
@@ -350,7 +377,8 @@ test('validateBundledHelpers rejects an incomplete shipped target matrix', async
   try { validateBundledHelpers({ repoRoot: root, resourcesDir }); } catch (error) { failure = error; }
   assert.equal(failure?.code, 'ERR_ASSERTION');
   assert.deepEqual(failure.actual, [target]);
-  assert.equal(failure.expected.length, 5);
+  assert.equal(failure.expected.length, 7);
+  assert.ok(failure.expected.includes('x86_64-unknown-linux-musl') && failure.expected.includes('aarch64-unknown-linux-musl'));
 });
 test('validateBundledHelpers rejects a duplicated shipped target', async t => {
   const root = fixture(t);

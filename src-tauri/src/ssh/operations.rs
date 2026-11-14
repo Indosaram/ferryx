@@ -110,8 +110,13 @@ pub fn shell_plan(
     environment.platform.validate_path(root)?;
     match environment.platform {
         RemotePlatform::Posix => {
-            let mut plan =
-                direct::shell_plan_with_session(host, root, Some(session_id), agent_socket)?;
+            let mut plan = direct::shell_plan_with_session(
+                host,
+                root,
+                Some(session_id),
+                agent_socket,
+                Some(&environment.home),
+            )?;
             if let Some(script) = plan.args.pop() {
                 plan.args.push(environment.executor.command(&script));
             }

@@ -203,8 +203,9 @@ where
         match executor {
             RemoteExecutor::Sh => format!(
                 "os=$(uname -s) || exit; case \"$os\" in Linux|Darwin|FreeBSD|OpenBSD|NetBSD) ;; *) exit 2;; esac; \
-                 g=0; command -v git >/dev/null 2>&1 && g=1; printf '{marker}\\000%s\\000%s\\000%s\\000%s\\000%s\\000' \
-                 posix \"$os\" \"$HOME\" \"${{TMPDIR:-/tmp}}\" \"$g\""
+                 {agent_dir}g=0; command -v git >/dev/null 2>&1 && g=1; printf '{marker}\\000%s\\000%s\\000%s\\000%s\\000%s\\000' \
+                 posix \"$os\" \"$HOME\" \"${{TMPDIR:-/tmp}}\" \"$g\"",
+                agent_dir = direct::REMOTE_AGENT_DIR_PREFLIGHT,
             ),
             RemoteExecutor::Powershell | RemoteExecutor::Pwsh => format!(
                 "if ([Environment]::OSVersion.Platform -ne 'Win32NT') {{ exit 2 }}; \
@@ -597,6 +598,32 @@ mod tests {
             .and_then(|v| v.get("exitCode"))
             .and_then(|v| v.as_i64());
         assert_ne!(exit_code, Some(255));
+    }
+
+    /// The POSIX detect probe precedes every pane, so it pre-creates the agent-forward directory
+    /// before sshd binds the first pane's -R forward; the probe's fields are unchanged.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn posix_probe_precreates_private_agent_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().to_path_buf();
+        let environment = detect_with(&probe_host(), Some(RemotePlatform::Posix), |executor, script, _| {
+            assert_eq!(executor, RemoteExecutor::Sh);
+            let output = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .env("HOME", &home)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            std::future::ready(Ok(output.stdout))
+        })
+        .await
+        .unwrap();
+        assert_eq!(environment.platform, RemotePlatform::Posix);
+        assert_eq!(environment.home, home.to_str().unwrap());
+        let mode = std::fs::metadata(home.join(".ferryx/a")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o700);
     }
 
     #[tokio::test]

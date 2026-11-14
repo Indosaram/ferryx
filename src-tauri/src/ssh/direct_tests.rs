@@ -505,6 +505,7 @@ fn shell_plan_with_session_forwards_agent_state_socket_and_exports_env() {
         "/srv/repo",
         Some("session-123"),
         Some("/tmp/local-agent.sock"),
+        None,
     )
     .expect("plan");
 
@@ -533,8 +534,165 @@ fn shell_plan_with_session_forwards_agent_state_socket_and_exports_env() {
 }
 
 #[test]
+fn shell_plan_forwards_agent_socket_into_private_home_dir_not_shared_tmp() {
+    let plan = shell_plan_with_session(
+        &host(),
+        "/srv/repo",
+        Some("session-123"),
+        Some("/tmp/local-agent.sock"),
+        Some("/home/u/"),
+    )
+    .expect("plan");
+    assert!(plan.args.windows(2).any(|pair| pair
+        == [
+            "-R",
+            "/home/u/.ferryx/a/session-123.sock:/tmp/local-agent.sock"
+        ]), "{:?}", plan.args);
+    assert!(!plan.args.iter().any(|arg| arg.contains("/tmp/ferryx-agent-")), "{:?}", plan.args);
+    let remote_cmd = plan.args.last().unwrap();
+    assert!(remote_cmd.starts_with(
+        "d='/home/u/.ferryx/a'; if [ ! -L \"$d\" ] && { [ -d \"$d\" ] || [ ! -e \"$d\" ]; }; then \
+         (umask 077; mkdir -p \"$d\" && chmod 700 \"$d\") >/dev/null 2>&1; fi; "
+    ), "{remote_cmd}");
+    assert!(remote_cmd.contains("FERRYX_AGENT_STATE_SOCKET='/home/u/.ferryx/a/session-123.sock'"));
+    assert!(remote_cmd.contains("HERDR_SOCKET_PATH='/home/u/.ferryx/a/session-123.sock'"));
+
+    // A home too long for sun_path, or no known home, keeps the legacy socket path.
+    let long_home = format!("/home/{}", "h".repeat(80));
+    assert_eq!(
+        remote_agent_socket(Some(&long_home), "session-123"),
+        (None, "/tmp/ferryx-agent-session-123.sock".to_string())
+    );
+    assert_eq!(
+        remote_agent_socket(None, "session-123"),
+        (None, "/tmp/ferryx-agent-session-123.sock".to_string())
+    );
+    assert_eq!(
+        remote_agent_socket(Some("relative"), "session-123").1,
+        "/tmp/ferryx-agent-session-123.sock"
+    );
+}
+
+/// Runs `REMOTE_AGENT_DIR_PREFLIGHT` in a local `sh` with the given HOME; returns (status, output).
+#[cfg(unix)]
+fn run_agent_dir_preflight(home: &std::path::Path) -> (bool, String) {
+    let output = std::process::Command::new("sh")
+        .args(["-c", &format!("{REMOTE_AGENT_DIR_PREFLIGHT}echo done")])
+        .env("HOME", home)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.success(), text)
+}
+
+/// sshd binds a pane's -R forward before the pane command runs, so the detect probe pre-creates
+/// the private directory: 0700, idempotent (tightening a loose mode), silent, never failing.
+#[cfg(unix)]
+#[test]
+fn agent_dir_preflight_creates_private_dir_idempotently() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = tempfile::tempdir().unwrap();
+    let dir = fixture.path().join(".ferryx/a");
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777, 0o700);
+    std::fs::write(dir.join("keep.sock"), "").unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777, 0o700);
+    assert!(dir.join("keep.sock").exists(), "existing entries survive");
+}
+
+/// A non-directory or a symlink (live or dangling) at the path is left alone, and the probe still
+/// succeeds; no relative or missing HOME makes it create anything.
+#[cfg(unix)]
+#[test]
+fn agent_dir_preflight_leaves_files_and_symlinks_untouched() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = tempfile::tempdir().unwrap();
+    let ferryx = fixture.path().join(".ferryx");
+    std::fs::create_dir(&ferryx).unwrap();
+    let dir = ferryx.join("a");
+
+    std::fs::write(&dir, "file").unwrap();
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert_eq!(std::fs::read_to_string(&dir).unwrap(), "file");
+    std::fs::remove_file(&dir).unwrap();
+
+    let target = fixture.path().join("elsewhere");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&target, &dir).unwrap();
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert!(std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o755);
+    std::fs::remove_file(&dir).unwrap();
+
+    let missing = fixture.path().join("missing");
+    std::os::unix::fs::symlink(&missing, &dir).unwrap();
+    assert_eq!(run_agent_dir_preflight(fixture.path()), (true, "done\n".to_string()));
+    assert!(!missing.exists(), "a dangling symlink is not followed");
+    std::fs::remove_file(&dir).unwrap();
+
+    let relative = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new("sh")
+        .args(["-c", &format!("{REMOTE_AGENT_DIR_PREFLIGHT}echo done")])
+        .current_dir(relative.path())
+        .env("HOME", "rel")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!relative.path().join("rel").exists());
+}
+
+/// The private directory is created 0700 by the pane command itself, so later panes on the host
+/// bind their forward inside it.
+#[cfg(unix)]
+#[test]
+fn forwarded_remote_shell_creates_private_agent_dir() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = tempfile::tempdir().unwrap();
+    let home = fixture.path().to_str().unwrap().to_string();
+    std::fs::write(fixture.path().join(".profile"), "exit 0\n").unwrap();
+    let plan = shell_plan_with_session(&host(), &home, Some("s1"), Some("/tmp/local.sock"), Some(&home))
+        .expect("plan");
+    let output = std::process::Command::new("sh")
+        .args(["-c", plan.args.last().unwrap()])
+        .env("HOME", fixture.path())
+        .env("SHELL", "/bin/sh")
+        .env_remove("ENV")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let mode = std::fs::metadata(fixture.path().join(".ferryx/a")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+
+    // The backstop never follows a symlink planted at the directory path.
+    let dir = fixture.path().join(".ferryx/a");
+    std::fs::remove_dir(&dir).unwrap();
+    let target = fixture.path().join("elsewhere");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&target, &dir).unwrap();
+    let output = std::process::Command::new("sh")
+        .args(["-c", plan.args.last().unwrap()])
+        .env("HOME", fixture.path())
+        .env("SHELL", "/bin/sh")
+        .env_remove("ENV")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o755);
+}
+
+#[test]
 fn shell_plan_without_a_forwarded_socket_exports_no_herdr_env() {
-    let plan = shell_plan_with_session(&host(), "/srv/repo", Some("session-123"), None)
+    let plan = shell_plan_with_session(&host(), "/srv/repo", Some("session-123"), None, None)
         .expect("plan");
     let remote_cmd = plan.args.last().unwrap();
     assert!(!remote_cmd.contains("HERDR_"), "{remote_cmd}");
@@ -550,7 +708,7 @@ fn forwarded_remote_shell_gets_herdr_env_unless_real_herdr_owns_it() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().to_str().unwrap().to_string();
     std::fs::write(fixture.path().join(".profile"), "env\nexit 0\n").unwrap();
-    let plan = shell_plan_with_session(&host(), &root, Some("session-123"), Some("/tmp/local.sock"))
+    let plan = shell_plan_with_session(&host(), &root, Some("session-123"), Some("/tmp/local.sock"), None)
         .expect("plan");
     let remote_cmd = plan.args.last().unwrap().clone();
     let env_of = |herdr: Option<(&str, &str)>| {
