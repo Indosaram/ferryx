@@ -35,6 +35,32 @@ pub struct AttachCandidates<'a> {
     pub http_client: Option<&'a reqwest::Client>,
 }
 
+/// Typed failure for an attach race in which every candidate was rejected because it named a
+/// machine other than the one being attached to. Never a panic, and never a silent fallback to
+/// a plain relay attach: the caller must not read this as an ordinary transport hiccup.
+pub const ATTACH_IDENTITY_MISMATCH: &str = "ATTACH_IDENTITY_MISMATCH";
+
+/// Whether a candidate can be the machine this attach targets.
+///
+/// Identity is checked here, inside the attempt, so a rejected candidate is torn down while
+/// every other candidate - the relay included - is still live and still able to win. A
+/// candidate that carries no identity claim keeps the historical behaviour: the Noise static
+/// key pin and the prologue-bound machine id remain the only checks.
+fn candidate_names_expected_machine(candidate: &CandidatePath, machine_id: &str) -> bool {
+    match candidate.expected_machine_id.as_deref() {
+        None => true,
+        Some(expected) => expected == machine_id,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn candidate_names_expected_machine_for_test(
+    candidate: &CandidatePath,
+    machine_id: &str,
+) -> bool {
+    candidate_names_expected_machine(candidate, machine_id)
+}
+
 pub async fn attach_paired_session_with_candidates(
     relay_origin: &str,
     session_id: &str,
@@ -74,6 +100,8 @@ pub async fn attach_paired_session_with_candidates(
         let mid = machine_id.to_string();
         let sid = session_id.to_string();
         let epoch = enrollment_epoch.to_string();
+        let rejected = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejections = Arc::clone(&rejected);
 
         let selected = select_and_reuse_channel(
             candidates,
@@ -84,7 +112,12 @@ pub async fn attach_paired_session_with_candidates(
                 let m = mid.clone();
                 let s = sid.clone();
                 let e = epoch.clone();
+                let rejections = Arc::clone(&rejections);
                 async move {
+                    if !candidate_names_expected_machine(&candidate, &m) {
+                        rejections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        return Err(());
+                    }
                     let is_relay = candidate.path == AttachPath::Relay;
                     let url = attach_ws_url(&candidate.base_origin, &s, is_relay);
                     let start = std::time::Instant::now();
@@ -110,6 +143,9 @@ pub async fn attach_paired_session_with_candidates(
         if let Some(winner) = selected {
             confirm_attach_origin(session_id, &winner.base_origin);
             return Ok(winner.channel);
+        }
+        if rejected.load(std::sync::atomic::Ordering::SeqCst) == candidates.len() {
+            return Err(anyhow::anyhow!(ATTACH_IDENTITY_MISMATCH));
         }
     }
 

@@ -359,6 +359,7 @@ fn probe_loop_skips_hosts_without_a_machine_grant() {
         ssh_host_id: None,
         device_id: None,
         unavailable_reason: None,
+        published_origins: Vec::new(),
     };
     assert!(is_probe_target(&host(AuthStatus::Paired, GrantScope::Machine)));
     assert!(
@@ -528,6 +529,7 @@ fn compat_old_and_new_host_view_wire_shapes_parse_both_ways() {
         ssh_host_id: None,
         device_id: Some("d".into()),
         unavailable_reason: None,
+        published_origins: Vec::new(),
     };
     let wire = serde_json::to_string(&new_view).unwrap();
     let legacy: LegacyHostView = serde_json::from_str(&wire).expect("old GUI parses new HostView");
