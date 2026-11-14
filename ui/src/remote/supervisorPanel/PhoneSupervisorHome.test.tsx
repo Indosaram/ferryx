@@ -295,7 +295,9 @@ describe("PhoneSupervisorHome", () => {
 
     const voice = {
       port: {
-        status: vi.fn(),
+        // useVoiceConversation awaits port.status() on mount; a bare vi.fn() returns undefined
+        // and the hook throws on .then before the call entry can render.
+        status: vi.fn(async () => null),
         transcribe: vi.fn(),
         speak: vi.fn(),
       },
