@@ -171,8 +171,8 @@ export const STAGE_TIMEOUT_MS = 120_000;
 export async function stageGeneration(ctx, artifact, { deadlineMs = STAGE_TIMEOUT_MS } = {}) {
   const exe = ctx.platform === 'mac'
     ? hjoin(ctx.stagedRoot, ctx.keys[artifact.name], 'Ferryx Daemon.app', 'Contents', 'MacOS', 'ferryx')
-    // runtime_stage.rs:38 stages ferryx.exe on Windows.
-    : hjoin(ctx.stagedRoot, ctx.keys[artifact.name], ctx.platform === 'windows' ? 'ferryx.exe' : 'ferryx');
+    // runtime_stage.rs WINDOWS_DAEMON_FILE_NAME: Windows stages ferryx-daemon.exe.
+    : hjoin(ctx.stagedRoot, ctx.keys[artifact.name], ctx.platform === 'windows' ? 'ferryx-daemon.exe' : 'ferryx');
   const generationDir = hjoin(ctx.stagedRoot, ctx.keys[artifact.name]);
   const startedAt = Date.now();
   const appeared = await ctx.agent.call('waitPath', { file: generationDir, deadlineMs });

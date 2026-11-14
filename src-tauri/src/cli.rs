@@ -2460,7 +2460,7 @@ pub const UP_EXIT_PLAN_LIMIT: i32 = 6;
 const UP_USAGE: &str = "usage: ferryx-cli up [--key-stdin | --key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]\n  The install key is read from stdin (--key-stdin) or FERRYX_INSTALL_KEY (--key-env, or implicitly when set); it is never accepted as an argument.\n  Without a key, an approval request is created and its URL and code are printed to stderr.";
 
 const SERVICE_USAGE: &str =
-    "usage: ferryx-cli service <install|status|uninstall> [--json]";
+    "usage: ferryx-cli service <install|status|uninstall [--force]> [--json]\n  uninstall removes the daemon's login jobs and leaves a running daemon running; --force also stops it, ending its terminals.";
 
 /// The `ferryx-cli --version` output line.
 pub fn cli_version_line() -> String {
@@ -2939,6 +2939,8 @@ pub enum ServiceCliAction {
 pub struct ServiceCliCommand {
     pub action: ServiceCliAction,
     pub json: bool,
+    /// `uninstall --force`: also stop a running daemon.
+    pub force: bool,
 }
 
 pub fn parse_service_cli<I, T>(args: I) -> Result<ServiceCliCommand, UpCliError>
@@ -2960,9 +2962,11 @@ where
         _ => return Err(UpCliError::usage("CLI_USAGE", SERVICE_USAGE)),
     };
     let mut json = false;
+    let mut force = false;
     for arg in &args[3..] {
         match arg.as_str() {
             "--json" => json = true,
+            "--force" if action == ServiceCliAction::Uninstall => force = true,
             other => {
                 return Err(UpCliError::usage(
                     "CLI_USAGE",
@@ -2971,7 +2975,7 @@ where
             }
         }
     }
-    Ok(ServiceCliCommand { action, json })
+    Ok(ServiceCliCommand { action, json, force })
 }
 
 /// The OS service manager this target's supervisor facade drives.
@@ -3208,30 +3212,71 @@ pub fn service_status(runtime: &tokio::runtime::Runtime) -> ServiceReport {
     }
 }
 
-/// `service uninstall`: removes the supervisor job only when no daemon answers. With a live
-/// daemon only login autostart is removed, so its terminals survive; a detached daemon is never
-/// stopped either.
-pub fn uninstall_service(runtime: &tokio::runtime::Runtime) -> Result<ServiceReport, UpCliError> {
-    if !crate::daemon::supervisor::supported() {
-        let mut report = service_status(runtime);
-        report.reason = Some(format!(
-            "{}; nothing to uninstall, and a running daemon is left running",
-            supervisor_unavailable_reason()
-        ));
-        return Ok(report);
+/// The supervisor operations `service uninstall` needs, injectable so the stop rule is testable.
+trait ServiceUninstallOps {
+    fn supported(&self) -> bool;
+    /// The daemon owner right now, described, or `None` when there is none.
+    fn running_owner(&self) -> Option<String>;
+    /// Removes every generation's job and the legacy job; never stops a daemon.
+    fn remove_jobs(&self) -> Result<(), String>;
+    /// Stops the running daemon (`--force` only); returns how many sessions ended with it.
+    fn stop_daemon(&self) -> Result<u32, String>;
+}
+
+struct SupervisorUninstallOps<'a>(&'a tokio::runtime::Runtime);
+
+impl ServiceUninstallOps for SupervisorUninstallOps<'_> {
+    fn supported(&self) -> bool {
+        crate::daemon::supervisor::supported()
     }
-    if let Some(pid) = answering_daemon_pid(runtime) {
-        crate::daemon::supervisor::remove_autostart()
+    fn running_owner(&self) -> Option<String> {
+        crate::daemon::supervisor::running_owner()
+    }
+    fn remove_jobs(&self) -> Result<(), String> {
+        crate::daemon::supervisor::uninstall()
+    }
+    fn stop_daemon(&self) -> Result<u32, String> {
+        self.0.block_on(crate::daemon::supervisor::shutdown_running_daemon())
+    }
+}
+
+/// The uninstall rule: every job is removed first, so nothing starts a daemon at the next login;
+/// a running daemon is stopped only with `force`, and otherwise left running and named in the
+/// returned reason. Returns the reason to report, if any.
+fn uninstall_service_with(ops: &dyn ServiceUninstallOps, force: bool) -> Result<Option<String>, UpCliError> {
+    let jobs = if ops.supported() {
+        ops.remove_jobs()
             .map_err(|error| UpCliError::other("SERVICE_UNINSTALL_FAILED", error))?;
-        let mut report = service_status(runtime);
-        report.reason = Some(format!(
-            "daemon pid {pid} is running; login autostart was removed and the running daemon was left untouched"
-        ));
-        return Ok(report);
+        "the daemon jobs were removed".to_string()
+    } else {
+        format!("{}; there were no daemon jobs to remove", supervisor_unavailable_reason())
+    };
+    let Some(owner) = ops.running_owner() else {
+        return Ok((!ops.supported()).then_some(jobs));
+    };
+    if !force {
+        return Ok(Some(format!(
+            "{jobs}; daemon {owner} is still running and was left running with its terminals (pass --force to stop it)"
+        )));
     }
-    crate::daemon::supervisor::uninstall()
-        .map_err(|error| UpCliError::other("SERVICE_UNINSTALL_FAILED", error))?;
-    Ok(service_status(runtime))
+    let live = ops.stop_daemon().map_err(|error| {
+        UpCliError::other("SERVICE_STOP_FAILED", format!("{jobs}, but daemon {owner} was not stopped: {error}"))
+    })?;
+    Ok(Some(format!(
+        "{jobs}; daemon {owner} was asked to stop (--force) and {live} live session(s) end with it"
+    )))
+}
+
+/// `service uninstall [--force]`: removes the job of every daemon generation and the legacy job.
+/// A running daemon is never stopped without `force`: it keeps its terminals until it exits, and
+/// nothing starts it again at the next login. A detached daemon is treated the same way.
+pub fn uninstall_service(runtime: &tokio::runtime::Runtime, force: bool) -> Result<ServiceReport, UpCliError> {
+    let reason = uninstall_service_with(&SupervisorUninstallOps(runtime), force)?;
+    let mut report = service_status(runtime);
+    if reason.is_some() {
+        report.reason = reason;
+    }
+    Ok(report)
 }
 
 pub fn render_service_report(report: &ServiceReport) -> String {
@@ -3257,7 +3302,7 @@ pub fn run_service_cli(command: &ServiceCliCommand) -> Result<ServiceReport, UpC
     match command.action {
         ServiceCliAction::Install => Ok(install_service(&runtime)),
         ServiceCliAction::Status => Ok(service_status(&runtime)),
-        ServiceCliAction::Uninstall => uninstall_service(&runtime),
+        ServiceCliAction::Uninstall => uninstall_service(&runtime, command.force),
     }
 }
 
@@ -4187,7 +4232,8 @@ mod tests {
             parse_service_cli(["ferryx-cli", "service", "install", "--json"]).expect("install"),
             ServiceCliCommand {
                 action: ServiceCliAction::Install,
-                json: true
+                json: true,
+                force: false
             }
         );
         assert_eq!(
@@ -4195,16 +4241,107 @@ mod tests {
             ServiceCliAction::Status
         );
         assert_eq!(
-            parse_service_cli(["ferryx-cli", "service", "uninstall"]).expect("uninstall").action,
-            ServiceCliAction::Uninstall
+            parse_service_cli(["ferryx-cli", "service", "uninstall"]).expect("uninstall"),
+            ServiceCliCommand {
+                action: ServiceCliAction::Uninstall,
+                json: false,
+                force: false
+            }
+        );
+        assert_eq!(
+            parse_service_cli(["ferryx-cli", "service", "uninstall", "--force", "--json"]).expect("uninstall --force"),
+            ServiceCliCommand {
+                action: ServiceCliAction::Uninstall,
+                json: true,
+                force: true
+            }
         );
         for args in [
             vec!["ferryx-cli", "service"],
             vec!["ferryx-cli", "service", "restart"],
             vec!["ferryx-cli", "service", "status", "--force"],
+            vec!["ferryx-cli", "service", "install", "--force"],
         ] {
             assert_eq!(parse_service_cli(&args).unwrap_err().exit_code, UP_EXIT_USAGE, "{args:?}");
         }
+    }
+
+    /// Records what `service uninstall` asked of the supervisor.
+    struct FakeUninstallOps {
+        supported: bool,
+        owner: Option<String>,
+        stop: Result<u32, String>,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl FakeUninstallOps {
+        fn new(owner: Option<&str>) -> Self {
+            Self {
+                supported: true,
+                owner: owner.map(str::to_string),
+                stop: Ok(2),
+                calls: Default::default(),
+            }
+        }
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl ServiceUninstallOps for FakeUninstallOps {
+        fn supported(&self) -> bool {
+            self.supported
+        }
+        fn running_owner(&self) -> Option<String> {
+            self.owner.clone()
+        }
+        fn remove_jobs(&self) -> Result<(), String> {
+            self.calls.borrow_mut().push("remove_jobs");
+            Ok(())
+        }
+        fn stop_daemon(&self) -> Result<u32, String> {
+            self.calls.borrow_mut().push("stop_daemon");
+            self.stop.clone()
+        }
+    }
+
+    #[test]
+    fn uninstall_removes_jobs_and_leaves_a_live_daemon_running_without_force() {
+        let ops = FakeUninstallOps::new(Some("pid 42"));
+        let reason = uninstall_service_with(&ops, false).unwrap().expect("says so");
+        assert_eq!(ops.calls(), vec!["remove_jobs"], "never stops without --force");
+        assert!(reason.contains("pid 42 is still running"), "{reason}");
+        assert!(reason.contains("--force"), "{reason}");
+
+        let idle = FakeUninstallOps::new(None);
+        assert_eq!(uninstall_service_with(&idle, false).unwrap(), None);
+        assert_eq!(idle.calls(), vec!["remove_jobs"]);
+        let forced_idle = FakeUninstallOps::new(None);
+        assert_eq!(uninstall_service_with(&forced_idle, true).unwrap(), None);
+        assert_eq!(forced_idle.calls(), vec!["remove_jobs"], "--force with no daemon stops nothing");
+    }
+
+    #[test]
+    fn uninstall_force_stops_a_live_daemon_after_removing_its_jobs() {
+        let ops = FakeUninstallOps::new(Some("pid 42"));
+        let reason = uninstall_service_with(&ops, true).unwrap().expect("says so");
+        assert_eq!(ops.calls(), vec!["remove_jobs", "stop_daemon"]);
+        assert!(reason.contains("2 live session(s)"), "{reason}");
+
+        let mut refused = FakeUninstallOps::new(Some("pid 42"));
+        refused.stop = Err("COUNT_CHANGED".to_string());
+        let error = uninstall_service_with(&refused, true).unwrap_err();
+        assert_eq!(error.exit_code, UP_EXIT_OTHER);
+        assert_eq!(refused.calls(), vec!["remove_jobs", "stop_daemon"]);
+
+        // Without a supervisor (a detached daemon) there are no jobs; --force still stops it, and
+        // without --force it is left running.
+        let mut detached = FakeUninstallOps::new(Some("pid 42"));
+        detached.supported = false;
+        assert!(uninstall_service_with(&detached, false).unwrap().unwrap().contains("--force"));
+        assert!(detached.calls().is_empty(), "nothing removed, nothing stopped");
+        assert!(uninstall_service_with(&detached, true).is_ok());
+        assert_eq!(detached.calls(), vec!["stop_daemon"]);
     }
 
     #[test]

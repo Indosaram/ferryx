@@ -324,12 +324,62 @@ impl crate::daemon::handover_request::CandidateStarter for ProcessCandidateStart
     }
 }
 
-/// Stops and removes the unit; a missing unit is success.
+/// Explicit user uninstall: removes the job of every daemon generation and the legacy job, so
+/// nothing starts a daemon at the next login. Nothing running is stopped: macOS boots out only a
+/// job with no process and merely deletes the plist of a running one (launchd keeps it loaded
+/// until logout), Linux `disable`s without `--now` and deletes the unit files (a running unit
+/// stays loaded until it exits), and Windows deletes the tasks (`/Delete` never ends a running
+/// watchdog). Ending a live daemon is [`shutdown_running_daemon`]'s job and needs the user's
+/// explicit consent. A missing job is success.
 pub fn uninstall() -> Result<()> {
     if !supported() {
         return Err("No daemon supervisor is supported in this runtime".to_string());
     }
     backend::uninstall(&process_env)
+}
+
+/// The daemon owner as owner admission classifies it right now: `None` when no daemon owns the
+/// endpoint, else a short description (`pid N`, or why the owner cannot be identified).
+pub fn running_owner() -> Option<String> {
+    use crate::daemon::owner_admission::{classify_owner, AdmissionPaths, OwnerState, RuntimeProbe};
+    let paths = AdmissionPaths::for_runtime();
+    match classify_owner(&RuntimeProbe { paths: &paths }) {
+        OwnerState::Absent => None,
+        OwnerState::Alive { pid, .. } => Some(format!("pid {pid}")),
+        OwnerState::Unknown { reason } => Some(format!("an unidentified owner ({reason})")),
+    }
+}
+
+/// `service uninstall --force` only: asks the running daemon over the control channel to shut
+/// down, confirming exactly the live session count its Inventory reported, so the daemon itself
+/// refuses when a session appeared in between. Returns the number of sessions that end with it.
+/// Never signals or kills a process.
+pub async fn shutdown_running_daemon() -> Result<u32> {
+    use crate::daemon::control::{self, ControlConnection, ControlReply, ControlRequest};
+    use crate::daemon::update_pending::{restart_terminals, RestartOutcome};
+    let runtime_dir = crate::daemon::server::get_runtime_dir();
+    let live = match control::connect(&runtime_dir).await {
+        Ok(ControlConnection::Connected(mut client)) => match client.call(&ControlRequest::Inventory).await {
+            Ok(ControlReply::Inventory(inventory)) => inventory.total(),
+            Ok(other) => return Err(format!("the running daemon refused Inventory: {other:?}")),
+            Err(error) => return Err(format!("control Inventory failed: {error}")),
+        },
+        Ok(ControlConnection::Missing) => {
+            return Err("the running daemon has no control endpoint, so it cannot be stopped from here".to_string())
+        }
+        Err(error) => return Err(format!("control connect failed: {error}")),
+    };
+    match restart_terminals(&runtime_dir, live).await? {
+        RestartOutcome::Accepted { live } => Ok(live),
+        RestartOutcome::CountChanged { live } => Err(format!(
+            "the live session count changed to {} while stopping; nothing was stopped",
+            live.map_or_else(|| "unknown".to_string(), |live| live.to_string())
+        )),
+        RestartOutcome::Refused { code } => Err(format!("the running daemon refused Shutdown ({code})")),
+        RestartOutcome::Unavailable => {
+            Err("the running daemon has no control endpoint, so it cannot be stopped from here".to_string())
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -473,7 +523,8 @@ mod backend {
     }
 
     /// The plist half of login registration: `job` gets `RunAtLoad` true, every other generation
-    /// in the agents dir loses its load-time launch. No runtime garbage collection.
+    /// in the agents dir loses its load-time launch, and the idle plists of superseded generations
+    /// are deleted ([`superseded_labels`]). No runtime garbage collection.
     pub(super) fn login_registration_with(
         launchctl: &dyn generation::Launchctl,
         uid: u32,
@@ -483,8 +534,36 @@ mod backend {
         let dir = agents_dir(env)?;
         let base = label_base(env);
         let mut changed = generation::register_newest_for_login(job)?;
-        changed |= generation::retire_older_generations(launchctl, uid, &dir, &base, &job.label)?;
+        let deletable = superseded_labels(&dir, &base, &job.label);
+        changed |= generation::retire_older_generations(
+            launchctl, uid, &dir, &base, &job.label, &deletable,
+        )?;
         Ok((changed, dir, base))
+    }
+
+    /// Labels of the generations whose plist may be deleted (`runtime_stage::superseded_job_keys`):
+    /// never `newest_label`, the next newest generation, or one a process runs from. Nothing when
+    /// the runtime root or the agents dir cannot be read.
+    fn superseded_labels(dir: &Path, base: &str, newest_label: &str) -> Vec<String> {
+        let prefix = format!("{base}.");
+        let (Some(root), Some(current), Ok(plists)) = (
+            crate::daemon::server::daemon_runtime_root(),
+            newest_label.strip_prefix(&prefix),
+            generation::generation_plists(dir, base),
+        ) else {
+            return Vec::new();
+        };
+        let keys: Vec<String> = plists
+            .iter()
+            .filter_map(|(label, _)| label.strip_prefix(&prefix).map(str::to_string))
+            .collect();
+        let usage = runtime_stage::SystemRuntimeUsage {
+            registered_job_executables: Vec::new(),
+        };
+        runtime_stage::superseded_job_keys(&root, &keys, current, &usage)
+            .iter()
+            .map(|key| generation::generation_label(base, key))
+            .collect()
     }
 
     /// Every executable a registered job references is kept, including the legacy job's. When any
@@ -535,16 +614,15 @@ mod backend {
         Err("Reloading a launchd daemon job is not supported; it would stop the live daemon".to_string())
     }
 
-    /// Explicit user uninstall: unloads and removes every generation job and the legacy job.
+    /// Explicit user uninstall: every generation job and every legacy job lose their plist; only
+    /// a job without a process is booted out ([`generation::remove_jobs`]).
     pub fn uninstall(env: Env<'_>) -> Result<()> {
         let dir = agents_dir(env)?;
-        for (_, path) in generation::generation_plists(&dir, &label_base(env))? {
-            launchd::uninstall_launchd_agent_from_path(&path)?;
-        }
-        match legacy_plist_path(env) {
-            Some(legacy) => launchd::uninstall_launchd_agent_from_path(&legacy),
-            None => Ok(()),
-        }
+        let mut jobs = generation::generation_plists(&dir, &label_base(env))?;
+        jobs.extend(legacy_jobs(env)?);
+        let removed = generation::remove_jobs(&generation::SystemLaunchctl, uid(), &jobs)?;
+        tracing::info!(?removed, "Removed the daemon launchd jobs");
+        Ok(())
     }
 
     pub fn installed(env: Env<'_>) -> bool {
@@ -617,7 +695,7 @@ mod backend {
 
     /// The Store owns an MSIX install's lifecycle, so it never gets a task.
     pub fn install_supported() -> bool {
-        task::supported_for_install(crate::ipc::updater::updater_managed_externally())
+        task::supported_for_install(crate::ipc::updater::store_install())
     }
 
     /// The Task Scheduler is part of every supported Windows install.
@@ -752,8 +830,9 @@ mod backend {
     }
 
     /// Writes this build's generation unit and enables it for login without `--now`; older
-    /// generations are disabled without `--now`. A running unit is untouched. Garbage collection
-    /// runs after registration, so the unit just written already protects its runtime.
+    /// generations are disabled without `--now`. A running unit is untouched. Then the idle,
+    /// disabled units of superseded generations are deleted and garbage collection runs, so the unit
+    /// just written already protects its runtime and a deleted unit no longer protects an old one.
     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
         let (base, name, path, staged) = generation_unit(env, executable)?;
         register_unit_for_login(&base, &name, &path, &staged)
@@ -770,9 +849,27 @@ mod backend {
     fn register_unit_for_login(base: &str, name: &str, path: &Path, staged: &Path) -> Result<bool> {
         let rewritten = supervisor_linux::register_for_login(base, name, path, staged)?;
         if let Some(unit_dir) = path.parent() {
+            remove_superseded_units(unit_dir, base, name);
             collect_runtime_garbage(unit_dir);
         }
         Ok(rewritten)
+    }
+
+    /// Deletes superseded generation units (`supervisor_linux::remove_superseded_units`); a failure
+    /// only keeps their runtimes until the next registration.
+    fn remove_superseded_units(unit_dir: &Path, base: &str, newest: &str) {
+        let Some(root) = crate::daemon::server::daemon_runtime_root() else {
+            return;
+        };
+        match supervisor_linux::remove_superseded_units(&root, unit_dir, base, newest) {
+            Ok(removed) if !removed.is_empty() => {
+                tracing::info!(?removed, "Removed superseded daemon generation units")
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "Could not remove superseded daemon generation units")
+            }
+        }
     }
 
     /// The legacy single unit `<base>.service`: disabled without `--now` for an Alive/Unknown
@@ -786,9 +883,14 @@ mod backend {
         supervisor_linux::start(&unit(env)?.0)
     }
 
+    /// Every generation unit and the legacy unit: `disable` without `--now`, unit file and secret
+    /// env file removed; nothing is stopped.
     pub fn uninstall(env: Env<'_>) -> Result<()> {
-        let (name, path) = unit(env)?;
-        supervisor_linux::uninstall(&name, &path)
+        let (base, path) = unit(env)?;
+        let unit_dir = path
+            .parent()
+            .ok_or("Cannot determine the systemd user unit directory")?;
+        supervisor_linux::uninstall(unit_dir, &base).map(|_| ())
     }
 
     pub fn installed(env: Env<'_>) -> bool {

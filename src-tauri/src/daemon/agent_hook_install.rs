@@ -175,10 +175,12 @@ fn ferryx_command_event<'a>(command: &'a str, agent: &str) -> Option<&'a str> {
     // other platform, and `Path` only knows this one's.
     let name = exe.rsplit(['/', '\\']).next()?;
     // `ferryx-remote-helper` is the reporter the SSH integration installs on a remote host
-    // (`ssh/remote_hooks.rs`); it runs the same `agent-hook` code.
+    // (`ssh/remote_hooks.rs`); it runs the same `agent-hook` code. `ferryx-daemon.exe` is the
+    // staged Windows daemon (`runtime_stage::WINDOWS_DAEMON_FILE_NAME`), whose own path the hooks
+    // name; `ferryx.exe` also covers generations staged by older builds.
     matches!(
         name,
-        "ferryx" | "ferryx.exe" | "ferryx-remote-helper" | "ferryx-remote-helper.exe"
+        "ferryx" | "ferryx.exe" | "ferryx-daemon.exe" | "ferryx-remote-helper" | "ferryx-remote-helper.exe"
     )
     .then_some(event)
 }
@@ -971,6 +973,16 @@ mod tests {
         }
         #[cfg(windows)]
         assert_eq!(ferryx_command_event("\"C:\\x\\ferryx.exe\" agent-hook codex Stop", "codex"), Some("Stop"));
+        // The staged Windows daemon's own path, and the legacy staged name, round-trip on every host
+        // (the desktop also recognises entries written for a Windows remote).
+        for exe in [
+            format!(r"C:\Users\u\AppData\Local\Ferryx\daemon-runtime\k\{}", crate::daemon::runtime_stage::WINDOWS_DAEMON_FILE_NAME),
+            format!(r"C:\Users\u\AppData\Local\Ferryx\daemon-runtime\k\{}", crate::daemon::runtime_stage::WINDOWS_LEGACY_DAEMON_FILE_NAME),
+        ] {
+            let command = hook_command_for(&exe, true, "claude", "Stop");
+            assert_eq!(ferryx_command_event(&command, "claude"), Some("Stop"), "{command}");
+        }
+        assert_eq!(ferryx_command_event("\"C:\\x\\ferryx-daemonx.exe\" agent-hook claude Stop", "claude"), None);
         assert_eq!(ferryx_command_event("'/bin/ferryx' agent-hook claude Stop; rm -rf /", "claude"), None);
         assert_eq!(ferryx_command_event("ferryx agent-hook claude Stop", "claude"), None);
     }

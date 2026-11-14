@@ -1443,6 +1443,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
                     "Could not arm the daemon supervisor; the daemon will be spawned detached"
                 ),
             });
+            // A CLI launcher installed earlier keeps working after the app is moved or the
+            // AppImage is swapped; a missing or foreign launcher is left alone.
+            tauri::async_runtime::spawn_blocking(
+                crate::ipc::cli_install::refresh_launcher_on_start,
+            );
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(raw_window) = window.ns_window() {

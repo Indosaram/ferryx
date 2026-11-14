@@ -46,6 +46,8 @@
 | **omaki** | Arch Linux x86_64 | `0.16.0-3` | Local NVMe (`/home/indo/.cache/sccache`, 50 GiB max) | `/home/indo/.cargo/config.toml` (`/usr/bin/sccache`) | `/home/indo/ferryx-release` |
 | **maho-win** | Windows 11 x86_64 | `0.17.0` | Local disk (`C:\Users\sook\.cache\maho\sccache`, 50 GiB max) | `C:\Users\sook\.cargo\config.toml` (`sccache.exe`) | `C:\Users\sook\ferryx-winbuild\ferryx-release` |
 
+glibc floors of the Linux artifacts produced by `bun run release:local` (`createLinuxBuildScript` in `scripts/lib/release-platforms.mjs`): the AppImage and deb are built inside an Ubuntu 22.04 container (`packaging/linux/bundle.Dockerfile`; glibc 2.35, webkit2gtk-4.1), so omaki needs Docker; `ferryx-cli-linux-amd64` is cross-linked with `cargo zigbuild --target x86_64-unknown-linux-gnu.2.17`, so omaki needs `cargo-zigbuild`. The Linux receipt records both under `toolchains.linuxBuilder`. On maho-win the same run also builds `ferryx-cli-windows-amd64.exe`.
+
 ---
 
 ## 4. Release Execution Guide (Incremental)

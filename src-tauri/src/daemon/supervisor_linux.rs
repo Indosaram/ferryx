@@ -6,7 +6,8 @@
 //! never the app install. Starting is idempotent and never disturbs a running unit: an active unit
 //! gets zero `systemctl` mutations, an idle one is written, reloaded and `start --no-block`ed.
 //! Only the newest generation is enabled for login; older ones are disabled without `--now`, so
-//! they keep running until their daemon exits on its own.
+//! they keep running until their daemon exits on its own. Once idle, the unit files of all but the
+//! newest two generations are deleted, so their staged runtimes can be garbage collected.
 //!
 //! The unit is `Type=notify`: the daemon reports `READY=1` once it serves its socket. A handover
 //! successor is forked by the predecessor, so it lives in the unit's cgroup; it reports
@@ -24,6 +25,7 @@
 //! reads through an optional `EnvironmentFile=-`, so a systemd restart still sees them.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
+use crate::daemon::runtime_stage;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write as _;
@@ -622,6 +624,82 @@ pub(crate) fn register_generation_with(
     Ok(rewritten)
 }
 
+/// Deletes the unit files of superseded generations of `base` in `unit_dir`, after
+/// [`register_generation_with`] disabled them, so a unit naming an old runtime no longer keeps it
+/// from garbage collection. The candidates are [`runtime_stage::superseded_job_keys`]: `newest`
+/// and the next newest generation keep their units, and so does every generation a running process
+/// executes from. A candidate also keeps its file while it is still enabled (its
+/// `default.target.wants` link exists) or not idle (`inactive` or `failed`), including when its
+/// state cannot be read. One `daemon-reload` after any removal; never `stop`, `kill` or `--now`.
+/// Returns the removed unit names.
+pub(crate) fn remove_superseded_units_with(
+    systemctl: &dyn Systemctl,
+    runtime_root: &Path,
+    unit_dir: &Path,
+    base: &str,
+    newest: &str,
+    usage: &dyn runtime_stage::RuntimeUsage,
+) -> Result<Vec<String>, String> {
+    let prefix = format!("{base}-");
+    let Some(current) = newest.strip_prefix(&prefix) else {
+        return Ok(Vec::new());
+    };
+    let keys: Vec<String> = generation_units_in(unit_dir, base)
+        .into_iter()
+        .filter_map(|(name, _)| name.strip_prefix(&prefix).map(str::to_string))
+        .collect();
+    let mut removed = Vec::new();
+    for key in runtime_stage::superseded_job_keys(runtime_root, &keys, current, usage) {
+        let name = format!("{prefix}{key}");
+        let unit = format!("{name}.service");
+        let wants = unit_dir.join("default.target.wants").join(&unit);
+        if fs::symlink_metadata(&wants).is_ok() {
+            continue;
+        }
+        match unit_is_busy(systemctl, &name) {
+            Ok(false) => {}
+            Ok(true) => continue,
+            Err(error) => {
+                tracing::warn!(%error, unit = %name, "Cannot read a superseded daemon unit's state; keeping its unit file");
+                continue;
+            }
+        }
+        match fs::remove_file(unit_dir.join(&unit)) {
+            Ok(()) => removed.push(name),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(%error, unit = %name, "Could not remove a superseded daemon unit file");
+            }
+        }
+    }
+    if !removed.is_empty() {
+        systemctl.run(&["daemon-reload"])?;
+    }
+    Ok(removed)
+}
+
+/// [`remove_superseded_units_with`] for the real user manager and process table; a removed unit
+/// also loses its secret env file.
+#[cfg(target_os = "linux")]
+pub(crate) fn remove_superseded_units(
+    runtime_root: &Path,
+    unit_dir: &Path,
+    base: &str,
+    newest: &str,
+) -> Result<Vec<String>, String> {
+    let usage = runtime_stage::SystemRuntimeUsage {
+        registered_job_executables: Vec::new(),
+    };
+    let removed =
+        remove_superseded_units_with(&UserSystemctl, runtime_root, unit_dir, base, newest, &usage)?;
+    for name in &removed {
+        if let Err(error) = remove_secret_env(name) {
+            tracing::warn!(%error, unit = %name, "Could not remove a superseded daemon unit's secret env file");
+        }
+    }
+    Ok(removed)
+}
+
 /// [`ensure_generation_with`] for the real user manager, keeping the unit's secret env file in sync
 /// first.
 #[cfg(target_os = "linux")]
@@ -686,22 +764,54 @@ pub(crate) fn register_for_login(
     register_generation_with(&UserSystemctl, base, name, path, &content)
 }
 
-/// `disable --now` and delete the unit file; a missing unit is success.
-#[cfg(target_os = "linux")]
-pub(crate) fn uninstall(name: &str, path: &Path) -> Result<(), String> {
-    let unit = format!("{name}.service");
-    if let Err(error) = systemctl(&["disable", "--now", &unit]) {
-        if path.exists() {
-            return Err(error);
+/// Explicit user uninstall of every generation unit of `base` in `unit_dir` and of the legacy
+/// base unit: each is `disable`d without `--now` and its unit file deleted, then one
+/// `daemon-reload`. Never `stop`, `kill` or `--now`: a running unit stays loaded with its daemon
+/// until that exits, and nothing starts it at the next login. Every unit is tried even when one
+/// fails; the failures are reported together. Returns the removed unit names.
+pub(crate) fn uninstall_with(
+    systemctl: &dyn Systemctl,
+    unit_dir: &Path,
+    base: &str,
+) -> Result<Vec<String>, String> {
+    let mut units = generation_units_in(unit_dir, base);
+    let legacy = unit_dir.join(format!("{base}.service"));
+    if legacy.exists() {
+        units.push((base.to_string(), legacy));
+    }
+    let mut removed = Vec::new();
+    let mut failures = Vec::new();
+    for (name, path) in units {
+        if let Err(error) = systemctl.run(&["disable", &format!("{name}.service")]) {
+            failures.push(error);
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed.push(name),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push(format!("Failed to remove {}: {error}", path.display())),
         }
     }
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("Failed to remove the systemd user unit: {error}")),
+    if !removed.is_empty() {
+        if let Err(error) = systemctl.run(&["daemon-reload"]) {
+            failures.push(error);
+        }
     }
-    remove_secret_env(name)?;
-    systemctl(&["daemon-reload"]).map(|_| ())
+    if failures.is_empty() {
+        Ok(removed)
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+/// [`uninstall_with`] for the real user manager; a removed unit also loses its secret env file.
+#[cfg(target_os = "linux")]
+pub(crate) fn uninstall(unit_dir: &Path, base: &str) -> Result<Vec<String>, String> {
+    let removed = uninstall_with(&UserSystemctl, unit_dir, base)?;
+    for name in &removed {
+        remove_secret_env(name)?;
+    }
+    Ok(removed)
 }
 
 /// Migrates the legacy single unit `name` (`ferryx-daemon`, or the QA base) at `path` for the
@@ -1514,6 +1624,121 @@ mod tests {
         );
     }
 
+    /// After upgrades, the idle and disabled units of all but the newest two generations are
+    /// deleted, and garbage collection then removes their runtimes. A unit that is still active,
+    /// or still enabled, keeps its file and protects its runtime until a later registration.
+    #[test]
+    fn superseded_idle_disabled_units_are_deleted_and_their_runtimes_collected() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("daemon-runtime");
+        let unit_dir = temp.path().join("systemd/user");
+        fs::create_dir_all(unit_dir.join("default.target.wants")).unwrap();
+        let names: Vec<String> = (1..=5)
+            .map(|index| {
+                let key = format!("2026.1027.{index}-0000000{index}");
+                let executable = root.join(&key).join("ferryx");
+                fs::create_dir_all(executable.parent().unwrap()).unwrap();
+                fs::write(&executable, key.as_bytes()).unwrap();
+                fs::write(
+                    root.join(&key).join(runtime_stage::STAGED_AT_FILE),
+                    index.to_string(),
+                )
+                .unwrap();
+                let name = generation_unit_name(DEFAULT_UNIT_NAME, &key).unwrap();
+                fs::write(
+                    unit_dir.join(format!("{name}.service")),
+                    render(executable.to_str().unwrap()),
+                )
+                .unwrap();
+                name
+            })
+            .collect();
+        let unit_exists = |name: &str| unit_dir.join(format!("{name}.service")).exists();
+        // Generation 3 is still enabled (its disable failed); generation 2 still runs.
+        let wants = unit_dir
+            .join("default.target.wants")
+            .join(format!("{}.service", names[2]));
+        std::os::unix::fs::symlink(unit_dir.join(format!("{}.service", names[2])), &wants).unwrap();
+        let no_process = runtime_stage::SystemRuntimeUsage {
+            registered_job_executables: Vec::new(),
+        };
+        let collect = |unit_dir: &Path| {
+            let usage = runtime_stage::SystemRuntimeUsage {
+                registered_job_executables: registered_job_executables(unit_dir),
+            };
+            runtime_stage::collect_garbage(&root, &usage).unwrap()
+        };
+        assert!(
+            collect(&unit_dir).is_empty(),
+            "every unit still protects its runtime"
+        );
+
+        let systemctl =
+            FakeSystemctl::with_states(&[(&names[0], "inactive"), (&names[1], "active")]);
+        let removed = remove_superseded_units_with(
+            &systemctl,
+            &root,
+            &unit_dir,
+            DEFAULT_UNIT_NAME,
+            &names[4],
+            &no_process,
+        );
+
+        assert_eq!(removed, Ok(vec![names[0].clone()]));
+        assert_eq!(systemctl.mutations(), [call(&["daemon-reload"])]);
+        assert_never_stops(&systemctl.calls());
+        assert!(!unit_exists(&names[0]));
+        assert!(names[1..].iter().all(|name| unit_exists(name)));
+        assert_eq!(collect(&unit_dir), vec!["2026.1027.1-00000001".to_string()]);
+
+        // Once generations 2 and 3 are idle and disabled, two generations and two units remain.
+        fs::remove_file(&wants).unwrap();
+        let systemctl =
+            FakeSystemctl::with_states(&[(&names[1], "failed"), (&names[2], "inactive")]);
+        let mut removed = remove_superseded_units_with(
+            &systemctl,
+            &root,
+            &unit_dir,
+            DEFAULT_UNIT_NAME,
+            &names[4],
+            &no_process,
+        )
+        .unwrap();
+        removed.sort();
+        assert_eq!(removed, names[1..3].to_vec());
+        assert_eq!(collect(&unit_dir).len(), 2);
+        let mut remaining: Vec<String> = generation_units_in(&unit_dir, DEFAULT_UNIT_NAME)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, names[3..].to_vec());
+        let mut generations: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        generations.sort();
+        assert_eq!(
+            generations,
+            ["2026.1027.4-00000004", "2026.1027.5-00000005"]
+        );
+
+        // Nothing is left to supersede: no state query and no reload.
+        let systemctl = FakeSystemctl::with_states(&[]);
+        assert_eq!(
+            remove_superseded_units_with(
+                &systemctl,
+                &root,
+                &unit_dir,
+                DEFAULT_UNIT_NAME,
+                &names[4],
+                &no_process
+            ),
+            Ok(Vec::new())
+        );
+        assert!(systemctl.calls().is_empty(), "{:?}", systemctl.calls());
+    }
+
     /// Opt-out disables every generation and the legacy unit, never with `--now` and never with
     /// `stop`/`restart`/`kill`, and leaves every unit file in place (a running daemon keeps its
     /// definition). A unit with no file (no legacy unit) is not touched.
@@ -1556,6 +1781,43 @@ mod tests {
         let systemctl = FakeSystemctl::with_states(&[]);
         remove_login_autostart_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap();
         assert_eq!(systemctl.calls().len(), 2, "{:?}", systemctl.calls());
+    }
+
+    /// `service uninstall`: every generation unit and the legacy unit are disabled without `--now`
+    /// and their unit files deleted, running or not; one `daemon-reload`, nothing stopped.
+    #[test]
+    fn uninstall_removes_every_generation_and_the_legacy_unit_without_stopping_any() {
+        let dir = tempfile::tempdir().unwrap();
+        let newest = generation_unit_name(DEFAULT_UNIT_NAME, KEY).unwrap();
+        let older = generation_unit_name(DEFAULT_UNIT_NAME, OLDER_KEY).unwrap();
+        fs::write(dir.path().join(format!("{newest}.service")), render(STAGED)).unwrap();
+        fs::write(dir.path().join(format!("{older}.service")), render("/opt/old/ferryx")).unwrap();
+        fs::write(dir.path().join("ferryx-daemon.service"), render("/opt/ferryx/ferryx")).unwrap();
+        let qa = dir.path().join("ferryx-daemon-qa-1.service");
+        fs::write(&qa, render("/opt/qa/ferryx")).unwrap();
+
+        let systemctl = FakeSystemctl::with_states(&[(&newest, "active"), (&older, "inactive")]);
+        let removed = uninstall_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME).unwrap();
+
+        assert_eq!(removed, vec![older.clone(), newest.clone(), "ferryx-daemon".to_string()]);
+        assert_eq!(
+            systemctl.calls(),
+            vec![
+                call(&["disable", &format!("{older}.service")]),
+                call(&["disable", &format!("{newest}.service")]),
+                call(&["disable", "ferryx-daemon.service"]),
+                call(&["daemon-reload"]),
+            ],
+            "no stop, no --now, no state gate"
+        );
+        assert!(generation_units_in(dir.path(), DEFAULT_UNIT_NAME).is_empty());
+        assert!(!dir.path().join("ferryx-daemon.service").exists());
+        assert!(qa.exists(), "another base's unit is not ours");
+
+        // A second uninstall finds nothing and calls nothing.
+        let systemctl = FakeSystemctl::with_states(&[]);
+        assert_eq!(uninstall_with(&systemctl, dir.path(), DEFAULT_UNIT_NAME), Ok(Vec::new()));
+        assert!(systemctl.calls().is_empty(), "{:?}", systemctl.calls());
     }
 
     /// After opt-out the GUI still starts an idle newest generation with `start` through the user

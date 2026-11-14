@@ -573,16 +573,19 @@ pub(crate) mod generation {
         Ok(true)
     }
 
-    /// Every generation except `newest_label` loses login autostart by plist rewrite; its plist is
-    /// deleted only when launchd reports no process for it (not registered, or registered and
-    /// idle). Only `launchctl print` runs: an older generation is never booted out, unloaded or
-    /// kickstarted. Returns whether any file changed.
+    /// Every generation except `newest_label` loses login autostart by plist rewrite. The plist of
+    /// a generation in `deletable` (`runtime_stage::superseded_job_keys`: never the newest two
+    /// generations or one a process runs from) is then deleted, so it no longer keeps its runtime
+    /// from garbage collection, but only when launchd reports no process for it (not registered,
+    /// or registered and idle). Only `launchctl print` runs: an older generation is never booted
+    /// out, unloaded or kickstarted. Returns whether any file changed.
     pub(crate) fn retire_older_generations(
         launchctl: &dyn Launchctl,
         uid: u32,
         dir: &Path,
         base: &str,
         newest_label: &str,
+        deletable: &[String],
     ) -> Result<bool, String> {
         let mut changed = false;
         for (label, path) in generation_plists(dir, base)? {
@@ -590,6 +593,9 @@ pub(crate) mod generation {
                 continue;
             }
             changed |= disable_login_autostart(&path)?;
+            if !deletable.contains(&label) {
+                continue;
+            }
             match print_job(launchctl, uid, &label) {
                 JobState::NotRegistered | JobState::RegisteredIdle => match fs::remove_file(&path) {
                     Ok(()) => changed = true,
@@ -658,6 +664,43 @@ pub(crate) mod generation {
         fs::write(plist_path, disabled)
             .map_err(|e| format!("Failed to rewrite {}: {e}", plist_path.display()))?;
         Ok(true)
+    }
+
+    /// Explicit user uninstall of `jobs` (`(label, plist path)`): every plist is deleted, so
+    /// launchd starts none of them at the next login. A job with no process (not registered, or
+    /// registered and idle) is also booted out; a running or unverifiable job only loses its file
+    /// and stays loaded with its daemon until it exits or the user logs out, so no live daemon is
+    /// ever stopped here. A missing plist with no registered job is skipped. Every job is tried;
+    /// the failures are reported together. Returns the labels whose plist was removed.
+    pub(crate) fn remove_jobs(
+        launchctl: &dyn Launchctl,
+        uid: u32,
+        jobs: &[(String, PathBuf)],
+    ) -> Result<Vec<String>, String> {
+        let mut removed = Vec::new();
+        let mut failures = Vec::new();
+        for (label, path) in jobs {
+            let state = print_job(launchctl, uid, label);
+            if state == JobState::RegisteredIdle {
+                let target = format!("gui/{uid}/{label}");
+                if let Err(error) = mutate(launchctl, &["bootout", target.as_str()]) {
+                    failures.push(error);
+                    continue;
+                }
+            } else if let JobState::Running { .. } | JobState::Unverifiable { .. } = state {
+                tracing::info!(%label, ?state, "A daemon job still has a process; only its plist is removed");
+            }
+            match fs::remove_file(path) {
+                Ok(()) => removed.push(label.clone()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => failures.push(format!("Failed to remove {}: {e}", path.display())),
+            }
+        }
+        if failures.is_empty() {
+            Ok(removed)
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     /// First `ProgramArguments` entry of a plist: the executable launchd runs.
@@ -879,6 +922,46 @@ mod tests {
             }
         }
 
+        /// `service uninstall`: every plist is deleted; only a job with no process is booted out, so
+        /// a running or unverifiable job keeps its daemon.
+        #[test]
+        fn uninstall_removes_every_plist_and_boots_out_only_idle_jobs() {
+            let dir = tempfile::tempdir().unwrap();
+            let labels = [
+                generation_label(BASE, "2026.1011.1-00000001"),
+                generation_label(BASE, "2026.1012.1-00000002"),
+                generation_label(BASE, KEY),
+                BASE.to_string(),
+                "com.rorca.daemon".to_string(),
+            ];
+            let mut jobs = Vec::new();
+            for label in &labels {
+                let path = dir.path().join(format!("{label}.plist"));
+                fs::write(&path, "<plist/>").unwrap();
+                jobs.push((label.clone(), path));
+            }
+            jobs.push(("com.ferryx.daemon.gone".to_string(), dir.path().join("com.ferryx.daemon.gone.plist")));
+            let launchctl = FakeLaunchctl::default()
+                .idle(&labels[0])
+                .not_registered(&labels[1])
+                .running(&labels[2], 4242)
+                .with_print(&labels[3], false, "", "launchctl exploded")
+                .running(&labels[4], 77)
+                .not_registered("com.ferryx.daemon.gone");
+
+            let removed = remove_jobs(&launchctl, UID, &jobs).unwrap();
+
+            assert_eq!(removed, labels.to_vec());
+            assert_eq!(
+                launchctl.mutations(),
+                vec![vec!["bootout".to_string(), format!("gui/{UID}/{}", labels[0])]],
+                "a running or unverifiable job is never booted out"
+            );
+            for (label, path) in &jobs {
+                assert!(!path.exists(), "{label}");
+            }
+        }
+
         #[test]
         fn generation_plist_names_staged_runtime_label_and_abandons_process_group() {
             let dir = tempfile::tempdir().unwrap();
@@ -1030,7 +1113,9 @@ mod tests {
             let old_running = generation_label(BASE, "2026.1001.1-11111111");
             let old_idle = generation_label(BASE, "2026.1005.1-22222222");
             let old_unverifiable = generation_label(BASE, "2026.1007.1-33333333");
-            for label in [&old_running, &old_idle, &old_unverifiable] {
+            // The next newest generation is not deletable (`runtime_stage::superseded_job_keys`).
+            let next_newest = generation_label(BASE, "2026.1009.1-44444444");
+            for label in [&old_running, &old_idle, &old_unverifiable, &next_newest] {
                 let older = GenerationJob {
                     label: label.clone(),
                     executable: dir.path().join(format!("daemon-runtime/{label}/ferryx")),
@@ -1048,25 +1133,86 @@ mod tests {
             let launchctl = FakeLaunchctl::default()
                 .running(&old_running, 100)
                 .idle(&old_idle)
-                .with_print(&old_unverifiable, false, "", "Operation not permitted");
-            assert!(retire_older_generations(&launchctl, UID, dir.path(), BASE, &newest.label).unwrap());
+                .with_print(&old_unverifiable, false, "", "Operation not permitted")
+                .idle(&next_newest);
+            let deletable = vec![
+                old_running.clone(),
+                old_idle.clone(),
+                old_unverifiable.clone(),
+            ];
+            assert!(retire_older_generations(
+                &launchctl,
+                UID,
+                dir.path(),
+                BASE,
+                &newest.label,
+                &deletable
+            )
+            .unwrap());
 
-            assert!(launchctl.mutations().is_empty(), "only launchctl print may run: {:?}", launchctl.calls());
+            assert!(
+                launchctl.mutations().is_empty(),
+                "only launchctl print may run: {:?}",
+                launchctl.calls()
+            );
             assert_never_stops(&launchctl.calls());
-            let running_plist = fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap();
-            assert!(running_plist.contains("<key>RunAtLoad</key>\n    <false/>"), "a running older job loses login autostart only");
-            assert!(!running_plist.contains("SuccessfulExit"), "KeepAlive SuccessfulExit implies RunAtLoad: {running_plist}");
+            let running_plist =
+                fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap();
+            assert!(
+                running_plist.contains("<key>RunAtLoad</key>\n    <false/>"),
+                "a running older job loses login autostart only"
+            );
+            assert!(
+                !running_plist.contains("SuccessfulExit"),
+                "KeepAlive SuccessfulExit implies RunAtLoad: {running_plist}"
+            );
             assert!(running_plist.contains("<key>KeepAlive</key>\n    <false/>"));
-            let unverifiable_plist = fs::read_to_string(dir.path().join(format!("{old_unverifiable}.plist"))).unwrap();
+            let unverifiable_plist =
+                fs::read_to_string(dir.path().join(format!("{old_unverifiable}.plist"))).unwrap();
             assert!(unverifiable_plist.contains("<key>RunAtLoad</key>\n    <false/>"));
-            assert!(!unverifiable_plist.contains("SuccessfulExit"), "{unverifiable_plist}");
-            assert!(!dir.path().join(format!("{old_idle}.plist")).exists(), "an idle older job's plist is deleted");
-            assert_eq!(fs::read_to_string(&newest.plist_path).unwrap(), newest.render(true), "the newest generation keeps RunAtLoad and KeepAlive");
+            assert!(
+                !unverifiable_plist.contains("SuccessfulExit"),
+                "{unverifiable_plist}"
+            );
+            assert!(
+                !dir.path().join(format!("{old_idle}.plist")).exists(),
+                "an idle older job's plist is deleted"
+            );
+            let next_plist =
+                fs::read_to_string(dir.path().join(format!("{next_newest}.plist"))).unwrap();
+            assert!(
+                next_plist.contains("<key>RunAtLoad</key>\n    <false/>"),
+                "a kept older job still loses login autostart"
+            );
+            assert!(
+                !launchctl
+                    .calls()
+                    .iter()
+                    .any(|call| call.iter().any(|arg| arg.ends_with(&next_newest))),
+                "a generation that is not deletable is never even queried: {:?}",
+                launchctl.calls()
+            );
+            assert_eq!(
+                fs::read_to_string(&newest.plist_path).unwrap(),
+                newest.render(true),
+                "the newest generation keeps RunAtLoad and KeepAlive"
+            );
             assert_eq!(fs::read_to_string(&legacy).unwrap(), "legacy");
 
             // A second run changes nothing.
-            assert!(!retire_older_generations(&launchctl, UID, dir.path(), BASE, &newest.label).unwrap());
-            assert_eq!(fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap(), running_plist);
+            assert!(!retire_older_generations(
+                &launchctl,
+                UID,
+                dir.path(),
+                BASE,
+                &newest.label,
+                &deletable
+            )
+            .unwrap());
+            assert_eq!(
+                fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap(),
+                running_plist
+            );
         }
 
         /// Backs `supervisor`'s macOS `remove_autostart` (opt-out) as well as retirement: a disabled
