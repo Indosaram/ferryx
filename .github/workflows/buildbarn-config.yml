@@ -1,0 +1,32 @@
+name: Buildbarn configuration
+
+on:
+  pull_request:
+    paths:
+      - 'infra/buildbarn/**'
+      - '.github/workflows/buildbarn-config.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infra/buildbarn/**'
+      - '.github/workflows/buildbarn-config.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  configuration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test offline renderer and shell smoke command
+        run: python3 -m unittest discover -s infra/buildbarn -p 'test_*.py' -v
+      - name: Render fictional inventory without contacting hosts
+        run: >-
+          python3 infra/buildbarn/configure.py
+          --hosts infra/buildbarn/hosts.example
+          --profile infra/buildbarn/profile.example.json
+          --output "$RUNNER_TEMP/buildbarn-config"
