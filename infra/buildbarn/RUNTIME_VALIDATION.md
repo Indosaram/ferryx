@@ -35,8 +35,22 @@ A passing Python unit suite alone is not evidence that this integration passed.
 
 - [bb-storage](https://github.com/buildbarn/bb-storage/tree/ca3d8b49a5af52eb02ed473dd689d19b949c9e41)
 - [bb-remote-execution](https://github.com/buildbarn/bb-remote-execution/tree/c9ba98cf52456c400278f45a9679635daa40dcd2)
-- Both pinned `go.mod` files specify Go 1.27.3. Build from checkout with
-  `-mod=readonly`; module replace directives prevent substituting `go install @sha`.
+- Both pinned `.bazelversion` files specify Bazel 9.1.0. The workflow downloads
+  its official Linux x86_64 binary and checks SHA256
+  `a667454f3f4f8878df8199136b82c199f6ada8477b337fae3b1ef854f01e4e2f`.
+  Upstream Bazel modules provision the Go SDK from `go.mod` (Go 1.27.3).
+- Build each checkout as its own Bazel root module, preserving all upstream
+  dependency overrides. Plain `go build` is not equivalent: storage's
+  [`MODULE.bazel`](https://github.com/buildbarn/bb-storage/blob/ca3d8b49a5af52eb02ed473dd689d19b949c9e41/MODULE.bazel)
+  applies the upstream
+  [`service-registrar.diff`](https://github.com/buildbarn/bb-storage/blob/ca3d8b49a5af52eb02ed473dd689d19b949c9e41/patches/org_golang_google_genproto_googleapis_bytestream/service-registrar.diff)
+  needed by `bb_storage` to compile. No local upstream patches are added.
+  The initial CI run exposed this exact type mismatch before the integration
+  harness started. The workflow now builds the official `//cmd/...` targets and
+  obtains binary paths using `bazel cquery --output=files`.
+- Cold Bazel dependency/toolchain compilation has a 30-minute step limit and
+  two concurrent build jobs; the overall job remains bounded at 45 minutes.
+  Build logs are retained as artifacts even if compilation fails.
 - [Buck2 2026-11-01](https://github.com/meta/buck2/releases/tag/2026-11-01), source
   `e8edae33cd7cbc6d042c58bb55a2a900ac6ad489`, official Linux x86_64 `.zst` archive
   SHA256 `a2f7830c240c682c32826ae0b30bf8864d264e866475abaafcc0857d8133cd53`.
