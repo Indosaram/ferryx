@@ -2572,9 +2572,12 @@ impl DaemonSessionService {
                             provider_session,
                         )
                         .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
-                        if crate::ipc::agents::resolve_binary(
+                        // Right after daemon start the login PATH may still be resolving; wait
+                        // for it as long as the pre-discovery code did (2 s) so a login-PATH-only
+                        // agent is not reported unsupported, while staying inside the spawn budget.
+                        if crate::ipc::agents::resolve_discovered_binary_within(
                             &plan.program,
-                            &crate::ipc::agents::search_paths(),
+                            std::time::Duration::from_secs(2),
                         )
                         .is_none()
                         {

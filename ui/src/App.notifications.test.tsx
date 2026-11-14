@@ -112,6 +112,8 @@ const { noteObservationInteraction } = await import("./lib/notificationCenter/ac
 
 vi.mock("./lib/tauri", () => ({
   listExternalWorktrees: vi.fn(async () => []),
+  // WelcomeWizard probes Git on its project step (task 35).
+  getGitProbe: vi.fn(async () => null),
   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
   listenDagWatchStatus: vi.fn(async () => () => undefined),
   // The notification coordinator re-consults the authoritative OS permission status before it

@@ -141,6 +141,21 @@ describe("WelcomeWizard", () => {
     expect(onRemindLater).toHaveBeenCalledTimes(2);
   });
 
+  it("project step shows the Git probe reason so the user knows what to install", async () => {
+    const loadGitProbe = vi.fn(async () => ({
+      version: null,
+      unavailable: { kind: "gitMissing" as const },
+    }));
+    render(
+      <WelcomeWizard
+        {...createDefaultProps({ steps: ["intro", "project"], initialStepIndex: 1, loadGitProbe })}
+      />
+    );
+
+    expect((await screen.findByTestId("onboarding-git-unavailable")).textContent).toMatch(/Git was not found/);
+    expect(loadGitProbe).toHaveBeenCalledTimes(1);
+  });
+
   it('project step Add Project button calls onStepCompleted("project") then onAddProject', () => {
     const onStepCompleted = vi.fn();
     const onAddProject = vi.fn();

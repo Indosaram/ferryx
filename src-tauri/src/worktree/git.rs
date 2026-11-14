@@ -1,4 +1,5 @@
 use crate::worktree::model::{DirtyFile, DirtyState, Worktree, WorktreeError};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -940,8 +941,10 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
             .map_err(WorktreeError::Io)?
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // Lossy only for the error payload, which is display text. Successful stdout stays strict:
+    // it carries paths and refs, and a lossy decode would alias distinct native names (A08).
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     if !output.status.success() {
         return Err(WorktreeError::GitError {
@@ -953,7 +956,152 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
     }
 
     String::from_utf8(output.stdout)
-        .map_err(|_| WorktreeError::ParseError("Invalid UTF-8 in Git stdout".into()))
+        .map_err(|_| WorktreeError::ParseError(NON_UTF8_STDOUT.into()))
+}
+
+/// `ParseError` text for Git stdout that is not UTF-8; `GitUnavailableReason` keys on it.
+const NON_UTF8_STDOUT: &str = "Invalid UTF-8 in Git stdout";
+
+/// Why a folder is served as a plain (terminal-only) folder instead of a Git repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GitUnavailableReason {
+    /// No `git` executable on PATH.
+    GitMissing,
+    /// macOS `/usr/bin/git` is the xcode-select stub and the Command Line Tools are not installed.
+    XcodeCommandLineToolsMissing,
+    /// Git refuses the repository because another user owns it (`safe.directory`).
+    #[serde(rename_all = "camelCase")]
+    DubiousOwnership { path: String },
+    /// Git works and the folder is simply not inside a repository.
+    NotARepository,
+    /// Git failed for another reason; `message` is its first stderr line.
+    GitFailed { message: String },
+    /// Git printed bytes that are not UTF-8 (a path or name in another encoding). They are not
+    /// decoded lossily: U+FFFD could alias a different real path.
+    NonUtf8Output,
+}
+
+impl GitUnavailableReason {
+    /// Classifies the failure of the repository probe (`git rev-parse`) or `git --version`.
+    pub fn classify(error: &WorktreeError) -> Self {
+        match error {
+            WorktreeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => Self::GitMissing,
+            WorktreeError::GitError { stderr, .. } => Self::classify_stderr(stderr),
+            WorktreeError::ParseError(message) if message == NON_UTF8_STDOUT => Self::NonUtf8Output,
+            other => Self::GitFailed {
+                message: other.to_string(),
+            },
+        }
+    }
+
+    fn classify_stderr(stderr: &str) -> Self {
+        let lower = stderr.to_ascii_lowercase();
+        if lower.contains("xcrun: error")
+            || lower.contains("xcode-select")
+            || lower.contains("no developer tools were found")
+        {
+            return Self::XcodeCommandLineToolsMissing;
+        }
+        if lower.contains("dubious ownership") {
+            // "fatal: detected dubious ownership in repository at '/path'"
+            let path = stderr
+                .split_once(" at '")
+                .and_then(|(_, rest)| rest.split_once('\''))
+                .map(|(path, _)| path.to_string())
+                .unwrap_or_default();
+            return Self::DubiousOwnership { path };
+        }
+        if lower.contains("not a git repository") {
+            return Self::NotARepository;
+        }
+        Self::GitFailed {
+            message: stderr.lines().next().unwrap_or_default().trim().to_string(),
+        }
+    }
+}
+
+/// Result of probing `git --version` once per process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitProbe {
+    /// The version `git --version` reported, e.g. `2.43.0`.
+    pub version: Option<String>,
+    /// Set when Git cannot run at all (missing, macOS stub, broken install).
+    pub unavailable: Option<GitUnavailableReason>,
+}
+
+/// Probes `git --version` once per process and caches the answer.
+pub fn git_probe() -> GitProbe {
+    static PROBE: std::sync::OnceLock<GitProbe> = std::sync::OnceLock::new();
+    PROBE
+        .get_or_init(|| {
+            // Direct spawn, not `run_git`: a caller's request budget must not turn a slow
+            // first probe into a TIMEOUT cached for the whole process.
+            let output = crate::util::no_window_command("git")
+                .arg("--version")
+                .current_dir(std::env::temp_dir())
+                .stdin(std::process::Stdio::null())
+                .output();
+            let probe = match output {
+                Ok(output) if output.status.success() => GitProbe {
+                    version: parse_git_version(&String::from_utf8_lossy(&output.stdout)).map(
+                        |(major, minor, patch)| format!("{major}.{minor}.{patch}"),
+                    ),
+                    unavailable: None,
+                },
+                Ok(output) => GitProbe {
+                    version: None,
+                    unavailable: Some(GitUnavailableReason::classify_stderr(
+                        &String::from_utf8_lossy(&output.stderr),
+                    )),
+                },
+                Err(error) => GitProbe {
+                    version: None,
+                    unavailable: Some(GitUnavailableReason::classify(&WorktreeError::Io(error))),
+                },
+            };
+            tracing::info!(version = ?probe.version, unavailable = ?probe.unavailable, "git probe");
+            probe
+        })
+        .clone()
+}
+
+/// Parses `git version 2.39.3 (Apple Git-145)` or `git version 2.45.1.windows.1`.
+fn parse_git_version(stdout: &str) -> Option<(u32, u32, u32)> {
+    let version = stdout.trim().strip_prefix("git version ")?;
+    let mut parts = version
+        .split(|c: char| !c.is_ascii_digit())
+        .take(3)
+        .map(|part| part.parse::<u32>().ok());
+    let major = parts.next()??;
+    let minor = parts.next()??;
+    let patch = parts.next().flatten().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// `--end-of-options` arrived in Git 2.24; older Git rejects it as an unknown revision.
+fn supports_end_of_options(version: Option<(u32, u32, u32)>) -> bool {
+    // An unparsable version keeps the flag: every Git still shipped today is newer.
+    version.is_none_or(|(major, minor, _)| (major, minor) >= (2, 24))
+}
+
+/// `git rev-parse --verify <spec>` arguments, with `--end-of-options` when Git supports it.
+/// Callers must already reject a `spec` starting with `-`; the flag is defense in depth.
+pub fn rev_parse_verify_args(spec: &str) -> Vec<String> {
+    let version = git_probe().version.as_deref().and_then(|version| {
+        parse_git_version(&format!("git version {version}"))
+    });
+    verify_args_for(spec, version)
+}
+
+fn verify_args_for(spec: &str, version: Option<(u32, u32, u32)>) -> Vec<String> {
+    let mut args = vec!["rev-parse".to_string(), "--verify".to_string()];
+    if supports_end_of_options(version) {
+        args.push("--end-of-options".to_string());
+    }
+    args.push(spec.to_string());
+    args
 }
 
 fn decode_git_quoted_path(path: &str) -> Result<String, WorktreeError> {
@@ -1346,6 +1494,108 @@ pub fn git_common_dir(repo_root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_error(stderr: &str) -> WorktreeError {
+        WorktreeError::GitError {
+            command: "git rev-parse --show-toplevel".into(),
+            stderr: stderr.into(),
+            stdout: String::new(),
+            code: Some(128),
+        }
+    }
+
+    #[test]
+    fn git_unavailable_reason_classifies_each_failure() {
+        let missing = WorktreeError::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(GitUnavailableReason::classify(&missing), GitUnavailableReason::GitMissing);
+        assert_eq!(
+            GitUnavailableReason::classify(&git_error(
+                "xcrun: error: invalid active developer path (/Library/Developer/CommandLineTools), missing xcrun at: /Library/Developer/CommandLineTools/usr/bin/xcrun"
+            )),
+            GitUnavailableReason::XcodeCommandLineToolsMissing
+        );
+        assert_eq!(
+            GitUnavailableReason::classify(&git_error(
+                "fatal: detected dubious ownership in repository at '/srv/repo'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /srv/repo"
+            )),
+            GitUnavailableReason::DubiousOwnership { path: "/srv/repo".into() }
+        );
+        assert_eq!(
+            GitUnavailableReason::classify(&git_error(
+                "fatal: not a git repository (or any of the parent directories): .git"
+            )),
+            GitUnavailableReason::NotARepository
+        );
+        assert_eq!(
+            GitUnavailableReason::classify(&git_error("fatal: bad config line 1\nmore")),
+            GitUnavailableReason::GitFailed { message: "fatal: bad config line 1".into() }
+        );
+    }
+
+    #[test]
+    fn git_unavailable_reason_serializes_with_a_kind_tag() {
+        let json = serde_json::to_value(GitUnavailableReason::DubiousOwnership { path: "/r".into() }).unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "dubiousOwnership", "path": "/r" }));
+        let json = serde_json::to_value(GitUnavailableReason::XcodeCommandLineToolsMissing).unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "xcodeCommandLineToolsMissing" }));
+    }
+
+    #[test]
+    fn end_of_options_is_used_only_on_git_that_supports_it() {
+        assert_eq!(parse_git_version("git version 2.39.3 (Apple Git-145)\n"), Some((2, 39, 3)));
+        assert_eq!(parse_git_version("git version 2.45.1.windows.1"), Some((2, 45, 1)));
+        assert_eq!(parse_git_version("git version 1.8.3.1"), Some((1, 8, 3)));
+        assert_eq!(parse_git_version("garbage"), None);
+        assert_eq!(
+            verify_args_for("HEAD^{commit}", Some((2, 24, 0))),
+            ["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"]
+        );
+        assert_eq!(
+            verify_args_for("HEAD^{commit}", Some((2, 23, 9))),
+            ["rev-parse", "--verify", "HEAD^{commit}"]
+        );
+        assert_eq!(
+            verify_args_for("HEAD^{commit}", Some((1, 8, 3))),
+            ["rev-parse", "--verify", "HEAD^{commit}"]
+        );
+        assert!(verify_args_for("x", None).contains(&"--end-of-options".to_string()));
+    }
+
+    #[test]
+    fn git_probe_reports_the_installed_git_version() {
+        let probe = git_probe();
+        assert_eq!(probe.unavailable, None, "{probe:?}");
+        assert!(probe.version.is_some_and(|version| version.starts_with("2.")));
+    }
+
+    /// A repository whose root path is not UTF-8 cannot be addressed without aliasing (A08), so
+    /// it opens as a plain folder with a reported reason instead of passing as a non-repository.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_repository_root_is_reported_not_hidden() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-q"]).unwrap();
+        let manager = crate::worktree::WorktreeManager::try_new(&repo).expect("folder registers");
+        assert!(!manager.is_git_backed());
+        assert_eq!(manager.git_unavailable(), Some(&GitUnavailableReason::NonUtf8Output));
+    }
+
+    /// Portable counterpart: real Git printing non-UTF-8 stdout (a blob holding `\xff`) fails
+    /// strictly and classifies as the typed non-UTF-8 reason.
+    #[test]
+    fn non_utf8_git_stdout_classifies_as_a_typed_reason() {
+        let root = tempfile::tempdir().unwrap();
+        run_git(root.path(), &["init", "-q"]).unwrap();
+        std::fs::write(root.path().join("latin1.txt"), b"caf\xe9 \xff\n").unwrap();
+        let object = run_git(root.path(), &["hash-object", "-w", "latin1.txt"]).unwrap();
+        let error = run_git(root.path(), &["cat-file", "blob", object.trim()]).unwrap_err();
+        assert_eq!(GitUnavailableReason::classify(&error), GitUnavailableReason::NonUtf8Output);
+        let json = serde_json::to_value(GitUnavailableReason::NonUtf8Output).unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "nonUtf8Output" }));
+    }
 
     #[test]
     fn git_path_argument_normalization_strips_windows_verbatim_prefixes() {

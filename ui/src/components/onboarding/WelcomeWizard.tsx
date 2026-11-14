@@ -4,6 +4,7 @@ import { Check, X } from "lucide-react";
 import type { ResolvedAgent } from "../../lib/agentsSettings";
 import { cn } from "../../lib/cn";
 import type { OnboardingStepId } from "../../lib/onboarding";
+import { getGitProbe, type GitProbe, type GitUnavailableReason } from "../../lib/tauri";
 import type { CliLauncherStatus } from "../../lib/types";
 import { Button } from "../ui/button";
 import { IconButton } from "../ui/IconButton";
@@ -27,6 +28,7 @@ export type WelcomeWizardProps = {
   onRemindLater: () => void;
   loadCliStatus?: () => Promise<CliLauncherStatus>;
   installCli?: () => Promise<CliLauncherStatus>;
+  loadGitProbe?: () => Promise<GitProbe | null>;
   initialStepIndex?: number;
 };
 
@@ -69,6 +71,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     onRemindLater,
     loadCliStatus,
     installCli,
+    loadGitProbe = getGitProbe,
     initialStepIndex = 0,
   } = props;
 
@@ -81,6 +84,27 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
 
   const currentStepIndex = clampStepIndex(stepIndex, steps.length);
   const currentStep = steps[currentStepIndex];
+
+  // Probe Git when the project step shows, so a missing Git or the macOS stub is
+  // explained before the user picks a folder that would silently open without worktrees.
+  const [gitUnavailable, setGitUnavailable] = useState<GitUnavailableReason | null>(null);
+  const loadGitProbeRef = useRef(loadGitProbe);
+  const onProjectStep = currentStep === "project";
+  useEffect(() => {
+    if (!onProjectStep) return;
+    let cancelled = false;
+    loadGitProbeRef.current().then(
+      (probe) => {
+        if (!cancelled) setGitUnavailable(probe?.unavailable ?? null);
+      },
+      () => {
+        if (!cancelled) setGitUnavailable(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [onProjectStep]);
   const isFirst = currentStepIndex === 0;
   const isLast = currentStepIndex === steps.length - 1;
 
@@ -180,6 +204,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
               onStepCompleted("project");
               onConnectMachine();
             }}
+            gitUnavailable={gitUnavailable}
           />
         );
       default:

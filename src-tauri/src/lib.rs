@@ -1696,6 +1696,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_remote_set_active_selection,
         cmd_remote_get_active_selection,
         cmd_project_initial,
+        cmd_git_probe,
         cmd_boot_trace,
         crate::ipc::system_resources::cmd_system_resources,
         cmd_project_register,
