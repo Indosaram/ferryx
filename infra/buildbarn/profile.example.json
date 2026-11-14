@@ -1,0 +1,11 @@
+{
+  "coordinator": {
+    "address": "127.0.0.1",
+    "state_dir": "/var/tmp/ferryx-bb-coordinator"
+  },
+  "workers": {
+    "linux-a": {"os": "linux", "arch": "x86_64", "toolchain": "shell-v1", "concurrency": 2, "state_dir": "/var/tmp/ferryx-bb-linux-a"},
+    "linux-b": {"os": "linux", "arch": "x86_64", "toolchain": "shell-v1", "concurrency": 2, "state_dir": "/var/tmp/ferryx-bb-linux-b"},
+    "mac-a": {"os": "darwin", "arch": "aarch64", "toolchain": "shell-v1", "concurrency": 2, "state_dir": "/var/tmp/ferryx-bb-mac-a"}
+  }
+}
