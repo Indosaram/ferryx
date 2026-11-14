@@ -10,6 +10,11 @@ import {
   restartPreviousTerminals,
   type DaemonUpdatePending,
 } from "../lib/updaterDaemonPending";
+import {
+  daemonDiagnosticsFrom,
+  formatDaemonDiagnostics,
+  redactSecrets,
+} from "../lib/daemonDiagnostics";
 import { Button } from "./ui/button";
 
 export type ProjectConnectionError = {
@@ -83,11 +88,40 @@ function UpdatePendingActions(props: {
   );
 }
 
+function DiagnosticsRow(props: { label: string; value: string; testId: string; mono?: boolean }): JSX.Element {
+  return (
+    <div className="flex gap-2">
+      <dt className="shrink-0 text-muted-foreground">{props.label}</dt>
+      <dd
+        data-testid={props.testId}
+        className={props.mono ? "min-w-0 break-all font-mono text-foreground" : "min-w-0 text-foreground"}
+      >
+        {redactSecrets(props.value)}
+      </dd>
+    </div>
+  );
+}
+
 export function DaemonConnectionBanner(props: {
   error: ProjectConnectionError;
   onRetry: () => void;
 }): JSX.Element {
   const { error, onRetry } = props;
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const diagnostics = daemonDiagnosticsFrom(error);
+  const reason = diagnostics?.reason ?? diagnostics?.supervisorError ?? null;
+
+  const copyDiagnostics = async (): Promise<void> => {
+    try {
+      if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+        throw new Error("clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(formatDaemonDiagnostics(error));
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  };
 
   let title = "Couldn't open this project";
   let body = error.message;
@@ -123,6 +157,22 @@ export function DaemonConnectionBanner(props: {
         <div className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
           {body}
         </div>
+        {diagnostics && (reason || diagnostics.socketPath || diagnostics.logPath) ? (
+          <dl
+            data-testid="daemon-connection-diagnostics"
+            className="mt-1.5 space-y-0.5 text-[11px]"
+          >
+            {reason ? (
+              <DiagnosticsRow label="Reason" value={reason} testId="daemon-diagnostics-reason" />
+            ) : null}
+            {diagnostics.socketPath ? (
+              <DiagnosticsRow label="Socket" value={diagnostics.socketPath} testId="daemon-diagnostics-socket" mono />
+            ) : null}
+            {diagnostics.logPath ? (
+              <DiagnosticsRow label="Log file" value={diagnostics.logPath} testId="daemon-diagnostics-log" mono />
+            ) : null}
+          </dl>
+        ) : null}
         {updatePending ? (
           <UpdatePendingActions initial={updatePending} onRetry={onRetry} />
         ) : null}
@@ -131,16 +181,40 @@ export function DaemonConnectionBanner(props: {
         </div>
       </div>
 
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        className="h-7 shrink-0 text-[11px]"
-        data-testid="daemon-connection-retry"
-        onClick={onRetry}
-      >
-        Retry
-      </Button>
+      <div className="flex shrink-0 items-center gap-2">
+        {error.details ? (
+          <>
+            {copyState !== "idle" ? (
+              <span
+                data-testid="daemon-diagnostics-copy-status"
+                className="text-[11px] text-muted-foreground"
+              >
+                {copyState === "copied" ? "Copied" : "Copy failed"}
+              </span>
+            ) : null}
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-7 text-[11px]"
+              data-testid="daemon-connection-copy-diagnostics"
+              onClick={() => void copyDiagnostics()}
+            >
+              Copy diagnostics
+            </Button>
+          </>
+        ) : null}
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="h-7 shrink-0 text-[11px]"
+          data-testid="daemon-connection-retry"
+          onClick={onRetry}
+        >
+          Retry
+        </Button>
+      </div>
     </div>
   );
 }

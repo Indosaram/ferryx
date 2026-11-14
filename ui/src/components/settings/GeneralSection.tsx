@@ -34,6 +34,7 @@ import {
   getDaemonSupervisor,
   installCliLauncher,
   setDaemonSupervisor,
+  type DaemonSupervisorStatus,
 } from "../../lib/tauri";
 import { classifyNavigatorPlatform } from "../../lib/platform";
 import { saveAdvancedFeatures, useAdvancedFeatures } from "../../lib/advancedFeatures";
@@ -361,7 +362,7 @@ export function GeneralSection() {
   const [managedExternally, setManagedExternally] = useState<boolean>(false);
   const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
   const advancedFeatures = useAdvancedFeatures();
-  const [supervisor, setSupervisor] = useState<{ supported: boolean; enabled: boolean } | null>(null);
+  const [supervisor, setSupervisor] = useState<DaemonSupervisorStatus | null>(null);
   const [supervisorBusy, setSupervisorBusy] = useState(false);
   const [supervisorError, setSupervisorError] = useState<string | null>(null);
 
@@ -493,6 +494,21 @@ export function GeneralSection() {
                 disabled={supervisorBusy}
                 onCheckedChange={(checked) => void toggleSupervisor(checked)}
               />
+            </SettingRow>
+          ) : supervisor?.unavailableReason ? (
+            <SettingRow
+              label="Restart background service automatically"
+              description={
+                <>
+                  Not available on this system:{" "}
+                  <span data-testid="general-daemon-supervisor-unavailable">
+                    {supervisor.unavailableReason}
+                  </span>
+                  .
+                </>
+              }
+            >
+              <span className="text-[11px] text-muted-foreground">Unavailable</span>
             </SettingRow>
           ) : null}
         </div>

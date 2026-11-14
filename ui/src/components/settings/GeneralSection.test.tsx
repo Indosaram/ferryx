@@ -154,4 +154,21 @@ describe("GeneralSection background service supervisor", () => {
       screen.queryByRole("switch", { name: "Restart background service automatically" }),
     ).toBeNull();
   });
+
+  it("explains why the supervisor is unavailable", async () => {
+    native.getDaemonSupervisor.mockResolvedValue({
+      supported: false,
+      enabled: false,
+      unavailableReason: "systemd user services are unavailable: running inside a container",
+    });
+
+    render(<GeneralSection />);
+
+    expect(await screen.findByTestId("general-daemon-supervisor-unavailable")).toHaveTextContent(
+      "systemd user services are unavailable: running inside a container",
+    );
+    expect(
+      screen.queryByRole("switch", { name: "Restart background service automatically" }),
+    ).toBeNull();
+  });
 });

@@ -1165,6 +1165,8 @@ export interface LocalRemovalReport {
 export interface DaemonSupervisorStatus {
   supported: boolean;
   enabled: boolean;
+  /** Why the switch is unavailable on this host; null when supported. */
+  unavailableReason?: string | null;
 }
 
 export async function getAgentIntegration(): Promise<AgentIntegrationStatus> {

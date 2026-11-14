@@ -145,6 +145,129 @@ mod transport_pair_tests {
             );
         }
     }
+
+    fn diagnostics_of(error: &IpcError) -> &serde_json::Value {
+        &error.details.as_ref().expect("details")["diagnostics"]
+    }
+
+    #[test]
+    fn a_connect_failure_names_its_stage_and_reason() {
+        let error = connect_failure(
+            IpcErrorCode::InternalError,
+            "Failed to spawn",
+            "spawn",
+            Some("permission denied token=abc123secretvalue"),
+        );
+        assert_eq!(error.code, IpcErrorCode::InternalError);
+        assert_eq!(error.message, "Failed to spawn");
+        let details = error.details.as_ref().unwrap();
+        assert_eq!(details["type"], "daemonConnectFailure");
+        assert_eq!(details["diagnostics"]["stage"], "spawn");
+        assert_eq!(
+            details["diagnostics"]["reason"],
+            "permission denied token=[redacted]"
+        );
+    }
+
+    #[test]
+    fn connect_diagnostics_name_the_socket_log_and_owner() {
+        let socket = Path::new("/tmp/ferryx-test-36/daemon.sock");
+        let log = Path::new("/home/u/.ferryx/logs/daemon.log");
+        let ownership = serde_json::json!({ "problem": "Path /tmp/ferryx-test-36 is owned by UID 0 (expected current UID 1000)" });
+
+        let plain = with_connect_diagnostics(
+            IpcError::new(IpcErrorCode::InternalError, "boom"),
+            socket,
+            Some(log),
+            ownership.clone(),
+            None,
+        );
+        assert_eq!(plain.details.as_ref().unwrap()["type"], "daemonConnectFailure");
+        let diagnostics = diagnostics_of(&plain);
+        assert_eq!(diagnostics["socketPath"], "/tmp/ferryx-test-36/daemon.sock");
+        assert_eq!(diagnostics["logPath"], "/home/u/.ferryx/logs/daemon.log");
+        assert_eq!(diagnostics["ownership"], ownership);
+        assert_eq!(diagnostics["supervisorError"], serde_json::Value::Null);
+
+        // A staged failure keeps its stage and gains the location.
+        let staged = with_connect_diagnostics(
+            connect_failure(IpcErrorCode::InternalError, "late", "connectAfterReady", None),
+            socket,
+            None,
+            serde_json::Value::Null,
+            None,
+        );
+        assert_eq!(diagnostics_of(&staged)["stage"], "connectAfterReady");
+        assert_eq!(diagnostics_of(&staged)["logPath"], serde_json::Value::Null);
+
+        // The retry decisions key on details.type, which must survive the annotation.
+        let stale = with_connect_diagnostics(
+            transport_pair_stale_error("stale"),
+            socket,
+            Some(log),
+            serde_json::Value::Null,
+            None,
+        );
+        assert!(transport_pair_is_stale(&stale));
+        assert_eq!(diagnostics_of(&stale)["socketPath"], "/tmp/ferryx-test-36/daemon.sock");
+
+        // Not a connect failure: left exactly as it was.
+        let mismatch = daemon_protocol_mismatch_error(5, 4);
+        assert_eq!(
+            with_connect_diagnostics(mismatch.clone(), socket, Some(log), serde_json::Value::Null, None),
+            mismatch
+        );
+    }
+
+    #[test]
+    fn supervisor_failures_are_reported_without_secrets() {
+        let key = format!("fxk_{}", "0123456789abcdef".repeat(4));
+        let reason = format!(
+            "codesign --verify failed for /Users/u/Library/Ferryx/runtime/g1/Ferryx.app; FERRYX_INSTALL_KEY={key} token=abc123secretvalue"
+        );
+        let error = with_connect_diagnostics(
+            IpcError::new(IpcErrorCode::DaemonBusy, "busy"),
+            Path::new("/tmp/ferryx-test-36/daemon.sock"),
+            None,
+            serde_json::Value::Null,
+            Some(reason.as_str()),
+        );
+        let text = diagnostics_of(&error)["supervisorError"].as_str().unwrap().to_string();
+        assert!(text.contains("codesign --verify failed for /Users/u/Library/Ferryx/runtime/g1/Ferryx.app"), "{text}");
+        assert!(!text.contains(&key), "{text}");
+        assert!(!text.contains("abc123secretvalue"), "{text}");
+        assert!(!serde_json::to_string(&error).unwrap().contains("abc123secretvalue"));
+    }
+
+    #[tokio::test]
+    async fn readiness_failures_name_their_stage() {
+        let closed = wait_for_daemon_ready(BufReader::new(tokio::io::empty()), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert_eq!(diagnostics_of(&closed)["stage"], "readinessClosed");
+
+        // The writer stays alive, so only the deadline can end the wait.
+        let (_writer, reader) = tokio::io::duplex(64);
+        let timed_out = wait_for_daemon_ready(BufReader::new(reader), Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert_eq!(diagnostics_of(&timed_out)["stage"], "readinessTimeout");
+    }
+
+    #[test]
+    fn unrecognized_daemon_errors_keep_their_code() {
+        let handshake = handshake_error_for_response("boom".into(), Some("INTERNAL_ERROR"));
+        assert_eq!(handshake.details.as_ref().unwrap()["type"], "daemonHandshakeError");
+        assert_eq!(handshake.details.as_ref().unwrap()["daemonCode"], "INTERNAL_ERROR");
+        let manual = manual_ssh_response(DaemonResponse::Error {
+            message: "odd".into(),
+            code: Some("SOMETHING_NEW".into()),
+            details: None,
+        })
+        .unwrap_err();
+        assert_eq!(manual.code, IpcErrorCode::InternalError);
+        assert_eq!(manual.details.unwrap()["daemonCode"], "SOMETHING_NEW");
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,18 +388,126 @@ where
                 return Ok(());
             }
         }
-        Err(IpcError::new(
+        Err(connect_failure(
             IpcErrorCode::InternalError,
             "Daemon process stdout closed before emitting readiness signal",
+            "readinessClosed",
+            None,
         ))
     })
     .await
     .map_err(|_| {
-        IpcError::new(
+        connect_failure(
             IpcErrorCode::InternalError,
             "Ferryx daemon startup timed out waiting for readiness signal",
+            "readinessTimeout",
+            None,
         )
     })?
+}
+
+/// `details.type` of a daemon connect failure that carries `details.diagnostics`.
+const DAEMON_CONNECT_FAILURE: &str = "daemonConnectFailure";
+
+/// Most of the daemon's stderr a failed spawn reads, and the tail of it that is reported.
+const STDERR_READ_BYTES: u64 = 4096;
+const STDERR_TAIL_BYTES: usize = 2048;
+
+/// A connect failure at one named stage, with an optional (redacted) reason.
+fn connect_failure(
+    code: IpcErrorCode,
+    message: impl Into<String>,
+    stage: &str,
+    reason: Option<&str>,
+) -> IpcError {
+    IpcError::new(code, message).with_details(json!({
+        "type": DAEMON_CONNECT_FAILURE,
+        "diagnostics": {
+            "stage": stage,
+            "reason": crate::daemon::diagnostics::redacted_value(reason),
+        },
+    }))
+}
+
+/// Adds each key of `extra` to `details.diagnostics` unless it is already there. An error without
+/// details becomes a `daemonConnectFailure`; every existing detail key (the retry decisions key
+/// on `type`) is kept, and non-object details are left alone.
+fn merge_diagnostics(mut error: IpcError, extra: serde_json::Value) -> IpcError {
+    let serde_json::Value::Object(extra) = extra else {
+        return error;
+    };
+    let details = error
+        .details
+        .get_or_insert_with(|| json!({ "type": DAEMON_CONNECT_FAILURE }));
+    if let Some(details) = details.as_object_mut() {
+        if let Some(diagnostics) = details
+            .entry("diagnostics")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+        {
+            for (key, value) in extra {
+                diagnostics.entry(key).or_insert(value);
+            }
+        }
+    }
+    error
+}
+
+/// Where to look when the daemon cannot be reached: the socket, the daemon log, who owns the
+/// runtime directory, and why the supervisor could not start it (codesign or staging failures
+/// surface there). Only connect-shaped failures are annotated.
+fn with_connect_diagnostics(
+    error: IpcError,
+    socket_path: &Path,
+    log_path: Option<&Path>,
+    ownership: serde_json::Value,
+    supervisor_error: Option<&str>,
+) -> IpcError {
+    if !matches!(
+        error.code,
+        IpcErrorCode::InternalError
+            | IpcErrorCode::IoError
+            | IpcErrorCode::DaemonBusy
+            | IpcErrorCode::HostUnavailable
+    ) {
+        return error;
+    }
+    merge_diagnostics(
+        error,
+        json!({
+            "socketPath": socket_path.display().to_string(),
+            "logPath": log_path.map(|path| path.display().to_string()),
+            "ownership": ownership,
+            "supervisorError": crate::daemon::diagnostics::redacted_value(supervisor_error),
+        }),
+    )
+}
+
+/// Kills a spawned daemon that failed its readiness wait and reports how it ended: the tail of
+/// its stderr (bounded in size and time, redacted) and its exit status.
+async fn spawned_daemon_failure(child: &mut tokio::process::Child) -> serde_json::Value {
+    use tokio::io::AsyncReadExt;
+    let _ = child.kill().await;
+    let mut captured = Vec::new();
+    if let Some(stderr) = child.stderr.take() {
+        let mut limited = stderr.take(STDERR_READ_BYTES);
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            limited.read_to_end(&mut captured),
+        )
+        .await;
+    }
+    let start = captured.len().saturating_sub(STDERR_TAIL_BYTES);
+    let tail = String::from_utf8_lossy(&captured[start..]).trim().to_string();
+    let status = child.try_wait().ok().flatten();
+    #[cfg(unix)]
+    let signal = status.and_then(|status| std::os::unix::process::ExitStatusExt::signal(&status));
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    json!({
+        "stderrTail": crate::daemon::diagnostics::redacted_value((!tail.is_empty()).then_some(tail.as_str())),
+        "exitStatus": status.map(|status| json!({ "code": status.code(), "signal": signal })),
+    })
 }
 
 /// The pid of the daemon that answers on this machine's canonical endpoint, or `None` when no live
@@ -482,7 +713,10 @@ fn handshake_error_for_response(message: String, code: Option<&str>) -> IpcError
         IpcError::new(IpcErrorCode::HostUnavailable, message)
             .with_details(serde_json::json!({ "type": "daemonRetired" }))
     } else {
-        IpcError::new(IpcErrorCode::InternalError, message)
+        IpcError::new(IpcErrorCode::InternalError, message).with_details(json!({
+            "type": "daemonHandshakeError",
+            "daemonCode": code,
+        }))
     }
 }
 
@@ -530,7 +764,8 @@ pub(crate) fn manual_ssh_response(
             Some("SESSION_NOT_FOUND") => IpcError::new(IpcErrorCode::SessionNotFound, message),
             Some(CODE_IO) => IpcError::new(IpcErrorCode::IoError, message)
                 .with_details(serde_json::json!({ "code": code })),
-            Some(_) => IpcError::new(IpcErrorCode::InternalError, message),
+            Some(_) => IpcError::new(IpcErrorCode::InternalError, message)
+                .with_details(serde_json::json!({ "type": "daemonError", "daemonCode": code })),
             None => IpcError::new(
                 IpcErrorCode::DaemonProtocolMismatch,
                 format!("Daemon cannot inspect manual SSH sessions: {message}"),
@@ -1298,7 +1533,10 @@ pub(crate) fn parse_attach_error_response(
             "sessionId": session_id,
         }))
     } else {
-        IpcError::new(IpcErrorCode::InternalError, message)
+        IpcError::new(IpcErrorCode::InternalError, message).with_details(serde_json::json!({
+            "type": "daemonAttachError",
+            "sessionId": session_id,
+        }))
     }
 }
 
@@ -1336,6 +1574,9 @@ pub struct DaemonClient {
     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
     upgrade_requested: Arc<AtomicBool>,
     spawn_lock: Arc<Mutex<()>>,
+    /// Why the supervisor could not take the daemon's lifetime on the last attempt (codesign or
+    /// staging failures surface here); reported with a failed connect.
+    supervisor_error: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl Default for DaemonClient {
@@ -1347,17 +1588,7 @@ impl Default for DaemonClient {
 impl DaemonClient {
 
     pub fn new() -> Self {
-        Self {
-            socket_path: Self::resolve_default_socket_path(),
-            connection: Arc::new(Mutex::new(None)),
-            interactive_connection: Arc::new(Mutex::new(None)),
-            spawn_connection: Arc::new(Mutex::new(None)),
-            remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            epoch: Arc::new(parking_lot::RwLock::new(None)),
-            upgrade_requested: Arc::new(AtomicBool::new(false)),
-            spawn_lock: Arc::new(Mutex::new(())),
-        }
+        Self::new_with_socket(Self::resolve_default_socket_path())
     }
 
     pub fn new_with_socket(socket_path: PathBuf) -> Self {
@@ -1371,6 +1602,7 @@ impl DaemonClient {
             epoch: Arc::new(parking_lot::RwLock::new(None)),
             upgrade_requested: Arc::new(AtomicBool::new(false)),
             spawn_lock: Arc::new(Mutex::new(())),
+            supervisor_error: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -2548,6 +2780,7 @@ impl DaemonClient {
     fn upgrade_rpc_client(&self) -> Self {
         Self {
             socket_path: self.socket_path.clone(),
+            supervisor_error: Arc::clone(&self.supervisor_error),
             connection: Arc::new(Mutex::new(None)),
             interactive_connection: Arc::new(Mutex::new(None)),
             spawn_connection: Arc::new(Mutex::new(None)),
@@ -2752,6 +2985,7 @@ impl DaemonClient {
             .await;
             match agent {
                 Ok(true) => {
+                    *self.supervisor_error.lock() = None;
                     tracing::info!(
                         "Daemon lifetime handed to the supervisor"
                     );
@@ -2761,10 +2995,12 @@ impl DaemonClient {
                         .wait_for_supervised_daemon(DAEMON_READY_TIMEOUT)
                         .await
                         .map_err(|error| {
-                            IpcError::new(
+                            let mut busy = IpcError::new(
                                 IpcErrorCode::DaemonBusy,
                                 format!("The supervised daemon did not publish its endpoint: {}", error.message),
-                            )
+                            );
+                            busy.details = error.details;
+                            busy
                         });
                 }
                 // The job was already loaded and unchanged, so nothing was started (launchd ran it
@@ -2773,10 +3009,13 @@ impl DaemonClient {
                 Ok(false) => tracing::warn!(
                     "The supervisor started nothing; spawning a detached daemon instead"
                 ),
-                Err(error) => tracing::warn!(
-                    %error,
-                    "Could not hand the daemon lifetime to the supervisor; spawning a detached daemon instead"
-                ),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Could not hand the daemon lifetime to the supervisor; spawning a detached daemon instead"
+                    );
+                    *self.supervisor_error.lock() = Some(error.message);
+                }
             }
             // No start was issued, so this caller's pending-start marker is withdrawn and the
             // owner is classified again, immediately before the fallback spawn.
@@ -2833,29 +3072,33 @@ impl DaemonClient {
         // `exec`, so `pre_exec` is the only place this can happen.
         crate::util::detach_launched_child(command.as_std_mut());
         let mut child = command.spawn().map_err(|e| {
-            IpcError::new(
+            connect_failure(
                 IpcErrorCode::InternalError,
                 format!(
                     "Failed to spawn Ferryx daemon process ({}): {e}",
                     binary_path.display()
                 ),
+                "spawn",
+                Some(e.to_string().as_str()),
             )
         })?;
         // The readiness-timeout kills below may only ever target this just-spawned child.
         let spawned_pid = child.id();
 
         let stdout = child.stdout.take().ok_or_else(|| {
-            IpcError::new(
+            connect_failure(
                 IpcErrorCode::InternalError,
                 "Failed to capture daemon process stdout",
+                "captureStdout",
+                None,
             )
         })?;
 
         if let Err(error) = wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
         {
             debug_assert_eq!(child.id(), spawned_pid, "kill must target the spawned child");
-            let _ = child.kill().await;
-            return Err(error);
+            let ended = spawned_daemon_failure(&mut child).await;
+            return Err(merge_diagnostics(error, ended));
         }
 
         if let Err(error) = Self::validate_existing_socket_path(&self.socket_path) {
@@ -2866,9 +3109,11 @@ impl DaemonClient {
 
         // Exactly one connection attempt after the readiness event; never poll and never fall back.
         Self::connect_socket(&self.socket_path).await.map_err(|e| {
-            IpcError::new(
+            connect_failure(
                 IpcErrorCode::InternalError,
                 format!("Failed to connect to daemon socket after readiness signal: {e}"),
+                "connectAfterReady",
+                Some(e.to_string().as_str()),
             )
         })
     }
@@ -2888,10 +3133,12 @@ impl DaemonClient {
                 return Ok(stream);
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(IpcError::new(
+                return Err(connect_failure(
                     IpcErrorCode::InternalError,
                     "Timed out waiting for the supervised daemon to publish its endpoint"
                         .to_string(),
+                    "supervisedEndpoint",
+                    None,
                 ));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2923,6 +3170,13 @@ impl DaemonClient {
     /// connected to, or presents one that boot rejects. The rejected attempt is never reported as
     /// a request failure, because re-reading both halves is what makes the pair coherent again.
     async fn connect_and_handshake(&self) -> Result<ActiveConnection, IpcError> {
+        match self.connect_and_handshake_retrying().await {
+            Err(error) => Err(self.annotate_connect_failure(error).await),
+            ok => ok,
+        }
+    }
+
+    async fn connect_and_handshake_retrying(&self) -> Result<ActiveConnection, IpcError> {
         let mut retirement_deadline = None;
         let mut refreshed_pair = false;
         loop {
@@ -2947,6 +3201,28 @@ impl DaemonClient {
                 outcome => return outcome,
             }
         }
+    }
+
+    /// [`with_connect_diagnostics`] for this client's endpoint: the socket, the daemon log, the
+    /// runtime directory's ownership and the last supervisor failure.
+    async fn annotate_connect_failure(&self, error: IpcError) -> IpcError {
+        let socket_path = self.socket_path.clone();
+        let supervisor_error = self.supervisor_error.lock().clone();
+        // A failed blocking task must never replace the connect failure it was annotating.
+        let unannotated = error.clone();
+        crate::ipc::run_blocking(move || {
+            let log_path = crate::daemon::logging::daemon_log_path();
+            let ownership = crate::daemon::diagnostics::runtime_ownership(&socket_path);
+            Ok(with_connect_diagnostics(
+                error,
+                &socket_path,
+                log_path.as_deref(),
+                ownership,
+                supervisor_error.as_deref(),
+            ))
+        })
+        .await
+        .unwrap_or(unannotated)
     }
 
     /// One attempt: the credential is read before the port is, so the token presented can never be
@@ -6923,7 +7199,10 @@ mod tests {
         );
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert_eq!(err.message, "Session 'other-id' not found");
-        assert!(err.details.is_none());
+        assert_eq!(
+            err.details,
+            Some(serde_json::json!({ "type": "daemonAttachError", "sessionId": "test-id" }))
+        );
     }
 
     #[test]
@@ -6932,7 +7211,7 @@ mod tests {
             parse_attach_error_response("Internal server error".to_string(), None, None, "test-id");
         assert_eq!(err.code, IpcErrorCode::InternalError);
         assert_eq!(err.message, "Internal server error");
-        assert!(err.details.is_none());
+        assert_eq!(err.details.unwrap()["type"], "daemonAttachError");
     }
 
     #[test]
@@ -6942,7 +7221,7 @@ mod tests {
         let err =
             parse_attach_error_response("Session ' not found".to_string(), None, None, "test-id");
         assert_eq!(err.code, IpcErrorCode::InternalError);
-        assert!(err.details.is_none());
+        assert_eq!(err.details.unwrap()["type"], "daemonAttachError");
     }
 
     #[test]

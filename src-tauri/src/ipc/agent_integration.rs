@@ -72,6 +72,16 @@ pub async fn cmd_agent_integration_remove_local() -> Result<RemovalReport, IpcEr
 pub struct DaemonSupervisorStatus {
     pub supported: bool,
     pub enabled: bool,
+    /// Why the switch is unavailable on this host (`null` when supported), shown in Settings.
+    pub unavailable_reason: Option<String>,
+}
+
+fn supervisor_status(supported: bool, enabled: bool, reason: Option<String>) -> DaemonSupervisorStatus {
+    DaemonSupervisorStatus {
+        supported,
+        enabled: supported && enabled,
+        unavailable_reason: if supported { None } else { reason },
+    }
 }
 
 #[tauri::command]
@@ -81,10 +91,20 @@ pub async fn cmd_daemon_supervisor_get() -> Result<DaemonSupervisorStatus, IpcEr
         let enabled = supported
             && !crate::daemon::supervisor::user_opted_out()
             && crate::daemon::supervisor::installed();
+        let status = supervisor_status(
+            supported,
+            enabled,
+            crate::daemon::supervisor::unavailable_reason(),
+        );
         // Settings > General reads this on mount; the line is the lifecycle QA's receipt that the
         // Settings view opened before it walks focus to the switch (todo 12 Q10).
-        tracing::info!(supported, enabled, "Daemon supervisor status read");
-        Ok(DaemonSupervisorStatus { supported, enabled })
+        tracing::info!(
+            supported,
+            enabled,
+            unavailable_reason = status.unavailable_reason.as_deref(),
+            "Daemon supervisor status read"
+        );
+        Ok(status)
     })
     .await
 }
@@ -104,10 +124,11 @@ pub async fn cmd_daemon_supervisor_set(enabled: bool) -> Result<DaemonSupervisor
         }
         .map_err(|e| IpcError::internal(format!("daemon supervisor: {e}")))?;
         let supported = crate::daemon::supervisor::supported();
-        Ok(DaemonSupervisorStatus {
+        Ok(supervisor_status(
             supported,
-            enabled: supported && enabled,
-        })
+            enabled,
+            crate::daemon::supervisor::unavailable_reason(),
+        ))
     })
     .await
 }
@@ -115,6 +136,28 @@ pub async fn cmd_daemon_supervisor_set(enabled: bool) -> Result<DaemonSupervisor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unsupported_supervisor_reports_why() {
+        let status = supervisor_status(
+            false,
+            true,
+            Some("systemd user services are unavailable: running inside a container".into()),
+        );
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({
+                "supported": false,
+                "enabled": false,
+                "unavailableReason": "systemd user services are unavailable: running inside a container",
+            })
+        );
+        let supported = supervisor_status(true, true, Some("stale".into()));
+        assert_eq!(
+            serde_json::to_value(&supported).unwrap(),
+            serde_json::json!({ "supported": true, "enabled": true, "unavailableReason": null })
+        );
+    }
 
     #[test]
     fn an_older_daemon_is_reported_as_upgrade_required() {

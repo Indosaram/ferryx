@@ -6,6 +6,8 @@ pub mod client;
 // Frozen, version-stable control channel ("control-v1"), separate from the data protocol.
 pub mod control;
 pub mod dag_service;
+// Redacted diagnostics a failed daemon connect or supervisor start carries (todo 36).
+pub(crate) mod diagnostics;
 pub mod handover;
 // Predecessor-authored handover request that authorizes one HandoverCandidate start (todo 8).
 pub(crate) mod handover_request;

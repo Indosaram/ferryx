@@ -210,9 +210,10 @@ pub(crate) fn report_failure(error: &anyhow::Error) {
     let _ = stderr.flush();
 }
 
-fn open_log() -> io::Result<std::fs::File> {
+/// `<data dir>/logs`, where the headless daemon writes `daemon.log`. Nothing is created.
+fn log_dir() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
-    let base = std::env::var_os("FERRYX_DATA_DIR")
+    std::env::var_os("FERRYX_DATA_DIR")
         .map(PathBuf::from)
         .or_else(|| {
             #[cfg(windows)]
@@ -228,10 +229,18 @@ fn open_log() -> io::Result<std::fs::File> {
                 std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".ferryx"))
             }
         })
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "no private daemon data directory")
-        })?;
-    let dir = base.join("logs");
+        .map(|base| base.join("logs"))
+}
+
+/// The daemon log a failed connect points the user at. Nothing is created.
+pub(crate) fn daemon_log_path() -> Option<std::path::PathBuf> {
+    log_dir().map(|dir| dir.join("daemon.log"))
+}
+
+fn open_log() -> io::Result<std::fs::File> {
+    let dir = log_dir().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "no private daemon data directory")
+    })?;
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]

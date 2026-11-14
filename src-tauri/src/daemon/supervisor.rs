@@ -82,6 +82,41 @@ pub fn supported() -> bool {
     supported_in(&process_env, crate::daemon::server::is_dev_runtime()) && backend::available()
 }
 
+/// Why no supervisor can own the daemon here, worded for Settings and `service status`; `None`
+/// when one can.
+pub fn unavailable_reason() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    let host_reason = crate::daemon::supervisor_linux::availability().clone();
+    #[cfg(not(target_os = "linux"))]
+    let host_reason: Option<String> = None;
+    let dev_runtime = crate::daemon::server::is_dev_runtime();
+    unavailable_reason_for(
+        supported(),
+        host_reason,
+        dev_runtime || isolated_runtime(&process_env),
+    )
+}
+
+/// Pure policy behind [`unavailable_reason`]: the host's own reason (no systemd user manager,
+/// a container, WSL) wins over the runtime's isolation, which wins over the generic answer.
+fn unavailable_reason_for(
+    supported: bool,
+    host_reason: Option<String>,
+    isolated_or_dev: bool,
+) -> Option<String> {
+    if supported {
+        return None;
+    }
+    Some(match host_reason {
+        Some(reason) => format!("systemd user services are unavailable: {reason}"),
+        None if isolated_or_dev => {
+            "this is an isolated or development runtime, which never manages the login service"
+                .to_string()
+        }
+        None => "no daemon supervisor is supported in this runtime".to_string(),
+    })
+}
+
 /// Name of the marker file that records the user's "do not autostart the daemon" choice.
 const OPTOUT_FILE_NAME: &str = "daemon-supervisor.optout";
 
@@ -890,6 +925,17 @@ mod tests {
 
     #[test]
     fn supervisor_is_unsupported_for_isolated_runtimes() {
+        assert_eq!(unavailable_reason_for(true, Some("ignored".into()), true), None);
+        assert_eq!(
+            unavailable_reason_for(false, Some("running inside a container".into()), true).as_deref(),
+            Some("systemd user services are unavailable: running inside a container")
+        );
+        assert!(unavailable_reason_for(false, None, true)
+            .is_some_and(|reason| reason.contains("isolated or development runtime")));
+        assert_eq!(
+            unavailable_reason_for(false, None, false).as_deref(),
+            Some("no daemon supervisor is supported in this runtime")
+        );
         for key in ISOLATED_RUNTIME_ENV {
             let isolated = env_of(&[(key, "/tmp/ferryx-fixture")]);
             assert!(!supported_in(&isolated, false), "{key} must disable the supervisor");

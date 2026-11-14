@@ -964,8 +964,10 @@ fn validate_safe_ownership_and_type_for_uid(
         .map_err(|e| format!("Failed to read metadata for {}: {e}", path.display()))?;
     if meta.file_type().is_symlink() {
         return Err(format!(
-            "Path {} is a symlink, which is prohibited for daemon runtime",
-            path.display()
+            "Path {} is a symlink, which is prohibited for daemon runtime (owned by UID {}, current UID {})",
+            path.display(),
+            meta.uid(),
+            expected_uid
         ));
     }
     if meta.uid() != expected_uid {
@@ -983,8 +985,10 @@ fn validate_safe_ownership_and_type_for_uid(
     };
     if !valid_type {
         return Err(format!(
-            "Path {} has an invalid runtime node type",
-            path.display()
+            "Path {} has an invalid runtime node type (owned by UID {}, current UID {})",
+            path.display(),
+            meta.uid(),
+            expected_uid
         ));
     }
     Ok(())
@@ -1120,6 +1124,105 @@ pub(crate) fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// How often a serving daemon checks that its socket path still exists.
+#[cfg(unix)]
+const SOCKET_WATCH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Rebinds the daemon socket when it (or its whole runtime directory) was deleted under a running
+/// daemon, e.g. by a tmp cleaner. `Ok(None)` while the path exists. The recreated directory must
+/// belong to `expected_uid`; a refusal names the path and both UIDs.
+#[cfg(unix)]
+pub(crate) fn rebind_socket_if_vanished_for_uid(
+    socket_path: &Path,
+    expected_uid: libc::uid_t,
+) -> Result<Option<std::os::unix::net::UnixListener>, String> {
+    match fs::symlink_metadata(socket_path) {
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect daemon socket {}: {error}",
+                socket_path.display()
+            ))
+        }
+    }
+    let runtime_dir = socket_path
+        .parent()
+        .ok_or_else(|| format!("Daemon socket {} has no runtime directory", socket_path.display()))?;
+    fs::create_dir_all(runtime_dir).map_err(|error| {
+        format!(
+            "Failed to recreate daemon runtime directory {}: {error}",
+            runtime_dir.display()
+        )
+    })?;
+    validate_safe_ownership_and_type_for_uid(runtime_dir, RuntimeNodeKind::Directory, expected_uid)?;
+    fs::set_permissions(runtime_dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        format!(
+            "Failed to secure daemon runtime directory {}: {error}",
+            runtime_dir.display()
+        )
+    })?;
+    let listener = std::os::unix::net::UnixListener::bind(socket_path).map_err(|error| {
+        format!("Failed to rebind UDS socket at {}: {error}", socket_path.display())
+    })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("Failed to configure the rebound daemon socket: {error}"))?;
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("Failed to secure daemon socket: {error}"))?;
+    validate_safe_ownership_and_type_for_uid(socket_path, RuntimeNodeKind::Socket, expected_uid)?;
+    Ok(Some(listener))
+}
+
+#[cfg(all(test, unix))]
+mod socket_rebind_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn a_deleted_runtime_directory_is_rebound() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path().join("rt");
+        let socket = runtime.join("daemon.sock");
+        // SAFETY: `getuid` takes no arguments and returns the current process UID.
+        let uid = unsafe { libc::getuid() };
+        assert!(rebind_socket_if_vanished_for_uid(&socket, uid).unwrap().is_some());
+        fs::remove_dir_all(&runtime).unwrap();
+
+        let listener = rebind_socket_if_vanished_for_uid(&socket, uid)
+            .unwrap()
+            .expect("a vanished socket is rebound");
+        assert_eq!(fs::metadata(&runtime).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::symlink_metadata(&socket).unwrap().permissions().mode() & 0o777, 0o600);
+        validate_runtime_socket_path_for_uid(&socket, uid).expect("the rebound path is trusted");
+
+        let mut client = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        listener.set_nonblocking(false).unwrap();
+        let (mut served, _) = listener.accept().unwrap();
+        client.write_all(b"ping").unwrap();
+        let mut buf = [0u8; 4];
+        served.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ping");
+
+        assert!(
+            rebind_socket_if_vanished_for_uid(&socket, uid).unwrap().is_none(),
+            "a present socket is left alone"
+        );
+    }
+
+    #[test]
+    fn a_rebind_refusal_names_the_path_and_uid() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("rt").join("daemon.sock");
+        // SAFETY: `getuid` takes no arguments and returns the current process UID.
+        let foreign = unsafe { libc::getuid() }.wrapping_add(1);
+        let error = rebind_socket_if_vanished_for_uid(&socket, foreign).unwrap_err();
+        assert!(error.contains(&dir.path().join("rt").display().to_string()), "{error}");
+        assert!(error.contains(&format!("UID {foreign}")), "{error}");
+        assert!(!socket.exists(), "nothing is bound in a directory that failed validation");
+    }
 }
 
 pub(crate) fn open_secure_lock_file(path: &Path) -> Result<File, String> {
@@ -5764,6 +5867,16 @@ impl DaemonServer {
             }
         }
 
+        // A tmp cleaner can delete the runtime directory under a running daemon; the listener
+        // keeps working but nobody can find it, so the path is checked and rebound (todo 36).
+        #[cfg(unix)]
+        let mut listener = listener;
+        #[cfg(unix)]
+        let mut socket_watch = tokio::time::interval(SOCKET_WATCH_INTERVAL);
+        #[cfg(unix)]
+        socket_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        #[cfg(unix)]
+        let mut last_rebind_error: Option<String> = None;
         loop {
             // Public accepts stop while a commit is decided and forever once this daemon has
             // handed its listener to a successor (todo 8); the legacy socket is not gated. Once
@@ -5771,7 +5884,27 @@ impl DaemonServer {
             // path connectable with nobody accepting after the successor retired (run-int1
             // Q08b), and it keeps serving its retained sessions on the legacy socket until
             // check_retirement_if_empty exits the process.
-            let Some(accepted) = self.handover_manager.gated_accept(|| listener.accept()).await else {
+            #[cfg(unix)]
+            let watched = tokio::select! {
+                accepted = self.handover_manager.gated_accept(|| listener.accept()) => Some(accepted),
+                _ = socket_watch.tick() => None,
+            };
+            #[cfg(unix)]
+            let Some(gated) = watched else {
+                if let Some(rebound) = self
+                    .rebind_vanished_socket(&socket_path, &mut last_rebind_error)
+                    .await
+                {
+                    listener = rebound;
+                    Arc::clone(&self).spawn_owner_publication(
+                        crate::daemon::owner_admission::AdmissionPaths::for_runtime(),
+                    );
+                }
+                continue;
+            };
+            #[cfg(not(unix))]
+            let gated = self.handover_manager.gated_accept(|| listener.accept()).await;
+            let Some(accepted) = gated else {
                 drop(listener);
                 std::future::pending::<()>().await;
                 unreachable!("pending never resolves");
@@ -5793,6 +5926,72 @@ impl DaemonServer {
         }
 
         Ok(())
+    }
+
+    /// The serving daemon's half of [`rebind_socket_if_vanished_for_uid`]: only an owner that
+    /// still holds its locks and has not handed its listener over rebinds, and the new listener
+    /// is registered so a later handover transfers it. Sessions are untouched either way. A
+    /// refusal is logged once per distinct message and retried on the next check.
+    #[cfg(unix)]
+    async fn rebind_vanished_socket(
+        &self,
+        socket_path: &Path,
+        last_error: &mut Option<String>,
+    ) -> Option<UnixListener> {
+        if !self.handover_manager.holds_lock_files()
+            || self.handover_manager.status() != crate::daemon::handover::HandoverStatus::Active
+        {
+            return None;
+        }
+        let path = socket_path.to_path_buf();
+        // SAFETY: `getuid` takes no arguments and returns the current process UID.
+        let uid = unsafe { libc::getuid() };
+        let rebound = crate::ipc::run_blocking(move || {
+            rebind_socket_if_vanished_for_uid(&path, uid).map_err(crate::ipc::IpcError::internal)
+        })
+        .await
+        .map_err(|error| error.message)
+        .and_then(|listener| {
+            listener
+                .map(|listener| {
+                    UnixListener::from_std(listener)
+                        .map_err(|error| format!("Failed to serve the rebound daemon socket: {error}"))
+                })
+                .transpose()
+        })
+        .and_then(|listener| {
+            if let Some(listener) = &listener {
+                use std::os::fd::AsRawFd;
+                if let Err(error) = self.handover_manager.register_authority_listener(
+                    crate::daemon::handover::AuthorityListenerRole::Canonical,
+                    listener.as_raw_fd(),
+                ) {
+                    // Never leave a path nobody serves: the next check binds it again.
+                    let _ = fs::remove_file(socket_path);
+                    return Err(error);
+                }
+            }
+            Ok(listener)
+        });
+        match rebound {
+            Ok(Some(listener)) => {
+                *last_error = None;
+                self.note_published_endpoint(socket_path);
+                tracing::warn!(
+                    path = %socket_path.display(),
+                    "Daemon socket path disappeared; rebound it and kept every session"
+                );
+                Some(listener)
+            }
+            Ok(None) => None,
+            Err(message) => {
+                if last_error.as_deref() != Some(message.as_str()) {
+                    tracing::error!(path = %socket_path.display(), %message, "Daemon socket path disappeared and could not be rebound");
+                    *last_error = Some(message);
+                }
+                None
+            }
+        }
     }
 
     fn resource_probes(&self) -> Vec<crate::daemon::resource_usage::SessionProbe> {

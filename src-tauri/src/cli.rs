@@ -2763,6 +2763,10 @@ pub struct ServiceReport {
     pub backend: &'static str,
     pub installed: bool,
     pub linger: Option<bool>,
+    /// Linux with linger off: the exact command that keeps the daemon alive past logout, plus
+    /// what `loginctl` said when enabling it failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linger_hint: Option<String>,
     pub pid: Option<u32>,
     pub reason: Option<String>,
 }
@@ -2988,13 +2992,8 @@ pub fn native_service_backend() -> &'static str {
 }
 
 fn supervisor_unavailable_reason() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(reason) = crate::daemon::supervisor_linux::availability().clone() {
-            return reason;
-        }
-    }
-    "no daemon supervisor is supported in this runtime".to_string()
+    crate::daemon::supervisor::unavailable_reason()
+        .unwrap_or_else(|| "no daemon supervisor is supported in this runtime".to_string())
 }
 
 /// Pid of the daemon answering on this machine's canonical endpoint. Read-only; on targets
@@ -3011,27 +3010,71 @@ fn login_user() -> Option<String> {
         .filter(|user| !user.is_empty())
 }
 
+/// The user a linger hint names; linger is a Linux-only concept.
+fn linger_user() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        login_user()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Most of `loginctl`'s stderr a linger hint repeats.
+const LINGER_STDERR_CHARS: usize = 300;
+
+/// What to tell a user whose linger is off: the exact `sudo loginctl enable-linger <user>` and,
+/// when enabling it failed, what `loginctl` said. `None` when linger is on or not a Linux concept.
+fn linger_hint(user: Option<&str>, enabled: Option<bool>, loginctl_stderr: Option<&str>) -> Option<String> {
+    if enabled != Some(false) {
+        return None;
+    }
+    let mut hint = format!(
+        "linger is off, so the daemon stops when you log out; enable it with: sudo loginctl enable-linger {}",
+        user.unwrap_or("$USER")
+    );
+    let stderr = loginctl_stderr.map(str::trim).unwrap_or_default();
+    if !stderr.is_empty() {
+        let stderr: String = crate::daemon::diagnostics::redact_secrets(stderr)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(LINGER_STDERR_CHARS)
+            .collect();
+        hint.push_str(&format!(" (loginctl: {stderr})"));
+    }
+    Some(hint)
+}
+
 /// Linux: `loginctl enable-linger $USER` so the user manager (and a supervised daemon) outlives
-/// the SSH session. `None` on other targets.
+/// the SSH session, with the hint to show when it did not work. `(None, None)` on other targets.
 #[cfg(target_os = "linux")]
-fn enable_linger() -> Option<bool> {
+fn enable_linger() -> (Option<bool>, Option<String>) {
     let Some(user) = login_user() else {
-        return Some(false);
+        return (Some(false), linger_hint(None, Some(false), None));
     };
-    Some(
-        std::process::Command::new("loginctl")
-            .args(["enable-linger", &user])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success()),
-    )
+    let output = std::process::Command::new("loginctl")
+        .args(["enable-linger", &user])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    let (enabled, stderr) = match output {
+        Ok(output) => (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ),
+        Err(error) => (false, format!("cannot run loginctl: {error}")),
+    };
+    (Some(enabled), linger_hint(Some(user.as_str()), Some(enabled), Some(stderr.as_str())))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn enable_linger() -> Option<bool> {
-    None
+fn enable_linger() -> (Option<bool>, Option<String>) {
+    (None, None)
 }
 
 #[cfg(target_os = "linux")]
@@ -3124,7 +3167,7 @@ fn wait_for_answering_daemon(
 
 fn detached_fallback(
     runtime: &tokio::runtime::Runtime,
-    linger: Option<bool>,
+    (linger, linger_hint): (Option<bool>, Option<String>),
     reason: String,
 ) -> ServiceReport {
     // A daemon already answers: never start a second one and never touch the running one.
@@ -3134,6 +3177,7 @@ fn detached_fallback(
             backend: "detached",
             installed: true,
             linger,
+            linger_hint,
             pid: Some(pid),
             reason: Some(reason),
         };
@@ -3144,6 +3188,7 @@ fn detached_fallback(
             backend: "detached",
             installed: true,
             linger,
+            linger_hint,
             pid: wait_for_answering_daemon(runtime, std::time::Duration::from_secs(10))
                 .or(Some(child_pid)),
             reason: Some(reason),
@@ -3153,6 +3198,7 @@ fn detached_fallback(
             backend: "detached",
             installed: false,
             linger,
+            linger_hint,
             pid: None,
             reason: Some(format!("{reason}; detached start failed: {error}")),
         },
@@ -3163,7 +3209,7 @@ fn detached_fallback(
 /// absent owner, under owner admission), else a detached `--daemon`. Never stops or replaces a
 /// running daemon.
 pub fn install_service(runtime: &tokio::runtime::Runtime) -> ServiceReport {
-    let linger = enable_linger();
+    let (linger, linger_hint) = enable_linger();
     let reason = if crate::daemon::supervisor::supported() {
         // `ensure_if_absent` is `ensure()` behind owner admission: it starts the supervised job
         // only when no daemon owns the endpoint and registers it for login.
@@ -3174,6 +3220,7 @@ pub fn install_service(runtime: &tokio::runtime::Runtime) -> ServiceReport {
                     backend: native_service_backend(),
                     installed: true,
                     linger,
+                    linger_hint,
                     pid: answering_daemon_pid(runtime),
                     reason: None,
                 };
@@ -3184,7 +3231,7 @@ pub fn install_service(runtime: &tokio::runtime::Runtime) -> ServiceReport {
     } else {
         supervisor_unavailable_reason()
     };
-    detached_fallback(runtime, linger, reason)
+    detached_fallback(runtime, (linger, linger_hint), reason)
 }
 
 /// `service status`: read-only.
@@ -3192,6 +3239,7 @@ pub fn service_status(runtime: &tokio::runtime::Runtime) -> ServiceReport {
     let supported = crate::daemon::supervisor::supported();
     let unit = supported && crate::daemon::supervisor::installed();
     let pid = answering_daemon_pid(runtime);
+    let linger = linger_status();
     ServiceReport {
         supervised: unit,
         backend: if unit {
@@ -3202,7 +3250,8 @@ pub fn service_status(runtime: &tokio::runtime::Runtime) -> ServiceReport {
             "none"
         },
         installed: unit || pid.is_some(),
-        linger: linger_status(),
+        linger,
+        linger_hint: linger_hint(linger_user().as_deref(), linger, None),
         pid,
         reason: (!supported).then(supervisor_unavailable_reason),
     }
@@ -3241,6 +3290,9 @@ pub fn render_service_report(report: &ServiceReport) -> String {
     );
     if let Some(linger) = report.linger {
         text.push_str(&format!(" linger={linger}"));
+    }
+    if let Some(hint) = &report.linger_hint {
+        text.push_str(&format!(" linger_hint=\"{hint}\""));
     }
     if let Some(pid) = report.pid {
         text.push_str(&format!(" pid={pid}"));
@@ -4140,6 +4192,7 @@ mod tests {
             backend: "detached",
             installed: true,
             linger: None,
+            linger_hint: None,
             pid: Some(42),
             reason: Some("systemd is not the init system".into()),
         };
@@ -4179,6 +4232,38 @@ mod tests {
         };
         assert_eq!(up_summary_exit_code(&not_running, false), UP_EXIT_OTHER);
         assert_eq!(up_summary_exit_code(&not_running, true), UP_EXIT_OK);
+    }
+
+    #[test]
+    fn linger_hint_names_the_exact_command() {
+        let failed = linger_hint(
+            Some("alice"),
+            Some(false),
+            Some("Could not enable linger: Access denied\n"),
+        )
+        .expect("a hint");
+        assert!(failed.contains("sudo loginctl enable-linger alice"), "{failed}");
+        assert!(failed.ends_with("(loginctl: Could not enable linger: Access denied)"), "{failed}");
+
+        let unknown = linger_hint(None, Some(false), None).expect("a hint");
+        assert!(unknown.ends_with("sudo loginctl enable-linger $USER"), "{unknown}");
+        assert_eq!(linger_hint(Some("alice"), Some(true), Some("ignored")), None);
+        assert_eq!(linger_hint(Some("alice"), None, None), None);
+
+        let secret = linger_hint(Some("alice"), Some(false), Some("polkit token=abc123secretvalue")).unwrap();
+        assert!(!secret.contains("abc123secretvalue"), "{secret}");
+
+        let report = ServiceReport {
+            supervised: true,
+            backend: "systemd-user",
+            installed: true,
+            linger: Some(false),
+            linger_hint: Some(failed.clone()),
+            pid: None,
+            reason: None,
+        };
+        assert!(render_service_report(&report).contains(&format!(" linger_hint=\"{failed}\"")));
+        assert_eq!(serde_json::to_value(&report).unwrap()["lingerHint"], failed);
     }
 
     #[test]
