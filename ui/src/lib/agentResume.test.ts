@@ -325,10 +325,20 @@ describe("agentResume adapter module", () => {
         ]);
       });
 
-      it("rejects a launcher that does not belong to the agent", () => {
-        expect(getAgentResumeArgv("maho", { key: "session_id", id: "x", launcher: "omo" })).toBeNull();
+      it("rejects the single launcher an agent may not resume through", () => {
+        // mhc is the only launcher the wire can carry, and it belongs to omo and maho alone.
         expect(getAgentResumeArgv("claude", { key: "session_id", id: "x", launcher: "mhc" })).toBeNull();
-        expect(getAgentResumeArgv("omo", { key: "session_id", id: "x", launcher: "maho" })).toBeNull();
+      });
+
+      it("rejects a forged launcher that never came through the wire parser", () => {
+        // The wire parser admits only mhc (pairedDaemonContracts) and the normalizer rejects
+        // every other value, so these records are impossible by type. The cast stands in for
+        // untrusted data reaching argv construction anyway: a launcher the agent does not own
+        // must never be forwarded as the binary to run.
+        const forged = (launcher: string) =>
+          ({ key: "session_id", id: "x", launcher }) as unknown as AgentProviderSession;
+        expect(getAgentResumeArgv("maho", forged("omo"))).toBeNull();
+        expect(getAgentResumeArgv("omo", forged("maho"))).toBeNull();
       });
     });
 
@@ -597,7 +607,7 @@ describe("agentResume adapter module", () => {
   });
 
   describe("isIdentityCorrection", () => {
-    const mhc = { key: "session_id" as const, id: "conv-1", launcher: "mhc" };
+    const mhc: AgentProviderSession = { key: "session_id", id: "conv-1", launcher: "mhc" };
 
     it("corrects omo -> maho only with the mhc launcher on the same report", () => {
       expect(isIdentityCorrection("omo", "maho", mhc)).toBe(true);

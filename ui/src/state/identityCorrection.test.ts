@@ -2,12 +2,15 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createLayoutState } from "./layout";
 import { resetAttentionEngagementClocksForTests, workspaceReducer, type WorkspaceState } from "./workspaceStore";
 import { migrateOmoLaunchedByMhc } from "../lib/sessionPersistence";
+import type { AgentProviderSession } from "../lib/types";
 
 // The engagement/episode clocks are module-level; tests reuse session ids, so reset per test.
 beforeEach(() => resetAttentionEngagementClocksForTests());
 
-const MHC = { key: "session_id" as const, id: "conv-1", launcher: "mhc" };
-const NO_LAUNCHER = { key: "session_id" as const, id: "conv-1" };
+// Typed as the wire record itself: the launcher is a closed set, and a fixture widened to
+// `string` would let a value through that neither parser can ever produce.
+const MHC: AgentProviderSession = { key: "session_id", id: "conv-1", launcher: "mhc" };
+const NO_LAUNCHER: AgentProviderSession = { key: "session_id", id: "conv-1" };
 
 function fixture(agentType: string | null): WorkspaceState {
   let state: WorkspaceState = {
@@ -63,7 +66,7 @@ describe("identity correction in the reducer", () => {
     state = screen(state, { state: "working" });
     state = screen(state, { state: "idle" });
     const activityBefore = state.activityBySessionId?.a;
-    expect(activityBefore.state).toBe("done");
+    expect(activityBefore?.state).toBe("done");
 
     state = screen(state, { state: "idle", agentType: "maho", providerSession: MHC });
     expect(state.sessions.a.agentType).toBe("maho");
