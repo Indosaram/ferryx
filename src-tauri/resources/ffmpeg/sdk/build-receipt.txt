@@ -1,0 +1,2 @@
+FFmpeg 9.0.2 (sha256 8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e)
+--prefix=/home/runner/work/_temp/sdk/ffmpeg --disable-doc --disable-debug --disable-ffplay --disable-network --disable-autodetect --enable-shared --disable-static --enable-vaapi --enable-ffnvcodec --enable-nvenc --enable-x86asm
