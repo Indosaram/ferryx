@@ -6,6 +6,7 @@ import {
   MICROSOFT_STORE_URL,
   MICROSOFT_STORE_SEARCH_URL,
   detectUserPlatform,
+  windowsPlatform,
   type PlatformId,
 } from './downloads';
 
@@ -86,13 +87,21 @@ describe('Cross-Platform Download Configuration', () => {
     expect(macos.assets.map((a) => a.id)).toEqual(['macos-universal']);
   });
 
-  test('Windows offers the Microsoft Store first and the x64 installer second, never the raw MSIX', () => {
-    const windows = PLATFORMS.windows;
-    expect(windows.id).toBe('windows');
-    expect(windows.name).toBe('Windows');
+  test('Windows resolves to the Microsoft Store alone when the release ships no NSIS installer', () => {
+    // Store-only releases (no --nsis-migration) publish no Ferryx_x64-setup.exe; a link would 404.
+    for (const windows of [PLATFORMS.windows, windowsPlatform(false)]) {
+      expect(windows.id).toBe('windows');
+      expect(windows.defaultAsset.id).toBe('windows-store');
+      expect(windows.defaultAsset.url).toBe(MICROSOFT_STORE_URL);
+      expect(windows.defaultAsset.fileType).toBe('Store');
+      expect(windows.assets.map((a) => a.id)).toEqual(['windows-store']);
+      expect(windows.assets.some((a) => a.url.endsWith('-setup.exe'))).toBe(false);
+    }
+  });
+
+  test('Windows adds the x64 installer second only when the release publishes it, never the raw MSIX', () => {
+    const windows = windowsPlatform(true);
     expect(windows.defaultAsset.id).toBe('windows-store');
-    expect(windows.defaultAsset.url).toBe(MICROSOFT_STORE_URL);
-    expect(windows.defaultAsset.fileType).toBe('Store');
     expect(windows.assets.map((a) => a.id)).toEqual(['windows-store', 'windows-installer']);
 
     const exeAsset = windows.assets.find((a) => a.id === 'windows-installer');

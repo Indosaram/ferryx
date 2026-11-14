@@ -2370,6 +2370,12 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
                 "Enrolled; the daemon keeps owning its identity and device tokens. \
                  Existing paired devices and live terminals are unaffected."
             );
+            enable_relay_on_this_machine(
+                &runtime,
+                &record.relay_origin,
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+            );
             Ok(())
         }
         AccountCliCommand::Login { email, origin } => {
@@ -2383,7 +2389,7 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
             };
             let origin = account_cli_origin(origin)?;
             let runtime = account_cli_runtime()?;
-            runtime.block_on(async {
+            let record = runtime.block_on(async {
                 let auth_resp = crate::account::enroll_client::request_device_auth(&origin, email)
                     .await
                     .map_err(|error| billing::from_enroll_error(&origin, &error))?;
@@ -2427,8 +2433,15 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
                     "Enrolled successfully! The daemon keeps owning its identity and device tokens. \
                      Existing paired devices and live terminals are unaffected."
                 );
-                Ok(())
-            })
+                Ok(record)
+            })?;
+            enable_relay_on_this_machine(
+                &runtime,
+                &record.relay_origin,
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+            );
+            Ok(())
         }
         AccountCliCommand::Plan { json, origin } => {
             let origin = account_cli_origin(origin)?;
@@ -2752,6 +2765,258 @@ pub struct UpEnrolled {
     pub account_id: String,
     pub machine_record_id: String,
     pub relay_origin: String,
+    /// What `up` did to the remote gateway mode: `enabled` (the daemon switched to Relay),
+    /// `saved` (no daemon answered; Relay was saved for its next boot), `unchanged` (a mode
+    /// the user chose was kept) or `failed`.
+    pub relay_activation: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_activation_error: Option<String>,
+    pub remote: RemoteLiveStatus,
+}
+
+/// Remote gateway state as the running daemon reports it, or the saved config when no daemon
+/// answers (`daemon` is then `notRunning` or `unreachable` and nothing live is claimed).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteLiveStatus {
+    /// `running`, `notRunning` (no daemon owns the endpoint) or `unreachable` (a daemon owns it
+    /// but did not answer the request, e.g. it speaks another protocol version).
+    pub daemon: &'static str,
+    pub mode: crate::remote::RemoteNetworkMode,
+    /// `None` when no daemon answered: the tunnel state is unknown, not down.
+    pub relay_connected: Option<bool>,
+    /// The relay the gateway connects to in Relay mode.
+    pub relay_url: Option<String>,
+    /// `config` (saved relay URL) or `default` (built-in relay); `None` outside Relay mode.
+    pub relay_url_source: Option<&'static str>,
+}
+
+/// How long `up` and `account enroll` wait for the daemon endpoint before saving Relay to the
+/// config file the daemon restores at boot.
+const RELAY_DAEMON_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long `up` waits for a just-enabled relay tunnel before reporting its current state.
+const RELAY_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The relay a gateway in `config` connects to, and where that URL came from.
+fn effective_relay_url(
+    config_mode: crate::remote::RemoteNetworkMode,
+    relay_url: Option<&str>,
+) -> (Option<String>, Option<&'static str>) {
+    if config_mode != crate::remote::RemoteNetworkMode::Relay {
+        return (None, None);
+    }
+    match relay_url.map(str::trim).filter(|url| !url.is_empty()) {
+        Some(url) => (Some(url.to_string()), Some("config")),
+        None => (
+            Some(crate::remote::state::DEFAULT_RELAY_URL.to_string()),
+            Some("default"),
+        ),
+    }
+}
+
+fn live_status_from_daemon(status: &crate::daemon::DaemonRemoteStatus) -> RemoteLiveStatus {
+    let (relay_url, relay_url_source) = effective_relay_url(status.mode, status.relay_url.as_deref());
+    RemoteLiveStatus {
+        daemon: "running",
+        mode: status.mode,
+        relay_connected: status.relay_connected,
+        relay_url,
+        relay_url_source,
+    }
+}
+
+/// The `daemon` marker for a status request that `error` failed: `notRunning` only when no daemon
+/// owns the endpoint; any other failure (e.g. a retiring daemon's handover timeout) is `unreachable`.
+fn daemon_absence(error: &crate::ipc::IpcError) -> &'static str {
+    if error.code == crate::ipc::IpcErrorCode::HostUnavailable
+        && error.message == crate::daemon::EXISTING_ONLY_NO_DAEMON_MESSAGE
+    {
+        "notRunning"
+    } else {
+        "unreachable"
+    }
+}
+
+fn live_status_from_saved(
+    saved: &crate::remote::RemoteGatewayConfig,
+    daemon: &'static str,
+) -> RemoteLiveStatus {
+    let (relay_url, relay_url_source) = effective_relay_url(saved.mode, saved.relay_url.as_deref());
+    RemoteLiveStatus {
+        daemon,
+        mode: saved.mode,
+        relay_connected: None,
+        relay_url,
+        relay_url_source,
+    }
+}
+
+fn saved_remote_config(config_path: Option<&std::path::Path>) -> crate::remote::RemoteGatewayConfig {
+    config_path
+        .and_then(crate::remote::state::load_persisted_config)
+        .unwrap_or_default()
+}
+
+/// The `relayActivationError` of an `unchanged` outcome caused by an unparseable remote config.
+const UNREADABLE_REMOTE_CONFIG_NOTE: &str =
+    "the saved remote config could not be read, so it was left as is";
+
+/// Outcome of [`enable_relay_after_enroll`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayActivation {
+    pub outcome: &'static str,
+    pub error: Option<String>,
+    pub remote: RemoteLiveStatus,
+}
+
+/// Turns the relay on after an enrollment, the way the desktop does on its first pairing: only
+/// when the gateway is Off, so a LocalNetwork or Tailscale mode the user chose is never replaced.
+/// A running daemon is switched over IPC; when none answers on `client`'s endpoint, Relay is
+/// saved to `config_path`, which the daemon restores at boot.
+pub async fn enable_relay_after_enroll(
+    client: &crate::daemon::DaemonClient,
+    config_path: Option<&std::path::Path>,
+    relay_origin: &str,
+    connect_wait: std::time::Duration,
+) -> RelayActivation {
+    use crate::remote::{RemoteGatewayConfig, RemoteNetworkMode, REMOTE_GATEWAY_PORT};
+
+    let status = match client.remote_get_status().await {
+        Ok(status) => status,
+        Err(status_error) => {
+            let valid = crate::remote::relay_client::validate_relay_url(
+                relay_origin,
+                crate::remote::relay_client::is_insecure_relay_allowed(),
+            );
+            let (outcome, error) = match (config_path, valid) {
+                (_, Err(error)) => ("failed", Some(format!("invalid relay origin: {error}"))),
+                (Some(path), Ok(_)) => match crate::remote::state::persist_relay_if_off(path, relay_origin) {
+                    Ok(true) => ("saved", None),
+                    Ok(false) if crate::remote::state::load_persisted_config(path).is_none() => {
+                        ("unchanged", Some(UNREADABLE_REMOTE_CONFIG_NOTE.to_string()))
+                    }
+                    Ok(false) => ("unchanged", None),
+                    Err(error) => ("failed", Some(format!("cannot save the remote config: {error}"))),
+                },
+                (None, Ok(_)) => ("failed", Some("cannot resolve the remote config path".to_string())),
+            };
+            return RelayActivation {
+                outcome,
+                error,
+                remote: live_status_from_saved(
+                    &saved_remote_config(config_path),
+                    daemon_absence(&status_error),
+                ),
+            };
+        }
+    };
+    if status.mode != RemoteNetworkMode::Off {
+        return RelayActivation {
+            outcome: "unchanged",
+            error: None,
+            remote: live_status_from_daemon(&status),
+        };
+    }
+    // A daemon that booted from an unreadable config reports Off; switching it to Relay would
+    // make it overwrite that file, so the file and the daemon are both left alone.
+    if config_path.is_some_and(|path| {
+        path.exists() && crate::remote::state::load_persisted_config(path).is_none()
+    }) {
+        return RelayActivation {
+            outcome: "unchanged",
+            error: Some(UNREADABLE_REMOTE_CONFIG_NOTE.to_string()),
+            remote: live_status_from_daemon(&status),
+        };
+    }
+    let config = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::Relay,
+        port: REMOTE_GATEWAY_PORT,
+        allow_control: status.allow_control,
+        relay_url: Some(relay_origin.to_string()),
+    };
+    if let Err(error) = client.remote_configure(config).await {
+        return RelayActivation {
+            outcome: "failed",
+            error: Some(error.message),
+            remote: live_status_from_daemon(&status),
+        };
+    }
+    // The tunnel connects in the background; report it once it is up or the wait ends.
+    let deadline = tokio::time::Instant::now() + connect_wait;
+    let latest = loop {
+        match client.remote_get_status().await {
+            Ok(status) => {
+                if status.relay_connected == Some(true) || tokio::time::Instant::now() >= deadline {
+                    break Ok(status);
+                }
+            }
+            Err(error) => break Err(daemon_absence(&error)),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
+    RelayActivation {
+        outcome: "enabled",
+        error: None,
+        remote: match latest {
+            Ok(status) => live_status_from_daemon(&status),
+            Err(daemon) => live_status_from_saved(&saved_remote_config(config_path), daemon),
+        },
+    }
+}
+
+/// [`enable_relay_after_enroll`] against this machine's daemon and config file.
+fn enable_relay_on_this_machine(
+    runtime: &tokio::runtime::Runtime,
+    relay_origin: &str,
+    daemon_wait: std::time::Duration,
+    connect_wait: std::time::Duration,
+) -> RelayActivation {
+    let client = crate::daemon::DaemonClient::existing_only(daemon_wait);
+    let config_path = crate::remote::state::remote_config_path();
+    let activation = runtime.block_on(enable_relay_after_enroll(
+        &client,
+        config_path.as_deref(),
+        relay_origin,
+        connect_wait,
+    ));
+    eprintln!("{}", relay_activation_message(&activation, relay_origin));
+    activation
+}
+
+/// The human line `up` and `account enroll` print for `activation`.
+fn relay_activation_message(activation: &RelayActivation, relay_origin: &str) -> String {
+    let remote = &activation.remote;
+    match (activation.outcome, &activation.error) {
+        ("enabled", _) => format!("Relay enabled through {relay_origin}."),
+        ("saved", _) if remote.daemon == "unreachable" => format!(
+            "A daemon owns the endpoint but did not answer; relay mode through {relay_origin} was saved \
+             and applies when that daemon restarts."
+        ),
+        ("saved", _) => format!(
+            "No daemon answered; relay mode through {relay_origin} was saved and starts with the daemon."
+        ),
+        ("unchanged", Some(note)) => format!("Remote access was left unchanged: {note}."),
+        ("unchanged", None) if remote.mode == crate::remote::RemoteNetworkMode::Relay => {
+            match remote.relay_url.as_deref() {
+                Some(url) if url.trim_end_matches('/') != relay_origin.trim_end_matches('/') => format!(
+                    "Relay mode already uses {url}; it was not switched to {relay_origin}."
+                ),
+                _ if remote.daemon == "running" => {
+                    "Relay mode is already on; it is left unchanged.".to_string()
+                }
+                _ => "Relay mode is already saved for the next daemon start; it is left unchanged."
+                    .to_string(),
+            }
+        }
+        ("unchanged", None) => format!(
+            "Remote access mode {:?} was chosen before; it is left unchanged.",
+            remote.mode
+        ),
+        (_, error) => format!(
+            "Could not enable the relay: {}",
+            error.as_deref().unwrap_or("unknown error")
+        ),
+    }
 }
 
 /// How the daemon is kept running (`service` of the `up --json` summary and `service --json`).
@@ -2843,6 +3108,16 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
         install_service(&runtime)
     };
 
+    // 6. Turn the relay on so the machine is reachable without a desktop. An unsupervised or
+    // skipped service gets one endpoint attempt; Relay is then saved for the daemon's boot.
+    let daemon_wait = if service.installed && !command.no_service {
+        RELAY_DAEMON_WAIT
+    } else {
+        std::time::Duration::ZERO
+    };
+    let activation =
+        enable_relay_on_this_machine(&runtime, &record.relay_origin, daemon_wait, RELAY_CONNECT_WAIT);
+
     Ok(UpSummary {
         cli_path: std::env::current_exe()
             .map(|path| path.display().to_string())
@@ -2852,6 +3127,9 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
             account_id: record.account_id,
             machine_record_id: record.machine_record_id,
             relay_origin: record.relay_origin,
+            relay_activation: activation.outcome,
+            relay_activation_error: activation.error,
+            remote: activation.remote,
         }),
         service,
     })
@@ -2908,6 +3186,11 @@ pub fn up_cli_main(args: &[String]) -> i32 {
                     println!(
                         "Enrolled: account {} machine {} relay {}",
                         enrolled.account_id, enrolled.machine_record_id, enrolled.relay_origin
+                    );
+                    println!(
+                        "remote relayActivation={} {}",
+                        enrolled.relay_activation,
+                        render_remote_live_status(&enrolled.remote)
                     );
                 }
                 println!("{}", render_service_report(&summary.service));
@@ -3293,76 +3576,69 @@ pub fn service_cli_main(args: &[String]) -> i32 {
     }
 }
 
-/// Resolves the base directory Ferryx stores remote gateway state under,
-/// mirroring the resolution used by [`remote_auth_manager`].
-fn remote_state_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("FERRYX_DATA_DIR")
-        .map(std::path::PathBuf::from)
-        .map(|dir| dir.join("remote"))
-        .or_else(|| {
-            #[cfg(windows)]
-            {
-                std::env::var_os("LOCALAPPDATA")
-                    .map(|dir| std::path::PathBuf::from(dir).join("Ferryx").join("remote"))
-                    .or_else(|| {
-                        std::env::var_os("USERPROFILE")
-                            .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
-                    })
-            }
-            #[cfg(not(windows))]
-            {
-                std::env::var_os("HOME")
-                    .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
-            }
-        })
-}
-
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RemoteStatusOutput {
+    /// `ok` when the daemon answered; `daemonNotRunning` or `daemonUnreachable` when only the
+    /// saved config was read.
     status: &'static str,
     port: u16,
-    mode: String,
+    #[serde(flatten)]
+    remote: RemoteLiveStatus,
 }
 
-/// Reads the persisted remote gateway config (`remote-config.json`) if one
-/// exists, otherwise falls back to the default config, and reports the
-/// configured port and mode. This does not require the daemon to be running.
-fn remote_status_output() -> RemoteStatusOutput {
-    let persisted = remote_state_dir()
-        .map(|dir| dir.join("remote-config.json"))
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-
-    let default_config = crate::remote::RemoteGatewayConfig::default();
-    let mode = persisted
-        .as_ref()
-        .and_then(|value| value.get("mode"))
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            serde_json::to_value(default_config.mode)
-                .ok()
-                .and_then(|value| value.as_str().map(str::to_string))
-                .unwrap_or_else(|| "off".to_string())
-        });
-    let port = persisted
-        .as_ref()
-        .and_then(|value| value.get("port"))
-        .and_then(|value| value.as_u64())
-        .and_then(|value| u16::try_from(value).ok())
-        .unwrap_or(default_config.port);
-
-    RemoteStatusOutput {
-        status: "ok",
-        port,
-        mode,
+/// Asks the running daemon for the live gateway state (mode, tunnel, effective relay). When no
+/// daemon answers, reports the saved `remote-config.json` and says whether the daemon is not
+/// running or did not answer, instead of claiming a live state.
+async fn remote_status_output(
+    client: &crate::daemon::DaemonClient,
+    config_path: Option<&std::path::Path>,
+) -> RemoteStatusOutput {
+    match client.remote_get_status().await {
+        Ok(status) => RemoteStatusOutput {
+            status: "ok",
+            port: status.port,
+            remote: live_status_from_daemon(&status),
+        },
+        Err(error) => {
+            let saved = saved_remote_config(config_path);
+            let remote = live_status_from_saved(&saved, daemon_absence(&error));
+            RemoteStatusOutput {
+                status: if remote.daemon == "notRunning" {
+                    "daemonNotRunning"
+                } else {
+                    "daemonUnreachable"
+                },
+                port: saved.port,
+                remote,
+            }
+        }
     }
+}
+
+fn render_remote_live_status(remote: &RemoteLiveStatus) -> String {
+    let mode = serde_json::to_value(remote.mode)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let mut text = format!("daemon={} mode={mode}", remote.daemon);
+    match remote.relay_connected {
+        Some(connected) => text.push_str(&format!(" relayConnected={connected}")),
+        None => text.push_str(" relayConnected=unknown"),
+    }
+    if let (Some(url), Some(source)) = (&remote.relay_url, remote.relay_url_source) {
+        text.push_str(&format!(" relayUrl={url} relayUrlSource={source}"));
+    }
+    text
 }
 
 pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
     match command {
         RemoteCliCommand::Status { json } => {
-            let output = remote_status_output();
+            let runtime = account_cli_runtime().map_err(|error| error.message)?;
+            let client = crate::daemon::DaemonClient::existing_only(std::time::Duration::ZERO);
+            let config_path = crate::remote::state::remote_config_path();
+            let output = runtime.block_on(remote_status_output(&client, config_path.as_deref()));
             if json {
                 println!(
                     "{}",
@@ -3370,8 +3646,10 @@ pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
                 );
             } else {
                 println!(
-                    "status={} port={} mode={}",
-                    output.status, output.port, output.mode
+                    "status={} port={} {}",
+                    output.status,
+                    output.port,
+                    render_remote_live_status(&output.remote)
                 );
             }
             Ok(())
@@ -4150,6 +4428,15 @@ mod tests {
                 account_id: "acct".into(),
                 machine_record_id: "rec".into(),
                 relay_origin: "https://relay.example".into(),
+                relay_activation: "enabled",
+                relay_activation_error: None,
+                remote: RemoteLiveStatus {
+                    daemon: "running",
+                    mode: crate::remote::RemoteNetworkMode::Relay,
+                    relay_connected: Some(true),
+                    relay_url: Some("https://relay.example".into()),
+                    relay_url_source: Some("config"),
+                },
             }),
             service: service.clone(),
         };
@@ -4159,7 +4446,13 @@ mod tests {
             serde_json::json!({
                 "cliPath": "/home/u/.local/bin/ferryx-cli",
                 "version": "1.0.0",
-                "enrolled": {"accountId": "acct", "machineRecordId": "rec", "relayOrigin": "https://relay.example"},
+                "enrolled": {
+                    "accountId": "acct",
+                    "machineRecordId": "rec",
+                    "relayOrigin": "https://relay.example",
+                    "relayActivation": "enabled",
+                    "remote": {"daemon": "running", "mode": "relay", "relayConnected": true, "relayUrl": "https://relay.example", "relayUrlSource": "config"}
+                },
                 "service": {"supervised": false, "backend": "detached", "installed": true, "linger": null, "pid": 42, "reason": "systemd is not the init system"}
             })
         );
@@ -4179,6 +4472,249 @@ mod tests {
         };
         assert_eq!(up_summary_exit_code(&not_running, false), UP_EXIT_OTHER);
         assert_eq!(up_summary_exit_code(&not_running, true), UP_EXIT_OK);
+    }
+
+    /// A daemon serving `config_path` on a private test socket, and an existing-only client of it.
+    #[cfg(unix)]
+    async fn up_test_daemon(
+        dir: &std::path::Path,
+    ) -> (
+        crate::daemon::DaemonClient,
+        Arc<crate::daemon::server::DaemonServer>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let socket_path = dir.join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let server = Arc::new(crate::daemon::server::DaemonServer::new_with_paths(
+            Some(dir.join("remote-config.json")),
+            Some(dir.join("remote-auth.json")),
+        ));
+        let serving = Arc::clone(&server);
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(Arc::clone(&serving).handle_client(stream));
+            }
+        });
+        let client = crate::daemon::DaemonClient::existing_only_at(
+            socket_path,
+            std::time::Duration::from_secs(5),
+        );
+        (client, server, task)
+    }
+
+    /// A relay origin nothing listens on: the gateway enters Relay mode and its tunnel retries.
+    const UP_TEST_RELAY: &str = "http://127.0.0.1:9";
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn up_enables_relay_on_a_running_daemon_and_persists_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("remote-config.json");
+        let (client, server, task) = up_test_daemon(dir.path()).await;
+
+        let activation = enable_relay_after_enroll(
+            &client,
+            Some(&config_path),
+            UP_TEST_RELAY,
+            std::time::Duration::ZERO,
+        )
+        .await;
+
+        assert_eq!(activation.outcome, "enabled", "{:?}", activation.error);
+        assert_eq!(activation.remote.daemon, "running");
+        assert_eq!(activation.remote.mode, crate::remote::RemoteNetworkMode::Relay);
+        assert_eq!(activation.remote.relay_url.as_deref(), Some(UP_TEST_RELAY));
+        assert_eq!(activation.remote.relay_url_source, Some("config"));
+        let saved = crate::remote::state::load_persisted_config(&config_path).expect("saved config");
+        assert_eq!(saved.mode, crate::remote::RemoteNetworkMode::Relay);
+        assert_eq!(saved.relay_url.as_deref(), Some(UP_TEST_RELAY));
+
+        let status = remote_status_output(&client, Some(&config_path)).await;
+        let value = serde_json::to_value(&status).unwrap();
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["daemon"], "running");
+        assert_eq!(value["mode"], "relay");
+        assert!(value["relayConnected"].is_boolean(), "{value}");
+        assert_eq!(value["relayUrl"], UP_TEST_RELAY);
+        assert_eq!(value["relayUrlSource"], "config");
+
+        server
+            .handle_remote_configure(crate::remote::RemoteGatewayConfig::default())
+            .await
+            .unwrap();
+        task.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn up_leaves_a_user_chosen_mode_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("remote-config.json");
+        let (client, server, task) = up_test_daemon(dir.path()).await;
+        server
+            .handle_remote_configure(crate::remote::RemoteGatewayConfig {
+                mode: crate::remote::RemoteNetworkMode::LocalNetwork,
+                ..Default::default()
+            })
+            .await
+            .expect("enable local network");
+
+        let activation = enable_relay_after_enroll(
+            &client,
+            Some(&config_path),
+            UP_TEST_RELAY,
+            std::time::Duration::ZERO,
+        )
+        .await;
+
+        assert_eq!(activation.outcome, "unchanged");
+        assert_eq!(activation.remote.mode, crate::remote::RemoteNetworkMode::LocalNetwork);
+        assert_eq!(
+            server.remote_state().config.read().mode,
+            crate::remote::RemoteNetworkMode::LocalNetwork
+        );
+        let saved = crate::remote::state::load_persisted_config(&config_path).expect("saved config");
+        assert_eq!(saved.mode, crate::remote::RemoteNetworkMode::LocalNetwork);
+        assert_eq!(saved.relay_url, None);
+
+        server
+            .handle_remote_configure(crate::remote::RemoteGatewayConfig::default())
+            .await
+            .unwrap();
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn up_without_a_daemon_saves_relay_for_the_next_boot_and_status_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("remote-config.json");
+        let client = crate::daemon::DaemonClient::existing_only_at(
+            dir.path().join("absent.sock"),
+            std::time::Duration::ZERO,
+        );
+
+        let activation =
+            enable_relay_after_enroll(&client, Some(&config_path), UP_TEST_RELAY, std::time::Duration::ZERO)
+                .await;
+
+        assert_eq!(activation.outcome, "saved", "{:?}", activation.error);
+        assert_eq!(activation.remote.daemon, "notRunning");
+        assert_eq!(activation.remote.relay_connected, None);
+        let saved = crate::remote::state::load_persisted_config(&config_path).expect("saved config");
+        assert_eq!(saved.mode, crate::remote::RemoteNetworkMode::Relay);
+        assert_eq!(saved.relay_url.as_deref(), Some(UP_TEST_RELAY));
+
+        let value = serde_json::to_value(remote_status_output(&client, Some(&config_path)).await).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "status": "daemonNotRunning",
+                "port": crate::remote::REMOTE_GATEWAY_PORT,
+                "daemon": "notRunning",
+                "mode": "relay",
+                "relayConnected": null,
+                "relayUrl": UP_TEST_RELAY,
+                "relayUrlSource": "config"
+            })
+        );
+
+        // A saved non-Off mode is kept, and a second run is a no-op.
+        crate::remote::state::persist_relay_if_off(&config_path, "http://127.0.0.1:10").unwrap();
+        assert_eq!(
+            crate::remote::state::load_persisted_config(&config_path).unwrap().relay_url.as_deref(),
+            Some(UP_TEST_RELAY)
+        );
+    }
+
+    #[tokio::test]
+    async fn up_without_a_daemon_leaves_an_unreadable_config_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("remote-config.json");
+        std::fs::write(&config_path, b"{not json").unwrap();
+        let client = crate::daemon::DaemonClient::existing_only_at(
+            dir.path().join("absent.sock"),
+            std::time::Duration::ZERO,
+        );
+
+        let activation =
+            enable_relay_after_enroll(&client, Some(&config_path), UP_TEST_RELAY, std::time::Duration::ZERO)
+                .await;
+
+        assert_eq!(activation.outcome, "unchanged");
+        assert!(activation.error.is_some());
+        assert_eq!(activation.remote.daemon, "notRunning");
+        assert_eq!(std::fs::read(&config_path).unwrap(), b"{not json");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn up_leaves_a_running_daemon_and_its_unreadable_config_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("remote-config.json");
+        std::fs::write(&config_path, b"{not json").unwrap();
+        let (client, server, task) = up_test_daemon(dir.path()).await;
+
+        let activation = enable_relay_after_enroll(
+            &client,
+            Some(&config_path),
+            UP_TEST_RELAY,
+            std::time::Duration::ZERO,
+        )
+        .await;
+
+        assert_eq!(activation.outcome, "unchanged");
+        assert_eq!(activation.error.as_deref(), Some(UNREADABLE_REMOTE_CONFIG_NOTE));
+        assert_eq!(activation.remote.daemon, "running");
+        assert_eq!(activation.remote.mode, crate::remote::RemoteNetworkMode::Off);
+        assert_eq!(
+            server.remote_state().config.read().mode,
+            crate::remote::RemoteNetworkMode::Off
+        );
+        assert_eq!(std::fs::read(&config_path).unwrap(), b"{not json");
+        task.abort();
+    }
+
+    #[test]
+    fn relay_already_on_message_tells_live_saved_and_other_relay_apart() {
+        let origin = "https://relay.example";
+        let activation = |daemon: &'static str, relay_url: &str| RelayActivation {
+            outcome: "unchanged",
+            error: None,
+            remote: RemoteLiveStatus {
+                daemon,
+                mode: crate::remote::RemoteNetworkMode::Relay,
+                relay_connected: None,
+                relay_url: Some(relay_url.to_string()),
+                relay_url_source: Some("config"),
+            },
+        };
+        let live = relay_activation_message(&activation("running", origin), origin);
+        let saved = relay_activation_message(&activation("notRunning", origin), origin);
+        let unreachable = relay_activation_message(&activation("unreachable", origin), origin);
+        let other = relay_activation_message(&activation("running", "http://127.0.0.1:9"), origin);
+
+        assert_ne!(live, saved);
+        assert_eq!(saved, unreachable);
+        assert!(other.contains("http://127.0.0.1:9") && other.contains(origin), "{other}");
+        assert_ne!(other, live);
+        assert_eq!(
+            relay_activation_message(&activation("running", "https://relay.example/"), origin),
+            live
+        );
+    }
+
+    #[test]
+    fn daemon_absence_is_not_running_only_when_no_daemon_owns_the_endpoint() {
+        use crate::ipc::{IpcError, IpcErrorCode};
+        let no_daemon = IpcError::new(
+            IpcErrorCode::HostUnavailable,
+            crate::daemon::EXISTING_ONLY_NO_DAEMON_MESSAGE,
+        );
+        assert_eq!(daemon_absence(&no_daemon), "notRunning");
+        let handover = IpcError::new(IpcErrorCode::HostUnavailable, "Daemon handover handshake timed out");
+        assert_eq!(daemon_absence(&handover), "unreachable");
+        let mismatch = IpcError::new(IpcErrorCode::DaemonUpdatePending, "another protocol");
+        assert_eq!(daemon_absence(&mismatch), "unreachable");
     }
 
     #[test]

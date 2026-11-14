@@ -9,14 +9,14 @@ description: "x64 installer walkthrough: SmartScreen warnings, SHA-256 verificat
 
 ## Installer download
 
-The [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`) is Ferryx's signed Windows channel. The Store signs the MSIX package it publishes, so a Store install shows no SmartScreen warning, and Store installs are updated by the Store rather than by Ferryx's own updater. Ferryx does not buy a separate code-signing certificate; the standalone GitHub release `Ferryx_x64-setup.exe` remains available as a secondary direct installer and is not code-signed.
+The [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`) is Ferryx's signed Windows channel. The Store signs the MSIX package it publishes, so a Store install shows no SmartScreen warning, and Store installs are updated by the Store rather than by Ferryx's own updater. Ferryx does not buy a separate code-signing certificate; some GitHub releases also attach a standalone `.exe` installer as a secondary direct option, and it is not code-signed.
 
 ## SmartScreen warning
 
 Install in this order:
 
 1. **Microsoft Store (signed, recommended).** Install from the [Microsoft Store listing](https://apps.microsoft.com/detail/9NLHQL5JNLM4), or run `winget install --source msstore 9NLHQL5JNLM4` in a terminal. SmartScreen does not warn on a Store install.
-2. **GitHub installer (unsigned).** Download `Ferryx_x64-setup.exe` and `SHA256SUMS.txt` from the [latest release](https://github.com/Indosaram/ferryx/releases/latest). Before running the installer, check its hash in PowerShell: `Get-FileHash .\Ferryx_x64-setup.exe -Algorithm SHA256` must match the `Ferryx_x64-setup.exe` line in `SHA256SUMS.txt`.
+2. **GitHub installer (unsigned, when the release attaches one).** If the [latest release](https://github.com/Indosaram/ferryx/releases/latest) lists a `.exe` installer, download it with `SHA256SUMS.txt`. Before running it, check its hash in PowerShell: `Get-FileHash .\<installer>.exe -Algorithm SHA256` must match that file's line in `SHA256SUMS.txt`.
 3. **Expect the SmartScreen prompt for the unsigned installer.** Because the `.exe` has no Authenticode signature, Windows shows "Windows protected your PC". Run it only if the hash matched: choose **More info**, then **Run anyway**. The installer installs for the current user and updates itself in place.
 
 The `Ferryx_x64.msix` attached to GitHub releases is the unsigned package that is submitted to the Store. It is not a sideloading installer, so install from the Store or the `.exe` instead.

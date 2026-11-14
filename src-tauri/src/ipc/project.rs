@@ -1,6 +1,6 @@
 use crate::daemon::DaemonClient;
 use crate::ipc::{run_blocking, IpcError};
-use crate::worktree::{run_git, WorkspaceRegistry, WorktreeError, WorktreeManager};
+use crate::worktree::{run_git, GitUnavailableReason, WorkspaceRegistry, WorktreeError, WorktreeManager};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -167,6 +167,8 @@ fn register_canonical_project(
     } else {
         None
     };
+    let git_unavailable = manager.git_unavailable().cloned();
+    let git_version = crate::worktree::git_probe().version;
 
     if let Some((workspace_id, _)) = registry
         .list()
@@ -179,6 +181,8 @@ fn register_canonical_project(
             git_root,
             git_remote,
             git_common_dir,
+            git_unavailable,
+            git_version,
         });
     }
 
@@ -198,6 +202,8 @@ fn register_canonical_project(
         git_root,
         git_remote,
         git_common_dir,
+        git_unavailable,
+        git_version,
     })
 }
 
@@ -220,6 +226,13 @@ pub struct RegisteredProject {
     pub git_remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_common_dir: Option<PathBuf>,
+    /// Why a plain folder is not Git-backed (Git missing, macOS stub, dubious
+    /// ownership, or simply not a repository); `None` for Git repositories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_unavailable: Option<GitUnavailableReason>,
+    /// `git --version` of this host, probed once per process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +279,14 @@ pub async fn cmd_project_register(
         .await?;
 
     Ok(registered)
+}
+
+/// Reports whether Git can run on this host and its version, probed once per process,
+/// so first-run onboarding can say what to install before a folder is picked.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_git_probe() -> Result<crate::worktree::GitProbe, IpcError> {
+    run_blocking(|| Ok(crate::worktree::git_probe())).await
 }
 
 #[cfg(feature = "desktop")]

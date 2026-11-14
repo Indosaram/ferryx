@@ -31,12 +31,15 @@ ones to you. Native Rust on Tauri v2 with a libghostty terminal core; no Electro
 | Platform | Package | |
 | :--- | :--- | :--- |
 | **macOS** | Universal DMG (Apple Silicon & Intel) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
-| **Windows** | Microsoft Store (Primary) / Installer (Secondary) | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) / [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
+| **Windows** | Microsoft Store (x64, signed, auto-updating) | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`) |
 | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
 | **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64 only; arm64: [build from source](CONTRIBUTING.md#build-prerequisites)) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
 
-The macOS, Windows, and Linux links resolve against the latest release. Local release assembly
+The macOS and Linux links resolve against the latest release. Windows installs come from the
+Microsoft Store; a release may additionally attach a direct `.exe` installer
+(not code-signed), so check the [release page](https://github.com/Indosaram/ferryx/releases/latest)
+for it rather than relying on a fixed link. Local release assembly
 stages the headless `ferryx-cli` beside the Linux AppImage and `.deb` (as
 `ferryx-cli-linux-amd64`) and, when the universal macOS CLI is present, as
 `ferryx-cli-darwin-universal`, so the one-line installer above resolves a current artifact when

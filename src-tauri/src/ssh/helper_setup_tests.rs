@@ -202,7 +202,34 @@ fn ssh_helper_setup_readiness_parser_rejects_missing_ready_event() {
 }
 
 #[test]
-fn ssh_helper_setup_ensure_started_exit_code_127_maps_to_missing_helper() {
+fn ssh_helper_setup_ensure_started_bare_exit_127_maps_to_exec_failed() {
+    let location = HelperLocation {
+        executable: "/home/u/.ferryx/bin/helper".into(),
+        root: "/home/u/.ferryx/helper/qa".into(),
+    };
+    // What busybox sh prints when a glibc helper's ELF interpreter is absent on Alpine.
+    let raw_err =
+        IpcError::new(IpcErrorCode::IoError, "exit 127").with_details(serde_json::json!({
+            "stage": "execution",
+            "exitCode": 127,
+            "stderr": "sh: /home/u/.ferryx/bin/helper: not found",
+        }));
+    let mapped = map_ensure_started_error(raw_err, &location);
+    assert_eq!(mapped.code, IpcErrorCode::Unsupported);
+    let details = mapped.details.as_ref().expect("details");
+    assert_eq!(
+        details.get("stage").and_then(serde_json::Value::as_str),
+        Some("helper_exec_failed")
+    );
+    assert_eq!(
+        details.get("stderr").and_then(serde_json::Value::as_str),
+        Some("sh: /home/u/.ferryx/bin/helper: not found")
+    );
+    assert!(!mapped.message.contains("not installed"));
+}
+
+#[test]
+fn ssh_helper_setup_ensure_started_exit_127_with_marker_maps_to_missing_helper() {
     let location = HelperLocation {
         executable: "/home/u/.ferryx/bin/helper".into(),
         root: "/home/u/.ferryx/helper/qa".into(),
@@ -211,7 +238,7 @@ fn ssh_helper_setup_ensure_started_exit_code_127_maps_to_missing_helper() {
         IpcError::new(IpcErrorCode::IoError, "exit 127").with_details(serde_json::json!({
             "stage": "execution",
             "exitCode": 127,
-            "stderr": "sh: helper: not found",
+            "stderr": "FERRYX_ERR_HELPER_MISSING\n",
         }));
     let mapped = map_ensure_started_error(raw_err, &location);
     assert_eq!(mapped.code, IpcErrorCode::CliExecutableNotFound);
@@ -427,6 +454,164 @@ fn ssh_helper_setup_probe_classifies_not_executable_sentinel_as_missing() {
     assert_eq!(
         classify_probe_result(Err(&posix_err)),
         HelperProbeState::Missing
+    );
+}
+
+#[test]
+fn ssh_helper_setup_probe_classifies_unrunnable_sentinel_as_missing() {
+    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 1)").with_details(
+        serde_json::json!({
+            "stage": "execution",
+            "exitCode": 1,
+            "stderr": "FERRYX_ERR_HELPER_UNRUNNABLE sh: helper: not found\n",
+        }),
+    );
+    assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Missing);
+}
+
+fn probe_err(exit_code: i64, stderr: &str) -> IpcError {
+    IpcError::new(IpcErrorCode::IoError, "SSH command failed").with_details(serde_json::json!({
+        "stage": "execution",
+        "exitCode": exit_code,
+        "stderr": stderr,
+    }))
+}
+
+#[test]
+fn ssh_helper_setup_probe_exec_failure_reports_present_but_unrunnable_binary() {
+    let location = HelperLocation {
+        executable: "/home/u/.ferryx/bin/helper".into(),
+        root: "/home/u/.ferryx/helper/qa".into(),
+    };
+    // What the probe prints when a glibc helper is present on a musl host.
+    let unrunnable = probe_err(
+        1,
+        "FERRYX_ERR_HELPER_UNRUNNABLE exit=127 sh: /home/u/.ferryx/bin/helper: not found\n",
+    );
+    assert_eq!(
+        classify_probe_result(Err(&unrunnable)),
+        HelperProbeState::Missing
+    );
+    let text = probe_exec_failure(&unrunnable, &location).expect("exec failure text");
+    assert!(text.contains("/home/u/.ferryx/bin/helper"), "{text}");
+    assert!(
+        text.contains("exit=127 sh: /home/u/.ferryx/bin/helper: not found"),
+        "{text}"
+    );
+    assert!(!text.contains("FERRYX_ERR_"), "{text}");
+
+    // An absent binary, a non-executable one, and a transport failure are not exec failures.
+    for err in [
+        probe_err(127, "FERRYX_ERR_HELPER_MISSING\n"),
+        probe_err(126, "FERRYX_ERR_HELPER_NOT_EXECUTABLE\n"),
+        probe_err(255, "FERRYX_ERR_HELPER_UNRUNNABLE exit=127 x\n"),
+    ] {
+        assert_eq!(probe_exec_failure(&err, &location), None, "{err:?}");
+    }
+}
+
+#[tokio::test]
+async fn ssh_helper_setup_detailed_probe_carries_exec_failure_for_connection_test() {
+    let host = sample_host("qa-host-probe-unrunnable");
+    let env = sample_posix_env("/home/testuser");
+    let qualified = qualified_location(
+        &host,
+        &env,
+        crate::ssh::helper_runtime::process::HELPER_VERSION,
+    )
+    .expect("qualified_location");
+    let quoted_qualified = direct::quote_posix(&qualified.executable);
+    // Qualified helper present but unrunnable, legacy default absent.
+    let (state, exec_failure) = probe_ready_detailed_with(&host, &env, |_, script, _| {
+        std::future::ready(Err(if script.contains(&quoted_qualified) {
+            probe_err(
+                1,
+                "FERRYX_ERR_HELPER_UNRUNNABLE exit=127 sh: helper: not found\n",
+            )
+        } else {
+            probe_err(127, "FERRYX_ERR_HELPER_MISSING\n")
+        }))
+    })
+    .await;
+    assert_eq!(
+        state,
+        HelperProbeState::Missing,
+        "must still route to reinstall"
+    );
+    let text = exec_failure.expect("connection test must carry the exec failure");
+    assert!(text.contains(&qualified.executable), "{text}");
+    assert!(text.contains("exit=127 sh: helper: not found"), "{text}");
+
+    // Both locations absent: plain Missing, no exec-failure text.
+    let (state, exec_failure) = probe_ready_detailed_with(&host, &env, |_, _, _| {
+        std::future::ready(Err(probe_err(127, "FERRYX_ERR_HELPER_MISSING\n")))
+    })
+    .await;
+    assert_eq!((state, exec_failure), (HelperProbeState::Missing, None));
+}
+
+/// Runs the real POSIX probe script locally with the same error shape as `bounded_output`.
+#[cfg(unix)]
+async fn probe_local_executable(executable: &Path) -> (HelperProbeState, Option<String>) {
+    let location = HelperLocation {
+        executable: executable.to_string_lossy().into_owned(),
+        root: "/unused".into(),
+    };
+    probe_ready_at_detailed_with(
+        &sample_posix_env("/home/testuser"),
+        &location,
+        |_, script, _| {
+            let output = Command::new("sh").args(["-c", &script]).output().unwrap();
+            std::future::ready(if output.status.success() {
+                Ok(output.stdout)
+            } else {
+                Err(
+                    IpcError::new(IpcErrorCode::IoError, "SSH command failed").with_details(
+                        serde_json::json!({
+                            "stage": "execution",
+                            "exitCode": output.status.code(),
+                            "stderr": String::from_utf8_lossy(&output.stderr),
+                        }),
+                    ),
+                )
+            })
+        },
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_helper_setup_probe_requires_the_binary_to_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let write_exe = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let runs = write_exe("runs", "#!/bin/sh\necho ferryx-remote-helper 2026.1027.1\n");
+    // A present, executable file whose interpreter is absent: the shell reports 127, exactly as a
+    // glibc helper does on a musl host.
+    let unrunnable = write_exe("unrunnable", "#!/nonexistent/ld-linux-x86-64.so.2\n");
+
+    assert_eq!(
+        probe_local_executable(&runs).await,
+        (HelperProbeState::Installed, None)
+    );
+    let (state, exec_failure) = probe_local_executable(&unrunnable).await;
+    assert_eq!(
+        state,
+        HelperProbeState::Missing,
+        "a binary that cannot run must not read as installed"
+    );
+    let text = exec_failure.expect("present-but-unrunnable must report why");
+    assert!(text.contains("exit="), "{text}");
+    assert!(text.contains(&*unrunnable.to_string_lossy()), "{text}");
+    assert_eq!(
+        probe_local_executable(&dir.path().join("absent")).await,
+        (HelperProbeState::Missing, None)
     );
 }
 
@@ -1125,6 +1310,18 @@ fn ssh_helper_setup_probe_locations_checks_qualified_before_default() {
     let expected_win_default = default_location(&host, &env_win).expect("default_location win");
     assert_eq!(locs_win[0], expected_win_qualified);
     assert_eq!(locs_win[1], expected_win_default);
+}
+
+async fn probe_ready_with<F, Fut>(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+    run: F,
+) -> HelperProbeState
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    probe_ready_detailed_with(host, environment, run).await.0
 }
 
 #[tokio::test]

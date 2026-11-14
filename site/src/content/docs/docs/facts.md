@@ -39,12 +39,12 @@ change remain under the Sustainable Use License (SUL-1.0). Read the license for 
 | Platform | Package | Requirement |
 | :--- | :--- | :--- |
 | macOS | Universal DMG (Apple Silicon and Intel), signed and notarised | macOS 10.15+ |
-| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed with automatic updates; or `Ferryx_x64-setup.exe` direct installer (not code-signed) | Windows 10/11 x64 with WebView2 |
+| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed with automatic updates; some releases also attach a direct `.exe` installer (not code-signed) | Windows 10/11 x64 with WebView2 |
 | Linux | AppImage (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |
 | Linux | Debian/Ubuntu `.deb` (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |
 | Linux headless | `ferryx-cli` single binary, PTY daemon and CLI (x86_64) | No GUI or WebKit dependency |
 
-On Windows, the [Microsoft Store listing](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`, or `winget install --source msstore 9NLHQL5JNLM4`) is the signed channel and updates automatically through the Store. The `Ferryx_x64-setup.exe` in each GitHub release is the secondary direct installer (not code-signed, self-updating), while `Ferryx_x64.msix` is the unsigned Store-ingestion package rather than a sideloading installer.
+On Windows, the [Microsoft Store listing](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`, or `winget install --source msstore 9NLHQL5JNLM4`) is the signed channel and updates automatically through the Store. When a GitHub release attaches a direct `.exe` installer, it is the secondary direct installer (not code-signed, self-updating), while `Ferryx_x64.msix` is the unsigned Store-ingestion package rather than a sideloading installer.
 
 For the Linux headless `ferryx-cli`, install with the one-line installer, which resolves the
 current build rather than a pinned tag:

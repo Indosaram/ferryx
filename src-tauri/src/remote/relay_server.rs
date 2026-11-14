@@ -549,6 +549,9 @@ struct RelayInner {
     data_pool: Mutex<HashMap<String, Vec<PooledDataSocket>>>,
     /// Refuse plaintext relay proxy routes (`FERRYX_RELAY_REQUIRE_E2E=1`).
     require_e2e: AtomicBool,
+    /// Socket peers whose forwarding headers name the real client
+    /// (`FERRYX_RELAY_TRUSTED_PROXIES`). Empty by default: headers are ignored.
+    trusted_proxies: Mutex<Vec<TrustedProxy>>,
     #[cfg(test)]
     spliced_taps: Mutex<HashMap<String, Arc<Mutex<Vec<u8>>>>>,
     #[cfg(test)]
@@ -648,6 +651,7 @@ impl RelayState {
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
+                trusted_proxies: Mutex::new(Vec::new()),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
                 #[cfg(test)]
@@ -704,6 +708,7 @@ impl RelayState {
                 pending_socket_tickets: Mutex::new(HashMap::new()),
                 data_pool: Mutex::new(HashMap::new()),
                 require_e2e: require_e2e_from_env(),
+                trusted_proxies: Mutex::new(Vec::new()),
                 #[cfg(test)]
                 spliced_taps: Mutex::new(HashMap::new()),
                 #[cfg(test)]
@@ -712,6 +717,11 @@ impl RelayState {
                 last_plaintext_build: Mutex::new(None),
             }),
         })
+    }
+
+    /// Replaces the socket peers whose forwarding headers are trusted.
+    pub fn set_trusted_proxies(&self, proxies: Vec<TrustedProxy>) {
+        *self.inner.trusted_proxies.lock() = proxies;
     }
 
     #[cfg(test)]
@@ -1317,8 +1327,9 @@ impl RelayState {
         &self,
         machine: &str,
         generation: u64,
-        registration: RegisterPairingPin,
+        mut registration: RegisterPairingPin,
     ) -> Result<(), &'static str> {
+        let now = current_time_secs();
         let channels = self.inner.control_channels.lock();
         if channels
             .get(machine)
@@ -1331,13 +1342,16 @@ impl RelayState {
                 .pairing_token
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            || registration.expires_at <= current_time_secs()
-            || registration.expires_at > current_time_secs() + MAX_PAIRING_LEASE
+            || registration.expires_at <= now
+            || registration.expires_at > now + MAX_PAIRING_LEASE + PAIRING_CLOCK_SKEW
         {
             return Err("Invalid pairing registration");
         }
+        // A host clock slightly ahead of the relay asks for a little more than the cap; accept
+        // it but never store a lease longer than MAX_PAIRING_LEASE on the relay's clock.
+        registration.expires_at = registration.expires_at.min(now + MAX_PAIRING_LEASE);
         let mut pairings = self.inner.pairings.lock();
-        pairings.retain(|_, p| p.registration.expires_at > current_time_secs());
+        pairings.retain(|_, p| p.registration.expires_at > now);
         // A daemon that retries after a lost ACK re-sends the identical registration.
         // Treat that as already-satisfied instead of an error, without consuming another
         // slot against MAX_ACTIVE_PAIRING_PINS_PER_MACHINE and without refreshing the
@@ -1590,6 +1604,9 @@ const MAX_ACTIVE_PAIRING_PINS_PER_MACHINE: usize = 5;
 /// A short numeric code is only safe as a brief lease, so the relay caps the lifetime
 /// rather than trusting the client-supplied `expires_at`.
 const MAX_PAIRING_LEASE: u64 = 600;
+/// How far a registering host's clock may run ahead of the relay's. A registration up to
+/// this much past MAX_PAIRING_LEASE is accepted and its stored expiry clamped to the cap.
+const PAIRING_CLOCK_SKEW: u64 = 120;
 
 async fn socket_ticket_handler(
     State(state): State<RelayState>,
@@ -2031,7 +2048,8 @@ async fn pair_exchange_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     request: Request<Body>,
 ) -> Result<Response, StatusCode> {
-    exchange_http(state, peer_ip(peer), None, request).await
+    let ip = client_ip(&state, peer, request.headers());
+    exchange_http(state, ip, None, request).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -2107,7 +2125,7 @@ async fn attach_session_handler(
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let ip = peer_ip(peer);
+    let ip = client_ip(&state, peer, &headers);
     if !state.admit(ip, Instant::now()) {
         return crate::account::service::ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
@@ -2327,7 +2345,8 @@ async fn host_http_handler(
         return Err(status);
     }
     if path == "pair/exchange" && request.method() == Method::POST {
-        return exchange_http(state, peer_ip(peer), Some(&machine), request).await;
+        let ip = client_ip(&state, peer, request.headers());
+        return exchange_http(state, ip, Some(&machine), request).await;
     }
     if let Err(refusal) = plaintext_gate(
         &state,
@@ -3742,7 +3761,7 @@ async fn control_handler(
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
     State(state): State<RelayState>,
 ) -> Result<Response, (StatusCode, String)> {
-    let ip = peer_ip(peer);
+    let ip = client_ip(&state, peer, &headers);
     if !state.admit(ip, Instant::now()) {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
@@ -3774,11 +3793,125 @@ async fn control_handler(
         }))
 }
 
-// Do not trust forwarding headers. Servers must supply ConnectInfo from the
-// accepted TCP socket; embeddings without it share one conservative bucket.
-fn peer_ip(peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>) -> IpAddr {
-    peer.map(|axum::Extension(ConnectInfo(addr))| addr.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+/// One entry of `FERRYX_RELAY_TRUSTED_PROXIES`: a network in CIDR notation, or a bare
+/// address meaning a single host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrustedProxy {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl TrustedProxy {
+    fn contains(&self, ip: IpAddr) -> bool {
+        match (self.network, ip.to_canonical()) {
+            (IpAddr::V4(network), IpAddr::V4(ip)) => {
+                (u32::from(network) ^ u32::from(ip))
+                    .checked_shr(32 - u32::from(self.prefix))
+                    .unwrap_or(0)
+                    == 0
+            }
+            (IpAddr::V6(network), IpAddr::V6(ip)) => {
+                (u128::from(network) ^ u128::from(ip))
+                    .checked_shr(128 - u32::from(self.prefix))
+                    .unwrap_or(0)
+                    == 0
+            }
+            _ => false,
+        }
+    }
+}
+
+impl std::str::FromStr for TrustedProxy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let invalid = || format!("invalid trusted proxy CIDR: {value:?}");
+        let (address, prefix) = match value.split_once('/') {
+            Some((address, prefix)) => (address, Some(prefix)),
+            None => (value, None),
+        };
+        let network: IpAddr = address.parse().map_err(|_| invalid())?;
+        let max = if network.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            Some(prefix) if !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit()) => {
+                prefix.parse::<u8>().map_err(|_| invalid())?
+            }
+            Some(_) => return Err(invalid()),
+            None => max,
+        };
+        if prefix > max {
+            return Err(invalid());
+        }
+        Ok(Self { network, prefix })
+    }
+}
+
+/// Parses the comma-separated `FERRYX_RELAY_TRUSTED_PROXIES` value. Any malformed entry
+/// rejects the whole list so a typo fails startup instead of quietly trusting a different
+/// set of peers than the operator intended.
+pub fn parse_trusted_proxies(value: &str) -> Result<Vec<TrustedProxy>, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::parse)
+        .collect()
+}
+
+/// The address that admission and pairing limits are charged to.
+///
+/// Servers must supply ConnectInfo from the accepted TCP socket; embeddings without it
+/// share one conservative bucket. Forwarding headers are honored only when that socket
+/// peer is inside the configured trusted-proxy list, so by default (and for an unknown
+/// peer) they are ignored and a client cannot pick its own bucket. A trusted proxy must
+/// append to `X-Forwarded-For` (or set `CF-Connecting-IP`) itself.
+///
+/// When any `X-Forwarded-For` header is present it alone decides: a hop that is not a
+/// visible-ASCII bare IP address (e.g. `addr:port`) ends the walk at the socket peer, and
+/// `CF-Connecting-IP` is never consulted, because a proxy that appends to
+/// `X-Forwarded-For` may pass a client-supplied `CF-Connecting-IP` through untouched.
+/// `CF-Connecting-IP` is used only when no `X-Forwarded-For` header exists.
+fn client_ip(
+    state: &RelayState,
+    peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
+) -> IpAddr {
+    let Some(axum::Extension(ConnectInfo(addr))) = peer else {
+        return IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    };
+    let peer = addr.ip();
+    let trusted = state.inner.trusted_proxies.lock();
+    let is_trusted = |ip: IpAddr| trusted.iter().any(|proxy| proxy.contains(ip));
+    if !is_trusted(peer) {
+        return peer;
+    }
+    let mut forwarded = headers.get_all("x-forwarded-for").iter().rev().peekable();
+    if forwarded.peek().is_none() {
+        return headers
+            .get("cf-connecting-ip")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(peer);
+    }
+    // Each proxy appends the address it received the request from, so walk the chain from
+    // the right and stop at the first hop that is not one of our own proxies. Entries left
+    // of that hop are client-controlled and never consulted.
+    let mut client = peer;
+    for value in forwarded {
+        let Ok(value) = value.to_str() else {
+            return peer;
+        };
+        for entry in value.rsplit(',') {
+            let Ok(ip) = entry.trim().parse::<IpAddr>() else {
+                return peer;
+            };
+            if !is_trusted(ip) {
+                return ip;
+            }
+            client = ip;
+        }
+    }
+    client
 }
 
 async fn authenticate_control_socket(
@@ -4030,9 +4163,11 @@ async fn data_handler(
     ws: WebSocketUpgrade,
     AxumPath(session_id): AxumPath<String>,
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     State(state): State<RelayState>,
 ) -> Result<Response, StatusCode> {
-    upgrade_half(ws, state, session_id, HalfKind::Data, peer_ip(peer))
+    let ip = client_ip(&state, peer, &headers);
+    upgrade_half(ws, state, session_id, HalfKind::Data, ip)
 }
 
 /// `GET /tunnel/client/:session_id` - the remote client's channel for a
@@ -4041,9 +4176,11 @@ async fn client_handler(
     ws: WebSocketUpgrade,
     AxumPath(session_id): AxumPath<String>,
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     State(state): State<RelayState>,
 ) -> Result<Response, StatusCode> {
-    upgrade_half(ws, state, session_id, HalfKind::Client, peer_ip(peer))
+    let ip = client_ip(&state, peer, &headers);
+    upgrade_half(ws, state, session_id, HalfKind::Client, ip)
 }
 
 /// `GET /tunnel/opaque/:session_id` - the account client's channel for a session whose
@@ -4054,9 +4191,11 @@ async fn opaque_handler(
     ws: WebSocketUpgrade,
     AxumPath(session_id): AxumPath<String>,
     peer: Option<axum::Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     State(state): State<RelayState>,
 ) -> Result<Response, StatusCode> {
-    upgrade_half(ws, state, session_id, HalfKind::Opaque, peer_ip(peer))
+    let ip = client_ip(&state, peer, &headers);
+    upgrade_half(ws, state, session_id, HalfKind::Opaque, ip)
 }
 
 fn upgrade_half(
@@ -6229,24 +6368,28 @@ mod tests {
             .lock()
             .insert(machine.to_owned(), ControlChannel { generation: 1, tx });
 
-        let registration = |expires_at: u64| RegisterPairingPin {
+        let registration = |pin: &str, expires_at: u64| RegisterPairingPin {
             generation: Some(1),
             machine_id: machine.into(),
-            pin: "654321".into(),
-            pairing_token: "lease-pairing-secret".into(),
+            pin: pin.into(),
+            pairing_token: format!("lease-pairing-secret-{pin}"),
             expires_at,
         };
 
         // A day-long lease is rejected outright.
         assert!(state
-            .register_pairing(machine, 1, registration(current_time_secs() + 86_400))
+            .register_pairing(
+                machine,
+                1,
+                registration("654320", current_time_secs() + 86_400)
+            )
             .is_err());
-        // Exceeding the cap by one second is still rejected: the bound is the contract.
+        // Past the cap plus the clock-skew allowance is still rejected.
         assert!(state
             .register_pairing(
                 machine,
                 1,
-                registration(current_time_secs() + MAX_PAIRING_LEASE + 1)
+                registration("654321", current_time_secs() + 800)
             )
             .is_err());
         // A lease inside the cap is accepted, so the guard is not simply refusing everything.
@@ -6254,9 +6397,19 @@ mod tests {
             .register_pairing(
                 machine,
                 1,
-                registration(current_time_secs() + MAX_PAIRING_LEASE - 5)
+                registration("654322", current_time_secs() + MAX_PAIRING_LEASE - 5)
             )
             .is_ok());
+        // A host clock running up to two minutes ahead (here +1 s, +60 s and +119 s past the
+        // cap) still pairs, but the stored lease never exceeds the cap on the relay's clock.
+        for (pin, ahead) in [("654323", 601), ("654324", 660), ("654325", 719)] {
+            assert!(state
+                .register_pairing(machine, 1, registration(pin, current_time_secs() + ahead))
+                .is_ok());
+            let stored = state.inner.pairings.lock()[pin].registration.expires_at;
+            assert!(stored <= current_time_secs() + MAX_PAIRING_LEASE);
+        }
+        assert!(!state.inner.pairings.lock().contains_key("654321"));
     }
 
     #[tokio::test]
@@ -8076,6 +8229,181 @@ mod tests {
         assert!(a.success && b.success);
         let (a, b) = tokio::join!(allocate(&mut first), allocate(&mut second));
         assert_ne!(a.session_id, b.session_id);
+        server.abort();
+    }
+
+    fn forwarded_headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.append(*name, value.parse().unwrap());
+        }
+        headers
+    }
+
+    fn connect_info(addr: &str) -> Option<axum::Extension<ConnectInfo<SocketAddr>>> {
+        Some(axum::Extension(ConnectInfo(addr.parse().unwrap())))
+    }
+
+    #[test]
+    fn test_relay_client_ip_trusts_forwarding_headers_only_from_configured_proxies() {
+        let state = test_state(vec![]);
+        let headers = forwarded_headers(&[("x-forwarded-for", "198.51.100.7")]);
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+
+        // Default: no trusted proxies, so the header is ignored.
+        assert_eq!(
+            client_ip(&state, connect_info("127.0.0.1:4000"), &headers),
+            peer
+        );
+
+        state.set_trusted_proxies(parse_trusted_proxies("127.0.0.0/8").unwrap());
+        // Trusted peer: the forwarded client becomes the bucket.
+        assert_eq!(
+            client_ip(&state, connect_info("127.0.0.1:4000"), &headers),
+            "198.51.100.7".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            client_ip(
+                &state,
+                connect_info("127.0.0.1:4000"),
+                &forwarded_headers(&[("cf-connecting-ip", "2001:db8::7")])
+            ),
+            "2001:db8::7".parse::<IpAddr>().unwrap()
+        );
+        // Untrusted peer: the header is ignored even with a list configured.
+        assert_eq!(
+            client_ip(&state, connect_info("192.0.2.9:4000"), &headers),
+            "192.0.2.9".parse::<IpAddr>().unwrap()
+        );
+        // Unknown peer: never take a header.
+        assert_eq!(
+            client_ip(&state, None, &headers),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+        // A client-supplied prefix cannot choose the bucket: the rightmost untrusted hop wins.
+        let spoofed =
+            forwarded_headers(&[("x-forwarded-for", "203.0.113.1, 198.51.100.7, 127.0.0.2")]);
+        assert_eq!(
+            client_ip(&state, connect_info("127.0.0.1:4000"), &spoofed),
+            "198.51.100.7".parse::<IpAddr>().unwrap()
+        );
+        // A garbage header from a trusted proxy falls back to the socket peer.
+        let garbage = forwarded_headers(&[("x-forwarded-for", "not-an-ip")]);
+        assert_eq!(
+            client_ip(&state, connect_info("127.0.0.1:4000"), &garbage),
+            peer
+        );
+        // Any X-Forwarded-For present means a client-supplied CF-Connecting-IP passed through
+        // by the proxy is never consulted: an undecodable or addr:port hop ends at the peer.
+        let mut non_utf8 = forwarded_headers(&[("cf-connecting-ip", "6.6.6.6")]);
+        non_utf8.append("x-forwarded-for", HeaderValue::from_bytes(b"\xff").unwrap());
+        assert_eq!(
+            client_ip(&state, connect_info("127.0.0.1:4000"), &non_utf8),
+            peer
+        );
+        let with_port = forwarded_headers(&[
+            ("x-forwarded-for", "198.51.100.7:5555"),
+            ("cf-connecting-ip", "6.6.6.6"),
+        ]);
+        assert_eq!(
+            client_ip(&state, connect_info("127.0.0.1:4000"), &with_port),
+            peer
+        );
+        // A garbage hop behind a trusted hop also ends at the peer, not the trusted hop.
+        let behind_trusted = forwarded_headers(&[("x-forwarded-for", "not-an-ip, 127.0.0.2")]);
+        assert_eq!(
+            client_ip(&state, connect_info("127.0.0.1:4000"), &behind_trusted),
+            peer
+        );
+        // Without any X-Forwarded-For, a trusted peer's CF-Connecting-IP is still used.
+        assert_eq!(
+            client_ip(
+                &state,
+                connect_info("127.0.0.1:4000"),
+                &forwarded_headers(&[("cf-connecting-ip", "198.51.100.8")])
+            ),
+            "198.51.100.8".parse::<IpAddr>().unwrap()
+        );
+        // An IPv4-mapped IPv6 socket peer matches an IPv4 range.
+        assert_eq!(
+            client_ip(&state, connect_info("[::ffff:127.0.0.1]:4000"), &headers),
+            "198.51.100.7".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_relay_trusted_proxy_cidr_parsing() {
+        let proxies = parse_trusted_proxies(" 10.0.0.0/8 ,, ::1, 192.168.1.5 ").unwrap();
+        assert_eq!(proxies.len(), 3);
+        let contains = |ip: &str| proxies.iter().any(|p| p.contains(ip.parse().unwrap()));
+        assert!(contains("10.255.0.1") && contains("::1") && contains("192.168.1.5"));
+        assert!(!contains("11.0.0.1") && !contains("192.168.1.6") && !contains("::2"));
+        assert!(parse_trusted_proxies("0.0.0.0/0").unwrap()[0].contains("8.8.8.8".parse().unwrap()));
+        assert!(parse_trusted_proxies("").unwrap().is_empty());
+        for bad in [
+            "10.0.0.0/33",
+            "::/129",
+            "10.0.0.0/",
+            "10.0.0.0/+8",
+            "10.0.0/8",
+            "host",
+            "1.2.3.4,x",
+        ] {
+            assert!(
+                parse_trusted_proxies(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_relay_trusted_proxy_gives_forwarded_clients_independent_buckets() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let attempt = |base: String, forwarded: &'static str| async move {
+            let mut request = format!("{base}/tunnel/client/unknown")
+                .into_client_request()
+                .unwrap();
+            request
+                .headers_mut()
+                .insert("x-forwarded-for", forwarded.parse().unwrap());
+            match tokio_tungstenite::connect_async(request).await.unwrap_err() {
+                tokio_tungstenite::tungstenite::Error::Http(response) => response.status(),
+                other => panic!("unexpected error: {other}"),
+            }
+        };
+
+        // Behind a trusted local proxy, exhausting one client's bucket leaves another's intact.
+        let state = test_state(vec![]);
+        state.set_trusted_proxies(parse_trusted_proxies("127.0.0.1/32").unwrap());
+        let (base, server) = spawn_test_relay_with_state(state).await;
+        for _ in 0..30 {
+            assert_eq!(
+                attempt(base.clone(), "198.51.100.1").await,
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(
+            attempt(base.clone(), "198.51.100.1").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            attempt(base.clone(), "198.51.100.2").await,
+            StatusCode::NOT_FOUND
+        );
+        server.abort();
+
+        // Without the setting the header is ignored: every client shares the peer's bucket.
+        let (base, server) = spawn_test_relay_with_state(test_state(vec![])).await;
+        for _ in 0..30 {
+            assert_eq!(
+                attempt(base.clone(), "198.51.100.1").await,
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(
+            attempt(base.clone(), "198.51.100.2").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
         server.abort();
     }
 

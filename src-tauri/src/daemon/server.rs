@@ -4856,6 +4856,9 @@ impl DaemonServer {
     ) -> Result<(), String> {
         let runtime_dir = get_runtime_dir();
         ensure_runtime_directory(&runtime_dir)?;
+        // Login-shell PATH discovery sources the user's rc chain; start it now so the first
+        // session spawn finds it ready instead of resolving agents against the bare process PATH.
+        crate::ipc::agents::prewarm_login_path();
 
         // HandoverCandidate admission (todo 8). A successor generation's OS job runs plain
         // `--daemon`; before any lock is taken it reads the predecessor's handover-request.json.

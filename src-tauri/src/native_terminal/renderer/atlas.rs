@@ -8,7 +8,7 @@ use super::rasterizer::{rasterize_glyph_with_scale, RasterizedGlyph};
 use super::types::{GlyphAtlasStats, RendererConfig};
 use crate::native_terminal::error::NativeTerminalError;
 
-const BASE_DIMENSION: u32 = 1024;
+pub(super) const BASE_DIMENSION: u32 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GlyphKey {

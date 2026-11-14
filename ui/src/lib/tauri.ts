@@ -77,6 +77,8 @@ export type RegisteredProject = {
   gitRoot?: string | null;
   gitRemote?: string | null;
   gitCommonDir?: string | null;
+  gitUnavailable?: GitUnavailableReason | null;
+  gitVersion?: string | null;
   gitBranch?: string | null;
   gitHead?: string | null;
   hostLabel?: string;
@@ -250,6 +252,26 @@ export async function unregisterProject(request: { workspaceId: string }) {
 
 export async function revealPath(path: string) {
   return invokeCommand<void>("cmd_path_reveal", { path });
+}
+
+/** Why a folder is served without Git; mirrors `GitUnavailableReason` in worktree/git.rs. */
+export type GitUnavailableReason =
+  | { kind: "gitMissing" }
+  | { kind: "xcodeCommandLineToolsMissing" }
+  | { kind: "dubiousOwnership"; path: string }
+  | { kind: "notARepository" }
+  | { kind: "gitFailed"; message: string }
+  | { kind: "nonUtf8Output" };
+
+export type GitProbe = {
+  version: string | null;
+  unavailable: GitUnavailableReason | null;
+};
+
+/** Whether Git runs on this host; null outside the desktop shell. */
+export async function getGitProbe(): Promise<GitProbe | null> {
+  if (!isTauri()) return null;
+  return invokeCommand<GitProbe>("cmd_git_probe");
 }
 
 export async function getInitialProject() {

@@ -72,9 +72,75 @@ fn sound_policy(sound: NotificationSound, platform: NotificationPlatform) -> Sou
 /// Only dev runs skip the AppUserModelID: a `cargo run` binary has no
 /// Start-Menu shortcut, so applying an unregistered identifier there would
 /// only lose the toast.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg(any(target_os = "windows", test))]
 fn is_dev_output_dir(dir: &std::path::Path) -> bool {
     dir.ends_with("target/debug") || dir.ends_with("target/release")
+}
+
+/// `<Application Id>` in `src-tauri/windows/msix/AppxManifest.xml`; a Store
+/// install's AUMID is `<PackageFamilyName>!<Application Id>`.
+#[cfg(any(target_os = "windows", test))]
+const MSIX_APPLICATION_ID: &str = "Ferryx";
+
+/// Which AppUserModelID a Windows toast must carry for this install.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum ToastIdentity {
+    /// MSIX (Store): the package AUMID; the config identifier is unknown to Windows there.
+    Packaged(String),
+    /// NSIS/MSI: Tauri's installer templates stamp the config identifier on the
+    /// Start-Menu shortcut as `System.AppUserModel.ID`.
+    Installed(String),
+    /// `cargo run`: no shortcut exists, so no identifier is applied.
+    Dev,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn select_toast_identity(
+    package_family_name: Option<&str>,
+    exe_dir: Option<&std::path::Path>,
+    identifier: &str,
+) -> ToastIdentity {
+    if let Some(family) = package_family_name.filter(|family| !family.is_empty()) {
+        return ToastIdentity::Packaged(format!("{family}!{MSIX_APPLICATION_ID}"));
+    }
+    if exe_dir.is_some_and(is_dev_output_dir) {
+        return ToastIdentity::Dev;
+    }
+    ToastIdentity::Installed(identifier.to_string())
+}
+
+/// The package family name when this process runs from an MSIX package.
+#[cfg(target_os = "windows")]
+fn current_package_family_name() -> Option<String> {
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
+    use windows_sys::Win32::Storage::Packaging::Appx::GetCurrentPackageFamilyName;
+    static FAMILY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    FAMILY
+        .get_or_init(|| {
+            let mut length: u32 = 0;
+            // SAFETY:
+            // Category: Foreign Function Interface (FFI).
+            // Invariant: a null buffer with length 0 is the documented size query; the call
+            // only writes the required length into `length`. An unpackaged process gets
+            // APPMODEL_ERROR_NO_PACKAGE instead.
+            let code = unsafe { GetCurrentPackageFamilyName(&mut length, std::ptr::null_mut()) };
+            if code != ERROR_INSUFFICIENT_BUFFER || length == 0 {
+                return None;
+            }
+            let mut buffer = vec![0u16; length as usize];
+            // SAFETY:
+            // Category: Foreign Function Interface (FFI).
+            // Invariant: `buffer` is writable for `length` UTF-16 units, the size the
+            // previous call reported, and outlives the call.
+            let code = unsafe { GetCurrentPackageFamilyName(&mut length, buffer.as_mut_ptr()) };
+            if code != ERROR_SUCCESS {
+                return None;
+            }
+            let end = buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len());
+            String::from_utf16(&buffer[..end]).ok()
+        })
+        .clone()
 }
 
 /// Show a notification and, when it carries a routing target, wait for the
@@ -83,14 +149,13 @@ fn is_dev_output_dir(dir: &std::path::Path) -> bool {
 /// The user's sound setting is applied before showing, since `notify-rust`
 /// leaves the alert entirely to the platform default otherwise.
 ///
-/// `app_id` is the Windows AppUserModelID applied to the toast; it is ignored
-/// on Linux. Windows only shows the toast when that identifier matches the
-/// `System.AppUserModel.ID` of an installed Start-Menu shortcut, and this repo
-/// registers none yet, so the NSIS/MSI packaging must register `app_id` before
-/// packaged Windows toasts can be relied on.
+/// `identifier` is the Tauri config identifier, ignored on Linux. On Windows
+/// the toast's AppUserModelID is chosen per install: the package AUMID for an
+/// MSIX install, the identifier for NSIS/MSI (whose Start-Menu shortcut
+/// carries it), and none for a dev run.
 pub fn submit_with_click_routing(
     content: &NotificationContent,
-    _app_id: &str,
+    identifier: &str,
     activations: Arc<NotificationActivations>,
 ) -> Result<(), String> {
     let mut builder = Notification::new();
@@ -98,18 +163,28 @@ pub fn submit_with_click_routing(
     #[cfg(target_os = "windows")]
     {
         let exe = std::env::current_exe().map_err(|error| error.to_string())?;
-        let dev_output = exe.parent().is_some_and(is_dev_output_dir);
-        if !dev_output {
-            // Nothing in this repo registers the identifier, and Windows only
-            // delivers a toast whose AppUserModelID matches the installed
-            // Start-Menu shortcut.
-            tracing::warn!(
-                app_id = %_app_id,
-                "Windows toast delivery requires a registered AppUserModelID matching this identifier; an unpackaged or shortcut-less install may silently drop the toast"
-            );
-            builder.app_id(_app_id);
+        let family = current_package_family_name();
+        match select_toast_identity(family.as_deref(), exe.parent(), identifier) {
+            ToastIdentity::Packaged(app_id) => {
+                builder.app_id(&app_id);
+            }
+            ToastIdentity::Installed(app_id) => {
+                // Delivery depends on the installer's shortcut still existing; Windows drops a
+                // toast for an AUMID no shortcut registers without reporting an error.
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        app_id = %app_id,
+                        "Windows toasts need the Start-Menu shortcut the installer registers with this AppUserModelID; without it they are dropped"
+                    );
+                });
+                builder.app_id(&app_id);
+            }
+            ToastIdentity::Dev => {}
         }
     }
+    #[cfg(not(target_os = "windows"))]
+    let _ = identifier;
     #[cfg(target_os = "linux")]
     builder.appname("Ferryx");
 
@@ -252,6 +327,31 @@ mod tests {
         let windows = sound_policy(NotificationSound::Silent, NotificationPlatform::Windows);
         assert_eq!(windows.sound_name, None);
         assert!(!windows.suppress);
+    }
+
+    #[test]
+    fn toast_identity_selects_packaged_installed_or_dev() {
+        let installed_dir = std::path::Path::new(r"C:\Users\dev\AppData\Local\Ferryx");
+        let dev_dir = std::path::Path::new("/repo/src-tauri/target/debug");
+        assert_eq!(
+            select_toast_identity(Some("ProjectMaho.Ferryx_abc123"), Some(installed_dir), "com.ferryx.app"),
+            ToastIdentity::Packaged("ProjectMaho.Ferryx_abc123!Ferryx".into())
+        );
+        assert_eq!(
+            select_toast_identity(None, Some(installed_dir), "com.ferryx.app"),
+            ToastIdentity::Installed("com.ferryx.app".into())
+        );
+        assert_eq!(
+            select_toast_identity(Some(""), Some(installed_dir), "com.ferryx.app"),
+            ToastIdentity::Installed("com.ferryx.app".into())
+        );
+        assert_eq!(select_toast_identity(None, Some(dev_dir), "com.ferryx.app"), ToastIdentity::Dev);
+    }
+
+    #[test]
+    fn packaged_application_id_matches_the_msix_manifest() {
+        let manifest = include_str!("../../windows/msix/AppxManifest.xml");
+        assert!(manifest.contains(&format!("<Application Id=\"{MSIX_APPLICATION_ID}\"")));
     }
 
     #[test]

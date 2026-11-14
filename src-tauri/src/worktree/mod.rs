@@ -65,6 +65,18 @@ pub mod tests {
     }
 
     #[test]
+    fn plain_folder_records_why_git_is_unavailable() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let folder = temp_dir.path();
+        let manager = WorktreeManager::try_new(folder).expect("plain folder registers");
+        assert_eq!(manager.git_unavailable(), Some(&GitUnavailableReason::NotARepository));
+
+        let (_repo, git_manager) = setup_test_repo();
+        assert!(git_manager.is_git_backed());
+        assert_eq!(git_manager.git_unavailable(), None);
+    }
+
+    #[test]
     fn branch_namespace_formatting_and_validation() {
         assert_eq!(
             WorktreeManager::format_branch_name("ws-123", "task-a").unwrap(),

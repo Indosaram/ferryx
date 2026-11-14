@@ -63,6 +63,7 @@ import {
   deriveWorkspaceId,
 } from "./ProjectDialogs";
 import type { GitHubIssuePreview, RegisteredProject } from "../lib/tauri";
+import { Toaster, toast } from "./ui/sonner";
 import type { SshHost } from "../lib/sshHosts";
 import type { RemoteDirectoryListing } from "../lib/remoteDirectories";
 
@@ -104,7 +105,12 @@ const mockHost2: SshHost = {
   disabled: true,
 };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  act(() => {
+    toast.dismiss();
+  });
+});
 
 beforeEach(() => {
   native.isTauriRuntime.mockReset();
@@ -329,6 +335,37 @@ describe("AddProjectDialog Local flow", () => {
     });
     expect(onRegistered).toHaveBeenCalledWith(registered);
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("warns why Git cannot serve a folder that registered as a plain folder", async () => {
+    native.isTauriRuntime.mockReturnValue(true);
+    dialog.open.mockResolvedValue("/srv/shared/repo");
+    const registered: RegisteredProject = {
+      workspaceId: "repo",
+      repoRoot: "/srv/shared/repo",
+      gitRoot: null,
+      gitUnavailable: { kind: "dubiousOwnership", path: "/srv/shared/repo" },
+    };
+    native.registerProject.mockResolvedValue(registered);
+    const onRegistered = vi.fn();
+
+    render(
+      <>
+        <Toaster />
+        <AddProjectDialog onClose={vi.fn()} onRegistered={onRegistered} />
+      </>,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("project-type-local"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Add Project" }));
+    });
+
+    expect(onRegistered).toHaveBeenCalledWith(registered);
+    expect(
+      await screen.findByText(/another user owns it.*safe\.directory \/srv\/shared\/repo/),
+    ).toBeInTheDocument();
   });
 
   it("appends -2 suffix when derived workspaceId conflicts with existing projects", async () => {
