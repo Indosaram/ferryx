@@ -1,0 +1,71 @@
+name: Buildbarn runtime smoke
+on:
+  pull_request:
+    paths: ['infra/buildbarn/**', '.github/workflows/buildbarn-runtime.yml']
+  push:
+    branches: [main]
+    paths: ['infra/buildbarn/**', '.github/workflows/buildbarn-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  loopback-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: buildbarn/bb-storage
+          ref: ca3d8b49a5af52eb02ed473dd689d19b949c9e41
+          path: .runtime-sources/bb-storage
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: buildbarn/bb-remote-execution
+          ref: c9ba98cf52456c400278f45a9679635daa40dcd2
+          path: .runtime-sources/bb-remote-execution
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache-dependency-path: |
+            .runtime-sources/bb-storage/go.sum
+            .runtime-sources/bb-remote-execution/go.sum
+      - name: Build pinned official Buildbarn binaries
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/buildbarn-bin"
+          mkdir -p "$bin"
+          (cd .runtime-sources/bb-storage && go build -mod=readonly -trimpath -o "$bin/bb_storage" ./cmd/bb_storage)
+          (cd .runtime-sources/bb-remote-execution && go build -mod=readonly -trimpath -o "$bin/" ./cmd/bb_scheduler ./cmd/bb_runner ./cmd/bb_worker)
+      - name: Fetch checksum-pinned official Buck2 release
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/buck2.zst"
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/meta/buck2/releases/download/2026-11-01/buck2-x86_64-unknown-linux-gnu.zst -o "$archive"
+          echo "a2f7830c240c682c32826ae0b30bf8864d264e866475abaafcc0857d8133cd53  $archive" | sha256sum --check -
+          zstd --decompress --stdout "$archive" > "$RUNNER_TEMP/buildbarn-bin/buck2"
+          chmod 755 "$RUNNER_TEMP/buildbarn-bin/buck2"
+      - name: Test generated configuration with real remote-only actions
+        timeout-minutes: 10
+        run: >-
+          python3 infra/buildbarn/runtime_smoke.py
+          --bin-dir "$RUNNER_TEMP/buildbarn-bin"
+          --evidence "$RUNNER_TEMP/buildbarn-runtime-evidence"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: buildbarn-runtime-evidence
+          path: ${{ runner.temp }}/buildbarn-runtime-evidence
+          if-no-files-found: warn
+          retention-days: 7
