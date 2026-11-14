@@ -52,7 +52,7 @@ Ferryx scores differently on each row because it starts from a different premise
 
 ## What this looks like in Ferryx today
 
-Ferryx ships the workspace-manager shape end to end: the daemon (`ferryx --daemon`, bundled or run headless) owns PTYs, the desktop and remote clients attach as consumers, and managed worktrees land in `.orca-worktrees/wt-<slug>` on branch `orca/<ws-id>/<slug>`. Cross-platform builds cover macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb) — see [product facts](/docs/facts/) for the dated claim list. If you are starting from tmux habits, the [parallel agents use case](/use-cases/parallel-ai-agents/) walks the same five migration steps with this tool specifically.
+Ferryx ships the workspace-manager shape end to end: the daemon (`ferryx --daemon`, bundled or run headless) owns PTYs, the desktop and remote clients attach as consumers, and managed worktrees land in `.orca-worktrees/wt-<slug>` on branch `orca/<ws-id>/<slug>`. Cross-platform builds cover macOS (universal DMG), Windows (x64, through the Microsoft Store; some releases also attach a direct `.exe`), and Linux (x86_64 AppImage and .deb) — see [product facts](/docs/facts/) for the dated claim list. If you are starting from tmux habits, the [parallel agents use case](/use-cases/parallel-ai-agents/) walks the same five migration steps with this tool specifically.
 
 ## FAQ
 

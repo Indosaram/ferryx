@@ -21,6 +21,14 @@
 #                        (default: latest, must match ^[A-Za-z0-9._-]+$)
 #   FERRYX_INSTALL_KEY : install key (same as -Key)
 #
+# Every downloaded binary is checked against the SHA256SUMS of the same GitHub release
+# (FERRYX_VERSION, or the latest release); a source whose bytes do not match is skipped, and
+# the install fails when no source matches.
+#
+# Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported architecture
+# (only windows/amd64 is supported; Windows ARM64 is not), otherwise the exit code of
+# "ferryx-cli up".
+#
 # Windows PowerShell 5.1 compatible; ASCII only.
 
 param(
@@ -31,6 +39,28 @@ param(
     [switch]$Json
 )
 
+$FerryxOrigin = $env:FERRYX_ORIGIN
+if ([string]::IsNullOrEmpty($FerryxOrigin)) {
+    $FerryxOrigin = "https://relay.ferryx.dev"
+}
+
+$FerryxVersion = $env:FERRYX_VERSION
+if ([string]::IsNullOrEmpty($FerryxVersion)) {
+    $FerryxVersion = "latest"
+}
+
+function Get-FerryxReleaseBaseUrl {
+    if ($FerryxVersion -eq "latest") {
+        return "https://github.com/Indosaram/ferryx/releases/latest/download"
+    }
+    return "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion
+}
+
+# Every failure names the download sources in use and the variables that override them.
+function Write-FerryxSourceOverrides {
+    [Console]::Error.WriteLine("    Download origin: " + $FerryxOrigin + " (override with FERRYX_ORIGIN); release: " + (Get-FerryxReleaseBaseUrl) + " (pin a tag with FERRYX_VERSION).")
+}
+
 $FerryxInstallKey = $Key
 if ([string]::IsNullOrEmpty($FerryxInstallKey)) {
     $FerryxInstallKey = $env:FERRYX_INSTALL_KEY
@@ -39,6 +69,7 @@ if ($KeyStdin) {
     $FerryxInstallKey = [Console]::In.ReadLine()
     if ([string]::IsNullOrWhiteSpace($FerryxInstallKey)) {
         [Console]::Error.WriteLine("Error: -KeyStdin found no install key on stdin.")
+        Write-FerryxSourceOverrides
         exit 2
     }
 }
@@ -221,27 +252,21 @@ function Invoke-FerryxSelfCheck {
     return [pscustomobject]@{ Passed = $true; ExitCode = $run.ExitCode; Failure = $null }
 }
 
-$FerryxOrigin = $env:FERRYX_ORIGIN
-if ([string]::IsNullOrEmpty($FerryxOrigin)) {
-    $FerryxOrigin = "https://relay.ferryx.dev"
-}
-
-$FerryxVersion = $env:FERRYX_VERSION
-if ([string]::IsNullOrEmpty($FerryxVersion)) {
-    $FerryxVersion = "latest"
-}
-
 # Validate FERRYX_ORIGIN before anything is downloaded.
 if (-not (Test-FerryxOrigin -Origin $FerryxOrigin)) {
     Write-FerryxError ('Invalid FERRYX_ORIGIN ''{0}''. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1]).' -f $FerryxOrigin)
+    Write-FerryxSourceOverrides
     exit 1
 }
 
 # Validate FERRYX_VERSION: must match ^[A-Za-z0-9._-]+$.
 if ($FerryxVersion -notmatch '^[A-Za-z0-9._-]+$') {
     Write-FerryxError ('Invalid FERRYX_VERSION ''{0}''. Must match ^[A-Za-z0-9._-]+$.' -f $FerryxVersion)
+    Write-FerryxSourceOverrides
     exit 1
 }
+
+$releaseBaseUrl = Get-FerryxReleaseBaseUrl
 
 Write-Host "==> Ferryx CLI Installer"
 
@@ -254,11 +279,18 @@ if ([string]::IsNullOrEmpty($rawArch)) {
 }
 if ([string]::IsNullOrEmpty($rawArch)) {
     Write-FerryxError "Cannot detect the CPU architecture: neither PROCESSOR_ARCHITEW6432 nor PROCESSOR_ARCHITECTURE is set."
+    Write-FerryxSourceOverrides
     exit 1
 }
+if ($rawArch.ToUpperInvariant() -eq "ARM64") {
+    Write-FerryxError ('Windows ARM64 ({0}) is not supported; ferryx-cli ships for Windows x64 (AMD64) only.' -f $rawArch)
+    Write-FerryxSourceOverrides
+    exit 2
+}
 if ($rawArch.ToUpperInvariant() -ne "AMD64") {
-    Write-FerryxError ('Unsupported CPU architecture ''{0}''. The Ferryx CLI is published for windows/amd64 only.' -f $rawArch)
-    exit 1
+    Write-FerryxError ('Windows {0} is not supported; ferryx-cli ships for Windows x64 (AMD64) only.' -f $rawArch)
+    Write-FerryxSourceOverrides
+    exit 2
 }
 $platformOs = "windows"
 $platformArch = "amd64"
@@ -269,27 +301,60 @@ $artifactName = "ferryx-cli-windows-amd64.exe"
 # 3. Resolve the download URLs.
 $primaryUrl = $FerryxOrigin + "/download/" + $artifactName
 $secondaryUrl = $FerryxOrigin + "/download/ferryx-cli"
-if ($FerryxVersion -eq "latest") {
-    $githubUrl = "https://github.com/Indosaram/ferryx/releases/latest/download/" + $artifactName
-} else {
-    $githubUrl = "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion + "/" + $artifactName
-}
+$githubUrl = $releaseBaseUrl + "/" + $artifactName
 
 # 4. Temporary download location.
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ferryx-install-" + [System.Guid]::NewGuid().ToString("N"))
 $tempExe = Join-Path $tempDir "ferryx-cli.exe"
+$tempSums = Join-Path $tempDir "SHA256SUMS"
 
 try {
     try {
         New-Item -ItemType Directory -Force -Path $tempDir -ErrorAction Stop | Out-Null
     } catch {
         Write-FerryxError ('Cannot create a temporary directory ''{0}'': {1}' -f $tempDir, $_.Exception.Message)
+        Write-FerryxSourceOverrides
+        exit 1
+    }
+
+    # 4a. Fetch the release checksums. Releases publish SHA256SUMS; older ones SHA256SUMS.txt.
+    Write-Host ("--> Downloading SHA256SUMS from " + $releaseBaseUrl + " ...")
+    $sumsFound = $false
+    foreach ($sumsName in @("SHA256SUMS", "SHA256SUMS.txt")) {
+        try {
+            Invoke-FerryxDownload -Url ($releaseBaseUrl + "/" + $sumsName) -Destination $tempSums
+        } catch {
+            Remove-Item -LiteralPath $tempSums -Force -ErrorAction SilentlyContinue
+            continue
+        }
+        if ((Test-Path -LiteralPath $tempSums -PathType Leaf) -and ((Get-Item -LiteralPath $tempSums).Length -gt 0)) {
+            $sumsFound = $true
+            break
+        }
+    }
+    if (-not $sumsFound) {
+        Write-FerryxError ("could not download SHA256SUMS from " + $releaseBaseUrl + "; refusing to install an unverified binary.")
+        Write-FerryxSourceOverrides
+        exit 1
+    }
+    $expectedSha256 = $null
+    foreach ($line in (Get-Content -LiteralPath $tempSums)) {
+        $fields = $line.Trim() -split '\s+'
+        if ($fields.Count -ge 2 -and ($fields[1] -eq $artifactName -or $fields[1] -eq ("*" + $artifactName))) {
+            $expectedSha256 = $fields[0].ToLowerInvariant()
+            break
+        }
+    }
+    if ($null -eq $expectedSha256 -or $expectedSha256 -notmatch '^[0-9a-f]{64}$') {
+        Write-FerryxError ("SHA256SUMS from " + $releaseBaseUrl + " has no valid entry for " + $artifactName + ".")
+        Write-FerryxSourceOverrides
         exit 1
     }
 
     # 5. Download, rejecting any source whose payload is not a Windows executable.
     Write-Host ("--> Downloading ferryx-cli for " + $platformOs + "/" + $platformArch + "...")
     $downloadSucceeded = $false
+    $checksumMismatch = $false
     foreach ($url in @($primaryUrl, $secondaryUrl, $githubUrl)) {
         Write-Host ("    Trying " + $url + " ...")
         try {
@@ -308,6 +373,13 @@ try {
             continue
         }
         if (Test-FerryxWindowsExecutable -Path $tempExe) {
+            $actualSha256 = (Get-FileHash -LiteralPath $tempExe -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSha256 -ne $expectedSha256) {
+                Write-Host ("    Skipping: SHA256 mismatch (expected " + $expectedSha256 + ", got " + $actualSha256 + ")")
+                $checksumMismatch = $true
+                continue
+            }
+            Write-Host ("    SHA256 verified: " + $actualSha256)
             $downloadSucceeded = $true
             break
         }
@@ -315,7 +387,13 @@ try {
     }
 
     if (-not $downloadSucceeded) {
+        if ($checksumMismatch) {
+            Write-FerryxError ("no downloaded ferryx-cli matched the SHA256SUMS of the release (" + $artifactName + ").")
+            Write-FerryxSourceOverrides
+            exit 1
+        }
         Write-FerryxError "Failed to download ferryx-cli from available endpoints."
+        Write-FerryxSourceOverrides
         exit 1
     }
 
@@ -324,6 +402,7 @@ try {
     if (-not (Test-FerryxWindowsExecutable -Path $tempExe)) {
         Write-FerryxError ("no downloadable artifact matched " + $platformOs + "/" + $platformArch + ".")
         Write-FerryxError ("Detected header bytes: " + (Get-FerryxHeaderHex -Path $tempExe))
+        Write-FerryxSourceOverrides
         exit 1
     }
 
@@ -336,6 +415,7 @@ try {
             $installDir = Join-Path $env:USERPROFILE ".local\bin"
         } else {
             Write-FerryxError "Cannot determine an install directory: set FERRYX_INSTALL_DIR, or make sure LOCALAPPDATA or USERPROFILE is set."
+            Write-FerryxSourceOverrides
             exit 1
         }
     }
@@ -347,6 +427,7 @@ try {
         New-Item -ItemType Directory -Force -Path $installDir -ErrorAction Stop | Out-Null
     } catch {
         Write-FerryxError ('Cannot create the install directory ''{0}'': {1}' -f $installDir, $_.Exception.Message)
+        Write-FerryxSourceOverrides
         exit 1
     }
 
@@ -359,6 +440,7 @@ try {
     if (-not $candidateCheck.Passed) {
         Write-FerryxError ("downloaded executable " + $candidateCheck.Failure + ".")
         Write-FerryxError "    Existing installation, if any, was left untouched."
+        Write-FerryxSourceOverrides
         exit 1
     }
 
@@ -370,6 +452,7 @@ try {
     } catch {
         Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
         Write-FerryxError ('Cannot install to ''{0}'': {1}' -f $targetExe, $_.Exception.Message)
+        Write-FerryxSourceOverrides
         exit 1
     }
 
@@ -377,6 +460,7 @@ try {
     $installedCheck = Invoke-FerryxSelfCheck -Executable $targetExe -WorkDir $tempDir
     if (-not $installedCheck.Passed) {
         Write-FerryxError ('installed ''{0}'' {1}.' -f $targetExe, $installedCheck.Failure)
+        Write-FerryxSourceOverrides
         exit 1
     }
 
@@ -486,6 +570,7 @@ try {
         }
         Write-FerryxError ("ferryx-cli up failed (exit " + $upStatus + "): " + $upReason + ".")
         Write-FerryxError ("    ferryx-cli stays installed at " + $targetExe + "; rerun it with 'up --origin " + $FerryxOrigin + "' when ready.")
+        Write-FerryxSourceOverrides
         exit $upStatus
     }
 } finally {

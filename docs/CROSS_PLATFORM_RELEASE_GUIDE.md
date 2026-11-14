@@ -27,7 +27,7 @@ v2026.09.08.1 -> app/updater 2026.908.1 -> MSIX 2026.908.1.0
 ```
 
 The coordinator verifies signed updater payloads against the public key committed in
-`src-tauri/tauri.conf.json`, emits stable aliases, `latest.json`, and `SHA256SUMS.txt`, and uses
+`src-tauri/tauri.conf.json`, emits stable aliases, `latest.json`, `SHA256SUMS`, and `SHA256SUMS.minisig`, and uses
 an explicitly approved draft/publish flow. Preserve that updater key and the existing macOS
 Developer ID identity across the local-only migration.
 
@@ -57,7 +57,7 @@ The canonical stable aliases are:
 - `ferryx-cli-darwin-universal`
 - `Ferryx_x64.msix`
 - `Ferryx_x64-setup.exe` only for an explicit NSIS migration release
-- `latest.json` and `SHA256SUMS.txt`
+- `latest.json`, `SHA256SUMS`, and `SHA256SUMS.minisig`
 
 The website download behavior is implemented in `site/src/lib/downloads.ts`. Validate website
 links separately from artifact production. Do not restore an Actions tag-trigger recipe to this

@@ -2,8 +2,9 @@
 
 > **Historical implementation packet (2026-09-28):** This records a pre-account
 > pairing workflow, not current setup instructions. `ferryx-cli pair generate` now
-> returns `ACCOUNT_LOGIN_REQUIRED`; use `ferryx-cli account login --email <address>`
-> with `--origin <account-origin>` or `FERRYX_ACCOUNT_ORIGIN` for headless enrollment.
+> returns `ACCOUNT_LOGIN_REQUIRED`; enroll a headless machine with
+> `curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install-key>`, which runs
+> `ferryx-cli up` (or run `ferryx-cli up --origin <account-origin>` on a host that already has it).
 > See [account service](account-service.md)
 > for the current flow. Capability and UI assertions below describe the original
 > packet and must be rechecked against current source before use.
@@ -20,21 +21,14 @@ The terminal proxy currently advertises false. Enabling the preference cannot pr
 
 Use a clean, dedicated Linux service account or disposable container with no existing Ferryx daemon, projects, or sessions. Do not run these commands against a developer's existing daemon. Install a compatible `ferryx-cli` separately; remote installation is not part of this feature.
 
-Set `FERRYX_RELAY_URL` to your compatible HTTPS relay origin in both shells. In the dedicated fixture account:
+In the dedicated fixture account, enroll the machine and let `up` keep its daemon running,
+instead of using the retired PIN command:
 
 ```sh
-export FERRYX_RELAY_URL=https://your-relay.example
-ferryx-cli --daemon
+ferryx-cli up --email you@example.com --origin https://your-relay.example
 ```
 
-Leave that fixture daemon running. In a second shell under the same fixture account,
-enroll through the account service instead of using the retired PIN command:
-
-```sh
-ferryx-cli account login --email you@example.com --origin https://your-account-service.example
-```
-
-The running daemon owns the relay identity. Do not launch a second standalone pairing server.
+The daemon `up` keeps running owns the relay identity. Do not launch a second standalone pairing server.
 The PIN-based desktop steps below are historical, not a current enrollment procedure. Permanent
 bearer credentials must never appear in URLs or renderer logs.
 

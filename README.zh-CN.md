@@ -31,17 +31,24 @@
 | 平台 | 软件包 | |
 | :--- | :--- | :--- |
 | **macOS** | 通用 DMG（Apple Silicon 和 Intel） | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
-| **Windows** | 安装程序（x64，未进行代码签名；Microsoft Store 版本正在等待认证） | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
+| **Windows** | Microsoft Store（x64，已签名，自动更新） | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4)（`winget install --source msstore 9NLHQL5JNLM4`） |
 | **Linux** | 便携式 AppImage（x64） | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu 软件包（x64） | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
-| **Linux（无头）** | 服务器 / VPS PTY 守护进程和 CLI（x64） | [`install.sh`](https://relay.ferryx.dev/install.sh)（`curl -fsSL https://relay.ferryx.dev/install.sh | bash`） |
+| **Linux（无头）** | 服务器 / VPS PTY 守护进程和 CLI（仅 x86_64，glibc 2.17+） | [`install.sh`](https://relay.ferryx.dev/install.sh)（`curl -fsSL https://relay.ferryx.dev/install.sh | bash`） |
 
-macOS、Windows 和 Linux 的下载链接会指向最新版本。进行本地发行版组装时，会将无头版 `ferryx-cli` 放在 Linux AppImage 和 `.deb` 旁边（文件名为
+macOS 和 Linux 的下载链接会指向最新版本。Windows 请通过 Microsoft Store 安装；部分发行版还会附带一个直接安装用的 `.exe` 安装程序（未进行代码签名），请在[发行版页面](https://github.com/Indosaram/ferryx/releases/latest)查看是否提供，而不要依赖固定链接。进行本地发行版组装时，会将无头版 `ferryx-cli` 放在 Linux AppImage 和 `.deb` 旁边（文件名为
 `ferryx-cli-linux-amd64`）；如果存在通用 macOS CLI，也会将其作为
-`ferryx-cli-darwin-universal` 一同放置。因此，上面的一行安装命令在发行版包含当前构建产物时会解析到该产物，否则会安全失败。请使用与二进制文件一同发布的 `SHA256SUMS.txt` 验证下载：
+`ferryx-cli-darwin-universal` 一同放置。因此，上面的一行安装命令在发行版包含当前构建产物时会解析到该产物，否则会安全失败。
+
+Linux 版本仅支持 x86_64。AppImage 和 `.deb` 需要 glibc 2.35 或更高版本以及 WebKitGTK 4.1 和 GTK 3（Ubuntu 22.04 或更高版本）；无头 `ferryx-cli` 需要 glibc 2.17 或更高版本。不提供 Linux 或 Windows ARM64 版本：在 Linux arm64、Alpine 等基于 musl 的发行版以及 Windows ARM64 上，安装脚本会以退出码 2 结束并说明原因。
+
+安装脚本会用发行版的 `SHA256SUMS` 校验下载的 `ferryx-cli`，不匹配时拒绝安装。每个发行版都会在二进制文件旁发布 `SHA256SUMS` 及其 minisign 签名 `SHA256SUMS.minisig`，可以这样校验下载：
 
 ```bash
-sha256sum -c SHA256SUMS.txt
+# 公钥是应用的更新器密钥（src-tauri/tauri.conf.json 中的 `pubkey`）。minisign：
+# https://jedisct1.github.io/minisign/（Ubuntu 22.04 未打包该工具，请使用其发布版构建）。
+minisign -Vm SHA256SUMS -P RWTLZ1zCtZ3JEO3XhjZZ6Uq3rQtEz2FbBcfxxl/+aFlNKJepqoQNj2Zm
+sha256sum -c SHA256SUMS --ignore-missing
 ```
 
 ## 速度、隔离与完全掌控
@@ -91,23 +98,28 @@ Ferryx 使用仅向外发起的中继隧道，因此位于 NAT 或防火墙之�
 如需使用自己的中继服务而不是默认服务，请遵循
 [自托管中继指南](https://ferryx.dev/docs/self-hosted-relay/)，了解 TLS、邮件投递、机器注册，以及独立的桌面账户和网关设置。
 
-- 无头 `ferryx-cli` 不需要显示服务器；在 Linux 上，其共享 crate 仍会链接 GTK 3 和 WebKitGTK 4.1
+- 无头 `ferryx-cli` 不需要显示服务器，也不链接 GTK、WebKitGTK 或 JavaScriptCore；在 Linux 上只需要 glibc（`libc`、`libm`、`libgcc_s`）
 - 仅向外发起的加密中继隧道：无需入站 SSH、开放端口或公网 IP
 - 原生终端分屏和远程 Git worktree 可直接在该机器上运行
 
 ```bash
 # 1. 在远程机器上通过一行命令安装 ferryx-cli（Linux x64、macOS）
 curl -fsSL https://relay.ferryx.dev/install.sh | bash
+# 安装脚本先用发行版的 SHA256SUMS 校验二进制文件，安装到 ~/.local/bin（root 用户为
+# /usr/local/bin），然后运行 `ferryx-cli up`。没有安装密钥时，`up` 会打印批准 URL 和代码：
+# 打开该 URL，或在桌面应用的 Settings > Remote > Add Machine > Approve a machine 中输入代码。
+# `up` 会等待批准。
 
-# 2. 在专用服务或终端中启动无头 PTY 守护进程；
-#    此前台进程运行时，请使用第二个终端执行第 3 步。
-ferryx-cli --daemon
+# 2. 或者跳过批准：Settings > Remote > Add Machine > Install command 会显示这一行，
+#    并已填入一次性安装密钥。
+curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install-key>
 
-# 3. 通过电子邮件 magic link 将机器关联到账户（无需开放端口或在 GUI 中复制 PIN）
-ferryx-cli account login --email you@example.com --origin https://your-account-service.example
-# 在电子邮件中打开授权链接；命令会等待批准。
-# 配置了 FERRYX_ACCOUNT_ORIGIN 时，可省略 --origin。
+# 3. 确认守护进程保持运行（Linux 上为启用 linger 的 systemd 用户单元，macOS 上为 launchd；
+#    没有可用的服务管理器时为分离运行的守护进程）。
+ferryx-cli service status
 ```
+
+`ferryx-cli up` 会将机器注册到你的账户并保持其守护进程运行；你无需自己启动 `ferryx-cli --daemon`。安装脚本选项：`--key <key>`（一次性安装密钥，通过 `FERRYX_INSTALL_KEY` 传给 `ferryx-cli`，绝不作为命令行参数）、`--email <address>`（批准请求的账户邮箱提示）、`--no-up`（只安装二进制文件）和 `--json`。使用 `--no-up` 时，或既没有密钥、邮箱也没有终端时，安装脚本会打印稍后要运行的命令：`ferryx-cli up --origin https://relay.ferryx.dev`。手动运行 `up` 时需要 `--origin` 或 `FERRYX_ACCOUNT_ORIGIN`，没有内置默认值。Windows（x64）上请使用 `irm https://relay.ferryx.dev/install.ps1 | iex`，或 Install command 显示的 PowerShell 命令。使用自托管中继时，也要为安装脚本设置源：`curl -fsSL https://relay.example.com/install.sh | FERRYX_ORIGIN=https://relay.example.com sh -s -- --key <install-key>`。
 
 ### 零 Electron 开销
 
@@ -161,14 +173,15 @@ Ferryx 原生 Ghostty 和 Rust 组件的架构清单。这不是与基于 Electr
 
 ### 前置条件
 
-- [Bun](https://bun.sh/) 1.1+
-- [Rust](https://www.rust-lang.org/) stable（至少 1.82）
-- [Node.js](https://nodejs.org/) 20+
+- [Bun](https://bun.sh/) 1.1+（仓库唯一使用的 JavaScript 运行时；不需要 Node.js）
+- [Rust](https://www.rust-lang.org/) stable（至少 1.89，即 `src-tauri/Cargo.toml` 中的 `rust-version`）
 - [Zig](https://ziglang.org/download/) 0.16.0（构建固定版本的 Ghostty 时需要）
-- [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)
+- [Tauri CLI v2](https://v2.tauri.app/start/prerequisites/)，作为 Cargo 子命令安装，因为 `cargo tauri dev` 会调用它：
+  `cargo install tauri-cli --version "^2" --locked`
 
-在 Linux 上，编译桌面或 CLI 二进制文件之前，请安装
-[Tauri](https://v2.tauri.app/start/prerequisites/) 所需的 GTK 3、WebKitGTK 4.1 和其他系统库。
+在 Linux 上，编译桌面应用之前，请安装
+[Tauri](https://v2.tauri.app/start/prerequisites/) 所需的 GTK 3、WebKitGTK 4.1 和其他系统库。无头 CLI 不需要它们即可构建：
+`cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-cli`。
 
 ### 克隆并安装
 

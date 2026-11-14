@@ -19,6 +19,14 @@ set -eu
 #   FERRYX_ORIGIN      : custom relay/download origin (default: https://relay.ferryx.dev, must be https or http on loopback)
 #   FERRYX_VERSION     : specific tag version or 'latest' (default: latest, must match ^[A-Za-z0-9._-]+$)
 #   FERRYX_INSTALL_KEY : install key (same as --key)
+#
+# Every downloaded binary is checked against the SHA256SUMS of the same GitHub release
+# (FERRYX_VERSION, or the latest release); a source whose bytes do not match is skipped, and
+# the install fails when no source matches.
+#
+# Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported platform
+# (Linux arm64, Linux with musl libc, or any other OS/CPU without a published ferryx-cli),
+# otherwise the exit code of "ferryx-cli up".
 
 FERRYX_INSTALL_KEY="${FERRYX_INSTALL_KEY:-}"
 INSTALL_EMAIL=""
@@ -26,12 +34,36 @@ INSTALL_NO_UP=0
 INSTALL_JSON=0
 INSTALL_KEY_STDIN=0
 
+FERRYX_ORIGIN="${FERRYX_ORIGIN:-https://relay.ferryx.dev}"
+FERRYX_VERSION="${FERRYX_VERSION:-latest}"
+
+release_base_url() {
+  if [ "$FERRYX_VERSION" = "latest" ]; then
+    echo "https://github.com/Indosaram/ferryx/releases/latest/download"
+  else
+    echo "https://github.com/Indosaram/ferryx/releases/download/${FERRYX_VERSION}"
+  fi
+}
+
+# Every failure names the download sources in use and the variables that override them.
+print_source_overrides() {
+  echo "    Download origin: ${FERRYX_ORIGIN} (override with FERRYX_ORIGIN); release: $(release_base_url) (pin a tag with FERRYX_VERSION)." >&2
+}
+
+# die STATUS MESSAGE: print the error and the source overrides, then exit with STATUS.
+die() {
+  die_status="$1"
+  shift
+  echo "Error: $*" >&2
+  print_source_overrides
+  exit "$die_status"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --key)
       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
-        echo "Error: --key needs a value." >&2
-        exit 2
+        die 2 "--key needs a value."
       fi
       FERRYX_INSTALL_KEY="$2"
       shift 2
@@ -46,8 +78,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --email)
       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
-        echo "Error: --email needs a value." >&2
-        exit 2
+        die 2 "--email needs a value."
       fi
       INSTALL_EMAIL="$2"
       shift 2
@@ -65,8 +96,7 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     *)
-      echo "Error: unknown option '$1'. Supported: --key K, --key-stdin, --email E, --no-up, --json." >&2
-      exit 2
+      die 2 "unknown option '$1'. Supported: --key K, --key-stdin, --email E, --no-up, --json."
       ;;
   esac
 done
@@ -76,8 +106,7 @@ if [ "$INSTALL_KEY_STDIN" -eq 1 ]; then
   # Exactly one line; a final line without a newline still counts.
   IFS= read -r FERRYX_INSTALL_KEY || true
   if [ -z "$FERRYX_INSTALL_KEY" ]; then
-    echo "Error: --key-stdin found no install key on stdin." >&2
-    exit 2
+    die 2 "--key-stdin found no install key on stdin."
   fi
 fi
 
@@ -89,15 +118,11 @@ else
   exec 3>&1
 fi
 
-FERRYX_ORIGIN="${FERRYX_ORIGIN:-https://relay.ferryx.dev}"
-FERRYX_VERSION="${FERRYX_VERSION:-latest}"
-
 # Validate FERRYX_ORIGIN: must be https://... or http:// on loopback (127.0.0.1, localhost, [::1])
 case "$FERRYX_ORIGIN" in
   https://*|https)
     if [ "$FERRYX_ORIGIN" = "https://" ] || [ "$FERRYX_ORIGIN" = "https" ]; then
-      echo "Error: Invalid FERRYX_ORIGIN '$FERRYX_ORIGIN'. Must start with https:// or http:// on a loopback host." >&2
-      exit 1
+      die 1 "Invalid FERRYX_ORIGIN '${FERRYX_ORIGIN}'. Must start with https:// or http:// on a loopback host."
     fi
     ;;
   http://localhost|http://localhost/*|http://localhost:*|\
@@ -105,29 +130,45 @@ case "$FERRYX_ORIGIN" in
   http://\[::1\]|http://\[::1\]/*|http://\[::1\]:*)
     ;;
   *)
-    echo "Error: Invalid FERRYX_ORIGIN '$FERRYX_ORIGIN'. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1])." >&2
-    exit 1
+    die 1 "Invalid FERRYX_ORIGIN '${FERRYX_ORIGIN}'. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1])."
     ;;
 esac
 
 # Validate FERRYX_VERSION: must match ^[A-Za-z0-9._-]+$
 case "$FERRYX_VERSION" in
   "")
-    echo "Error: Invalid FERRYX_VERSION '$FERRYX_VERSION'. Must match ^[A-Za-z0-9._-]+$." >&2
-    exit 1
+    die 1 "Invalid FERRYX_VERSION '${FERRYX_VERSION}'. Must match ^[A-Za-z0-9._-]+$."
     ;;
   *[!A-Za-z0-9._-]*|"")
-    echo "Error: Invalid FERRYX_VERSION '$FERRYX_VERSION'. Must match ^[A-Za-z0-9._-]+$." >&2
-    exit 1
+    die 1 "Invalid FERRYX_VERSION '${FERRYX_VERSION}'. Must match ^[A-Za-z0-9._-]+$."
     ;;
   *)
     ;;
 esac
 
+RELEASE_BASE_URL="$(release_base_url)"
+
+# musl-based distributions (Alpine and similar) cannot run the glibc ferryx-cli build. A glibc
+# host that merely has the musl loader installed still answers GNU_LIBC_VERSION.
+linux_libc_is_musl() {
+  if ldd --version 2>&1 | grep -qi musl; then
+    return 0
+  fi
+  if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+    return 1
+  fi
+  for loader in /lib/ld-musl-*; do
+    if [ -e "$loader" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 echo "==> Ferryx CLI Installer"
 
 # 1. Detect OS
-OS="$(uname -s)"
+OS="$(uname -s)" || die 1 "cannot detect the operating system: 'uname -s' failed."
 case "$OS" in
   Linux)
     PLATFORM_OS="linux"
@@ -136,33 +177,35 @@ case "$OS" in
     PLATFORM_OS="darwin"
     ;;
   *)
-    echo "Error: Unsupported operating system '$OS'. Ferryx CLI supports Linux and macOS." >&2
-    exit 1
+    die 2 "operating system '${OS}' is not supported; ferryx-cli ships for Linux x86_64 and macOS (use install.ps1 on Windows)."
     ;;
 esac
 
 # 2. Detect Architecture
-ARCH="$(uname -m)"
+ARCH="$(uname -m)" || die 1 "cannot detect the CPU architecture: 'uname -m' failed."
 case "$ARCH" in
   x86_64|amd64)
     PLATFORM_ARCH="amd64"
     ;;
   aarch64|arm64)
+    if [ "$PLATFORM_OS" = "linux" ]; then
+      die 2 "Linux arm64 (${ARCH}) is not supported; ferryx-cli ships for Linux x86_64 only."
+    fi
     PLATFORM_ARCH="arm64"
     ;;
   *)
-    echo "Error: Unsupported CPU architecture '$ARCH'." >&2
-    exit 1
+    die 2 "${OS} ${ARCH} is not supported; ferryx-cli ships for Linux x86_64 and macOS only."
     ;;
 esac
 
-# 3. Determine download artifact name
+# 2a. Detect the C library: the Linux build needs glibc.
+if [ "$PLATFORM_OS" = "linux" ] && linux_libc_is_musl; then
+  die 2 "Linux with musl libc (Alpine and similar) is not supported; ferryx-cli needs glibc 2.17 or newer."
+fi
+
+# 3. Determine download artifact name (Linux is amd64 only; macOS ships one universal binary)
 if [ "$PLATFORM_OS" = "linux" ]; then
-  if [ "$PLATFORM_ARCH" = "amd64" ]; then
-    ARTIFACT_NAME="ferryx-cli-linux-amd64"
-  else
-    ARTIFACT_NAME="ferryx-cli-linux-arm64"
-  fi
+  ARTIFACT_NAME="ferryx-cli-linux-amd64"
 elif [ "$PLATFORM_OS" = "darwin" ]; then
   ARTIFACT_NAME="ferryx-cli-darwin-universal"
 fi
@@ -170,15 +213,24 @@ fi
 # 4. Resolve download URLs
 PRIMARY_URL="${FERRYX_ORIGIN}/download/${ARTIFACT_NAME}"
 SECONDARY_URL="${FERRYX_ORIGIN}/download/ferryx-cli"
-if [ "$FERRYX_VERSION" = "latest" ]; then
-  GITHUB_URL="https://github.com/Indosaram/ferryx/releases/latest/download/${ARTIFACT_NAME}"
+GITHUB_URL="${RELEASE_BASE_URL}/${ARTIFACT_NAME}"
+
+# 4a. Determine the installation directory before downloading anything.
+if [ -n "${FERRYX_INSTALL_DIR:-}" ]; then
+  TARGET_DIR="$FERRYX_INSTALL_DIR"
+elif [ "$(id -u)" -eq 0 ]; then
+  TARGET_DIR="/usr/local/bin"
+elif [ -n "${HOME:-}" ]; then
+  TARGET_DIR="${HOME}/.local/bin"
 else
-  GITHUB_URL="https://github.com/Indosaram/ferryx/releases/download/${FERRYX_VERSION}/${ARTIFACT_NAME}"
+  die 1 "HOME is not set; set FERRYX_INSTALL_DIR to choose the install directory."
 fi
 
 # 5. Temporary download location
-TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'ferryx-install')"
+TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'ferryx-install')" ||
+  die 1 "Cannot create a temporary directory."
 TMP_BIN="${TMP_DIR}/ferryx-cli"
+TMP_SUMS="${TMP_DIR}/SHA256SUMS"
 cleanup() {
   rm -rf "$TMP_DIR"
 }
@@ -193,8 +245,7 @@ download() {
   elif command -v wget >/dev/null 2>&1; then
     wget -qO "$dest" "$url"
   else
-    echo "Error: Neither curl nor wget was found on your system." >&2
-    exit 1
+    return 1
   fi
 }
 
@@ -225,7 +276,6 @@ artifact_matches_platform() {
       esac
       case "$PLATFORM_ARCH:$(field 37 40)" in
         amd64:3e00) ;;
-        arm64:b700) ;;
         *) return 1 ;;
       esac
       ;;
@@ -259,22 +309,73 @@ artifact_matches_platform() {
   esac
 }
 
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d ' ' -f 1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+  else
+    return 1
+  fi
+}
+
+# Checked up front: download() runs with stderr discarded, so its own failure would be silent.
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+  die 1 "Neither curl nor wget was found on your system."
+fi
+
+# 6a. Fetch the release checksums. Releases publish SHA256SUMS; older ones SHA256SUMS.txt.
+echo "--> Downloading SHA256SUMS from ${RELEASE_BASE_URL} ..."
+SUMS_FOUND=0
+for sums_name in SHA256SUMS SHA256SUMS.txt; do
+  if download "${RELEASE_BASE_URL}/${sums_name}" "$TMP_SUMS" 2>/dev/null && [ -s "$TMP_SUMS" ]; then
+    SUMS_FOUND=1
+    break
+  fi
+done
+if [ "$SUMS_FOUND" -ne 1 ]; then
+  die 1 "could not download SHA256SUMS from ${RELEASE_BASE_URL}; refusing to install an unverified binary."
+fi
+EXPECTED_SHA256="$(awk -v name="$ARTIFACT_NAME" '$2 == name || $2 == "*" name { print tolower($1); exit }' "$TMP_SUMS")" ||
+  die 1 "cannot read SHA256SUMS from ${RELEASE_BASE_URL} (awk failed)."
+case "$EXPECTED_SHA256" in
+  ????????????????????????????????????????????????????????????????) ;;
+  *)
+    die 1 "SHA256SUMS from ${RELEASE_BASE_URL} has no valid entry for ${ARTIFACT_NAME}."
+    ;;
+esac
+if ! sha256_of "$TMP_SUMS" >/dev/null; then
+  die 1 "neither sha256sum nor shasum was found; cannot verify the download."
+fi
+
 echo "--> Downloading ferryx-cli for ${PLATFORM_OS}/${PLATFORM_ARCH}..."
 DOWNLOAD_SUCCESS=0
+CHECKSUM_MISMATCH=0
 for url in "$PRIMARY_URL" "$SECONDARY_URL" "$GITHUB_URL"; do
   echo "    Trying $url ..."
   if download "$url" "$TMP_BIN" 2>/dev/null && [ -s "$TMP_BIN" ]; then
-    if artifact_matches_platform "$TMP_BIN"; then
-      DOWNLOAD_SUCCESS=1
-      break
+    if ! artifact_matches_platform "$TMP_BIN"; then
+      echo "    Skipping: artifact is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
+      continue
     fi
-    echo "    Skipping: artifact is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
+    actual_sha256="$(sha256_of "$TMP_BIN" | tr 'A-F' 'a-f')" ||
+      die 1 "cannot compute the SHA256 of the download from ${url}."
+    if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
+      echo "    Skipping: SHA256 mismatch (expected ${EXPECTED_SHA256}, got ${actual_sha256})"
+      CHECKSUM_MISMATCH=1
+      continue
+    fi
+    echo "    SHA256 verified: ${actual_sha256}"
+    DOWNLOAD_SUCCESS=1
+    break
   fi
 done
 
 if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
-  echo "Error: Failed to download ferryx-cli from available endpoints." >&2
-  exit 1
+  if [ "$CHECKSUM_MISMATCH" -eq 1 ]; then
+    die 1 "no downloaded ferryx-cli matched the SHA256SUMS of the release (${ARTIFACT_NAME})."
+  fi
+  die 1 "Failed to download ferryx-cli from available endpoints."
 fi
 
 # 7. Confirm the accepted artifact matches this platform (the loop above already filtered;
@@ -282,23 +383,16 @@ fi
 if ! artifact_matches_platform "$TMP_BIN"; then
   echo "Error: no downloadable artifact matched ${PLATFORM_OS}/${PLATFORM_ARCH}." >&2
   echo "Detected header bytes: $(header_hex "$TMP_BIN")" >&2
+  print_source_overrides
   exit 1
 fi
 
-# 8. Determine installation directory
-if [ -n "${FERRYX_INSTALL_DIR:-}" ]; then
-  TARGET_DIR="$FERRYX_INSTALL_DIR"
-elif [ "$(id -u)" -eq 0 ]; then
-  TARGET_DIR="/usr/local/bin"
-else
-  TARGET_DIR="${HOME}/.local/bin"
-fi
-
-mkdir -p "$TARGET_DIR"
+# 8. Create the installation directory (chosen in step 4a, before any download)
+mkdir -p "$TARGET_DIR" || die 1 "Cannot create the install directory '${TARGET_DIR}'."
 TARGET_BIN="${TARGET_DIR}/ferryx-cli"
 STAGED_BIN="${TARGET_BIN}.new"
 
-chmod +x "$TMP_BIN"
+chmod +x "$TMP_BIN" || die 1 "Cannot mark the downloaded ferryx-cli executable in ${TMP_DIR}."
 
 # 9. Verify the candidate can execute BEFORE it replaces anything. A payload that cannot
 # run here must leave any existing installation byte-for-byte untouched.
@@ -310,23 +404,22 @@ case "$verify_status" in
   126|127)
     echo "Error: downloaded binary cannot execute on this platform (exit ${verify_status})." >&2
     echo "    Existing installation, if any, was left untouched." >&2
+    print_source_overrides
     exit 1
     ;;
 esac
 
 # 10. Install atomically: stage beside the target, then rename over it.
-rm -f "$STAGED_BIN"
-if ! install -m 0755 "$TMP_BIN" "$STAGED_BIN"; then
-  rm -f "$STAGED_BIN"
-  exit 1
+if ! rm -f "$STAGED_BIN" || ! install -m 0755 "$TMP_BIN" "$STAGED_BIN" || ! mv -f "$STAGED_BIN" "$TARGET_BIN"; then
+  rm -f "$STAGED_BIN" 2>/dev/null || true
+  die 1 "Cannot install to '${TARGET_BIN}' (staged at '${STAGED_BIN}'); the existing installation, if any, was left untouched."
 fi
-mv -f "$STAGED_BIN" "$TARGET_BIN"
 
 echo "==> Successfully installed ferryx-cli to ${TARGET_BIN}"
 echo "    Verified: ${TARGET_BIN} executes (--help exit ${verify_status})."
 
 # 11. Check PATH
-case ":$PATH:" in
+case ":${PATH:-}:" in
   *":$TARGET_DIR:"*) ;;
   *)
     echo ""
@@ -397,5 +490,6 @@ if [ "$up_status" -ne 0 ]; then
   esac
   echo "Error: ferryx-cli up failed (exit ${up_status}): ${up_reason}." >&2
   echo "    ferryx-cli stays installed at ${TARGET_BIN}; rerun '${TARGET_BIN} up --origin ${FERRYX_ORIGIN}' when ready." >&2
+  print_source_overrides
   exit "$up_status"
 fi

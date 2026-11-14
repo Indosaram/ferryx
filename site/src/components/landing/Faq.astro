@@ -28,11 +28,11 @@ const faqs: { q: string; a: string }[] = [
   },
   {
     q: "Why does Windows warn when I install it?",
-    a: "Install from the Microsoft Store (https://apps.microsoft.com/detail/9NLHQL5JNLM4 or winget install --source msstore 9NLHQL5JNLM4) for the signed build with no SmartScreen warning. The standalone GitHub .exe installer is not code-signed, so SmartScreen warns before it runs; verify it against SHA256SUMS.txt with sha256sum -c SHA256SUMS.txt.",
+    a: "Install from the Microsoft Store (https://apps.microsoft.com/detail/9NLHQL5JNLM4 or winget install --source msstore 9NLHQL5JNLM4) for the signed build with no SmartScreen warning. Some GitHub releases also attach a standalone .exe installer; it is not code-signed, so SmartScreen warns before it runs. Check it against the release's SHA256SUMS first (Get-FileHash in PowerShell, or sha256sum -c SHA256SUMS --ignore-missing).",
   },
   {
     q: "Does it run on a headless Linux server?",
-    a: "Yes. Install the headless ferryx-cli daemon and CLI with curl -fsSL https://relay.ferryx.dev/install.sh | bash, then pair the machine as a remote to watch it from the app.",
+    a: "Yes. On x86_64 with glibc 2.17 or newer, run curl -fsSL https://relay.ferryx.dev/install.sh | bash. The installer verifies ferryx-cli, then runs ferryx-cli up, which links the machine to your account (approve it in the app, or use the install key from Add Machine > Install command) and keeps its daemon running.",
   },
   {
     q: "How mature is it?",

@@ -9,11 +9,47 @@ description: "AppImage versus deb choice, execute permissions, and desktop entry
 
 ## Choosing a package
 
-Terminal tooling fails in confusing ways because several layers (OS, WebView, PTY, daemon, renderer) can each produce similar symptoms. A structured triage path saves you from restarting blindly and killing sessions that were fine. In the specific case of “Installing Ferryx on Linux: AppImage or Deb”, the Ferryx angle is straightforward: appimage versus deb choice, execute permissions, and desktop entry basics for linux installs. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+Ferryx publishes two desktop packages for Linux, both for x86_64 only. Both are built on Ubuntu 22.04 and need glibc 2.35 or newer, WebKitGTK 4.1, and GTK 3; a release that would need a newer glibc is refused before it is published. There are no ARM64 Linux packages. Check your machine first:
+
+```bash
+uname -m                # must print x86_64
+ldd --version | head -n1  # glibc 2.35 or newer
+```
+
+- **`.deb`** for Debian, Ubuntu and their derivatives. The package declares its dependencies (`libwebkit2gtk-4.1-0`, `libgtk-3-0`, an appindicator library and ALSA), so `apt` installs them and adds the desktop entry for you.
+- **AppImage** for other glibc distributions. It is a single file you run in place; it does not add a menu entry by itself.
+
+Download from the [latest release](https://github.com/Indosaram/ferryx/releases/latest) and check the file before you install it. `SHA256SUMS` lists every release file and `SHA256SUMS.minisig` signs that list with the app's updater key. [minisign](https://jedisct1.github.io/minisign/) is not packaged for Ubuntu 22.04, so take its release build there:
+
+```bash
+curl -fLO https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb
+curl -fLO https://github.com/Indosaram/ferryx/releases/latest/download/SHA256SUMS
+curl -fLO https://github.com/Indosaram/ferryx/releases/latest/download/SHA256SUMS.minisig
+minisign -Vm SHA256SUMS -P RWTLZ1zCtZ3JEO3XhjZZ6Uq3rQtEz2FbBcfxxl/+aFlNKJepqoQNj2Zm
+sha256sum -c SHA256SUMS --ignore-missing
+sudo apt install ./Ferryx_amd64.deb
+```
 
 ## Making AppImage executable
 
-Most Ferryx issues cluster into install/platform quirks, IME and rendering oddities, daemon socket permissions, and overlay states like Shell exited. The product facts page and architecture doc are the first places to confirm expected behavior before changing anything. Applied to “install ferryx linux appimage deb”, that context matters because the failure modes people search for are almost always failures of ownership or visibility rather than of raw rendering. When the process outlives the window, when the buffer can prove what it missed, and when each agent's files live in a jailed worktree, the same task that used to require three clones and a spreadsheet becomes a pane layout you can read at a glance.
+Download `Ferryx_amd64.AppImage` the same way, check it against `SHA256SUMS`, then mark it executable and run it:
+
+```bash
+chmod +x Ferryx_amd64.AppImage
+./Ferryx_amd64.AppImage
+```
+
+An AppImage mounts itself with FUSE. If it refuses to start on a system without FUSE, extract it and run the extracted copy instead: `./Ferryx_amd64.AppImage --appimage-extract && ./squashfs-root/AppRun`.
+
+## Headless servers
+
+A server without a display does not need either package. The headless `ferryx-cli` runs the same PTY daemon, links no GTK or WebKit, and needs glibc 2.17 or newer on x86_64. In the desktop app, open Settings > Remote, choose **Add Machine** > **Install command**, and run the line it shows on the server:
+
+```bash
+curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install-key>
+```
+
+The installer checks the binary against the release `SHA256SUMS`, installs it to `~/.local/bin` (or `/usr/local/bin` as root), then runs `ferryx-cli up`. `up` enrolls the server with your account and keeps its daemon running as a systemd user service with linger enabled, or as a detached daemon where systemd is not available. Without `--key`, `up` prints an approval code that you enter under **Add Machine** > **Approve a machine**. `ferryx-cli service status` shows how the daemon is kept running. The installer stops with exit code 2 on arm64 and on musl-based distributions such as Alpine.
 
 ## Practical steps
 
@@ -32,7 +68,7 @@ Most Ferryx issues cluster into install/platform quirks, IME and rendering oddit
 
 ## How this fits Ferryx today
 
-Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
+Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64, through the Microsoft Store; some releases also attach a direct `.exe`), and Linux (x86_64 AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
 ![Installing Ferryx on Linux: AppImage or Deb illustration](/images/blog/ferryx-install-linux/body-1.png)
 
@@ -56,7 +92,7 @@ Ferryx ships calendar-versioned releases quickly; check that your version matche
 
 ## Limits and non-goals
 
-Ferryx is early software: core flows work, but expect rough edges and breaking changes between calendar-versioned releases. Some OS integrations remain platform-specific (Dock badge counters and launchd supervision are macOS-only today), Windows builds are not code-signed yet so SmartScreen warns on first run, and remote features assume you control the host and pairing grants. None of that changes the core claim of this post—daemon-owned sessions, managed worktrees, and visible multi-agent workflows—but it is the honest boundary of what has shipped. Verify anything version-sensitive against the [facts page](/docs/facts/) and the [release notes](https://github.com/Indosaram/ferryx/releases/latest) before you standardise a team workflow on it. If something in this guide disagrees with your build, trust the repository sources linked from product facts and open an issue with your version string attached.
+Ferryx is early software: core flows work, but expect rough edges and breaking changes between calendar-versioned releases. Some OS integrations remain platform-specific (Dock badge counters and launchd supervision are macOS-only today), the direct Windows `.exe` that some releases attach is not code-signed, so SmartScreen warns on it (the Microsoft Store build is signed), and remote features assume you control the host and pairing grants. None of that changes the core claim of this post—daemon-owned sessions, managed worktrees, and visible multi-agent workflows—but it is the honest boundary of what has shipped. Verify anything version-sensitive against the [facts page](/docs/facts/) and the [release notes](https://github.com/Indosaram/ferryx/releases/latest) before you standardise a team workflow on it. If something in this guide disagrees with your build, trust the repository sources linked from product facts and open an issue with your version string attached.
 
 ## How to verify these claims
 

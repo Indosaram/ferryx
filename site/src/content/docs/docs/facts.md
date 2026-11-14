@@ -39,27 +39,48 @@ change remain under the Sustainable Use License (SUL-1.0). Read the license for 
 | Platform | Package | Requirement |
 | :--- | :--- | :--- |
 | macOS | Universal DMG (Apple Silicon and Intel), signed and notarised | macOS 10.15+ |
-| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed with automatic updates; or `Ferryx_x64-setup.exe` direct installer (not code-signed) | Windows 10/11 x64 with WebView2 |
-| Linux | AppImage (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |
-| Linux | Debian/Ubuntu `.deb` (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |
-| Linux headless | `ferryx-cli` single binary, PTY daemon and CLI (x86_64) | No GUI or WebKit dependency |
+| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed with automatic updates; some releases also attach a direct `.exe` installer (not code-signed) | Windows 10/11 x64 with WebView2 |
+| Linux | AppImage (x86_64) | glibc 2.35+, WebKitGTK 4.1 with GTK 3 (Ubuntu 22.04 or later) |
+| Linux | Debian/Ubuntu `.deb` (x86_64) | glibc 2.35+, WebKitGTK 4.1 with GTK 3 (Ubuntu 22.04 or later) |
+| Linux headless | `ferryx-cli` single binary, PTY daemon and CLI (x86_64) | glibc 2.17+; no GUI or WebKit dependency |
 
-On Windows, the [Microsoft Store listing](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`, or `winget install --source msstore 9NLHQL5JNLM4`) is the signed channel and updates automatically through the Store. The `Ferryx_x64-setup.exe` in each GitHub release is the secondary direct installer (not code-signed, self-updating), while `Ferryx_x64.msix` is the unsigned Store-ingestion package rather than a sideloading installer.
+Linux and Windows ARM64 builds are not published. The installers stop with exit code 2 on Linux
+arm64, on musl-based Linux such as Alpine, and on Windows ARM64. The release refuses to publish a
+Linux artifact that needs a newer glibc than listed above (`GLIBC_FLOORS` in
+[`scripts/lib/release-contract.mjs`](https://github.com/Indosaram/ferryx/blob/main/scripts/lib/release-contract.mjs)).
 
-For the Linux headless `ferryx-cli`, install with the one-line installer, which resolves the
-current build rather than a pinned tag:
+On Windows, the [Microsoft Store listing](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`, or `winget install --source msstore 9NLHQL5JNLM4`) is the signed channel and updates automatically through the Store. When a GitHub release attaches a direct `.exe` installer, it is the secondary direct installer (not code-signed, self-updating), while `Ferryx_x64.msix` is the unsigned Store-ingestion package rather than a sideloading installer.
+
+For the headless `ferryx-cli` (Linux x86_64 or macOS), install with the one-line installer,
+which resolves the current build rather than a pinned tag. The **Install command** in
+Settings > Remote > Add Machine shows the same line with a single-use install key:
 
 ```bash
-curl -fsSL https://relay.ferryx.dev/install.sh | bash
+curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install-key>
 ```
+
+The installer ([`scripts/install.sh`](https://github.com/Indosaram/ferryx/blob/main/scripts/install.sh))
+checks the binary against the release `SHA256SUMS`, installs it, and runs `ferryx-cli up`, which
+enrolls the machine with your account and keeps the daemon running under systemd (user unit,
+with linger), launchd or Task Scheduler, or as a detached daemon where none is available.
+Without `--key`, `up` waits for you to approve the machine. `--email <address>` adds an account
+hint to that approval request, and `--no-up` installs the binary only. On Windows x64,
+`irm https://relay.ferryx.dev/install.ps1 | iex` does the same.
 
 Local release assembly stages `ferryx-cli` beside the Linux AppImage and `.deb` (and, on macOS,
 as a universal binary), so the installer has a current artifact to fetch; it falls back to the
-GitHub release asset if the relay has no local copy. `cargo build --manifest-path src-tauri/Cargo.toml --release --bin ferryx-cli`
+GitHub release asset if the relay has no local copy.
+`cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin ferryx-cli`
 remains available for building from source.
 
-Every release publishes `SHA256SUMS.txt` beside the binaries, so a download can be checked with
-`sha256sum -c SHA256SUMS.txt` before it is run.
+Every release publishes `SHA256SUMS` and its minisign signature `SHA256SUMS.minisig` beside the
+binaries, signed with the app's updater key (the `pubkey` in `src-tauri/tauri.conf.json`), so a
+download can be checked before it is run:
+
+```bash
+minisign -Vm SHA256SUMS -P RWTLZ1zCtZ3JEO3XhjZZ6Uq3rQtEz2FbBcfxxl/+aFlNKJepqoQNj2Zm
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 ## Coding agents
 

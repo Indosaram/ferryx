@@ -162,7 +162,7 @@ ferryx-relay --port 8787
 You can authenticate daemons connecting to `/tunnel/control` in two ways:
 
 1. **Operator machine tokens**: Set `FERRYX_RELAY_MACHINE_TOKENS` on the relay and set a distinct `FERRYX_MACHINE_TOKEN` on each daemon. Never share a token between hosts: a later control connection evicts the earlier one. Keep tokens out of URLs and logs.
-2. **Account enrollment and machine identity**: Sign in on the desktop and issue an enrollment code, then run `ferryx-cli account enroll --code ... --origin ...` on the daemon host. Alternatively, `ferryx-cli account login --email ... --origin ...` starts a headless login using an email link. When the Ed25519 machine identity matches the enrollment record, the relay accepts its control connection without `FERRYX_MACHINE_TOKEN`. The warning printed when no static tokens are configured does not disable this account-enrolled route.
+2. **Account enrollment and machine identity**: Run the installer on the daemon host with your relay as the origin, `curl -fsSL https://relay.example.com/install.sh | FERRYX_ORIGIN=https://relay.example.com sh -s -- --key <install-key>`, using the install key from the desktop's **Add Machine** > **Install command**. The installer runs `ferryx-cli up --origin https://relay.example.com`, which enrolls the machine and keeps its daemon running. On a host that already has `ferryx-cli`, run `ferryx-cli up --origin https://relay.example.com` directly, or `ferryx-cli account enroll --code ... --origin ...` with an enrollment code. When the Ed25519 machine identity matches the enrollment record, the relay accepts its control connection without `FERRYX_MACHINE_TOKEN`. The warning printed when no static tokens are configured does not disable this account-enrolled route.
 
 ### Mail Delivery Setup
 
@@ -432,8 +432,10 @@ Check the desired configuration using `ferryx-cli remote status` (this command r
 ferryx-cli remote status
 ```
 
-Enrollment alone does not enable the local gateway. After writing this configuration, start the
-headless daemon with `ferryx-cli --daemon` on a host without another daemon using `43821`. Check
+Enrollment alone does not enable the local gateway. After writing this configuration, keep the
+headless daemon running with `ferryx-cli service install` (or `ferryx-cli up`, which does the same
+after enrolling) on a host without another daemon using `43821`; it never starts a second daemon
+when one already answers. Check
 the relay account health with `curl -i https://relay.example.com/api/account/v1/health`, then
 probe `https://relay.example.com/host/<machineId>/api/v1/capabilities` to confirm the control
 tunnel (see [Host Capability Probe](#host-capability-probe)). For an already running daemon, use
@@ -452,13 +454,13 @@ If you are using Account Enrollment rather than fixed machine tokens:
    ```
    The desktop binary also supports `ferryx account enroll` if installed on the host.
 
-To log in directly from a headless terminal without copying codes:
+To enroll from a headless terminal without copying codes, let `up` request approval:
 ```bash
-ferryx-cli account login --email admin@example.com --origin https://relay.example.com
+ferryx-cli up --email admin@example.com --origin https://relay.example.com
 ```
-The command waits for approval through the link sent to that email address. Start the daemon in
-a dedicated service or terminal after persisting `remote-config.json`; never stop an existing live
-daemon simply to apply a documentation example.
+`up` prints an approval URL and code and waits until you approve the machine (or enter the code
+under **Add Machine** > **Approve a machine** on the desktop), then installs the daemon service.
+Never stop an existing live daemon simply to apply a documentation example.
 
 ---
 

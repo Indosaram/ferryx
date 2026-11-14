@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { assembleReleaseRun, verifyReleaseRun } from "./release-local.mjs";
 import { msixWithVersion } from "./fixtures/msix-fixture.mjs";
+import { evaluateFloors } from "./lib/release-contract.mjs";
 import {
   attachReleaseProvenance,
   CHECKSUMS_NAME,
@@ -87,6 +88,7 @@ function receiptsFor(p) {
       completedAt: "2026-09-08T12:35:00.000Z",
       toolchains: { node: "22.22.0", bun: "1.4.0", zig: "0.16.0", rust: "1.88.0" },
       artifacts: [{ kind: "appimage", name: "Ferryx_amd64.AppImage", bytes: 14, sha256: "a".repeat(64) }],
+      floors: { waiver: "local QA build", checks: [] },
     },
     {
       host: "macbook",
@@ -134,6 +136,9 @@ test("fixture asset dir: SHA256SUMS passes shasum -c, minisig verifies with the 
     assert.deepEqual(provenance.builds.map((b) => b.host), ["macbook", "omaki"]);
     assert.equal(provenance.builds[1].toolchains.rust, "1.88.0");
     assert.deepEqual(provenance.builds[1].assets.map((a) => a.name), ["Ferryx_amd64.AppImage"]);
+    // A floor waiver stays visible in provenance; a receipt without floors reports null.
+    assert.equal(provenance.builds[1].floorWaiver, "local QA build");
+    assert.equal(provenance.builds[0].floorWaiver, null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -256,6 +261,19 @@ test("generateSboms runs cargo cyclonedx for src-tauri and cyclonedx-npm for ui 
 
 // ---- release-local integration: assemble attaches provenance; verify enforces it ----
 
+// Floor measurements that meet every advertised floor (release floor gate in assembleRelease).
+const NOTARIZED = (target) => ({ target, spctlStatus: 0, spctl: "source=Notarized Developer ID", staplerStatus: 0 });
+const CONFORMING_FLOORS = {
+  "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app")] },
+  dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app"), NOTARIZED("dmg")] },
+  "cli-darwin-universal": { minos: { x86_64: "10.15", arm64: "11.0" } },
+  appimage: { glibc: "2.35" },
+  deb: { glibc: "2.35" },
+  "cli-linux-amd64": { glibc: "2.17" },
+  msix: { dependents: ["KERNEL32.dll"] },
+  "cli-windows-amd64": { dependents: ["KERNEL32.dll"] },
+};
+
 function writeRun(tmp, key) {
   const runDir = join(tmp, "run");
   const artifacts = join(runDir, "artifacts");
@@ -285,6 +303,7 @@ function writeRun(tmp, key) {
     "linux/Ferryx_2026.908.1_amd64.AppImage": "appimage",
     "linux/Ferryx_2026.908.1_amd64.deb": "deb",
     "linux/ferryx-cli-linux-amd64": "linux cli",
+    "windows/ferryx-cli-windows-amd64.exe": "windows cli",
   };
   for (const [rel, body] of Object.entries(files)) writeFileSync(join(artifacts, rel), body);
   // The release-local Store gate reads the MSIX Identity version, so this one is a real zip.
@@ -300,6 +319,7 @@ function writeRun(tmp, key) {
     schemaVersion: 1, runId: p.runId, host, commitSha: p.commitSha, appVersion: p.appVersion,
     completedAt: "2026-09-08T12:30:00.000Z", exitCode: 0,
     toolchains: { node: "22.22.0", bun: "1.4.0", zig: "0.16.0", rust: "1.88.0" }, artifacts: artifactsList,
+    floors: { waiver: null, checks: evaluateFloors({ kinds: artifactsList.map((a) => a.kind), measurements: CONFORMING_FLOORS, macosMinimum: "10.15" }) },
   });
   const write = (host, list) => writeFileSync(join(receipts, `build-receipt-${host}.json`), JSON.stringify(receipt(host, list)));
   write("macbook", [
@@ -312,7 +332,10 @@ function writeRun(tmp, key) {
     art("deb", "linux/Ferryx_2026.908.1_amd64.deb", false),
     art("cli-linux-amd64", "linux/ferryx-cli-linux-amd64", false),
   ]);
-  write("maho-win", [art("msix", "windows/Ferryx_2026.908.1.0_x64.msix", false)]);
+  write("maho-win", [
+    art("msix", "windows/Ferryx_2026.908.1.0_x64.msix", false),
+    art("cli-windows-amd64", "windows/ferryx-cli-windows-amd64.exe", false),
+  ]);
   return runDir;
 }
 

@@ -9,7 +9,13 @@ description: "Prepare a Linux box: install, daemon service, pairing, and firewal
 
 ## Service install steps
 
-Long agent runs do not wait for you to be at the desk. Remote access that does not require inbound SSH or a vendor-hosted jump box keeps you checking progress, sending input, and watching CI from a phone without exposing a raw shell to the internet. In the specific case of “Headless Linux Host Setup for Remote Access”, the Ferryx angle is straightforward: prepare a linux box: install, daemon service, pairing, and firewall notes for remote ferryx access. claims map to ferryx docs and cited sources only. Teams evaluating this often arrive from a shared-checkout pain story or from tooling that treats the terminal as a disposable window. Ferryx takes the opposite stance—sessions are daemon-owned, isolation is a first-class action, and everything you need to verify sits behind documented surfaces.
+A headless Linux host runs `ferryx-cli`, a single binary for x86_64 that needs glibc 2.17 or newer and no GTK or WebKit. In the desktop app, open Settings > Remote, choose **Add Machine** > **Install command**, and run the line it shows on the host:
+
+```bash
+curl -fsSL https://relay.ferryx.dev/install.sh | sh -s -- --key <install-key>
+```
+
+The installer checks the binary against the release `SHA256SUMS`, installs it, and runs `ferryx-cli up`. `up` enrolls the host with your account and keeps its daemon running as a systemd user service, enabling linger so the daemon outlives your SSH session; where systemd is not available it starts a detached daemon instead. You do not start `ferryx-cli --daemon` yourself. Without a key, run `curl -fsSL https://relay.ferryx.dev/install.sh | bash` in an interactive terminal: `up` prints an approval code that you enter under **Add Machine** > **Approve a machine**, and it waits for you. `ferryx-cli service status` reports the result, and `ferryx-cli service uninstall` removes the service without stopping a running daemon. The relay tunnel is outbound only, so the host needs no open inbound port.
 
 ## Pairing on headless hosts
 
@@ -32,7 +38,7 @@ Ferryx pairs a mobile or browser client to your daemon through an authenticated 
 
 ## How this fits Ferryx today
 
-Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64 installer), and Linux (AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
+Ferryx ships calendar-versioned releases for macOS (universal DMG), Windows (x64, through the Microsoft Store; some releases also attach a direct `.exe`), and Linux (x86_64 AppImage and .deb). The desktop shell, daemon, and optional `ferryx-cli` headless binary are described with sources on the [product facts](/docs/facts/) page. If you are new to the workspace model, start with the [introduction](/docs/introduction/); if you want the mechanical details of sessions and replay, read [technical architecture](/docs/architecture/).
 
 ![Headless Linux Host Setup for Remote Access illustration](/images/blog/headless-linux-host-setup/body-1.png)
 
@@ -56,7 +62,7 @@ An account sign-in lets the client complete an authenticated pairing handshake w
 
 ## Limits and non-goals
 
-Ferryx is early software: core flows work, but expect rough edges and breaking changes between calendar-versioned releases. Some OS integrations remain platform-specific (Dock badge counters and launchd supervision are macOS-only today), Windows builds are not code-signed yet so SmartScreen warns on first run, and remote features assume you control the host and pairing grants. None of that changes the core claim of this post—daemon-owned sessions, managed worktrees, and visible multi-agent workflows—but it is the honest boundary of what has shipped. Verify anything version-sensitive against the [facts page](/docs/facts/) and the [release notes](https://github.com/Indosaram/ferryx/releases/latest) before you standardise a team workflow on it. If something in this guide disagrees with your build, trust the repository sources linked from product facts and open an issue with your version string attached.
+Ferryx is early software: core flows work, but expect rough edges and breaking changes between calendar-versioned releases. Some OS integrations remain platform-specific (Dock badge counters and launchd supervision are macOS-only today), the direct Windows `.exe` that some releases attach is not code-signed, so SmartScreen warns on it (the Microsoft Store build is signed), and remote features assume you control the host and pairing grants. None of that changes the core claim of this post—daemon-owned sessions, managed worktrees, and visible multi-agent workflows—but it is the honest boundary of what has shipped. Verify anything version-sensitive against the [facts page](/docs/facts/) and the [release notes](https://github.com/Indosaram/ferryx/releases/latest) before you standardise a team workflow on it. If something in this guide disagrees with your build, trust the repository sources linked from product facts and open an issue with your version string attached.
 
 ## How to verify these claims
 
