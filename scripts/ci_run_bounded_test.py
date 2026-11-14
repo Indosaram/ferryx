@@ -24,6 +24,49 @@ class BoundedCommandTests(unittest.TestCase):
                 "--heartbeat", "0.1", "--grace", "0.1", "--log", str(self.log),
                 "--", sys.executable, "-u", "-c", source]
 
+    def permission_denied_command(self, child_source, timeout):
+        # Inject EPERM only into the wrapper process. SIGTERM still reaches the
+        # real owned child, so the regression test cannot strand a live process.
+        launcher = """
+import errno, os, runpy, signal, sys
+original = os.killpg
+def denied(pgid, signum):
+    if signum == signal.SIGTERM:
+        return original(pgid, signum)
+    raise PermissionError(errno.EPERM, "injected permission denial")
+os.killpg = denied
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+        return [sys.executable, '-c', launcher] + self.command(child_source, timeout)[1:]
+
+    def test_eperm_means_existing_but_unsignalable_group(self):
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("ci_bounded", WRAPPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with mock.patch.object(module.os, "killpg", side_effect=PermissionError):
+            self.assertTrue(module.group_exists(123))
+            self.assertFalse(module.group_signal(123, signal.SIGTERM))
+            self.assertFalse(module.group_signal(123, signal.SIGKILL))
+
+    def test_timeout_preserved_when_group_probe_and_cleanup_return_eperm(self):
+        result = subprocess.run(self.permission_denied_command(
+            "import time; time.sleep(60)", 0.3), capture_output=True, timeout=8)
+        self.assertEqual(result.returncode, 124)
+        self.assertIn(b"shutdown reason=timeout", result.stdout)
+        self.assertIn(b"cleanup_permission_denied", result.stdout)
+        self.assertIn(b"finished exit_code=124", self.log.read_bytes())
+        self.assertNotIn(b"Traceback", result.stderr)
+
+    def test_denied_cleanup_cannot_mask_as_success(self):
+        result = subprocess.run(self.permission_denied_command(
+            "print('leader-done')", 5), capture_output=True, timeout=8)
+        self.assertEqual(result.returncode, 125)
+        self.assertIn(b"cleanup_permission_denied", result.stdout)
+        self.assertNotIn(b"Traceback", result.stderr)
+
     def test_success_and_failure_preserve_exit_and_tee_output(self):
         for code in (0, 7):
             result = subprocess.run(self.command(
@@ -176,3 +219,4 @@ class BoundedCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

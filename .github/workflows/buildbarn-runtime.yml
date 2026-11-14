@@ -1,0 +1,89 @@
+name: Buildbarn runtime smoke
+on:
+  pull_request:
+    paths: ['infra/buildbarn/**', '.github/workflows/buildbarn-runtime.yml']
+  push:
+    branches: [main]
+    paths: ['infra/buildbarn/**', '.github/workflows/buildbarn-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  loopback-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: buildbarn/bb-storage
+          ref: ca3d8b49a5af52eb02ed473dd689d19b949c9e41
+          path: .runtime-sources/bb-storage
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: buildbarn/bb-remote-execution
+          ref: c9ba98cf52456c400278f45a9679635daa40dcd2
+          path: .runtime-sources/bb-remote-execution
+          persist-credentials: false
+      - name: Fetch checksum-pinned official Bazel
+        shell: bash
+        run: |
+          set -euo pipefail
+          bazel="$RUNNER_TEMP/bazel"
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/bazelbuild/bazel/releases/download/9.1.0/bazel-9.1.0-linux-x86_64 -o "$bazel"
+          echo "a667454f3f4f8878df8199136b82c199f6ada8477b337fae3b1ef854f01e4e2f  $bazel" | sha256sum --check -
+          chmod 755 "$bazel"
+      - name: Build pinned official Buildbarn Bazel targets
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/buildbarn-bin"
+          evidence="$RUNNER_TEMP/buildbarn-runtime-evidence"
+          mkdir -p "$bin" "$evidence"
+          # Upstream Bazel MODULE files apply required dependency patches that
+          # plain go build omits. Use both root modules without modifying either.
+          build_binaries() (
+            source="$1"
+            shift
+            cd "$source"
+            test "$(cat .bazelversion)" = 9.1.0
+            bazel="$RUNNER_TEMP/bazel"
+            targets=()
+            for name in "$@"; do targets+=("//cmd/$name:$name"); done
+            "$bazel" --batch build --jobs=2 "${targets[@]}"
+            for name in "$@"; do
+              output="$("$bazel" --batch cquery --output=files "//cmd/$name:$name")"
+              test -f "$output"
+              install -m 755 "$output" "$bin/$name"
+            done
+          )
+          build_binaries .runtime-sources/bb-storage bb_storage 2>&1 | tee "$evidence/build-storage.log"
+          build_binaries .runtime-sources/bb-remote-execution bb_scheduler bb_runner bb_worker 2>&1 | tee "$evidence/build-execution.log"
+      - name: Fetch checksum-pinned official Buck2 release
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/buck2.zst"
+          curl --fail --location --retry 3 --max-time 120 \
+            https://github.com/meta/buck2/releases/download/2026-11-01/buck2-x86_64-unknown-linux-gnu.zst -o "$archive"
+          echo "a2f7830c240c682c32826ae0b30bf8864d264e866475abaafcc0857d8133cd53  $archive" | sha256sum --check -
+          zstd --decompress --stdout "$archive" > "$RUNNER_TEMP/buildbarn-bin/buck2"
+          chmod 755 "$RUNNER_TEMP/buildbarn-bin/buck2"
+      - name: Test generated configuration with real remote-only actions
+        timeout-minutes: 10
+        run: >-
+          python3 infra/buildbarn/runtime_smoke.py
+          --bin-dir "$RUNNER_TEMP/buildbarn-bin"
+          --evidence "$RUNNER_TEMP/buildbarn-runtime-evidence"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: buildbarn-runtime-evidence
+          path: ${{ runner.temp }}/buildbarn-runtime-evidence
+          if-no-files-found: warn
+          retention-days: 7

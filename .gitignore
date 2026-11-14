@@ -10,7 +10,8 @@ Cargo.lock
 node_modules/
 ui/node_modules/
 dist/
-ui/dist/
+# Match both generated directory and accidental machine-local symlink.
+/ui/dist
 ui/coverage/
 site/.astro/
 

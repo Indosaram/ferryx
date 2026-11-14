@@ -3730,7 +3730,7 @@ mod tests {
                 .expect("deserialize legacy handshake");
         match legacy {
             DaemonRequest::Handshake { version, token } => {
-                assert_eq!(version, DAEMON_PROTOCOL_VERSION);
+                assert_eq!(version, 5, "decoding preserves the legacy frame's version");
                 assert_eq!(token, None);
             }
             other => panic!("unexpected variant: {other:?}"),
@@ -3739,7 +3739,10 @@ mod tests {
 
     #[test]
     fn test_protocol_v4_handshake_and_list_sessions_epoch() {
+        #[cfg(not(feature = "qa-protocol-bump"))]
         assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
+        #[cfg(feature = "qa-protocol-bump")]
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 7);
 
         let hs = DaemonResponse::HandshakeOk {
             version: DAEMON_PROTOCOL_VERSION,
@@ -3752,11 +3755,13 @@ mod tests {
             admission_time_unix_ms: None,
         };
         let hs_json = serde_json::to_string(&hs).expect("serialize handshake");
-        assert!(hs_json.contains(r#""epoch":777777"#));
-        assert!(hs_json.contains(r#""version":5"#));
-        assert!(hs_json.contains(r#""binaryPath":"/bin/ferryx""#));
-        assert!(hs_json.contains(r#""binaryMtimeMs":1700000000000"#));
-        assert!(hs_json.contains(r#""daemonVersion":"2026.902.2""#));
+        let hs_value: serde_json::Value =
+            serde_json::from_str(&hs_json).expect("handshake JSON");
+        assert_eq!(hs_value["epoch"], 777777);
+        assert_eq!(hs_value["version"], DAEMON_PROTOCOL_VERSION);
+        assert_eq!(hs_value["binaryPath"], "/bin/ferryx");
+        assert_eq!(hs_value["binaryMtimeMs"], 1700000000000_u64);
+        assert_eq!(hs_value["daemonVersion"], "2026.902.2");
 
         // Back-compat: JSON without binary/version fields deserializes with None
         let legacy_hs_json = r#"{"type":"handshakeOk","version":3,"pid":9999,"epoch":777777}"#;
@@ -4190,3 +4195,4 @@ mod tests {
         assert_eq!(inv_deser, inv_msg);
     }
 }
+
