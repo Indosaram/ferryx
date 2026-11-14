@@ -506,6 +506,29 @@ pub async fn cmd_ssh_test_connection(
     Ok(summary)
 }
 
+/// Connects once with host-key acceptance redirected into a private temporary file and reports
+/// the keys the server presented, for the user to compare before trusting.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_scan_host_key(
+    host: SshHost,
+) -> Result<crate::ssh::host_key::HostKeyScan, IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    crate::ssh::host_key::scan(&host).await
+}
+
+/// Pins the host key into the user's known_hosts only when a fresh scan still presents the
+/// fingerprint the user confirmed.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_trust_host_key(
+    host: SshHost,
+    fingerprint_sha256: String,
+) -> Result<(), IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    crate::ssh::host_key::trust(&host, fingerprint_sha256).await
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_set_password(

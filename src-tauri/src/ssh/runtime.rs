@@ -34,6 +34,35 @@ pub fn error(code: IpcErrorCode, stage: &str, message: &str) -> IpcError {
     IpcError::new(code, message).with_details(serde_json::json!({"stage": stage}))
 }
 
+/// Whether OpenSSH reported the server as new: no key of the presented type is known for it in any
+/// known_hosts file it consulted ("No <type> host key is known for <host> ...").
+pub fn host_key_is_new(stderr: &str) -> bool {
+    stderr
+        .to_ascii_lowercase()
+        .lines()
+        .any(|line| line.contains("no ") && line.contains(" host key is known for "))
+}
+
+/// Classifies OpenSSH stderr that reports a host-key verification failure. Only OpenSSH's explicit
+/// "No <type> host key is known" line is an unknown key the user may trust. A bare "Host key
+/// verification failed" is also what a changed key prints under `LogLevel FATAL` and what an
+/// untrusted ProxyJump hop prints, so it is reported like a changed key and never offered trust.
+pub fn host_key_failure(stderr: &str) -> Option<IpcErrorCode> {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("remote host identification has changed")
+        || (lower.contains("host key for ") && lower.contains(" has changed"))
+    {
+        return Some(IpcErrorCode::HostKeyChanged);
+    }
+    if host_key_is_new(stderr) {
+        return Some(IpcErrorCode::HostKeyUnknown);
+    }
+    if lower.contains("host key verification failed") {
+        return Some(IpcErrorCode::HostKeyChanged);
+    }
+    None
+}
+
 pub fn powershell_data(value: &str) -> String {
     format!(
         "([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{}')))",
@@ -341,25 +370,33 @@ where
                 // host key verification failure, authentication failure). In that case, subsequent
                 // executor probes will also fail identically, so fail immediately.
                 if exit_code == Some(255) {
-                    let authentication_failed = host.auth_method == super::SshAuthMethod::Password
-                        && err
-                            .details
-                            .as_ref()
-                            .and_then(|v| v.get("stderr"))
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|text| text.contains("Permission denied"));
+                    let stderr = err
+                        .details
+                        .as_ref()
+                        .and_then(|v| v.get("stderr"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let host_key = host_key_failure(stderr);
+                    let authentication_failed = host_key.is_none()
+                        && host.auth_method == super::SshAuthMethod::Password
+                        && stderr.contains("Permission denied");
                     if authentication_failed {
                         if let Some(generation) = credential_generation.as_deref() {
                             super::password::clear_generation(host, generation)?;
                         }
                     }
+                    let stage = if host_key.is_some() {
+                        "host_key"
+                    } else if authentication_failed {
+                        "authentication"
+                    } else {
+                        "environment"
+                    };
+                    if let Some(code) = host_key {
+                        err.code = code;
+                    }
                     if let Some(details) = err.details.as_mut() {
-                        details["stage"] = if authentication_failed {
-                            "authentication"
-                        } else {
-                            "environment"
-                        }
-                        .into();
+                        details["stage"] = stage.into();
                         details["executor"] = executor.program().into();
                     }
                     return Err(err);
@@ -624,6 +661,51 @@ mod tests {
         );
         let details = failure.details.unwrap();
         assert_eq!(details["exitCode"], 255);
+    }
+
+    #[tokio::test]
+    async fn host_key_failures_report_their_own_code_and_stage() {
+        let samples = [
+            // Bare line: a changed key under LogLevel FATAL, or an untrusted ProxyJump hop.
+            ("Host key verification failed.\r\n", IpcErrorCode::HostKeyChanged),
+            (
+                "No ED25519 host key is known for example.test and you have requested strict checking.\nHost key verification failed.\n",
+                IpcErrorCode::HostKeyUnknown,
+            ),
+            (
+                "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nHost key for example.test has changed and you have requested strict checking.\nHost key verification failed.\n",
+                IpcErrorCode::HostKeyChanged,
+            ),
+        ];
+        for (stderr, code) in samples {
+            let failure = detect_with(&probe_host(), Some(RemotePlatform::Posix), |_, _, _| {
+                std::future::ready(Err(error(IpcErrorCode::IoError, "execution", "ssh failed")
+                    .with_details(serde_json::json!({ "exitCode": 255, "stderr": stderr }))))
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(failure.code, code, "{stderr}");
+            assert_eq!(failure.details.unwrap()["stage"], "host_key", "{stderr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn password_permission_denied_still_reports_authentication() {
+        let host = SshHost {
+            auth_method: super::super::SshAuthMethod::Password,
+            ..probe_host()
+        };
+        let failure = detect_with(&host, Some(RemotePlatform::Posix), |_, _, _| {
+            std::future::ready(Err(error(IpcErrorCode::IoError, "execution", "ssh failed")
+                .with_details(serde_json::json!({
+                    "exitCode": 255,
+                    "stderr": "user@example.test: Permission denied (password)."
+                }))))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(failure.code, IpcErrorCode::IoError);
+        assert_eq!(failure.details.unwrap()["stage"], "authentication");
     }
 
     #[tokio::test]
