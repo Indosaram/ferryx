@@ -93,7 +93,7 @@ export function VoiceSection() {
           {saved ? (
             <div className="flex items-center gap-2">
               <span className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
-                <CheckCircle2 className="size-3.5 text-emerald-500" />
+                <CheckCircle2 className="size-3.5 text-status-success" />
                 Saved
               </span>
               {keyState.source === "file" ? (

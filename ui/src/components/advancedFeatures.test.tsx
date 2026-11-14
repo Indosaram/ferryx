@@ -117,7 +117,8 @@ function entryPoints() {
 const CORE_ENTRIES = {
   // The Supervisor panel is the sidebar's default view; it is not behind advanced features.
   sidebarViews: ["Supervisor", "Worktrees"],
-  settingsSections: ["General", "Appearance", "Terminal", "Keyboard Shortcuts", "Agents", "Permissions", "Remote"],
+  // Voice is a core entry point: SettingsDialog renders it outside the advanced gate.
+  settingsSections: ["General", "Appearance", "Terminal", "Keyboard Shortcuts", "Agents", "Permissions", "Voice", "Remote"],
   newBrowserTab: false,
   dagBadge: false,
 };
@@ -133,6 +134,7 @@ const ALL_ENTRIES = {
     "Browser",
     "Notifications",
     "Permissions",
+    "Voice",
     "Remote",
   ],
   newBrowserTab: true,

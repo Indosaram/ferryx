@@ -221,7 +221,16 @@ if (typeof window !== "undefined") {
   Object.defineProperty(globalThis, "WebSocket", { configurable: true, writable: true, value: OfflineWebSocket });
 }
 
-const { beforeEach: setupBeforeEach } = await import("vitest");
+const { afterEach: setupAfterEach, beforeEach: setupBeforeEach } = await import("vitest");
+
+// React Testing Library only registers its automatic cleanup when it finds a *global*
+// `afterEach`, and this config runs without `globals: true`. Nothing called it, so every
+// test inherited the previous test's mounted tree: duplicated `screen` matches, stale
+// portals, and handlers firing twice. Register it here, where the suite's lifecycle lives.
+const { cleanup: cleanupRenderedTrees } = await import("@testing-library/react");
+setupAfterEach(() => {
+  cleanupRenderedTrees();
+});
 const { clearHmrWorkspaceState } = await import("../state/hmrWorkspaceState");
 const { clearWorkspaceSnapshot } = await import("../state/workspaceSnapshotCache");
 const { setAdvancedFeaturesFallbackForTests } = await import("../lib/advancedFeatures");
