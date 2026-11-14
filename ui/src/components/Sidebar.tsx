@@ -75,6 +75,8 @@ type SidebarProps = {
   isMac?: boolean;
   projects?: RegisteredProject[];
   activeProjectId?: string;
+  /** The active workspace the backend registry accepted; absent while unregistered. */
+  registeredProjectId?: string | null;
   worktrees: Worktree[];
   inactiveProjectWorktrees?: Record<string, Worktree[]>;
   emptyWorkspaceIds?: readonly string[];
@@ -116,6 +118,7 @@ export function Sidebar({
   isMac = isMacShortcutPlatform(),
   projects = [],
   activeProjectId,
+  registeredProjectId,
   worktrees,
   inactiveProjectWorktrees,
   emptyWorkspaceIds,
@@ -497,7 +500,7 @@ export function Sidebar({
           }}
           filter={{ query: filterQuery, onChange: setFilterQuery }}
           view={sidebarView}
-          supervisor={onFocusSupervisorSession ? { content: <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} workspaceId={activeProjectId ?? null} /> } : undefined}
+          supervisor={onFocusSupervisorSession ? { content: <SupervisorPanelHost onFocusSession={onFocusSupervisorSession} workspaceId={activeProjectId ?? null} registeredWorkspaceId={registeredProjectId ?? null} /> } : undefined}
           titlebarLeading={isMac ? <div data-testid="titlebar-traffic-light-pad" className="w-[72px] shrink-0" aria-hidden="true" /> : null}
           titlebarProps={{ "data-testid": "sidebar-drag-region", "data-tauri-drag-region": true }}
           shortcuts={{
