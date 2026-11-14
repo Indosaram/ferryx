@@ -441,6 +441,12 @@ pub struct Capabilities {
     #[serde(deserialize_with = "text_list")]
     pub capabilities: Vec<String>,
     pub limits: Limits,
+    /// Where this host believes it can be reached without the relay, most recently observed
+    /// first. A routing hint only: the attach handshake still proves identity, and a client
+    /// that cannot reach any of these falls back to the relay. Omitted by hosts that publish
+    /// nothing, so an older or loopback-only host keeps the exact wire shape it had before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub published_origins: Vec<crate::paired_host::inventory::PublishedOrigin>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,6 +1,60 @@
 use super::*;
 use crate::ssh::{SshAuthMethod, SshHostSource};
 
+fn key_host(hostname: &str) -> SshHost {
+    SshHost {
+        id: "t".into(),
+        label: "t".into(),
+        hostname: hostname.into(),
+        username: None,
+        port: None,
+        // Key auth is only plannable with an absolute identity path; this test never touches
+        // the file, it only has to survive the plan's own validation.
+        identity_file: Some("/tmp/ferryx-test-identity".into()),
+        jump_host: None,
+        source: SshHostSource::Manual,
+        auth_method: SshAuthMethod::Key,
+        disabled: None,
+    }
+}
+
+/// Reuse must be stated before the plan's own `ControlPath=none`, because OpenSSH honours the
+/// first value it sees for a keyword. If this ordering inverts, every operation silently falls
+/// back to a cold connection and the master becomes dead weight nobody notices.
+#[test]
+fn master_reuse_options_precede_the_plans_own_control_path() {
+    let mut plan = ssh_plan(&key_host("example.test"), "true".into(), false)
+        .expect("a key-auth host always yields a plan");
+    let cold = plan.args.clone();
+    use_master(&mut plan, std::path::Path::new("/run/ferryx/ssh/x.sock"));
+
+    let reuse = plan
+        .args
+        .iter()
+        .position(|arg| arg == "ControlPath=/run/ferryx/ssh/x.sock")
+        .expect("the master socket must be named on the command line");
+    let disabled = plan
+        .args
+        .iter()
+        .position(|arg| arg == "ControlPath=none")
+        .expect("the cold plan still carries its own ControlPath=none");
+    assert!(reuse < disabled, "the master socket has to be the first ControlPath");
+    assert_eq!(plan.args.len(), cold.len() + 4);
+    assert_eq!(plan.args.last(), cold.last(), "the remote command stays last");
+    assert!(plan.args.iter().any(|arg| arg == "ControlMaster=no"));
+}
+
+/// The fallback path is the one every host without a usable master takes, so it must remain
+/// byte-identical to what shipped before this module existed.
+#[test]
+fn a_plan_without_a_master_is_untouched() {
+    let plan = ssh_plan(&key_host("example.test"), "true".into(), false)
+        .expect("a key-auth host always yields a plan");
+    assert!(plan.args.iter().any(|arg| arg == "ControlPath=none"));
+    assert!(plan.args.iter().any(|arg| arg == "ControlMaster=no"));
+    assert!(!plan.args.iter().any(|arg| arg.starts_with("ControlPath=/")));
+}
+
 #[test]
 fn diagnostic_colors_are_removed_without_changing_unicode() {
     assert_eq!(strip_ansi_colors("\u{1b}[31;1msh: 명령을 찾을 수 없습니다\u{1b}[0m"), "sh: 명령을 찾을 수 없습니다");

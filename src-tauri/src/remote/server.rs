@@ -4581,6 +4581,57 @@ fn reference_chat_control_capabilities() -> [&'static str; 3] {
 }
 
 #[cfg(test)]
+mod published_origin_tests {
+    use super::{published_origins_for, DirectGatewayGateStatus};
+    use crate::paired_host::inventory::PublishedOriginKind;
+    use std::net::SocketAddr;
+
+    fn addr(text: &str) -> SocketAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn only_a_dialable_listener_is_offered_to_a_paired_client() {
+        // The loopback listener is the primary one and is always private: a client on another
+        // machine cannot reach it, so advertising it would only add a guaranteed failure.
+        assert!(published_origins_for(&DirectGatewayGateStatus::LoopbackOnly).is_empty());
+
+        // A gated LAN listener refused to serve, so it must not be offered either.
+        assert!(published_origins_for(&DirectGatewayGateStatus::InsecureLanGated {
+            address: addr("192.168.1.9:43821"),
+            reason: "insecure direct is disabled".into(),
+        })
+        .is_empty());
+
+        // The zero-address and loopback spellings never leak, whatever the gate claimed.
+        for leak in ["127.0.0.1:43821", "[::1]:43821"] {
+            assert!(published_origins_for(&DirectGatewayGateStatus::InsecureLanAllowed {
+                address: addr(leak),
+            })
+            .is_empty());
+        }
+
+        let overlay = published_origins_for(&DirectGatewayGateStatus::OverlaySecure {
+            address: addr("100.101.102.103:43821"),
+        });
+        assert_eq!(overlay.len(), 1);
+        assert_eq!(overlay[0].kind, PublishedOriginKind::Tailscale);
+        assert_eq!(overlay[0].origin, "http://100.101.102.103:43821");
+        assert!(
+            overlay[0].observed_at > 1_600_000_000_000,
+            "observation time is epoch milliseconds, not seconds"
+        );
+
+        let lan = published_origins_for(&DirectGatewayGateStatus::InsecureLanAllowed {
+            address: addr("192.168.1.9:43821"),
+        });
+        assert_eq!(lan.len(), 1);
+        assert_eq!(lan[0].kind, PublishedOriginKind::Lan);
+        assert_eq!(lan[0].origin, "http://192.168.1.9:43821");
+    }
+}
+
+#[cfg(test)]
 mod gateway_capability_name_tests {
     use super::gateway_capability_names;
     use crate::remote::reference_chat::control::REFERENCE_COMPOSER_CONTROL_CAPABILITY;
@@ -4684,6 +4735,16 @@ async fn get_capabilities(
             &reference_host_id,
             &state.reference_owner_id,
         ));
+        // Advertise where this host can be reached without the relay. Authenticated callers
+        // only: the request was authorized above, so this reaches a paired client and never
+        // an anonymous observer. Empty for a loopback-only or stopped gateway.
+        let origins = state.published_origins.read().clone();
+        if !origins.is_empty() {
+            fields.insert(
+                "publishedOrigins".into(),
+                serde_json::to_value(origins).unwrap_or(serde_json::Value::Null),
+            );
+        }
     }
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(document)).into_response())
 }
@@ -9594,6 +9655,45 @@ pub enum DirectGatewayGateStatus {
     InsecureLanGated { address: SocketAddr, reason: String },
 }
 
+/// The origins this host can honestly offer a paired client, derived from what it actually
+/// bound. Only listeners a remote machine could dial appear here: the loopback listener is
+/// always private, so `LoopbackOnly` publishes nothing at all. A gated LAN listener is
+/// excluded too - it refuses to serve, so offering it would only cost a failed connect.
+///
+/// The scheme is `http` because the gateway terminates no TLS itself; a caller upgrades it
+/// to `ws`/`wss` per request. Confidentiality on these paths comes from the overlay (a
+/// proven Tailscale address) or from the operator's explicit insecure opt-in.
+pub fn published_origins_for(
+    gate: &DirectGatewayGateStatus,
+) -> Vec<crate::paired_host::inventory::PublishedOrigin> {
+    use crate::paired_host::inventory::{PublishedOrigin, PublishedOriginKind};
+    let (kind, address) = match gate {
+        DirectGatewayGateStatus::LoopbackOnly => return Vec::new(),
+        DirectGatewayGateStatus::OverlaySecure { address } => {
+            (PublishedOriginKind::Tailscale, address)
+        }
+        DirectGatewayGateStatus::InsecureLanAllowed { address } => {
+            (PublishedOriginKind::Lan, address)
+        }
+        // A gated listener never started serving, so there is nothing to offer.
+        DirectGatewayGateStatus::InsecureLanGated { .. } => return Vec::new(),
+    };
+    if address.ip().is_loopback() {
+        return Vec::new();
+    }
+    vec![PublishedOrigin {
+        kind,
+        origin: format!("http://{address}"),
+        observed_at: crate::paired_host::direct_wire::unix_now_ms(),
+    }]
+}
+
+/// Republish this machine's dialable origins once its listeners were (re)classified, or clear
+/// them when it stopped serving. Callers pass the live gate status; nothing here guesses.
+pub fn publish_gateway_origins(state: &RemoteGatewayState, gate: &DirectGatewayGateStatus) {
+    *state.published_origins.write() = published_origins_for(gate);
+}
+
 pub struct RemoteServerHandle {
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     relay_task: Option<tokio::task::JoinHandle<()>>,
@@ -9742,6 +9842,10 @@ async fn bind_and_serve(
         if track_bound_address {
             *state_clone.is_running.write() = false;
             *state_clone.bound_address.write() = None;
+            // The gateway is no longer serving, so it must stop advertising itself: a stale
+            // origin would send every later attach into a refused connect before the relay
+            // fallback ran.
+            *state_clone.published_origins.write() = Vec::new();
         }
     });
 
@@ -9995,6 +10099,10 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
             tokio::spawn(async move { client.run().await })
         });
+
+    // The classification above is final for this start: advertise exactly what a remote client
+    // could dial, so its attach can race a direct path instead of always paying the relay.
+    publish_gateway_origins(&state, &gate_status);
 
     Ok((
         RemoteServerHandle {

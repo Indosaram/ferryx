@@ -831,6 +831,11 @@ pub struct RemoteGatewayState {
     /// Origins of this machine's saved paired hosts. A browser page served by one of them may
     /// call this gateway's `/api/v1/*` routes cross-origin, so the CORS allowlist admits them.
     pub cors_saved_host_origins: RwLock<Vec<String>>,
+    /// Where this machine currently says it can be reached without the relay, as classified
+    /// when its audiences were last configured. Served on `GET /api/v1/capabilities` so a
+    /// paired client can race a direct path against the relay. Live listener state only: it is
+    /// cleared when the gateway stops, and never contains the loopback listener's address.
+    pub published_origins: RwLock<Vec<crate::paired_host::inventory::PublishedOrigin>>,
     config_path: Option<PathBuf>,
     pub desktop_event_sink: RwLock<Option<DesktopEventSink>>,
     /// The single relay pairing authority owned by the running gateway.
@@ -1167,6 +1172,7 @@ impl RemoteGatewayState {
             is_running: RwLock::new(false),
             bound_address: RwLock::new(None),
             cors_saved_host_origins: RwLock::new(Vec::new()),
+            published_origins: RwLock::new(Vec::new()),
             config_path,
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),

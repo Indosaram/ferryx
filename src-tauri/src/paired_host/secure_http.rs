@@ -10,7 +10,7 @@
 use super::{
     attach::{attach_relay_session_with_candidates, RelayAttachedStream},
     client::ClientError,
-    inventory::HostAttach,
+    inventory::{HostAttach, PublishedOrigin},
     path_select::{AttachPath, CandidatePath},
 };
 use crate::remote::attach_crypto::MAX_ATTACH_FRAME;
@@ -402,8 +402,18 @@ fn attach_candidates(
     relay_origin: &str,
     machine_id: &str,
     bearer: &str,
+    published_origins: &[PublishedOrigin],
 ) -> Vec<CandidatePath> {
-    let mut candidates = Vec::with_capacity(2);
+    // Two independent sources of a direct route, both kept: the verified direct route this client
+    // discovered for the host (which carries the auth token the machine's gateway wants), and the
+    // origins the host itself published (which carry no token). An empty set from either simply
+    // contributes nothing, so a host that publishes nothing keeps today's behaviour exactly.
+    let mut candidates = Vec::with_capacity(3);
+    let published = super::path_select::candidates_for_published(
+        published_origins,
+        relay_origin,
+        machine_id,
+    );
     // Grant redemption has no host record yet (the pairing exchange is what creates one), so it
     // runs relay-only. Everything attached to a known host races its verified direct route.
     if let Some(host_id) = host_id {
@@ -416,6 +426,12 @@ fn attach_candidates(
             candidates.push(direct);
         }
     }
+    candidates.extend(
+        published
+            .into_iter()
+            .filter(|candidate| candidate.path != AttachPath::Relay),
+    );
+    // The relay is appended exactly once, with the bearer: it is the guaranteed last resort.
     candidates.push(CandidatePath::with_expected_machine_id(
         AttachPath::Relay,
         relay_origin.to_string(),
@@ -435,13 +451,20 @@ async fn establish_stream(
     machine_id: &str,
     attach: &HostAttach,
     kind: SessionKind,
+    published_origins: &[PublishedOrigin],
 ) -> Result<RelayAttachedStream, ClientError> {
     let relay_origin = crate::remote::relay_client::live_relay_url(relay_origin).into_owned();
     let dir = client_attach_dir()?;
     tokio::time::timeout(ESTABLISH_TIMEOUT, async {
         let session_id =
             allocate_e2e_session(http, &relay_origin, allocation_bearer, machine_id, kind).await?;
-        let candidates = attach_candidates(host_id, &relay_origin, machine_id, allocation_bearer);
+        let candidates = attach_candidates(
+            host_id,
+            &relay_origin,
+            machine_id,
+            allocation_bearer,
+            published_origins,
+        );
         // Only a candidate set with a real alternative is raced. A relay-only set must keep the
         // original single dial under the full establishment budget: the race deadline is three
         // seconds, far shorter than a cold relay handshake, and the session it allocates cannot be
@@ -487,6 +510,7 @@ impl SecureHttpSession {
         allocation_bearer: &str,
         machine_id: &str,
         attach: &HostAttach,
+        published_origins: &[PublishedOrigin],
     ) -> Result<Self, ClientError> {
         establish_stream(
             http,
@@ -496,6 +520,7 @@ impl SecureHttpSession {
             machine_id,
             attach,
             SessionKind::Http,
+            published_origins,
         )
         .await
         .map(|stream| Self { stream })
@@ -550,6 +575,9 @@ pub struct SecureTarget<'a> {
     pub machine_id: &'a str,
     pub attach: &'a HostAttach,
     pub bearer: &'a str,
+    /// Origins the host advertised for itself, raced before the relay is preferred. Empty
+    /// keeps the historical relay-only behaviour.
+    pub published_origins: &'a [PublishedOrigin],
     /// Lifetime class the relay applies to a socket opened on this target.
     pub session_kind: SessionKind,
 }
@@ -592,6 +620,7 @@ pub async fn shared_request(
             target.bearer,
             target.machine_id,
             target.attach,
+            target.published_origins,
         )
     };
     let (mut session, reused) = match guard.take() {
@@ -642,6 +671,7 @@ pub async fn open_secure_websocket(
         target.machine_id,
         target.attach,
         target.session_kind,
+        target.published_origins,
     )
     .await?;
     let (local, gateway) = tokio::io::duplex(256 * 1024);
@@ -759,7 +789,7 @@ mod tests {
         assert!(GLOBAL_DIRECT_ROUTES.publish(host_id, epoch, route.into(), DirectGuard::default()));
 
         let candidates =
-            attach_candidates(Some(host_id), "https://relay.example.com", "m1", "tok");
+            attach_candidates(Some(host_id), "https://relay.example.com", "m1", "tok", &[]);
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].path, AttachPath::Direct);
@@ -775,7 +805,7 @@ mod tests {
     /// candidate there would be looked up under an id the machine never published.
     #[test]
     fn a_host_without_an_id_attaches_over_the_relay_only() {
-        let candidates = attach_candidates(None, "https://relay.example.com", "m1", "tok");
+        let candidates = attach_candidates(None, "https://relay.example.com", "m1", "tok", &[]);
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, AttachPath::Relay);

@@ -257,6 +257,14 @@ pub fn ssh_plan(
     })
 }
 
+/// Makes `plan` ride the daemon's existing master. The reuse options go first because OpenSSH
+/// honours the earliest `-o` for a given keyword, and `ssh_plan` already sets `ControlPath=none`.
+pub fn use_master(plan: &mut ShellCommandPlan, socket: &std::path::Path) {
+    for (index, arg) in super::master::client_reuse_args(socket).into_iter().enumerate() {
+        plan.args.insert(index, arg);
+    }
+}
+
 pub fn shell_plan_with_session(
     host: &SshHost,
     root: &str,

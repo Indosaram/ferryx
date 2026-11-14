@@ -92,20 +92,42 @@ async fn pin_attach(
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-/// Candidates that may be dialled for `machine_id`.
+/// Typed failure for an attach race in which every candidate was rejected because it named a
+/// machine other than the one being attached to. Never a panic, and never a silent fallback to
+/// a plain relay attach: the caller must not read this as an ordinary transport hiccup.
+pub const ATTACH_IDENTITY_MISMATCH: &str = "ATTACH_IDENTITY_MISMATCH";
+
+/// Whether a candidate can be the machine this attach targets.
+///
+/// Identity is checked here, inside the attempt, so a rejected candidate is torn down while
+/// every other candidate - the relay included - is still live and still able to win. A
+/// candidate that carries no identity claim keeps the historical behaviour: the Noise static
+/// key pin and the prologue-bound machine id remain the only checks.
+fn candidate_names_expected_machine(candidate: &CandidatePath, machine_id: &str) -> bool {
+    match candidate.expected_machine_id.as_deref() {
+        None => true,
+        Some(expected) => expected == machine_id,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn candidate_names_expected_machine_for_test(
+    candidate: &CandidatePath,
+    machine_id: &str,
+) -> bool {
+    candidate_names_expected_machine(candidate, machine_id)
+}
+
+/// The candidates that may still be dialled for `machine_id`.
 ///
 /// A candidate that names a *different* machine is dropped rather than dialled: a stale paired
-/// record must never attach this client to another host. Dropping keeps the relay fallback live,
-/// which is what an unavailable direct route already does.
+/// record must never attach this client to another host. Filtering here - rather than only inside
+/// the race - is what makes the identity gate hold on the degraded path too; without it the
+/// fallback would dial `candidates.first()` and quietly re-admit a candidate the gate just refused.
 pub(crate) fn eligible_candidates(candidates: &[CandidatePath], machine_id: &str) -> Vec<CandidatePath> {
     candidates
         .iter()
-        .filter(|candidate| {
-            candidate
-                .expected_machine_id
-                .as_deref()
-                .is_none_or(|expected| expected == machine_id)
-        })
+        .filter(|candidate| candidate_names_expected_machine(candidate, machine_id))
         .cloned()
         .collect()
 }
@@ -123,7 +145,6 @@ fn discard_ineligible_pin(session_id: &str) {
 fn pinned_is_eligible(candidates: &[CandidatePath], origin: &str) -> bool {
     candidates.iter().any(|c| c.base_origin == origin)
 }
-
 pub async fn attach_paired_session_with_candidates(
     relay_origin: &str,
     session_id: &str,
@@ -134,7 +155,12 @@ pub async fn attach_paired_session_with_candidates(
     options: AttachCandidates<'_>,
 ) -> anyhow::Result<RelayAttachedStream> {
     let AttachCandidates { paths: candidates, http_client: _http_client } = options;
-    let mut candidates = eligible_candidates(candidates, machine_id);
+    // The RAW pool is kept here on purpose. Filtering up front would make the identity gate
+    // unreachable: an all-mismatched pool would look like an empty one, fall through to the
+    // relay-only path below, and attach over the relay instead of reporting the mismatch. The
+    // gate belongs inside each attempt, where a rejected candidate is torn down while the relay
+    // is still live and able to win.
+    let mut candidates = candidates.to_vec();
     // A direct route is a probe; the relay is a cold handshake. Give the relay candidate the full
     // establishment budget so a stale direct route cannot stop an attach that the relay would serve.
     for candidate in candidates.iter_mut() {
@@ -210,6 +236,8 @@ pub async fn attach_paired_session_with_candidates(
         let mid = machine_id.to_string();
         let sid = session_id.to_string();
         let epoch = enrollment_epoch.to_string();
+        let rejected = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejections = Arc::clone(&rejected);
 
         // The direct attempt is a PROBE: it either answers quickly or it does not, and a slow
         // direct dial says nothing about the machine. The relay can only be reached through a cold
@@ -225,7 +253,12 @@ pub async fn attach_paired_session_with_candidates(
                 let m = mid.clone();
                 let s = sid.clone();
                 let e = epoch.clone();
+                let rejections = Arc::clone(&rejections);
                 async move {
+                    if !candidate_names_expected_machine(&candidate, &m) {
+                        rejections.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        return Err(());
+                    }
                     let is_relay = candidate.path == AttachPath::Relay;
                     let url = attach_ws_url(&candidate.base_origin, &s, is_relay);
                     let prologue_session = prologue_session_id(&candidate, &s).to_string();
@@ -253,8 +286,14 @@ pub async fn attach_paired_session_with_candidates(
             confirm_attach_origin(session_id, &winner.base_origin);
             return Ok(winner.channel);
         }
+        // Every candidate named a machine other than the one being attached to. That is an
+        // identity event, not bad luck on the network, so it is reported as its own typed failure
+        // rather than re-dialled: nothing here was ever dialled in the first place.
+        if rejected.load(std::sync::atomic::Ordering::SeqCst) == candidates.len() {
+            return Err(anyhow::anyhow!(ATTACH_IDENTITY_MISMATCH));
+        }
 
-        // Every candidate was tried and none attached. Falling through would dial a route this
+        // Every remaining candidate was tried and none attached. Falling through would dial a route this
         // attempt already consumed: a relay half the relay server now refuses (it rejects an
         // active or reserved half), or the same direct endpoint that just failed. So the failure is
         // reported as-is. In particular the relay must NOT be re-dialled when the pool contained
@@ -265,6 +304,9 @@ pub async fn attach_paired_session_with_candidates(
         ));
     }
 
+    // The pool was empty, so this is the relay-only path. `candidates` was already filtered by the
+    // identity gate at entry, which keeps that gate enforceable here too: an empty pool resolves to
+    // the caller's relay origin, never to a candidate the gate refused.
     let chosen_origin =
         resolve_attach_base_origin(session_id, candidates, machine_id, relay_origin);
     let is_relay = !candidates
@@ -445,5 +487,71 @@ mod tests {
         assert_eq!(GLOBAL_SESSION_ATTACH_ORIGINS.get(&session), None);
         assert_eq!(confirm_attach_origin(&session, fresh), fresh);
         release_attach_origin(&session);
+    }
+
+    fn claiming(path: AttachPath, origin: &str) -> CandidatePath {
+        CandidatePath::with_expected_machine_id(path, origin, None, Some("machine-a".into()))
+    }
+
+    #[test]
+    fn the_degraded_path_drops_a_candidate_naming_another_machine() {
+        let candidates = vec![
+            claiming(AttachPath::Direct, "https://wrong.test"),
+            CandidatePath::new(AttachPath::Relay, "https://relay.test", None),
+        ];
+        let eligible = eligible_candidates(&candidates, "machine-b");
+        assert_eq!(eligible.len(), 1, "only the relay may survive the identity gate");
+        assert_eq!(eligible[0].base_origin, "https://relay.test");
+        assert_eq!(
+            eligible_candidates(&candidates, "machine-a").len(),
+            2,
+            "the machine that was actually published stays reachable"
+        );
+    }
+
+    #[test]
+    fn an_empty_candidate_list_stays_empty_so_the_relay_is_unconditional() {
+        assert!(eligible_candidates(&[], "machine-a").is_empty());
+    }
+
+    fn naming_another_machine(path: AttachPath, origin: &str) -> CandidatePath {
+        CandidatePath::with_expected_machine_id(
+            path,
+            origin,
+            None,
+            Some("other-machine".to_string()),
+        )
+    }
+
+    /// Every candidate naming a different machine must fail as one typed error - never a panic,
+    /// and never a silent relay fallback. The caller has to be able to tell "this is not the host
+    /// I expected" from "the network was unlucky", because only the first is a security event.
+    #[tokio::test]
+    async fn every_candidate_naming_another_machine_is_one_typed_error() {
+        let identity = tempfile::tempdir().expect("temp identity dir");
+        let candidates = [
+            naming_another_machine(AttachPath::Lan, "http://127.0.0.1:9"),
+            naming_another_machine(AttachPath::Relay, "http://127.0.0.1:9"),
+        ];
+        let result = attach_paired_session_with_candidates(
+            "http://127.0.0.1:9",
+            "session-every-candidate-mismatched",
+            "machine-a",
+            "unused-attach-public-key",
+            "epoch-1",
+            identity.path(),
+            AttachCandidates {
+                paths: &candidates,
+                http_client: None,
+            },
+        )
+        .await;
+        // Matched rather than `expect_err`, which would require the attached stream to be Debug
+        // for a failure path that never produces one.
+        let error = match result {
+            Ok(_) => panic!("no candidate names machine-a, so nothing may attach"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), ATTACH_IDENTITY_MISMATCH);
     }
 }

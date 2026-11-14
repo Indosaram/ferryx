@@ -549,7 +549,13 @@ impl PairedHostService {
                     };
                     #[cfg(not(test))]
                     let loaded = Inventory::open(&owner.directory);
-                    owner.inventory = Some(loaded);
+                    // A failed load is not cached: the file can be repaired out-of-band
+                    // (a stale row, a hand-fix after a crash), and keeping the error for
+                    // the daemon's lifetime would make that repair invisible.
+                    match loaded {
+                        Ok(inventory) => owner.inventory = Some(Ok(inventory)),
+                        Err(error) => return Err(error),
+                    }
                 }
                 operation(
                     owner
@@ -575,6 +581,47 @@ impl PairedHostService {
     }
     pub async fn list(&self) -> Result<Vec<HostView>> {
         self.run(|store| Ok(store.list())).await
+    }
+    /// Records the origins `host_id` reported for itself, under the generation that observed them.
+    ///
+    /// The caller is the machine's own gateway announcing where it can be reached, so the entries
+    /// are a hint for racing paths and never grounds for trust: the attach handshake still proves
+    /// identity. A publication against a stale generation is refused, which is what stops a
+    /// forgotten or re-paired host from keeping reachability it no longer owns.
+    pub async fn publish_origins(
+        &self,
+        host_id: String,
+        generation: Epoch,
+        origins: Vec<crate::paired_host::inventory::PublishedOrigin>,
+    ) -> Result<()> {
+        self.run(move |store| store.publish_origins(&host_id, generation, origins))
+            .await
+    }
+    /// Records what the host advertised about itself during a round-trip that just succeeded.
+    ///
+    /// Best-effort by construction: the pairing or migration it follows has already been
+    /// committed, so a refused publication (a concurrent re-pair bumped the generation) must
+    /// not fail the caller. The origins are only a routing hint, and the relay still covers a
+    /// host whose hints could not be stored.
+    async fn adopt_advertised_origins(
+        &self,
+        host_id: String,
+        generation: Epoch,
+        origins: Vec<crate::paired_host::inventory::PublishedOrigin>,
+    ) {
+        if origins.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .publish_origins(host_id.clone(), generation, origins)
+            .await
+        {
+            tracing::debug!(
+                host_id = %host_id,
+                generation = generation.0,
+                "advertised origins not stored: {error:?}"
+            );
+        }
     }
     pub async fn read(&self, request: MigrationReceipt) -> Result<HostView> {
         self.run(move |store| store.read_verified(&request.host_id, request.generation))
@@ -735,7 +782,12 @@ impl PairedHostService {
             retryable: Some(false),
         })
     }
-    async fn authenticate(&self, origin: &str, machine: &str, token: &str) -> Result<GrantScope> {
+    async fn authenticate(
+        &self,
+        origin: &str,
+        machine: &str,
+        token: &str,
+    ) -> Result<(GrantScope, Vec<crate::paired_host::inventory::PublishedOrigin>)> {
         if token.is_empty() || token.len() > 8192 || !token.bytes().all(|b| (33..=126).contains(&b))
         {
             return Err(ServiceError::invalid());
@@ -758,10 +810,11 @@ impl PairedHostService {
         {
             return Err(InventoryError::Unauthorized.into());
         }
-        Ok(match caps.access_scope {
+        let scope = match caps.access_scope {
             crate::remote::machine_protocol::AccessScope::Machine => GrantScope::Machine,
             crate::remote::machine_protocol::AccessScope::Mirror => GrantScope::Mirror,
-        })
+        };
+        Ok((scope, caps.published_origins))
     }
     pub async fn pair(&self, request: PairRequest) -> Result<HostView> {
         let mut host = tokio::time::timeout(Duration::from_secs(30), self.pair_inner(request))
@@ -824,7 +877,7 @@ impl PairedHostService {
             .header("content-type", "application/json")
             .header(super::secure_http::CLIENT_BUILD_HEADER, super::secure_http::CLIENT_BUILD)
             .body(serde_json::to_vec(&serde_json::json!({"pin": request.pin.0, "deviceName": "Ferryx Desktop"})).map_err(|_| ServiceError::invalid())?)).await?;
-        let grant_scope = self
+        let (grant_scope, advertised_origins) = self
             .authenticate(&origin, &exchanged.machine_id, &exchanged.token.0)
             .await?;
         let issued_scope = match exchanged.device.access_scope {
@@ -843,13 +896,18 @@ impl PairedHostService {
             grant_scope,
             device_token: exchanged.token.0,
         };
-        self.run(move |store| {
-            if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
-                return Err(InventoryError::StaleGeneration);
-            }
-            store.pair_with_device(&pairing, device_id)
-        })
-        .await
+        let host_id_for_origins = host_id.clone();
+        let host = self
+            .run(move |store| {
+                if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
+                    return Err(InventoryError::StaleGeneration);
+                }
+                store.pair_with_device(&pairing, device_id)
+            })
+            .await?;
+        self.adopt_advertised_origins(host_id_for_origins, host.generation, advertised_origins)
+            .await;
+        Ok(host)
     }
     pub async fn migrate_legacy(&self, request: MigrationRequest) -> Result<MigrationReceipt> {
         let (receipt, mut view) =
@@ -949,6 +1007,8 @@ impl PairedHostService {
             &request.account_session_token.0,
             &request.machine_id,
             &attach,
+            // Pairing runs before this machine has published any origin for the new device.
+            &[],
         )
         .await
         .map_err(client_error)?;
@@ -1000,6 +1060,7 @@ impl PairedHostService {
                 &exchanged.token.0,
                 &request.machine_id,
                 &attach,
+                &[],
             )
             .await
             .map_err(client_error)?;
@@ -1045,13 +1106,19 @@ impl PairedHostService {
             grant_scope,
             device_token: exchanged.token.0,
         };
-        self.run(move |store| {
-            if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
-                return Err(InventoryError::StaleGeneration);
-            }
-            store.pair_attached(&pairing, device_id, attach)
-        })
-        .await
+        let advertised_origins = caps.published_origins;
+        let host_id_for_origins = host_id.clone();
+        let host = self
+            .run(move |store| {
+                if store.generation_snapshot()?.get(&host_id) != snapshot.get(&host_id) {
+                    return Err(InventoryError::StaleGeneration);
+                }
+                store.pair_attached(&pairing, device_id, attach)
+            })
+            .await?;
+        self.adopt_advertised_origins(host_id_for_origins, host.generation, advertised_origins)
+            .await;
+        Ok(host)
     }
     async fn migrate_inner(
         &self,
@@ -1060,7 +1127,7 @@ impl PairedHostService {
         let origin = self.origin(&request.relay_origin)?;
         let host_id = inventory::host_key(&origin, &request.machine_id)?;
         let snapshot = self.run(|store| store.generation_snapshot()).await?;
-        let grant_scope = self
+        let (grant_scope, advertised_origins) = self
             .authenticate(&origin, &request.machine_id, &request.device_token.0)
             .await?;
         let legacy = LegacyCredential {
@@ -1073,19 +1140,25 @@ impl PairedHostService {
                 device_token: request.device_token.0,
             },
         };
-        self.run(move |store| {
-            if store.generation_snapshot()?.get(&legacy.host_id) != snapshot.get(&legacy.host_id) {
-                return Err(InventoryError::MigrationPending);
-            }
-            let receipt = store.migrate_copy(&legacy)?;
-            let view = store
-                .list()
-                .into_iter()
-                .find(|v| v.host_id == receipt.host_id)
-                .ok_or(InventoryError::MigrationPending)?;
-            Ok((receipt, view))
-        })
-        .await
+        let (receipt, view) = self
+            .run(move |store| {
+                if store.generation_snapshot()?.get(&legacy.host_id)
+                    != snapshot.get(&legacy.host_id)
+                {
+                    return Err(InventoryError::MigrationPending);
+                }
+                let receipt = store.migrate_copy(&legacy)?;
+                let view = store
+                    .list()
+                    .into_iter()
+                    .find(|v| v.host_id == receipt.host_id)
+                    .ok_or(InventoryError::MigrationPending)?;
+                Ok((receipt, view))
+            })
+            .await?;
+        self.adopt_advertised_origins(receipt.host_id.clone(), receipt.generation, advertised_origins)
+            .await;
+        Ok((receipt, view))
     }
 }
 
@@ -1279,3 +1352,50 @@ fn sanitize_error_text(text: &str) -> String {
 #[cfg(test)]
 #[path = "service_direct_lifecycle_tests.rs"]
 mod direct_lifecycle_tests;
+
+#[cfg(test)]
+mod inventory_retry_tests {
+    use super::*;
+
+    /// A failed inventory load must not be cached: repairing the file out-of-band has to be
+    /// visible to the next call, otherwise one stale row disables pairing until a daemon restart.
+    #[tokio::test]
+    async fn a_repaired_inventory_file_is_read_again() {
+        let root = std::env::temp_dir().join(format!(
+            "ferryx-inventory-retry-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let file = root.join("paired-hosts.v1.json");
+
+        // A row claiming a machine grant with no token is rejected by the loader.
+        std::fs::write(
+            &file,
+            br#"{"version":1,"hosts":{"https://relay.example/host/m":{"relayOrigin":"https://relay.example","machineId":"m","displayLabel":"M","grantScope":"machine","deviceToken":null,"generation":"1","authStatus":"paired"}},"generations":{"https://relay.example/host/m":"1"}}"#,
+        )
+        .expect("seed corrupt inventory");
+
+        let service = PairedHostService::open(root.clone());
+        assert!(
+            service.run(|_| Ok(())).await.is_err(),
+            "a corrupt inventory must fail"
+        );
+
+        // Repair it the way an operator would, then read again without restarting anything.
+        std::fs::write(
+            &file,
+            br#"{"version":1,"hosts":{},"generations":{}}"#,
+        )
+        .expect("repair inventory");
+        assert!(
+            service.run(|store| Ok(store.list().len())).await.is_ok(),
+            "a repaired inventory must load on the next call"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
