@@ -37,8 +37,8 @@ struct DeferredPayload {
 /// Honest Terminal Helper readiness from a bounded, non-installing remote check.
 ///
 /// `Installed` means the helper binary was observed present (and executable on
-/// POSIX) at the default location. `Missing` means the remote explicitly
-/// reported the binary absent or not executable. `Unknown` covers every other
+/// POSIX) and answered `--version`. `Missing` means the remote explicitly
+/// reported the binary absent, not executable, or unrunnable. `Unknown` covers every other
 /// outcome (timeout, transport failure, unexpected output): no claim is made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +50,9 @@ pub enum HelperProbeState {
 
 /// Stdout marker printed by the probe script when the helper binary checks out.
 const PROBE_READY_MARKER: &str = "FERRYX_HELPER_READY";
+
+/// Stderr marker printed by the probe script when the binary exists but `--version` fails.
+const PROBE_UNRUNNABLE_MARKER: &str = "FERRYX_ERR_HELPER_UNRUNNABLE";
 
 #[derive(Debug, Deserialize)]
 struct HelperReadyEvent {
@@ -355,13 +358,38 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
         return err;
     }
 
-    let is_missing = exit_code == Some(127) || (exit_code == Some(1) && has_missing_marker);
+    // Exit 127 alone is not proof of absence: a shell also returns 127 when the binary exists
+    // but its ELF interpreter does not (a glibc helper on musl/Alpine). Only the explicit marker
+    // printed after the existence check means "not installed".
+    let is_missing = has_missing_marker && matches!(exit_code, Some(127) | Some(1));
     let is_permissions =
         exit_code == Some(126) || (exit_code == Some(1) && has_not_executable_marker);
+    let is_exec_failure = exit_code == Some(127) && !has_missing_marker;
 
     let cause = err.details.clone();
 
-    if is_missing {
+    if is_exec_failure {
+        let mut details = serde_json::json!({
+            "stage": "helper_exec_failed",
+            "operation": "helper_startup_readiness",
+            "executable": location.executable,
+            "root": location.root,
+            "exitCode": 127,
+            "stderr": stderr,
+        });
+        if let Some(c) = cause {
+            details["cause"] = c;
+        }
+        IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!(
+                "Remote helper at '{}' exists but could not be executed on this host: {}",
+                location.executable,
+                stderr.trim()
+            ),
+        )
+        .with_details(details)
+    } else if is_missing {
         let mut details = serde_json::json!({
             "stage": "helper_missing",
             "operation": "helper_startup_readiness",
@@ -495,6 +523,8 @@ fn classify_probe_error(err: &IpcError) -> HelperProbeState {
         || err.message.contains("FERRYX_ERR_HELPER_MISSING");
     let has_not_executable_marker = stderr.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE")
         || err.message.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE");
+    let has_unrunnable_marker =
+        stderr.contains(PROBE_UNRUNNABLE_MARKER) || err.message.contains(PROBE_UNRUNNABLE_MARKER);
 
     // Contradictory signals are untrustworthy: claim nothing.
     if (has_missing_marker && (has_not_executable_marker || exit_code == Some(126)))
@@ -505,9 +535,11 @@ fn classify_probe_error(err: &IpcError) -> HelperProbeState {
 
     // Windows sshd.exe normalizes child exit codes to 1, so the explicit
     // stderr sentinels are the reliable signal there; POSIX adds 127/126.
-    // Both sentinels mean the helper is not usable at its default location.
+    // Every sentinel means the helper is not usable at its default location;
+    // an unrunnable binary must be replaced just like a missing one.
     if has_missing_marker
         || has_not_executable_marker
+        || has_unrunnable_marker
         || exit_code == Some(127)
         || exit_code == Some(126)
     {
@@ -538,23 +570,72 @@ pub fn probe_locations(
 /// Tests existence (plus executability on POSIX) at candidate locations:
 /// first checks `qualified_location` for the current bundled helper version,
 /// falling back to unversioned `default_location` for legacy installs.
-/// It never writes, never installs, and never executes or spawns the helper,
-/// so no persistent remote process can linger. Remote platform dispatch and
-/// the bounded exec helper mirror `ensure_started`.
+/// It never writes or installs. In the same round trip it runs `--version`,
+/// which exits immediately and spawns nothing persistent, because a present
+/// binary can still be unrunnable (a glibc build on a musl host exits 127):
+/// that case prints `FERRYX_ERR_HELPER_UNRUNNABLE` and reads as Missing so the
+/// caller reinstalls. Remote platform dispatch and the bounded exec helper
+/// mirror `ensure_started`.
 fn probe_ready_script(environment: &RemoteEnvironment, location: &HelperLocation) -> String {
     match environment.platform {
         RemotePlatform::Posix => format!(
             "exe={}; \
              if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
              if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
+             out=$(\"$exe\" --version 2>&1); rc=$?; \
+             if [ \"$rc\" -ne 0 ]; then printf 'FERRYX_ERR_HELPER_UNRUNNABLE exit=%s %s\\n' \"$rc\" \"$(printf '%s\\n' \"$out\" | head -n 1)\" >&2; exit 1; fi; \
              printf 'FERRYX_HELPER_READY\\n'",
             direct::quote_posix(&location.executable)
         ),
         RemotePlatform::Windows => format!(
             "$exe = {}; \
              if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
+             try {{ $out = (& $exe --version 2>&1 | Out-String).Trim(); $rc = $LASTEXITCODE }} catch {{ $out = $_.Exception.Message; $rc = -1 }}; \
+             if ($rc -ne 0) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_UNRUNNABLE exit=' + $rc + ' ' + ($out -split '\\r?\\n')[0]); exit 1; }}; \
              [Console]::WriteLine('FERRYX_HELPER_READY')",
             runtime::powershell_data(&location.executable)
+        ),
+    }
+}
+
+/// User-facing reason a present helper failed its probe `--version` run, taken from the
+/// `FERRYX_ERR_HELPER_UNRUNNABLE exit=<code> <first output line>` sentinel. `None` when the
+/// probe did not observe a present-but-unrunnable binary (absent, not executable, transport).
+pub(crate) fn probe_exec_failure(err: &IpcError, location: &HelperLocation) -> Option<String> {
+    if classify_probe_error(err) != HelperProbeState::Missing {
+        return None;
+    }
+    let stderr = err
+        .details
+        .as_ref()
+        .and_then(|d| d.get("stderr"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let detail = stderr.lines().chain(err.message.lines()).find_map(|line| {
+        line.split_once(PROBE_UNRUNNABLE_MARKER)
+            .map(|(_, rest)| rest.trim().to_owned())
+    })?;
+    Some(format!(
+        "Remote helper at '{}' exists but could not be executed on this host ({detail}); reinstall it.",
+        location.executable
+    ))
+}
+
+async fn probe_ready_at_detailed_with<F, Fut>(
+    environment: &RemoteEnvironment,
+    location: &HelperLocation,
+    mut run: F,
+) -> (HelperProbeState, Option<String>)
+where
+    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+{
+    let script = probe_ready_script(environment, location);
+    match run(environment.executor, script, Duration::from_secs(10)).await {
+        Ok(stdout) => (classify_probe_result(Ok(&stdout)), None),
+        Err(err) => (
+            classify_probe_result(Err(&err)),
+            probe_exec_failure(&err, location),
         ),
     }
 }
@@ -562,52 +643,63 @@ fn probe_ready_script(environment: &RemoteEnvironment, location: &HelperLocation
 pub(super) async fn probe_ready_at_with<F, Fut>(
     environment: &RemoteEnvironment,
     location: &HelperLocation,
-    mut run: F,
+    run: F,
 ) -> HelperProbeState
 where
     F: FnMut(RemoteExecutor, String, Duration) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
 {
-    let script = probe_ready_script(environment, location);
-    match run(environment.executor, script, Duration::from_secs(10)).await {
-        Ok(stdout) => classify_probe_result(Ok(&stdout)),
-        Err(err) => classify_probe_result(Err(&err)),
-    }
+    probe_ready_at_detailed_with(environment, location, run)
+        .await
+        .0
 }
 
-pub(super) async fn probe_ready_with<F, Fut>(
+pub(super) async fn probe_ready_detailed_with<F, Fut>(
     host: &SshHost,
     environment: &RemoteEnvironment,
     mut run: F,
-) -> HelperProbeState
+) -> (HelperProbeState, Option<String>)
 where
     F: FnMut(RemoteExecutor, String, Duration) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
 {
     let locations = match probe_locations(host, environment) {
         Ok(locs) => locs,
-        Err(_) => return HelperProbeState::Unknown,
+        Err(_) => return (HelperProbeState::Unknown, None),
     };
     let mut last_state = HelperProbeState::Missing;
+    let mut exec_failure = None;
     for location in &locations {
-        let state = probe_ready_at_with(environment, location, &mut run).await;
+        let (state, failure) = probe_ready_at_detailed_with(environment, location, &mut run).await;
         if state == HelperProbeState::Installed {
-            return HelperProbeState::Installed;
+            return (HelperProbeState::Installed, None);
         }
         last_state = state;
+        exec_failure = exec_failure.or(failure);
     }
-    last_state
+    (last_state, exec_failure)
 }
 
 pub async fn probe_ready(host: &SshHost, environment: &RemoteEnvironment) -> HelperProbeState {
-    probe_ready_with(host, environment, |executor, script, timeout| async move {
+    probe_ready_detailed(host, environment).await.0
+}
+
+/// `probe_ready` plus the exec-failure reason when a present helper binary could not run
+/// (see [`probe_exec_failure`]); same single round trip per location.
+pub async fn probe_ready_detailed(
+    host: &SshHost,
+    environment: &RemoteEnvironment,
+) -> (HelperProbeState, Option<String>) {
+    probe_ready_detailed_with(host, environment, |executor, script, timeout| async move {
         let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
-            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
-            details["operation"] = "helper_readiness_probe".into();
-            details["executor"] = executor.program().into();
-            err
-        })
+        direct::bounded_output(&plan, timeout)
+            .await
+            .map_err(|mut err| {
+                let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+                details["operation"] = "helper_readiness_probe".into();
+                details["executor"] = executor.program().into();
+                err
+            })
     })
     .await
 }
@@ -617,15 +709,21 @@ pub async fn probe_ready_at(
     environment: &RemoteEnvironment,
     location: &HelperLocation,
 ) -> HelperProbeState {
-    probe_ready_at_with(environment, location, |executor, script, timeout| async move {
-        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
-        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
-            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
-            details["operation"] = "helper_readiness_probe".into();
-            details["executor"] = executor.program().into();
-            err
-        })
-    })
+    probe_ready_at_with(
+        environment,
+        location,
+        |executor, script, timeout| async move {
+            let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+            direct::bounded_output(&plan, timeout)
+                .await
+                .map_err(|mut err| {
+                    let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+                    details["operation"] = "helper_readiness_probe".into();
+                    details["executor"] = executor.program().into();
+                    err
+                })
+        },
+    )
     .await
 }
 
