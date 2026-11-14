@@ -1,0 +1,2 @@
+src-tauri/src/ssh/host_key.rs
+src-tauri/src/ssh/host_key_tests.rs

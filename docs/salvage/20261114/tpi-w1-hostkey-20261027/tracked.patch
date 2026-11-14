@@ -1,0 +1,778 @@
+diff --git a/src-tauri/src/ipc/dag.rs b/src-tauri/src/ipc/dag.rs
+index d19b2927f..179f5ae30 100644
+--- a/src-tauri/src/ipc/dag.rs
++++ b/src-tauri/src/ipc/dag.rs
+@@ -24,6 +24,7 @@ pub enum DagWatchFailureCode {
+     HelperMissing,
+     CapabilityMissing,
+     Authentication,
++    HostKey,
+     Unavailable,
+ }
+ 
+@@ -33,6 +34,7 @@ impl std::fmt::Display for DagWatchFailureCode {
+             Self::HelperMissing => write!(f, "helper_missing"),
+             Self::CapabilityMissing => write!(f, "capability_missing"),
+             Self::Authentication => write!(f, "authentication"),
++            Self::HostKey => write!(f, "host_key"),
+             Self::Unavailable => write!(f, "unavailable"),
+         }
+     }
+@@ -607,6 +609,8 @@ pub enum SshWatchFailureKind {
+     HelperMissing(String),
+     CapabilityMissing(String),
+     Authentication(String),
++    /// The SSH server's host key is unknown or changed; terminal like authentication.
++    HostKey(String),
+     Transport(String),
+     Other(String),
+ }
+@@ -617,6 +621,7 @@ impl SshWatchFailureKind {
+             Self::HelperMissing(_) => DagWatchFailureCode::HelperMissing,
+             Self::CapabilityMissing(_) => DagWatchFailureCode::CapabilityMissing,
+             Self::Authentication(_) => DagWatchFailureCode::Authentication,
++            Self::HostKey(_) => DagWatchFailureCode::HostKey,
+             Self::Transport(_) | Self::Other(_) => DagWatchFailureCode::Unavailable,
+         }
+     }
+@@ -626,6 +631,7 @@ impl SshWatchFailureKind {
+             Self::HelperMissing(msg)
+             | Self::CapabilityMissing(msg)
+             | Self::Authentication(msg)
++            | Self::HostKey(msg)
+             | Self::Transport(msg)
+             | Self::Other(msg) => msg,
+         }
+@@ -670,15 +676,22 @@ pub(crate) fn classify_ssh_ipc_error(err: &IpcError) -> SshWatchFailureKind {
+         return SshWatchFailureKind::HelperMissing(err.message.clone());
+     }
+ 
++    if err.code == IpcErrorCode::HostKeyUnknown
++        || err.code == IpcErrorCode::HostKeyChanged
++        || stage == "host_key"
++        || crate::ssh::runtime::host_key_failure(stderr).is_some()
++        || crate::ssh::runtime::host_key_failure(&err.message).is_some()
++    {
++        return SshWatchFailureKind::HostKey(err.message.clone());
++    }
++
+     let lower_msg = err.message.to_lowercase();
+     let lower_stderr = stderr.to_lowercase();
+     if err.code == IpcErrorCode::Unauthorized
+         || err.code == IpcErrorCode::PermissionDenied
+         || lower_msg.contains("permission denied")
+         || lower_msg.contains("authentication failed")
+-        || lower_msg.contains("host key verification failed")
+         || lower_stderr.contains("permission denied")
+-        || lower_stderr.contains("host key verification failed")
+         || lower_stderr.contains("authentication failed")
+     {
+         return SshWatchFailureKind::Authentication(err.message.clone());
+@@ -712,9 +725,12 @@ pub(crate) fn classify_bridge_error(err: &crate::ssh::bridge::BridgeError) -> Ss
+                 SshWatchFailureKind::HelperMissing(format!(
+                     "Helper process not executable (exit 126): {stderr}"
+                 ))
++            } else if (*code == Some(255) || code.is_none())
++                && crate::ssh::runtime::host_key_failure(stderr).is_some()
++            {
++                SshWatchFailureKind::HostKey(format!("SSH host key verification failed: {stderr}"))
+             } else if (*code == Some(255) || code.is_none())
+                 && (lower_stderr.contains("permission denied")
+-                    || lower_stderr.contains("host key verification failed")
+                     || lower_stderr.contains("authentication failed"))
+             {
+                 SshWatchFailureKind::Authentication(format!(
+@@ -797,7 +813,8 @@ pub(crate) fn decide_ssh_watch_step_with_budget(
+     match failure {
+         SshWatchFailureKind::HelperMissing(msg)
+         | SshWatchFailureKind::CapabilityMissing(msg)
+-        | SshWatchFailureKind::Authentication(msg) => {
++        | SshWatchFailureKind::Authentication(msg)
++        | SshWatchFailureKind::HostKey(msg) => {
+             let next_terminal = consecutive_terminal_failures + 1;
+             if next_terminal >= terminal_budget {
+                 SshWatchDecision::Terminal(DagWatchFailurePayload {
+@@ -2097,6 +2114,22 @@ mod tests {
+             classify_bridge_error(&bridge_auth),
+             SshWatchFailureKind::Authentication(_)
+         ));
++
++        // Host-key rejection is its own terminal kind, not authentication.
++        let bridge_host_key = crate::ssh::bridge::BridgeError::ProcessExited {
++            code: Some(255),
++            stderr: "No ED25519 host key is known for example.test and you have requested strict checking.\nHost key verification failed.".into(),
++        };
++        assert!(matches!(
++            classify_bridge_error(&bridge_host_key),
++            SshWatchFailureKind::HostKey(_)
++        ));
++        let ipc_host_key = IpcError::new(IpcErrorCode::HostKeyChanged, "ssh failed")
++            .with_details(serde_json::json!({"stage": "host_key"}));
++        assert_eq!(
++            classify_ssh_ipc_error(&ipc_host_key).to_code(),
++            DagWatchFailureCode::HostKey
++        );
+     }
+ 
+     #[test]
+diff --git a/src-tauri/src/ipc/error.rs b/src-tauri/src/ipc/error.rs
+index 3b4670505..71a133784 100644
+--- a/src-tauri/src/ipc/error.rs
++++ b/src-tauri/src/ipc/error.rs
+@@ -138,6 +138,12 @@ pub enum IpcErrorCode {
+     AuthExpired,
+     NotFound,
+     MethodNotAllowed,
++    /// OpenSSH refused the connection because the server's host key is not in known_hosts.
++    /// The UI offers a fingerprint confirmation step before the key is trusted.
++    HostKeyUnknown,
++    /// OpenSSH refused the connection because the server's host key differs from the pinned one.
++    /// Never trusted from the UI: the stale entry must be removed by the user.
++    HostKeyChanged,
+     #[serde(untagged)]
+     Custom(String),
+ }
+@@ -250,6 +256,8 @@ impl IpcErrorCode {
+             "DAEMON_BUSY" => Self::DaemonBusy,
+             "DAEMON_DETACH_UNAVAILABLE" => Self::DaemonDetachUnavailable,
+             "NATIVE_RENDERER_UNAVAILABLE" => Self::NativeRendererUnavailable,
++            "HOST_KEY_UNKNOWN" => Self::HostKeyUnknown,
++            "HOST_KEY_CHANGED" => Self::HostKeyChanged,
+             other => Self::Custom(other.to_string()),
+         }
+     }
+@@ -584,6 +592,8 @@ mod tests {
+             (IpcErrorCode::DaemonUpdatePending, "DAEMON_UPDATE_PENDING"),
+             (IpcErrorCode::DaemonBusy, "DAEMON_BUSY"),
+             (IpcErrorCode::DaemonDetachUnavailable, "DAEMON_DETACH_UNAVAILABLE"),
++            (IpcErrorCode::HostKeyUnknown, "HOST_KEY_UNKNOWN"),
++            (IpcErrorCode::HostKeyChanged, "HOST_KEY_CHANGED"),
+         ];
+         for (code, wire) in cases {
+             let encoded = serde_json::to_value(&code).expect("encode typed error");
+diff --git a/src-tauri/src/ipc/ssh.rs b/src-tauri/src/ipc/ssh.rs
+index 32621dd97..e84382798 100644
+--- a/src-tauri/src/ipc/ssh.rs
++++ b/src-tauri/src/ipc/ssh.rs
+@@ -506,6 +506,29 @@ pub async fn cmd_ssh_test_connection(
+     Ok(summary)
+ }
+ 
++/// Connects once with host-key acceptance redirected into a private temporary file and reports
++/// the keys the server presented, for the user to compare before trusting.
++#[cfg(feature = "desktop")]
++#[tauri::command]
++pub async fn cmd_ssh_scan_host_key(
++    host: SshHost,
++) -> Result<crate::ssh::host_key::HostKeyScan, IpcError> {
++    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
++    crate::ssh::host_key::scan(&host).await
++}
++
++/// Pins the host key into the user's known_hosts only when a fresh scan still presents the
++/// fingerprint the user confirmed.
++#[cfg(feature = "desktop")]
++#[tauri::command]
++pub async fn cmd_ssh_trust_host_key(
++    host: SshHost,
++    fingerprint_sha256: String,
++) -> Result<(), IpcError> {
++    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
++    crate::ssh::host_key::trust(&host, fingerprint_sha256).await
++}
++
+ #[cfg(feature = "desktop")]
+ #[tauri::command]
+ pub async fn cmd_ssh_set_password(
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 0705739ba..8d6eaa7db 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1712,6 +1712,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
+         ipc::ssh::cmd_ssh_update_host,
+         ipc::ssh::cmd_ssh_delete_host,
+         ipc::ssh::cmd_ssh_test_connection,
++        ipc::ssh::cmd_ssh_scan_host_key,
++        ipc::ssh::cmd_ssh_trust_host_key,
+         ipc::ssh::cmd_ssh_set_password,
+         ipc::ssh::cmd_ssh_clear_password,
+         ipc::ssh::cmd_ssh_prepare_integration,
+diff --git a/src-tauri/src/ssh/config.rs b/src-tauri/src/ssh/config.rs
+index e28e3c9e4..87d31187b 100644
+--- a/src-tauri/src/ssh/config.rs
++++ b/src-tauri/src/ssh/config.rs
+@@ -29,7 +29,8 @@ pub fn parse_ssh_config_with_dir(text: &str, config_dir: Option<&Path>) -> Vec<C
+     hosts
+ }
+ 
+-fn dirs_fallback_ssh_dir() -> Option<PathBuf> {
++/// The user's `~/.ssh` directory as OpenSSH resolves it on this platform.
++pub(crate) fn dirs_fallback_ssh_dir() -> Option<PathBuf> {
+     preferred_ssh_home(
+         std::env::var_os("HOME"),
+         std::env::var_os("USERPROFILE"),
+diff --git a/src-tauri/src/ssh/mod.rs b/src-tauri/src/ssh/mod.rs
+index 8cff64d95..7ea280304 100644
+--- a/src-tauri/src/ssh/mod.rs
++++ b/src-tauri/src/ssh/mod.rs
+@@ -7,6 +7,7 @@ pub mod helper_assets;
+ #[path = "../ferryx_scope/ssh/mod.rs"]
+ pub mod helper_runtime;
+ pub mod helper_setup;
++pub mod host_key;
+ pub mod manual;
+ pub mod operations;
+ pub mod password;
+diff --git a/src-tauri/src/ssh/runtime.rs b/src-tauri/src/ssh/runtime.rs
+index ea22f0c34..e65730fc6 100644
+--- a/src-tauri/src/ssh/runtime.rs
++++ b/src-tauri/src/ssh/runtime.rs
+@@ -34,6 +34,35 @@ pub fn error(code: IpcErrorCode, stage: &str, message: &str) -> IpcError {
+     IpcError::new(code, message).with_details(serde_json::json!({"stage": stage}))
+ }
+ 
++/// Whether OpenSSH reported the server as new: no key of the presented type is known for it in any
++/// known_hosts file it consulted ("No <type> host key is known for <host> ...").
++pub fn host_key_is_new(stderr: &str) -> bool {
++    stderr
++        .to_ascii_lowercase()
++        .lines()
++        .any(|line| line.contains("no ") && line.contains(" host key is known for "))
++}
++
++/// Classifies OpenSSH stderr that reports a host-key verification failure. Only OpenSSH's explicit
++/// "No <type> host key is known" line is an unknown key the user may trust. A bare "Host key
++/// verification failed" is also what a changed key prints under `LogLevel FATAL` and what an
++/// untrusted ProxyJump hop prints, so it is reported like a changed key and never offered trust.
++pub fn host_key_failure(stderr: &str) -> Option<IpcErrorCode> {
++    let lower = stderr.to_ascii_lowercase();
++    if lower.contains("remote host identification has changed")
++        || (lower.contains("host key for ") && lower.contains(" has changed"))
++    {
++        return Some(IpcErrorCode::HostKeyChanged);
++    }
++    if host_key_is_new(stderr) {
++        return Some(IpcErrorCode::HostKeyUnknown);
++    }
++    if lower.contains("host key verification failed") {
++        return Some(IpcErrorCode::HostKeyChanged);
++    }
++    None
++}
++
+ pub fn powershell_data(value: &str) -> String {
+     format!(
+         "([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{}')))",
+@@ -341,25 +370,33 @@ where
+                 // host key verification failure, authentication failure). In that case, subsequent
+                 // executor probes will also fail identically, so fail immediately.
+                 if exit_code == Some(255) {
+-                    let authentication_failed = host.auth_method == super::SshAuthMethod::Password
+-                        && err
+-                            .details
+-                            .as_ref()
+-                            .and_then(|v| v.get("stderr"))
+-                            .and_then(|v| v.as_str())
+-                            .is_some_and(|text| text.contains("Permission denied"));
++                    let stderr = err
++                        .details
++                        .as_ref()
++                        .and_then(|v| v.get("stderr"))
++                        .and_then(|v| v.as_str())
++                        .unwrap_or_default();
++                    let host_key = host_key_failure(stderr);
++                    let authentication_failed = host_key.is_none()
++                        && host.auth_method == super::SshAuthMethod::Password
++                        && stderr.contains("Permission denied");
+                     if authentication_failed {
+                         if let Some(generation) = credential_generation.as_deref() {
+                             super::password::clear_generation(host, generation)?;
+                         }
+                     }
++                    let stage = if host_key.is_some() {
++                        "host_key"
++                    } else if authentication_failed {
++                        "authentication"
++                    } else {
++                        "environment"
++                    };
++                    if let Some(code) = host_key {
++                        err.code = code;
++                    }
+                     if let Some(details) = err.details.as_mut() {
+-                        details["stage"] = if authentication_failed {
+-                            "authentication"
+-                        } else {
+-                            "environment"
+-                        }
+-                        .into();
++                        details["stage"] = stage.into();
+                         details["executor"] = executor.program().into();
+                     }
+                     return Err(err);
+@@ -626,6 +663,51 @@ mod tests {
+         assert_eq!(details["exitCode"], 255);
+     }
+ 
++    #[tokio::test]
++    async fn host_key_failures_report_their_own_code_and_stage() {
++        let samples = [
++            // Bare line: a changed key under LogLevel FATAL, or an untrusted ProxyJump hop.
++            ("Host key verification failed.\r\n", IpcErrorCode::HostKeyChanged),
++            (
++                "No ED25519 host key is known for example.test and you have requested strict checking.\nHost key verification failed.\n",
++                IpcErrorCode::HostKeyUnknown,
++            ),
++            (
++                "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nHost key for example.test has changed and you have requested strict checking.\nHost key verification failed.\n",
++                IpcErrorCode::HostKeyChanged,
++            ),
++        ];
++        for (stderr, code) in samples {
++            let failure = detect_with(&probe_host(), Some(RemotePlatform::Posix), |_, _, _| {
++                std::future::ready(Err(error(IpcErrorCode::IoError, "execution", "ssh failed")
++                    .with_details(serde_json::json!({ "exitCode": 255, "stderr": stderr }))))
++            })
++            .await
++            .unwrap_err();
++            assert_eq!(failure.code, code, "{stderr}");
++            assert_eq!(failure.details.unwrap()["stage"], "host_key", "{stderr}");
++        }
++    }
++
++    #[tokio::test]
++    async fn password_permission_denied_still_reports_authentication() {
++        let host = SshHost {
++            auth_method: super::super::SshAuthMethod::Password,
++            ..probe_host()
++        };
++        let failure = detect_with(&host, Some(RemotePlatform::Posix), |_, _, _| {
++            std::future::ready(Err(error(IpcErrorCode::IoError, "execution", "ssh failed")
++                .with_details(serde_json::json!({
++                    "exitCode": 255,
++                    "stderr": "user@example.test: Permission denied (password)."
++                }))))
++        })
++        .await
++        .unwrap_err();
++        assert_eq!(failure.code, IpcErrorCode::IoError);
++        assert_eq!(failure.details.unwrap()["stage"], "authentication");
++    }
++
+     #[tokio::test]
+     async fn transport_timeout_without_exit_code_falls_through_to_all_executors() {
+         let mut probed = Vec::new();
+diff --git a/src-tauri/src/terminal/remote.rs b/src-tauri/src/terminal/remote.rs
+index 50a3fefb1..7dd86d773 100644
+--- a/src-tauri/src/terminal/remote.rs
++++ b/src-tauri/src/terminal/remote.rs
+@@ -46,6 +46,9 @@ pub struct RemoteSessionDescriptor {
+ pub enum RemoteFailureKind {
+     Transport,
+     Authentication,
++    /// OpenSSH rejected the server's host key (unknown or changed); reconnecting cannot help
++    /// until the user trusts or repairs the key.
++    HostKey,
+     Missing,
+     Expired,
+     Protocol,
+@@ -83,6 +86,12 @@ impl RemoteFailure {
+                     || error.code == crate::ipc::IpcErrorCode::CliExecutableNotFound
+                 {
+                     RemoteFailureKind::Missing
++                } else if matches!(
++                    error.code,
++                    crate::ipc::IpcErrorCode::HostKeyUnknown
++                        | crate::ipc::IpcErrorCode::HostKeyChanged
++                ) {
++                    RemoteFailureKind::HostKey
+                 } else if error.code != crate::ipc::IpcErrorCode::IoError {
+                     RemoteFailureKind::Protocol
+                 } else if stage == Some("transport") {
+@@ -118,11 +127,11 @@ impl RemoteFailure {
+     }
+ }
+ fn ssh_stderr_failure_kind(stderr: &str) -> RemoteFailureKind {
++    if crate::ssh::runtime::host_key_failure(stderr).is_some() {
++        return RemoteFailureKind::HostKey;
++    }
+     let lower = stderr.to_lowercase();
+-    if lower.contains("permission denied")
+-        || lower.contains("authentication")
+-        || lower.contains("host key verification failed")
+-    {
++    if lower.contains("permission denied") || lower.contains("authentication") {
+         RemoteFailureKind::Authentication
+     } else {
+         RemoteFailureKind::Transport
+diff --git a/src-tauri/src/terminal/remote_runtime_tests.rs b/src-tauri/src/terminal/remote_runtime_tests.rs
+index 17fe43847..5f719a82d 100644
+--- a/src-tauri/src/terminal/remote_runtime_tests.rs
++++ b/src-tauri/src/terminal/remote_runtime_tests.rs
+@@ -414,6 +414,16 @@ async fn ssh_reconnect_safety_setup_classifies_structured_transport_and_authenti
+             serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Permission denied (publickey)"}),
+             RemoteFailureKind::Authentication,
+         ),
++        (
++            IpcErrorCode::IoError,
++            serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Host key verification failed."}),
++            RemoteFailureKind::HostKey,
++        ),
++        (
++            IpcErrorCode::HostKeyChanged,
++            serde_json::json!({"stage": "host_key", "exitCode": 255}),
++            RemoteFailureKind::HostKey,
++        ),
+         (
+             IpcErrorCode::IoError,
+             serde_json::json!({"stage": "execution", "exitCode": 255, "stderr": "Connection refused"}),
+diff --git a/ui/src/components/settings/AddMachineModal.test.tsx b/ui/src/components/settings/AddMachineModal.test.tsx
+index e1b52678d..eb160536f 100644
+--- a/ui/src/components/settings/AddMachineModal.test.tsx
++++ b/ui/src/components/settings/AddMachineModal.test.tsx
+@@ -177,6 +177,86 @@ describe("AddMachineModal - SSH connection and import", () => {
+     fireEvent.click(screen.getByRole("button", { name: "Back" }));
+     expect(screen.getByRole("radio", { name: "Import SSH Config" })).toHaveAttribute("aria-checked", "true");
+   });
++
++  async function submitSshForm() {
++    vi.mocked(invoke).mockClear();
++    render(<AddMachineModal isOpen={true} onClose={() => {}} onSuccess={() => {}} initialMethod="ssh" />);
++    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "dev" } });
++    fireEvent.change(screen.getByLabelText("Hostname"), { target: { value: "dev.example" } });
++    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Connect SSH Machine" })); });
++  }
++
++  const fingerprint = "SHA256:QC8NK7dHes+PsoxIbE/WpRKLdTd8DwAUUbcIg2HU4pg";
++
++  it("shows the fingerprint for an unknown host key and trusts it only after confirmation", async () => {
++    let trusted = false;
++    vi.mocked(invoke).mockImplementation(async (command: string, args?: Record<string, unknown>) => {
++      switch (command) {
++        case "cmd_ssh_read_system_config": return { path: "", exists: false, rawText: "", hosts: [] };
++        case "cmd_ssh_test_connection":
++          return trusted
++            ? { host: args?.host, reachable: true, checkedAt: 1 }
++            : { host: args?.host, reachable: false, checkedAt: 1, lastError: "Host key verification failed.",
++                diagnostic: { code: "HOST_KEY_UNKNOWN", message: "Host key verification failed.", details: { stage: "host_key" } } };
++        case "cmd_ssh_scan_host_key":
++          return { keys: [{ keyType: "ssh-ed25519", fingerprintSha256: fingerprint, line: "dev.example ssh-ed25519 AAAA" }] };
++        case "cmd_ssh_trust_host_key": trusted = true; return undefined;
++        case "cmd_ssh_update_host": return [args?.host];
++        default: return undefined;
++      }
++    });
++    await submitSshForm();
++
++    expect(screen.getByTestId("ssh-host-key-fingerprint")).toHaveTextContent(fingerprint);
++    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "cmd_ssh_trust_host_key")).toBe(false);
++    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "cmd_ssh_update_host")).toBe(false);
++
++    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Trust and Connect" })); });
++
++    const trustCall = vi.mocked(invoke).mock.calls.find(([command]) => command === "cmd_ssh_trust_host_key");
++    expect(trustCall?.[1]).toMatchObject({ fingerprintSha256: fingerprint, host: { hostname: "dev.example" } });
++    expect(await screen.findByText(/connected and verified/)).toBeInTheDocument();
++  });
++
++  it("explains a changed host key without offering to trust it", async () => {
++    vi.mocked(invoke).mockImplementation(async (command: string, args?: Record<string, unknown>) => {
++      switch (command) {
++        case "cmd_ssh_read_system_config": return { path: "", exists: false, rawText: "", hosts: [] };
++        case "cmd_ssh_test_connection":
++          return { host: args?.host, reachable: false, checkedAt: 1, lastError: "REMOTE HOST IDENTIFICATION HAS CHANGED",
++                   diagnostic: { code: "HOST_KEY_CHANGED", message: "changed", details: { stage: "host_key" } } };
++        default: return undefined;
++      }
++    });
++    await submitSshForm();
++
++    expect(screen.getByRole("alert")).toHaveTextContent(/does not match the trusted one/);
++    expect(screen.queryByTestId("ssh-host-key-confirm")).toBeNull();
++    const commands = vi.mocked(invoke).mock.calls.map(([command]) => command);
++    expect(commands).not.toContain("cmd_ssh_scan_host_key");
++    expect(commands).not.toContain("cmd_ssh_trust_host_key");
++  });
++
++  it("reports a rejected trust call as a changed key", async () => {
++    vi.mocked(invoke).mockImplementation(async (command: string, args?: Record<string, unknown>) => {
++      switch (command) {
++        case "cmd_ssh_read_system_config": return { path: "", exists: false, rawText: "", hosts: [] };
++        case "cmd_ssh_test_connection":
++          return { host: args?.host, reachable: false, checkedAt: 1,
++                   diagnostic: { code: "HOST_KEY_UNKNOWN", message: "unknown", details: { stage: "host_key" } } };
++        case "cmd_ssh_scan_host_key":
++          return { keys: [{ keyType: "ssh-ed25519", fingerprintSha256: fingerprint, line: "dev.example ssh-ed25519 AAAA" }] };
++        case "cmd_ssh_trust_host_key":
++          throw { code: "HOST_KEY_CHANGED", message: "different key", details: { stage: "host_key" } };
++        default: return undefined;
++      }
++    });
++    await submitSshForm();
++    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Trust and Connect" })); });
++
++    expect(screen.getByRole("alert")).toHaveTextContent(/does not match the trusted one/);
++    expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "cmd_ssh_update_host")).toBe(false);
++  });
+ });
+ 
+ describe("AddMachineModal - enrollment code step", () => {
+diff --git a/ui/src/components/settings/AddMachineModal.tsx b/ui/src/components/settings/AddMachineModal.tsx
+index 6e6855663..03a65cdd7 100644
+--- a/ui/src/components/settings/AddMachineModal.tsx
++++ b/ui/src/components/settings/AddMachineModal.tsx
+@@ -33,14 +33,17 @@ import {
+   importSshConfig,
+   installFerryxNode,
+   readSystemSshConfig,
++  scanSshHostKey,
+   setSshConfigPathOverride,
+   setSshPassword,
+   testSshConnection,
++  trustSshHostKey,
+   updateSshHost,
+   type SshAuthMethod,
+   type SshHost,
+   type SshNodeInstallReport,
+   type SshRemoteEnvironment,
++  type SshScannedHostKey,
+   type SystemSshConfig,
+ } from "../../lib/sshHosts";
+ import {
+@@ -116,6 +119,10 @@ export function getModalErrorMessage(error: PairedHostError | string): string {
+       return "Authorization rejected. Check machine permissions and retry.";
+     case "NATIVE_CONTEXT_REQUIRED":
+       return "Native host inventory is unavailable. Use the desktop app with a compatible local daemon.";
++    case "HOST_KEY_UNKNOWN":
++      return "This server's host key is not trusted yet. Compare its fingerprint with the one the server reports before trusting it.";
++    case "HOST_KEY_CHANGED":
++      return "The server's host key does not match the trusted one. The server may have been reinstalled, or the connection may be intercepted. Confirm the new key with the server's owner, remove the old entry with 'ssh-keygen -R <host>', then retry.";
+     case "PAIR_FAILED":
+     default:
+       if (typeof error === "object" && error.message && error.message !== code && error.message !== "PAIRED_HOST_UNAVAILABLE") {
+@@ -351,6 +358,8 @@ function AddMachineWizard({
+ 
+   const [sshForm, setSshForm] = useState<HostFormData>(DEFAULT_SSH_FORM);
+   const [sshPassword, setSshPasswordInput] = useState("");
++  // First contact with an unknown host key: the scanned keys wait for explicit confirmation.
++  const [hostKeyPrompt, setHostKeyPrompt] = useState<{ host: SshHost; keys: SshScannedHostKey[] } | null>(null);
+   const [showAdvancedSsh, setShowAdvancedSsh] = useState(false);
+ 
+   // Config Import state
+@@ -502,29 +511,66 @@ function AddMachineWizard({
+       if (candidateHost.authMethod === "password") {
+         await setSshPassword(candidateHost, sshPassword);
+       }
+-      const summary = await testSshConnection(candidateHost);
++      await verifyAndSaveSshHost(candidateHost);
++    } catch (err) {
+       if (!alive()) return;
++      reportError(err, "SSH connection test failed.");
++    } finally {
++      setBusy(false);
++    }
++  };
+ 
+-      if (!summary.reachable) {
+-        showError(summary.lastError || "SSH connection test failed. Check host, credentials, and network reachability.");
++  const verifyAndSaveSshHost = async (candidateHost: SshHost) => {
++    const summary = await testSshConnection(candidateHost);
++    if (!alive()) return;
++
++    if (!summary.reachable) {
++      const code = summary.diagnostic?.code;
++      if (code === "HOST_KEY_UNKNOWN") {
++        const scan = await scanSshHostKey(candidateHost);
++        if (!alive()) return;
++        if (scan.keys.length > 0) {
++          setHostKeyPrompt({ host: candidateHost, keys: scan.keys });
++          return;
++        }
++      }
++      if (code === "HOST_KEY_UNKNOWN" || code === "HOST_KEY_CHANGED") {
++        const structured: PairedHostError = { code, message: summary.diagnostic?.message ?? code, retryable: false };
++        showError(getModalErrorMessage(code), structured);
+         return;
+       }
++      showError(summary.lastError || "SSH connection test failed. Check host, credentials, and network reachability.");
++      return;
++    }
+ 
+-      await updateSshHost(candidateHost);
+-      if (!alive()) return;
++    await updateSshHost(candidateHost);
++    if (!alive()) return;
++
++    const target: MachineProjectTarget = { kind: "ssh", hostId: candidateHost.id };
++    setSshPasswordInput("");
++    setSuccessTarget({ target, name: candidateHost.label });
++    onSuccess({
++      kind: "ssh",
++      hostId: candidateHost.id,
++      name: candidateHost.label,
++      summary: { reachable: true, environment: summary.environment },
++    });
++  };
+ 
+-      const target: MachineProjectTarget = { kind: "ssh", hostId: candidateHost.id };
+-      setSshPasswordInput("");
+-      setSuccessTarget({ target, name: candidateHost.label });
+-      onSuccess({
+-        kind: "ssh",
+-        hostId: candidateHost.id,
+-        name: candidateHost.label,
+-        summary: { reachable: true, environment: summary.environment },
+-      });
++  const handleTrustHostKey = async () => {
++    if (busy || !hostKeyPrompt) return;
++    const { host, keys } = hostKeyPrompt;
++    setBusy(true);
++    clearError();
++    try {
++      await trustSshHostKey(host, keys[0].fingerprintSha256);
++      if (!alive()) return;
++      setHostKeyPrompt(null);
++      await verifyAndSaveSshHost(host);
+     } catch (err) {
+       if (!alive()) return;
+-      reportError(err, "SSH connection test failed.");
++      setHostKeyPrompt(null);
++      reportError(err, "Could not trust the SSH host key.");
+     } finally {
+       setBusy(false);
+     }
+@@ -806,7 +852,41 @@ function AddMachineWizard({
+           />
+         ) : null}
+ 
+-        {!showingResult && step === "details" && method === "ssh" ? (
++        {!showingResult && step === "details" && method === "ssh" && hostKeyPrompt ? (
++          <div className="space-y-3" data-testid="ssh-host-key-confirm">
++            <div className="flex items-start gap-2">
++              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
++              <div className="space-y-1">
++                <p className="text-[13px] font-medium text-foreground">Trust this host key?</p>
++                <p className="text-[12px] text-muted-foreground">
++                  {hostKeyPrompt.host.hostname} is not in your known_hosts yet. Compare the fingerprint below with
++                  the one the server reports (for example <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> on
++                  the server) before trusting it.
++                </p>
++              </div>
++            </div>
++            <ul className="space-y-1">
++              {hostKeyPrompt.keys.map(key => (
++                <li key={key.line} className="rounded-md border border-border bg-muted/40 p-2 text-[12px]">
++                  <span className="text-muted-foreground">{key.keyType}</span>{" "}
++                  <code data-testid="ssh-host-key-fingerprint" className="break-all font-mono">{key.fingerprintSha256}</code>
++                </li>
++              ))}
++            </ul>
++            <div className="flex items-center gap-2 border-t border-border pt-3">
++              <span className="flex-1" />
++              <Button type="button" variant="outline" size="sm" className="text-[12px]" disabled={busy}
++                onClick={() => setHostKeyPrompt(null)}>
++                Cancel
++              </Button>
++              <Button type="button" size="sm" className="text-[12px]" disabled={busy} onClick={() => void handleTrustHostKey()}>
++                {busy ? "Trusting & Connecting…" : "Trust and Connect"}
++              </Button>
++            </div>
++          </div>
++        ) : null}
++
++        {!showingResult && step === "details" && method === "ssh" && !hostKeyPrompt ? (
+           <form className="space-y-3" onSubmit={handleSshSubmit}>
+             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+               <div className="space-y-1">
+diff --git a/ui/src/lib/sshHosts.ts b/ui/src/lib/sshHosts.ts
+index cc0dabc51..605429beb 100644
+--- a/ui/src/lib/sshHosts.ts
++++ b/ui/src/lib/sshHosts.ts
+@@ -259,6 +259,22 @@ export async function testSshConnection(host: SshHost): Promise<SshTargetSummary
+   return invoke<SshTargetSummary>("cmd_ssh_test_connection", { host: cleaned });
+ }
+ 
++export interface SshScannedHostKey {
++  keyType: string;
++  fingerprintSha256: string;
++  line: string;
++}
++
++/** Reads the host keys the server presents, without trusting any of them. */
++export async function scanSshHostKey(host: SshHost): Promise<{ keys: SshScannedHostKey[] }> {
++  return invoke<{ keys: SshScannedHostKey[] }>("cmd_ssh_scan_host_key", { host: cleanHostForIpc(host) });
++}
++
++/** Pins the host key; the backend refuses when the server no longer presents this fingerprint. */
++export async function trustSshHostKey(host: SshHost, fingerprintSha256: string): Promise<void> {
++  return invoke<void>("cmd_ssh_trust_host_key", { host: cleanHostForIpc(host), fingerprintSha256 });
++}
++
+ export async function prepareSshIntegration(host: SshHost): Promise<void> {
+   return invoke<void>("cmd_ssh_prepare_integration", { host: cleanHostForIpc(host) });
+ }
+diff --git a/ui/src/lib/sshRecovery.ts b/ui/src/lib/sshRecovery.ts
+index 366e7fa88..a6588b34d 100644
+--- a/ui/src/lib/sshRecovery.ts
++++ b/ui/src/lib/sshRecovery.ts
+@@ -84,7 +84,7 @@ export function startSshRecovery(options: {
+     } catch (error) {
+       if (isStructuredIpcError(error)) {
+         const detailsKind = typeof error.details?.kind === "string" ? error.details.kind : "";
+-        if (detailsKind === "authentication" || error.code === "AUTHENTICATION_FAILED") {
++        if (detailsKind === "authentication" || detailsKind === "hostKey" || error.code === "AUTHENTICATION_FAILED") {
+           return { ok: false, blockedReason: "auth_revoked" };
+         }
+         if (detailsKind === "protocol" || error.code === "PROTOCOL_ERROR") {
+@@ -172,7 +172,7 @@ export function startSshRecovery(options: {
+           // Check if prior observation is already blocked; never dial on blocked failure
+           const failureKindBefore = observationBefore?.failure?.kind;
+           if (observationBefore?.state === "disconnected") {
+-            if (failureKindBefore === "authentication") {
++            if (failureKindBefore === "authentication" || failureKindBefore === "hostKey") {
+               return { kind: "blocked", reason: "auth_revoked", error: observationBefore.failure };
+             }
+             if (failureKindBefore === "protocol") {
+@@ -223,7 +223,7 @@ export function startSshRecovery(options: {
+ 
+           if (result.details?.failure) {
+             const fKind = result.details.failure.kind;
+-            if (fKind === "authentication") {
++            if (fKind === "authentication" || fKind === "hostKey") {
+               setLatest(backendId, probedStatus);
+               apply(probedStatus);
+               return { kind: "blocked", reason: "auth_revoked", error: result.details.failure };
+@@ -294,7 +294,7 @@ export function startSshRecovery(options: {
+ 
+           if (result.details?.failure) {
+             const fKind = result.details.failure.kind;
+-            if (fKind === "authentication") {
++            if (fKind === "authentication" || fKind === "hostKey") {
+               return { kind: "blocked", reason: "auth_revoked", error: result.details.failure };
+             }
+             if (fKind === "protocol") {
+diff --git a/ui/src/lib/tauri.ts b/ui/src/lib/tauri.ts
+index 6cf04069f..a30bbf534 100644
+--- a/ui/src/lib/tauri.ts
++++ b/ui/src/lib/tauri.ts
+@@ -1573,6 +1573,7 @@ export type DagWatchFailureCode =
+   | "helper_missing"
+   | "capability_missing"
+   | "authentication"
++  | "host_key"
+   | "unavailable";
+ 
+ /** Terminal DAG-watch outcome pushed by the backend when retrying stopped for good. */
+diff --git a/ui/src/lib/types.ts b/ui/src/lib/types.ts
+index 386d52fd4..38872787b 100644
+--- a/ui/src/lib/types.ts
++++ b/ui/src/lib/types.ts
+@@ -252,7 +252,7 @@ export type SessionRecoveryState =
+   | { phase: "blocked"; reason: string }
+   | { phase: "exited"; reason: string | null };
+ export type RemoteFailure = {
+-  kind: "network" | "transport" | "authentication" | "missing" | "expired" | "protocol" | "busy" | "staleGeneration" | "disconnected";
++  kind: "network" | "transport" | "authentication" | "hostKey" | "missing" | "expired" | "protocol" | "busy" | "staleGeneration" | "disconnected";
+   message: string;
+ };
+ export type RemoteReplayGap = { requestedAfterCursor: string; availableFromCursor: string };

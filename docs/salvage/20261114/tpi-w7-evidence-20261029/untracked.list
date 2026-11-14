@@ -1,0 +1,11 @@
+diagnostics/metal-observer-proof/LICENSE-APACHE.wgpu-hal
+diagnostics/metal-observer-proof/LICENSE-MIT.wgpu-hal
+diagnostics/metal-observer-proof/src/original_observer.rs
+docs/EVIDENCE.md
+src-tauri/tests/fixtures/paired-daemon/contracts.json
+src-tauri/tests/fixtures/paired-daemon/descriptor.json
+src-tauri/tests/fixtures/paired-daemon/identities.json
+src-tauri/tests/fixtures/paired-daemon/invalid.json
+src-tauri/tests/fixtures/paired-daemon/lifecycle.json
+src-tauri/tests/fixtures/paired-daemon/parity-invalid.json
+src-tauri/tests/fixtures/paired-daemon/parity-valid.json

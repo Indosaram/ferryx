@@ -1,0 +1,1324 @@
+diff --git a/src-tauri/src/daemon/launchd.rs b/src-tauri/src/daemon/launchd.rs
+index c0e3b73c7..6291c51a4 100644
+--- a/src-tauri/src/daemon/launchd.rs
++++ b/src-tauri/src/daemon/launchd.rs
+@@ -573,16 +573,19 @@ pub(crate) mod generation {
+         Ok(true)
+     }
+ 
+-    /// Every generation except `newest_label` loses login autostart by plist rewrite; its plist is
+-    /// deleted only when launchd reports no process for it (not registered, or registered and
+-    /// idle). Only `launchctl print` runs: an older generation is never booted out, unloaded or
+-    /// kickstarted. Returns whether any file changed.
++    /// Every generation except `newest_label` loses login autostart by plist rewrite. The plist of
++    /// a generation in `deletable` (`runtime_stage::superseded_job_keys`: never the newest two
++    /// generations or one a process runs from) is then deleted, so it no longer keeps its runtime
++    /// from garbage collection, but only when launchd reports no process for it (not registered,
++    /// or registered and idle). Only `launchctl print` runs: an older generation is never booted
++    /// out, unloaded or kickstarted. Returns whether any file changed.
+     pub(crate) fn retire_older_generations(
+         launchctl: &dyn Launchctl,
+         uid: u32,
+         dir: &Path,
+         base: &str,
+         newest_label: &str,
++        deletable: &[String],
+     ) -> Result<bool, String> {
+         let mut changed = false;
+         for (label, path) in generation_plists(dir, base)? {
+@@ -590,6 +593,9 @@ pub(crate) mod generation {
+                 continue;
+             }
+             changed |= disable_login_autostart(&path)?;
++            if !deletable.contains(&label) {
++                continue;
++            }
+             match print_job(launchctl, uid, &label) {
+                 JobState::NotRegistered | JobState::RegisteredIdle => match fs::remove_file(&path) {
+                     Ok(()) => changed = true,
+@@ -1030,7 +1036,9 @@ mod tests {
+             let old_running = generation_label(BASE, "2026.1001.1-11111111");
+             let old_idle = generation_label(BASE, "2026.1005.1-22222222");
+             let old_unverifiable = generation_label(BASE, "2026.1007.1-33333333");
+-            for label in [&old_running, &old_idle, &old_unverifiable] {
++            // The next newest generation is not deletable (`runtime_stage::superseded_job_keys`).
++            let next_newest = generation_label(BASE, "2026.1009.1-44444444");
++            for label in [&old_running, &old_idle, &old_unverifiable, &next_newest] {
+                 let older = GenerationJob {
+                     label: label.clone(),
+                     executable: dir.path().join(format!("daemon-runtime/{label}/ferryx")),
+@@ -1048,25 +1056,86 @@ mod tests {
+             let launchctl = FakeLaunchctl::default()
+                 .running(&old_running, 100)
+                 .idle(&old_idle)
+-                .with_print(&old_unverifiable, false, "", "Operation not permitted");
+-            assert!(retire_older_generations(&launchctl, UID, dir.path(), BASE, &newest.label).unwrap());
++                .with_print(&old_unverifiable, false, "", "Operation not permitted")
++                .idle(&next_newest);
++            let deletable = vec![
++                old_running.clone(),
++                old_idle.clone(),
++                old_unverifiable.clone(),
++            ];
++            assert!(retire_older_generations(
++                &launchctl,
++                UID,
++                dir.path(),
++                BASE,
++                &newest.label,
++                &deletable
++            )
++            .unwrap());
+ 
+-            assert!(launchctl.mutations().is_empty(), "only launchctl print may run: {:?}", launchctl.calls());
++            assert!(
++                launchctl.mutations().is_empty(),
++                "only launchctl print may run: {:?}",
++                launchctl.calls()
++            );
+             assert_never_stops(&launchctl.calls());
+-            let running_plist = fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap();
+-            assert!(running_plist.contains("<key>RunAtLoad</key>\n    <false/>"), "a running older job loses login autostart only");
+-            assert!(!running_plist.contains("SuccessfulExit"), "KeepAlive SuccessfulExit implies RunAtLoad: {running_plist}");
++            let running_plist =
++                fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap();
++            assert!(
++                running_plist.contains("<key>RunAtLoad</key>\n    <false/>"),
++                "a running older job loses login autostart only"
++            );
++            assert!(
++                !running_plist.contains("SuccessfulExit"),
++                "KeepAlive SuccessfulExit implies RunAtLoad: {running_plist}"
++            );
+             assert!(running_plist.contains("<key>KeepAlive</key>\n    <false/>"));
+-            let unverifiable_plist = fs::read_to_string(dir.path().join(format!("{old_unverifiable}.plist"))).unwrap();
++            let unverifiable_plist =
++                fs::read_to_string(dir.path().join(format!("{old_unverifiable}.plist"))).unwrap();
+             assert!(unverifiable_plist.contains("<key>RunAtLoad</key>\n    <false/>"));
+-            assert!(!unverifiable_plist.contains("SuccessfulExit"), "{unverifiable_plist}");
+-            assert!(!dir.path().join(format!("{old_idle}.plist")).exists(), "an idle older job's plist is deleted");
+-            assert_eq!(fs::read_to_string(&newest.plist_path).unwrap(), newest.render(true), "the newest generation keeps RunAtLoad and KeepAlive");
++            assert!(
++                !unverifiable_plist.contains("SuccessfulExit"),
++                "{unverifiable_plist}"
++            );
++            assert!(
++                !dir.path().join(format!("{old_idle}.plist")).exists(),
++                "an idle older job's plist is deleted"
++            );
++            let next_plist =
++                fs::read_to_string(dir.path().join(format!("{next_newest}.plist"))).unwrap();
++            assert!(
++                next_plist.contains("<key>RunAtLoad</key>\n    <false/>"),
++                "a kept older job still loses login autostart"
++            );
++            assert!(
++                !launchctl
++                    .calls()
++                    .iter()
++                    .any(|call| call.iter().any(|arg| arg.ends_with(&next_newest))),
++                "a generation that is not deletable is never even queried: {:?}",
++                launchctl.calls()
++            );
++            assert_eq!(
++                fs::read_to_string(&newest.plist_path).unwrap(),
++                newest.render(true),
++                "the newest generation keeps RunAtLoad and KeepAlive"
++            );
+             assert_eq!(fs::read_to_string(&legacy).unwrap(), "legacy");
+ 
+             // A second run changes nothing.
+-            assert!(!retire_older_generations(&launchctl, UID, dir.path(), BASE, &newest.label).unwrap());
+-            assert_eq!(fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap(), running_plist);
++            assert!(!retire_older_generations(
++                &launchctl,
++                UID,
++                dir.path(),
++                BASE,
++                &newest.label,
++                &deletable
++            )
++            .unwrap());
++            assert_eq!(
++                fs::read_to_string(dir.path().join(format!("{old_running}.plist"))).unwrap(),
++                running_plist
++            );
+         }
+ 
+         /// Backs `supervisor`'s macOS `remove_autostart` (opt-out) as well as retirement: a disabled
+diff --git a/src-tauri/src/daemon/runtime_stage.rs b/src-tauri/src/daemon/runtime_stage.rs
+index 7a8193516..6fa40ed5a 100644
+--- a/src-tauri/src/daemon/runtime_stage.rs
++++ b/src-tauri/src/daemon/runtime_stage.rs
+@@ -12,6 +12,10 @@
+ //!   must pass `codesign --verify --strict`; nothing here builds or edits a bundle.
+ //! - Linux: `<root>/<key>/ferryx` (source: the AppImage path when running from one).
+ //! - Windows: `<root>\\<key>\\ferryx.exe`.
++//!
++//! Beside the executable (outside any bundle) every generation also gets copies of the remote
++//! helper assets (`<key>/helpers`) and the web UI (`<key>/ui/dist`), so a daemon running from its
++//! staged copy needs nothing from the app install.
+ 
+ use sha2::{Digest, Sha256};
+ use std::ffi::OsStr;
+@@ -34,6 +38,10 @@ pub const STAGED_AT_FILE: &str = ".staged-at";
+ /// copy of the app's remote helper assets (`manifest.json` plus one binary per target): the staged
+ /// daemon installs SSH helpers from here, since it no longer runs from the app install.
+ pub const HELPER_ASSETS_DIR: &str = "helpers";
++/// Dir inside every generation (outside any bundle) holding a copy of the app's built web UI, so
++/// the remote server of a staged daemon serves the real client instead of the placeholder page.
++/// Same relative path as the app bundle resource (`tauri.conf.json` `bundle.resources`).
++pub const UI_DIST_DIR: &str = "ui/dist";
+ /// Generations that garbage collection always keeps, newest first.
+ pub const KEEP_NEWEST: usize = 2;
+ const TMP_MARKER: &str = ".tmp-";
+@@ -149,15 +157,22 @@ pub fn platform_source(source_exe: &Path) -> Result<StageSource, RuntimeStageErr
+ /// Stages the runtime for `source_exe` under `root` for this build's version. Blocking: async
+ /// callers go through [`stage_runtime_blocking`].
+ pub fn stage_runtime(root: &Path, source_exe: &Path) -> Result<StagedRuntime, RuntimeStageError> {
+-    let staged = stage_from(root, &platform_source(source_exe)?, env!("CARGO_PKG_VERSION"))?;
++    let staged = stage_from(
++        root,
++        &platform_source(source_exe)?,
++        env!("CARGO_PKG_VERSION"),
++    )?;
+     let generation = root.join(&staged.key);
+     // The running process is the app being staged (or a staged generation of it); an AppImage
+     // `source_exe` sits outside its mounted image, so look next to the live executable first.
+-    let assets = std::env::current_exe()
+-        .ok()
+-        .and_then(|exe| helper_assets_dir_near(&exe))
+-        .or_else(|| helper_assets_dir_near(source_exe));
+-    match assets {
++    let running_exe = std::env::current_exe().ok();
++    let find = |near: fn(&Path) -> Option<PathBuf>| {
++        running_exe
++            .as_deref()
++            .and_then(near)
++            .or_else(|| near(source_exe))
++    };
++    match find(helper_assets_dir_near) {
+         Some(assets) => {
+             if let Err(error) = ensure_helper_assets(&generation, &assets) {
+                 tracing::warn!(%error, generation = %staged.key, "Could not stage the remote helper assets; SSH helper installs from this daemon will fail");
+@@ -167,6 +182,16 @@ pub fn stage_runtime(root: &Path, source_exe: &Path) -> Result<StagedRuntime, Ru
+             tracing::warn!(source = %source_exe.display(), "No remote helper assets next to the daemon source; SSH helper installs from this daemon will fail");
+         }
+     }
++    match find(ui_dist_dir_near) {
++        Some(dist) => {
++            if let Err(error) = ensure_ui_dist(&generation, &dist) {
++                tracing::warn!(%error, generation = %staged.key, "Could not stage the web UI; this daemon's remote server will show its placeholder page");
++            }
++        }
++        None => {
++            tracing::warn!(source = %source_exe.display(), "No web UI next to the daemon source; this daemon's remote server will show its placeholder page");
++        }
++    }
+     Ok(staged)
+ }
+ 
+@@ -187,26 +212,81 @@ pub fn helper_assets_dir_near(executable: &Path) -> Option<PathBuf> {
+     .find(|dir| dir.join("manifest.json").is_file())
+ }
+ 
++/// Where the built web UI may sit relative to `executable`, in lookup order: an app install
++/// (macOS `Contents/Resources/ui/dist`, Windows `<install dir>/ui/dist` or `resources/ui/dist`,
++/// Linux deb or AppImage `usr/lib/Ferryx/ui/dist`) or a staged generation (`<key>/ui/dist`: next
++/// to a Linux/Windows staged executable, beside the sealed bundle on macOS).
++pub fn ui_dist_candidates(executable: &Path) -> Vec<PathBuf> {
++    let Some(exe_dir) = executable.parent() else {
++        return Vec::new();
++    };
++    let mut candidates = vec![
++        exe_dir.join("../Resources").join(UI_DIST_DIR),
++        exe_dir.join(UI_DIST_DIR),
++        exe_dir.join("resources").join(UI_DIST_DIR),
++        exe_dir.join("../lib/Ferryx").join(UI_DIST_DIR),
++        exe_dir.join("../lib").join(UI_DIST_DIR),
++    ];
++    // macOS staged generation: `<key>/Ferryx Daemon.app/Contents/MacOS/ferryx` -> `<key>/ui/dist`.
++    let generation = exe_dir
++        .parent()
++        .and_then(Path::parent)
++        .filter(|bundle| bundle.file_name() == Some(OsStr::new(HELPER_BUNDLE_NAME)))
++        .and_then(Path::parent);
++    if let Some(generation) = generation {
++        candidates.push(generation.join(UI_DIST_DIR));
++    }
++    candidates
++}
++
++/// The first of [`ui_dist_candidates`] that holds an `index.html`.
++pub fn ui_dist_dir_near(executable: &Path) -> Option<PathBuf> {
++    ui_dist_candidates(executable)
++        .into_iter()
++        .find(|dir| dir.join("index.html").is_file())
++}
++
+ /// Copies `assets` into `<generation>/helpers` unless it is already there. Also backfills
+ /// generations staged before helper assets were staged. The copy lands complete (temp dir, then
+ /// rename) and an existing assets dir is never overwritten.
+ pub fn ensure_helper_assets(generation: &Path, assets: &Path) -> Result<(), RuntimeStageError> {
+-    let destination = generation.join(HELPER_ASSETS_DIR);
+-    if destination.join("manifest.json").is_file() {
++    ensure_tree_copy(&generation.join(HELPER_ASSETS_DIR), "manifest.json", assets)
++}
++
++/// Copies the built web UI `dist` into `<generation>/ui/dist` unless it is already there, with the
++/// guarantees of [`ensure_helper_assets`] (it also backfills older generations).
++pub fn ensure_ui_dist(generation: &Path, dist: &Path) -> Result<(), RuntimeStageError> {
++    ensure_tree_copy(&generation.join(UI_DIST_DIR), "index.html", dist)
++}
++
++/// Copies `source` to `destination` unless `destination/<marker>` is already a file: a temp dir
++/// next to `destination`, fsync, then rename, so the copy lands complete and is never overwritten.
++fn ensure_tree_copy(
++    destination: &Path,
++    marker: &str,
++    source: &Path,
++) -> Result<(), RuntimeStageError> {
++    if destination.join(marker).is_file() {
+         return Ok(());
+     }
++    let parent = destination.parent().unwrap_or(Path::new(""));
++    let name = destination
++        .file_name()
++        .unwrap_or_default()
++        .to_string_lossy();
++    fs::create_dir_all(parent).map_err(io_error(format!("create {}", parent.display())))?;
+     static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+-    let tmp = generation.join(format!(
+-        "{HELPER_ASSETS_DIR}{TMP_MARKER}{}-{}",
++    let tmp = parent.join(format!(
++        "{name}{TMP_MARKER}{}-{}",
+         std::process::id(),
+         NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+     ));
+-    let result = copy_tree(assets, &tmp)
++    let result = copy_tree(source, &tmp)
+         .and_then(|()| sync_dir(&tmp).map_err(io_error(format!("sync {}", tmp.display()))))
+-        .and_then(|()| match fs::rename(&tmp, &destination) {
+-            Ok(()) => sync_dir(generation).map_err(io_error(format!("sync {}", generation.display()))),
++        .and_then(|()| match fs::rename(&tmp, destination) {
++            Ok(()) => sync_dir(parent).map_err(io_error(format!("sync {}", parent.display()))),
+             // Another stager won the rename.
+-            Err(_) if destination.join("manifest.json").is_file() => Ok(()),
++            Err(_) if destination.join(marker).is_file() => Ok(()),
+             Err(error) => Err(io_error(format!("rename {} to {}", tmp.display(), destination.display()))(error)),
+         });
+     if tmp.exists() {
+@@ -545,6 +625,49 @@ pub fn collect_garbage(root: &Path, usage: &dyn RuntimeUsage) -> Result<Vec<Stri
+     Ok(removed)
+ }
+ 
++/// Generations among `job_keys` (generations that still have a registered OS job) whose job a
++/// supervisor may delete once it lost login autostart, so a job naming an old runtime no longer
++/// blocks [`collect_garbage`]. Kept: the [`KEEP_NEWEST`] newest generations by staged-at under
++/// `root` (a job whose generation dir is gone counts as oldest), `current` even when it is older
++/// (an older app registering never costs a newer generation its job), and every generation a
++/// running process executes from. When the process table cannot be read nothing is returned: a
++/// job whose generation may be live stays.
++pub fn superseded_job_keys(
++    root: &Path,
++    job_keys: &[String],
++    current: &str,
++    usage: &dyn RuntimeUsage,
++) -> Vec<String> {
++    let mut newest_first: Vec<&String> = job_keys.iter().collect();
++    newest_first.sort_by_key(|key| std::cmp::Reverse(staged_at(&root.join(key))));
++    let older: Vec<&String> = newest_first
++        .into_iter()
++        .skip(KEEP_NEWEST)
++        .filter(|key| key.as_str() != current)
++        .collect();
++    if older.is_empty() {
++        return Vec::new();
++    }
++    let running: Vec<PathBuf> = match usage.running_executables() {
++        Ok(running) => running.iter().map(|path| normalized(path)).collect(),
++        Err(error) => {
++            tracing::warn!(%error, "Cannot list running processes; keeping every daemon generation job");
++            return Vec::new();
++        }
++    };
++    // The root, not the generation dir, is resolved: a removed generation dir has no canonical form.
++    let root = normalized(root);
++    older
++        .into_iter()
++        .filter(|key| {
++            // Same comparison form as `running`: on Windows the key's case is folded too.
++            let dir = comparison_form(&root.join(key), cfg!(windows));
++            !running.iter().any(|path| path.starts_with(&dir))
++        })
++        .cloned()
++        .collect()
++}
++
+ fn staged_at(dir: &Path) -> u128 {
+     fs::read_to_string(dir.join(STAGED_AT_FILE))
+         .ok()
+@@ -556,16 +679,17 @@ fn staged_at(dir: &Path) -> u128 {
+ /// 8.3 short names on Windows) and, on Windows, drops the verbatim prefix and case.
+ fn normalized(path: &Path) -> PathBuf {
+     let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+-    #[cfg(windows)]
+-    {
+-        let text = resolved.to_string_lossy();
+-        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+-        PathBuf::from(text.to_lowercase())
+-    }
+-    #[cfg(not(windows))]
+-    {
+-        resolved
++    comparison_form(&resolved, cfg!(windows))
++}
++
++/// The case- and prefix-insensitive form Windows paths are compared in (`windows`), else `path`.
++fn comparison_form(path: &Path, windows: bool) -> PathBuf {
++    if !windows {
++        return path.to_path_buf();
+     }
++    let text = path.to_string_lossy();
++    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
++    PathBuf::from(text.to_lowercase())
+ }
+ 
+ #[cfg(target_os = "macos")]
+diff --git a/src-tauri/src/daemon/runtime_stage_tests.rs b/src-tauri/src/daemon/runtime_stage_tests.rs
+index b9a7d9582..4147a80c7 100644
+--- a/src-tauri/src/daemon/runtime_stage_tests.rs
++++ b/src-tauri/src/daemon/runtime_stage_tests.rs
+@@ -226,6 +226,146 @@ fn gc_removes_nothing_when_the_process_table_is_unreadable() {
+     assert_eq!(dir_names(root).len(), 3);
+ }
+ 
++fn keys(names: &[&str]) -> Vec<String> {
++    names.iter().map(|name| name.to_string()).collect()
++}
++
++#[test]
++fn superseded_jobs_are_all_but_the_newest_two_and_their_runtimes_are_then_collected() {
++    let temp = tempfile::tempdir().unwrap();
++    let root = temp.path();
++    let generations: Vec<PathBuf> = (1..=4)
++        .map(|index| fake_generation(root, &format!("1.0.0-0000000{index}"), index))
++        .collect();
++    // Every generation still has a job, plus one whose runtime was already removed.
++    let jobs = keys(&[
++        "1.0.0-00000001",
++        "1.0.0-00000002",
++        "1.0.0-00000003",
++        "1.0.0-00000004",
++        "0.9.0-0000000f",
++    ]);
++    let usage = FakeUsage::new(Some(Vec::new()), Vec::new());
++
++    let mut superseded = superseded_job_keys(root, &jobs, "1.0.0-00000004", &usage);
++
++    superseded.sort();
++    assert_eq!(
++        superseded,
++        keys(&["0.9.0-0000000f", "1.0.0-00000001", "1.0.0-00000002"])
++    );
++    // While every job is registered nothing old can be collected; once the superseded jobs are
++    // deleted, their runtimes go and two generations with two jobs remain.
++    let all_jobs: Vec<PathBuf> = generations
++        .iter()
++        .map(|dir| dir.join(DAEMON_FILE_NAME))
++        .collect();
++    assert!(
++        collect_garbage(root, &FakeUsage::new(Some(Vec::new()), all_jobs.clone()))
++            .unwrap()
++            .is_empty()
++    );
++    let remaining_jobs = all_jobs[2..].to_vec();
++    let mut removed =
++        collect_garbage(root, &FakeUsage::new(Some(Vec::new()), remaining_jobs)).unwrap();
++    removed.sort();
++    assert_eq!(removed, keys(&["1.0.0-00000001", "1.0.0-00000002"]));
++    assert_eq!(dir_names(root), keys(&["1.0.0-00000003", "1.0.0-00000004"]));
++}
++
++#[test]
++fn a_job_whose_generation_has_a_live_process_is_never_superseded() {
++    let temp = tempfile::tempdir().unwrap();
++    let root = temp.path();
++    let live = fake_generation(root, "1.0.0-00000001", 1);
++    fake_generation(root, "1.0.0-00000002", 2);
++    fake_generation(root, "1.0.0-00000003", 3);
++    fake_generation(root, "1.0.0-00000004", 4);
++    let jobs = keys(&[
++        "1.0.0-00000001",
++        "1.0.0-00000002",
++        "1.0.0-00000003",
++        "1.0.0-00000004",
++    ]);
++
++    let usage = FakeUsage::new(Some(vec![live.join(DAEMON_FILE_NAME)]), Vec::new());
++    assert_eq!(
++        superseded_job_keys(root, &jobs, "1.0.0-00000004", &usage),
++        keys(&["1.0.0-00000002"])
++    );
++
++    // `current` is kept even when it is not the newest staged generation, besides the newest two.
++    let usage = FakeUsage::new(Some(Vec::new()), Vec::new());
++    assert_eq!(
++        superseded_job_keys(root, &jobs, "1.0.0-00000001", &usage),
++        keys(&["1.0.0-00000002"])
++    );
++
++    // An unreadable process table supersedes nothing; with nothing to supersede it is not read.
++    let unreadable = FakeUsage::new(None, Vec::new());
++    assert!(superseded_job_keys(root, &jobs, "1.0.0-00000004", &unreadable).is_empty());
++    assert_eq!(unreadable.running_calls.get(), 1);
++    let unread = FakeUsage::new(None, Vec::new());
++    assert!(superseded_job_keys(root, &jobs[2..], "1.0.0-00000004", &unread).is_empty());
++    assert_eq!(unread.running_calls.get(), 0);
++}
++
++#[test]
++fn an_older_generation_registering_keeps_both_newer_jobs() {
++    let temp = tempfile::tempdir().unwrap();
++    let root = temp.path();
++    fake_generation(root, "1.0.0-00000002", 2);
++    fake_generation(root, "1.0.0-00000003", 3);
++    // An older app (staged before both) registers after the two newer generations exist.
++    fake_generation(root, "1.0.0-00000001", 1);
++    let jobs = keys(&["1.0.0-00000002", "1.0.0-00000003", "1.0.0-00000001"]);
++    let usage = FakeUsage::new(Some(Vec::new()), Vec::new());
++
++    assert!(superseded_job_keys(root, &jobs, "1.0.0-00000001", &usage).is_empty());
++
++    // Staged-at is compared as a number, not as text ("10" is newer than "9").
++    fake_generation(root, "1.0.0-0000000a", 10);
++    fake_generation(root, "1.0.0-00000009", 9);
++    let jobs = keys(&[
++        "1.0.0-00000001",
++        "1.0.0-00000002",
++        "1.0.0-00000003",
++        "1.0.0-00000009",
++        "1.0.0-0000000a",
++    ]);
++    let mut superseded = superseded_job_keys(root, &jobs, "1.0.0-00000001", &usage);
++    superseded.sort();
++    assert_eq!(superseded, keys(&["1.0.0-00000002", "1.0.0-00000003"]));
++}
++
++#[test]
++fn windows_generation_paths_are_compared_without_case_or_verbatim_prefix() {
++    let running = comparison_form(
++        Path::new(r"\\?\C:\Users\Me\AppData\Ferryx\daemon-runtime\2026.1027.5-ABCDEF01\ferryx.exe"),
++        true,
++    );
++    assert_eq!(
++        running,
++        PathBuf::from(r"c:\users\me\appdata\ferryx\daemon-runtime\2026.1027.5-abcdef01\ferryx.exe")
++    );
++    // A generation key with an uppercase version tag, joined onto the already folded root, is
++    // folded the same way, so a live process inside it is matched.
++    let root = comparison_form(
++        Path::new(r"\\?\C:\Users\Me\AppData\Ferryx\daemon-runtime"),
++        true,
++    );
++    let dir = comparison_form(
++        Path::new(&format!(r"{}\2026.1027.5-ABCDEF01", root.display())),
++        true,
++    );
++    assert!(running
++        .to_string_lossy()
++        .starts_with(dir.to_string_lossy().as_ref()));
++    // Elsewhere paths are compared as they are.
++    let unix = Path::new("/home/me/.local/share/ferryx/daemon-runtime/2026.1027.5-ABCDEF01");
++    assert_eq!(comparison_form(unix, false), unix);
++}
++
+ /// Child mode for [`gc_leaves_a_generation_with_a_running_process_intact`]: blocks until its stdin
+ /// closes, so the parent decides exactly when it exits. A plain run returns at once.
+ #[test]
+@@ -362,6 +502,49 @@ fn staged_helper_binaries_stay_executable() {
+     assert_eq!(mode & 0o777, 0o755);
+ }
+ 
++#[test]
++fn the_web_ui_is_staged_into_a_generation_and_resolved_by_its_daemon() {
++    let temp = tempfile::tempdir().unwrap();
++    let gui = temp.path().join("usr/bin/ferryx");
++    write_exe(&gui, b"gui");
++    let dist = temp.path().join("usr/lib/Ferryx/ui/dist");
++    write_exe(&dist.join("index.html"), b"<div id=\"root\"></div>");
++    write_exe(&dist.join("assets/index.js"), b"app");
++    assert_eq!(
++        fs::canonicalize(ui_dist_dir_near(&gui).unwrap()).unwrap(),
++        fs::canonicalize(&dist).unwrap()
++    );
++    let generation = fake_generation(&temp.path().join("runtime"), "1.0.0-00000001", 1);
++
++    ensure_ui_dist(&generation, &dist).unwrap();
++
++    let staged = generation.join(UI_DIST_DIR);
++    assert_eq!(fs::read(staged.join("assets/index.js")).unwrap(), b"app");
++    let mut names = dir_names(&generation.join("ui"));
++    names.retain(|name| name.contains(TMP_MARKER));
++    assert!(names.is_empty(), "leftover temp dirs: {names:?}");
++    // Both staged layouts resolve the generation's own copy.
++    assert_eq!(
++        ui_dist_dir_near(&generation.join(DAEMON_FILE_NAME)),
++        Some(staged.clone())
++    );
++    let bundled = generation
++        .join(HELPER_BUNDLE_NAME)
++        .join("Contents/MacOS")
++        .join(HELPER_EXECUTABLE);
++    write_exe(&bundled, b"helper exe");
++    assert_eq!(
++        fs::canonicalize(ui_dist_dir_near(&bundled).unwrap()).unwrap(),
++        fs::canonicalize(&staged).unwrap()
++    );
++    // A later app's UI never replaces a staged copy.
++    write_exe(&dist.join("assets/index.js"), b"other build");
++    ensure_ui_dist(&generation, &dist).unwrap();
++    assert_eq!(fs::read(staged.join("assets/index.js")).unwrap(), b"app");
++    write_exe(&temp.path().join("bare/ferryx"), b"exe");
++    assert_eq!(ui_dist_dir_near(&temp.path().join("bare/ferryx")), None);
++}
++
+ #[test]
+ fn a_missing_assets_source_leaves_no_partial_copy() {
+     let temp = tempfile::tempdir().unwrap();
+diff --git a/src-tauri/src/daemon/supervisor.rs b/src-tauri/src/daemon/supervisor.rs
+index 242118928..4b6a806ec 100644
+--- a/src-tauri/src/daemon/supervisor.rs
++++ b/src-tauri/src/daemon/supervisor.rs
+@@ -473,7 +473,8 @@ mod backend {
+     }
+ 
+     /// The plist half of login registration: `job` gets `RunAtLoad` true, every other generation
+-    /// in the agents dir loses its load-time launch. No runtime garbage collection.
++    /// in the agents dir loses its load-time launch, and the idle plists of superseded generations
++    /// are deleted ([`superseded_labels`]). No runtime garbage collection.
+     pub(super) fn login_registration_with(
+         launchctl: &dyn generation::Launchctl,
+         uid: u32,
+@@ -483,10 +484,38 @@ mod backend {
+         let dir = agents_dir(env)?;
+         let base = label_base(env);
+         let mut changed = generation::register_newest_for_login(job)?;
+-        changed |= generation::retire_older_generations(launchctl, uid, &dir, &base, &job.label)?;
++        let deletable = superseded_labels(&dir, &base, &job.label);
++        changed |= generation::retire_older_generations(
++            launchctl, uid, &dir, &base, &job.label, &deletable,
++        )?;
+         Ok((changed, dir, base))
+     }
+ 
++    /// Labels of the generations whose plist may be deleted (`runtime_stage::superseded_job_keys`):
++    /// never `newest_label`, the next newest generation, or one a process runs from. Nothing when
++    /// the runtime root or the agents dir cannot be read.
++    fn superseded_labels(dir: &Path, base: &str, newest_label: &str) -> Vec<String> {
++        let prefix = format!("{base}.");
++        let (Some(root), Some(current), Ok(plists)) = (
++            crate::daemon::server::daemon_runtime_root(),
++            newest_label.strip_prefix(&prefix),
++            generation::generation_plists(dir, base),
++        ) else {
++            return Vec::new();
++        };
++        let keys: Vec<String> = plists
++            .iter()
++            .filter_map(|(label, _)| label.strip_prefix(&prefix).map(str::to_string))
++            .collect();
++        let usage = runtime_stage::SystemRuntimeUsage {
++            registered_job_executables: Vec::new(),
++        };
++        runtime_stage::superseded_job_keys(&root, &keys, current, &usage)
++            .iter()
++            .map(|key| generation::generation_label(base, key))
++            .collect()
++    }
++
+     /// Every executable a registered job references is kept, including the legacy job's. When any
+     /// plist cannot be read nothing is collected: a runtime that may be referenced stays.
+     fn collect_unused_runtimes(env: Env<'_>, dir: &Path, base: &str) {
+@@ -752,8 +781,9 @@ mod backend {
+     }
+ 
+     /// Writes this build's generation unit and enables it for login without `--now`; older
+-    /// generations are disabled without `--now`. A running unit is untouched. Garbage collection
+-    /// runs after registration, so the unit just written already protects its runtime.
++    /// generations are disabled without `--now`. A running unit is untouched. Then the idle,
++    /// disabled units of superseded generations are deleted and garbage collection runs, so the unit
++    /// just written already protects its runtime and a deleted unit no longer protects an old one.
+     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
+         let (base, name, path, staged) = generation_unit(env, executable)?;
+         register_unit_for_login(&base, &name, &path, &staged)
+@@ -770,11 +800,29 @@ mod backend {
+     fn register_unit_for_login(base: &str, name: &str, path: &Path, staged: &Path) -> Result<bool> {
+         let rewritten = supervisor_linux::register_for_login(base, name, path, staged)?;
+         if let Some(unit_dir) = path.parent() {
++            remove_superseded_units(unit_dir, base, name);
+             collect_runtime_garbage(unit_dir);
+         }
+         Ok(rewritten)
+     }
+ 
++    /// Deletes superseded generation units (`supervisor_linux::remove_superseded_units`); a failure
++    /// only keeps their runtimes until the next registration.
++    fn remove_superseded_units(unit_dir: &Path, base: &str, newest: &str) {
++        let Some(root) = crate::daemon::server::daemon_runtime_root() else {
++            return;
++        };
++        match supervisor_linux::remove_superseded_units(&root, unit_dir, base, newest) {
++            Ok(removed) if !removed.is_empty() => {
++                tracing::info!(?removed, "Removed superseded daemon generation units")
++            }
++            Ok(_) => {}
++            Err(error) => {
++                tracing::warn!(%error, "Could not remove superseded daemon generation units")
++            }
++        }
++    }
++
+     /// The legacy single unit `<base>.service`: disabled without `--now` for an Alive/Unknown
+     /// owner, removed when idle for an Absent one; never stopped.
+     pub fn migrate_legacy_job(env: Env<'_>, owner: &OwnerState) -> Result<bool> {
+diff --git a/src-tauri/src/daemon/supervisor_linux.rs b/src-tauri/src/daemon/supervisor_linux.rs
+index 68cdb4383..add8bfd8f 100644
+--- a/src-tauri/src/daemon/supervisor_linux.rs
++++ b/src-tauri/src/daemon/supervisor_linux.rs
+@@ -6,7 +6,8 @@
+ //! never the app install. Starting is idempotent and never disturbs a running unit: an active unit
+ //! gets zero `systemctl` mutations, an idle one is written, reloaded and `start --no-block`ed.
+ //! Only the newest generation is enabled for login; older ones are disabled without `--now`, so
+-//! they keep running until their daemon exits on its own.
++//! they keep running until their daemon exits on its own. Once idle, the unit files of all but the
++//! newest two generations are deleted, so their staged runtimes can be garbage collected.
+ //!
+ //! The unit is `Type=notify`: the daemon reports `READY=1` once it serves its socket. A handover
+ //! successor is forked by the predecessor, so it lives in the unit's cgroup; it reports
+@@ -24,6 +25,7 @@
+ //! reads through an optional `EnvironmentFile=-`, so a systemd restart still sees them.
+ #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+ 
++use crate::daemon::runtime_stage;
+ use std::ffi::{OsStr, OsString};
+ use std::fs;
+ use std::io::Write as _;
+@@ -622,6 +624,82 @@ pub(crate) fn register_generation_with(
+     Ok(rewritten)
+ }
+ 
++/// Deletes the unit files of superseded generations of `base` in `unit_dir`, after
++/// [`register_generation_with`] disabled them, so a unit naming an old runtime no longer keeps it
++/// from garbage collection. The candidates are [`runtime_stage::superseded_job_keys`]: `newest`
++/// and the next newest generation keep their units, and so does every generation a running process
++/// executes from. A candidate also keeps its file while it is still enabled (its
++/// `default.target.wants` link exists) or not idle (`inactive` or `failed`), including when its
++/// state cannot be read. One `daemon-reload` after any removal; never `stop`, `kill` or `--now`.
++/// Returns the removed unit names.
++pub(crate) fn remove_superseded_units_with(
++    systemctl: &dyn Systemctl,
++    runtime_root: &Path,
++    unit_dir: &Path,
++    base: &str,
++    newest: &str,
++    usage: &dyn runtime_stage::RuntimeUsage,
++) -> Result<Vec<String>, String> {
++    let prefix = format!("{base}-");
++    let Some(current) = newest.strip_prefix(&prefix) else {
++        return Ok(Vec::new());
++    };
++    let keys: Vec<String> = generation_units_in(unit_dir, base)
++        .into_iter()
++        .filter_map(|(name, _)| name.strip_prefix(&prefix).map(str::to_string))
++        .collect();
++    let mut removed = Vec::new();
++    for key in runtime_stage::superseded_job_keys(runtime_root, &keys, current, usage) {
++        let name = format!("{prefix}{key}");
++        let unit = format!("{name}.service");
++        let wants = unit_dir.join("default.target.wants").join(&unit);
++        if fs::symlink_metadata(&wants).is_ok() {
++            continue;
++        }
++        match unit_is_busy(systemctl, &name) {
++            Ok(false) => {}
++            Ok(true) => continue,
++            Err(error) => {
++                tracing::warn!(%error, unit = %name, "Cannot read a superseded daemon unit's state; keeping its unit file");
++                continue;
++            }
++        }
++        match fs::remove_file(unit_dir.join(&unit)) {
++            Ok(()) => removed.push(name),
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
++            Err(error) => {
++                tracing::warn!(%error, unit = %name, "Could not remove a superseded daemon unit file");
++            }
++        }
++    }
++    if !removed.is_empty() {
++        systemctl.run(&["daemon-reload"])?;
++    }
++    Ok(removed)
++}
++
++/// [`remove_superseded_units_with`] for the real user manager and process table; a removed unit
++/// also loses its secret env file.
++#[cfg(target_os = "linux")]
++pub(crate) fn remove_superseded_units(
++    runtime_root: &Path,
++    unit_dir: &Path,
++    base: &str,
++    newest: &str,
++) -> Result<Vec<String>, String> {
++    let usage = runtime_stage::SystemRuntimeUsage {
++        registered_job_executables: Vec::new(),
++    };
++    let removed =
++        remove_superseded_units_with(&UserSystemctl, runtime_root, unit_dir, base, newest, &usage)?;
++    for name in &removed {
++        if let Err(error) = remove_secret_env(name) {
++            tracing::warn!(%error, unit = %name, "Could not remove a superseded daemon unit's secret env file");
++        }
++    }
++    Ok(removed)
++}
++
+ /// [`ensure_generation_with`] for the real user manager, keeping the unit's secret env file in sync
+ /// first.
+ #[cfg(target_os = "linux")]
+@@ -1514,6 +1592,121 @@ mod tests {
+         );
+     }
+ 
++    /// After upgrades, the idle and disabled units of all but the newest two generations are
++    /// deleted, and garbage collection then removes their runtimes. A unit that is still active,
++    /// or still enabled, keeps its file and protects its runtime until a later registration.
++    #[test]
++    fn superseded_idle_disabled_units_are_deleted_and_their_runtimes_collected() {
++        let temp = tempfile::tempdir().unwrap();
++        let root = temp.path().join("daemon-runtime");
++        let unit_dir = temp.path().join("systemd/user");
++        fs::create_dir_all(unit_dir.join("default.target.wants")).unwrap();
++        let names: Vec<String> = (1..=5)
++            .map(|index| {
++                let key = format!("2026.1027.{index}-0000000{index}");
++                let executable = root.join(&key).join("ferryx");
++                fs::create_dir_all(executable.parent().unwrap()).unwrap();
++                fs::write(&executable, key.as_bytes()).unwrap();
++                fs::write(
++                    root.join(&key).join(runtime_stage::STAGED_AT_FILE),
++                    index.to_string(),
++                )
++                .unwrap();
++                let name = generation_unit_name(DEFAULT_UNIT_NAME, &key).unwrap();
++                fs::write(
++                    unit_dir.join(format!("{name}.service")),
++                    render(executable.to_str().unwrap()),
++                )
++                .unwrap();
++                name
++            })
++            .collect();
++        let unit_exists = |name: &str| unit_dir.join(format!("{name}.service")).exists();
++        // Generation 3 is still enabled (its disable failed); generation 2 still runs.
++        let wants = unit_dir
++            .join("default.target.wants")
++            .join(format!("{}.service", names[2]));
++        std::os::unix::fs::symlink(unit_dir.join(format!("{}.service", names[2])), &wants).unwrap();
++        let no_process = runtime_stage::SystemRuntimeUsage {
++            registered_job_executables: Vec::new(),
++        };
++        let collect = |unit_dir: &Path| {
++            let usage = runtime_stage::SystemRuntimeUsage {
++                registered_job_executables: registered_job_executables(unit_dir),
++            };
++            runtime_stage::collect_garbage(&root, &usage).unwrap()
++        };
++        assert!(
++            collect(&unit_dir).is_empty(),
++            "every unit still protects its runtime"
++        );
++
++        let systemctl =
++            FakeSystemctl::with_states(&[(&names[0], "inactive"), (&names[1], "active")]);
++        let removed = remove_superseded_units_with(
++            &systemctl,
++            &root,
++            &unit_dir,
++            DEFAULT_UNIT_NAME,
++            &names[4],
++            &no_process,
++        );
++
++        assert_eq!(removed, Ok(vec![names[0].clone()]));
++        assert_eq!(systemctl.mutations(), [call(&["daemon-reload"])]);
++        assert_never_stops(&systemctl.calls());
++        assert!(!unit_exists(&names[0]));
++        assert!(names[1..].iter().all(|name| unit_exists(name)));
++        assert_eq!(collect(&unit_dir), vec!["2026.1027.1-00000001".to_string()]);
++
++        // Once generations 2 and 3 are idle and disabled, two generations and two units remain.
++        fs::remove_file(&wants).unwrap();
++        let systemctl =
++            FakeSystemctl::with_states(&[(&names[1], "failed"), (&names[2], "inactive")]);
++        let mut removed = remove_superseded_units_with(
++            &systemctl,
++            &root,
++            &unit_dir,
++            DEFAULT_UNIT_NAME,
++            &names[4],
++            &no_process,
++        )
++        .unwrap();
++        removed.sort();
++        assert_eq!(removed, names[1..3].to_vec());
++        assert_eq!(collect(&unit_dir).len(), 2);
++        let mut remaining: Vec<String> = generation_units_in(&unit_dir, DEFAULT_UNIT_NAME)
++            .into_iter()
++            .map(|(name, _)| name)
++            .collect();
++        remaining.sort();
++        assert_eq!(remaining, names[3..].to_vec());
++        let mut generations: Vec<String> = fs::read_dir(&root)
++            .unwrap()
++            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
++            .collect();
++        generations.sort();
++        assert_eq!(
++            generations,
++            ["2026.1027.4-00000004", "2026.1027.5-00000005"]
++        );
++
++        // Nothing is left to supersede: no state query and no reload.
++        let systemctl = FakeSystemctl::with_states(&[]);
++        assert_eq!(
++            remove_superseded_units_with(
++                &systemctl,
++                &root,
++                &unit_dir,
++                DEFAULT_UNIT_NAME,
++                &names[4],
++                &no_process
++            ),
++            Ok(Vec::new())
++        );
++        assert!(systemctl.calls().is_empty(), "{:?}", systemctl.calls());
++    }
++
+     /// Opt-out disables every generation and the legacy unit, never with `--now` and never with
+     /// `stop`/`restart`/`kill`, and leaves every unit file in place (a running daemon keeps its
+     /// definition). A unit with no file (no legacy unit) is not touched.
+diff --git a/src-tauri/src/daemon/supervisor_windows.rs b/src-tauri/src/daemon/supervisor_windows.rs
+index d0e1215e9..7e392bcaf 100644
+--- a/src-tauri/src/daemon/supervisor_windows.rs
++++ b/src-tauri/src/daemon/supervisor_windows.rs
+@@ -29,7 +29,7 @@
+ #![cfg_attr(not(windows), allow(dead_code))]
+ 
+ use super::owner_admission::{Endpoint, LockState, OwnerProbe, OwnerRecord, StartingRecord};
+-use super::runtime_stage::StagedRuntime;
++use super::runtime_stage::{self, RuntimeUsage, StagedRuntime};
+ use super::supervisor::{non_empty, Env, Result, SUPERVISOR_NAME_ENV};
+ use std::collections::VecDeque;
+ use std::path::{Path, PathBuf};
+@@ -440,6 +440,48 @@ pub fn register_for_login_with(
+     Ok(changed)
+ }
+ 
++/// Deletes the tasks of superseded generations, after [`register_for_login_with`] removed their
++/// logon trigger, together with their recorded definitions, so a task naming an old runtime no
++/// longer keeps it from garbage collection. The candidates are
++/// [`runtime_stage::superseded_job_keys`] over the recorded generations: `staged` and the next
++/// newest generation keep their tasks, and so does every generation a running process executes
++/// from. A registered candidate is deleted (`/Delete /F`) only when its State reads `Ready` or
++/// `Disabled`: a `Running` or `Queued` task may host its watchdog and an unreadable State is no
++/// proof of idleness, so such a task keeps its definition and its record. A candidate that is no
++/// longer registered only loses its record. Never `/End` or `/Run`. Returns the removed keys.
++pub fn remove_superseded_tasks_with(
++    env: Env<'_>,
++    staged: &StagedRuntime,
++    runtime_root: &Path,
++    scheduler: &mut dyn TaskScheduler,
++    usage: &dyn RuntimeUsage,
++) -> Result<Vec<String>> {
++    let keys = recorded_generation_keys(env)?;
++    let mut removed = Vec::new();
++    for key in runtime_stage::superseded_job_keys(runtime_root, &keys, &staged.key, usage) {
++        let name = generation_task_name(env, &key);
++        if scheduler.run(&["/Query", "/TN", &name])? {
++            let state = scheduler.task_state(&name);
++            if !matches!(state.as_deref(), Ok("Ready" | "Disabled")) {
++                tracing::info!(task = %name, ?state, "A superseded daemon task is not idle; it keeps its definition");
++                continue;
++            }
++            if !scheduler.run(&["/Delete", "/TN", &name, "/F"])? {
++                tracing::warn!(task = %name, "schtasks /Delete failed for a superseded daemon task");
++                continue;
++            }
++        }
++        let xml_path = task_xml_path(env, &name)?;
++        match std::fs::remove_file(&xml_path) {
++            Ok(()) => {}
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
++            Err(error) => return Err(format!("Failed to remove {}: {error}", xml_path.display())),
++        }
++        removed.push(key);
++    }
++    Ok(removed)
++}
++
+ /// Migrates the legacy single task (`Ferryx\Daemon`, or the QA base name) for the owner admission
+ /// classified under its lock (todo 14).
+ ///
+@@ -1008,8 +1050,9 @@ mod platform {
+         remove_login_autostart_with(env, &mut SystemScheduler).map(|_| ())
+     }
+ 
+-    /// Registers this build's generation for the next logon and demotes older generations, then
+-    /// collects runtime generations that neither a process nor a recorded task uses.
++    /// Registers this build's generation for the next logon and demotes older generations, deletes
++    /// the idle tasks of superseded generations, then collects runtime generations that neither a
++    /// process nor a recorded task uses.
+     pub fn register_for_login(env: Env<'_>, executable: &Path) -> Result<bool> {
+         let staged = stage(executable)?;
+         register_staged_for_login(env, &staged)
+@@ -1019,6 +1062,19 @@ mod platform {
+     pub fn register_staged_for_login(env: Env<'_>, staged: &StagedRuntime) -> Result<bool> {
+         let changed = register_for_login_with(env, staged, &mut SystemScheduler)?;
+         if let Some(root) = crate::daemon::server::daemon_runtime_root() {
++            let processes = SystemRuntimeUsage {
++                registered_job_executables: Vec::new(),
++            };
++            match remove_superseded_tasks_with(env, staged, &root, &mut SystemScheduler, &processes)
++            {
++                Ok(removed) if !removed.is_empty() => {
++                    tracing::info!(?removed, "Removed superseded daemon generation tasks")
++                }
++                Ok(_) => {}
++                Err(error) => {
++                    tracing::warn!(%error, "Could not remove superseded daemon generation tasks")
++                }
++            }
+             let usage = SystemRuntimeUsage {
+                 registered_job_executables: registered_executables(env),
+             };
+@@ -1751,7 +1807,117 @@ mod tests {
+         let mut scheduler = FakeScheduler::default();
+         register_for_login_with(&f.env(), &new, &mut scheduler).unwrap();
+         assert!(!f.xml_path(old_name).exists());
+-        assert!(!scheduler.calls.iter().any(|call| call.contains(old_name) && !call.starts_with("/Query")));
++        assert!(!scheduler
++            .calls
++            .iter()
++            .any(|call| call.contains(old_name) && !call.starts_with("/Query")));
++    }
++
++    /// Four generations, each with a recorded and registered task, the newest just registered.
++    fn four_generations(
++        f: &Fixture,
++        scheduler: &mut FakeScheduler,
++    ) -> (PathBuf, Vec<StagedRuntime>) {
++        let root = f.local.join("Ferryx").join("daemon-runtime");
++        let generations: Vec<StagedRuntime> = (1..=4)
++            .map(|index| {
++                let staged = f.staged(&format!("v{index}-0000000{index}"));
++                let marker = root.join(&staged.key).join(runtime_stage::STAGED_AT_FILE);
++                std::fs::write(marker, index.to_string()).unwrap();
++                let name = generation_task_name(&f.env(), &staged.key);
++                let definition = f.definition(&staged);
++                write_task_xml(&f.xml_path(&name), &definition).unwrap();
++                scheduler.registered.insert(name, definition);
++                staged
++            })
++            .collect();
++        register_for_login_with(&f.env(), &generations[3], scheduler).unwrap();
++        (root, generations)
++    }
++
++    fn no_process() -> runtime_stage::SystemRuntimeUsage {
++        runtime_stage::SystemRuntimeUsage {
++            registered_job_executables: Vec::new(),
++        }
++    }
++
++    #[test]
++    fn superseded_idle_tasks_are_deleted_and_their_runtimes_then_collected() {
++        let f = Fixture::new();
++        let mut scheduler = FakeScheduler::default().with_state("Ready");
++        let (root, generations) = four_generations(&f, &mut scheduler);
++        let collect = || {
++            let usage = runtime_stage::SystemRuntimeUsage {
++                registered_job_executables: registered_executables(&f.env()),
++            };
++            let mut removed = runtime_stage::collect_garbage(&root, &usage).unwrap();
++            removed.sort();
++            removed
++        };
++        assert!(
++            collect().is_empty(),
++            "every recorded task protects its runtime"
++        );
++        scheduler.calls.clear();
++
++        let mut removed = remove_superseded_tasks_with(
++            &f.env(),
++            &generations[3],
++            &root,
++            &mut scheduler,
++            &no_process(),
++        )
++        .unwrap();
++
++        removed.sort();
++        assert_eq!(removed, ["v1-00000001", "v2-00000002"]);
++        let mut mutations: Vec<String> = scheduler.mutations().into_iter().cloned().collect();
++        mutations.sort();
++        assert_eq!(
++            mutations,
++            [
++                "/Delete /TN Ferryx\\Daemon-v1-00000001 /F",
++                "/Delete /TN Ferryx\\Daemon-v2-00000002 /F"
++            ]
++        );
++        assert!(!f.xml_path("Ferryx\\Daemon-v1-00000001").exists());
++        assert!(!f.xml_path("Ferryx\\Daemon-v2-00000002").exists());
++        assert!(f.xml_path("Ferryx\\Daemon-v3-00000003").exists());
++        assert!(f.xml_path("Ferryx\\Daemon-v4-00000004").exists());
++        assert_eq!(collect(), ["v1-00000001", "v2-00000002"]);
++        assert!(!generations[0].executable.exists() && generations[2].executable.exists());
++    }
++
++    #[test]
++    fn a_superseded_task_that_runs_or_cannot_be_read_is_kept() {
++        for state in [Some("Running"), Some("Queued"), None] {
++            let f = Fixture::new();
++            let mut scheduler = FakeScheduler {
++                state: state.map(str::to_string),
++                ..FakeScheduler::default()
++            };
++            let (root, generations) = four_generations(&f, &mut scheduler);
++            scheduler.calls.clear();
++
++            let removed = remove_superseded_tasks_with(
++                &f.env(),
++                &generations[3],
++                &root,
++                &mut scheduler,
++                &no_process(),
++            );
++
++            assert_eq!(removed, Ok(Vec::new()), "{state:?}");
++            assert!(
++                scheduler.mutations().is_empty(),
++                "{state:?}: {:?}",
++                scheduler.calls
++            );
++            assert!(
++                f.xml_path("Ferryx\\Daemon-v1-00000001").exists(),
++                "{state:?}"
++            );
++        }
+     }
+ 
+     /// No `/Run`, `/End` or `/Delete`: opting out of autostart must never start, end or remove a
+diff --git a/src-tauri/src/remote/server.rs b/src-tauri/src/remote/server.rs
+index d584032e3..8a13a4876 100644
+--- a/src-tauri/src/remote/server.rs
++++ b/src-tauri/src/remote/server.rs
+@@ -3554,38 +3554,46 @@ pub(crate) fn resolve_dist_dir_from(
+     cwd: Option<&Path>,
+     exe: Option<&Path>,
+     manifest_dir: Option<&Path>,
++) -> Option<PathBuf> {
++    resolve_dist_dir_with(cwd, exe, manifest_dir, cfg!(debug_assertions) || cfg!(test))
++}
++
++/// [`resolve_dist_dir_from`] with the dev candidates (compile-time manifest dir, cwd, relative
++/// paths) only when `dev_candidates`: a release daemon serves the UI next to its executable or
++/// the fallback page, never a checkout's `ui/dist`.
++pub(crate) fn resolve_dist_dir_with(
++    cwd: Option<&Path>,
++    exe: Option<&Path>,
++    manifest_dir: Option<&Path>,
++    dev_candidates: bool,
+ ) -> Option<PathBuf> {
+     let mut candidates = Vec::new();
+ 
+-    // 1. Packaged Tauri bundle resource directory (established by bundle.resources: {"../ui/dist": "ui/dist"})
++    // 1. Packaged Tauri bundle resource directory (established by bundle.resources:
++    //    {"../ui/dist": "ui/dist"}) or the copy staged with a daemon runtime generation
++    //    (macOS `Contents/Resources/ui/dist`, Windows/Linux next to the executable or under
++    //    `resources/`, Linux deb/AppImage `usr/lib/Ferryx/ui/dist`, staged `<key>/ui/dist`).
+     if let Some(exe) = exe {
+-        if let Some(exe_dir) = exe.parent() {
+-            // macOS bundle: Ferryx.app/Contents/MacOS/ferryx -> Contents/Resources/ui/dist
+-            candidates.push(exe_dir.join("../Resources/ui/dist"));
+-            // Windows / Linux packaged layout: next to executable or resources subdirectory
+-            candidates.push(exe_dir.join("ui/dist"));
+-            candidates.push(exe_dir.join("resources/ui/dist"));
+-            // Linux deb/AppImage: binary at usr/bin, resources at usr/lib/<productName>.
+-            candidates.push(exe_dir.join("../lib/Ferryx/ui/dist"));
+-            candidates.push(exe_dir.join("../lib/ui/dist"));
+-        }
++        candidates.extend(crate::daemon::runtime_stage::ui_dist_candidates(exe));
+     }
+ 
+-    // 2. Dev / debug compile-time manifest directory
+-    if let Some(manifest_dir) = manifest_dir {
+-        candidates.push(manifest_dir.join("../ui/dist"));
+-        candidates.push(manifest_dir.join("ui/dist"));
+-    }
++    if dev_candidates {
++        // 2. Dev / debug compile-time manifest directory
++        if let Some(manifest_dir) = manifest_dir {
++            candidates.push(manifest_dir.join("../ui/dist"));
++            candidates.push(manifest_dir.join("ui/dist"));
++        }
+ 
+-    // 3. Dev / standalone CWD
+-    if let Some(cwd) = cwd {
+-        candidates.push(cwd.join("ui/dist"));
+-        candidates.push(cwd.join("../ui/dist"));
+-    }
++        // 3. Dev / standalone CWD
++        if let Some(cwd) = cwd {
++            candidates.push(cwd.join("ui/dist"));
++            candidates.push(cwd.join("../ui/dist"));
++        }
+ 
+-    // 4. Default fallback relative path
+-    candidates.push(PathBuf::from("ui/dist"));
+-    candidates.push(PathBuf::from("../ui/dist"));
++        // 4. Default fallback relative path
++        candidates.push(PathBuf::from("ui/dist"));
++        candidates.push(PathBuf::from("../ui/dist"));
++    }
+ 
+     for c in candidates {
+         if c.is_dir() && c.join("index.html").is_file() {
+@@ -3618,7 +3626,12 @@ pub(crate) fn resolve_dist_dir() -> PathBuf {
+     if let Some(found) = resolve_dist_dir_from(cwd.as_deref(), exe.as_deref(), manifest_dir) {
+         return found;
+     }
+-    PathBuf::from("ui/dist")
++    if cfg!(debug_assertions) || cfg!(test) {
++        PathBuf::from("ui/dist")
++    } else {
++        // Never canonicalizes, so the caller serves the fallback page instead of a cwd `ui/dist`.
++        PathBuf::new()
++    }
+ }
+ 
+ /// Parse once, before joining to a filesystem root. Reject Windows separators,
+@@ -3693,7 +3706,7 @@ const EMBEDDED_FALLBACK_HTML: &str = r#"<!DOCTYPE html>
+ <body style="background:#09090b;color:#fafafa;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;">
+   <div style="text-align:center;">
+     <h2>Ferryx Remote Server Active</h2>
+-    <p style="color:#a1a1aa;font-size:14px;">Building the UI bundle or connect through the Ferryx desktop app.</p>
++    <p style="color:#a1a1aa;font-size:14px;">The web UI files (ui/dist) were not found next to this daemon. Update or reinstall Ferryx, or connect through the Ferryx desktop app.</p>
+   </div>
+ </body>
+ </html>"#;
+diff --git a/src-tauri/src/remote/tests.rs b/src-tauri/src/remote/tests.rs
+index 19ecef68d..195ddc349 100644
+--- a/src-tauri/src/remote/tests.rs
++++ b/src-tauri/src/remote/tests.rs
+@@ -477,6 +477,84 @@ fn test_resolve_dist_dir_packaged_windows_or_linux_bundle_layout() {
+     assert_eq!(resolved, expected);
+ }
+ 
++#[test]
++fn test_resolve_dist_dir_staged_daemon_runtime_layout() {
++    let dir = tempfile::TempDir::new().expect("tempdir");
++    let generation = dir.path().join("daemon-runtime/2026.1027.1-0a1b2c3d");
++    let staged_ui_dist = generation.join("ui/dist");
++    std::fs::create_dir_all(&staged_ui_dist).unwrap();
++    std::fs::write(
++        staged_ui_dist.join("index.html"),
++        "<!doctype html><html><body><div id=\"root\"></div></body></html>",
++    )
++    .unwrap();
++    let isolated_cwd = dir.path().join("isolated_cwd");
++    std::fs::create_dir_all(&isolated_cwd).unwrap();
++    let expected = staged_ui_dist.canonicalize().unwrap();
++
++    // Linux/Windows generation: `<key>/ferryx`; macOS: the sealed helper bundle inside `<key>`.
++    for exe_path in [
++        generation.join("ferryx"),
++        generation.join("Ferryx Daemon.app/Contents/MacOS/ferryx"),
++    ] {
++        let resolved = crate::remote::server::resolve_dist_dir_from(
++            Some(&isolated_cwd),
++            Some(&exe_path),
++            None,
++        );
++        assert_eq!(
++            resolved.as_deref(),
++            Some(expected.as_path()),
++            "{}",
++            exe_path.display()
++        );
++    }
++}
++
++#[test]
++fn test_resolve_dist_dir_release_uses_only_executable_relative_candidates() {
++    let dir = tempfile::TempDir::new().expect("tempdir");
++    // A checkout: `<checkout>/src-tauri` is the manifest dir and `<checkout>/ui/dist` is built;
++    // the cwd is the checkout too, so every dev candidate would find a UI.
++    let checkout = dir.path().join("checkout");
++    let manifest_dir = checkout.join("src-tauri");
++    let checkout_dist = checkout.join("ui/dist");
++    std::fs::create_dir_all(&manifest_dir).unwrap();
++    std::fs::create_dir_all(&checkout_dist).unwrap();
++    std::fs::write(checkout_dist.join("index.html"), "<div id=\"root\"></div>").unwrap();
++    let generation = dir.path().join("daemon-runtime/2026.1027.1-0a1b2c3d");
++    std::fs::create_dir_all(&generation).unwrap();
++    let exe = generation.join("ferryx");
++
++    // Staged dist gone: release resolves nothing (the fallback page), debug finds the checkout.
++    let release = crate::remote::server::resolve_dist_dir_with(
++        Some(&checkout),
++        Some(&exe),
++        Some(&manifest_dir),
++        false,
++    );
++    assert_eq!(release, None);
++    let debug = crate::remote::server::resolve_dist_dir_with(
++        Some(&checkout),
++        Some(&exe),
++        Some(&manifest_dir),
++        true,
++    );
++    assert_eq!(debug, Some(checkout_dist.canonicalize().unwrap()));
++
++    // Staged dist present: release serves the generation's own copy.
++    let staged_ui_dist = generation.join("ui/dist");
++    std::fs::create_dir_all(&staged_ui_dist).unwrap();
++    std::fs::write(staged_ui_dist.join("index.html"), "<div id=\"root\"></div>").unwrap();
++    let release = crate::remote::server::resolve_dist_dir_with(
++        Some(&checkout),
++        Some(&exe),
++        Some(&manifest_dir),
++        false,
++    );
++    assert_eq!(release, Some(staged_ui_dist.canonicalize().unwrap()));
++}
++
+ #[test]
+ fn test_resolve_dist_dir_isolated_runtime_debug_fallback() {
+     let dir = tempfile::TempDir::new().expect("tempdir");
+@@ -489,10 +567,11 @@ fn test_resolve_dist_dir_isolated_runtime_debug_fallback() {
+     let expected_dist = manifest_dir.join("../ui/dist");
+ 
+     if expected_dist.join("index.html").exists() {
+-        let resolved = crate::remote::server::resolve_dist_dir_from(
++        let resolved = crate::remote::server::resolve_dist_dir_with(
+             Some(&isolated_cwd),
+             Some(&fake_exe),
+             Some(&manifest_dir),
++            true,
+         );
+         let expected = expected_dist.canonicalize().unwrap();
+         assert_eq!(resolved.as_deref(), Some(expected.as_path()));

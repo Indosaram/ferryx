@@ -1,0 +1,7 @@
+src-tauri/examples/ssh_prompt_qa.rs
+src-tauri/resources/helpers/aarch64-unknown-linux-musl/ferryx-remote-helper
+src-tauri/resources/helpers/x86_64-unknown-linux-musl/ferryx-remote-helper
+src-tauri/src/ssh/host_key.rs
+src-tauri/src/ssh/host_key_tests.rs
+ui/src/components/settings/SshAuthPromptCard.test.tsx
+ui/src/components/settings/SshAuthPromptCard.tsx

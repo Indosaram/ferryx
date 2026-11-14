@@ -1,0 +1,12 @@
+M	README.md
+M	README.zh-CN.md
+M	site/README.md
+M	site/src/components/landing/GetStarted.astro
+M	site/src/content/docs/blog/ferryx-install-windows.md
+M	site/src/content/docs/compare/cmux.md
+M	site/src/content/docs/compare/conductor.md
+M	site/src/content/docs/docs/facts.md
+M	site/src/content/docs/docs/introduction.md
+M	site/src/content/docs/privacy.md
+M	site/src/lib/downloads.test.ts
+M	site/src/lib/downloads.ts

@@ -1,0 +1,10 @@
+M	README.md
+M	docs/SOURCE_ANCHORS_VERIFICATION.md
+M	site/src/content/docs/privacy.md
+M	src-tauri/src/cli.rs
+M	src-tauri/src/paired_host/direct_client.rs
+M	src-tauri/src/paired_host/direct_connect.rs
+M	src-tauri/src/paired_host/direct_connect_tests.rs
+M	src-tauri/src/remote/direct_api.rs
+M	src-tauri/src/remote/direct_api_tests.rs
+M	ui/src/components/settings/RemoteAccessSection.tsx

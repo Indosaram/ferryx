@@ -1,0 +1,3 @@
+M	site/src/content/docs/docs/self-hosted-relay.md
+M	src-tauri/src/bin/relay.rs
+M	src-tauri/src/remote/relay_server.rs

@@ -1,0 +1,353 @@
+diff --git a/README.md b/README.md
+index 19f7b0914..926e97933 100644
+--- a/README.md
++++ b/README.md
+@@ -31,12 +31,15 @@ ones to you. Native Rust on Tauri v2 with a libghostty terminal core; no Electro
+ | Platform | Package | |
+ | :--- | :--- | :--- |
+ | **macOS** | Universal DMG (Apple Silicon & Intel) | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
+-| **Windows** | Microsoft Store (Primary) / Installer (Secondary) | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) / [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
++| **Windows** | Microsoft Store (x64, signed, auto-updating) | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`) |
+ | **Linux** | Portable AppImage (x64) | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
+ | **Linux** | Debian / Ubuntu package (x64) | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
+ | **Linux (Headless)** | Server / VPS PTY Daemon & CLI (x64 only; arm64: [build from source](CONTRIBUTING.md#build-prerequisites)) | [`install.sh`](https://relay.ferryx.dev/install.sh) (`curl -fsSL https://relay.ferryx.dev/install.sh \| bash`) |
+ 
+-The macOS, Windows, and Linux links resolve against the latest release. Local release assembly
++The macOS and Linux links resolve against the latest release. Windows installs come from the
++Microsoft Store; a release may additionally attach a direct `.exe` installer
++(not code-signed), so check the [release page](https://github.com/Indosaram/ferryx/releases/latest)
++for it rather than relying on a fixed link. Local release assembly
+ stages the headless `ferryx-cli` beside the Linux AppImage and `.deb` (as
+ `ferryx-cli-linux-amd64`) and, when the universal macOS CLI is present, as
+ `ferryx-cli-darwin-universal`, so the one-line installer above resolves a current artifact when
+diff --git a/README.zh-CN.md b/README.zh-CN.md
+index 570ba82af..76b9b3512 100644
+--- a/README.zh-CN.md
++++ b/README.zh-CN.md
+@@ -31,12 +31,12 @@
+ | 平台 | 软件包 | |
+ | :--- | :--- | :--- |
+ | **macOS** | 通用 DMG（Apple Silicon 和 Intel） | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
+-| **Windows** | 安装程序（x64，未进行代码签名；Microsoft Store 版本正在等待认证） | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
++| **Windows** | Microsoft Store（x64，已签名，自动更新） | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4)（`winget install --source msstore 9NLHQL5JNLM4`） |
+ | **Linux** | 便携式 AppImage（x64） | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
+ | **Linux** | Debian / Ubuntu 软件包（x64） | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
+ | **Linux（无头）** | 服务器 / VPS PTY 守护进程和 CLI（x64） | [`install.sh`](https://relay.ferryx.dev/install.sh)（`curl -fsSL https://relay.ferryx.dev/install.sh | bash`） |
+ 
+-macOS、Windows 和 Linux 的下载链接会指向最新版本。进行本地发行版组装时，会将无头版 `ferryx-cli` 放在 Linux AppImage 和 `.deb` 旁边（文件名为
++macOS 和 Linux 的下载链接会指向最新版本。Windows 请通过 Microsoft Store 安装；部分发行版还会附带一个直接安装用的 `.exe` 安装程序（未进行代码签名），请在[发行版页面](https://github.com/Indosaram/ferryx/releases/latest)查看是否提供，而不要依赖固定链接。进行本地发行版组装时，会将无头版 `ferryx-cli` 放在 Linux AppImage 和 `.deb` 旁边（文件名为
+ `ferryx-cli-linux-amd64`）；如果存在通用 macOS CLI，也会将其作为
+ `ferryx-cli-darwin-universal` 一同放置。因此，上面的一行安装命令在发行版包含当前构建产物时会解析到该产物，否则会安全失败。请使用与二进制文件一同发布的 `SHA256SUMS.txt` 验证下载：
+ 
+diff --git a/site/README.md b/site/README.md
+index 742a0c739..9c9184786 100644
+--- a/site/README.md
++++ b/site/README.md
+@@ -15,6 +15,9 @@ This repository hosts the unified Ferryx public web presence and documentation e
+ Production is `https://ferryx.dev`, served by Cloudflare Workers Static Assets.
+ Run `bun run --cwd site deploy` after checking the production build. The command
+ sets the production origin and deploys both the apex site and the `www` redirect.
++The Windows direct installer (`Ferryx_x64-setup.exe`) is optional per release, so the site
++links only the Microsoft Store by default. Set `PUBLIC_FERRYX_WINDOWS_INSTALLER=true` for the
++build only after confirming the latest release lists that asset; otherwise the link would 404.
+ Local development keeps the site at `http://localhost:14173/`.
+ 
+ See [the hosting runbook](../docs/SITE_DOMAIN_MIGRATION.md) for routing and
+diff --git a/site/src/components/landing/GetStarted.astro b/site/src/components/landing/GetStarted.astro
+index 7dbdd689c..a924c20ac 100644
+--- a/site/src/components/landing/GetStarted.astro
++++ b/site/src/components/landing/GetStarted.astro
+@@ -1,5 +1,6 @@
+ ---
+ import CopyCommand from './CopyCommand';
++import { PLATFORMS } from '@/lib/downloads';
+ 
+ const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+   ? import.meta.env.BASE_URL
+@@ -7,7 +8,8 @@ const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+ 
+ const macUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg';
+ const windowsStoreUrl = 'https://apps.microsoft.com/detail/9NLHQL5JNLM4';
+-const windowsUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe';
++// The direct installer is optional per release; PLATFORMS lists it only when it is published.
++const windowsInstallerUrl = PLATFORMS.windows.assets.find((asset) => asset.id === 'windows-installer')?.url;
+ const appImageUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage';
+ const debUrl = 'https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb';
+ const releasesUrl = 'https://github.com/Indosaram/ferryx/releases/latest';
+@@ -72,7 +74,7 @@ const textLink =
+           </svg>
+           <h3 class="text-[17px] font-medium tracking-[-0.015em] text-ink">Windows</h3>
+         </div>
+-        <p class="mt-2 text-[13px] text-ink-faint">Microsoft Store + x64 installer (.exe)</p>
++        <p class="mt-2 text-[13px] text-ink-faint">{windowsInstallerUrl ? 'Microsoft Store + x64 installer (.exe)' : 'Microsoft Store (x64)'}</p>
+         <ul class="mt-4 flex flex-col gap-2">
+           <li class="flex items-start gap-2.5 text-[14px] leading-relaxed text-ink-soft">
+             <span class="mt-2.5 h-1 w-1 shrink-0 rounded-full bg-ink-faint"></span>
+@@ -89,13 +91,15 @@ const textLink =
+         </ul>
+         <div class="mt-auto flex flex-col gap-3 pt-6">
+           <a href={windowsStoreUrl} data-ferryx-location="install_section" class={primaryLink}>Get from Microsoft Store</a>
+-          <a
+-            href={windowsUrl}
+-            data-ferryx-location="install_section"
+-            class="text-[14px] font-medium text-ink underline underline-offset-4 transition-colors duration-150 hover:text-ink-soft"
+-          >
+-            Direct .exe installer (unsigned)
+-          </a>
++          {windowsInstallerUrl && (
++            <a
++              href={windowsInstallerUrl}
++              data-ferryx-location="install_section"
++              class="text-[14px] font-medium text-ink underline underline-offset-4 transition-colors duration-150 hover:text-ink-soft"
++            >
++              Direct .exe installer (unsigned)
++            </a>
++          )}
+         </div>
+       </div>
+ 
+diff --git a/site/src/content/docs/blog/ferryx-install-windows.md b/site/src/content/docs/blog/ferryx-install-windows.md
+index 1fddef339..c8ad7dd0a 100644
+--- a/site/src/content/docs/blog/ferryx-install-windows.md
++++ b/site/src/content/docs/blog/ferryx-install-windows.md
+@@ -9,14 +9,14 @@ description: "x64 installer walkthrough: SmartScreen warnings, SHA-256 verificat
+ 
+ ## Installer download
+ 
+-The [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`) is Ferryx's signed Windows channel. The Store signs the MSIX package it publishes, so a Store install shows no SmartScreen warning, and Store installs are updated by the Store rather than by Ferryx's own updater. Ferryx does not buy a separate code-signing certificate; the standalone GitHub release `Ferryx_x64-setup.exe` remains available as a secondary direct installer and is not code-signed.
++The [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`) is Ferryx's signed Windows channel. The Store signs the MSIX package it publishes, so a Store install shows no SmartScreen warning, and Store installs are updated by the Store rather than by Ferryx's own updater. Ferryx does not buy a separate code-signing certificate; some GitHub releases also attach a standalone `.exe` installer as a secondary direct option, and it is not code-signed.
+ 
+ ## SmartScreen warning
+ 
+ Install in this order:
+ 
+ 1. **Microsoft Store (signed, recommended).** Install from the [Microsoft Store listing](https://apps.microsoft.com/detail/9NLHQL5JNLM4), or run `winget install --source msstore 9NLHQL5JNLM4` in a terminal. SmartScreen does not warn on a Store install.
+-2. **GitHub installer (unsigned).** Download `Ferryx_x64-setup.exe` and `SHA256SUMS.txt` from the [latest release](https://github.com/Indosaram/ferryx/releases/latest). Before running the installer, check its hash in PowerShell: `Get-FileHash .\Ferryx_x64-setup.exe -Algorithm SHA256` must match the `Ferryx_x64-setup.exe` line in `SHA256SUMS.txt`.
++2. **GitHub installer (unsigned, when the release attaches one).** If the [latest release](https://github.com/Indosaram/ferryx/releases/latest) lists a `.exe` installer, download it with `SHA256SUMS.txt`. Before running it, check its hash in PowerShell: `Get-FileHash .\<installer>.exe -Algorithm SHA256` must match that file's line in `SHA256SUMS.txt`.
+ 3. **Expect the SmartScreen prompt for the unsigned installer.** Because the `.exe` has no Authenticode signature, Windows shows "Windows protected your PC". Run it only if the hash matched: choose **More info**, then **Run anyway**. The installer installs for the current user and updates itself in place.
+ 
+ The `Ferryx_x64.msix` attached to GitHub releases is the unsigned package that is submitted to the Store. It is not a sideloading installer, so install from the Store or the `.exe` instead.
+diff --git a/site/src/content/docs/compare/cmux.md b/site/src/content/docs/compare/cmux.md
+index 7fc426151..d1aed4a2f 100644
+--- a/site/src/content/docs/compare/cmux.md
++++ b/site/src/content/docs/compare/cmux.md
+@@ -13,7 +13,7 @@ Facts as of 2026-10: checked on 2026-10-24 against the cmux [README](https://git
+ | | Ferryx | cmux |
+ | :--- | :--- | :--- |
+ | macOS | Universal DMG | Yes, native Swift/AppKit app (DMG or Homebrew cask) |
+-| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (signed) and x64 `.exe` installer | No desktop app; [Windows request](https://github.com/manaflow-ai/cmux/issues/1012) is open |
++| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (x64, signed); some releases also attach a direct `.exe` | No desktop app; [Windows request](https://github.com/manaflow-ai/cmux/issues/1012) is open |
+ | Linux | AppImage and .deb (x86_64), plus a headless `ferryx-cli` | No desktop app; [Linux request #330](https://github.com/manaflow-ai/cmux/issues/330) is open, its most-reacted issue |
+ | Terminal core | libghostty-vt parser, WGPU renderer | libghostty, reads your existing Ghostty config |
+ | License | Source-available under the Ferryx License, free for individuals and small companies | The README calls it "Free and GPL-licensed" |
+diff --git a/site/src/content/docs/compare/conductor.md b/site/src/content/docs/compare/conductor.md
+index f668eefc1..8549107d4 100644
+--- a/site/src/content/docs/compare/conductor.md
++++ b/site/src/content/docs/compare/conductor.md
+@@ -12,7 +12,7 @@ That's the practical difference. The rest of this page covers what Conductor act
+ | | Ferryx | Conductor |
+ | :--- | :--- | :--- |
+ | macOS | Universal DMG | Yes, the only supported platform |
+-| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (signed) and x64 `.exe` installer | Not available yet |
++| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (x64, signed); some releases also attach a direct `.exe` | Not available yet |
+ | Linux | AppImage and .deb (x86_64), plus a headless `ferryx-cli` | Not available yet |
+ | Licensing | Source-available under the Ferryx License, free for individuals and small companies | Closed source; free tier plus paid plans from $50/mo |
+ | Agents | Any command you can start in a shell; status detection ships for <!-- agents:count -->16<!-- /agents:count --> | Claude Code, Codex, Cursor, and OpenCode |
+diff --git a/site/src/content/docs/docs/facts.md b/site/src/content/docs/docs/facts.md
+index 7fbb3226a..bb92a9dcd 100644
+--- a/site/src/content/docs/docs/facts.md
++++ b/site/src/content/docs/docs/facts.md
+@@ -39,12 +39,12 @@ change remain under the Sustainable Use License (SUL-1.0). Read the license for
+ | Platform | Package | Requirement |
+ | :--- | :--- | :--- |
+ | macOS | Universal DMG (Apple Silicon and Intel), signed and notarised | macOS 10.15+ |
+-| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed with automatic updates; or `Ferryx_x64-setup.exe` direct installer (not code-signed) | Windows 10/11 x64 with WebView2 |
++| Windows | [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed with automatic updates; some releases also attach a direct `.exe` installer (not code-signed) | Windows 10/11 x64 with WebView2 |
+ | Linux | AppImage (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |
+ | Linux | Debian/Ubuntu `.deb` (x86_64) | glibc 2.31+, WebKitGTK 4.0/4.1 with GTK 3 |
+ | Linux headless | `ferryx-cli` single binary, PTY daemon and CLI (x86_64) | No GUI or WebKit dependency |
+ 
+-On Windows, the [Microsoft Store listing](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`, or `winget install --source msstore 9NLHQL5JNLM4`) is the signed channel and updates automatically through the Store. The `Ferryx_x64-setup.exe` in each GitHub release is the secondary direct installer (not code-signed, self-updating), while `Ferryx_x64.msix` is the unsigned Store-ingestion package rather than a sideloading installer.
++On Windows, the [Microsoft Store listing](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (product ID `9NLHQL5JNLM4`, or `winget install --source msstore 9NLHQL5JNLM4`) is the signed channel and updates automatically through the Store. When a GitHub release attaches a direct `.exe` installer, it is the secondary direct installer (not code-signed, self-updating), while `Ferryx_x64.msix` is the unsigned Store-ingestion package rather than a sideloading installer.
+ 
+ For the Linux headless `ferryx-cli`, install with the one-line installer, which resolves the
+ current build rather than a pinned tag:
+diff --git a/site/src/content/docs/docs/introduction.md b/site/src/content/docs/docs/introduction.md
+index 20dbe4541..e55425ad7 100644
+--- a/site/src/content/docs/docs/introduction.md
++++ b/site/src/content/docs/docs/introduction.md
+@@ -42,7 +42,7 @@ Most of Ferryx reduces to six concepts.
+ Download from the [releases page](https://github.com/Indosaram/ferryx/releases/latest); the links below resolve against the latest release. Releases are calendar-versioned, so the newest tag is the one the release page shows.
+ 
+ - **macOS**: universal DMG for Apple Silicon and Intel, [Ferryx_universal.dmg](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg)
+-- **Windows**: [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed by the Store with automatic updates; or the direct x64 installer [Ferryx_x64-setup.exe](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) (not code-signed, so SmartScreen warns on first run; check the SHA-256 below before running it). The `Ferryx_x64.msix` attached to releases is an unsigned Store-ingestion package rather than a direct installer.
++- **Windows**: [Microsoft Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4) (`winget install --source msstore 9NLHQL5JNLM4`), signed by the Store with automatic updates. Some releases also attach a direct x64 `.exe` installer on the [releases page](https://github.com/Indosaram/ferryx/releases/latest) (not code-signed, so SmartScreen warns on first run; check the SHA-256 below before running it). The `Ferryx_x64.msix` attached to releases is an unsigned Store-ingestion package rather than a direct installer.
+ - **Linux**: [Ferryx_amd64.AppImage](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) or [Ferryx_amd64.deb](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb), both x64
+ 
+ Each release also publishes a `SHA256SUMS.txt` beside the binaries, so you can check a download before running it:
+diff --git a/site/src/content/docs/privacy.md b/site/src/content/docs/privacy.md
+index d054e33b7..83608f3a1 100644
+--- a/site/src/content/docs/privacy.md
++++ b/site/src/content/docs/privacy.md
+@@ -52,7 +52,7 @@ The website can use Google Analytics 4, and only with your explicit permission:
+ When you allow analytics, the site records:
+ 
+ - **`page_view`:** Sent once per page load, replacing the automatic page view so the reported URL can be sanitized first (`site/src/lib/analyticsRuntime.ts:161-184`).
+-- **`download_click`:** Sent when you click a release artifact link (including `.dmg`, `.exe`, `.AppImage`, `.deb`, and versioned `ferryx-cli` artifacts), with the parameters `platform`, `asset_id`, `destination`, and `link_location` (`site/src/lib/analytics.ts`). The classifier also recognises Microsoft Store links, but the current menu offers the GitHub Windows installer, not a Store listing. Opening the GitHub releases listing page is not recorded as a download.
++- **`download_click`:** Sent when you click a release artifact link (including `.dmg`, `.exe`, `.AppImage`, `.deb`, and versioned `ferryx-cli` artifacts), with the parameters `platform`, `asset_id`, `destination`, and `link_location` (`site/src/lib/analytics.ts`). Microsoft Store links count as a Windows install intent; the menu offers the Store as the Windows download and lists the GitHub `.exe` installer only for releases that publish it. Opening the GitHub releases listing page is not recorded as a download.
+ 
+ What is deliberately not collected:
+ 
+diff --git a/site/src/lib/downloads.test.ts b/site/src/lib/downloads.test.ts
+index bd6646903..7c055e47d 100644
+--- a/site/src/lib/downloads.test.ts
++++ b/site/src/lib/downloads.test.ts
+@@ -6,6 +6,7 @@ import {
+   MICROSOFT_STORE_URL,
+   MICROSOFT_STORE_SEARCH_URL,
+   detectUserPlatform,
++  windowsPlatform,
+   type PlatformId,
+ } from './downloads';
+ 
+@@ -86,13 +87,21 @@ describe('Cross-Platform Download Configuration', () => {
+     expect(macos.assets.map((a) => a.id)).toEqual(['macos-universal']);
+   });
+ 
+-  test('Windows offers the Microsoft Store first and the x64 installer second, never the raw MSIX', () => {
+-    const windows = PLATFORMS.windows;
+-    expect(windows.id).toBe('windows');
+-    expect(windows.name).toBe('Windows');
++  test('Windows resolves to the Microsoft Store alone when the release ships no NSIS installer', () => {
++    // Store-only releases (no --nsis-migration) publish no Ferryx_x64-setup.exe; a link would 404.
++    for (const windows of [PLATFORMS.windows, windowsPlatform(false)]) {
++      expect(windows.id).toBe('windows');
++      expect(windows.defaultAsset.id).toBe('windows-store');
++      expect(windows.defaultAsset.url).toBe(MICROSOFT_STORE_URL);
++      expect(windows.defaultAsset.fileType).toBe('Store');
++      expect(windows.assets.map((a) => a.id)).toEqual(['windows-store']);
++      expect(windows.assets.some((a) => a.url.endsWith('-setup.exe'))).toBe(false);
++    }
++  });
++
++  test('Windows adds the x64 installer second only when the release publishes it, never the raw MSIX', () => {
++    const windows = windowsPlatform(true);
+     expect(windows.defaultAsset.id).toBe('windows-store');
+-    expect(windows.defaultAsset.url).toBe(MICROSOFT_STORE_URL);
+-    expect(windows.defaultAsset.fileType).toBe('Store');
+     expect(windows.assets.map((a) => a.id)).toEqual(['windows-store', 'windows-installer']);
+ 
+     const exeAsset = windows.assets.find((a) => a.id === 'windows-installer');
+diff --git a/site/src/lib/downloads.ts b/site/src/lib/downloads.ts
+index 61c97db9a..03a8a881f 100644
+--- a/site/src/lib/downloads.ts
++++ b/site/src/lib/downloads.ts
+@@ -23,39 +23,31 @@ export const GITHUB_RELEASE_DOWNLOAD_BASE = 'https://github.com/Indosaram/ferryx
+ /**
+  * Canonical Microsoft Store product page for Ferryx (ProductId 9NLHQL5JNLM4), verified live by
+  * `bun scripts/store-listing-status.mjs`. The Store is the signed Windows channel with automatic
+- * background updates; the GitHub release .exe stays available as the secondary unsigned installer.
++ * background updates. The GitHub release .exe is offered only when the release publishes it.
+  */
+ export const MICROSOFT_STORE_URL = 'https://apps.microsoft.com/detail/9NLHQL5JNLM4';
+ export const MICROSOFT_STORE_SEARCH_URL = MICROSOFT_STORE_URL;
+ 
+-export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = {
+-  macos: {
+-    id: 'macos',
+-    name: 'macOS',
+-    badge: 'macOS 10.15+',
+-    systemReqs: 'Apple Silicon or Intel 64-bit',
+-    defaultAsset: {
+-      id: 'macos-universal',
+-      name: 'Universal DMG',
+-      architecture: 'Apple Silicon + Intel (Universal)',
+-      fileType: '.dmg',
+-      url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_universal.dmg`,
+-      recommended: true,
+-      notes: 'Runs on both Apple Silicon & Intel Macs',
+-    },
+-    assets: [
+-      {
+-        id: 'macos-universal',
+-        name: 'Universal DMG (.dmg)',
+-        architecture: 'Apple Silicon + Intel (Universal Binary)',
+-        fileType: '.dmg',
+-        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_universal.dmg`,
+-        recommended: true,
+-        notes: 'Compatible with Apple Silicon (M1/M2/M3/M4) and Intel Macs',
+-      },
+-    ],
+-  },
+-  windows: {
++/**
++ * The direct NSIS installer is optional in the release contract: a Store-only release
++ * (`--nsis-migration` omitted) publishes no `Ferryx_x64-setup.exe`, so linking it unconditionally
++ * would 404. The site offers it only when the build sets PUBLIC_FERRYX_WINDOWS_INSTALLER=true,
++ * which the deployer does after confirming the latest release ships that asset.
++ */
++const WINDOWS_INSTALLER_ASSET: DownloadAsset = {
++  id: 'windows-installer',
++  name: 'Windows Installer (.exe)',
++  architecture: 'x64',
++  fileType: '.exe',
++  url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
++  // The direct installer is not Authenticode-signed (the signed channel is the Microsoft
++  // Store above), so SmartScreen warns on first run; saying so here avoids surprise.
++  notes: 'Direct installer (not code-signed). SmartScreen shows a warning — check SHA256SUMS.txt before running',
++};
++
++/** Windows entry: the Microsoft Store always, the direct installer only when it is published. */
++export function windowsPlatform(installerPublished: boolean): PlatformConfig {
++  return {
+     id: 'windows',
+     name: 'Windows',
+     badge: 'Windows 10/11 (64-bit)',
+@@ -79,18 +71,39 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> =
+         recommended: true,
+         notes: 'Signed by the Microsoft Store with automatic updates (winget install --source msstore 9NLHQL5JNLM4)',
+       },
++      ...(installerPublished ? [WINDOWS_INSTALLER_ASSET] : []),
++    ],
++  };
++}
++
++export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = {
++  macos: {
++    id: 'macos',
++    name: 'macOS',
++    badge: 'macOS 10.15+',
++    systemReqs: 'Apple Silicon or Intel 64-bit',
++    defaultAsset: {
++      id: 'macos-universal',
++      name: 'Universal DMG',
++      architecture: 'Apple Silicon + Intel (Universal)',
++      fileType: '.dmg',
++      url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_universal.dmg`,
++      recommended: true,
++      notes: 'Runs on both Apple Silicon & Intel Macs',
++    },
++    assets: [
+       {
+-        id: 'windows-installer',
+-        name: 'Windows Installer (.exe)',
+-        architecture: 'x64',
+-        fileType: '.exe',
+-        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
+-        // The direct installer is not Authenticode-signed (the signed channel is the Microsoft
+-        // Store above), so SmartScreen warns on first run; saying so here avoids surprise.
+-        notes: 'Direct installer (not code-signed). SmartScreen shows a warning — check SHA256SUMS.txt before running',
++        id: 'macos-universal',
++        name: 'Universal DMG (.dmg)',
++        architecture: 'Apple Silicon + Intel (Universal Binary)',
++        fileType: '.dmg',
++        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_universal.dmg`,
++        recommended: true,
++        notes: 'Compatible with Apple Silicon (M1/M2/M3/M4) and Intel Macs',
+       },
+     ],
+   },
++  windows: windowsPlatform(import.meta.env.PUBLIC_FERRYX_WINDOWS_INSTALLER === 'true'),
+   linux: {
+     id: 'linux',
+     name: 'Linux',

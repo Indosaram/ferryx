@@ -1,0 +1,4 @@
+M	docs/HEADLESS_LINUX_SERVER_DEPLOYMENT_GUIDE.md
+M	src-tauri/src/cli.rs
+M	src-tauri/src/daemon/client.rs
+M	src-tauri/src/remote/state.rs

@@ -1,0 +1,4 @@
+src-tauri/src/daemon/diagnostics.rs
+src-tauri/tests/fixtures/redaction-v1.json
+ui/src/components/DaemonConnectionBanner.diagnostics.test.tsx
+ui/src/lib/daemonDiagnostics.ts

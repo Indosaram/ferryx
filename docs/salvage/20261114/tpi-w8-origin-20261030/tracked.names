@@ -1,0 +1,12 @@
+M	docs/HEADLESS_LINUX_SERVER_DEPLOYMENT_GUIDE.md
+M	docs/billing-operations.md
+M	site/src/content/docs/docs/pricing.mdx
+M	site/src/content/docs/docs/self-hosted-relay.md
+M	src-tauri/src/account/install_keys.rs
+M	src-tauri/src/account/mailer.rs
+M	src-tauri/src/account/onboarding_tests.rs
+M	src-tauri/src/account/origin.rs
+M	src-tauri/src/account/service.rs
+M	src-tauri/src/bin/relay.rs
+M	src-tauri/src/cli.rs
+M	src-tauri/src/remote/relay_server.rs

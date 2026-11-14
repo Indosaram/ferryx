@@ -1,0 +1,4 @@
+packaging/linux/bundle.Dockerfile
+src-tauri/resources/helpers/aarch64-unknown-linux-musl/ferryx-remote-helper
+src-tauri/resources/helpers/x86_64-unknown-linux-musl/ferryx-remote-helper
+ui/src/components/onboarding/FirstProjectStep.test.tsx

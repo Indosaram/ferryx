@@ -1,0 +1,2656 @@
+diff --git a/scripts/install.ps1 b/scripts/install.ps1
+index 2cd87ce41..765f199a3 100644
+--- a/scripts/install.ps1
++++ b/scripts/install.ps1
+@@ -25,8 +25,10 @@
+ # (FERRYX_VERSION, or the latest release); a source whose bytes do not match is skipped, and
+ # the install fails when no source matches.
+ #
+-# Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported architecture
+-# (only windows/amd64 has a prebuilt ferryx-cli), otherwise the exit code of "ferryx-cli up".
++# Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported platform
++# (only windows/amd64 is supported; Windows ARM64 is not; a host whose Windows loader rejects
++# the published ferryx-cli, for example a missing DLL), otherwise the exit code of
++# "ferryx-cli up".
+ #
+ # Windows PowerShell 5.1 compatible; ASCII only.
+ 
+@@ -38,6 +40,28 @@ param(
+     [switch]$Json
+ )
+ 
++$FerryxOrigin = $env:FERRYX_ORIGIN
++if ([string]::IsNullOrEmpty($FerryxOrigin)) {
++    $FerryxOrigin = "https://relay.ferryx.dev"
++}
++
++$FerryxVersion = $env:FERRYX_VERSION
++if ([string]::IsNullOrEmpty($FerryxVersion)) {
++    $FerryxVersion = "latest"
++}
++
++function Get-FerryxReleaseBaseUrl {
++    if ($FerryxVersion -eq "latest") {
++        return "https://github.com/Indosaram/ferryx/releases/latest/download"
++    }
++    return "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion
++}
++
++# Every failure names the download sources in use and the variables that override them.
++function Write-FerryxSourceOverrides {
++    [Console]::Error.WriteLine("    Download origin: " + $FerryxOrigin + " (override with FERRYX_ORIGIN); release: " + (Get-FerryxReleaseBaseUrl) + " (pin a tag with FERRYX_VERSION).")
++}
++
+ $FerryxInstallKey = $Key
+ if ([string]::IsNullOrEmpty($FerryxInstallKey)) {
+     $FerryxInstallKey = $env:FERRYX_INSTALL_KEY
+@@ -46,6 +70,7 @@ if ($KeyStdin) {
+     $FerryxInstallKey = [Console]::In.ReadLine()
+     if ([string]::IsNullOrWhiteSpace($FerryxInstallKey)) {
+         [Console]::Error.WriteLine("Error: -KeyStdin found no install key on stdin.")
++        Write-FerryxSourceOverrides
+         exit 2
+     }
+ }
+@@ -207,7 +232,10 @@ function Test-FerryxUnrunnableExitCode {
+ # Judges one '<Executable> --help' run. Measured contract: '--help exits 1 by design;
+ # install.sh accepts that, so a non-zero exit alone is not a failure'. A run passes when the
+ # process started, the platform loader did not reject the image, and the captured output
+-# carries the Ferryx CLI usage banner ("ferryx-cli" or "Usage:"). Returns a result object
++# carries the Ferryx CLI version or usage banner at the start of a line ("Usage: ferryx-cli",
++# "Ferryx CLI is running" or "ferryx-cli <version>"; a crash message that merely contains the
++# exe path does not count). A crash (any other negative NTSTATUS exit, for example 0xC0000005)
++# fails even after the banner was printed, like a signal death in install.sh. Returns a result object
+ # with Passed, the run's ExitCode, and Failure - a short phrase for the caller's error line.
+ function Invoke-FerryxSelfCheck {
+     param(
+@@ -217,39 +245,183 @@ function Invoke-FerryxSelfCheck {
+ 
+     $run = Invoke-FerryxSelfCheckRun -Executable $Executable -WorkDir $WorkDir
+     if ($null -eq $run) {
+-        return [pscustomobject]@{ Passed = $false; ExitCode = $null; Failure = "cannot start on this machine" }
++        return [pscustomobject]@{ Passed = $false; Unsupported = $true; ExitCode = $null; Failure = "cannot start on this machine" }
+     }
+     if (Test-FerryxUnrunnableExitCode -ExitCode $run.ExitCode) {
+-        return [pscustomobject]@{ Passed = $false; ExitCode = $run.ExitCode; Failure = ("cannot run on this machine (--help exit " + $run.ExitCode + ")") }
++        $ntstatus = "0x{0:X8}" -f $run.ExitCode
++        $reason = "--help exit " + $run.ExitCode
++        if ($run.ExitCode -eq -1073741515) {
++            $reason = $reason + ", " + $ntstatus + " STATUS_DLL_NOT_FOUND: a DLL it needs, such as the Microsoft Visual C++ runtime (VCRUNTIME140.dll), is missing"
++        } elseif ($run.ExitCode -lt 0) {
++            $reason = $reason + ", Windows loader status " + $ntstatus
++        }
++        return [pscustomobject]@{ Passed = $false; Unsupported = $true; ExitCode = $run.ExitCode; Failure = ("cannot run on this machine (" + $reason + ")") }
++    }
++    if ($run.ExitCode -lt 0) {
++        return [pscustomobject]@{ Passed = $false; Unsupported = $false; ExitCode = $run.ExitCode; Failure = ("crashed during its self-check (--help exit " + $run.ExitCode + ", status " + ("0x{0:X8}" -f $run.ExitCode) + ")") }
+     }
+-    if (($run.Output -notmatch "ferryx-cli") -and ($run.Output -notmatch "Usage:")) {
+-        return [pscustomobject]@{ Passed = $false; ExitCode = $run.ExitCode; Failure = ("failed its self-check (--help exit " + $run.ExitCode + ", output did not look like the Ferryx CLI usage)") }
++    if ($run.Output -notmatch '(?m)^(Usage: ferryx-cli|Ferryx CLI is running|ferryx-cli \d)') {
++        return [pscustomobject]@{ Passed = $false; Unsupported = $false; ExitCode = $run.ExitCode; Failure = ("failed its self-check (--help exit " + $run.ExitCode + ", output did not look like the Ferryx CLI usage)") }
+     }
+-    return [pscustomobject]@{ Passed = $true; ExitCode = $run.ExitCode; Failure = $null }
++    return [pscustomobject]@{ Passed = $true; Unsupported = $false; ExitCode = $run.ExitCode; Failure = $null }
+ }
+ 
+-$FerryxOrigin = $env:FERRYX_ORIGIN
+-if ([string]::IsNullOrEmpty($FerryxOrigin)) {
+-    $FerryxOrigin = "https://relay.ferryx.dev"
++# Removes the directories one install created: <InstallDir> and its parents up to $CreatedTop
++# (the topmost one that did not exist before). Only empty directories go; the first one that
++# cannot be removed (not empty, or in use) ends the walk, which is the intended stop.
++function Remove-FerryxCreatedDirectories {
++    param(
++        [Parameter(Mandatory = $true)][string]$InstallDir,
++        [string]$CreatedTop
++    )
++
++    if ([string]::IsNullOrEmpty($CreatedTop)) {
++        return
++    }
++    $dir = $InstallDir
++    while (-not [string]::IsNullOrEmpty($dir)) {
++        try {
++            [System.IO.Directory]::Delete($dir)
++        } catch {
++            return
++        }
++        if ($dir -eq $CreatedTop) {
++            return
++        }
++        $dir = Split-Path -Parent $dir
++    }
+ }
+ 
+-$FerryxVersion = $env:FERRYX_VERSION
+-if ([string]::IsNullOrEmpty($FerryxVersion)) {
+-    $FerryxVersion = "latest"
++# Installs the verified download $TempExe as <InstallDir>\ferryx-cli.exe and returns the exit
++# status for the caller: 0 installed, 2 the Windows loader rejected the candidate (unsupported),
++# 1 any other failure. The candidate must pass its self-check before the install directory is
++# created or anything is replaced, so a refusal leaves no new directory. The candidate is staged
++# and the previous exe kept under names unique to this run (.ferryx-cli.exe.new.<guid>,
++# .ferryx-cli.exe.old.<guid>), so a leftover or concurrent ferryx-cli.exe.new/.old - file or
++# directory - is never used or removed. The previous exe is kept until the installed copy passes
++# its own check; when that check fails, the previous exe is restored (or, on a fresh install, the
++# new one and the directories this call created are removed).
++function Install-FerryxCandidate {
++    param(
++        [Parameter(Mandatory = $true)][string]$TempExe,
++        [Parameter(Mandatory = $true)][string]$InstallDir,
++        [Parameter(Mandatory = $true)][string]$WorkDir
++    )
++
++    $targetExe = Join-Path $InstallDir "ferryx-cli.exe"
++    $runId = [System.Guid]::NewGuid().ToString("N")
++    $stagedExe = Join-Path $InstallDir (".ferryx-cli.exe.new." + $runId)
++    $backupExe = Join-Path $InstallDir (".ferryx-cli.exe.old." + $runId)
++
++    $candidateCheck = Invoke-FerryxSelfCheck -Executable $TempExe -WorkDir $WorkDir
++    if (-not $candidateCheck.Passed) {
++        Write-FerryxError ("downloaded executable " + $candidateCheck.Failure + ".")
++        Write-FerryxError "    Existing installation, if any, was left untouched."
++        Write-FerryxSourceOverrides
++        if ($candidateCheck.Unsupported) {
++            return 2
++        }
++        return 1
++    }
++
++    # The topmost missing ancestor of the install dir: what New-Item creates and a failure removes.
++    $createdTop = $null
++    $probe = $InstallDir
++    while ((-not [string]::IsNullOrEmpty($probe)) -and (-not (Test-Path -LiteralPath $probe))) {
++        $createdTop = $probe
++        $probe = Split-Path -Parent $probe
++    }
++    try {
++        New-Item -ItemType Directory -Force -Path $InstallDir -ErrorAction Stop | Out-Null
++    } catch {
++        Remove-FerryxCreatedDirectories -InstallDir $InstallDir -CreatedTop $createdTop
++        Write-FerryxError ('Cannot create the install directory ''{0}'': {1}' -f $InstallDir, $_.Exception.Message)
++        Write-FerryxSourceOverrides
++        return 1
++    }
++
++    # Stage beside the target, set the previous exe aside, then move the staged copy in.
++    $hadPrevious = Test-Path -LiteralPath $targetExe -PathType Leaf
++    try {
++        Copy-Item -LiteralPath $TempExe -Destination $stagedExe -Force -ErrorAction Stop
++        if ($hadPrevious) {
++            Move-Item -LiteralPath $targetExe -Destination $backupExe -Force -ErrorAction Stop
++            # A rename keeps the old timestamp; mark the backup as fresh so a concurrent run's
++            # age-guarded cleanup below leaves it alone. Best effort: the guard is only a safety margin.
++            try { (Get-Item -LiteralPath $backupExe -Force).LastWriteTime = Get-Date } catch { }
++        }
++        Move-Item -LiteralPath $stagedExe -Destination $targetExe -Force -ErrorAction Stop
++    } catch {
++        $installError = $_.Exception.Message
++        Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
++        if ($hadPrevious -and -not (Test-Path -LiteralPath $targetExe -PathType Leaf)) {
++            Move-Item -LiteralPath $backupExe -Destination $targetExe -Force -ErrorAction SilentlyContinue
++        }
++        Remove-FerryxCreatedDirectories -InstallDir $InstallDir -CreatedTop $createdTop
++        Write-FerryxError ('Cannot install to ''{0}'': {1}' -f $targetExe, $installError)
++        Write-FerryxError "    Existing installation, if any, was left untouched."
++        Write-FerryxSourceOverrides
++        return 1
++    }
++
++    # Confirm the installed path itself runs; otherwise put the previous state back.
++    $installedCheck = Invoke-FerryxSelfCheck -Executable $targetExe -WorkDir $WorkDir
++    if (-not $installedCheck.Passed) {
++        if ($hadPrevious -and -not (Test-Path -LiteralPath $backupExe -PathType Leaf)) {
++            # The backup is gone (a concurrent install replaced ferryx-cli.exe and cleaned up), so
++            # ferryx-cli.exe may now be that run's install: leave it rather than delete it.
++            $restoreNote = ('    The previous ferryx-cli.exe backup ''{0}'' is gone (another install may have replaced it); ''{1}'' was left as it is.' -f $backupExe, $targetExe)
++        } elseif ($hadPrevious) {
++            Remove-Item -LiteralPath $targetExe -Force -ErrorAction SilentlyContinue
++            Move-Item -LiteralPath $backupExe -Destination $targetExe -Force -ErrorAction SilentlyContinue
++            if ((Test-Path -LiteralPath $targetExe -PathType Leaf) -and -not (Test-Path -LiteralPath $backupExe)) {
++                $restoreNote = "    The previous ferryx-cli.exe was restored."
++            } else {
++                $restoreNote = ('    Restoring the previous ferryx-cli.exe failed; it was kept as ''{0}''.' -f $backupExe)
++            }
++        } else {
++            Remove-Item -LiteralPath $targetExe -Force -ErrorAction SilentlyContinue
++            Remove-FerryxCreatedDirectories -InstallDir $InstallDir -CreatedTop $createdTop
++            $restoreNote = "    Nothing was left installed."
++        }
++        Write-FerryxError ('installed ''{0}'' {1}.' -f $targetExe, $installedCheck.Failure)
++        Write-FerryxError $restoreNote
++        Write-FerryxSourceOverrides
++        if ($installedCheck.Unsupported) {
++            return 2
++        }
++        return 1
++    }
++    # A running previous exe cannot be deleted on Windows; it then stays as .ferryx-cli.exe.old.<guid>
++    # until a later successful install removes it here. Other runs' backups are removed only once they
++    # are over an hour old, so a concurrent run's live backup is kept.
++    Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue
++    $staleBefore = (Get-Date).AddMinutes(-60)
++    Get-ChildItem -LiteralPath $InstallDir -Filter ".ferryx-cli.exe.old.*" -File -Force -ErrorAction SilentlyContinue |
++        Where-Object { $_.LastWriteTime -lt $staleBefore } |
++        Remove-Item -Force -ErrorAction SilentlyContinue
++
++    Write-Host ("==> Successfully installed ferryx-cli to " + $targetExe)
++    Write-Host ("    Verified: " + $targetExe + " executes (--help exit " + $installedCheck.ExitCode + ").")
++    return 0
+ }
+ 
+ # Validate FERRYX_ORIGIN before anything is downloaded.
+ if (-not (Test-FerryxOrigin -Origin $FerryxOrigin)) {
+     Write-FerryxError ('Invalid FERRYX_ORIGIN ''{0}''. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1]).' -f $FerryxOrigin)
++    Write-FerryxSourceOverrides
+     exit 1
+ }
+ 
+ # Validate FERRYX_VERSION: must match ^[A-Za-z0-9._-]+$.
+ if ($FerryxVersion -notmatch '^[A-Za-z0-9._-]+$') {
+     Write-FerryxError ('Invalid FERRYX_VERSION ''{0}''. Must match ^[A-Za-z0-9._-]+$.' -f $FerryxVersion)
++    Write-FerryxSourceOverrides
+     exit 1
+ }
+ 
++$releaseBaseUrl = Get-FerryxReleaseBaseUrl
++
+ Write-Host "==> Ferryx CLI Installer"
+ 
+ # 1. Detect the CPU architecture. A 32-bit host process reports x86 in
+@@ -261,10 +433,17 @@ if ([string]::IsNullOrEmpty($rawArch)) {
+ }
+ if ([string]::IsNullOrEmpty($rawArch)) {
+     Write-FerryxError "Cannot detect the CPU architecture: neither PROCESSOR_ARCHITEW6432 nor PROCESSOR_ARCHITECTURE is set."
++    Write-FerryxSourceOverrides
+     exit 1
+ }
++if ($rawArch.ToUpperInvariant() -eq "ARM64") {
++    Write-FerryxError ('Windows ARM64 ({0}) is not supported; ferryx-cli ships for Windows x64 (AMD64) only.' -f $rawArch)
++    Write-FerryxSourceOverrides
++    exit 2
++}
+ if ($rawArch.ToUpperInvariant() -ne "AMD64") {
+-    Write-FerryxError ('Windows {0} has no prebuilt ferryx-cli yet; build from source: https://github.com/Indosaram/ferryx/blob/main/CONTRIBUTING.md#build-prerequisites' -f $rawArch)
++    Write-FerryxError ('Windows {0} is not supported; ferryx-cli ships for Windows x64 (AMD64) only.' -f $rawArch)
++    Write-FerryxSourceOverrides
+     exit 2
+ }
+ $platformOs = "windows"
+@@ -276,11 +455,6 @@ $artifactName = "ferryx-cli-windows-amd64.exe"
+ # 3. Resolve the download URLs.
+ $primaryUrl = $FerryxOrigin + "/download/" + $artifactName
+ $secondaryUrl = $FerryxOrigin + "/download/ferryx-cli"
+-if ($FerryxVersion -eq "latest") {
+-    $releaseBaseUrl = "https://github.com/Indosaram/ferryx/releases/latest/download"
+-} else {
+-    $releaseBaseUrl = "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion
+-}
+ $githubUrl = $releaseBaseUrl + "/" + $artifactName
+ 
+ # 4. Temporary download location.
+@@ -293,6 +467,7 @@ try {
+         New-Item -ItemType Directory -Force -Path $tempDir -ErrorAction Stop | Out-Null
+     } catch {
+         Write-FerryxError ('Cannot create a temporary directory ''{0}'': {1}' -f $tempDir, $_.Exception.Message)
++        Write-FerryxSourceOverrides
+         exit 1
+     }
+ 
+@@ -313,6 +488,7 @@ try {
+     }
+     if (-not $sumsFound) {
+         Write-FerryxError ("could not download SHA256SUMS from " + $releaseBaseUrl + "; refusing to install an unverified binary.")
++        Write-FerryxSourceOverrides
+         exit 1
+     }
+     $expectedSha256 = $null
+@@ -325,6 +501,7 @@ try {
+     }
+     if ($null -eq $expectedSha256 -or $expectedSha256 -notmatch '^[0-9a-f]{64}$') {
+         Write-FerryxError ("SHA256SUMS from " + $releaseBaseUrl + " has no valid entry for " + $artifactName + ".")
++        Write-FerryxSourceOverrides
+         exit 1
+     }
+ 
+@@ -366,9 +543,11 @@ try {
+     if (-not $downloadSucceeded) {
+         if ($checksumMismatch) {
+             Write-FerryxError ("no downloaded ferryx-cli matched the SHA256SUMS of the release (" + $artifactName + ").")
++            Write-FerryxSourceOverrides
+             exit 1
+         }
+         Write-FerryxError "Failed to download ferryx-cli from available endpoints."
++        Write-FerryxSourceOverrides
+         exit 1
+     }
+ 
+@@ -377,6 +556,7 @@ try {
+     if (-not (Test-FerryxWindowsExecutable -Path $tempExe)) {
+         Write-FerryxError ("no downloadable artifact matched " + $platformOs + "/" + $platformArch + ".")
+         Write-FerryxError ("Detected header bytes: " + (Get-FerryxHeaderHex -Path $tempExe))
++        Write-FerryxSourceOverrides
+         exit 1
+     }
+ 
+@@ -389,54 +569,22 @@ try {
+             $installDir = Join-Path $env:USERPROFILE ".local\bin"
+         } else {
+             Write-FerryxError "Cannot determine an install directory: set FERRYX_INSTALL_DIR, or make sure LOCALAPPDATA or USERPROFILE is set."
++            Write-FerryxSourceOverrides
+             exit 1
+         }
+     }
+ 
+     $targetExe = Join-Path $installDir "ferryx-cli.exe"
+-    $stagedExe = $targetExe + ".new"
+ 
+-    try {
+-        New-Item -ItemType Directory -Force -Path $installDir -ErrorAction Stop | Out-Null
+-    } catch {
+-        Write-FerryxError ('Cannot create the install directory ''{0}'': {1}' -f $installDir, $_.Exception.Message)
+-        exit 1
+-    }
+-
+-    # 8. Verify the candidate can execute BEFORE it replaces anything. Measured contract:
+-    #    '--help exits 1 by design; install.sh accepts that, so a non-zero exit alone is not a
+-    #    failure' - what must hold is that the process starts and prints the Ferryx CLI usage.
+-    #    A payload that cannot run here must leave any existing installation byte-for-byte
+-    #    untouched.
+-    $candidateCheck = Invoke-FerryxSelfCheck -Executable $tempExe -WorkDir $tempDir
+-    if (-not $candidateCheck.Passed) {
+-        Write-FerryxError ("downloaded executable " + $candidateCheck.Failure + ".")
+-        Write-FerryxError "    Existing installation, if any, was left untouched."
+-        exit 1
++    # 8. Self-check the candidate, then create the directory and install it (see
++    #    Install-FerryxCandidate). A loader rejection is an unsupported platform: exit 2, like
++    #    install.sh; a refusal leaves no new directory and any existing installation untouched.
++    $installStatus = Install-FerryxCandidate -TempExe $tempExe -InstallDir $installDir -WorkDir $tempDir
++    if ($installStatus -ne 0) {
++        exit $installStatus
+     }
+ 
+-    # 9. Install: stage beside the target, then move over it.
+-    Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
+-    try {
+-        Copy-Item -LiteralPath $tempExe -Destination $stagedExe -Force -ErrorAction Stop
+-        Move-Item -LiteralPath $stagedExe -Destination $targetExe -Force -ErrorAction Stop
+-    } catch {
+-        Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
+-        Write-FerryxError ('Cannot install to ''{0}'': {1}' -f $targetExe, $_.Exception.Message)
+-        exit 1
+-    }
+-
+-    # 10. Confirm the installed path itself runs.
+-    $installedCheck = Invoke-FerryxSelfCheck -Executable $targetExe -WorkDir $tempDir
+-    if (-not $installedCheck.Passed) {
+-        Write-FerryxError ('installed ''{0}'' {1}.' -f $targetExe, $installedCheck.Failure)
+-        exit 1
+-    }
+-
+-    Write-Host ("==> Successfully installed ferryx-cli to " + $targetExe)
+-    Write-Host ("    Verified: " + $targetExe + " executes (--help exit " + $installedCheck.ExitCode + ").")
+-
+-    # 11. Check PATH. Adding the directory to the user PATH must never fail the install.
++    # 9. Check PATH. Adding the directory to the user PATH must never fail the install.
+     $environmentKey = $null
+     try {
+         $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+@@ -490,7 +638,7 @@ try {
+         ""
+     )
+ 
+-    # 12. Link this machine and keep its daemon running. Progress uses Write-Host, so with -Json
++    # 10. Link this machine and keep its daemon running. Progress uses Write-Host, so with -Json
+     #     the only stdout output is the JSON summary line of "ferryx-cli up --json".
+     if ($NoUp) {
+         foreach ($line in $nextStep) { Write-Host $line }
+@@ -539,6 +687,7 @@ try {
+         }
+         Write-FerryxError ("ferryx-cli up failed (exit " + $upStatus + "): " + $upReason + ".")
+         Write-FerryxError ("    ferryx-cli stays installed at " + $targetExe + "; rerun it with 'up --origin " + $FerryxOrigin + "' when ready.")
++        Write-FerryxSourceOverrides
+         exit $upStatus
+     }
+ } finally {
+diff --git a/scripts/install.sh b/scripts/install.sh
+index e31048fe0..e33ed8fe0 100755
+--- a/scripts/install.sh
++++ b/scripts/install.sh
+@@ -25,7 +25,11 @@ set -eu
+ # the install fails when no source matches.
+ #
+ # Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported platform
+-# (Linux arm64 has no prebuilt ferryx-cli), otherwise the exit code of "ferryx-cli up".
++# (Linux arm64, Linux with musl libc, a glibc older than the published ferryx-cli needs, a
++# missing shared library or any other dynamic loader rejection, or any other OS/CPU without a
++# published ferryx-cli), otherwise the exit code of "ferryx-cli up". The downloaded binary
++# is staged in the install directory and must run there before it replaces anything; an
++# install directory that does not allow running programs (noexec) is exit 1.
+ 
+ FERRYX_INSTALL_KEY="${FERRYX_INSTALL_KEY:-}"
+ INSTALL_EMAIL=""
+@@ -33,12 +37,36 @@ INSTALL_NO_UP=0
+ INSTALL_JSON=0
+ INSTALL_KEY_STDIN=0
+ 
++FERRYX_ORIGIN="${FERRYX_ORIGIN:-https://relay.ferryx.dev}"
++FERRYX_VERSION="${FERRYX_VERSION:-latest}"
++
++release_base_url() {
++  if [ "$FERRYX_VERSION" = "latest" ]; then
++    echo "https://github.com/Indosaram/ferryx/releases/latest/download"
++  else
++    echo "https://github.com/Indosaram/ferryx/releases/download/${FERRYX_VERSION}"
++  fi
++}
++
++# Every failure names the download sources in use and the variables that override them.
++print_source_overrides() {
++  echo "    Download origin: ${FERRYX_ORIGIN} (override with FERRYX_ORIGIN); release: $(release_base_url) (pin a tag with FERRYX_VERSION)." >&2
++}
++
++# die STATUS MESSAGE: print the error and the source overrides, then exit with STATUS.
++die() {
++  die_status="$1"
++  shift
++  echo "Error: $*" >&2
++  print_source_overrides
++  exit "$die_status"
++}
++
+ while [ "$#" -gt 0 ]; do
+   case "$1" in
+     --key)
+       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+-        echo "Error: --key needs a value." >&2
+-        exit 2
++        die 2 "--key needs a value."
+       fi
+       FERRYX_INSTALL_KEY="$2"
+       shift 2
+@@ -53,8 +81,7 @@ while [ "$#" -gt 0 ]; do
+       ;;
+     --email)
+       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+-        echo "Error: --email needs a value." >&2
+-        exit 2
++        die 2 "--email needs a value."
+       fi
+       INSTALL_EMAIL="$2"
+       shift 2
+@@ -72,8 +99,7 @@ while [ "$#" -gt 0 ]; do
+       shift
+       ;;
+     *)
+-      echo "Error: unknown option '$1'. Supported: --key K, --key-stdin, --email E, --no-up, --json." >&2
+-      exit 2
++      die 2 "unknown option '$1'. Supported: --key K, --key-stdin, --email E, --no-up, --json."
+       ;;
+   esac
+ done
+@@ -83,8 +109,7 @@ if [ "$INSTALL_KEY_STDIN" -eq 1 ]; then
+   # Exactly one line; a final line without a newline still counts.
+   IFS= read -r FERRYX_INSTALL_KEY || true
+   if [ -z "$FERRYX_INSTALL_KEY" ]; then
+-    echo "Error: --key-stdin found no install key on stdin." >&2
+-    exit 2
++    die 2 "--key-stdin found no install key on stdin."
+   fi
+ fi
+ 
+@@ -96,15 +121,11 @@ else
+   exec 3>&1
+ fi
+ 
+-FERRYX_ORIGIN="${FERRYX_ORIGIN:-https://relay.ferryx.dev}"
+-FERRYX_VERSION="${FERRYX_VERSION:-latest}"
+-
+ # Validate FERRYX_ORIGIN: must be https://... or http:// on loopback (127.0.0.1, localhost, [::1])
+ case "$FERRYX_ORIGIN" in
+   https://*|https)
+     if [ "$FERRYX_ORIGIN" = "https://" ] || [ "$FERRYX_ORIGIN" = "https" ]; then
+-      echo "Error: Invalid FERRYX_ORIGIN '$FERRYX_ORIGIN'. Must start with https:// or http:// on a loopback host." >&2
+-      exit 1
++      die 1 "Invalid FERRYX_ORIGIN '${FERRYX_ORIGIN}'. Must start with https:// or http:// on a loopback host."
+     fi
+     ;;
+   http://localhost|http://localhost/*|http://localhost:*|\
+@@ -112,29 +133,45 @@ case "$FERRYX_ORIGIN" in
+   http://\[::1\]|http://\[::1\]/*|http://\[::1\]:*)
+     ;;
+   *)
+-    echo "Error: Invalid FERRYX_ORIGIN '$FERRYX_ORIGIN'. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1])." >&2
+-    exit 1
++    die 1 "Invalid FERRYX_ORIGIN '${FERRYX_ORIGIN}'. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1])."
+     ;;
+ esac
+ 
+ # Validate FERRYX_VERSION: must match ^[A-Za-z0-9._-]+$
+ case "$FERRYX_VERSION" in
+   "")
+-    echo "Error: Invalid FERRYX_VERSION '$FERRYX_VERSION'. Must match ^[A-Za-z0-9._-]+$." >&2
+-    exit 1
++    die 1 "Invalid FERRYX_VERSION '${FERRYX_VERSION}'. Must match ^[A-Za-z0-9._-]+$."
+     ;;
+   *[!A-Za-z0-9._-]*|"")
+-    echo "Error: Invalid FERRYX_VERSION '$FERRYX_VERSION'. Must match ^[A-Za-z0-9._-]+$." >&2
+-    exit 1
++    die 1 "Invalid FERRYX_VERSION '${FERRYX_VERSION}'. Must match ^[A-Za-z0-9._-]+$."
+     ;;
+   *)
+     ;;
+ esac
+ 
++RELEASE_BASE_URL="$(release_base_url)"
++
++# musl-based distributions (Alpine and similar) cannot run the glibc ferryx-cli build. A glibc
++# host that merely has the musl loader installed still answers GNU_LIBC_VERSION.
++linux_libc_is_musl() {
++  if ldd --version 2>&1 | grep -qi musl; then
++    return 0
++  fi
++  if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
++    return 1
++  fi
++  for loader in /lib/ld-musl-*; do
++    if [ -e "$loader" ]; then
++      return 0
++    fi
++  done
++  return 1
++}
++
+ echo "==> Ferryx CLI Installer"
+ 
+ # 1. Detect OS
+-OS="$(uname -s)"
++OS="$(uname -s)" || die 1 "cannot detect the operating system: 'uname -s' failed."
+ case "$OS" in
+   Linux)
+     PLATFORM_OS="linux"
+@@ -143,31 +180,32 @@ case "$OS" in
+     PLATFORM_OS="darwin"
+     ;;
+   *)
+-    echo "Error: Unsupported operating system '$OS'. Ferryx CLI supports Linux and macOS." >&2
+-    exit 1
++    die 2 "operating system '${OS}' is not supported; ferryx-cli ships for Linux x86_64 and macOS (use install.ps1 on Windows)."
+     ;;
+ esac
+ 
+ # 2. Detect Architecture
+-BUILD_FROM_SOURCE_URL="https://github.com/Indosaram/ferryx/blob/main/CONTRIBUTING.md#build-prerequisites"
+-ARCH="$(uname -m)"
++ARCH="$(uname -m)" || die 1 "cannot detect the CPU architecture: 'uname -m' failed."
+ case "$ARCH" in
+   x86_64|amd64)
+     PLATFORM_ARCH="amd64"
+     ;;
+   aarch64|arm64)
+     if [ "$PLATFORM_OS" = "linux" ]; then
+-      echo "Error: Linux arm64 has no prebuilt ferryx-cli yet; build from source: ${BUILD_FROM_SOURCE_URL}" >&2
+-      exit 2
++      die 2 "Linux arm64 (${ARCH}) is not supported; ferryx-cli ships for Linux x86_64 only."
+     fi
+     PLATFORM_ARCH="arm64"
+     ;;
+   *)
+-    echo "Error: ${OS} ${ARCH} has no prebuilt ferryx-cli; build from source: ${BUILD_FROM_SOURCE_URL}" >&2
+-    exit 2
++    die 2 "${OS} ${ARCH} is not supported; ferryx-cli ships for Linux x86_64 and macOS only."
+     ;;
+ esac
+ 
++# 2a. Detect the C library: the Linux build needs glibc.
++if [ "$PLATFORM_OS" = "linux" ] && linux_libc_is_musl; then
++  die 2 "Linux with musl libc (Alpine and similar) is not supported; ferryx-cli needs glibc 2.17 or newer."
++fi
++
+ # 3. Determine download artifact name (Linux is amd64 only; macOS ships one universal binary)
+ if [ "$PLATFORM_OS" = "linux" ]; then
+   ARTIFACT_NAME="ferryx-cli-linux-amd64"
+@@ -178,19 +216,28 @@ fi
+ # 4. Resolve download URLs
+ PRIMARY_URL="${FERRYX_ORIGIN}/download/${ARTIFACT_NAME}"
+ SECONDARY_URL="${FERRYX_ORIGIN}/download/ferryx-cli"
+-if [ "$FERRYX_VERSION" = "latest" ]; then
+-  RELEASE_BASE_URL="https://github.com/Indosaram/ferryx/releases/latest/download"
++GITHUB_URL="${RELEASE_BASE_URL}/${ARTIFACT_NAME}"
++
++# 4a. Determine the installation directory before downloading anything.
++if [ -n "${FERRYX_INSTALL_DIR:-}" ]; then
++  TARGET_DIR="$FERRYX_INSTALL_DIR"
++elif [ "$(id -u)" -eq 0 ]; then
++  TARGET_DIR="/usr/local/bin"
++elif [ -n "${HOME:-}" ]; then
++  TARGET_DIR="${HOME}/.local/bin"
+ else
+-  RELEASE_BASE_URL="https://github.com/Indosaram/ferryx/releases/download/${FERRYX_VERSION}"
++  die 1 "HOME is not set; set FERRYX_INSTALL_DIR to choose the install directory."
+ fi
+-GITHUB_URL="${RELEASE_BASE_URL}/${ARTIFACT_NAME}"
+ 
+ # 5. Temporary download location
+-TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'ferryx-install')"
++TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'ferryx-install')" ||
++  die 1 "Cannot create a temporary directory."
+ TMP_BIN="${TMP_DIR}/ferryx-cli"
+ TMP_SUMS="${TMP_DIR}/SHA256SUMS"
++STAGED_BIN=""
+ cleanup() {
+   rm -rf "$TMP_DIR"
++  [ -z "$STAGED_BIN" ] || rm -f "$STAGED_BIN"
+ }
+ trap cleanup EXIT INT TERM
+ 
+@@ -203,8 +250,7 @@ download() {
+   elif command -v wget >/dev/null 2>&1; then
+     wget -qO "$dest" "$url"
+   else
+-    echo "Error: Neither curl nor wget was found on your system." >&2
+-    exit 1
++    return 1
+   fi
+ }
+ 
+@@ -278,6 +324,11 @@ sha256_of() {
+   fi
+ }
+ 
++# Checked up front: download() runs with stderr discarded, so its own failure would be silent.
++if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
++  die 1 "Neither curl nor wget was found on your system."
++fi
++
+ # 6a. Fetch the release checksums. Releases publish SHA256SUMS; older ones SHA256SUMS.txt.
+ echo "--> Downloading SHA256SUMS from ${RELEASE_BASE_URL} ..."
+ SUMS_FOUND=0
+@@ -288,20 +339,18 @@ for sums_name in SHA256SUMS SHA256SUMS.txt; do
+   fi
+ done
+ if [ "$SUMS_FOUND" -ne 1 ]; then
+-  echo "Error: could not download SHA256SUMS from ${RELEASE_BASE_URL}; refusing to install an unverified binary." >&2
+-  exit 1
++  die 1 "could not download SHA256SUMS from ${RELEASE_BASE_URL}; refusing to install an unverified binary."
+ fi
+-EXPECTED_SHA256="$(awk -v name="$ARTIFACT_NAME" '$2 == name || $2 == "*" name { print tolower($1); exit }' "$TMP_SUMS")"
++EXPECTED_SHA256="$(awk -v name="$ARTIFACT_NAME" '$2 == name || $2 == "*" name { print tolower($1); exit }' "$TMP_SUMS")" ||
++  die 1 "cannot read SHA256SUMS from ${RELEASE_BASE_URL} (awk failed)."
+ case "$EXPECTED_SHA256" in
+   ????????????????????????????????????????????????????????????????) ;;
+   *)
+-    echo "Error: SHA256SUMS from ${RELEASE_BASE_URL} has no valid entry for ${ARTIFACT_NAME}." >&2
+-    exit 1
++    die 1 "SHA256SUMS from ${RELEASE_BASE_URL} has no valid entry for ${ARTIFACT_NAME}."
+     ;;
+ esac
+ if ! sha256_of "$TMP_SUMS" >/dev/null; then
+-  echo "Error: neither sha256sum nor shasum was found; cannot verify the download." >&2
+-  exit 1
++  die 1 "neither sha256sum nor shasum was found; cannot verify the download."
+ fi
+ 
+ echo "--> Downloading ferryx-cli for ${PLATFORM_OS}/${PLATFORM_ARCH}..."
+@@ -314,7 +363,8 @@ for url in "$PRIMARY_URL" "$SECONDARY_URL" "$GITHUB_URL"; do
+       echo "    Skipping: artifact is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
+       continue
+     fi
+-    actual_sha256="$(sha256_of "$TMP_BIN" | tr 'A-F' 'a-f')"
++    actual_sha256="$(sha256_of "$TMP_BIN" | tr 'A-F' 'a-f')" ||
++      die 1 "cannot compute the SHA256 of the download from ${url}."
+     if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
+       echo "    Skipping: SHA256 mismatch (expected ${EXPECTED_SHA256}, got ${actual_sha256})"
+       CHECKSUM_MISMATCH=1
+@@ -328,11 +378,9 @@ done
+ 
+ if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
+   if [ "$CHECKSUM_MISMATCH" -eq 1 ]; then
+-    echo "Error: no downloaded ferryx-cli matched the SHA256SUMS of the release (${ARTIFACT_NAME})." >&2
+-    exit 1
++    die 1 "no downloaded ferryx-cli matched the SHA256SUMS of the release (${ARTIFACT_NAME})."
+   fi
+-  echo "Error: Failed to download ferryx-cli from available endpoints." >&2
+-  exit 1
++  die 1 "Failed to download ferryx-cli from available endpoints."
+ fi
+ 
+ # 7. Confirm the accepted artifact matches this platform (the loop above already filtered;
+@@ -340,51 +388,148 @@ fi
+ if ! artifact_matches_platform "$TMP_BIN"; then
+   echo "Error: no downloadable artifact matched ${PLATFORM_OS}/${PLATFORM_ARCH}." >&2
+   echo "Detected header bytes: $(header_hex "$TMP_BIN")" >&2
++  print_source_overrides
+   exit 1
+ fi
+ 
+-# 8. Determine installation directory
+-if [ -n "${FERRYX_INSTALL_DIR:-}" ]; then
+-  TARGET_DIR="$FERRYX_INSTALL_DIR"
+-elif [ "$(id -u)" -eq 0 ]; then
+-  TARGET_DIR="/usr/local/bin"
+-else
+-  TARGET_DIR="${HOME}/.local/bin"
++# 8. Stage the candidate beside the target and prove it runs there BEFORE anything is replaced.
++#    It runs from the install directory, not TMPDIR, so a noexec /tmp cannot turn a supported
++#    host into a refusal. A refusal removes the staged file and every directory this run created,
++#    so an existing installation stays byte-for-byte untouched. The staging file has a unique
++#    name per run (mktemp), so concurrent runs never remove or overwrite each other's candidate.
++TARGET_BIN="${TARGET_DIR}/ferryx-cli"
++
++# The topmost missing ancestor of TARGET_DIR: what "mkdir -p" creates and a refusal removes.
++CREATED_TOP=""
++created_probe="$TARGET_DIR"
++while [ ! -e "$created_probe" ] && [ ! -L "$created_probe" ]; do
++  CREATED_TOP="$created_probe"
++  created_parent="$(dirname "$created_probe")"
++  [ "$created_parent" != "$created_probe" ] || break
++  created_probe="$created_parent"
++done
++
++discard_staged() {
++  [ -z "$STAGED_BIN" ] || rm -f "$STAGED_BIN" 2>/dev/null || true
++  STAGED_BIN=""
++  [ -n "$CREATED_TOP" ] || return 0
++  created_dir="$TARGET_DIR"
++  while rmdir "$created_dir" 2>/dev/null; do
++    [ "$created_dir" != "$CREATED_TOP" ] || return 0
++    created_dir="$(dirname "$created_dir")"
++  done
++  return 0
++}
++
++if ! mkdir -p "$TARGET_DIR"; then
++  discard_staged
++  die 1 "Cannot create the install directory '${TARGET_DIR}'."
++fi
++# Staging files of runs killed before their rename (SIGKILL, OOM, power loss) are binary-sized;
++# remove those older than an hour. The age guard keeps a concurrent run's staging file.
++find "$TARGET_DIR" -maxdepth 1 -type f -name '.ferryx-cli.new.*' -mmin +60 -exec rm -f {} + 2>/dev/null || true
++if ! STAGED_BIN="$(mktemp "${TARGET_DIR}/.ferryx-cli.new.XXXXXX")" || [ -z "$STAGED_BIN" ] ||
++  ! install -m 0755 "$TMP_BIN" "$STAGED_BIN"; then
++  discard_staged
++  die 1 "Cannot install to '${TARGET_BIN}' (staging a copy in '${TARGET_DIR}' failed); the existing installation, if any, was left untouched."
+ fi
+ 
+-mkdir -p "$TARGET_DIR"
+-TARGET_BIN="${TARGET_DIR}/ferryx-cli"
+-STAGED_BIN="${TARGET_BIN}.new"
++# The dynamic loader reports a too-old glibc, a missing symbol version or a missing library on
++# stderr and exits 1 (127 when the ELF interpreter itself is missing), so the exit status alone
++# cannot tell a loader failure from a CLI that answered: loader messages on stderr are checked
++# first. A release that predates "--version" prints its usage and exits 1; that usage proves the
++# CLI's main ran. The banner must start a line, so a loader message that merely contains it in
++# a path (for example an install directory named "Ferryx CLI") never passes.
++host_glibc_version() {
++  if getconf GNU_LIBC_VERSION 2>/dev/null; then
++    return 0
++  fi
++  if command -v ldd >/dev/null 2>&1; then
++    ldd --version 2>&1 | head -n 1
++  else
++    echo "an unknown C library"
++  fi
++}
+ 
+-chmod +x "$TMP_BIN"
++# refuse_unrunnable STATUS REASON: the candidate cannot run on this host.
++refuse_unrunnable() {
++  refuse_status="$1"
++  shift
++  discard_staged
++  echo "Error: $*" >&2
++  printf '%s\n%s\n' "$verify_stderr" "$verify_stdout" | sed '/^$/d' | head -n 3 | sed 's/^/    /' >&2
++  echo "    The downloaded ferryx-cli was not installed; the existing installation, if any, was left untouched." >&2
++  print_source_overrides
++  exit "$refuse_status"
++}
+ 
+-# 9. Verify the candidate can execute BEFORE it replaces anything. A payload that cannot
+-# run here must leave any existing installation byte-for-byte untouched.
++VERIFY_ERR="${TMP_DIR}/verify.err"
+ set +e
+-"$TMP_BIN" --help >/dev/null 2>&1
++verify_stdout="$("$STAGED_BIN" --version </dev/null 2>"$VERIFY_ERR")"
+ verify_status=$?
++verify_stderr="$(cat "$VERIFY_ERR" 2>/dev/null)"
+ set -e
+-case "$verify_status" in
+-  126|127)
+-    echo "Error: downloaded binary cannot execute on this platform (exit ${verify_status})." >&2
+-    echo "    Existing installation, if any, was left untouched." >&2
+-    exit 1
+-    ;;
+-esac
+ 
+-# 10. Install atomically: stage beside the target, then rename over it.
+-rm -f "$STAGED_BIN"
+-if ! install -m 0755 "$TMP_BIN" "$STAGED_BIN"; then
+-  rm -f "$STAGED_BIN"
+-  exit 1
++if [ "$verify_status" -ne 0 ]; then
++  missing_glibc="$(printf '%s\n' "$verify_stderr" |
++    sed -n "s/.*version .GLIBC_\([0-9][0-9.]*\)' not found.*/\1/p" |
++    sort -t . -k 1,1n -k 2,2n -k 3,3n | tail -n 1)"
++  missing_glibcxx="$(printf '%s\n' "$verify_stderr" |
++    sed -n "s/.*version .\(GLIBCXX_[0-9][0-9.]*\)' not found.*/\1/p" | tail -n 1)"
++  missing_version="$(printf '%s\n' "$verify_stderr" |
++    sed -n "s/.*version .\([^']*\)' not found (required by .*/\1/p" | head -n 1)"
++  missing_library="$(printf '%s\n' "$verify_stderr" |
++    sed -n 's/.*error while loading shared libraries: \([^:]*\): cannot open shared object file.*/\1/p' | head -n 1)"
++  loader_error="$(printf '%s\n' "$verify_stderr" | sed -n '/error while loading shared libraries/{p;q;}')"
++
++  if [ -n "$missing_glibc" ]; then
++    refuse_unrunnable 2 "this Linux is not supported: ferryx-cli needs glibc ${missing_glibc} or newer (GLIBC_${missing_glibc} not found), and this host has $(host_glibc_version)."
++  elif [ -n "$missing_glibcxx" ]; then
++    refuse_unrunnable 2 "this Linux is not supported: ferryx-cli needs a libstdc++ that provides ${missing_glibcxx}, which this host lacks (C library: $(host_glibc_version))."
++  elif [ -n "$missing_version" ]; then
++    refuse_unrunnable 2 "this system is not supported: the dynamic loader rejected ferryx-cli because no installed library provides ${missing_version} (C library: $(host_glibc_version))."
++  elif [ -n "$missing_library" ]; then
++    refuse_unrunnable 2 "this system is not supported: ferryx-cli needs the shared library '${missing_library}', which is not installed here."
++  elif [ -n "$loader_error" ]; then
++    refuse_unrunnable 2 "this system is not supported: the dynamic loader could not start ferryx-cli (C library: $(host_glibc_version))."
++  fi
++  case "$verify_status" in
++    126)
++      case "$verify_stderr" in
++        *"Permission denied"*)
++          refuse_unrunnable 1 "cannot run programs from '${TARGET_DIR}' (Permission denied, exit 126; is it mounted noexec?). Set FERRYX_INSTALL_DIR to a directory that allows running programs."
++          ;;
++      esac
++      refuse_unrunnable 2 "the downloaded ferryx-cli cannot execute on this system (exit 126)."
++      ;;
++    127)
++      refuse_unrunnable 2 "the downloaded ferryx-cli cannot execute on this system (exit 127)."
++      ;;
++  esac
++  # A status above 128 (a signal death, 128+N, or such an exit code) fails even after the usage
++  # banner was printed.
++  if [ "$verify_status" -gt 128 ]; then
++    refuse_unrunnable 1 "the downloaded ferryx-cli failed its self-check ('--version' exit ${verify_status}; a status above 128 is a signal death)."
++  fi
++  if ! printf '%s\n%s\n' "$verify_stdout" "$verify_stderr" |
++    grep -q -e '^Usage: ferryx-cli' -e '^Ferryx CLI is running' -e '^ferryx-cli [0-9]'; then
++    refuse_unrunnable 1 "the downloaded ferryx-cli failed its self-check ('--version' exit ${verify_status}, and it did not print the Ferryx CLI version or usage)."
++  fi
++fi
++
++# 9. Install atomically: rename the verified staged file over the target.
++if ! mv -f "$STAGED_BIN" "$TARGET_BIN"; then
++  staged_name="$STAGED_BIN"
++  discard_staged
++  die 1 "Cannot install to '${TARGET_BIN}' (staged at '${staged_name}'); the existing installation, if any, was left untouched."
+ fi
+-mv -f "$STAGED_BIN" "$TARGET_BIN"
++STAGED_BIN=""
+ 
+ echo "==> Successfully installed ferryx-cli to ${TARGET_BIN}"
+-echo "    Verified: ${TARGET_BIN} executes (--help exit ${verify_status})."
++echo "    Verified: ${TARGET_BIN} runs on this host (--version exit ${verify_status})."
+ 
+-# 11. Check PATH
+-case ":$PATH:" in
++# 10. Check PATH
++case ":${PATH:-}:" in
+   *":$TARGET_DIR:"*) ;;
+   *)
+     echo ""
+@@ -402,7 +547,7 @@ print_next_step() {
+   echo ""
+ }
+ 
+-# 12. Link this machine and keep its daemon running.
++# 11. Link this machine and keep its daemon running.
+ if [ "$INSTALL_NO_UP" -eq 1 ]; then
+   print_next_step
+   exit 0
+@@ -455,5 +600,6 @@ if [ "$up_status" -ne 0 ]; then
+   esac
+   echo "Error: ferryx-cli up failed (exit ${up_status}): ${up_reason}." >&2
+   echo "    ferryx-cli stays installed at ${TARGET_BIN}; rerun '${TARGET_BIN} up --origin ${FERRYX_ORIGIN}' when ready." >&2
++  print_source_overrides
+   exit "$up_status"
+ fi
+diff --git a/scripts/install.test.mjs b/scripts/install.test.mjs
+index b1550d8d1..32d5cfdb4 100644
+--- a/scripts/install.test.mjs
++++ b/scripts/install.test.mjs
+@@ -1,11 +1,15 @@
+ import { afterEach, expect, test } from "bun:test";
+ import { createHash } from "node:crypto";
+-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
++import { execFileSync } from "node:child_process";
++import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { dirname, join } from "node:path";
+ import { fileURLToPath } from "node:url";
+ 
+-const INSTALL_SH = join(dirname(fileURLToPath(import.meta.url)), "install.sh");
++const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
++const INSTALL_SH = join(SCRIPTS_DIR, "install.sh");
++const SOURCE_OVERRIDES =
++  "Download origin: https://relay.ferryx.dev (override with FERRYX_ORIGIN); release: https://github.com/Indosaram/ferryx/releases/latest/download (pin a tag with FERRYX_VERSION).";
+ const ARTIFACT = "ferryx-cli-linux-amd64";
+ 
+ const sandboxes = [];
+@@ -13,10 +17,17 @@ afterEach(() => {
+   while (sandboxes.length) rmSync(sandboxes.pop(), { recursive: true, force: true });
+ });
+ 
+-// A file whose first 20 bytes pass the installer's linux/amd64 ELF header check and which the
+-// shell runs as a script when execve rejects it (ENOEXEC), so the "--help" self-check exits 0.
+-// The newline sits before the first NUL byte so the shell does not treat it as binary.
++// A file whose first 20 bytes pass the installer's linux/amd64 ELF header check and whose
++// "--help" self-check exits 0. On a linux/amd64 host that is the real /bin/true: bash 5.2+ and
++// dash refuse to run an ELF-tagged file as a script. Elsewhere the shell runs the stub below as a
++// script when execve rejects it (ENOEXEC); the newline sits before the first NUL byte so the shell
++// does not treat it as binary.
+ function fakeLinuxAmd64Binary() {
++  if (existsSync("/bin/true")) {
++    const host = readFileSync("/bin/true");
++    const amd64Elf = host.subarray(0, 4).toString("latin1") === "\x7fELF" && host[4] === 2 && host.readUInt16LE(18) === 0x3e;
++    if (amd64Elf) return host;
++  }
+   const header = Buffer.from([
+     0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x0a, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23,
+     0x02, 0x00, 0x3e, 0x00,
+@@ -24,14 +35,127 @@ function fakeLinuxAmd64Binary() {
+   return Buffer.concat([header, Buffer.from("\nexit 0\n")]);
+ }
+ 
++// The fallback stub of fakeLinuxAmd64Binary with a different script body.
++function amd64ElfStub(script) {
++  const header = Buffer.from([
++    0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x0a, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23, 0x23,
++    0x02, 0x00, 0x3e, 0x00,
++  ]);
++  return Buffer.concat([header, Buffer.from(`\n${script}\n`)]);
++}
++
++function hostAmd64Elf(path) {
++  if (!existsSync(path)) return null;
++  const bytes = readFileSync(path);
++  const amd64Elf = bytes.subarray(0, 4).toString("latin1") === "\x7fELF" && bytes[4] === 2 && bytes.readUInt16LE(18) === 0x3e;
++  return amd64Elf ? bytes : null;
++}
++
++// A linux/amd64 binary the dynamic loader rejects for a too-old glibc, the way the published
++// ferryx-cli fails on Ubuntu 22.04: "version `GLIBC_x' not found (required by ...)", exit 1.
++// On a linux/amd64 host this is /bin/true with one GLIBC_2.NN version requirement renamed to
++// GLIBC_9.99 (same length), so the real loader produces the error. Elsewhere a stub prints it.
++function glibcTooOldBinary() {
++  const host = hostAmd64Elf("/bin/true");
++  if (host) {
++    const text = host.toString("latin1");
++    const match = /GLIBC_2\.\d\d\0/.exec(text);
++    if (match) {
++      const patched = Buffer.from(host);
++      patched.write("GLIBC_9.99\0", match.index, "latin1");
++      return { binary: patched, missing: "9.99" };
++    }
++  }
++  return {
++    binary: amd64ElfStub(
++      "echo \"$0: /lib/x86_64-linux-gnu/libc.so.6: version \\`GLIBC_2.39' not found (required by $0)\" >&2\nexit 1",
++    ),
++    missing: "2.39",
++  };
++}
++
++// A linux/amd64 binary the loader rejects for a missing non-glibc symbol version:
++// "version `CXXABI_9.9' not found (required by ...)", exit 1. On a linux/amd64 host this is
++// /bin/true with one GLIBC_2.NN requirement renamed to CXXABI_9.9 (same length).
++function cxxabiMissingBinary() {
++  const host = hostAmd64Elf("/bin/true");
++  if (host) {
++    const match = /GLIBC_2\.\d\d\0/.exec(host.toString("latin1"));
++    if (match) {
++      const patched = Buffer.from(host);
++      patched.write("CXXABI_9.9\0", match.index, "latin1");
++      return patched;
++    }
++  }
++  return amd64ElfStub(
++    "echo \"$0: /lib/x86_64-linux-gnu/libstdc++.so.6: version \\`CXXABI_9.9' not found (required by $0)\" >&2\nexit 1",
++  );
++}
++
++// A linux/amd64 binary that runs but prints nothing and exits 1 (/bin/false on linux/amd64).
++function silentFailingBinary() {
++  return hostAmd64Elf("/bin/false") ?? amd64ElfStub("exit 1");
++}
++
++// A static linux/amd64 ELF (no dynamic loader) that writes the Ferryx usage banner to stdout and
++// then runs `tail`: by default a store to address 0, so it crashes with SIGSEGV (shell status 139)
++// after printing the banner.
++const SEGFAULT_TAIL = [0xc7, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // mov dword [0], 0
++const EXIT_200_TAIL = [0xbf, 0xc8, 0x00, 0x00, 0x00, 0xb8, 0x3c, 0x00, 0x00, 0x00, 0x0f, 0x05]; // exit(200)
++function bannerThenSegfaultBinary(tail = SEGFAULT_TAIL) {
++  const msg = Buffer.from("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up>\n", "latin1");
++  const base = 0x400000;
++  const codeOff = 0x78; // ELF header (0x40) + one program header (0x38)
++  const code = Buffer.from([
++    0xb8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1 (write)
++    0xbf, 0x01, 0x00, 0x00, 0x00, // mov edi, 1 (stdout)
++    0x48, 0x8d, 0x35, 0x00, 0x00, 0x00, 0x00, // lea rsi, [rip + msg]
++    0xba, 0x00, 0x00, 0x00, 0x00, // mov edx, len
++    0x0f, 0x05, // syscall
++    ...tail,
++  ]);
++  code.writeInt32LE(code.length - 17, 13); // msg follows the code; rip after the lea is code+17
++  code.writeUInt32LE(msg.length, 18);
++  const total = codeOff + code.length + msg.length;
++  const h = Buffer.alloc(codeOff);
++  h.write("\x7fELF", 0, "latin1");
++  h[4] = 2; // ELFCLASS64
++  h[5] = 1; // little endian
++  h[6] = 1; // EV_CURRENT
++  h.writeUInt16LE(2, 16); // ET_EXEC
++  h.writeUInt16LE(0x3e, 18); // EM_X86_64
++  h.writeUInt32LE(1, 20);
++  h.writeBigUInt64LE(BigInt(base + codeOff), 24); // e_entry
++  h.writeBigUInt64LE(0x40n, 32); // e_phoff
++  h.writeUInt16LE(0x40, 52); // e_ehsize
++  h.writeUInt16LE(0x38, 54); // e_phentsize
++  h.writeUInt16LE(1, 56); // e_phnum
++  h.writeUInt32LE(1, 0x40); // PT_LOAD
++  h.writeUInt32LE(5, 0x44); // R+X
++  h.writeBigUInt64LE(BigInt(base), 0x50); // p_vaddr
++  h.writeBigUInt64LE(BigInt(base), 0x58); // p_paddr
++  h.writeBigUInt64LE(BigInt(total), 0x60); // p_filesz
++  h.writeBigUInt64LE(BigInt(total), 0x68); // p_memsz
++  h.writeBigUInt64LE(0x1000n, 0x70); // p_align
++  return Buffer.concat([h, code, msg]);
++}
++const LINUX_AMD64 = process.platform === "linux" && process.arch === "x64";
++
+ function sha256(bytes) {
+   return createHash("sha256").update(bytes).digest("hex");
+ }
+ 
+-// Builds a sandbox: PATH shims for uname and curl, and a fixture dir served via file:// URLs.
++// The per-run staging files (.ferryx-cli.new.XXXXXX) install.sh left in `dir`.
++function stagingLeftovers(dir) {
++  return existsSync(dir) ? readdirSync(dir).filter((name) => name.startsWith(".ferryx-cli.new.")) : [];
++}
++
++// Builds a sandbox: PATH shims for uname and curl (uname fails for the flag in `unameFails`), plus
++// ldd when `ldd` is given, an `install` that always fails when `failInstall` is set, and an `id`
++// reporting `uid`; and a fixture dir served via file:// URLs.
+ // The curl shim maps every requested URL to file://<fixtures>/<basename>, so the relay and the
+ // GitHub release resolve to the same fixture bytes.
+-function sandbox({ arch, binary, sums }) {
++function sandbox({ arch, binary, sums, ldd, failInstall, nonExecInstall, mvSync, unameFails, uid }) {
+   const root = mkdtempSync(join(tmpdir(), "ferryx-install-test-"));
+   sandboxes.push(root);
+   const bin = join(root, "shim");
+@@ -42,7 +166,7 @@ function sandbox({ arch, binary, sums }) {
+ 
+   writeFileSync(
+     join(bin, "uname"),
+-    `#!/bin/sh\ncase "$1" in\n  -s) echo Linux ;;\n  -m) echo ${arch} ;;\n  *) echo Linux ;;\nesac\n`,
++    `#!/bin/sh\n${unameFails ? `[ "$1" = "${unameFails}" ] && exit 1\n` : ""}case "$1" in\n  -s) echo Linux ;;\n  -m) echo ${arch} ;;\n  *) echo Linux ;;\nesac\n`,
+   );
+   writeFileSync(
+     join(bin, "curl"),
+@@ -63,20 +187,52 @@ function sandbox({ arch, binary, sums }) {
+   );
+   chmodSync(join(bin, "uname"), 0o755);
+   chmodSync(join(bin, "curl"), 0o755);
++  if (ldd) {
++    writeFileSync(join(bin, "ldd"), `#!/bin/sh\necho '${ldd}' >&2\nexit 1\n`);
++    chmodSync(join(bin, "ldd"), 0o755);
++  }
++  if (uid !== undefined) {
++    writeFileSync(join(bin, "id"), `#!/bin/sh\necho ${uid}\n`);
++    chmodSync(join(bin, "id"), 0o755);
++  }
++  if (failInstall) {
++    writeFileSync(join(bin, "install"), "#!/bin/sh\necho 'install: cannot create regular file' >&2\nexit 1\n");
++    chmodSync(join(bin, "install"), 0o755);
++  }
++  let sync;
++  if (mvSync) {
++    // An mv that, for the final staged-file rename only, announces itself on the at-mv FIFO and
++    // then blocks until a line arrives on the go FIFO: the test decides what runs in between.
++    sync = { atMv: join(root, "at-mv.fifo"), go: join(root, "go.fifo") };
++    execFileSync("mkfifo", [sync.atMv, sync.go]);
++    writeFileSync(
++      join(bin, "mv"),
++      `#!/bin/sh\ncase "$1 $2" in\n  *.ferryx-cli.new.*) echo at-mv > "${sync.atMv}"; read go < "${sync.go}" ;;\nesac\nexec /bin/mv "$@"\n`,
++    );
++    chmodSync(join(bin, "mv"), 0o755);
++  }
++  if (nonExecInstall) {
++    // "install -m 0755 SRC DST" that stages DST without the execute bit, so running it fails
++    // with EACCES ("Permission denied", exit 126) the way a noexec mount does.
++    writeFileSync(join(bin, "install"), '#!/bin/sh\ncp "$3" "$4" && chmod 0644 "$4"\n');
++    chmodSync(join(bin, "install"), 0o755);
++  }
+ 
+   if (binary) writeFileSync(join(fixtures, ARTIFACT), binary);
+   if (sums !== undefined) writeFileSync(join(fixtures, "SHA256SUMS"), sums);
+ 
+-  return { root, bin, installDir };
++  return { root, bin, installDir, sync };
+ }
+ 
+-async function runInstaller({ bin, installDir }) {
++async function runInstaller({ bin, installDir }, env = {}) {
++  // Keys set to undefined in `env` are removed from the installer's environment.
+   const proc = Bun.spawn(["sh", INSTALL_SH, "--no-up"], {
+-    env: {
++    env: Object.fromEntries(Object.entries({
+       PATH: `${bin}:/usr/bin:/bin:/usr/sbin:/sbin`,
+       HOME: installDir,
+       FERRYX_INSTALL_DIR: installDir,
+-    },
++      ...env,
++    }).filter(([, value]) => value !== undefined)),
+     stdin: "ignore",
+     stdout: "pipe",
+     stderr: "pipe",
+@@ -90,17 +246,61 @@ async function runInstaller({ bin, installDir }) {
+ }
+ 
+ for (const arch of ["aarch64", "arm64"]) {
+-  test(`Linux ${arch} exits 2 and points to the source build`, async () => {
++  test(`Linux ${arch} exits 2 and says arm64 is not supported`, async () => {
+     const box = sandbox({ arch });
+     const result = await runInstaller(box);
+     expect(result.code).toBe(2);
+     expect(result.stderr).toContain(
+-      "Linux arm64 has no prebuilt ferryx-cli yet; build from source: https://github.com/Indosaram/ferryx/blob/main/CONTRIBUTING.md#build-prerequisites",
++      `Error: Linux arm64 (${arch}) is not supported; ferryx-cli ships for Linux x86_64 only.`,
+     );
++    expect(result.stderr).toContain(SOURCE_OVERRIDES);
+     expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(false);
+   });
+ }
+ 
++test("Linux x86_64 on musl libc exits 2 before downloading anything", async () => {
++  const box = sandbox({ arch: "x86_64", binary: fakeLinuxAmd64Binary(), ldd: "musl libc (x86_64)" });
++  const result = await runInstaller(box);
++  expect(result.code).toBe(2);
++  expect(result.stderr).toContain(
++    "Error: Linux with musl libc (Alpine and similar) is not supported; ferryx-cli needs glibc 2.17 or newer.",
++  );
++  expect(result.stderr).toContain(SOURCE_OVERRIDES);
++  expect(result.stdout).not.toContain("Downloading");
++  expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(false);
++});
++
++test("an invalid FERRYX_ORIGIN exits 1, naming the value and the overrides", async () => {
++  const box = sandbox({ arch: "x86_64" });
++  const result = await runInstaller(box, { FERRYX_ORIGIN: "http://relay.example.com" });
++  expect(result.code).toBe(1);
++  expect(result.stderr).toContain("Error: Invalid FERRYX_ORIGIN 'http://relay.example.com'.");
++  expect(result.stderr).toContain(
++    "Download origin: http://relay.example.com (override with FERRYX_ORIGIN); release: https://github.com/Indosaram/ferryx/releases/latest/download (pin a tag with FERRYX_VERSION).",
++  );
++  expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(false);
++});
++
++for (const flag of ["-s", "-m"]) {
++  test(`a failing 'uname ${flag}' exits 1 with a message and the overrides`, async () => {
++    const box = sandbox({ arch: "x86_64", unameFails: flag });
++    const result = await runInstaller(box);
++    expect(result.code).toBe(1);
++    expect(result.stderr).toContain(`'uname ${flag}' failed.`);
++    expect(result.stderr).toContain(SOURCE_OVERRIDES);
++  });
++}
++
++test("a non-root user without HOME or FERRYX_INSTALL_DIR exits 1 before downloading", async () => {
++  const binary = fakeLinuxAmd64Binary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n`, uid: 1000 });
++  const result = await runInstaller(box, { HOME: undefined, FERRYX_INSTALL_DIR: undefined });
++  expect(result.code).toBe(1);
++  expect(result.stderr).toContain("Error: HOME is not set; set FERRYX_INSTALL_DIR to choose the install directory.");
++  expect(result.stderr).toContain(SOURCE_OVERRIDES);
++  expect(result.stdout).not.toContain("Downloading");
++});
++
+ test("Linux x86_64 with a matching checksum installs the binary", async () => {
+   const binary = fakeLinuxAmd64Binary();
+   const box = sandbox({
+@@ -112,9 +312,171 @@ test("Linux x86_64 with a matching checksum installs the binary", async () => {
+   expect(result.stderr).toBe("");
+   expect(result.code).toBe(0);
+   expect(result.stdout).toContain(`SHA256 verified: ${sha256(binary)}`);
++  expect(result.stdout).toContain("runs on this host (--version exit 0)");
+   expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(true);
+ });
+ 
++const EXISTING_INSTALL = Buffer.from("#!/bin/sh\necho previously installed ferryx-cli\n");
++
++test("a binary the loader rejects for a too-old glibc exits 2 and leaves the existing install byte-identical", async () => {
++  const { binary, missing } = glibcTooOldBinary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n` });
++  mkdirSync(box.installDir, { recursive: true });
++  writeFileSync(join(box.installDir, "ferryx-cli"), EXISTING_INSTALL);
++  const result = await runInstaller(box);
++  expect(result.code).toBe(2);
++  expect(result.stderr).toContain(
++    `Error: this Linux is not supported: ferryx-cli needs glibc ${missing} or newer (GLIBC_${missing} not found), and this host has `,
++  );
++  expect(result.stderr).toMatch(/and this host has \S/);
++  expect(result.stderr).toContain(`GLIBC_${missing}' not found (required by`);
++  expect(result.stderr).toContain("the existing installation, if any, was left untouched.");
++  expect(result.stderr).toContain(SOURCE_OVERRIDES);
++  expect(result.stdout).not.toContain("Successfully installed");
++  expect(readFileSync(join(box.installDir, "ferryx-cli")).equals(EXISTING_INSTALL)).toBe(true);
++  expect(stagingLeftovers(box.installDir)).toEqual([]);
++});
++
++test("a binary that runs but neither succeeds nor prints the CLI usage exits 1 and installs nothing", async () => {
++  const binary = silentFailingBinary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n` });
++  const result = await runInstaller(box);
++  expect(result.code).toBe(1);
++  expect(result.stderr).toContain("Error: the downloaded ferryx-cli failed its self-check ('--version' exit 1");
++  expect(result.stderr).toContain(SOURCE_OVERRIDES);
++  expect(existsSync(box.installDir)).toBe(false);
++  expect(existsSync(join(box.root, "prefix"))).toBe(false);
++});
++
++test("a non-glibc loader failure exits 2 even when TMPDIR and the install dir contain 'Ferryx CLI'", async () => {
++  const binary = cxxabiMissingBinary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n` });
++  const tmp = join(box.root, "Ferryx CLI tmp");
++  const installDir = join(box.root, "Ferryx CLI", "bin");
++  mkdirSync(tmp);
++  mkdirSync(installDir, { recursive: true });
++  writeFileSync(join(installDir, "ferryx-cli"), EXISTING_INSTALL);
++  const result = await runInstaller(box, { TMPDIR: tmp, FERRYX_INSTALL_DIR: installDir });
++  expect(result.code).toBe(2);
++  expect(result.stderr).toContain(
++    "Error: this system is not supported: the dynamic loader rejected ferryx-cli because no installed library provides CXXABI_9.9",
++  );
++  expect(result.stderr).toContain("CXXABI_9.9' not found (required by");
++  expect(result.stderr).toContain(SOURCE_OVERRIDES);
++  expect(result.stdout).not.toContain("Successfully installed");
++  expect(readFileSync(join(installDir, "ferryx-cli")).equals(EXISTING_INSTALL)).toBe(true);
++  expect(stagingLeftovers(installDir)).toEqual([]);
++});
++
++test("an install dir that cannot run programs (exit 126, Permission denied) exits 1 with a noexec hint", async () => {
++  const binary = fakeLinuxAmd64Binary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n`, nonExecInstall: true });
++  mkdirSync(box.installDir, { recursive: true });
++  writeFileSync(join(box.installDir, "ferryx-cli"), EXISTING_INSTALL);
++  const result = await runInstaller(box);
++  expect(result.code).toBe(1);
++  expect(result.stderr).toContain(
++    `Error: cannot run programs from '${box.installDir}' (Permission denied, exit 126; is it mounted noexec?). Set FERRYX_INSTALL_DIR to a directory that allows running programs.`,
++  );
++  expect(result.stderr).not.toContain("not supported");
++  expect(result.stderr).toContain(SOURCE_OVERRIDES);
++  expect(readFileSync(join(box.installDir, "ferryx-cli")).equals(EXISTING_INSTALL)).toBe(true);
++  expect(stagingLeftovers(box.installDir)).toEqual([]);
++});
++
++test.skipIf(!LINUX_AMD64)("a binary that prints the usage banner and then crashes (SIGSEGV) exits 1 and installs nothing", async () => {
++  const binary = bannerThenSegfaultBinary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n` });
++  mkdirSync(box.installDir, { recursive: true });
++  writeFileSync(join(box.installDir, "ferryx-cli"), EXISTING_INSTALL);
++  const result = await runInstaller(box);
++  expect(result.code).toBe(1);
++  expect(result.stderr).toContain(
++    "Error: the downloaded ferryx-cli failed its self-check ('--version' exit 139; a status above 128 is a signal death).",
++  );
++  expect(result.stderr).toContain("Ferryx CLI is running in headless mode.");
++  expect(result.stderr).toContain(SOURCE_OVERRIDES);
++  expect(result.stdout).not.toContain("Successfully installed");
++  expect(readFileSync(join(box.installDir, "ferryx-cli")).equals(EXISTING_INSTALL)).toBe(true);
++  expect(stagingLeftovers(box.installDir)).toEqual([]);
++});
++
++test.skipIf(!LINUX_AMD64)("a plain exit 200 after the usage banner is refused without naming a signal", async () => {
++  const binary = bannerThenSegfaultBinary(EXIT_200_TAIL);
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n` });
++  const result = await runInstaller(box);
++  expect(result.code).toBe(1);
++  expect(result.stderr).toContain(
++    "Error: the downloaded ferryx-cli failed its self-check ('--version' exit 200; a status above 128 is a signal death).",
++  );
++  expect(result.stderr).not.toContain("signal 72");
++  expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(false);
++});
++
++test("staging files older than an hour are removed; a recent one (a concurrent run) is kept", async () => {
++  const binary = fakeLinuxAmd64Binary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n` });
++  mkdirSync(box.installDir, { recursive: true });
++  const stale = join(box.installDir, ".ferryx-cli.new.Stale1");
++  const recent = join(box.installDir, ".ferryx-cli.new.Fresh1");
++  writeFileSync(stale, "killed run");
++  writeFileSync(recent, "concurrent run");
++  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
++  utimesSync(stale, twoHoursAgo, twoHoursAgo);
++  const result = await runInstaller(box);
++  expect(result.code).toBe(0);
++  expect(readFileSync(join(box.installDir, "ferryx-cli")).equals(binary)).toBe(true);
++  expect(stagingLeftovers(box.installDir)).toEqual([".ferryx-cli.new.Fresh1"]);
++});
++
++test("a leftover ferryx-cli.new directory neither blocks the install nor is touched", async () => {
++  const binary = fakeLinuxAmd64Binary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n` });
++  mkdirSync(join(box.installDir, "ferryx-cli.new"), { recursive: true });
++  writeFileSync(join(box.installDir, "ferryx-cli.new", "user-file"), "keep");
++  const result = await runInstaller(box);
++  expect(result.code).toBe(0);
++  expect(readFileSync(join(box.installDir, "ferryx-cli")).equals(binary)).toBe(true);
++  expect(readFileSync(join(box.installDir, "ferryx-cli.new", "user-file"), "utf8")).toBe("keep");
++  expect(stagingLeftovers(box.installDir)).toEqual([]);
++});
++
++test("three parallel runs of the same release into one dir all install it", async () => {
++  const binary = fakeLinuxAmd64Binary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n` });
++  const results = await Promise.all([0, 1, 2].map(() => runInstaller(box)));
++  expect(results.map((r) => r.code)).toEqual([0, 0, 0]);
++  expect(readFileSync(join(box.installDir, "ferryx-cli")).equals(binary)).toBe(true);
++  expect(stagingLeftovers(box.installDir)).toEqual([]);
++});
++
++test("a refused run between another run's verify and its rename cannot swap in its own binary", async () => {
++  const good = fakeLinuxAmd64Binary();
++  const bad = cxxabiMissingBinary();
++  const a = sandbox({ arch: "x86_64", binary: good, sums: `${sha256(good)}  ${ARTIFACT}\n`, mvSync: true });
++  const b = sandbox({ arch: "x86_64", binary: bad, sums: `${sha256(bad)}  ${ARTIFACT}\n` });
++  const installDir = join(a.root, "shared", "bin");
++  mkdirSync(installDir, { recursive: true });
++  writeFileSync(join(installDir, "ferryx-cli"), EXISTING_INSTALL);
++
++  // A verifies its candidate, then blocks in its final mv; B runs start to finish meanwhile.
++  const runA = runInstaller(a, { FERRYX_INSTALL_DIR: installDir });
++  const atMv = Bun.spawn(["cat", a.sync.atMv], { stdout: "ignore" });
++  const first = await Promise.race([atMv.exited.then(() => "a-at-mv"), runA.then(() => "a-exited")]);
++  if (first !== "a-at-mv") atMv.kill();
++  expect(first).toBe("a-at-mv");
++  const resultB = await runInstaller(b, { FERRYX_INSTALL_DIR: installDir });
++  expect(resultB.code).toBe(2);
++  expect(readFileSync(join(installDir, "ferryx-cli")).equals(EXISTING_INSTALL)).toBe(true);
++  await Bun.spawn(["sh", "-c", 'echo go > "$1"', "sh", a.sync.go]).exited;
++
++  const resultA = await runA;
++  expect(resultA.code).toBe(0);
++  expect(resultA.stdout).toContain("Successfully installed");
++  expect(readFileSync(join(installDir, "ferryx-cli")).equals(good)).toBe(true);
++  expect(stagingLeftovers(installDir)).toEqual([]);
++}, 30000);
++
+ test("Linux x86_64 with a mismatched checksum exits non-zero and installs nothing", async () => {
+   const binary = fakeLinuxAmd64Binary();
+   const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(Buffer.from("corrupted"))}  ${ARTIFACT}\n` });
+@@ -129,5 +491,252 @@ test("a release without SHA256SUMS exits non-zero and installs nothing", async (
+   const result = await runInstaller(box);
+   expect(result.code).not.toBe(0);
+   expect(result.stderr).toContain("could not download SHA256SUMS");
++  expect(result.stderr).toContain(SOURCE_OVERRIDES);
++  expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(false);
++});
++
++test("a failed staged install exits 1 with the overrides and leaves no binary behind", async () => {
++  const binary = fakeLinuxAmd64Binary();
++  const box = sandbox({ arch: "x86_64", binary, sums: `${sha256(binary)}  ${ARTIFACT}\n`, failInstall: true });
++  const result = await runInstaller(box);
++  expect(result.code).toBe(1);
++  expect(result.stderr).toContain(`Error: Cannot install to '${join(box.installDir, "ferryx-cli")}'`);
++  expect(result.stderr).toContain(SOURCE_OVERRIDES);
+   expect(existsSync(join(box.installDir, "ferryx-cli"))).toBe(false);
++  expect(stagingLeftovers(box.installDir)).toEqual([]);
+ });
++
++// install.ps1's Install-FerryxCandidate, driven under pwsh with the self-check run mocked per
++// executable: the candidate in the temp dir and the installed ferryx-cli.exe each get their own
++// exit code and output. Runs where pwsh is installed (the PowerShell container in QA).
++const PWSH = Bun.which("pwsh");
++const INSTALL_PS1 = join(SCRIPTS_DIR, "install.ps1");
++const PS1_DRIVER = `param([string]$Script, [string]$TempExe, [string]$InstallDir, [string]$WorkDir)
++$FerryxOrigin = "https://relay.ferryx.dev"
++$FerryxVersion = "latest"
++$ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$null)
++$wanted = @("Get-FerryxReleaseBaseUrl", "Write-FerryxSourceOverrides", "Write-FerryxError", "Test-FerryxUnrunnableExitCode", "Invoke-FerryxSelfCheck", "Remove-FerryxCreatedDirectories", "Install-FerryxCandidate")
++foreach ($f in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
++    if ($wanted -contains $f.Name) { . ([scriptblock]::Create($f.Extent.Text)) }
++}
++function Invoke-FerryxSelfCheckRun {
++    param($Executable, $WorkDir)
++    if ($Executable -eq $TempExe) { $prefix = "MOCK_TEMP" } else { $prefix = "MOCK_TARGET" }
++    if ($prefix -eq "MOCK_TARGET" -and $env:MOCK_CONCURRENT) {
++        # A concurrent successful run installs its exe and cleans up this run's backup meanwhile.
++        Get-ChildItem -LiteralPath (Split-Path -Parent $Executable) -Filter ".ferryx-cli.exe.old.*" -File -Force | Microsoft.PowerShell.Management\\Remove-Item -Force
++        Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $Executable -Force
++        [System.IO.File]::WriteAllText($Executable, $env:MOCK_CONCURRENT)
++    }
++    [pscustomobject]@{ ExitCode = [int][Environment]::GetEnvironmentVariable($prefix + "_CODE"); Output = [Environment]::GetEnvironmentVariable($prefix + "_OUT") }
++}
++if ($env:MOCK_FAIL_RESTORE) {
++    # The restore (backup -> ferryx-cli.exe) silently does nothing, as a denied rename would.
++    function Move-Item {
++        [CmdletBinding()]
++        param([string]$LiteralPath, [string]$Destination, [switch]$Force)
++        if ($LiteralPath -like "*.ferryx-cli.exe.old.*" -and $Destination -like "*ferryx-cli.exe") { return }
++        Microsoft.PowerShell.Management\\Move-Item @PSBoundParameters
++    }
++}
++if ($env:MOCK_LOCKED_TARGET) {
++    # Deleting the installed ferryx-cli.exe silently does nothing, as a file locked by AV would.
++    function Remove-Item {
++        [CmdletBinding()]
++        param([Parameter(ValueFromPipeline = $true)]$InputObject, [string]$LiteralPath, [switch]$Force)
++        process {
++            if ($LiteralPath -like "*ferryx-cli.exe" -and -not ($LiteralPath -like "*.ferryx-cli.exe.*")) { return }
++            if ($InputObject) { $InputObject | Microsoft.PowerShell.Management\\Remove-Item -Force } else { Microsoft.PowerShell.Management\\Remove-Item @PSBoundParameters }
++        }
++    }
++}
++$status = Install-FerryxCandidate -TempExe $TempExe -InstallDir $InstallDir -WorkDir $WorkDir
++[Console]::Out.WriteLine("STATUS=" + $status)
++`;
++
++const NEW_EXE = Buffer.from("MZ new ferryx-cli.exe");
++const OLD_EXE = Buffer.from("MZ previous ferryx-cli.exe");
++const USAGE = "Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up>";
++
++async function runPs1Install({ existing, plant, stale, fresh, failRestore, lockedTarget, concurrent, temp, target }) {
++  const root = mkdtempSync(join(tmpdir(), "ferryx-install-ps1-test-"));
++  sandboxes.push(root);
++  const work = join(root, "work");
++  const installDir = join(root, "Ferryx", "bin");
++  mkdirSync(work);
++  writeFileSync(join(work, "ferryx-cli.exe"), NEW_EXE);
++  writeFileSync(join(root, "driver.ps1"), PS1_DRIVER);
++  if (existing) {
++    mkdirSync(installDir, { recursive: true });
++    writeFileSync(join(installDir, "ferryx-cli.exe"), OLD_EXE);
++  }
++  if (plant) {
++    // Leftover ferryx-cli.exe.new / .old DIRECTORIES holding a user file.
++    for (const name of ["ferryx-cli.exe.new", "ferryx-cli.exe.old"]) {
++      mkdirSync(join(installDir, name), { recursive: true });
++      writeFileSync(join(installDir, name, "user-file"), "keep");
++    }
++  }
++  if (stale) {
++    // A backup an earlier run could not delete while the previous exe was running.
++    const staleBackup = join(installDir, ".ferryx-cli.exe.old.0123456789abcdef");
++    writeFileSync(staleBackup, OLD_EXE);
++    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
++    utimesSync(staleBackup, twoHoursAgo, twoHoursAgo);
++  }
++  if (fresh) {
++    // A concurrent run's live backup, written moments ago.
++    writeFileSync(join(installDir, ".ferryx-cli.exe.old.fedcba9876543210"), OLD_EXE);
++  }
++  const proc = Bun.spawn(
++    [PWSH, "-NoProfile", "-File", join(root, "driver.ps1"), "-Script", INSTALL_PS1, "-TempExe", join(work, "ferryx-cli.exe"), "-InstallDir", installDir, "-WorkDir", work],
++    {
++      env: {
++        PATH: process.env.PATH,
++        HOME: root,
++        MOCK_TEMP_CODE: String(temp.code),
++        MOCK_TEMP_OUT: temp.out,
++        MOCK_TARGET_CODE: String(target.code),
++        MOCK_TARGET_OUT: target.out,
++        ...(failRestore ? { MOCK_FAIL_RESTORE: "1" } : {}),
++        ...(lockedTarget ? { MOCK_LOCKED_TARGET: "1" } : {}),
++        ...(concurrent ? { MOCK_CONCURRENT: concurrent } : {}),
++      },
++      stdin: "ignore",
++      stdout: "pipe",
++      stderr: "pipe",
++    },
++  );
++  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
++  const status = /STATUS=(-?\d+)/.exec(stdout);
++  const exe = join(installDir, "ferryx-cli.exe");
++  return {
++    status: status ? Number(status[1]) : null,
++    stdout,
++    stderr,
++    dirExists: existsSync(installDir),
++    parentExists: existsSync(join(root, "Ferryx")),
++    exeIsFile: existsSync(exe) && statSync(exe).isFile(),
++    exe: existsSync(exe) && statSync(exe).isFile() ? readFileSync(exe) : null,
++    planted: ["ferryx-cli.exe.new", "ferryx-cli.exe.old"].map((name) =>
++      existsSync(join(installDir, name, "user-file")) ? readFileSync(join(installDir, name, "user-file"), "utf8") : null,
++    ),
++    leftovers: existsSync(installDir) ? readdirSync(installDir).filter((name) => name.startsWith(".ferryx-cli.exe.")) : [],
++  };
++}
++
++test.skipIf(!PWSH)("install.ps1: a candidate the Windows loader rejects (0xC0000135) returns 2 and creates no install dir", async () => {
++  const r = await runPs1Install({ existing: false, temp: { code: -1073741515, out: "" }, target: { code: 0, out: USAGE } });
++  expect(r.status).toBe(2);
++  expect(r.stderr).toContain("0xC0000135 STATUS_DLL_NOT_FOUND");
++  expect(r.stderr).toContain(SOURCE_OVERRIDES);
++  expect(r.dirExists).toBe(false);
++  expect(r.parentExists).toBe(false);
++});
++
++test.skipIf(!PWSH)("install.ps1: a rejected candidate leaves the existing exe byte-identical", async () => {
++  const r = await runPs1Install({ existing: true, temp: { code: -1073741515, out: "" }, target: { code: 0, out: USAGE } });
++  expect(r.status).toBe(2);
++  expect(r.exe.equals(OLD_EXE)).toBe(true);
++  expect(r.leftovers).toEqual([]);
++});
++
++test.skipIf(!PWSH)("install.ps1: a failed post-install check restores the previous exe", async () => {
++  const r = await runPs1Install({ existing: true, temp: { code: 1, out: USAGE }, target: { code: 1, out: "" } });
++  expect(r.status).toBe(1);
++  expect(r.stderr).toContain("The previous ferryx-cli.exe was restored.");
++  expect(r.stderr).toContain(SOURCE_OVERRIDES);
++  expect(r.exe.equals(OLD_EXE)).toBe(true);
++  expect(r.leftovers).toEqual([]);
++});
++
++test.skipIf(!PWSH)("install.ps1: a failed restore says so and names the kept backup", async () => {
++  const r = await runPs1Install({ existing: true, failRestore: true, temp: { code: 1, out: USAGE }, target: { code: 1, out: "" } });
++  expect(r.status).toBe(1);
++  expect(r.stderr).not.toContain("was restored");
++  expect(r.stderr).toContain("Restoring the previous ferryx-cli.exe failed; it was kept as '");
++  expect(r.exeIsFile).toBe(false);
++  expect(r.leftovers.length).toBe(1);
++  expect(r.leftovers[0]).toMatch(/^\.ferryx-cli\.exe\.old\.[0-9a-f]{32}$/);
++  expect(r.stderr).toContain(r.leftovers[0]);
++});
++
++test.skipIf(!PWSH)("install.ps1: a successful install removes .ferryx-cli.exe.old.* backups older than an hour, not a fresh one", async () => {
++  const r = await runPs1Install({ existing: true, stale: true, fresh: true, temp: { code: 1, out: USAGE }, target: { code: 0, out: USAGE } });
++  expect(r.status).toBe(0);
++  expect(r.exe.equals(NEW_EXE)).toBe(true);
++  expect(r.leftovers).toEqual([".ferryx-cli.exe.old.fedcba9876543210"]);
++});
++
++test.skipIf(!PWSH)("install.ps1: an undeletable failed exe plus a failed restore is not reported as restored", async () => {
++  const r = await runPs1Install({ existing: true, lockedTarget: true, failRestore: true, temp: { code: 1, out: USAGE }, target: { code: 1, out: "" } });
++  expect(r.status).toBe(1);
++  expect(r.stderr).not.toContain("was restored");
++  expect(r.stderr).toContain("Restoring the previous ferryx-cli.exe failed; it was kept as '");
++  expect(r.exe.equals(NEW_EXE)).toBe(true);
++  expect(r.leftovers.length).toBe(1);
++  expect(r.stderr).toContain(r.leftovers[0]);
++});
++
++test.skipIf(!PWSH)("install.ps1: a failed check whose backup a concurrent run removed leaves that run's exe in place", async () => {
++  const r = await runPs1Install({ existing: true, concurrent: "MZ concurrent ferryx-cli.exe", temp: { code: 1, out: USAGE }, target: { code: 1, out: "" } });
++  expect(r.status).toBe(1);
++  expect(r.stderr).not.toContain("was restored");
++  expect(r.stderr).toContain("is gone (another install may have replaced it)");
++  expect(r.exe.toString()).toBe("MZ concurrent ferryx-cli.exe");
++  expect(r.leftovers).toEqual([]);
++});
++
++test.skipIf(!PWSH)("install.ps1: a failed post-install check on a fresh install leaves no exe and no new dir", async () => {
++  const r = await runPs1Install({ existing: false, temp: { code: 1, out: USAGE }, target: { code: -1073741515, out: "" } });
++  expect(r.status).toBe(2);
++  expect(r.stderr).toContain("Nothing was left installed.");
++  expect(r.dirExists).toBe(false);
++  expect(r.parentExists).toBe(false);
++});
++
++test.skipIf(!PWSH)("install.ps1: a passing candidate replaces the previous exe and leaves no .old/.new", async () => {
++  const r = await runPs1Install({ existing: true, temp: { code: 1, out: USAGE }, target: { code: 0, out: "ferryx-cli 2026.1027.5" } });
++  expect(r.status).toBe(0);
++  expect(r.stdout).toContain("==> Successfully installed ferryx-cli to ");
++  expect(r.exe.equals(NEW_EXE)).toBe(true);
++  expect(r.leftovers).toEqual([]);
++});
++
++test.skipIf(!PWSH)("install.ps1: output that only contains the exe path in a crash message is not the usage banner", async () => {
++  const r = await runPs1Install({
++    existing: true,
++    temp: { code: 1, out: "C:\\Users\\u\\AppData\\Local\\Temp\\ferryx-install-1\\ferryx-cli.exe: some crash\r\nUsage: was not printed\r\n" },
++    target: { code: 0, out: USAGE },
++  });
++  expect(r.status).toBe(1);
++  expect(r.stderr).toContain("output did not look like the Ferryx CLI usage");
++  expect(r.exe.equals(OLD_EXE)).toBe(true);
++  expect(r.leftovers).toEqual([]);
++});
++
++test.skipIf(!PWSH)("install.ps1: a crash (0xC0000005) after printing the usage banner is refused", async () => {
++  const r = await runPs1Install({ existing: true, temp: { code: -1073741819, out: USAGE }, target: { code: 0, out: USAGE } });
++  expect(r.status).toBe(1);
++  expect(r.stderr).toContain("crashed during its self-check (--help exit -1073741819, status 0xC0000005)");
++  expect(r.exe.equals(OLD_EXE)).toBe(true);
++});
++
++test.skipIf(!PWSH)("install.ps1: leftover ferryx-cli.exe.new/.old directories are neither used nor touched", async () => {
++  const r = await runPs1Install({ existing: true, plant: true, temp: { code: 1, out: USAGE }, target: { code: 0, out: USAGE } });
++  expect(r.status).toBe(0);
++  expect(r.exeIsFile).toBe(true);
++  expect(r.exe.equals(NEW_EXE)).toBe(true);
++  expect(r.planted).toEqual(["keep", "keep"]);
++  expect(r.leftovers).toEqual([]);
++});
++
++// site/public copies are generated by scripts/gen-site-installers.mjs (site prebuild); the relay
++// serves scripts/ directly, so both origins must publish identical bytes.
++for (const name of ["install.sh", "install.ps1"]) {
++  test(`site/public/${name} is byte-identical to scripts/${name}`, () => {
++    const source = readFileSync(join(SCRIPTS_DIR, name));
++    const published = readFileSync(join(SCRIPTS_DIR, "..", "site", "public", name));
++    expect(published.equals(source)).toBe(true);
++  });
++}
+diff --git a/site/package.json b/site/package.json
+index 839a043f6..376e8ced1 100644
+--- a/site/package.json
++++ b/site/package.json
+@@ -5,7 +5,7 @@
+   "type": "module",
+   "scripts": {
+     "dev": "astro dev --port 14173",
+-    "prebuild": "bun ../scripts/gen-site-agents.mjs",
++    "prebuild": "bun ../scripts/gen-site-agents.mjs && bun ../scripts/gen-site-installers.mjs",
+     "build": "astro build",
+     "preview": "astro preview --port 14173",
+     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+diff --git a/site/public/install.ps1 b/site/public/install.ps1
+index f16e726dc..765f199a3 100644
+--- a/site/public/install.ps1
++++ b/site/public/install.ps1
+@@ -21,6 +21,15 @@
+ #                        (default: latest, must match ^[A-Za-z0-9._-]+$)
+ #   FERRYX_INSTALL_KEY : install key (same as -Key)
+ #
++# Every downloaded binary is checked against the SHA256SUMS of the same GitHub release
++# (FERRYX_VERSION, or the latest release); a source whose bytes do not match is skipped, and
++# the install fails when no source matches.
++#
++# Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported platform
++# (only windows/amd64 is supported; Windows ARM64 is not; a host whose Windows loader rejects
++# the published ferryx-cli, for example a missing DLL), otherwise the exit code of
++# "ferryx-cli up".
++#
+ # Windows PowerShell 5.1 compatible; ASCII only.
+ 
+ param(
+@@ -31,6 +40,28 @@ param(
+     [switch]$Json
+ )
+ 
++$FerryxOrigin = $env:FERRYX_ORIGIN
++if ([string]::IsNullOrEmpty($FerryxOrigin)) {
++    $FerryxOrigin = "https://relay.ferryx.dev"
++}
++
++$FerryxVersion = $env:FERRYX_VERSION
++if ([string]::IsNullOrEmpty($FerryxVersion)) {
++    $FerryxVersion = "latest"
++}
++
++function Get-FerryxReleaseBaseUrl {
++    if ($FerryxVersion -eq "latest") {
++        return "https://github.com/Indosaram/ferryx/releases/latest/download"
++    }
++    return "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion
++}
++
++# Every failure names the download sources in use and the variables that override them.
++function Write-FerryxSourceOverrides {
++    [Console]::Error.WriteLine("    Download origin: " + $FerryxOrigin + " (override with FERRYX_ORIGIN); release: " + (Get-FerryxReleaseBaseUrl) + " (pin a tag with FERRYX_VERSION).")
++}
++
+ $FerryxInstallKey = $Key
+ if ([string]::IsNullOrEmpty($FerryxInstallKey)) {
+     $FerryxInstallKey = $env:FERRYX_INSTALL_KEY
+@@ -39,6 +70,7 @@ if ($KeyStdin) {
+     $FerryxInstallKey = [Console]::In.ReadLine()
+     if ([string]::IsNullOrWhiteSpace($FerryxInstallKey)) {
+         [Console]::Error.WriteLine("Error: -KeyStdin found no install key on stdin.")
++        Write-FerryxSourceOverrides
+         exit 2
+     }
+ }
+@@ -200,7 +232,10 @@ function Test-FerryxUnrunnableExitCode {
+ # Judges one '<Executable> --help' run. Measured contract: '--help exits 1 by design;
+ # install.sh accepts that, so a non-zero exit alone is not a failure'. A run passes when the
+ # process started, the platform loader did not reject the image, and the captured output
+-# carries the Ferryx CLI usage banner ("ferryx-cli" or "Usage:"). Returns a result object
++# carries the Ferryx CLI version or usage banner at the start of a line ("Usage: ferryx-cli",
++# "Ferryx CLI is running" or "ferryx-cli <version>"; a crash message that merely contains the
++# exe path does not count). A crash (any other negative NTSTATUS exit, for example 0xC0000005)
++# fails even after the banner was printed, like a signal death in install.sh. Returns a result object
+ # with Passed, the run's ExitCode, and Failure - a short phrase for the caller's error line.
+ function Invoke-FerryxSelfCheck {
+     param(
+@@ -210,39 +245,183 @@ function Invoke-FerryxSelfCheck {
+ 
+     $run = Invoke-FerryxSelfCheckRun -Executable $Executable -WorkDir $WorkDir
+     if ($null -eq $run) {
+-        return [pscustomobject]@{ Passed = $false; ExitCode = $null; Failure = "cannot start on this machine" }
++        return [pscustomobject]@{ Passed = $false; Unsupported = $true; ExitCode = $null; Failure = "cannot start on this machine" }
+     }
+     if (Test-FerryxUnrunnableExitCode -ExitCode $run.ExitCode) {
+-        return [pscustomobject]@{ Passed = $false; ExitCode = $run.ExitCode; Failure = ("cannot run on this machine (--help exit " + $run.ExitCode + ")") }
++        $ntstatus = "0x{0:X8}" -f $run.ExitCode
++        $reason = "--help exit " + $run.ExitCode
++        if ($run.ExitCode -eq -1073741515) {
++            $reason = $reason + ", " + $ntstatus + " STATUS_DLL_NOT_FOUND: a DLL it needs, such as the Microsoft Visual C++ runtime (VCRUNTIME140.dll), is missing"
++        } elseif ($run.ExitCode -lt 0) {
++            $reason = $reason + ", Windows loader status " + $ntstatus
++        }
++        return [pscustomobject]@{ Passed = $false; Unsupported = $true; ExitCode = $run.ExitCode; Failure = ("cannot run on this machine (" + $reason + ")") }
++    }
++    if ($run.ExitCode -lt 0) {
++        return [pscustomobject]@{ Passed = $false; Unsupported = $false; ExitCode = $run.ExitCode; Failure = ("crashed during its self-check (--help exit " + $run.ExitCode + ", status " + ("0x{0:X8}" -f $run.ExitCode) + ")") }
+     }
+-    if (($run.Output -notmatch "ferryx-cli") -and ($run.Output -notmatch "Usage:")) {
+-        return [pscustomobject]@{ Passed = $false; ExitCode = $run.ExitCode; Failure = ("failed its self-check (--help exit " + $run.ExitCode + ", output did not look like the Ferryx CLI usage)") }
++    if ($run.Output -notmatch '(?m)^(Usage: ferryx-cli|Ferryx CLI is running|ferryx-cli \d)') {
++        return [pscustomobject]@{ Passed = $false; Unsupported = $false; ExitCode = $run.ExitCode; Failure = ("failed its self-check (--help exit " + $run.ExitCode + ", output did not look like the Ferryx CLI usage)") }
+     }
+-    return [pscustomobject]@{ Passed = $true; ExitCode = $run.ExitCode; Failure = $null }
++    return [pscustomobject]@{ Passed = $true; Unsupported = $false; ExitCode = $run.ExitCode; Failure = $null }
+ }
+ 
+-$FerryxOrigin = $env:FERRYX_ORIGIN
+-if ([string]::IsNullOrEmpty($FerryxOrigin)) {
+-    $FerryxOrigin = "https://relay.ferryx.dev"
++# Removes the directories one install created: <InstallDir> and its parents up to $CreatedTop
++# (the topmost one that did not exist before). Only empty directories go; the first one that
++# cannot be removed (not empty, or in use) ends the walk, which is the intended stop.
++function Remove-FerryxCreatedDirectories {
++    param(
++        [Parameter(Mandatory = $true)][string]$InstallDir,
++        [string]$CreatedTop
++    )
++
++    if ([string]::IsNullOrEmpty($CreatedTop)) {
++        return
++    }
++    $dir = $InstallDir
++    while (-not [string]::IsNullOrEmpty($dir)) {
++        try {
++            [System.IO.Directory]::Delete($dir)
++        } catch {
++            return
++        }
++        if ($dir -eq $CreatedTop) {
++            return
++        }
++        $dir = Split-Path -Parent $dir
++    }
+ }
+ 
+-$FerryxVersion = $env:FERRYX_VERSION
+-if ([string]::IsNullOrEmpty($FerryxVersion)) {
+-    $FerryxVersion = "latest"
++# Installs the verified download $TempExe as <InstallDir>\ferryx-cli.exe and returns the exit
++# status for the caller: 0 installed, 2 the Windows loader rejected the candidate (unsupported),
++# 1 any other failure. The candidate must pass its self-check before the install directory is
++# created or anything is replaced, so a refusal leaves no new directory. The candidate is staged
++# and the previous exe kept under names unique to this run (.ferryx-cli.exe.new.<guid>,
++# .ferryx-cli.exe.old.<guid>), so a leftover or concurrent ferryx-cli.exe.new/.old - file or
++# directory - is never used or removed. The previous exe is kept until the installed copy passes
++# its own check; when that check fails, the previous exe is restored (or, on a fresh install, the
++# new one and the directories this call created are removed).
++function Install-FerryxCandidate {
++    param(
++        [Parameter(Mandatory = $true)][string]$TempExe,
++        [Parameter(Mandatory = $true)][string]$InstallDir,
++        [Parameter(Mandatory = $true)][string]$WorkDir
++    )
++
++    $targetExe = Join-Path $InstallDir "ferryx-cli.exe"
++    $runId = [System.Guid]::NewGuid().ToString("N")
++    $stagedExe = Join-Path $InstallDir (".ferryx-cli.exe.new." + $runId)
++    $backupExe = Join-Path $InstallDir (".ferryx-cli.exe.old." + $runId)
++
++    $candidateCheck = Invoke-FerryxSelfCheck -Executable $TempExe -WorkDir $WorkDir
++    if (-not $candidateCheck.Passed) {
++        Write-FerryxError ("downloaded executable " + $candidateCheck.Failure + ".")
++        Write-FerryxError "    Existing installation, if any, was left untouched."
++        Write-FerryxSourceOverrides
++        if ($candidateCheck.Unsupported) {
++            return 2
++        }
++        return 1
++    }
++
++    # The topmost missing ancestor of the install dir: what New-Item creates and a failure removes.
++    $createdTop = $null
++    $probe = $InstallDir
++    while ((-not [string]::IsNullOrEmpty($probe)) -and (-not (Test-Path -LiteralPath $probe))) {
++        $createdTop = $probe
++        $probe = Split-Path -Parent $probe
++    }
++    try {
++        New-Item -ItemType Directory -Force -Path $InstallDir -ErrorAction Stop | Out-Null
++    } catch {
++        Remove-FerryxCreatedDirectories -InstallDir $InstallDir -CreatedTop $createdTop
++        Write-FerryxError ('Cannot create the install directory ''{0}'': {1}' -f $InstallDir, $_.Exception.Message)
++        Write-FerryxSourceOverrides
++        return 1
++    }
++
++    # Stage beside the target, set the previous exe aside, then move the staged copy in.
++    $hadPrevious = Test-Path -LiteralPath $targetExe -PathType Leaf
++    try {
++        Copy-Item -LiteralPath $TempExe -Destination $stagedExe -Force -ErrorAction Stop
++        if ($hadPrevious) {
++            Move-Item -LiteralPath $targetExe -Destination $backupExe -Force -ErrorAction Stop
++            # A rename keeps the old timestamp; mark the backup as fresh so a concurrent run's
++            # age-guarded cleanup below leaves it alone. Best effort: the guard is only a safety margin.
++            try { (Get-Item -LiteralPath $backupExe -Force).LastWriteTime = Get-Date } catch { }
++        }
++        Move-Item -LiteralPath $stagedExe -Destination $targetExe -Force -ErrorAction Stop
++    } catch {
++        $installError = $_.Exception.Message
++        Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
++        if ($hadPrevious -and -not (Test-Path -LiteralPath $targetExe -PathType Leaf)) {
++            Move-Item -LiteralPath $backupExe -Destination $targetExe -Force -ErrorAction SilentlyContinue
++        }
++        Remove-FerryxCreatedDirectories -InstallDir $InstallDir -CreatedTop $createdTop
++        Write-FerryxError ('Cannot install to ''{0}'': {1}' -f $targetExe, $installError)
++        Write-FerryxError "    Existing installation, if any, was left untouched."
++        Write-FerryxSourceOverrides
++        return 1
++    }
++
++    # Confirm the installed path itself runs; otherwise put the previous state back.
++    $installedCheck = Invoke-FerryxSelfCheck -Executable $targetExe -WorkDir $WorkDir
++    if (-not $installedCheck.Passed) {
++        if ($hadPrevious -and -not (Test-Path -LiteralPath $backupExe -PathType Leaf)) {
++            # The backup is gone (a concurrent install replaced ferryx-cli.exe and cleaned up), so
++            # ferryx-cli.exe may now be that run's install: leave it rather than delete it.
++            $restoreNote = ('    The previous ferryx-cli.exe backup ''{0}'' is gone (another install may have replaced it); ''{1}'' was left as it is.' -f $backupExe, $targetExe)
++        } elseif ($hadPrevious) {
++            Remove-Item -LiteralPath $targetExe -Force -ErrorAction SilentlyContinue
++            Move-Item -LiteralPath $backupExe -Destination $targetExe -Force -ErrorAction SilentlyContinue
++            if ((Test-Path -LiteralPath $targetExe -PathType Leaf) -and -not (Test-Path -LiteralPath $backupExe)) {
++                $restoreNote = "    The previous ferryx-cli.exe was restored."
++            } else {
++                $restoreNote = ('    Restoring the previous ferryx-cli.exe failed; it was kept as ''{0}''.' -f $backupExe)
++            }
++        } else {
++            Remove-Item -LiteralPath $targetExe -Force -ErrorAction SilentlyContinue
++            Remove-FerryxCreatedDirectories -InstallDir $InstallDir -CreatedTop $createdTop
++            $restoreNote = "    Nothing was left installed."
++        }
++        Write-FerryxError ('installed ''{0}'' {1}.' -f $targetExe, $installedCheck.Failure)
++        Write-FerryxError $restoreNote
++        Write-FerryxSourceOverrides
++        if ($installedCheck.Unsupported) {
++            return 2
++        }
++        return 1
++    }
++    # A running previous exe cannot be deleted on Windows; it then stays as .ferryx-cli.exe.old.<guid>
++    # until a later successful install removes it here. Other runs' backups are removed only once they
++    # are over an hour old, so a concurrent run's live backup is kept.
++    Remove-Item -LiteralPath $backupExe -Force -ErrorAction SilentlyContinue
++    $staleBefore = (Get-Date).AddMinutes(-60)
++    Get-ChildItem -LiteralPath $InstallDir -Filter ".ferryx-cli.exe.old.*" -File -Force -ErrorAction SilentlyContinue |
++        Where-Object { $_.LastWriteTime -lt $staleBefore } |
++        Remove-Item -Force -ErrorAction SilentlyContinue
++
++    Write-Host ("==> Successfully installed ferryx-cli to " + $targetExe)
++    Write-Host ("    Verified: " + $targetExe + " executes (--help exit " + $installedCheck.ExitCode + ").")
++    return 0
+ }
+ 
+ # Validate FERRYX_ORIGIN before anything is downloaded.
+ if (-not (Test-FerryxOrigin -Origin $FerryxOrigin)) {
+     Write-FerryxError ('Invalid FERRYX_ORIGIN ''{0}''. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1]).' -f $FerryxOrigin)
++    Write-FerryxSourceOverrides
+     exit 1
+ }
+ 
+ # Validate FERRYX_VERSION: must match ^[A-Za-z0-9._-]+$.
+ if ($FerryxVersion -notmatch '^[A-Za-z0-9._-]+$') {
+     Write-FerryxError ('Invalid FERRYX_VERSION ''{0}''. Must match ^[A-Za-z0-9._-]+$.' -f $FerryxVersion)
++    Write-FerryxSourceOverrides
+     exit 1
+ }
+ 
++$releaseBaseUrl = Get-FerryxReleaseBaseUrl
++
+ Write-Host "==> Ferryx CLI Installer"
+ 
+ # 1. Detect the CPU architecture. A 32-bit host process reports x86 in
+@@ -254,11 +433,18 @@ if ([string]::IsNullOrEmpty($rawArch)) {
+ }
+ if ([string]::IsNullOrEmpty($rawArch)) {
+     Write-FerryxError "Cannot detect the CPU architecture: neither PROCESSOR_ARCHITEW6432 nor PROCESSOR_ARCHITECTURE is set."
++    Write-FerryxSourceOverrides
+     exit 1
+ }
++if ($rawArch.ToUpperInvariant() -eq "ARM64") {
++    Write-FerryxError ('Windows ARM64 ({0}) is not supported; ferryx-cli ships for Windows x64 (AMD64) only.' -f $rawArch)
++    Write-FerryxSourceOverrides
++    exit 2
++}
+ if ($rawArch.ToUpperInvariant() -ne "AMD64") {
+-    Write-FerryxError ('Unsupported CPU architecture ''{0}''. The Ferryx CLI is published for windows/amd64 only.' -f $rawArch)
+-    exit 1
++    Write-FerryxError ('Windows {0} is not supported; ferryx-cli ships for Windows x64 (AMD64) only.' -f $rawArch)
++    Write-FerryxSourceOverrides
++    exit 2
+ }
+ $platformOs = "windows"
+ $platformArch = "amd64"
+@@ -269,27 +455,60 @@ $artifactName = "ferryx-cli-windows-amd64.exe"
+ # 3. Resolve the download URLs.
+ $primaryUrl = $FerryxOrigin + "/download/" + $artifactName
+ $secondaryUrl = $FerryxOrigin + "/download/ferryx-cli"
+-if ($FerryxVersion -eq "latest") {
+-    $githubUrl = "https://github.com/Indosaram/ferryx/releases/latest/download/" + $artifactName
+-} else {
+-    $githubUrl = "https://github.com/Indosaram/ferryx/releases/download/" + $FerryxVersion + "/" + $artifactName
+-}
++$githubUrl = $releaseBaseUrl + "/" + $artifactName
+ 
+ # 4. Temporary download location.
+ $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ferryx-install-" + [System.Guid]::NewGuid().ToString("N"))
+ $tempExe = Join-Path $tempDir "ferryx-cli.exe"
++$tempSums = Join-Path $tempDir "SHA256SUMS"
+ 
+ try {
+     try {
+         New-Item -ItemType Directory -Force -Path $tempDir -ErrorAction Stop | Out-Null
+     } catch {
+         Write-FerryxError ('Cannot create a temporary directory ''{0}'': {1}' -f $tempDir, $_.Exception.Message)
++        Write-FerryxSourceOverrides
++        exit 1
++    }
++
++    # 4a. Fetch the release checksums. Releases publish SHA256SUMS; older ones SHA256SUMS.txt.
++    Write-Host ("--> Downloading SHA256SUMS from " + $releaseBaseUrl + " ...")
++    $sumsFound = $false
++    foreach ($sumsName in @("SHA256SUMS", "SHA256SUMS.txt")) {
++        try {
++            Invoke-FerryxDownload -Url ($releaseBaseUrl + "/" + $sumsName) -Destination $tempSums
++        } catch {
++            Remove-Item -LiteralPath $tempSums -Force -ErrorAction SilentlyContinue
++            continue
++        }
++        if ((Test-Path -LiteralPath $tempSums -PathType Leaf) -and ((Get-Item -LiteralPath $tempSums).Length -gt 0)) {
++            $sumsFound = $true
++            break
++        }
++    }
++    if (-not $sumsFound) {
++        Write-FerryxError ("could not download SHA256SUMS from " + $releaseBaseUrl + "; refusing to install an unverified binary.")
++        Write-FerryxSourceOverrides
++        exit 1
++    }
++    $expectedSha256 = $null
++    foreach ($line in (Get-Content -LiteralPath $tempSums)) {
++        $fields = $line.Trim() -split '\s+'
++        if ($fields.Count -ge 2 -and ($fields[1] -eq $artifactName -or $fields[1] -eq ("*" + $artifactName))) {
++            $expectedSha256 = $fields[0].ToLowerInvariant()
++            break
++        }
++    }
++    if ($null -eq $expectedSha256 -or $expectedSha256 -notmatch '^[0-9a-f]{64}$') {
++        Write-FerryxError ("SHA256SUMS from " + $releaseBaseUrl + " has no valid entry for " + $artifactName + ".")
++        Write-FerryxSourceOverrides
+         exit 1
+     }
+ 
+     # 5. Download, rejecting any source whose payload is not a Windows executable.
+     Write-Host ("--> Downloading ferryx-cli for " + $platformOs + "/" + $platformArch + "...")
+     $downloadSucceeded = $false
++    $checksumMismatch = $false
+     foreach ($url in @($primaryUrl, $secondaryUrl, $githubUrl)) {
+         Write-Host ("    Trying " + $url + " ...")
+         try {
+@@ -308,6 +527,13 @@ try {
+             continue
+         }
+         if (Test-FerryxWindowsExecutable -Path $tempExe) {
++            $actualSha256 = (Get-FileHash -LiteralPath $tempExe -Algorithm SHA256).Hash.ToLowerInvariant()
++            if ($actualSha256 -ne $expectedSha256) {
++                Write-Host ("    Skipping: SHA256 mismatch (expected " + $expectedSha256 + ", got " + $actualSha256 + ")")
++                $checksumMismatch = $true
++                continue
++            }
++            Write-Host ("    SHA256 verified: " + $actualSha256)
+             $downloadSucceeded = $true
+             break
+         }
+@@ -315,7 +541,13 @@ try {
+     }
+ 
+     if (-not $downloadSucceeded) {
++        if ($checksumMismatch) {
++            Write-FerryxError ("no downloaded ferryx-cli matched the SHA256SUMS of the release (" + $artifactName + ").")
++            Write-FerryxSourceOverrides
++            exit 1
++        }
+         Write-FerryxError "Failed to download ferryx-cli from available endpoints."
++        Write-FerryxSourceOverrides
+         exit 1
+     }
+ 
+@@ -324,6 +556,7 @@ try {
+     if (-not (Test-FerryxWindowsExecutable -Path $tempExe)) {
+         Write-FerryxError ("no downloadable artifact matched " + $platformOs + "/" + $platformArch + ".")
+         Write-FerryxError ("Detected header bytes: " + (Get-FerryxHeaderHex -Path $tempExe))
++        Write-FerryxSourceOverrides
+         exit 1
+     }
+ 
+@@ -336,54 +569,22 @@ try {
+             $installDir = Join-Path $env:USERPROFILE ".local\bin"
+         } else {
+             Write-FerryxError "Cannot determine an install directory: set FERRYX_INSTALL_DIR, or make sure LOCALAPPDATA or USERPROFILE is set."
++            Write-FerryxSourceOverrides
+             exit 1
+         }
+     }
+ 
+     $targetExe = Join-Path $installDir "ferryx-cli.exe"
+-    $stagedExe = $targetExe + ".new"
+-
+-    try {
+-        New-Item -ItemType Directory -Force -Path $installDir -ErrorAction Stop | Out-Null
+-    } catch {
+-        Write-FerryxError ('Cannot create the install directory ''{0}'': {1}' -f $installDir, $_.Exception.Message)
+-        exit 1
+-    }
+-
+-    # 8. Verify the candidate can execute BEFORE it replaces anything. Measured contract:
+-    #    '--help exits 1 by design; install.sh accepts that, so a non-zero exit alone is not a
+-    #    failure' - what must hold is that the process starts and prints the Ferryx CLI usage.
+-    #    A payload that cannot run here must leave any existing installation byte-for-byte
+-    #    untouched.
+-    $candidateCheck = Invoke-FerryxSelfCheck -Executable $tempExe -WorkDir $tempDir
+-    if (-not $candidateCheck.Passed) {
+-        Write-FerryxError ("downloaded executable " + $candidateCheck.Failure + ".")
+-        Write-FerryxError "    Existing installation, if any, was left untouched."
+-        exit 1
+-    }
+-
+-    # 9. Install: stage beside the target, then move over it.
+-    Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
+-    try {
+-        Copy-Item -LiteralPath $tempExe -Destination $stagedExe -Force -ErrorAction Stop
+-        Move-Item -LiteralPath $stagedExe -Destination $targetExe -Force -ErrorAction Stop
+-    } catch {
+-        Remove-Item -LiteralPath $stagedExe -Force -ErrorAction SilentlyContinue
+-        Write-FerryxError ('Cannot install to ''{0}'': {1}' -f $targetExe, $_.Exception.Message)
+-        exit 1
+-    }
+ 
+-    # 10. Confirm the installed path itself runs.
+-    $installedCheck = Invoke-FerryxSelfCheck -Executable $targetExe -WorkDir $tempDir
+-    if (-not $installedCheck.Passed) {
+-        Write-FerryxError ('installed ''{0}'' {1}.' -f $targetExe, $installedCheck.Failure)
+-        exit 1
++    # 8. Self-check the candidate, then create the directory and install it (see
++    #    Install-FerryxCandidate). A loader rejection is an unsupported platform: exit 2, like
++    #    install.sh; a refusal leaves no new directory and any existing installation untouched.
++    $installStatus = Install-FerryxCandidate -TempExe $tempExe -InstallDir $installDir -WorkDir $tempDir
++    if ($installStatus -ne 0) {
++        exit $installStatus
+     }
+ 
+-    Write-Host ("==> Successfully installed ferryx-cli to " + $targetExe)
+-    Write-Host ("    Verified: " + $targetExe + " executes (--help exit " + $installedCheck.ExitCode + ").")
+-
+-    # 11. Check PATH. Adding the directory to the user PATH must never fail the install.
++    # 9. Check PATH. Adding the directory to the user PATH must never fail the install.
+     $environmentKey = $null
+     try {
+         $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+@@ -437,7 +638,7 @@ try {
+         ""
+     )
+ 
+-    # 12. Link this machine and keep its daemon running. Progress uses Write-Host, so with -Json
++    # 10. Link this machine and keep its daemon running. Progress uses Write-Host, so with -Json
+     #     the only stdout output is the JSON summary line of "ferryx-cli up --json".
+     if ($NoUp) {
+         foreach ($line in $nextStep) { Write-Host $line }
+@@ -486,6 +687,7 @@ try {
+         }
+         Write-FerryxError ("ferryx-cli up failed (exit " + $upStatus + "): " + $upReason + ".")
+         Write-FerryxError ("    ferryx-cli stays installed at " + $targetExe + "; rerun it with 'up --origin " + $FerryxOrigin + "' when ready.")
++        Write-FerryxSourceOverrides
+         exit $upStatus
+     }
+ } finally {
+diff --git a/site/public/install.sh b/site/public/install.sh
+index 595451fb5..e33ed8fe0 100755
+--- a/site/public/install.sh
++++ b/site/public/install.sh
+@@ -19,6 +19,17 @@ set -eu
+ #   FERRYX_ORIGIN      : custom relay/download origin (default: https://relay.ferryx.dev, must be https or http on loopback)
+ #   FERRYX_VERSION     : specific tag version or 'latest' (default: latest, must match ^[A-Za-z0-9._-]+$)
+ #   FERRYX_INSTALL_KEY : install key (same as --key)
++#
++# Every downloaded binary is checked against the SHA256SUMS of the same GitHub release
++# (FERRYX_VERSION, or the latest release); a source whose bytes do not match is skipped, and
++# the install fails when no source matches.
++#
++# Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported platform
++# (Linux arm64, Linux with musl libc, a glibc older than the published ferryx-cli needs, a
++# missing shared library or any other dynamic loader rejection, or any other OS/CPU without a
++# published ferryx-cli), otherwise the exit code of "ferryx-cli up". The downloaded binary
++# is staged in the install directory and must run there before it replaces anything; an
++# install directory that does not allow running programs (noexec) is exit 1.
+ 
+ FERRYX_INSTALL_KEY="${FERRYX_INSTALL_KEY:-}"
+ INSTALL_EMAIL=""
+@@ -26,12 +37,36 @@ INSTALL_NO_UP=0
+ INSTALL_JSON=0
+ INSTALL_KEY_STDIN=0
+ 
++FERRYX_ORIGIN="${FERRYX_ORIGIN:-https://relay.ferryx.dev}"
++FERRYX_VERSION="${FERRYX_VERSION:-latest}"
++
++release_base_url() {
++  if [ "$FERRYX_VERSION" = "latest" ]; then
++    echo "https://github.com/Indosaram/ferryx/releases/latest/download"
++  else
++    echo "https://github.com/Indosaram/ferryx/releases/download/${FERRYX_VERSION}"
++  fi
++}
++
++# Every failure names the download sources in use and the variables that override them.
++print_source_overrides() {
++  echo "    Download origin: ${FERRYX_ORIGIN} (override with FERRYX_ORIGIN); release: $(release_base_url) (pin a tag with FERRYX_VERSION)." >&2
++}
++
++# die STATUS MESSAGE: print the error and the source overrides, then exit with STATUS.
++die() {
++  die_status="$1"
++  shift
++  echo "Error: $*" >&2
++  print_source_overrides
++  exit "$die_status"
++}
++
+ while [ "$#" -gt 0 ]; do
+   case "$1" in
+     --key)
+       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+-        echo "Error: --key needs a value." >&2
+-        exit 2
++        die 2 "--key needs a value."
+       fi
+       FERRYX_INSTALL_KEY="$2"
+       shift 2
+@@ -46,8 +81,7 @@ while [ "$#" -gt 0 ]; do
+       ;;
+     --email)
+       if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+-        echo "Error: --email needs a value." >&2
+-        exit 2
++        die 2 "--email needs a value."
+       fi
+       INSTALL_EMAIL="$2"
+       shift 2
+@@ -65,8 +99,7 @@ while [ "$#" -gt 0 ]; do
+       shift
+       ;;
+     *)
+-      echo "Error: unknown option '$1'. Supported: --key K, --key-stdin, --email E, --no-up, --json." >&2
+-      exit 2
++      die 2 "unknown option '$1'. Supported: --key K, --key-stdin, --email E, --no-up, --json."
+       ;;
+   esac
+ done
+@@ -76,8 +109,7 @@ if [ "$INSTALL_KEY_STDIN" -eq 1 ]; then
+   # Exactly one line; a final line without a newline still counts.
+   IFS= read -r FERRYX_INSTALL_KEY || true
+   if [ -z "$FERRYX_INSTALL_KEY" ]; then
+-    echo "Error: --key-stdin found no install key on stdin." >&2
+-    exit 2
++    die 2 "--key-stdin found no install key on stdin."
+   fi
+ fi
+ 
+@@ -89,15 +121,11 @@ else
+   exec 3>&1
+ fi
+ 
+-FERRYX_ORIGIN="${FERRYX_ORIGIN:-https://relay.ferryx.dev}"
+-FERRYX_VERSION="${FERRYX_VERSION:-latest}"
+-
+ # Validate FERRYX_ORIGIN: must be https://... or http:// on loopback (127.0.0.1, localhost, [::1])
+ case "$FERRYX_ORIGIN" in
+   https://*|https)
+     if [ "$FERRYX_ORIGIN" = "https://" ] || [ "$FERRYX_ORIGIN" = "https" ]; then
+-      echo "Error: Invalid FERRYX_ORIGIN '$FERRYX_ORIGIN'. Must start with https:// or http:// on a loopback host." >&2
+-      exit 1
++      die 1 "Invalid FERRYX_ORIGIN '${FERRYX_ORIGIN}'. Must start with https:// or http:// on a loopback host."
+     fi
+     ;;
+   http://localhost|http://localhost/*|http://localhost:*|\
+@@ -105,29 +133,45 @@ case "$FERRYX_ORIGIN" in
+   http://\[::1\]|http://\[::1\]/*|http://\[::1\]:*)
+     ;;
+   *)
+-    echo "Error: Invalid FERRYX_ORIGIN '$FERRYX_ORIGIN'. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1])." >&2
+-    exit 1
++    die 1 "Invalid FERRYX_ORIGIN '${FERRYX_ORIGIN}'. Must be https:// or http:// on a loopback host (localhost, 127.0.0.1, [::1])."
+     ;;
+ esac
+ 
+ # Validate FERRYX_VERSION: must match ^[A-Za-z0-9._-]+$
+ case "$FERRYX_VERSION" in
+   "")
+-    echo "Error: Invalid FERRYX_VERSION '$FERRYX_VERSION'. Must match ^[A-Za-z0-9._-]+$." >&2
+-    exit 1
++    die 1 "Invalid FERRYX_VERSION '${FERRYX_VERSION}'. Must match ^[A-Za-z0-9._-]+$."
+     ;;
+   *[!A-Za-z0-9._-]*|"")
+-    echo "Error: Invalid FERRYX_VERSION '$FERRYX_VERSION'. Must match ^[A-Za-z0-9._-]+$." >&2
+-    exit 1
++    die 1 "Invalid FERRYX_VERSION '${FERRYX_VERSION}'. Must match ^[A-Za-z0-9._-]+$."
+     ;;
+   *)
+     ;;
+ esac
+ 
++RELEASE_BASE_URL="$(release_base_url)"
++
++# musl-based distributions (Alpine and similar) cannot run the glibc ferryx-cli build. A glibc
++# host that merely has the musl loader installed still answers GNU_LIBC_VERSION.
++linux_libc_is_musl() {
++  if ldd --version 2>&1 | grep -qi musl; then
++    return 0
++  fi
++  if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
++    return 1
++  fi
++  for loader in /lib/ld-musl-*; do
++    if [ -e "$loader" ]; then
++      return 0
++    fi
++  done
++  return 1
++}
++
+ echo "==> Ferryx CLI Installer"
+ 
+ # 1. Detect OS
+-OS="$(uname -s)"
++OS="$(uname -s)" || die 1 "cannot detect the operating system: 'uname -s' failed."
+ case "$OS" in
+   Linux)
+     PLATFORM_OS="linux"
+@@ -136,33 +180,35 @@ case "$OS" in
+     PLATFORM_OS="darwin"
+     ;;
+   *)
+-    echo "Error: Unsupported operating system '$OS'. Ferryx CLI supports Linux and macOS." >&2
+-    exit 1
++    die 2 "operating system '${OS}' is not supported; ferryx-cli ships for Linux x86_64 and macOS (use install.ps1 on Windows)."
+     ;;
+ esac
+ 
+ # 2. Detect Architecture
+-ARCH="$(uname -m)"
++ARCH="$(uname -m)" || die 1 "cannot detect the CPU architecture: 'uname -m' failed."
+ case "$ARCH" in
+   x86_64|amd64)
+     PLATFORM_ARCH="amd64"
+     ;;
+   aarch64|arm64)
++    if [ "$PLATFORM_OS" = "linux" ]; then
++      die 2 "Linux arm64 (${ARCH}) is not supported; ferryx-cli ships for Linux x86_64 only."
++    fi
+     PLATFORM_ARCH="arm64"
+     ;;
+   *)
+-    echo "Error: Unsupported CPU architecture '$ARCH'." >&2
+-    exit 1
++    die 2 "${OS} ${ARCH} is not supported; ferryx-cli ships for Linux x86_64 and macOS only."
+     ;;
+ esac
+ 
+-# 3. Determine download artifact name
++# 2a. Detect the C library: the Linux build needs glibc.
++if [ "$PLATFORM_OS" = "linux" ] && linux_libc_is_musl; then
++  die 2 "Linux with musl libc (Alpine and similar) is not supported; ferryx-cli needs glibc 2.17 or newer."
++fi
++
++# 3. Determine download artifact name (Linux is amd64 only; macOS ships one universal binary)
+ if [ "$PLATFORM_OS" = "linux" ]; then
+-  if [ "$PLATFORM_ARCH" = "amd64" ]; then
+-    ARTIFACT_NAME="ferryx-cli-linux-amd64"
+-  else
+-    ARTIFACT_NAME="ferryx-cli-linux-arm64"
+-  fi
++  ARTIFACT_NAME="ferryx-cli-linux-amd64"
+ elif [ "$PLATFORM_OS" = "darwin" ]; then
+   ARTIFACT_NAME="ferryx-cli-darwin-universal"
+ fi
+@@ -170,17 +216,28 @@ fi
+ # 4. Resolve download URLs
+ PRIMARY_URL="${FERRYX_ORIGIN}/download/${ARTIFACT_NAME}"
+ SECONDARY_URL="${FERRYX_ORIGIN}/download/ferryx-cli"
+-if [ "$FERRYX_VERSION" = "latest" ]; then
+-  GITHUB_URL="https://github.com/Indosaram/ferryx/releases/latest/download/${ARTIFACT_NAME}"
++GITHUB_URL="${RELEASE_BASE_URL}/${ARTIFACT_NAME}"
++
++# 4a. Determine the installation directory before downloading anything.
++if [ -n "${FERRYX_INSTALL_DIR:-}" ]; then
++  TARGET_DIR="$FERRYX_INSTALL_DIR"
++elif [ "$(id -u)" -eq 0 ]; then
++  TARGET_DIR="/usr/local/bin"
++elif [ -n "${HOME:-}" ]; then
++  TARGET_DIR="${HOME}/.local/bin"
+ else
+-  GITHUB_URL="https://github.com/Indosaram/ferryx/releases/download/${FERRYX_VERSION}/${ARTIFACT_NAME}"
++  die 1 "HOME is not set; set FERRYX_INSTALL_DIR to choose the install directory."
+ fi
+ 
+ # 5. Temporary download location
+-TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'ferryx-install')"
++TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'ferryx-install')" ||
++  die 1 "Cannot create a temporary directory."
+ TMP_BIN="${TMP_DIR}/ferryx-cli"
++TMP_SUMS="${TMP_DIR}/SHA256SUMS"
++STAGED_BIN=""
+ cleanup() {
+   rm -rf "$TMP_DIR"
++  [ -z "$STAGED_BIN" ] || rm -f "$STAGED_BIN"
+ }
+ trap cleanup EXIT INT TERM
+ 
+@@ -193,8 +250,7 @@ download() {
+   elif command -v wget >/dev/null 2>&1; then
+     wget -qO "$dest" "$url"
+   else
+-    echo "Error: Neither curl nor wget was found on your system." >&2
+-    exit 1
++    return 1
+   fi
+ }
+ 
+@@ -225,7 +281,6 @@ artifact_matches_platform() {
+       esac
+       case "$PLATFORM_ARCH:$(field 37 40)" in
+         amd64:3e00) ;;
+-        arm64:b700) ;;
+         *) return 1 ;;
+       esac
+       ;;
+@@ -259,22 +314,73 @@ artifact_matches_platform() {
+   esac
+ }
+ 
++sha256_of() {
++  if command -v sha256sum >/dev/null 2>&1; then
++    sha256sum "$1" | cut -d ' ' -f 1
++  elif command -v shasum >/dev/null 2>&1; then
++    shasum -a 256 "$1" | cut -d ' ' -f 1
++  else
++    return 1
++  fi
++}
++
++# Checked up front: download() runs with stderr discarded, so its own failure would be silent.
++if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
++  die 1 "Neither curl nor wget was found on your system."
++fi
++
++# 6a. Fetch the release checksums. Releases publish SHA256SUMS; older ones SHA256SUMS.txt.
++echo "--> Downloading SHA256SUMS from ${RELEASE_BASE_URL} ..."
++SUMS_FOUND=0
++for sums_name in SHA256SUMS SHA256SUMS.txt; do
++  if download "${RELEASE_BASE_URL}/${sums_name}" "$TMP_SUMS" 2>/dev/null && [ -s "$TMP_SUMS" ]; then
++    SUMS_FOUND=1
++    break
++  fi
++done
++if [ "$SUMS_FOUND" -ne 1 ]; then
++  die 1 "could not download SHA256SUMS from ${RELEASE_BASE_URL}; refusing to install an unverified binary."
++fi
++EXPECTED_SHA256="$(awk -v name="$ARTIFACT_NAME" '$2 == name || $2 == "*" name { print tolower($1); exit }' "$TMP_SUMS")" ||
++  die 1 "cannot read SHA256SUMS from ${RELEASE_BASE_URL} (awk failed)."
++case "$EXPECTED_SHA256" in
++  ????????????????????????????????????????????????????????????????) ;;
++  *)
++    die 1 "SHA256SUMS from ${RELEASE_BASE_URL} has no valid entry for ${ARTIFACT_NAME}."
++    ;;
++esac
++if ! sha256_of "$TMP_SUMS" >/dev/null; then
++  die 1 "neither sha256sum nor shasum was found; cannot verify the download."
++fi
++
+ echo "--> Downloading ferryx-cli for ${PLATFORM_OS}/${PLATFORM_ARCH}..."
+ DOWNLOAD_SUCCESS=0
++CHECKSUM_MISMATCH=0
+ for url in "$PRIMARY_URL" "$SECONDARY_URL" "$GITHUB_URL"; do
+   echo "    Trying $url ..."
+   if download "$url" "$TMP_BIN" 2>/dev/null && [ -s "$TMP_BIN" ]; then
+-    if artifact_matches_platform "$TMP_BIN"; then
+-      DOWNLOAD_SUCCESS=1
+-      break
++    if ! artifact_matches_platform "$TMP_BIN"; then
++      echo "    Skipping: artifact is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
++      continue
+     fi
+-    echo "    Skipping: artifact is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
++    actual_sha256="$(sha256_of "$TMP_BIN" | tr 'A-F' 'a-f')" ||
++      die 1 "cannot compute the SHA256 of the download from ${url}."
++    if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
++      echo "    Skipping: SHA256 mismatch (expected ${EXPECTED_SHA256}, got ${actual_sha256})"
++      CHECKSUM_MISMATCH=1
++      continue
++    fi
++    echo "    SHA256 verified: ${actual_sha256}"
++    DOWNLOAD_SUCCESS=1
++    break
+   fi
+ done
+ 
+ if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
+-  echo "Error: Failed to download ferryx-cli from available endpoints." >&2
+-  exit 1
++  if [ "$CHECKSUM_MISMATCH" -eq 1 ]; then
++    die 1 "no downloaded ferryx-cli matched the SHA256SUMS of the release (${ARTIFACT_NAME})."
++  fi
++  die 1 "Failed to download ferryx-cli from available endpoints."
+ fi
+ 
+ # 7. Confirm the accepted artifact matches this platform (the loop above already filtered;
+@@ -282,51 +388,148 @@ fi
+ if ! artifact_matches_platform "$TMP_BIN"; then
+   echo "Error: no downloadable artifact matched ${PLATFORM_OS}/${PLATFORM_ARCH}." >&2
+   echo "Detected header bytes: $(header_hex "$TMP_BIN")" >&2
++  print_source_overrides
+   exit 1
+ fi
+ 
+-# 8. Determine installation directory
+-if [ -n "${FERRYX_INSTALL_DIR:-}" ]; then
+-  TARGET_DIR="$FERRYX_INSTALL_DIR"
+-elif [ "$(id -u)" -eq 0 ]; then
+-  TARGET_DIR="/usr/local/bin"
+-else
+-  TARGET_DIR="${HOME}/.local/bin"
++# 8. Stage the candidate beside the target and prove it runs there BEFORE anything is replaced.
++#    It runs from the install directory, not TMPDIR, so a noexec /tmp cannot turn a supported
++#    host into a refusal. A refusal removes the staged file and every directory this run created,
++#    so an existing installation stays byte-for-byte untouched. The staging file has a unique
++#    name per run (mktemp), so concurrent runs never remove or overwrite each other's candidate.
++TARGET_BIN="${TARGET_DIR}/ferryx-cli"
++
++# The topmost missing ancestor of TARGET_DIR: what "mkdir -p" creates and a refusal removes.
++CREATED_TOP=""
++created_probe="$TARGET_DIR"
++while [ ! -e "$created_probe" ] && [ ! -L "$created_probe" ]; do
++  CREATED_TOP="$created_probe"
++  created_parent="$(dirname "$created_probe")"
++  [ "$created_parent" != "$created_probe" ] || break
++  created_probe="$created_parent"
++done
++
++discard_staged() {
++  [ -z "$STAGED_BIN" ] || rm -f "$STAGED_BIN" 2>/dev/null || true
++  STAGED_BIN=""
++  [ -n "$CREATED_TOP" ] || return 0
++  created_dir="$TARGET_DIR"
++  while rmdir "$created_dir" 2>/dev/null; do
++    [ "$created_dir" != "$CREATED_TOP" ] || return 0
++    created_dir="$(dirname "$created_dir")"
++  done
++  return 0
++}
++
++if ! mkdir -p "$TARGET_DIR"; then
++  discard_staged
++  die 1 "Cannot create the install directory '${TARGET_DIR}'."
++fi
++# Staging files of runs killed before their rename (SIGKILL, OOM, power loss) are binary-sized;
++# remove those older than an hour. The age guard keeps a concurrent run's staging file.
++find "$TARGET_DIR" -maxdepth 1 -type f -name '.ferryx-cli.new.*' -mmin +60 -exec rm -f {} + 2>/dev/null || true
++if ! STAGED_BIN="$(mktemp "${TARGET_DIR}/.ferryx-cli.new.XXXXXX")" || [ -z "$STAGED_BIN" ] ||
++  ! install -m 0755 "$TMP_BIN" "$STAGED_BIN"; then
++  discard_staged
++  die 1 "Cannot install to '${TARGET_BIN}' (staging a copy in '${TARGET_DIR}' failed); the existing installation, if any, was left untouched."
+ fi
+ 
+-mkdir -p "$TARGET_DIR"
+-TARGET_BIN="${TARGET_DIR}/ferryx-cli"
+-STAGED_BIN="${TARGET_BIN}.new"
++# The dynamic loader reports a too-old glibc, a missing symbol version or a missing library on
++# stderr and exits 1 (127 when the ELF interpreter itself is missing), so the exit status alone
++# cannot tell a loader failure from a CLI that answered: loader messages on stderr are checked
++# first. A release that predates "--version" prints its usage and exits 1; that usage proves the
++# CLI's main ran. The banner must start a line, so a loader message that merely contains it in
++# a path (for example an install directory named "Ferryx CLI") never passes.
++host_glibc_version() {
++  if getconf GNU_LIBC_VERSION 2>/dev/null; then
++    return 0
++  fi
++  if command -v ldd >/dev/null 2>&1; then
++    ldd --version 2>&1 | head -n 1
++  else
++    echo "an unknown C library"
++  fi
++}
+ 
+-chmod +x "$TMP_BIN"
++# refuse_unrunnable STATUS REASON: the candidate cannot run on this host.
++refuse_unrunnable() {
++  refuse_status="$1"
++  shift
++  discard_staged
++  echo "Error: $*" >&2
++  printf '%s\n%s\n' "$verify_stderr" "$verify_stdout" | sed '/^$/d' | head -n 3 | sed 's/^/    /' >&2
++  echo "    The downloaded ferryx-cli was not installed; the existing installation, if any, was left untouched." >&2
++  print_source_overrides
++  exit "$refuse_status"
++}
+ 
+-# 9. Verify the candidate can execute BEFORE it replaces anything. A payload that cannot
+-# run here must leave any existing installation byte-for-byte untouched.
++VERIFY_ERR="${TMP_DIR}/verify.err"
+ set +e
+-"$TMP_BIN" --help >/dev/null 2>&1
++verify_stdout="$("$STAGED_BIN" --version </dev/null 2>"$VERIFY_ERR")"
+ verify_status=$?
++verify_stderr="$(cat "$VERIFY_ERR" 2>/dev/null)"
+ set -e
+-case "$verify_status" in
+-  126|127)
+-    echo "Error: downloaded binary cannot execute on this platform (exit ${verify_status})." >&2
+-    echo "    Existing installation, if any, was left untouched." >&2
+-    exit 1
+-    ;;
+-esac
+ 
+-# 10. Install atomically: stage beside the target, then rename over it.
+-rm -f "$STAGED_BIN"
+-if ! install -m 0755 "$TMP_BIN" "$STAGED_BIN"; then
+-  rm -f "$STAGED_BIN"
+-  exit 1
++if [ "$verify_status" -ne 0 ]; then
++  missing_glibc="$(printf '%s\n' "$verify_stderr" |
++    sed -n "s/.*version .GLIBC_\([0-9][0-9.]*\)' not found.*/\1/p" |
++    sort -t . -k 1,1n -k 2,2n -k 3,3n | tail -n 1)"
++  missing_glibcxx="$(printf '%s\n' "$verify_stderr" |
++    sed -n "s/.*version .\(GLIBCXX_[0-9][0-9.]*\)' not found.*/\1/p" | tail -n 1)"
++  missing_version="$(printf '%s\n' "$verify_stderr" |
++    sed -n "s/.*version .\([^']*\)' not found (required by .*/\1/p" | head -n 1)"
++  missing_library="$(printf '%s\n' "$verify_stderr" |
++    sed -n 's/.*error while loading shared libraries: \([^:]*\): cannot open shared object file.*/\1/p' | head -n 1)"
++  loader_error="$(printf '%s\n' "$verify_stderr" | sed -n '/error while loading shared libraries/{p;q;}')"
++
++  if [ -n "$missing_glibc" ]; then
++    refuse_unrunnable 2 "this Linux is not supported: ferryx-cli needs glibc ${missing_glibc} or newer (GLIBC_${missing_glibc} not found), and this host has $(host_glibc_version)."
++  elif [ -n "$missing_glibcxx" ]; then
++    refuse_unrunnable 2 "this Linux is not supported: ferryx-cli needs a libstdc++ that provides ${missing_glibcxx}, which this host lacks (C library: $(host_glibc_version))."
++  elif [ -n "$missing_version" ]; then
++    refuse_unrunnable 2 "this system is not supported: the dynamic loader rejected ferryx-cli because no installed library provides ${missing_version} (C library: $(host_glibc_version))."
++  elif [ -n "$missing_library" ]; then
++    refuse_unrunnable 2 "this system is not supported: ferryx-cli needs the shared library '${missing_library}', which is not installed here."
++  elif [ -n "$loader_error" ]; then
++    refuse_unrunnable 2 "this system is not supported: the dynamic loader could not start ferryx-cli (C library: $(host_glibc_version))."
++  fi
++  case "$verify_status" in
++    126)
++      case "$verify_stderr" in
++        *"Permission denied"*)
++          refuse_unrunnable 1 "cannot run programs from '${TARGET_DIR}' (Permission denied, exit 126; is it mounted noexec?). Set FERRYX_INSTALL_DIR to a directory that allows running programs."
++          ;;
++      esac
++      refuse_unrunnable 2 "the downloaded ferryx-cli cannot execute on this system (exit 126)."
++      ;;
++    127)
++      refuse_unrunnable 2 "the downloaded ferryx-cli cannot execute on this system (exit 127)."
++      ;;
++  esac
++  # A status above 128 (a signal death, 128+N, or such an exit code) fails even after the usage
++  # banner was printed.
++  if [ "$verify_status" -gt 128 ]; then
++    refuse_unrunnable 1 "the downloaded ferryx-cli failed its self-check ('--version' exit ${verify_status}; a status above 128 is a signal death)."
++  fi
++  if ! printf '%s\n%s\n' "$verify_stdout" "$verify_stderr" |
++    grep -q -e '^Usage: ferryx-cli' -e '^Ferryx CLI is running' -e '^ferryx-cli [0-9]'; then
++    refuse_unrunnable 1 "the downloaded ferryx-cli failed its self-check ('--version' exit ${verify_status}, and it did not print the Ferryx CLI version or usage)."
++  fi
++fi
++
++# 9. Install atomically: rename the verified staged file over the target.
++if ! mv -f "$STAGED_BIN" "$TARGET_BIN"; then
++  staged_name="$STAGED_BIN"
++  discard_staged
++  die 1 "Cannot install to '${TARGET_BIN}' (staged at '${staged_name}'); the existing installation, if any, was left untouched."
+ fi
+-mv -f "$STAGED_BIN" "$TARGET_BIN"
++STAGED_BIN=""
+ 
+ echo "==> Successfully installed ferryx-cli to ${TARGET_BIN}"
+-echo "    Verified: ${TARGET_BIN} executes (--help exit ${verify_status})."
++echo "    Verified: ${TARGET_BIN} runs on this host (--version exit ${verify_status})."
+ 
+-# 11. Check PATH
+-case ":$PATH:" in
++# 10. Check PATH
++case ":${PATH:-}:" in
+   *":$TARGET_DIR:"*) ;;
+   *)
+     echo ""
+@@ -344,7 +547,7 @@ print_next_step() {
+   echo ""
+ }
+ 
+-# 12. Link this machine and keep its daemon running.
++# 11. Link this machine and keep its daemon running.
+ if [ "$INSTALL_NO_UP" -eq 1 ]; then
+   print_next_step
+   exit 0
+@@ -397,5 +600,6 @@ if [ "$up_status" -ne 0 ]; then
+   esac
+   echo "Error: ferryx-cli up failed (exit ${up_status}): ${up_reason}." >&2
+   echo "    ferryx-cli stays installed at ${TARGET_BIN}; rerun '${TARGET_BIN} up --origin ${FERRYX_ORIGIN}' when ready." >&2
++  print_source_overrides
+   exit "$up_status"
+ fi

@@ -1,0 +1,12 @@
+M	src-tauri/src/cli.rs
+M	src-tauri/src/daemon/client.rs
+M	src-tauri/src/daemon/control_server.rs
+M	src-tauri/src/daemon/logging.rs
+M	src-tauri/src/daemon/mod.rs
+M	src-tauri/src/daemon/server.rs
+M	src-tauri/src/daemon/supervisor.rs
+M	src-tauri/src/ipc/agent_integration.rs
+M	ui/src/components/DaemonConnectionBanner.tsx
+M	ui/src/components/settings/GeneralSection.test.tsx
+M	ui/src/components/settings/GeneralSection.tsx
+M	ui/src/lib/tauri.ts

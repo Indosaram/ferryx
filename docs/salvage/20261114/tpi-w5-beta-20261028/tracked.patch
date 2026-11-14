@@ -1,0 +1,2638 @@
+diff --git a/docs/releases/INCREMENTAL_RELEASE_PIPELINE.md b/docs/releases/INCREMENTAL_RELEASE_PIPELINE.md
+index 5af4dbfec..ae2949ea5 100644
+--- a/docs/releases/INCREMENTAL_RELEASE_PIPELINE.md
++++ b/docs/releases/INCREMENTAL_RELEASE_PIPELINE.md
+@@ -46,6 +46,8 @@
+ | **omaki** | Arch Linux x86_64 | `0.16.0-3` | Local NVMe (`/home/indo/.cache/sccache`, 50 GiB max) | `/home/indo/.cargo/config.toml` (`/usr/bin/sccache`) | `/home/indo/ferryx-release` |
+ | **maho-win** | Windows 11 x86_64 | `0.17.0` | Local disk (`C:\Users\sook\.cache\maho\sccache`, 50 GiB max) | `C:\Users\sook\.cargo\config.toml` (`sccache.exe`) | `C:\Users\sook\ferryx-winbuild\ferryx-release` |
+ 
++glibc floors of the Linux artifacts produced by `bun run release:local` (`createLinuxBuildScript` in `scripts/lib/release-platforms.mjs`): the AppImage and deb are built inside an Ubuntu 22.04 container (`packaging/linux/bundle.Dockerfile`; glibc 2.35, webkit2gtk-4.1), so omaki needs Docker; `ferryx-cli-linux-amd64` is cross-linked with `cargo zigbuild --target x86_64-unknown-linux-gnu.2.17`, so omaki needs `cargo-zigbuild`. The Linux receipt records both under `toolchains.linuxBuilder`. On maho-win the same run also builds `ferryx-cli-windows-amd64.exe`.
++
+ ---
+ 
+ ## 4. Release Execution Guide (Incremental)
+diff --git a/docs/releases/LOCAL_RELEASE_RUNBOOK.md b/docs/releases/LOCAL_RELEASE_RUNBOOK.md
+index d30a2836c..306bd2e57 100644
+--- a/docs/releases/LOCAL_RELEASE_RUNBOOK.md
++++ b/docs/releases/LOCAL_RELEASE_RUNBOOK.md
+@@ -64,16 +64,27 @@ both forms produce are the same, so the change does not reorder updates.
+ The in-app updater has two channels, chosen in Settings > General > Software Update > "Update
+ channel". Stable is the default.
+ 
+-| Channel | Manifest (asset of the latest GitHub release) |
++| Channel | Manifest |
+ | --- | --- |
+-| Stable | `latest.json` (the `plugins.updater.endpoints` entry in `src-tauri/tauri.conf.json`) |
+-| Beta | `latest-beta.json`, then `latest.json` when no beta manifest is published |
++| Stable | `latest.json` of the latest GitHub release (the `plugins.updater.endpoints` entry in `src-tauri/tauri.conf.json`) |
++| Beta | `latest-beta.json` of the fixed `beta` release tag, then the stable `latest.json` when that is missing |
+ 
+ Endpoints are fixed in `src-tauri/src/ipc/updater.rs` (`STABLE_UPDATE_ENDPOINT`,
+-`BETA_UPDATE_ENDPOINT`); the UI sends only the channel name. To ship a beta, assemble the release
+-as usual, copy its signed `latest.json` to `latest-beta.json` in `$RUN/publish` before publishing,
+-and keep the stable `latest.json` pointing at the last stable build. Both manifests are signed with
+-the same updater key, so a beta never bypasses signature verification.
++`BETA_UPDATE_ENDPOINT`); the UI sends only the channel name. `releases/latest` never resolves to a
++prerelease, so the beta manifest lives on a tag that does not move with stable releases
++(`BETA_CHANNEL_TAG` in `scripts/lib/release-contract.mjs`). Assembly writes `latest-beta.json`
++next to `latest.json` with the same content, so every run carries both and both are covered by
++`SHA256SUMS.txt`. Either way the updater only moves forward: it offers a manifest only when its
++version is newer than the running build. To point the beta channel at a published run, upload that
++run's manifest to the `beta` release (create it once as a prerelease that is not marked latest):
++
++```bash
++gh release upload beta "$RUN/publish/latest-beta.json" --repo Indosaram/ferryx --clobber
++```
++
++Do this for stable releases too, so beta users never sit behind stable. Both manifests reference
++the artifacts of the run's own versioned tag and are signed with the same updater key, so a beta
++never bypasses signature verification.
+ 
+ ## One-time host configuration
+ 
+@@ -218,6 +229,54 @@ receipt-listed outputs back into `$RUN/artifacts`, and writes one receipt per ho
+ restarts or kills `ferryx --daemon`, or launches a release/debug binary or GUI. Those actions can
+ destroy active terminal sessions or contaminate acceptance evidence.
+ 
++### Release floor gate
++
++`buildHost` (`scripts/lib/release-platforms.mjs`) measures each host's artifacts and refuses to
++write a receipt when any artifact breaks an advertised floor. The error starts with
++`Release floor gate failed on host '<host>':` and names each failing artifact kind, check, and
++reason. Checks per host:
++
++- `omaki` (Linux): the highest `GLIBC_` symbol version needed by any ELF file inside the artifact,
++  measured with `objdump -T` inside the Ubuntu 22.04 bundle image (the AppImage is extracted with
++  `--appimage-extract`, the deb with `dpkg-deb -x`). Limits: `ferryx-cli-linux-amd64` <=
++  `GLIBC_2.17`; AppImage and deb <= `GLIBC_2.35`.
++- `macbook` (macOS): minos is read per architecture. `lipo -archs` lists each file's slices, and
++  `otool -arch <arch> -l` reads that slice's `LC_BUILD_VERSION` `minos` (or
++  `LC_VERSION_MIN_MACOSX`). The highest value per architecture over `Ferryx.app` and the universal
++  CLI is recorded, for example `{ "x86_64": "10.15", "arm64": "11.0" }`. x86_64 slices must not
++  exceed `bundle.macOS.minimumSystemVersion` in `src-tauri/tauri.conf.json` (currently 10.15).
++  arm64 slices are held to 11.0, the first macOS release on Apple Silicon (the linker never emits a
++  lower arm64 minos), so a universal build with arm64 minos 11.0 passes. The app and the DMG must
++  also pass `spctl -a -vvv -t install` with "Notarized Developer ID" and
++  `xcrun stapler validate`. This check runs in `buildHost` after `finalizeMacosBundle`, not inside
++  it, because QA harnesses finalize ad-hoc signed bundles on purpose. So a `macbook` build without
++  `--approve-notarization` fails the gate unless it is waived.
++- `maho-win` (Windows): `dumpbin /dependents` of `ferryx.exe` (packed in the MSIX, and in the NSIS
++  installer when selected) and of `ferryx-cli.exe` is captured into the receipt. Any Visual C++
++  redistributable DLL (`vcruntime*`, `msvcp*`, `vccorlib*`, `concrt*`, `vcomp*`, `mfc*`) fails the
++  check: a clean Windows doesn't have it and the MSIX declares no VCLibs dependency. `dumpbin` is
++  taken from `PATH` or found with `vswhere`, so the MSVC build tools are required on `maho-win`.
++
++Every result is recorded in the receipt's additive `floors` field:
++`{ "waiver": null | "<reason>", "checks": [ { kind, check, limit, measured, pass, reason? } ] }`.
++
++`assembleRelease` (`scripts/build-latest-json.mjs`) re-evaluates every recorded measurement against
++the same limits; it doesn't trust the recorded `pass` flag. It refuses with `Release floor gate
++failed: ...` when a measurement violates a floor, a required check is missing, a receipt has no
++`floors` field, or a receipt was built under a waiver. `verify` re-runs assembly, so the same
++applies there.
++
++For local dev/test releases only, there is an explicit opt-out: set
++`FERRYX_RELEASE_FLOOR_WAIVER="<reason>"` in the environment of the build command, and again for
++`assemble` and `verify`. The build then records the waiver and the failing results in the receipt
++instead of failing, and prints a warning. Assembling a receipt built under a waiver needs the
++variable as well. A waived run must never be published.
++
++```bash
++FERRYX_RELEASE_FLOOR_WAIVER="local QA build, not for publishing" \
++  bun scripts/release-local.mjs build --config "$RELEASE_CONFIG" --run "$RUN" --host macbook
++```
++
+ ### 4. Assemble and verify locally
+ 
+ For a production release, use the public key from committed Tauri configuration (do not pass the
+@@ -232,10 +291,11 @@ bun scripts/release-local.mjs verify --run "$RUN"
+ ```
+ 
+ Assembly requires the macOS updater + DMG + universal CLI, Linux AppImage + DEB + x86_64 CLI,
+-Windows MSIX, and, when selected, NSIS. It verifies receipt identity, paths, sizes, hashes, updater signatures, target uniqueness,
++Windows MSIX + x86_64 CLI (`ferryx-cli-windows-amd64.exe`), and, when selected, NSIS. It verifies receipt identity, paths, sizes, hashes, updater signatures, target uniqueness,
+ and the selected channel matrix before creating stable aliases, `latest.json`, and
+ `SHA256SUMS.txt`. `verify` checks listed bytes and independently re-derives the publish directory.
+ Inspect the final inventory; no MSI or architecture-specific macOS DMG is part of this contract.
++Assembly also re-checks every receipt's recorded floor results (see "Release floor gate").
+ 
+ ### Release provenance
+ 
+diff --git a/scripts/build-latest-json.mjs b/scripts/build-latest-json.mjs
+index 685755242..a5fd15f59 100644
+--- a/scripts/build-latest-json.mjs
++++ b/scripts/build-latest-json.mjs
+@@ -17,11 +17,15 @@ import { fileURLToPath } from "node:url";
+ 
+ import { verifyMinisign } from "./lib/minisign-verify.mjs";
+ import {
++  BETA_MANIFEST_NAME,
++  evaluateFloorCheck,
++  FLOOR_CHECKS,
+   isSafeRelativePath,
+   KIND_DEFINITIONS,
+   parsePlan,
+   parseReceipt,
+   requiredKinds,
++  STABLE_MANIFEST_NAME,
+   VALID_HOSTS,
+ } from "./lib/release-contract.mjs";
+ 
+@@ -71,6 +75,23 @@ function loadDefaultPublicKey() {
+   throw new Error("Public key was not provided and could not be loaded from src-tauri/tauri.conf.json");
+ }
+ 
++/**
++ * Reads bundle.macOS.minimumSystemVersion from the checked-in Tauri config, or null.
++ */
++export function loadDefaultMacosMinimum() {
++  const candidates = [
++    join(process.cwd(), "src-tauri", "tauri.conf.json"),
++    resolve(dirname(fileURLToPath(import.meta.url)), "..", "src-tauri", "tauri.conf.json"),
++  ];
++  for (const p of candidates) {
++    if (existsSync(p)) {
++      const minimum = JSON.parse(readFileSync(p, "utf8")).bundle?.macOS?.minimumSystemVersion;
++      if (minimum) return minimum;
++    }
++  }
++  return null;
++}
++
+ /**
+  * Assembles and verifies a complete release inventory based on release plan and host receipts.
+  *
+@@ -80,6 +101,9 @@ function loadDefaultPublicKey() {
+  * @param {string} options.artifactsDir
+  * @param {string} options.outDir
+  * @param {string} [options.publicKey]
++ * @param {string} [options.floorWaiver] explicit floor-gate opt-out reason (local dev/test only);
++ *   defaults to FERRYX_RELEASE_FLOOR_WAIVER
++ * @param {string} [options.macosMinimum] defaults to bundle.macOS.minimumSystemVersion
+  * @returns {{ outDir: string, plan: object, receipts: object[], manifest: object, files: string[] }}
+  */
+ export function assembleRelease(options) {
+@@ -184,6 +208,47 @@ export function assembleRelease(options) {
+     }
+   }
+ 
++  // 3b. Release floor gate: every recorded floor measurement is re-evaluated against the
++  // advertised floors (the recorded pass flag is not trusted). A receipt without floor results,
++  // or one built under a waiver, is refused unless this assembly is explicitly waived as well.
++  const floorWaiver = options.floorWaiver ?? (process.env.FERRYX_RELEASE_FLOOR_WAIVER || null);
++  const macosMinimum = options.macosMinimum ?? loadDefaultMacosMinimum();
++  const floorFailures = [];
++  for (const receipt of receipts) {
++    if (!receipt.floors) {
++      floorFailures.push(`${receipt.host}: receipt carries no floor results`);
++      continue;
++    }
++    if (receipt.floors.waiver) {
++      floorFailures.push(`${receipt.host}: built under floor waiver "${receipt.floors.waiver}"`);
++    }
++    for (const art of receipt.artifacts) {
++      for (const check of FLOOR_CHECKS[art.kind]) {
++        const recorded = receipt.floors.checks.find((c) => c.kind === art.kind && c.check === check);
++        if (!recorded) {
++          floorFailures.push(`${receipt.host} ${art.kind} ${check}: no recorded result`);
++          continue;
++        }
++        // The host measured against the plan-commit minimum; a different minimum here means the
++        // recorded check and this re-evaluation disagree about the floor, so refuse.
++        if (check === "macos-minos" && recorded.limit !== macosMinimum) {
++          floorFailures.push(
++            `${receipt.host} ${art.kind} ${check}: built against minimum ${JSON.stringify(recorded.limit)}, but this assembly uses ${JSON.stringify(macosMinimum)}`,
++          );
++          continue;
++        }
++        const fresh = evaluateFloorCheck({ kind: art.kind, check, measured: recorded.measured, macosMinimum });
++        if (!fresh.pass) floorFailures.push(`${receipt.host} ${art.kind} ${check}: ${fresh.reason}`);
++      }
++    }
++  }
++  if (floorFailures.length > 0) {
++    if (!floorWaiver) {
++      throw new Error(`Release floor gate failed: ${floorFailures.join("; ")}`);
++    }
++    console.warn(`Release floor gate waived (${floorWaiver}): ${floorFailures.join("; ")}`);
++  }
++
+   // 4. Verify artifact contents and signatures in filesystem
+   const realArtifactsDir = realpathSync(artifactsDir);
+   const validatedArtifacts = [];
+@@ -353,10 +418,13 @@ export function assembleRelease(options) {
+       stagedFiles.set(targetName, sourcePath);
+     }
+ 
+-    // Write latest.json FIRST
+-    const latestPath = join(stagingDir, "latest.json");
+-    writeFileSync(latestPath, JSON.stringify(manifest, null, 2) + "\n");
+-    stagedFiles.set("latest.json", "manifest");
++    // Write the manifests FIRST. latest-beta.json carries the same signed-artifact manifest, so
++    // the beta channel's fixed tag can be pointed at any published release, stable or beta.
++    const manifestText = JSON.stringify(manifest, null, 2) + "\n";
++    for (const manifestName of [STABLE_MANIFEST_NAME, BETA_MANIFEST_NAME]) {
++      writeFileSync(join(stagingDir, manifestName), manifestText);
++      stagedFiles.set(manifestName, "manifest");
++    }
+ 
+     // Stage artifacts, signatures, and stable aliases
+     for (const { artifact, kindDef, fullPath, fullSigPath, sigContent } of validatedArtifacts) {
+diff --git a/scripts/build-latest-json.test.mjs b/scripts/build-latest-json.test.mjs
+index 3a04e1012..4df81046e 100644
+--- a/scripts/build-latest-json.test.mjs
++++ b/scripts/build-latest-json.test.mjs
+@@ -18,6 +18,33 @@ import { fileURLToPath } from "node:url";
+ 
+ import { assembleRelease } from "./build-latest-json.mjs";
+ import { verifyMinisign } from "./lib/minisign-verify.mjs";
++import { evaluateFloors } from "./lib/release-contract.mjs";
++
++// Floor measurements of a release that meets every advertised floor.
++const NOTARIZED = (target) => ({ target, spctlStatus: 0, spctl: `${target}: accepted\nsource=Notarized Developer ID`, staplerStatus: 0 });
++const AD_HOC = (target) => ({ target, spctlStatus: 3, spctl: `${target}: rejected\nsource=no usable signature`, staplerStatus: 65 });
++const WINDOWS_DEPENDENTS = ["KERNEL32.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "WebView2Loader.dll"];
++const CONFORMING_FLOORS = {
++  "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app")] },
++  dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app"), NOTARIZED("dmg")] },
++  "cli-darwin-universal": { minos: { x86_64: "10.15", arm64: "11.0" } },
++  appimage: { glibc: "2.35" },
++  deb: { glibc: "2.35" },
++  "cli-linux-amd64": { glibc: "2.17" },
++  msix: { dependents: WINDOWS_DEPENDENTS },
++  nsis: { dependents: WINDOWS_DEPENDENTS },
++  "cli-windows-amd64": { dependents: ["KERNEL32.dll", "ucrtbase.dll"] },
++};
++function floorsFor(receipt, overrides) {
++  return {
++    waiver: null,
++    checks: evaluateFloors({
++      kinds: receipt.artifacts.map((a) => a.kind),
++      measurements: { ...CONFORMING_FLOORS, ...overrides },
++      macosMinimum: "10.15",
++    }),
++  };
++}
+ 
+ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+ const SCRIPT = join(REPO_ROOT, "scripts", "build-latest-json.mjs");
+@@ -92,6 +119,7 @@ function createSyntheticReleaseFixture({
+   commitSha = "5d5499806a1b207849778f488b4e3e7b821a751b",
+   nsisMigration = false,
+   keys = createMinisignTestKeys(),
++  floorOverrides = {},
+ } = {}) {
+   const rootDir = mkdtempSync(join(tmpdir(), "ferryx-release-fixture-"));
+   const receiptsDir = join(rootDir, "receipts");
+@@ -188,6 +216,7 @@ function createSyntheticReleaseFixture({
+       },
+     ],
+   };
++  macReceipt.floors = floorsFor(macReceipt, floorOverrides);
+   writeFileSync(join(receiptsDir, "build-receipt-macbook.json"), JSON.stringify(macReceipt, null, 2) + "\n");
+ 
+   // Linux artifacts
+@@ -248,6 +277,7 @@ function createSyntheticReleaseFixture({
+       },
+     ],
+   };
++  linuxReceipt.floors = floorsFor(linuxReceipt, floorOverrides);
+   writeFileSync(join(receiptsDir, "build-receipt-omaki.json"), JSON.stringify(linuxReceipt, null, 2) + "\n");
+ 
+   // Windows artifacts
+@@ -255,6 +285,8 @@ function createSyntheticReleaseFixture({
+   mkdirSync(winDir, { recursive: true });
+   const msixBuf = Buffer.from("windows-msix-installer-content-store");
+   writeFileSync(join(winDir, "Ferryx_2026.908.1.0_x64.msix"), msixBuf);
++  const winCliBuf = Buffer.from("windows-cli-binary-content");
++  writeFileSync(join(winDir, "ferryx-cli-windows-amd64.exe"), winCliBuf);
+ 
+   const winArtifacts = [
+     {
+@@ -266,6 +298,15 @@ function createSyntheticReleaseFixture({
+       signatureRelPath: null,
+       targets: [],
+     },
++    {
++      kind: "cli-windows-amd64",
++      name: "ferryx-cli-windows-amd64.exe",
++      relPath: "windows/ferryx-cli-windows-amd64.exe",
++      bytes: winCliBuf.length,
++      sha256: sha256(winCliBuf),
++      signatureRelPath: null,
++      targets: [],
++    },
+   ];
+ 
+   if (nsisMigration) {
+@@ -302,6 +343,7 @@ function createSyntheticReleaseFixture({
+     },
+     artifacts: winArtifacts,
+   };
++  winReceipt.floors = floorsFor(winReceipt, floorOverrides);
+   writeFileSync(join(receiptsDir, "build-receipt-maho-win.json"), JSON.stringify(winReceipt, null, 2) + "\n");
+ 
+   return {
+@@ -377,6 +419,7 @@ test("assembleRelease creates complete release inventory, latest.json first, sta
+     assert.equal(existsSync(join(outDir, "Ferryx_x64.msix")), true);
+     assert.equal(existsSync(join(outDir, "ferryx-cli-linux-amd64")), true);
+     assert.equal(existsSync(join(outDir, "ferryx-cli-darwin-universal")), true);
++    assert.equal(existsSync(join(outDir, "ferryx-cli-windows-amd64.exe")), true);
+ 
+     // Original artifacts present
+     assert.equal(existsSync(join(outDir, "Ferryx_2026.908.1_universal.dmg")), true);
+@@ -390,6 +433,13 @@ test("assembleRelease creates complete release inventory, latest.json first, sta
+     assert.deepEqual(listedFiles, actualFiles);
+     assert.ok(listedFiles.includes("latest.json"));
+ 
++    // The beta channel manifest is written next to latest.json with the same signed content.
++    assert.ok(listedFiles.includes("latest-beta.json"));
++    assert.deepEqual(
++      readFileSync(join(outDir, "latest-beta.json")),
++      readFileSync(join(outDir, "latest.json")),
++    );
++
+     // Verify all checksums match actual files
+     for (const line of checksums) {
+       const [expectedHash, filename] = line.split(/\s+/);
+@@ -797,3 +847,129 @@ test("archive layout is checked against staged bytes rather than a mutable sourc
+     fixture.cleanup();
+   }
+ });
++
++// ----------------- Release floor gate -----------------
++
++test("assembleRelease floor gate: a GLIBC_2.38 Linux artifact, an ad-hoc signed macOS build, a too-new minos and a VC++ runtime dependency each abort by name", () => {
++  const fixture = createSyntheticReleaseFixture({
++    floorOverrides: {
++      appimage: { glibc: "2.38" },
++      "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app")] },
++      dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app"), AD_HOC("dmg")] },
++      "cli-darwin-universal": { minos: { x86_64: "11.0", arm64: "11.0" } },
++      "cli-windows-amd64": { dependents: ["KERNEL32.dll", "VCRUNTIME140.dll"] },
++    },
++  });
++  const outDir = join(fixture.rootDir, "publish-floor-violation");
++  try {
++    assert.throws(
++      () => assembleRelease({
++        planPath: fixture.planPath,
++        receiptsDir: fixture.receiptsDir,
++        artifactsDir: fixture.artifactsDir,
++        outDir,
++        publicKey: fixture.keys.publicKeyWrapped,
++        macosMinimum: "10.15",
++      }),
++      (err) => {
++        assert.match(err.message, /^Release floor gate failed: /);
++        assert.match(err.message, /omaki appimage glibc: requires GLIBC_2\.38, above the GLIBC_2\.35 floor/);
++        assert.match(err.message, /macbook dmg notarization: app: spctl does not report Notarized Developer ID \(app: rejected source=no usable signature\)/);
++        assert.match(err.message, /macbook macos-updater notarization: app: spctl does not report Notarized Developer ID/);
++        assert.match(err.message, /macbook cli-darwin-universal macos-minos: x86_64 slice declares minos 11\.0, above the configured minimum 10\.15/);
++        // arm64 slices at 11.0 meet the Apple Silicon floor and are not reported.
++        assert.doesNotMatch(err.message, /arm64 slice/);
++        assert.match(err.message, /maho-win cli-windows-amd64 crt: depends on VCRUNTIME140\.dll/);
++        assert.doesNotMatch(err.message, /omaki deb|omaki cli-linux-amd64|maho-win msix/);
++        return true;
++      },
++    );
++    assert.equal(existsSync(outDir), false, "no publish directory may be created");
++  } finally {
++    fixture.cleanup();
++  }
++});
++
++test("assembleRelease floor gate: a macOS minos check recorded against a different minimum is refused", () => {
++  // Built (and recorded) against the plan-commit minimum 10.15; minos 12.0 would pass a 13.0 minimum.
++  const fixture = createSyntheticReleaseFixture({
++    floorOverrides: { "cli-darwin-universal": { minos: { x86_64: "12.0", arm64: "12.0" } } },
++  });
++  const outDir = join(fixture.rootDir, "publish-minimum-mismatch");
++  try {
++    assert.throws(
++      () => assembleRelease({
++        planPath: fixture.planPath,
++        receiptsDir: fixture.receiptsDir,
++        artifactsDir: fixture.artifactsDir,
++        outDir,
++        publicKey: fixture.keys.publicKeyWrapped,
++        macosMinimum: "13.0",
++      }),
++      (err) => {
++        assert.match(err.message, /macbook cli-darwin-universal macos-minos: built against minimum "10\.15", but this assembly uses "13\.0"/);
++        assert.match(err.message, /macbook dmg macos-minos: built against minimum "10\.15", but this assembly uses "13\.0"/);
++        return true;
++      },
++    );
++    assert.equal(existsSync(outDir), false);
++  } finally {
++    fixture.cleanup();
++  }
++});
++
++test("assembleRelease floor gate: re-evaluates recorded measurements instead of trusting a recorded pass flag", () => {
++  const fixture = createSyntheticReleaseFixture();
++  const outDir = join(fixture.rootDir, "publish-forged-pass");
++  try {
++    const receiptPath = join(fixture.receiptsDir, "build-receipt-omaki.json");
++    const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
++    const cli = receipt.floors.checks.find((c) => c.kind === "cli-linux-amd64");
++    cli.measured = "2.30";
++    assert.equal(cli.pass, true);
++    writeFileSync(receiptPath, JSON.stringify(receipt, null, 2) + "\n");
++    assert.throws(
++      () => assembleRelease({
++        planPath: fixture.planPath,
++        receiptsDir: fixture.receiptsDir,
++        artifactsDir: fixture.artifactsDir,
++        outDir,
++        publicKey: fixture.keys.publicKeyWrapped,
++      }),
++      /Release floor gate failed: omaki cli-linux-amd64 glibc: requires GLIBC_2\.30, above the GLIBC_2\.17 floor$/,
++    );
++    assert.equal(existsSync(outDir), false);
++  } finally {
++    fixture.cleanup();
++  }
++});
++
++test("assembleRelease floor gate: a receipt without floor results or built under a waiver is refused unless the assembly is waived too", () => {
++  const fixture = createSyntheticReleaseFixture();
++  try {
++    const winPath = join(fixture.receiptsDir, "build-receipt-maho-win.json");
++    const win = JSON.parse(readFileSync(winPath, "utf8"));
++    delete win.floors;
++    writeFileSync(winPath, JSON.stringify(win, null, 2) + "\n");
++    const macPath = join(fixture.receiptsDir, "build-receipt-macbook.json");
++    const mac = JSON.parse(readFileSync(macPath, "utf8"));
++    mac.floors.waiver = "local QA build";
++    writeFileSync(macPath, JSON.stringify(mac, null, 2) + "\n");
++    const args = (outDir) => ({
++      planPath: fixture.planPath,
++      receiptsDir: fixture.receiptsDir,
++      artifactsDir: fixture.artifactsDir,
++      outDir,
++      publicKey: fixture.keys.publicKeyWrapped,
++    });
++    assert.throws(
++      () => assembleRelease(args(join(fixture.rootDir, "publish-unwaived"))),
++      /Release floor gate failed: macbook: built under floor waiver "local QA build"; maho-win: receipt carries no floor results$/,
++    );
++    assert.equal(existsSync(join(fixture.rootDir, "publish-unwaived")), false);
++    const res = assembleRelease({ ...args(join(fixture.rootDir, "publish-waived")), floorWaiver: "local dev release" });
++    assert.ok(res.files.includes("latest.json"));
++  } finally {
++    fixture.cleanup();
++  }
++});
+diff --git a/scripts/lib/release-contract.mjs b/scripts/lib/release-contract.mjs
+index defe06c0b..d29d6ab3a 100644
+--- a/scripts/lib/release-contract.mjs
++++ b/scripts/lib/release-contract.mjs
+@@ -24,6 +24,9 @@ export const ALLOWED_TOOLCHAIN_KEYS = Object.freeze([
+   "zig",
+   "rust",
+   "tauri",
++  // Linux receipts only: the container image the AppImage/deb were built in and the glibc
++  // floor the CLI was linked against (release-platforms.mjs createLinuxBuildScript).
++  "linuxBuilder",
+ ]);
+ 
+ export const REQUIRED_TOOLCHAIN_KEYS = Object.freeze(["node", "bun", "zig"]);
+@@ -87,8 +90,36 @@ export const KIND_DEFINITIONS = Object.freeze({
+     stableAlias: "ferryx-cli-darwin-universal",
+     allowedExtensions: ["-darwin-universal", "ferryx-cli"],
+   },
++  "cli-windows-amd64": {
++    permittedHost: "maho-win",
++    isUpdater: false,
++    expectedTargets: [],
++    stableAlias: "ferryx-cli-windows-amd64.exe",
++    allowedExtensions: ["-windows-amd64.exe"],
++  },
+ });
+ 
++/**
++ * Every updater target a release publishes in its manifests. src-tauri/src/ipc/updater.rs
++ * (`PUBLISHED_UPDATER_TARGETS`) treats any other build target as externally managed.
++ */
++export const UPDATER_TARGETS = Object.freeze(
++  Object.values(KIND_DEFINITIONS)
++    .filter((definition) => definition.isUpdater)
++    .flatMap((definition) => definition.expectedTargets)
++    .sort(),
++);
++
++/**
++ * Updater manifests written by build-latest-json.mjs. The stable channel reads
++ * `releases/latest/download/latest.json`; `releases/latest` never resolves to a prerelease, so the
++ * beta channel reads `releases/download/<BETA_CHANNEL_TAG>/latest-beta.json` from a fixed tag
++ * (src-tauri/src/ipc/updater.rs `BETA_UPDATE_ENDPOINT`).
++ */
++export const STABLE_MANIFEST_NAME = "latest.json";
++export const BETA_MANIFEST_NAME = "latest-beta.json";
++export const BETA_CHANNEL_TAG = "beta";
++
+ export const ALLOWED_RECEIPT_KEYS = Object.freeze([
+   "schemaVersion",
+   "runId",
+@@ -99,6 +130,8 @@ export const ALLOWED_RECEIPT_KEYS = Object.freeze([
+   "exitCode",
+   "artifacts",
+   "toolchains",
++  // Release floor gate results ({ waiver, checks }); see FLOOR_CHECKS.
++  "floors",
+ ]);
+ 
+ export const REQUIRED_RECEIPT_KEYS = Object.freeze([
+@@ -122,6 +155,178 @@ export const ALLOWED_ARTIFACT_KEYS = Object.freeze([
+   "targets",
+ ]);
+ 
++/**
++ * Advertised floors every released artifact must meet before a release is assembled.
++ * - glibc: highest GLIBC_ symbol version any ELF file inside the artifact requires.
++ * - macos-minos: highest LC_BUILD_VERSION minos per architecture over all Mach-O files
++ *   ({ x86_64: "10.15", arm64: "11.0" }); the limit is the app's bundle.macOS.minimumSystemVersion
++ *   (src-tauri/tauri.conf.json, supplied by the caller), raised to 11.0 for arm64 slices because
++ *   macOS 11 is the first release on Apple Silicon and the linker never emits less.
++ * - notarization: `spctl -a -vvv -t install` reports Notarized Developer ID and
++ *   `xcrun stapler validate` passes, for the app and (dmg kind) the disk image.
++ * - crt: `dumpbin /dependents` lists no Visual C++ redistributable DLL; a clean Windows does
++ *   not have it and the MSIX declares no VCLibs dependency.
++ */
++export const FLOOR_CHECKS = Object.freeze({
++  "macos-updater": Object.freeze(["macos-minos", "notarization"]),
++  dmg: Object.freeze(["macos-minos", "notarization"]),
++  "cli-darwin-universal": Object.freeze(["macos-minos"]),
++  appimage: Object.freeze(["glibc"]),
++  deb: Object.freeze(["glibc"]),
++  "cli-linux-amd64": Object.freeze(["glibc"]),
++  msix: Object.freeze(["crt"]),
++  nsis: Object.freeze(["crt"]),
++  "cli-windows-amd64": Object.freeze(["crt"]),
++});
++
++export const GLIBC_FLOORS = Object.freeze({ "cli-linux-amd64": "2.17", appimage: "2.35", deb: "2.35" });
++
++/** Measurement field that carries each check's input in a host's floor measurements. */
++const FLOOR_MEASUREMENT_FIELD = Object.freeze({
++  glibc: "glibc",
++  "macos-minos": "minos",
++  notarization: "notarization",
++  crt: "dependents",
++});
++
++const VC_REDIST_DLL_REGEX = /^(vcruntime|msvcp|vccorlib|concrt|vcomp|mfc)[0-9a-z_]*\.dll$/i;
++const APPLE_SILICON_MINIMUM = "11.0";
++const DOTTED_VERSION_REGEX = /^\d+(\.\d+)*$/;
++
++/** Compares dotted numeric versions ("2.35" vs "2.17"); missing parts count as 0. */
++export function compareDottedVersions(a, b) {
++  const pa = a.split(".").map(Number);
++  const pb = b.split(".").map(Number);
++  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
++    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
++    if (d !== 0) return Math.sign(d);
++  }
++  return 0;
++}
++
++/**
++ * Evaluates one floor check from its measured value. Never trusts a recorded pass flag:
++ * assembleRelease re-runs this on every receipt's recorded measurement.
++ *
++ * @returns {{ kind: string, check: string, limit: string | null, measured: unknown, pass: boolean, reason?: string }}
++ */
++export function evaluateFloorCheck({ kind, check, measured, macosMinimum = null }) {
++  const result = (limit, pass, reason) => ({
++    kind,
++    check,
++    limit,
++    measured: measured ?? null,
++    pass,
++    ...(pass ? {} : { reason }),
++  });
++  if (check === "glibc") {
++    const limit = GLIBC_FLOORS[kind];
++    if (typeof measured !== "string" || !DOTTED_VERSION_REGEX.test(measured)) {
++      return result(limit, false, "no GLIBC_ symbol version was measured");
++    }
++    return compareDottedVersions(measured, limit) <= 0
++      ? result(limit, true)
++      : result(limit, false, `requires GLIBC_${measured}, above the GLIBC_${limit} floor`);
++  }
++  if (check === "macos-minos") {
++    if (typeof macosMinimum !== "string" || !DOTTED_VERSION_REGEX.test(macosMinimum)) {
++      throw new Error(`macOS minimum system version must be a dotted version, got ${JSON.stringify(macosMinimum)}`);
++    }
++    const slices = measured && typeof measured === "object" && !Array.isArray(measured) ? Object.entries(measured) : [];
++    if (slices.length === 0 || slices.some(([, v]) => typeof v !== "string" || !DOTTED_VERSION_REGEX.test(v))) {
++      return result(macosMinimum, false, "no LC_BUILD_VERSION minos was measured");
++    }
++    const problems = [];
++    for (const [arch, minos] of slices) {
++      const raised = arch.startsWith("arm64") && compareDottedVersions(macosMinimum, APPLE_SILICON_MINIMUM) < 0;
++      const limit = raised ? APPLE_SILICON_MINIMUM : macosMinimum;
++      if (compareDottedVersions(minos, limit) > 0) {
++        problems.push(
++          `${arch} slice declares minos ${minos}, above ${raised ? `${limit} (the Apple Silicon floor)` : `the configured minimum ${limit}`}`,
++        );
++      }
++    }
++    return problems.length === 0 ? result(macosMinimum, true) : result(macosMinimum, false, problems.join("; "));
++  }
++  if (check === "notarization") {
++    const required = kind === "dmg" ? ["app", "dmg"] : ["app"];
++    const probes = Array.isArray(measured) ? measured : [];
++    const problems = [];
++    for (const target of required) {
++      const probe = probes.find((p) => p && p.target === target);
++      if (!probe) {
++        problems.push(`${target}: not checked`);
++        continue;
++      }
++      const spctl = typeof probe.spctl === "string" ? probe.spctl : "";
++      if (probe.spctlStatus !== 0 || !spctl.includes("Notarized Developer ID")) {
++        problems.push(`${target}: spctl does not report Notarized Developer ID (${spctl.replace(/\s+/g, " ").trim() || `exit ${probe.spctlStatus}`})`);
++      }
++      if (probe.staplerStatus !== 0) {
++        problems.push(`${target}: stapler validate failed (exit ${probe.staplerStatus})`);
++      }
++    }
++    return problems.length === 0 ? result(null, true) : result(null, false, problems.join("; "));
++  }
++  if (check === "crt") {
++    if (!Array.isArray(measured) || measured.length === 0 || measured.some((d) => typeof d !== "string")) {
++      return result(null, false, "no dumpbin /dependents output was captured");
++    }
++    const redist = measured.filter((d) => VC_REDIST_DLL_REGEX.test(d));
++    return redist.length === 0
++      ? result(null, true)
++      : result(null, false, `depends on ${redist.join(", ")} (Visual C++ runtime, absent on a clean Windows)`);
++  }
++  throw new Error(`Unknown floor check '${check}' for kind '${kind}'`);
++}
++
++/**
++ * Evaluates every floor check of the given artifact kinds from a host's measurements
++ * ({ [kind]: { glibc?, minos?, notarization?, dependents? } }).
++ */
++export function evaluateFloors({ kinds, measurements, macosMinimum = null }) {
++  const checks = [];
++  for (const kind of kinds) {
++    for (const check of FLOOR_CHECKS[kind] ?? []) {
++      const measured = measurements?.[kind]?.[FLOOR_MEASUREMENT_FIELD[check]];
++      checks.push(evaluateFloorCheck({ kind, check, measured, macosMinimum }));
++    }
++  }
++  return checks;
++}
++
++/** Formats failing floor checks as one error line. */
++export function describeFloorFailures(checks) {
++  return checks
++    .filter((c) => !c.pass)
++    .map((c) => `${c.kind} ${c.check}: ${c.reason}`)
++    .join("; ");
++}
++
++function validateFloors(floors) {
++  if (!floors || typeof floors !== "object" || Array.isArray(floors)) {
++    throw new Error("floors must be an object");
++  }
++  assertExactKeys(floors, ["waiver", "checks"], "floors");
++  if (floors.waiver !== null && (typeof floors.waiver !== "string" || floors.waiver.trim() === "")) {
++    throw new Error("floors.waiver must be null or a non-empty reason");
++  }
++  if (!Array.isArray(floors.checks)) {
++    throw new Error("floors.checks must be an array");
++  }
++  for (const [i, c] of floors.checks.entries()) {
++    if (!c || typeof c !== "object" || Array.isArray(c)) {
++      throw new Error(`floors.checks[${i}] must be an object`);
++    }
++    if (!FLOOR_CHECKS[c.kind]?.includes(c.check)) {
++      throw new Error(`floors.checks[${i}] has unknown check '${c.check}' for kind '${c.kind}'`);
++    }
++    if (typeof c.pass !== "boolean") {
++      throw new Error(`floors.checks[${i}].pass must be a boolean`);
++    }
++  }
++}
++
+ const SHA256_REGEX = /^[0-9a-f]{64}$/;
+ const COMMIT_SHA_REGEX = /^[0-9a-f]{40}$/;
+ const REPO_REGEX = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
+@@ -344,7 +549,16 @@ export function parsePlan(value) {
+  */
+ export function requiredKinds(plan) {
+   const p = typeof plan === "string" || !plan.schemaVersion ? parsePlan(plan) : plan;
+-  const kinds = ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal"];
++  const kinds = [
++    "macos-updater",
++    "dmg",
++    "appimage",
++    "deb",
++    "msix",
++    "cli-linux-amd64",
++    "cli-darwin-universal",
++    "cli-windows-amd64",
++  ];
+   if (p.channels && p.channels.nsisMigration) {
+     kinds.push("nsis");
+   }
+@@ -413,6 +627,10 @@ export function parseReceipt(value, plan = null) {
+     validateToolchains(receipt.toolchains, { required: [] });
+   }
+ 
++  if ("floors" in receipt) {
++    validateFloors(receipt.floors);
++  }
++
+   // Cross-check with plan if provided
+   if (plan) {
+     const parsedPlan = plan.schemaVersion ? plan : parsePlan(plan);
+diff --git a/scripts/lib/release-platforms.mjs b/scripts/lib/release-platforms.mjs
+index a00bc7177..ec0531dd7 100644
+--- a/scripts/lib/release-platforms.mjs
++++ b/scripts/lib/release-platforms.mjs
+@@ -13,6 +13,9 @@ import {
+   sameEntitlements,
+ } from "../macos-daemon-helper.mjs";
+ import {
++  compareDottedVersions,
++  describeFloorFailures,
++  evaluateFloors,
+   parseReceipt,
+   parsePlan,
+   validateToolchains,
+@@ -497,7 +500,7 @@ export function createGitBundles({ repoDir, ghosttyRepoDir, commitSha, ghosttyPi
+ /**
+  * Creates a build receipt conforming to the release contract.
+  */
+-export function createBuildReceipt({ host, runId, commitSha, appVersion, exitCode = 0, artifacts, toolchains }) {
++export function createBuildReceipt({ host, runId, commitSha, appVersion, exitCode = 0, artifacts, toolchains, floors = null }) {
+   const receipt = {
+     schemaVersion: 1,
+     runId,
+@@ -508,6 +511,7 @@ export function createBuildReceipt({ host, runId, commitSha, appVersion, exitCod
+     exitCode,
+     artifacts,
+     ...(toolchains ? { toolchains } : {}),
++    ...(floors ? { floors } : {}),
+   };
+ 
+   return receipt;
+@@ -586,6 +590,152 @@ function parseBuildResult(stdout) {
+   return validateToolchains(JSON.parse(match[1]), { required: ["node", "bun", "zig", "rust"] });
+ }
+ 
++/** Reads the floor measurements a remote build script printed after `---FLOOR_RESULT---`. */
++export function parseFloorResult(stdout) {
++  const match = stdout.match(/---FLOOR_RESULT---\s*({[^\r\n]+})/);
++  if (!match) throw new Error("Remote builder did not return floor measurements");
++  const measurements = JSON.parse(match[1]);
++  if (!measurements || typeof measurements !== "object" || Array.isArray(measurements)) {
++    throw new Error("Remote floor measurements must be a JSON object");
++  }
++  return measurements;
++}
++
++/**
++ * Shell fragment for createLinuxBuildScript that measures, inside the bundle image (binutils and
++ * dpkg), the highest GLIBC_ symbol version needed by any ELF file of each Linux artifact, and
++ * prints it after `---FLOOR_RESULT---`. Needs $workspace, $out_dir and $bundle_image.
++ */
++export function createLinuxFloorScanScript() {
++  return `floor_dir="$workspace/floor-scan"
++rm -rf "$floor_dir"
++mkdir -p "$floor_dir"
++cat > "$floor_dir/scan.sh" <<'FERRYX_FLOOR_SCAN'
++set -euo pipefail
++max_glibc() {
++  find "$@" -type f -print0 | while IFS= read -r -d '' f; do
++    if [ "$(head -c 4 "$f" | od -An -c | tr -d ' \\n')" = '177ELF' ]; then
++      objdump -T "$f" 2>/dev/null || true
++    fi
++  done | { grep -o 'GLIBC_[0-9][0-9.]*' || true; } | sed 's/^GLIBC_//' | sort -Vu | tail -n 1
++}
++cd "$FLOOR_DIR"
++"$OUT_DIR/Ferryx_amd64.AppImage" --appimage-extract >/dev/null
++dpkg-deb -x "$OUT_DIR/Ferryx_amd64.deb" deb-root
++cli_glibc="$(max_glibc "$OUT_DIR/ferryx-cli-linux-amd64")"
++appimage_glibc="$(max_glibc squashfs-root)"
++deb_glibc="$(max_glibc deb-root)"
++printf '%s\\n' '---FLOOR_RESULT---' "{\\"cli-linux-amd64\\":{\\"glibc\\":\\"$cli_glibc\\"},\\"appimage\\":{\\"glibc\\":\\"$appimage_glibc\\"},\\"deb\\":{\\"glibc\\":\\"$deb_glibc\\"}}"
++FERRYX_FLOOR_SCAN
++docker run --rm --user "$(id -u):$(id -g)" -v "$out_dir:$out_dir:ro" -v "$floor_dir:$floor_dir" \\
++  -e HOME=/tmp -e OUT_DIR="$out_dir" -e FLOOR_DIR="$floor_dir" "$bundle_image" bash "$floor_dir/scan.sh"
++chmod -R u+w "$floor_dir"
++rm -rf "$floor_dir"
++`;
++}
++
++/**
++ * PowerShell fragment for createWindowsBuildScript that captures `dumpbin /dependents` of the
++ * shipped Ferryx and CLI executables and prints the DLL lists after `---FLOOR_RESULT---`. Needs
++ * $msixAppExe (the ferryx.exe the MSIX packaged), $executables (the ferryx.exe the NSIS build
++ * packaged) and $outDir (the shipped CLI copy); a preset $dumpbin skips the MSVC tools lookup.
++ */
++export function createWindowsFloorScanScript({ nsisMigration = false } = {}) {
++  return `if (-not $dumpbin) { $dumpbin = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
++if (-not $dumpbin) {
++  $vswhere = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio\\Installer\\vswhere.exe'
++  if (Test-Path -LiteralPath $vswhere) { $dumpbin = & $vswhere -latest -products '*' -find 'VC\\Tools\\MSVC\\**\\bin\\Hostx64\\x64\\dumpbin.exe' | Select-Object -First 1 }
++}
++if (-not $dumpbin) { throw 'dumpbin.exe not found: install the MSVC build tools (the CRT floor check needs it)' }
++function Get-FerryxDependents([string]$Path) {
++  $lines = & $dumpbin /nologo /dependents $Path
++  if ($LASTEXITCODE -ne 0) { throw "dumpbin /dependents failed for $Path" }
++  ,@($lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9_.+-]+\\.dll$' })
++}
++$appDependents = Get-FerryxDependents $msixAppExe
++$cliDependents = Get-FerryxDependents (Join-Path $outDir 'ferryx-cli-windows-amd64.exe')
++$floors = [ordered]@{ 'msix' = @{ dependents = $appDependents }; 'cli-windows-amd64' = @{ dependents = $cliDependents } }
++${nsisMigration ? "$floors['nsis'] = @{ dependents = (Get-FerryxDependents $executables[0].FullName) }\n" : ""}Write-Output '---FLOOR_RESULT---'
++Write-Output ($floors | ConvertTo-Json -Compress -Depth 4)
++`;
++}
++
++/** Highest minos over every LC_BUILD_VERSION / LC_VERSION_MIN_MACOSX in `otool -l` output, or null. */
++function maxMinosFromOtool(output) {
++  let pending = null;
++  let max = null;
++  for (const raw of output.split("\n")) {
++    const line = raw.trim();
++    if (line === "cmd LC_BUILD_VERSION") pending = "minos";
++    else if (line === "cmd LC_VERSION_MIN_MACOSX") pending = "version";
++    else if (line.startsWith("cmd ")) pending = null;
++    else if (pending && line.startsWith(`${pending} `)) {
++      const version = line.slice(pending.length + 1).trim();
++      if (max === null || compareDottedVersions(version, max) > 0) max = version;
++      pending = null;
++    }
++  }
++  return max;
++}
++
++/**
++ * Highest minos per architecture over the given Mach-O files ({ x86_64: "10.15", arm64: "11.0" }).
++ * A slice without a version load command makes the result null, so the floor check fails closed.
++ */
++function measureMinos(paths, exec) {
++  const byArch = {};
++  for (const path of paths) {
++    for (const arch of exec("lipo", ["-archs", path]).stdout.trim().split(/\s+/).filter(Boolean)) {
++      const minos = maxMinosFromOtool(exec("otool", ["-arch", arch, "-l", path]).stdout);
++      if (minos === null) return null;
++      if (!byArch[arch] || compareDottedVersions(minos, byArch[arch]) > 0) byArch[arch] = minos;
++    }
++  }
++  return Object.keys(byArch).length === 0 ? null : byArch;
++}
++
++function probeNotarization(target, path, exec) {
++  const spctl = exec("spctl", ["-a", "-vvv", "-t", "install", path], { allowFailure: true });
++  const stapler = exec("xcrun", ["stapler", "validate", path], { allowFailure: true });
++  return {
++    target,
++    spctlStatus: spctl.status,
++    spctl: `${spctl.stdout}\n${spctl.stderr}`.trim(),
++    staplerStatus: stapler.status,
++  };
++}
++
++/**
++ * Measures the macOS floors of a finished build: minos of every Mach-O file in the app and of the
++ * standalone CLI, and the Gatekeeper/stapler state of the app and DMG. Runs after
++ * finalizeMacosBundle and outside it, because QA harnesses finalize ad-hoc signed bundles.
++ */
++export function measureMacosFloors({ appPath, dmgPath = null, cliPath = null, exec = macExec }) {
++  const machos = [];
++  for (const itemPath of exec("find", [appPath, "-type", "f"]).stdout.trim().split("\n")) {
++    if (itemPath && exec("file", ["-b", itemPath]).stdout.includes("Mach-O")) machos.push(itemPath);
++  }
++  const appMinos = machos.length === 0 ? null : measureMinos(machos, exec);
++  const appProbe = probeNotarization("app", appPath, exec);
++  const measurements = {
++    "macos-updater": { minos: appMinos, notarization: [appProbe] },
++  };
++  if (dmgPath) {
++    measurements.dmg = { minos: appMinos, notarization: [appProbe, probeNotarization("dmg", dmgPath, exec)] };
++  }
++  if (cliPath) {
++    measurements["cli-darwin-universal"] = { minos: measureMinos([cliPath], exec) };
++  }
++  return measurements;
++}
++
++/** bundle.macOS.minimumSystemVersion of a source checkout, or null when it cannot be read. */
++function readMacosMinimum(sourceDir) {
++  const confPath = join(sourceDir, "src-tauri", "tauri.conf.json");
++  if (!existsSync(confPath)) return null;
++  return JSON.parse(readFileSync(confPath, "utf8")).bundle?.macOS?.minimumSystemVersion ?? null;
++}
++
+ export function createLinuxBuildScript({ workspaceDir, plan, hostConfig }) {
+   const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY;
+   const signingPassword = process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
+@@ -597,6 +747,10 @@ export function createLinuxBuildScript({ workspaceDir, plan, hostConfig }) {
+   const targetDirCode = hostConfig.root
+     ? `export CARGO_TARGET_DIR=${quoteSh(targetDir)}\nmkdir -p "$CARGO_TARGET_DIR"`
+     : `export CARGO_TARGET_DIR="$workspace/cargo-target"`;
++  // Registry, Zig and linuxdeploy caches for the bundle container survive across runs.
++  const bundleCacheCode = hostConfig.root
++    ? `bundle_cache=${quoteSh(`${hostConfig.root}/linux-bundle-cache`)}`
++    : `bundle_cache="$workspace/linux-bundle-cache"`;
+   return `set -euo pipefail
+ umask 077
+ ${pathPrefix}workspace=${quoteSh(workspaceDir)}
+@@ -627,26 +781,51 @@ mkdir "$out_dir"
+ ${targetDirCode}
+ export SOURCE_DATE_EPOCH=${quoteSh(String(plan.sourceDateEpoch))}
+ export NO_STRIP=true
+-rm -rf "$CARGO_TARGET_DIR/release/bundle"
+ cd "$source_dir"
+-bun tauri build --bundles appimage,deb
+-cargo build --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --no-default-features --bin ferryx-cli
+-cp "$CARGO_TARGET_DIR/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64" || cp "$source_dir/src-tauri/target/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64"
++# The desktop bundles link the build system's WebKitGTK and glibc, so they are built in an
++# Ubuntu 22.04 container (glibc 2.35, webkit2gtk-4.1) carrying this host's Rust, Zig, Bun and
++# tauri-cli versions. The container keeps its own target dir: its objects must not mix with
++# host-built ones.
++rust_v="$(rustc --version | awk '{print $2}')"
++zig_v="$(zig version)"
++bun_v="$(bun --version)"
++tauri_v="$(cargo tauri --version | awk '{print $2}')"
++bundle_image="ferryx-linux-bundle:ubuntu-22.04-rust-$rust_v-zig-$zig_v-bun-$bun_v-tauri-$tauri_v"
++docker build --quiet --tag "$bundle_image" --file "$source_dir/packaging/linux/bundle.Dockerfile" --build-arg RUST_VERSION="$rust_v" --build-arg ZIG_VERSION="$zig_v" --build-arg BUN_VERSION="$bun_v" --build-arg TAURI_CLI_VERSION="$tauri_v" "$source_dir/packaging/linux"
++bundle_image_id="$(docker image inspect --format '{{.Id}}' "$bundle_image")"
++bundle_target_dir="$CARGO_TARGET_DIR-ubuntu-22.04"
++${bundleCacheCode}
++mkdir -p "$bundle_target_dir" "$bundle_cache/cargo-home" "$bundle_cache/xdg-cache"
++rm -rf "$bundle_target_dir/release/bundle"
++docker run --rm --user "$(id -u):$(id -g)" \\
++  -v "$source_dir:$source_dir" -v "$bundle_target_dir:$bundle_target_dir" -v "$bundle_cache:$bundle_cache" \\
++  -w "$source_dir" -e HOME=/tmp \\
++  -e CARGO_HOME="$bundle_cache/cargo-home" -e XDG_CACHE_HOME="$bundle_cache/xdg-cache" \\
++  -e CARGO_TARGET_DIR="$bundle_target_dir" -e SOURCE_DATE_EPOCH -e NO_STRIP \\
++  -e APPIMAGE_EXTRACT_AND_RUN=1 -e TAURI_SIGNING_PRIVATE_KEY -e TAURI_SIGNING_PRIVATE_KEY_PASSWORD \\
++  "$bundle_image" bun tauri build --bundles appimage,deb
++# The standalone CLI is cross-linked by cargo-zigbuild against glibc 2.17 symbol stubs. An empty
++# RUSTFLAGS keeps a host config's linker flags for the plain triple (for example mold through
++# clang) away from zig cc.
++RUSTFLAGS= cargo zigbuild --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --no-default-features --bin ferryx-cli --target x86_64-unknown-linux-gnu.2.17
++cp "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64"
+ test -s "$out_dir/ferryx-cli-linux-amd64"
+ appimages=()
+ while IFS= read -r f; do
+   [ -n "$f" ] && appimages+=("$f")
+-done < <(find "$CARGO_TARGET_DIR/release/bundle/appimage" -maxdepth 1 -type f -name '*.AppImage')
++done < <(find "$bundle_target_dir/release/bundle/appimage" -maxdepth 1 -type f -name '*.AppImage')
+ debs=()
+ while IFS= read -r f; do
+   [ -n "$f" ] && debs+=("$f")
+-done < <(find "$CARGO_TARGET_DIR/release/bundle/deb" -maxdepth 1 -type f -name '*.deb')
++done < <(find "$bundle_target_dir/release/bundle/deb" -maxdepth 1 -type f -name '*.deb')
+ test "${"${#appimages[@]}"}" -eq 1 && test "${"${#debs[@]}"}" -eq 1
+ test -s "${"${appimages[0]}"}" && test -s "${"${debs[0]}"}"
+ cp "${"${appimages[0]}"}" "$out_dir/Ferryx_amd64.AppImage"
+ cp "${"${debs[0]}"}" "$out_dir/Ferryx_amd64.deb"
+ test -s "$out_dir/Ferryx_amd64.AppImage" && test -s "$out_dir/Ferryx_amd64.deb"
+-printf '%s\\n' '---BUILD_RESULT---' "{\\"node\\":\\"$(node --version | sed 's/^v//')\\",\\"bun\\":\\"$(bun --version)\\",\\"zig\\":\\"$(zig version)\\",\\"rust\\":\\"$(rustc --version | awk '{print $2}')\\"}"
++# Release floor gate input (buildHost enforces it): highest GLIBC_ symbol per artifact.
++${createLinuxFloorScanScript()}linux_builder="bundles=ubuntu-22.04 glibc-2.35 image=$bundle_image_id; cli=cargo-zigbuild x86_64-unknown-linux-gnu.2.17"
++printf '%s\\n' '---BUILD_RESULT---' "{\\"node\\":\\"$(node --version | sed 's/^v//')\\",\\"bun\\":\\"$bun_v\\",\\"zig\\":\\"$zig_v\\",\\"rust\\":\\"$rust_v\\",\\"tauri\\":\\"$tauri_v\\",\\"linuxBuilder\\":\\"$linux_builder\\"}"
+ `;
+ }
+ 
+@@ -658,7 +837,10 @@ export function createWindowsBuildScript({ workspaceDir, plan, hostConfig, signi
+     ? `$cargoTarget = Join-Path ${quotePowerShell(hostConfig.root)} 'cargo-target'\nif (-not (Test-Path $cargoTarget)) { New-Item -ItemType Directory -Path $cargoTarget -Force | Out-Null }\n$env:CARGO_TARGET_DIR = $cargoTarget`
+     : `$cargoTarget = Join-Path $workspace 'cargo-target'\n$env:CARGO_TARGET_DIR = $cargoTarget`;
+   const nsisBuild = plan.channels.nsisMigration
+-    ? `Remove-Item -Path (Join-Path $cargoTarget 'release\\bundle') -Recurse -Force -ErrorAction SilentlyContinue
++    ? `# The NSIS build rebuilds every bin in target\\release; keep the ferryx.exe the MSIX packaged for the floor check.
++$msixAppExe = Join-Path $workspace 'floor-msix-ferryx.exe'
++Copy-Item -LiteralPath $executables[0].FullName -Destination $msixAppExe
++Remove-Item -Path (Join-Path $cargoTarget 'release\\bundle') -Recurse -Force -ErrorAction SilentlyContinue
+ bun tauri build --bundles nsis -c '{"build":{"beforeBuildCommand":""}}'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+ $nsis = @(Get-ChildItem -Path $cargoTarget -Filter '*-setup.exe' -File -Recurse)
+ if ($nsis.Count -ne 1) { throw "Expected exactly one NSIS installer, found $($nsis.Count)" }
+@@ -700,17 +882,37 @@ bun install --cwd (Join-Path $sourceDir 'ui') --frozen-lockfile; if ($LASTEXITCO
+ New-Item -ItemType Directory -Path $outDir | Out-Null
+ ${targetDirCode}
+ $env:SOURCE_DATE_EPOCH = ${quotePowerShell(String(plan.sourceDateEpoch))}
++# CARGO_ENCODED_RUSTFLAGS, even set to an empty string, makes cargo ignore RUSTFLAGS and would
++# silently drop +crt-static from the CLI build below; refuse before any build starts.
++if (Test-Path Env:CARGO_ENCODED_RUSTFLAGS) { throw 'CARGO_ENCODED_RUSTFLAGS is set on this host; it overrides RUSTFLAGS and would drop +crt-static from ferryx-cli.exe. Unset it for release builds.' }
+ Push-Location $sourceDir
+ bun tauri build --no-bundle; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+ $executables = @(Get-ChildItem -Path (Join-Path $cargoTarget 'release') -Filter 'ferryx.exe' -File)
+ if ($executables.Count -ne 1) { throw "Expected exactly one Ferryx executable, found $($executables.Count)" }
++# The desktop-free CLI skips tauri-build (src-tauri/build.rs), so it does not get tauri's static
++# VC runtime. Link the CRT statically for this one build only, so ferryx-cli.exe needs no
++# VCRUNTIME140.dll on a clean Windows; RUSTFLAGS is restored right after.
++$prevRustflags = $env:RUSTFLAGS
++$env:RUSTFLAGS = (@($prevRustflags, '-C target-feature=+crt-static') | Where-Object { $_ }) -join ' '
++try {
++  cargo build --manifest-path (Join-Path $sourceDir 'src-tauri/Cargo.toml') --release --no-default-features --bin ferryx-cli
++  $cliBuildExit = $LASTEXITCODE
++} finally {
++  if ($null -eq $prevRustflags) { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue } else { $env:RUSTFLAGS = $prevRustflags }
++}
++if ($cliBuildExit -ne 0) { exit $cliBuildExit }
++$cliExe = Join-Path $cargoTarget 'release\\ferryx-cli.exe'
++if (-not (Test-Path -LiteralPath $cliExe) -or (Get-Item -LiteralPath $cliExe).Length -le 0) { throw "Expected a non-empty ferryx-cli.exe at $cliExe" }
++Copy-Item -LiteralPath $cliExe -Destination (Join-Path $outDir 'ferryx-cli-windows-amd64.exe')
+ & (Join-Path $sourceDir 'scripts/build-msix.ps1') -ExePath $executables[0].FullName -Version ${quotePowerShell(plan.msixVersion)} -OutputDir $outDir -SkipSigning
+ if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
++$msixAppExe = $executables[0].FullName
+ ${nsisBuild}Pop-Location
+ $msix = @(Get-ChildItem -Path $outDir -Filter '*.msix' -File)
+ if ($msix.Count -ne 1 -or $msix[0].Length -le 0) { throw 'Expected exactly one non-empty MSIX' }
+ if ($msix[0].Name -ne 'Ferryx_x64.msix') { Move-Item $msix[0].FullName (Join-Path $outDir 'Ferryx_x64.msix') }
+-$versions = [ordered]@{ node = ((node --version) -replace '^v',''); bun = (bun --version); zig = (zig version); rust = ((rustc --version) -split ' ')[1] }
++# Release floor gate input (buildHost enforces it): DLL dependencies of the shipped executables.
++${createWindowsFloorScanScript({ nsisMigration: plan.channels.nsisMigration })}$versions = [ordered]@{ node = ((node --version) -replace '^v',''); bun = (bun --version); zig = (zig version); rust = ((rustc --version) -split ' ')[1] }
+ Write-Output '---BUILD_RESULT---'
+ Write-Output ($versions | ConvertTo-Json -Compress)
+ } finally {
+@@ -961,6 +1163,10 @@ export async function buildHost({
+   approveNotarization = false,
+   runner = null,
+   timeoutMs = Number(process.env.FERRYX_BUILD_TIMEOUT_MS) || 1800000,
++  // Explicit opt-out of the release floor gate for local dev/test builds: a non-empty reason.
++  floorWaiver = process.env.FERRYX_RELEASE_FLOOR_WAIVER || null,
++  // bundle.macOS.minimumSystemVersion; read from the checkout being built when not given.
++  macosMinimum = null,
+ }) {
+   if (!VALID_HOSTS.includes(hostName)) {
+     throw new Error(`Unknown host: '${hostName}'. Valid hosts: ${VALID_HOSTS.join(", ")}`);
+@@ -1068,6 +1274,7 @@ export async function buildHost({
+ 
+   let toolchains = null;
+   let exitCode = 0;
++  let floorMeasurements = null;
+ 
+   if (runner) {
+     mkdirSync(workspaceDir, { recursive: true });
+@@ -1084,6 +1291,7 @@ export async function buildHost({
+     }
+     exitCode = runResult.exitCode;
+     toolchains = runResult.toolchains ?? null;
++    floorMeasurements = runResult.floors ?? null;
+   } else {
+     // Real build dispatch
+     if (hostName === "macbook") {
+@@ -1267,6 +1475,12 @@ export async function buildHost({
+       if (existsSync(universalCli)) {
+         execFileSync("cp", [universalCli, join(artifactsOutDir, "ferryx-cli-darwin-universal")]);
+       }
++      floorMeasurements = measureMacosFloors({
++        appPath,
++        dmgPath: dmgPath && existsSync(dmgPath) ? dmgPath : null,
++        cliPath: existsSync(universalCli) ? universalCli : null,
++      });
++      macosMinimum ??= readMacosMinimum(isolatedSource);
+     } else {
+       const scpCommand = process.env.FERRYX_SCP_COMMAND || "scp";
+       // Bundle transfer and artifact retrieval can be silent for minutes on a
+@@ -1297,6 +1511,7 @@ export async function buildHost({
+         const script = createLinuxBuildScript({ workspaceDir, plan, hostConfig });
+         const result = await runHostScript(hostConfig, { posix: script }, { timeoutMs });
+         toolchains = parseBuildResult(result.stdout);
++        floorMeasurements = parseFloorResult(result.stdout);
+         for (const name of ["Ferryx_amd64.AppImage", "Ferryx_amd64.deb", "ferryx-cli-linux-amd64"]) {
+           await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir}/out/${name}`, artifactsOutDir], { timeoutMs });
+         }
+@@ -1320,7 +1535,8 @@ export async function buildHost({
+           });
+           const result = await runHostScript(hostConfig, { powershell: script }, { timeoutMs });
+           toolchains = parseBuildResult(result.stdout);
+-          const names = ["Ferryx_x64.msix"];
++          floorMeasurements = parseFloorResult(result.stdout);
++          const names = ["Ferryx_x64.msix", "ferryx-cli-windows-amd64.exe"];
+           if (plan.channels.nsisMigration) names.push("Ferryx_x64-setup.exe");
+           for (const name of names) {
+             await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir.replaceAll("\\", "/")}/out/${name}`, artifactsOutDir], { timeoutMs });
+@@ -1369,6 +1585,24 @@ export async function buildHost({
+     }
+   }
+ 
++  // Release floor gate: glibc symbol floors, macOS minos, notarization and the Windows CRT. A
++  // waiver (local dev/test builds only) is recorded with the failing results, and assembleRelease
++  // refuses such a receipt unless it is given a waiver as well.
++  const floorChecks = evaluateFloors({
++    kinds: artifacts.map((artifact) => artifact.kind),
++    measurements: floorMeasurements,
++    macosMinimum: hostName === "macbook" ? macosMinimum ?? readMacosMinimum(config.repository) : null,
++  });
++  const floorFailures = describeFloorFailures(floorChecks);
++  if (floorFailures) {
++    if (!floorWaiver) {
++      throw new Error(
++        `Release floor gate failed on host '${hostName}': ${floorFailures}. Only a local dev/test build may opt out, with FERRYX_RELEASE_FLOOR_WAIVER="<reason>".`,
++      );
++    }
++    console.warn(`Release floor gate waived on host '${hostName}' (${floorWaiver}): ${floorFailures}`);
++  }
++
+   const receipt = createBuildReceipt({
+     host: hostName,
+     runId: plan.runId,
+@@ -1377,6 +1611,7 @@ export async function buildHost({
+     exitCode: 0,
+     artifacts,
+     toolchains,
++    floors: { waiver: floorFailures ? floorWaiver : null, checks: floorChecks },
+   });
+ 
+   // Strict validation against release contract
+diff --git a/scripts/release-contract.test.mjs b/scripts/release-contract.test.mjs
+index dc1deb22d..1b139c83c 100644
+--- a/scripts/release-contract.test.mjs
++++ b/scripts/release-contract.test.mjs
+@@ -1,12 +1,36 @@
+ import assert from "node:assert/strict";
++import { readFileSync } from "node:fs";
+ import test from "node:test";
+ 
+ import {
++  BETA_CHANNEL_TAG,
++  BETA_MANIFEST_NAME,
+   parsePlan,
+   parseReceipt,
+   requiredKinds,
++  STABLE_MANIFEST_NAME,
++  UPDATER_TARGETS,
+ } from "./lib/release-contract.mjs";
+ 
++test("updater targets and manifest URLs match the desktop updater", () => {
++  const updaterRs = readFileSync(new URL("../src-tauri/src/ipc/updater.rs", import.meta.url), "utf8");
++  const targetsBlock = updaterRs.match(/const PUBLISHED_UPDATER_TARGETS: \[&str; \d+\] = \[([^\]]*)\]/);
++  assert.ok(targetsBlock, "PUBLISHED_UPDATER_TARGETS not found in updater.rs");
++  const rustTargets = [...targetsBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
++  assert.deepEqual(rustTargets, [...UPDATER_TARGETS]);
++  assert.deepEqual([...UPDATER_TARGETS], ["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"]);
++
++  const endpoint = (name) => updaterRs.match(new RegExp(`pub const ${name}: &str =\\s*"([^"]+)"`))?.[1];
++  assert.equal(
++    endpoint("BETA_UPDATE_ENDPOINT"),
++    `https://github.com/Indosaram/ferryx/releases/download/${BETA_CHANNEL_TAG}/${BETA_MANIFEST_NAME}`,
++  );
++  assert.equal(
++    endpoint("STABLE_UPDATE_ENDPOINT"),
++    `https://github.com/Indosaram/ferryx/releases/latest/download/${STABLE_MANIFEST_NAME}`,
++  );
++});
++
+ function makeValidPlan(overrides = {}) {
+   return {
+     schemaVersion: 1,
+@@ -282,13 +306,13 @@ test("parsePlan validates sourceDateEpoch and createdAt", () => {
+ 
+ // ------------------- requiredKinds tests -------------------
+ 
+-test("requiredKinds returns standard 7 kinds without NSIS migration", () => {
++test("requiredKinds returns standard 8 kinds without NSIS migration", () => {
+   const plan = makeValidPlan();
+   const kinds = requiredKinds(plan);
+-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal"]);
++  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "cli-windows-amd64"]);
+ });
+ 
+-test("requiredKinds returns 8 kinds when nsisMigration is true", () => {
++test("requiredKinds returns 9 kinds when nsisMigration is true", () => {
+   const plan = makeValidPlan({
+     channels: { store: true, nsisMigration: true },
+     requiredTargets: [
+@@ -299,7 +323,7 @@ test("requiredKinds returns 8 kinds when nsisMigration is true", () => {
+     ],
+   });
+   const kinds = requiredKinds(plan);
+-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "nsis"]);
++  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "cli-windows-amd64", "nsis"]);
+ });
+ 
+ // ------------------- parseReceipt tests -------------------
+@@ -795,6 +819,33 @@ test("parseReceipt accepts receipts containing cli-darwin-universal from host ma
+   assert.equal(parsedAlt.artifacts[0].name, "ferryx-cli");
+ });
+ 
++test("parseReceipt accepts cli-windows-amd64 only from maho-win with its .exe name", () => {
++  const plan = makeValidPlan();
++  const cli = {
++    kind: "cli-windows-amd64",
++    name: "ferryx-cli-windows-amd64.exe",
++    relPath: "windows/ferryx-cli-windows-amd64.exe",
++    bytes: 12345678,
++    sha256: "6623456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
++    signatureRelPath: null,
++    targets: [],
++  };
++  const winReceipt = makeValidReceipt("maho-win", plan);
++  winReceipt.artifacts.push(cli);
++  const parsed = parseReceipt(winReceipt, plan);
++  assert.ok(parsed.artifacts.some((a) => a.kind === "cli-windows-amd64"));
++
++  assert.throws(
++    () => parseReceipt(makeValidReceipt("omaki", plan, { artifacts: [{ ...cli, relPath: "linux/ferryx-cli-windows-amd64.exe" }] }), plan),
++    /kind 'cli-windows-amd64' not permitted for host 'omaki'/i,
++  );
++  // The bare `ferryx-cli` alias of the other CLI kinds is not a Windows CLI name.
++  assert.throws(
++    () => parseReceipt(makeValidReceipt("maho-win", plan, { artifacts: [{ ...cli, name: "ferryx-cli.exe", relPath: "windows/ferryx-cli.exe" }] }), plan),
++    /does not match allowed extensions/i,
++  );
++});
++
+ test("parseReceipt enforces permitted hosts and targets for cli artifacts", () => {
+   const plan = makeValidPlan();
+ 
+@@ -857,3 +908,19 @@ test("parseReceipt enforces permitted hosts and targets for cli artifacts", () =
+ });
+ 
+ 
++
++test("parseReceipt accepts recorded floor gate results and rejects malformed ones", () => {
++  const plan = makeValidPlan();
++  const receipt = makeValidReceipt("omaki", plan);
++  receipt.floors = {
++    waiver: null,
++    checks: [{ kind: "appimage", check: "glibc", limit: "2.35", measured: "2.35", pass: true }],
++  };
++  assert.deepEqual(parseReceipt(receipt, plan).floors, receipt.floors);
++
++  const bad = (floors) => parseReceipt({ ...makeValidReceipt("omaki", plan), floors }, plan);
++  assert.throws(() => bad({ checks: [] }), /floors missing required property: waiver/i);
++  assert.throws(() => bad({ waiver: "", checks: [] }), /floors\.waiver must be null or a non-empty reason/);
++  assert.throws(() => bad({ waiver: null, checks: [{ kind: "appimage", check: "crt", pass: true }] }), /unknown check 'crt' for kind 'appimage'/);
++  assert.throws(() => bad({ waiver: null, checks: [{ kind: "deb", check: "glibc", pass: "yes" }] }), /floors\.checks\[0\]\.pass must be a boolean/);
++});
+diff --git a/scripts/release-local.mjs b/scripts/release-local.mjs
+index 86f92a260..c60d0a38f 100644
+--- a/scripts/release-local.mjs
++++ b/scripts/release-local.mjs
+@@ -16,9 +16,9 @@ import { basename, dirname, join, resolve } from "node:path";
+ import { fileURLToPath } from "node:url";
+ import { inflateRawSync } from "node:zlib";
+ 
+-import { assembleRelease } from "./build-latest-json.mjs";
++import { assembleRelease, loadDefaultMacosMinimum } from "./build-latest-json.mjs";
+ import { appendSurvivalReport, generateChangelog } from "./lib/release-changelog.mjs";
+-import { parsePlan, parseReceipt } from "./lib/release-contract.mjs";
++import { evaluateFloorCheck, FLOOR_CHECKS, parsePlan, parseReceipt } from "./lib/release-contract.mjs";
+ import { loadHostConfig, redactProcessOutput } from "./lib/release-hosts.mjs";
+ import { buildHost, preflightAll } from "./lib/release-platforms.mjs";
+ import { assertSurvivalGate } from "./lib/release-survival.mjs";
+@@ -680,6 +680,46 @@ export function survivalGateRelease({ runDir, survivalWaiver = null }) {
+   return assertSurvivalGate({ releaseDir: resolvedRunDir, commitSha: plan.commitSha, waiver: survivalWaiver });
+ }
+ 
++/**
++ * Refuses to publish unless every build receipt carries floor results that pass without a waiver:
++ * one recorded check per FLOOR_CHECKS entry of each artifact kind, each re-evaluated from its
++ * measured value (the recorded pass flag is not trusted). There is no publish-time override.
++ */
++function assertPublishableFloors(runDir, macosMinimum) {
++  const receiptsDir = join(runDir, "receipts");
++  for (const name of readdirSync(receiptsDir).filter((n) => n.endsWith(".json")).sort()) {
++    const receipt = JSON.parse(readFileSync(join(receiptsDir, name), "utf8"));
++    const floors = receipt.floors;
++    if (!floors) {
++      throw new Error(`Release floor gate: ${name} carries no floor results; it cannot be published`);
++    }
++    if (floors.waiver !== null) {
++      throw new Error(
++        `Release floor gate: ${name} was built under floor waiver ${JSON.stringify(floors.waiver)}; a waived run cannot be published`,
++      );
++    }
++    const failing = [];
++    for (const art of receipt.artifacts ?? []) {
++      for (const check of FLOOR_CHECKS[art.kind] ?? []) {
++        const recorded = (floors.checks ?? []).find((c) => c.kind === art.kind && c.check === check);
++        if (!recorded) {
++          failing.push(`${art.kind} ${check}: no recorded result`);
++          continue;
++        }
++        if (check === "macos-minos" && recorded.limit !== macosMinimum) {
++          failing.push(`${art.kind} ${check}: built against minimum ${JSON.stringify(recorded.limit)}, but publish uses ${JSON.stringify(macosMinimum)}`);
++          continue;
++        }
++        const fresh = evaluateFloorCheck({ kind: art.kind, check, measured: recorded.measured, macosMinimum });
++        if (!fresh.pass) failing.push(`${art.kind} ${check}: ${fresh.reason}`);
++      }
++    }
++    if (failing.length > 0) {
++      throw new Error(`Release floor gate: ${name} fails the release floors (${failing.join("; ")}); it cannot be published`);
++    }
++  }
++}
++
+ /**
+  * Publishes release assets to GitHub Release as draft, verifies bytes, and undrafts. Refuses to
+  * draft unless the session survival gate passes (or the owner waived unreachable evidence).
+@@ -691,6 +731,7 @@ export async function publishRelease({
+   ghCommand = "gh",
+   lsRemoteFn = null,
+   env = process.env,
++  macosMinimum = null,
+ }) {
+   assertNotInCI("publish");
+ 
+@@ -708,7 +749,9 @@ export async function publishRelease({
+     throw new Error(`publish directory not found in run directory: ${runDir}`);
+   }
+ 
+-  // 0. Session survival gate, before any network call.
++  // 0. Release floor gate and session survival gate, before any network call. A run built
++  // under FERRYX_RELEASE_FLOOR_WAIVER may be assembled and verified locally, never published.
++  assertPublishableFloors(resolvedRunDir, macosMinimum ?? loadDefaultMacosMinimum());
+   const survival = assertSurvivalGate({ releaseDir: resolvedRunDir, commitSha: plan.commitSha, waiver: survivalWaiver });
+ 
+   // 1. Verify remote tag matches plan commitSha
+diff --git a/scripts/release-local.test.mjs b/scripts/release-local.test.mjs
+index addfcc532..041b6c68e 100644
+--- a/scripts/release-local.test.mjs
++++ b/scripts/release-local.test.mjs
+@@ -668,3 +668,70 @@ test("assemble CLI: a Windows build without the MSIX exits non-zero with STORE_M
+     rmSync(tmp, { recursive: true, force: true });
+   }
+ });
++
++test("publish: refuses a run whose receipts were built under a floor waiver, carry no or incomplete floor results, or fail a re-evaluated floor, before any network call", async () => {
++  const { publishRelease } = await import("./release-local.mjs");
++  const plan = {
++    schemaVersion: 1,
++    runId: "rel-run-floor-publish-1",
++    repo: "Indosaram/ferryx",
++    commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b",
++    tag: "v2026.09.08.1",
++    appVersion: "2026.908.1",
++    msixVersion: "2026.908.1.0",
++    channels: { store: true, nsisMigration: false },
++    requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
++    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
++    sourceDateEpoch: 1788868800,
++    createdAt: "2026-09-08T12:00:00.000Z",
++  };
++  const passing = { kind: "appimage", check: "glibc", limit: "2.35", measured: "2.35", pass: true };
++  const conforming = [passing, { kind: "cli-linux-amd64", check: "glibc", limit: "2.17", measured: "2.17", pass: true }];
++  const cases = [
++    [{ waiver: "local QA build", checks: [{ ...passing, measured: "2.38", pass: false, reason: "too new" }] },
++      /Release floor gate: build-receipt-omaki\.json was built under floor waiver "local QA build"; a waived run cannot be published/],
++    [undefined, /Release floor gate: build-receipt-omaki\.json carries no floor results; it cannot be published/],
++    [{ waiver: null, checks: [] },
++      /Release floor gate: build-receipt-omaki\.json fails the release floors \(appimage glibc: no recorded result; cli-linux-amd64 glibc: no recorded result\)/],
++    // A recorded pass flag is not trusted: the measured value is re-evaluated.
++    [{ waiver: null, checks: [{ ...passing, measured: "2.38", pass: true }, conforming[1]] },
++      /Release floor gate: build-receipt-omaki\.json fails the release floors \(appimage glibc: requires GLIBC_2\.38, above the GLIBC_2\.35 floor\)/],
++    // Conforming floors pass this gate; publish then reaches the remote tag check (first network call).
++    [{ waiver: null, checks: conforming }, /Remote tag 'v2026\.09\.08\.1' does not exist on origin/],
++    // A minos check recorded against the plan-commit minimum 10.15 is refused under a different
++    // publish-time minimum, even though minos 12.0 would pass 13.0.
++    [{ waiver: null, checks: [{ kind: "cli-darwin-universal", check: "macos-minos", limit: "10.15", measured: { x86_64: "12.0", arm64: "12.0" }, pass: true }] },
++      /Release floor gate: build-receipt-omaki\.json fails the release floors \(cli-darwin-universal macos-minos: built against minimum "10\.15", but publish uses "13\.0"\)/,
++      { artifacts: [{ kind: "cli-darwin-universal", name: "ferryx-cli-darwin-universal" }], macosMinimum: "13.0" }],
++  ];
++  for (const [floors, expected, extra = {}] of cases) {
++    const tmp = mkdtempSync(join(tmpdir(), "ferryx-publish-floor-"));
++    try {
++      const runDir = join(tmp, "run");
++      const publishDir = join(runDir, "publish");
++      mkdirSync(join(runDir, "receipts"), { recursive: true });
++      mkdirSync(publishDir);
++      writeFileSync(join(runDir, "plan.json"), JSON.stringify(plan));
++      writeFileSync(join(publishDir, "latest.json"), "{}\n");
++      const artifacts = extra.artifacts ?? [{ kind: "appimage", name: "Ferryx_amd64.AppImage" }, { kind: "cli-linux-amd64", name: "ferryx-cli-linux-amd64" }];
++      writeFileSync(join(runDir, "receipts", "build-receipt-omaki.json"), JSON.stringify({ host: "omaki", artifacts, ...(floors ? { floors } : {}) }));
++      writeIntegrityState(runDir, plan, publishDir);
++      let network = 0;
++      await assert.rejects(
++        () => publishRelease({
++          runDir,
++          approvePublish: true,
++          survivalWaiver: "fixture run: no survival evidence",
++          macosMinimum: extra.macosMinimum ?? "10.15",
++          env: { FERRYX_APPROVE_PUBLISH: "1", FERRYX_RELEASE_FLOOR_WAIVER: "exported waiver must not help" },
++          ghCommand: join(tmp, "no-gh"),
++          lsRemoteFn: async () => { network += 1; return ""; },
++        }),
++        expected,
++      );
++      assert.equal(network, floors?.checks === conforming ? 1 : 0, "no network call unless the floor gate passed");
++    } finally {
++      rmSync(tmp, { recursive: true, force: true });
++    }
++  }
++});
+diff --git a/scripts/release-platforms.test.mjs b/scripts/release-platforms.test.mjs
+index bab81355f..550e31cf4 100644
+--- a/scripts/release-platforms.test.mjs
++++ b/scripts/release-platforms.test.mjs
+@@ -20,8 +20,20 @@ import {
+   submitForNotarization,
+   recreateDmgFromApp,
+   finalizeMacosBundle,
++  measureMacosFloors,
++  parseFloorResult,
+ } from "./lib/release-platforms.mjs";
+-import { parseReceipt } from "./lib/release-contract.mjs";
++import { evaluateFloors, parseReceipt } from "./lib/release-contract.mjs";
++
++// Floor measurements of a conforming macOS build (notarized; x86_64 minos at or below 10.15,
++// arm64 at the 11.0 Apple Silicon floor).
++const NOTARIZED = (target) => ({ target, spctlStatus: 0, spctl: `${target}: accepted\nsource=Notarized Developer ID`, staplerStatus: 0 });
++const AD_HOC = (target) => ({ target, spctlStatus: 3, spctl: `${target}: rejected\nsource=no usable signature`, staplerStatus: 65 });
++const MAC_FLOORS = {
++  "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app")] },
++  dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app"), NOTARIZED("dmg")] },
++  "cli-darwin-universal": { minos: { x86_64: "10.13", arm64: "11.0" } },
++};
+ 
+ test("release-platforms: exports required APIs", () => {
+   assert.equal(typeof probeMacbook, "function");
+@@ -313,6 +325,7 @@ test("buildHost: reuses existing host-scoped bundles when present", async () =>
+       return {
+         exitCode: 0,
+         toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" },
++        floors: MAC_FLOORS,
+       };
+     };
+ 
+@@ -321,6 +334,7 @@ test("buildHost: reuses existing host-scoped bundles when present", async () =>
+       config,
+       runDir,
+       runner: mockRunner,
++      macosMinimum: "10.15",
+     });
+ 
+     assert.equal(receipt.host, "macbook");
+@@ -414,6 +428,7 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
+       return {
+         exitCode: 0,
+         toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" },
++        floors: MAC_FLOORS,
+       };
+     };
+ 
+@@ -422,6 +437,7 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
+       config,
+       runDir,
+       runner: mockRunner,
++      macosMinimum: "10.15",
+     });
+ 
+     assert.equal(receipt.host, "macbook");
+@@ -521,6 +537,20 @@ test("remote builders: generated scripts enforce exact isolated build and artifa
+   assert.doesNotMatch(linux, /signer sign/);
+   assert.doesNotMatch(linux, /signer --help/);
+   assert.match(linux, /test -s/);
++  // The standalone CLI links against the glibc 2.17 floor; the desktop bundles are built in an
++  // Ubuntu 22.04 (glibc 2.35, webkit2gtk-4.1) container.
++  assert.match(linux, /cargo zigbuild .*--no-default-features --bin ferryx-cli --target x86_64-unknown-linux-gnu\.2\.17/);
++  assert.match(linux, /docker build .*packaging\/linux\/bundle\.Dockerfile/);
++  assert.match(linux, /docker run --rm [\s\S]*"\$bundle_image" bun tauri build --bundles appimage,deb/);
++  assert.doesNotMatch(linux, /^bun tauri build/m);
++  assert.match(linux, /linuxBuilder/);
++  // Floor gate input: GLIBC_ maxima measured in the bundle image over every ELF of each artifact.
++  assert.match(linux, /objdump -T/);
++  assert.match(linux, /--appimage-extract/);
++  assert.match(linux, /dpkg-deb -x "\$OUT_DIR\/Ferryx_amd64\.deb"/);
++  assert.match(linux, /-v "\$out_dir:\$out_dir:ro" .*"\$bundle_image" bash "\$floor_dir\/scan\.sh"/s);
++  assert.match(linux, /---FLOOR_RESULT---/);
++  assert.ok(linux.indexOf("---FLOOR_RESULT---") < linux.indexOf("---BUILD_RESULT---"));
+ 
+   const windows = createWindowsBuildScript({
+     workspaceDir: "C:/release root/run", plan,
+@@ -533,6 +563,47 @@ test("remote builders: generated scripts enforce exact isolated build and artifa
+   assert.match(windows, /-SkipSigning/);
+   assert.match(windows, /--bundles nsis/);
+   assert.match(windows, /--bundles nsis -c '{"build":{"beforeBuildCommand":""}}'; if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
++  assert.match(windows, /cargo build --manifest-path \(Join-Path \$sourceDir 'src-tauri\/Cargo\.toml'\) --release --no-default-features --bin ferryx-cli\n  \$cliBuildExit = \$LASTEXITCODE\n/);
++  assert.match(windows, /if \(\$cliBuildExit -ne 0\) \{ exit \$cliBuildExit \}/);
++  // Only the CLI build links the CRT statically (it skips tauri-build's static VC runtime): RUSTFLAGS
++  // gains +crt-static right before it and is restored before the NSIS desktop build.
++  assert.equal((windows.match(/target-feature=\+crt-static/g) ?? []).length, 1);
++  const setFlags = windows.indexOf("$env:RUSTFLAGS = (@($prevRustflags, '-C target-feature=+crt-static') | Where-Object { $_ }) -join ' '");
++  const cliBuild = windows.indexOf("--bin ferryx-cli\n");
++  const restore = windows.indexOf("} finally {\n  if ($null -eq $prevRustflags) { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue } else { $env:RUSTFLAGS = $prevRustflags }\n}");
++  assert.ok(setFlags > windows.indexOf("bun tauri build --no-bundle"), "desktop build runs without the CLI flags");
++  assert.ok(setFlags < cliBuild && cliBuild < restore, "+crt-static is scoped to the CLI cargo build");
++  assert.ok(restore < windows.indexOf("--bundles nsis"), "RUSTFLAGS is restored before the NSIS build");
++  assert.doesNotMatch(linux, /crt-static/);
++  assert.match(windows, /Copy-Item -LiteralPath \$cliExe -Destination \(Join-Path \$outDir 'ferryx-cli-windows-amd64\.exe'\)/);
++  // The CLI path keeps its backslash (a single one in the JS template became a form feed).
++  assert.ok(windows.includes("$cliExe = Join-Path $cargoTarget 'release\\ferryx-cli.exe'"));
++  assert.ok(!windows.includes("\f"), "generated PowerShell must not contain a form feed");
++  // CARGO_ENCODED_RUSTFLAGS (even empty) would silently override RUSTFLAGS: refuse before any build.
++  const encodedGuard = windows.indexOf("if (Test-Path Env:CARGO_ENCODED_RUSTFLAGS) { throw ");
++  assert.ok(encodedGuard > 0 && encodedGuard < windows.indexOf("bun tauri build"), "CARGO_ENCODED_RUSTFLAGS guard runs before the first build");
++  assert.equal((windows.match(/CARGO_ENCODED_RUSTFLAGS\)? \{ throw/g) ?? []).length, 1);
++  assert.doesNotMatch(windows, /if \(\$env:CARGO_ENCODED_RUSTFLAGS\)/);
++  const storeOnly = createWindowsBuildScript({
++    workspaceDir: "C:/release root/run", plan: { ...plan, channels: { nsisMigration: false } },
++    hostConfig: {},
++  });
++  // Floor gate input: dumpbin /dependents of the executables that actually ship. The NSIS build
++  // rebuilds every bin in target\release, so the CLI is measured as its shipped copy and the MSIX
++  // ferryx.exe as a copy taken before the NSIS rebuild.
++  for (const script of [windows, storeOnly]) {
++    assert.match(script, /& \$dumpbin \/nologo \/dependents \$Path/);
++    assert.ok(script.includes("$cliDependents = Get-FerryxDependents (Join-Path $outDir 'ferryx-cli-windows-amd64.exe')"));
++    assert.ok(script.includes("$appDependents = Get-FerryxDependents $msixAppExe\n"));
++    assert.doesNotMatch(script, /Get-FerryxDependents \$cliExe/);
++    assert.ok(script.indexOf("$msixAppExe = $executables[0].FullName\n") > script.indexOf("build-msix.ps1"));
++    assert.match(script, /Write-Output '---FLOOR_RESULT---'/);
++  }
++  const msixCopy = windows.indexOf("$msixAppExe = Join-Path $workspace 'floor-msix-ferryx.exe'\nCopy-Item -LiteralPath $executables[0].FullName -Destination $msixAppExe\n");
++  assert.ok(msixCopy > windows.indexOf("build-msix.ps1") && msixCopy < windows.indexOf("--bundles nsis"), "MSIX exe kept before the NSIS rebuild");
++  assert.ok(windows.indexOf("$floors['nsis'] = @{ dependents = (Get-FerryxDependents $executables[0].FullName) }") > windows.indexOf("--bundles nsis"));
++  assert.doesNotMatch(storeOnly, /\$floors\['nsis'\]/);
++  assert.doesNotMatch(storeOnly, /floor-msix-ferryx\.exe/);
+   assert.doesNotMatch(windows, /signer sign/);
+   assert.doesNotMatch(windows, /signer --help/);
+ });
+@@ -710,6 +781,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
+           rust: "1.92.0",
+           tauri: "2.10.1",
+         },
++        floors: MAC_FLOORS,
+       };
+     };
+ 
+@@ -718,6 +790,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
+       config,
+       runDir,
+       runner: mockRunner,
++      macosMinimum: "10.15",
+     });
+ 
+     assert.equal(receipt.host, "macbook");
+@@ -729,6 +802,18 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
+     const savedReceipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+     const validated = parseReceipt(savedReceipt, plan);
+     assert.equal(validated.runId, plan.runId);
++    // The floor gate results are recorded in the receipt: every macOS floor passed, no waiver.
++    assert.equal(validated.floors.waiver, null);
++    assert.deepEqual(
++      validated.floors.checks.map((c) => `${c.kind}/${c.check}/${c.pass}`).sort(),
++      [
++        "cli-darwin-universal/macos-minos/true",
++        "dmg/macos-minos/true",
++        "dmg/notarization/true",
++        "macos-updater/macos-minos/true",
++        "macos-updater/notarization/true",
++      ],
++    );
+   } finally {
+     rmSync(tmp, { recursive: true, force: true });
+   }
+@@ -791,12 +876,6 @@ if [ "$1" = "--version" ]; then
+   echo "1.4.0"
+ elif [ "$1" = "install" ]; then
+   exit 0
+-elif [ "$1" = "tauri" ] && [ "$2" = "build" ]; then
+-  mkdir -p "$CARGO_TARGET_DIR/release/bundle/appimage"
+-  mkdir -p "$CARGO_TARGET_DIR/release/bundle/deb"
+-  printf "ELF_MOCK_APPIMAGE_BYTES" > "$CARGO_TARGET_DIR/release/bundle/appimage/Ferryx_1.0.0_amd64.AppImage"
+-  printf "DEB_MOCK_BYTES" > "$CARGO_TARGET_DIR/release/bundle/deb/Ferryx_1.0.0_amd64.deb"
+-  exit 0
+ fi
+ `;
+     writeFileSync(join(binDir, "bun"), bunScript);
+@@ -814,16 +893,39 @@ fi
+     const cargoScript = `#!/usr/bin/env bash
+ if [ "$1" = "--version" ]; then
+   echo "cargo 1.92.0 (mock)"
+-elif [ "$1" = "build" ]; then
++elif [ "$1" = "tauri" ] && [ "$2" = "--version" ]; then
++  echo "tauri-cli 2.10.1"
++elif [ "$1" = "zigbuild" ]; then
++  mkdir -p "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release"
+   printf "%s\n" "$*" >> "$CARGO_TARGET_DIR/cargo-build-args.log"
+-  mkdir -p "$CARGO_TARGET_DIR/release"
+-  printf "ELF_MOCK_CLI_BYTES" > "$CARGO_TARGET_DIR/release/ferryx-cli"
++  printf "ELF_MOCK_CLI_BYTES" > "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/ferryx-cli"
+   exit 0
+ fi
+ `;
+     writeFileSync(join(binDir, "cargo"), cargoScript);
+     chmodSync(join(binDir, "cargo"), 0o755);
+ 
++    // Mock docker: the container bundle build writes into the CARGO_TARGET_DIR passed with -e.
++    const dockerScript = `#!/usr/bin/env bash
++printf "%s\n" "$*" >> "$(dirname "$0")/docker-args.log"
++if [ "$1" = "image" ]; then
++  echo "sha256:mockimage"
++elif [ "$1" = "run" ] && [[ "$*" == *floor-scan/scan.sh ]]; then
++  echo "---FLOOR_RESULT---"
++  echo '{"cli-linux-amd64":{"glibc":"2.17"},"appimage":{"glibc":"2.35"},"deb":{"glibc":"2.35"}}'
++elif [ "$1" = "run" ]; then
++  for arg in "$@"; do
++    case "$arg" in CARGO_TARGET_DIR=*) target="\${arg#CARGO_TARGET_DIR=}" ;; esac
++  done
++  mkdir -p "$target/release/bundle/appimage" "$target/release/bundle/deb"
++  printf "ELF_MOCK_APPIMAGE_BYTES" > "$target/release/bundle/appimage/Ferryx_1.0.0_amd64.AppImage"
++  printf "DEB_MOCK_BYTES" > "$target/release/bundle/deb/Ferryx_1.0.0_amd64.deb"
++fi
++exit 0
++`;
++    writeFileSync(join(binDir, "docker"), dockerScript);
++    chmodSync(join(binDir, "docker"), 0o755);
++
+     const plan = {
+       commitSha: sourceSha,
+       ghosttyPin: ghosttySha,
+@@ -856,8 +958,21 @@ fi
+     assert.equal(existsSync(tarGzFile), false, "AppImage.tar.gz must NOT be created");
+     // The standalone Linux CLI must build without the desktop feature, so it links no GTK/WebKit.
+     const cargoBuildArgs = readFileSync(join(workspaceDir, "cargo-target", "cargo-build-args.log"), "utf8");
+-    assert.match(cargoBuildArgs, /--release --no-default-features --bin ferryx-cli/);
++    assert.match(cargoBuildArgs, /zigbuild .*--release --no-default-features --bin ferryx-cli --target x86_64-unknown-linux-gnu\.2\.17/);
++    const dockerArgs = readFileSync(join(binDir, "docker-args.log"), "utf8");
++    assert.match(dockerArgs, /^run --rm .* bun tauri build --bundles appimage,deb$/m);
++    assert.match(dockerArgs, /^run --rm .*:ro .* bash \S*\/floor-scan\/scan\.sh$/m);
++    assert.deepEqual(parseFloorResult(runRes), {
++      "cli-linux-amd64": { glibc: "2.17" },
++      appimage: { glibc: "2.35" },
++      deb: { glibc: "2.35" },
++    });
++    assert.equal(existsSync(join(workspaceDir, "floor-scan")), false, "floor scan scratch must be removed");
+     assert.match(runRes, /---BUILD_RESULT---/);
++    const buildResult = JSON.parse(runRes.split("---BUILD_RESULT---")[1].trim());
++    assert.equal(buildResult.tauri, "2.10.1");
++    assert.match(buildResult.linuxBuilder, /ubuntu-22\.04 glibc-2\.35 image=sha256:mockimage/);
++    assert.match(buildResult.linuxBuilder, /x86_64-unknown-linux-gnu\.2\.17/);
+   } finally {
+     rmSync(tmp, { recursive: true, force: true });
+   }
+@@ -1333,3 +1448,239 @@ writeFileSync(target + ".sig", sig);
+   }
+ });
+ 
++
++test("floor gate: evaluateFloors accepts conforming artifacts and rejects each violated floor by name", () => {
++  const winOk = ["KERNEL32.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "WebView2Loader.dll"];
++  const ok = evaluateFloors({
++    kinds: ["cli-linux-amd64", "appimage", "deb", "macos-updater", "dmg", "cli-darwin-universal", "msix", "nsis", "cli-windows-amd64"],
++    measurements: {
++      "cli-linux-amd64": { glibc: "2.17" },
++      appimage: { glibc: "2.35" },
++      deb: { glibc: "2.34" },
++      ...MAC_FLOORS,
++      msix: { dependents: winOk },
++      nsis: { dependents: winOk },
++      "cli-windows-amd64": { dependents: ["KERNEL32.dll", "ucrtbase.dll"] },
++    },
++    macosMinimum: "10.15",
++  });
++  assert.equal(ok.length, 11);
++  assert.deepEqual(ok.filter((c) => !c.pass), []);
++
++  const bad = evaluateFloors({
++    kinds: ["cli-linux-amd64", "appimage", "deb", "dmg", "cli-darwin-universal", "msix", "cli-windows-amd64"],
++    measurements: {
++      "cli-linux-amd64": { glibc: "2.18" },
++      appimage: { glibc: "2.38" },
++      deb: { glibc: "" },
++      dmg: { minos: { x86_64: "11.0", arm64: "12.0" }, notarization: [AD_HOC("app"), AD_HOC("dmg")] },
++      "cli-darwin-universal": { minos: null },
++      msix: { dependents: ["KERNEL32.dll", "VCRUNTIME140.dll", "MSVCP140.dll"] },
++      "cli-windows-amd64": {},
++    },
++    macosMinimum: "10.15",
++  });
++  const reasons = Object.fromEntries(bad.map((c) => [`${c.kind} ${c.check}`, c.pass ? "PASS" : c.reason]));
++  assert.equal(reasons["cli-linux-amd64 glibc"], "requires GLIBC_2.18, above the GLIBC_2.17 floor");
++  assert.equal(reasons["appimage glibc"], "requires GLIBC_2.38, above the GLIBC_2.35 floor");
++  assert.equal(reasons["deb glibc"], "no GLIBC_ symbol version was measured");
++  assert.equal(
++    reasons["dmg macos-minos"],
++    "x86_64 slice declares minos 11.0, above the configured minimum 10.15; arm64 slice declares minos 12.0, above 11.0 (the Apple Silicon floor)",
++  );
++  assert.match(reasons["dmg notarization"], /app: spctl does not report Notarized Developer ID \(app: rejected source=no usable signature\)/);
++  assert.match(reasons["dmg notarization"], /dmg: stapler validate failed \(exit 65\)/);
++  assert.equal(reasons["cli-darwin-universal macos-minos"], "no LC_BUILD_VERSION minos was measured");
++  assert.equal(reasons["msix crt"], "depends on VCRUNTIME140.dll, MSVCP140.dll (Visual C++ runtime, absent on a clean Windows)");
++  assert.equal(reasons["cli-windows-amd64 crt"], "no dumpbin /dependents output was captured");
++  // A DMG whose app was notarized but whose image was never checked still fails.
++  const [halfChecked] = evaluateFloors({
++    kinds: ["dmg"],
++    measurements: { dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app")] } },
++    macosMinimum: "10.15",
++  }).filter((c) => c.check === "notarization");
++  assert.equal(halfChecked.reason, "dmg: not checked");
++  assert.throws(
++    () => evaluateFloors({ kinds: ["dmg"], measurements: {}, macosMinimum: null }),
++    /macOS minimum system version must be a dotted version/,
++  );
++});
++
++test("parseFloorResult: reads the measurement line and fails closed without one", () => {
++  const out = 'noise\n---FLOOR_RESULT---\n{"msix":{"dependents":["KERNEL32.dll"]}}\n---BUILD_RESULT---\n{"node":"1"}\n';
++  assert.deepEqual(parseFloorResult(out), { msix: { dependents: ["KERNEL32.dll"] } });
++  assert.throws(() => parseFloorResult("---BUILD_RESULT---\n{}\n"), /did not return floor measurements/);
++});
++
++test("measureMacosFloors: takes the highest minos per architecture over every Mach-O file and probes spctl and stapler", () => {
++  const buildVersion = (minos) => `Load command 9\n      cmd LC_BUILD_VERSION\n  cmdsize 32\n platform 1\n    minos ${minos}\n      sdk 15.0\n`;
++  const fakeExec = (x86AppMinos) => {
++    const calls = [];
++    const archs = {
++      "/A.app/Contents/MacOS/ferryx": "x86_64 arm64",
++      "/A.app/Contents/Helpers/ghostty-helper": "x86_64",
++      "/out/ferryx-cli": "x86_64 arm64",
++    };
++    const otool = {
++      "x86_64 /A.app/Contents/MacOS/ferryx": buildVersion(x86AppMinos),
++      "arm64 /A.app/Contents/MacOS/ferryx": buildVersion("11.0"),
++      "x86_64 /A.app/Contents/Helpers/ghostty-helper": "Load command 8\n      cmd LC_VERSION_MIN_MACOSX\n  cmdsize 16\n  version 10.13\n      sdk 10.14\n",
++      "x86_64 /out/ferryx-cli": buildVersion("10.15"),
++      "arm64 /out/ferryx-cli": buildVersion("11.0"),
++    };
++    const exec = (command, args) => {
++      calls.push([command, ...args].join(" "));
++      if (command === "find") return { status: 0, stdout: "/A.app/Contents/MacOS/ferryx\n/A.app/Contents/Info.plist\n/A.app/Contents/Helpers/ghostty-helper\n", stderr: "" };
++      if (command === "file") return { status: 0, stdout: args[1].endsWith(".plist") ? "XML 1.0 document" : "Mach-O universal binary", stderr: "" };
++      if (command === "lipo") return { status: 0, stdout: `${archs[args[1]]}\n`, stderr: "" };
++      if (command === "otool") return { status: 0, stdout: otool[`${args[1]} ${args[3]}`], stderr: "" };
++      if (command === "spctl") return { status: 3, stdout: "", stderr: `${args.at(-1)}: rejected\nsource=no usable signature` };
++      if (command === "xcrun") return { status: 65, stdout: "", stderr: "does not have a ticket stapled to it" };
++      throw new Error(`unexpected ${command}`);
++    };
++    return { exec, calls };
++  };
++
++  const { exec, calls } = fakeExec("10.15");
++  const m = measureMacosFloors({ appPath: "/A.app", dmgPath: "/A.dmg", cliPath: "/out/ferryx-cli", exec });
++  // The helper's LC_VERSION_MIN_MACOSX 10.13 is below the app's 10.15, so x86_64 stays 10.15.
++  assert.deepEqual(m.dmg.minos, { x86_64: "10.15", arm64: "11.0" });
++  assert.deepEqual(m["macos-updater"].minos, { x86_64: "10.15", arm64: "11.0" });
++  assert.deepEqual(m["cli-darwin-universal"].minos, { x86_64: "10.15", arm64: "11.0" });
++  assert.deepEqual(m.dmg.notarization.map((p) => [p.target, p.spctlStatus, p.staplerStatus]), [["app", 3, 65], ["dmg", 3, 65]]);
++  assert.ok(calls.includes("lipo -archs /A.app/Contents/MacOS/ferryx"));
++  assert.ok(calls.includes("otool -arch arm64 -l /A.app/Contents/MacOS/ferryx"));
++  assert.ok(calls.includes("spctl -a -vvv -t install /A.dmg"));
++  assert.ok(calls.includes("xcrun stapler validate /A.app"));
++  assert.ok(!calls.some((c) => c.includes("Info.plist") && (c.startsWith("otool") || c.startsWith("lipo"))));
++  // A universal build: arm64 at 11.0 meets the Apple Silicon floor; only the unsigned state fails.
++  assert.deepEqual(
++    evaluateFloors({ kinds: ["dmg", "cli-darwin-universal"], measurements: m, macosMinimum: "10.15" }).map((c) => `${c.kind} ${c.check} ${c.pass}`),
++    ["dmg macos-minos true", "dmg notarization false", "cli-darwin-universal macos-minos true"],
++  );
++
++  // An Intel slice built for macOS 12 breaks the advertised 10.15 floor.
++  const tooNew = measureMacosFloors({ appPath: "/A.app", exec: fakeExec("12.0").exec });
++  const [minosCheck] = evaluateFloors({ kinds: ["macos-updater"], measurements: tooNew, macosMinimum: "10.15" });
++  assert.equal(minosCheck.reason, "x86_64 slice declares minos 12.0, above the configured minimum 10.15");
++});
++
++function createFloorGateRun(tmp, platformSubdir) {
++  const runDir = join(tmp, "run");
++  for (const d of ["receipts", "bundles", join("artifacts", platformSubdir)]) mkdirSync(join(runDir, d), { recursive: true });
++  writeFileSync(join(runDir, "bundles", "source.bundle"), "FIXTURE_SOURCE_BUNDLE");
++  writeFileSync(join(runDir, "bundles", "ghostty.bundle"), "FIXTURE_GHOSTTY_BUNDLE");
++  writeFileSync(join(runDir, "plan.json"), JSON.stringify({
++    schemaVersion: 1,
++    runId: "rel-run-floor-gate",
++    repo: "Indosaram/ferryx",
++    commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b",
++    tag: "v2026.09.08.1",
++    appVersion: "2026.908.1",
++    msixVersion: "2026.908.1.0",
++    channels: { store: true, nsisMigration: false },
++    requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
++    toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.16.0" },
++    sourceDateEpoch: 1788868800,
++    createdAt: "2026-09-08T12:00:00.000Z",
++  }));
++  const hostRoot = join(tmp, "host-root");
++  mkdirSync(hostRoot);
++  return { runDir, hostRoot };
++}
++
++const macRunner = (floors) => async ({ artifactsOutDir }) => {
++  writeFileSync(join(artifactsOutDir, "Ferryx.app.tar.gz"), "MOCK_APP_CONTENT");
++  writeFileSync(join(artifactsOutDir, "Ferryx.app.tar.gz.sig"), "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
++  writeFileSync(join(artifactsOutDir, "Ferryx_universal.dmg"), "MOCK_DMG_CONTENT");
++  writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
++  return { exitCode: 0, toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" }, floors };
++};
++
++test("buildHost floor gate: an ad-hoc signed macOS build aborts with the named reason and writes no receipt", async () => {
++  const tmp = mkdtempSync(join(tmpdir(), "ferryx-floor-gate-mac-"));
++  try {
++    const { runDir, hostRoot } = createFloorGateRun(tmp, "darwin");
++    const config = {
++      schemaVersion: 1, repository: join(tmp, "no-repo"), ghosttyRepository: join(tmp, "no-ghostty"), repo: "Indosaram/ferryx",
++      hosts: { macbook: { platform: "darwin", ssh: null, root: hostRoot, minFreeBytes: 1024 } },
++    };
++    const adHoc = {
++      "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app")] },
++      dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app"), AD_HOC("dmg")] },
++      "cli-darwin-universal": { minos: { x86_64: "10.15", arm64: "11.0" } },
++    };
++    await assert.rejects(
++      () => buildHost({ hostName: "macbook", config, runDir, runner: macRunner(adHoc), macosMinimum: "10.15", floorWaiver: null }),
++      (err) => {
++        assert.match(err.message, /^Release floor gate failed on host 'macbook': /);
++        assert.match(err.message, /dmg notarization: app: spctl does not report Notarized Developer ID/);
++        assert.match(err.message, /macos-updater notarization: app: spctl does not report Notarized Developer ID \([^)]*\); app: stapler validate failed \(exit 65\)/);
++        assert.match(err.message, /FERRYX_RELEASE_FLOOR_WAIVER="<reason>"/);
++        return true;
++      },
++    );
++    assert.equal(existsSync(join(runDir, "receipts", "build-receipt-macbook.json")), false);
++  } finally {
++    rmSync(tmp, { recursive: true, force: true });
++  }
++});
++
++test("buildHost floor gate: a local dev build may opt out explicitly; the waiver and failures are recorded", async () => {
++  const tmp = mkdtempSync(join(tmpdir(), "ferryx-floor-gate-waiver-"));
++  try {
++    const { runDir, hostRoot } = createFloorGateRun(tmp, "darwin");
++    const config = {
++      schemaVersion: 1, repository: join(tmp, "no-repo"), ghosttyRepository: join(tmp, "no-ghostty"), repo: "Indosaram/ferryx",
++      hosts: { macbook: { platform: "darwin", ssh: null, root: hostRoot, minFreeBytes: 1024 } },
++    };
++    const adHoc = { ...MAC_FLOORS, dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [AD_HOC("app"), AD_HOC("dmg")] } };
++    const receipt = await buildHost({
++      hostName: "macbook", config, runDir, runner: macRunner(adHoc), macosMinimum: "10.15", floorWaiver: "local QA build, not for publishing",
++    });
++    assert.equal(receipt.floors.waiver, "local QA build, not for publishing");
++    assert.deepEqual(receipt.floors.checks.filter((c) => !c.pass).map((c) => `${c.kind}/${c.check}`), ["dmg/notarization"]);
++    const saved = parseReceipt(readFileSync(join(runDir, "receipts", "build-receipt-macbook.json"), "utf8"));
++    assert.equal(saved.floors.waiver, "local QA build, not for publishing");
++  } finally {
++    rmSync(tmp, { recursive: true, force: true });
++  }
++});
++
++test("buildHost floor gate: a Linux CLI needing GLIBC_2.38 aborts the omaki build", async () => {
++  const tmp = mkdtempSync(join(tmpdir(), "ferryx-floor-gate-linux-"));
++  try {
++    const { runDir, hostRoot } = createFloorGateRun(tmp, "linux");
++    // A non-ssh platform keeps the fixture runner local; the gate is host-independent.
++    const config = {
++      schemaVersion: 1, repository: join(tmp, "no-repo"), ghosttyRepository: join(tmp, "no-ghostty"), repo: "Indosaram/ferryx",
++      hosts: { omaki: { platform: "fixture", ssh: null, root: hostRoot, minFreeBytes: 1024 } },
++    };
++    const linuxRunner = (floors) => async ({ artifactsOutDir }) => {
++      writeFileSync(join(artifactsOutDir, "Ferryx_amd64.AppImage"), "MOCK_APPIMAGE");
++      writeFileSync(join(artifactsOutDir, "Ferryx_amd64.AppImage.sig"), "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
++      writeFileSync(join(artifactsOutDir, "Ferryx_amd64.deb"), "MOCK_DEB");
++      writeFileSync(join(artifactsOutDir, "ferryx-cli-linux-amd64"), "MOCK_CLI");
++      return { exitCode: 0, toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.16.0", rust: "1.92.0" }, floors };
++    };
++    const linuxFloors = (cli) => ({ "cli-linux-amd64": { glibc: cli }, appimage: { glibc: "2.35" }, deb: { glibc: "2.35" } });
++    await assert.rejects(
++      () => buildHost({ hostName: "omaki", config, runDir, runner: linuxRunner(linuxFloors("2.38")), floorWaiver: null }),
++      /Release floor gate failed on host 'omaki': cli-linux-amd64 glibc: requires GLIBC_2\.38, above the GLIBC_2\.17 floor\./,
++    );
++    assert.equal(existsSync(join(runDir, "receipts", "build-receipt-omaki.json")), false);
++
++    // The same build with conforming measurements passes and records three glibc results.
++    rmSync(join(runDir, "artifacts", "linux"), { recursive: true, force: true });
++    mkdirSync(join(runDir, "artifacts", "linux"));
++    rmSync(join(hostRoot, "rel-run-floor-gate"), { recursive: true, force: true });
++    const receipt = await buildHost({ hostName: "omaki", config, runDir, runner: linuxRunner(linuxFloors("2.17")), floorWaiver: null });
++    assert.deepEqual(receipt.floors.checks.map((c) => `${c.kind} ${c.measured}<=${c.limit} ${c.pass}`).sort(), [
++      "appimage 2.35<=2.35 true",
++      "cli-linux-amd64 2.17<=2.17 true",
++      "deb 2.35<=2.35 true",
++    ]);
++  } finally {
++    rmSync(tmp, { recursive: true, force: true });
++  }
++});
+diff --git a/scripts/release-provenance.mjs b/scripts/release-provenance.mjs
+index 5e5115918..446b7646e 100644
+--- a/scripts/release-provenance.mjs
++++ b/scripts/release-provenance.mjs
+@@ -269,6 +269,8 @@ export function buildProvenance({ plan, state = {}, receipts, sbomTools }) {
+         host: receipt.host,
+         completedAt: receipt.completedAt,
+         toolchains: receipt.toolchains ?? null,
++        // Non-null only for local dev/test runs; publishRelease refuses waived receipts.
++        floorWaiver: receipt.floors?.waiver ?? null,
+         assets: receipt.artifacts.map((artifact) => ({
+           name: artifact.name,
+           kind: artifact.kind,
+diff --git a/scripts/release-provenance.test.mjs b/scripts/release-provenance.test.mjs
+index f657d2099..ae0427a20 100644
+--- a/scripts/release-provenance.test.mjs
++++ b/scripts/release-provenance.test.mjs
+@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
+ 
+ import { assembleReleaseRun, verifyReleaseRun } from "./release-local.mjs";
+ import { msixWithVersion } from "./fixtures/msix-fixture.mjs";
++import { evaluateFloors } from "./lib/release-contract.mjs";
+ import {
+   attachReleaseProvenance,
+   CHECKSUMS_NAME,
+@@ -87,6 +88,7 @@ function receiptsFor(p) {
+       completedAt: "2026-09-08T12:35:00.000Z",
+       toolchains: { node: "22.22.0", bun: "1.4.0", zig: "0.16.0", rust: "1.88.0" },
+       artifacts: [{ kind: "appimage", name: "Ferryx_amd64.AppImage", bytes: 14, sha256: "a".repeat(64) }],
++      floors: { waiver: "local QA build", checks: [] },
+     },
+     {
+       host: "macbook",
+@@ -134,6 +136,9 @@ test("fixture asset dir: SHA256SUMS passes shasum -c, minisig verifies with the
+     assert.deepEqual(provenance.builds.map((b) => b.host), ["macbook", "omaki"]);
+     assert.equal(provenance.builds[1].toolchains.rust, "1.88.0");
+     assert.deepEqual(provenance.builds[1].assets.map((a) => a.name), ["Ferryx_amd64.AppImage"]);
++    // A floor waiver stays visible in provenance; a receipt without floors reports null.
++    assert.equal(provenance.builds[1].floorWaiver, "local QA build");
++    assert.equal(provenance.builds[0].floorWaiver, null);
+   } finally {
+     rmSync(tmp, { recursive: true, force: true });
+   }
+@@ -256,6 +261,19 @@ test("generateSboms runs cargo cyclonedx for src-tauri and cyclonedx-npm for ui
+ 
+ // ---- release-local integration: assemble attaches provenance; verify enforces it ----
+ 
++// Floor measurements that meet every advertised floor (release floor gate in assembleRelease).
++const NOTARIZED = (target) => ({ target, spctlStatus: 0, spctl: "source=Notarized Developer ID", staplerStatus: 0 });
++const CONFORMING_FLOORS = {
++  "macos-updater": { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app")] },
++  dmg: { minos: { x86_64: "10.15", arm64: "11.0" }, notarization: [NOTARIZED("app"), NOTARIZED("dmg")] },
++  "cli-darwin-universal": { minos: { x86_64: "10.15", arm64: "11.0" } },
++  appimage: { glibc: "2.35" },
++  deb: { glibc: "2.35" },
++  "cli-linux-amd64": { glibc: "2.17" },
++  msix: { dependents: ["KERNEL32.dll"] },
++  "cli-windows-amd64": { dependents: ["KERNEL32.dll"] },
++};
++
+ function writeRun(tmp, key) {
+   const runDir = join(tmp, "run");
+   const artifacts = join(runDir, "artifacts");
+@@ -285,6 +303,7 @@ function writeRun(tmp, key) {
+     "linux/Ferryx_2026.908.1_amd64.AppImage": "appimage",
+     "linux/Ferryx_2026.908.1_amd64.deb": "deb",
+     "linux/ferryx-cli-linux-amd64": "linux cli",
++    "windows/ferryx-cli-windows-amd64.exe": "windows cli",
+   };
+   for (const [rel, body] of Object.entries(files)) writeFileSync(join(artifacts, rel), body);
+   // The release-local Store gate reads the MSIX Identity version, so this one is a real zip.
+@@ -300,6 +319,7 @@ function writeRun(tmp, key) {
+     schemaVersion: 1, runId: p.runId, host, commitSha: p.commitSha, appVersion: p.appVersion,
+     completedAt: "2026-09-08T12:30:00.000Z", exitCode: 0,
+     toolchains: { node: "22.22.0", bun: "1.4.0", zig: "0.16.0", rust: "1.88.0" }, artifacts: artifactsList,
++    floors: { waiver: null, checks: evaluateFloors({ kinds: artifactsList.map((a) => a.kind), measurements: CONFORMING_FLOORS, macosMinimum: "10.15" }) },
+   });
+   const write = (host, list) => writeFileSync(join(receipts, `build-receipt-${host}.json`), JSON.stringify(receipt(host, list)));
+   write("macbook", [
+@@ -312,7 +332,10 @@ function writeRun(tmp, key) {
+     art("deb", "linux/Ferryx_2026.908.1_amd64.deb", false),
+     art("cli-linux-amd64", "linux/ferryx-cli-linux-amd64", false),
+   ]);
+-  write("maho-win", [art("msix", "windows/Ferryx_2026.908.1.0_x64.msix", false)]);
++  write("maho-win", [
++    art("msix", "windows/Ferryx_2026.908.1.0_x64.msix", false),
++    art("cli-windows-amd64", "windows/ferryx-cli-windows-amd64.exe", false),
++  ]);
+   return runDir;
+ }
+ 
+diff --git a/src-tauri/src/daemon/supervisor.rs b/src-tauri/src/daemon/supervisor.rs
+index 242118928..98a779cc5 100644
+--- a/src-tauri/src/daemon/supervisor.rs
++++ b/src-tauri/src/daemon/supervisor.rs
+@@ -617,7 +617,7 @@ mod backend {
+ 
+     /// The Store owns an MSIX install's lifecycle, so it never gets a task.
+     pub fn install_supported() -> bool {
+-        task::supported_for_install(crate::ipc::updater::updater_managed_externally())
++        task::supported_for_install(crate::ipc::updater::store_install())
+     }
+ 
+     /// The Task Scheduler is part of every supported Windows install.
+diff --git a/src-tauri/src/ipc/cli_install.rs b/src-tauri/src/ipc/cli_install.rs
+index db1a74899..3e79ef3d7 100644
+--- a/src-tauri/src/ipc/cli_install.rs
++++ b/src-tauri/src/ipc/cli_install.rs
+@@ -26,6 +26,14 @@ pub enum CliInstallError {
+     #[error("Failed to determine canonical active executable: {0}")]
+     ExecutableNotFound(String),
+ 
++    #[error(
++        "Ferryx is running from a temporary location ({location}) that disappears when it quits, so the CLI launcher would break: {path}. Move Ferryx to a permanent folder (for example /Applications or ~/Applications), relaunch it, and install the CLI again."
++    )]
++    TemporaryExecutable {
++        path: PathBuf,
++        location: &'static str,
++    },
++
+     #[error("User home directory could not be determined")]
+     HomeDirNotFound,
+ 
+@@ -117,11 +125,51 @@ pub fn resolve_launcher_status(
+     ))
+ }
+ 
++/// The executable the launcher points at. Inside an AppImage the running binary lives in a
++/// mount (`$APPDIR`) that vanishes on exit, so the AppImage file itself (`$APPIMAGE`) is the stable
++/// target; it is used only when the running binary really is inside that AppImage's `$APPDIR`, so
++/// a build started from a terminal that merely inherited those variables keeps its own path.
+ pub fn get_canonical_active_executable() -> Result<PathBuf, CliInstallError> {
+     let current =
+         std::env::current_exe().map_err(|e| CliInstallError::ExecutableNotFound(e.to_string()))?;
+-    let canonical = std::fs::canonicalize(&current).unwrap_or(current);
+-    Ok(canonical)
++    let appimage = std::env::var_os("APPIMAGE");
++    let appdir = std::env::var_os("APPDIR");
++    Ok(resolve_launcher_target(
++        &current,
++        appimage.as_deref().map(Path::new),
++        appdir.as_deref().map(Path::new),
++    ))
++}
++
++pub fn resolve_launcher_target(
++    current_exe: &Path,
++    appimage: Option<&Path>,
++    appdir: Option<&Path>,
++) -> PathBuf {
++    let canonical =
++        std::fs::canonicalize(current_exe).unwrap_or_else(|_| current_exe.to_path_buf());
++    if let (Some(appimage), Some(appdir)) = (appimage, appdir) {
++        let appdir = std::fs::canonicalize(appdir).unwrap_or_else(|_| appdir.to_path_buf());
++        if appimage.is_absolute() && appimage.is_file() && canonical.starts_with(&appdir) {
++            return appimage.to_path_buf();
++        }
++    }
++    canonical
++}
++
++/// Names the temporary location `path` lives in, if any: macOS App Translocation runs a
++/// quarantined app from a randomized read-only mount, and an AppImage runs from a `.mount_*`
++/// directory; both disappear when the app quits.
++pub fn temporary_executable_location(path: &Path) -> Option<&'static str> {
++    path.components().find_map(|component| match component {
++        std::path::Component::Normal(name) if name == "AppTranslocation" => {
++            Some("macOS App Translocation")
++        }
++        std::path::Component::Normal(name) if name.to_string_lossy().starts_with(".mount_") => {
++            Some("AppImage mount")
++        }
++        _ => None,
++    })
+ }
+ 
+ pub fn check_launcher_status(launcher_path: &Path, active_exe: Option<&Path>) -> CliLauncherStatus {
+@@ -196,6 +244,12 @@ pub fn install_launcher(
+             active_exe.display()
+         ))
+     })?;
++    if let Some(location) = temporary_executable_location(&canonical_active_exe) {
++        return Err(CliInstallError::TemporaryExecutable {
++            path: canonical_active_exe,
++            location,
++        });
++    }
+ 
+     let parent = launcher_path
+         .parent()
+@@ -274,6 +328,79 @@ pub fn install_launcher(
+     ))
+ }
+ 
++/// Whether an existing launcher should be re-pointed at `target` when the app starts. Only a
++/// symlink the user already installed is considered, and only when it is clearly a stale Ferryx
++/// launcher: it points into a temporary app location, or it dangles and its old target was the
++/// same executable (same file name, or another AppImage) that has since moved or been replaced.
++/// A missing launcher, a regular file, or a working link to some other binary is left alone.
++pub fn launcher_needs_refresh(launcher_path: &Path, target: &Path) -> bool {
++    let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
++    // A launch from a temporary location has no stable target to re-point at.
++    if temporary_executable_location(&target).is_some() {
++        return false;
++    }
++    let Ok(meta) = std::fs::symlink_metadata(launcher_path) else {
++        return false;
++    };
++    if !meta.file_type().is_symlink() {
++        return false;
++    }
++    let Ok(old_target) = std::fs::read_link(launcher_path) else {
++        return false;
++    };
++    match std::fs::canonicalize(launcher_path) {
++        Ok(resolved) => resolved != target && temporary_executable_location(&old_target).is_some(),
++        Err(_) => {
++            let is_appimage = |path: &Path| {
++                path.extension()
++                    .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
++            };
++            temporary_executable_location(&old_target).is_some()
++                || (old_target.file_name().is_some()
++                    && old_target.file_name() == target.file_name())
++                || (is_appimage(&old_target) && is_appimage(&target))
++        }
++    }
++}
++
++/// Re-points a stale launcher at `target` (see [`launcher_needs_refresh`]). The link is replaced
++/// atomically, so the user's launcher is never removed without being re-created. Returns whether
++/// the launcher was re-pointed.
++pub fn refresh_launcher(launcher_path: &Path, target: &Path) -> Result<bool, CliInstallError> {
++    if !launcher_needs_refresh(launcher_path, target) {
++        return Ok(false);
++    }
++    install_launcher(launcher_path, target)?;
++    Ok(true)
++}
++
++/// Start-up re-check of the CLI launcher, so moving the app or swapping the AppImage does not
++/// leave `ferryx` on PATH dangling. Debug builds never touch the user's launcher.
++pub fn refresh_launcher_on_start() {
++    if !cfg!(unix) || cfg!(debug_assertions) {
++        return;
++    }
++    let (Ok(launcher_path), Ok(target)) = (
++        get_default_launcher_path(),
++        get_canonical_active_executable(),
++    ) else {
++        return;
++    };
++    match refresh_launcher(&launcher_path, &target) {
++        Ok(true) => tracing::info!(
++            launcher = %launcher_path.display(),
++            target = %target.display(),
++            "Re-pointed the CLI launcher at the current app location"
++        ),
++        Ok(false) => {}
++        Err(error) => tracing::warn!(
++            %error,
++            launcher = %launcher_path.display(),
++            "Could not re-point the CLI launcher at the current app location"
++        ),
++    }
++}
++
+ #[cfg(feature = "desktop")]
+ #[tauri::command]
+ pub async fn cmd_cli_launcher_status() -> Result<CliLauncherStatus, IpcError> {
+@@ -618,6 +745,206 @@ mod tests {
+         assert!(status_broken.is_symlink);
+     }
+ 
++    #[test]
++    fn test_temporary_executable_location_names_ephemeral_app_paths() {
++        assert_eq!(
++            temporary_executable_location(Path::new(
++                "/private/var/folders/xy/T/AppTranslocation/5E1F/d/Ferryx.app/Contents/MacOS/ferryx"
++            )),
++            Some("macOS App Translocation")
++        );
++        assert_eq!(
++            temporary_executable_location(Path::new("/tmp/.mount_FerryxAbC123/usr/bin/ferryx")),
++            Some("AppImage mount")
++        );
++        for stable in [
++            "/Applications/Ferryx.app/Contents/MacOS/ferryx",
++            "/home/u/Applications/Ferryx_amd64.AppImage",
++            "/home/u/AppTranslocationNotes/ferryx",
++        ] {
++            assert_eq!(
++                temporary_executable_location(Path::new(stable)),
++                None,
++                "{stable}"
++            );
++        }
++    }
++
++    #[test]
++    #[cfg(unix)]
++    fn test_install_refuses_translocated_executable() {
++        let temp_dir = TempDir::new().expect("temp dir");
++        let macos_dir = temp_dir
++            .path()
++            .join("AppTranslocation/5E1F/d/Ferryx.app/Contents/MacOS");
++        std::fs::create_dir_all(&macos_dir).expect("create translocated bundle");
++        let exe = macos_dir.join("ferryx");
++        std::fs::write(&exe, b"binary").expect("write exe");
++        let launcher_path = temp_dir.path().join("bin").join("ferryx");
++
++        let err = install_launcher(&launcher_path, &exe).expect_err("must refuse translocation");
++        match &err {
++            CliInstallError::TemporaryExecutable { path, location } => {
++                assert_eq!(*location, "macOS App Translocation");
++                assert_eq!(path, &std::fs::canonicalize(&exe).unwrap());
++            }
++            other => panic!("expected TemporaryExecutable, got {other:?}"),
++        }
++        assert!(std::fs::symlink_metadata(&launcher_path).is_err());
++
++        let ipc: IpcError = err.into();
++        assert_eq!(
++            ipc.code,
++            crate::ipc::error::IpcErrorCode::CliTemporaryExecutable
++        );
++        assert_eq!(
++            ipc.details.as_ref().unwrap()["location"],
++            "macOS App Translocation"
++        );
++    }
++
++    #[test]
++    #[cfg(unix)]
++    fn test_resolve_launcher_target_prefers_appimage_only_inside_its_mount() {
++        let temp_dir = TempDir::new().expect("temp dir");
++        let appimage = temp_dir.path().join("Ferryx_amd64.AppImage");
++        std::fs::write(&appimage, b"appimage").expect("write appimage");
++        let appdir = temp_dir.path().join(".mount_FerryxAbC");
++        std::fs::create_dir_all(appdir.join("usr/bin")).expect("create mount");
++        let mounted_exe = appdir.join("usr/bin/ferryx");
++        std::fs::write(&mounted_exe, b"binary").expect("write mounted exe");
++        let other_exe = temp_dir.path().join("self-built-ferryx");
++        std::fs::write(&other_exe, b"binary").expect("write other exe");
++
++        assert_eq!(
++            resolve_launcher_target(&mounted_exe, Some(&appimage), Some(&appdir)),
++            appimage
++        );
++        // A binary outside the AppImage mount that merely inherited the variables keeps its path.
++        assert_eq!(
++            resolve_launcher_target(&other_exe, Some(&appimage), Some(&appdir)),
++            std::fs::canonicalize(&other_exe).unwrap()
++        );
++        // A missing AppImage file or a relative path is never used.
++        let missing = temp_dir.path().join("gone.AppImage");
++        assert_eq!(
++            resolve_launcher_target(&mounted_exe, Some(&missing), Some(&appdir)),
++            std::fs::canonicalize(&mounted_exe).unwrap()
++        );
++        assert_eq!(
++            resolve_launcher_target(
++                &mounted_exe,
++                Some(Path::new("Ferryx_amd64.AppImage")),
++                Some(&appdir)
++            ),
++            std::fs::canonicalize(&mounted_exe).unwrap()
++        );
++        assert_eq!(
++            resolve_launcher_target(&other_exe, None, None),
++            std::fs::canonicalize(&other_exe).unwrap()
++        );
++    }
++
++    #[test]
++    #[cfg(unix)]
++    fn test_refresh_repoints_launcher_after_app_bundle_moves() {
++        let temp_dir = TempDir::new().expect("temp dir");
++        let old_root = temp_dir.path().join("Applications");
++        let bundle_exe = Path::new("Ferryx.app/Contents/MacOS/ferryx");
++        std::fs::create_dir_all(old_root.join(bundle_exe).parent().unwrap()).expect("bundle");
++        std::fs::write(old_root.join(bundle_exe), b"binary").expect("write exe");
++        let launcher_path = temp_dir.path().join("bin").join("ferryx");
++        install_launcher(&launcher_path, &old_root.join(bundle_exe)).expect("install");
++
++        // The user moves the bundle; the launcher now dangles.
++        let new_root = temp_dir.path().join("Moved");
++        std::fs::rename(&old_root, &new_root).expect("move bundle");
++        assert!(std::fs::canonicalize(&launcher_path).is_err());
++        let new_exe = new_root.join(bundle_exe);
++
++        // The next start re-points it and leaves a working link afterwards.
++        assert!(refresh_launcher(&launcher_path, &new_exe).expect("refresh"));
++        assert_eq!(
++            std::fs::canonicalize(&launcher_path).unwrap(),
++            std::fs::canonicalize(&new_exe).unwrap()
++        );
++        assert!(check_launcher_status(&launcher_path, Some(&new_exe)).is_installed);
++        assert!(!refresh_launcher(&launcher_path, &new_exe).expect("second refresh"));
++    }
++
++    #[test]
++    #[cfg(unix)]
++    fn test_refresh_repoints_swapped_appimage_and_mount_links() {
++        let temp_dir = TempDir::new().expect("temp dir");
++        let launcher_path = temp_dir.path().join("bin").join("ferryx");
++        let old_appimage = temp_dir.path().join("Ferryx_2026.1027.5_amd64.AppImage");
++        std::fs::write(&old_appimage, b"old").expect("write old");
++        install_launcher(&launcher_path, &old_appimage).expect("install");
++
++        // Swapped for a newer AppImage with a different file name.
++        std::fs::remove_file(&old_appimage).expect("remove old");
++        let new_appimage = temp_dir.path().join("Ferryx_2026.1028.1_amd64.AppImage");
++        std::fs::write(&new_appimage, b"new").expect("write new");
++        assert!(refresh_launcher(&launcher_path, &new_appimage).expect("refresh"));
++        assert_eq!(
++            std::fs::canonicalize(&launcher_path).unwrap(),
++            std::fs::canonicalize(&new_appimage).unwrap()
++        );
++
++        // A launcher an older build pointed into a still-mounted AppImage is moved to the file.
++        let mount_exe = temp_dir.path().join(".mount_FerryxAbC/usr/bin/ferryx");
++        std::fs::create_dir_all(mount_exe.parent().unwrap()).expect("mount");
++        std::fs::write(&mount_exe, b"binary").expect("write mount exe");
++        let staged = temp_dir.path().join("bin").join("staged");
++        std::os::unix::fs::symlink(&mount_exe, &staged).expect("stage link");
++        std::fs::rename(&staged, &launcher_path).expect("replace link");
++        assert!(refresh_launcher(&launcher_path, &new_appimage).expect("refresh mount"));
++        assert_eq!(
++            std::fs::canonicalize(&launcher_path).unwrap(),
++            std::fs::canonicalize(&new_appimage).unwrap()
++        );
++    }
++
++    #[test]
++    #[cfg(unix)]
++    fn test_refresh_leaves_missing_foreign_and_unrelated_launchers_alone() {
++        let temp_dir = TempDir::new().expect("temp dir");
++        let exe = temp_dir.path().join("app").join("ferryx");
++        std::fs::create_dir_all(exe.parent().unwrap()).expect("app dir");
++        std::fs::write(&exe, b"binary").expect("write exe");
++        let bin = temp_dir.path().join("bin");
++        std::fs::create_dir_all(&bin).expect("bin");
++        let launcher_path = bin.join("ferryx");
++
++        // Never installed: nothing is created.
++        assert!(!refresh_launcher(&launcher_path, &exe).expect("missing"));
++        assert!(std::fs::symlink_metadata(&launcher_path).is_err());
++
++        // A regular file is the user's own launcher.
++        std::fs::write(&launcher_path, b"#!/bin/sh\n").expect("write file");
++        assert!(!refresh_launcher(&launcher_path, &exe).expect("file"));
++        assert_eq!(std::fs::read(&launcher_path).unwrap(), b"#!/bin/sh\n");
++        std::fs::remove_file(&launcher_path).expect("remove file");
++
++        // A working link to another binary stays as the user set it.
++        let other = temp_dir.path().join("dev-build");
++        std::fs::write(&other, b"dev").expect("write other");
++        std::os::unix::fs::symlink(&other, &launcher_path).expect("link other");
++        assert!(!refresh_launcher(&launcher_path, &exe).expect("working link"));
++        assert_eq!(std::fs::read_link(&launcher_path).unwrap(), other);
++
++        // A dangling link to a differently named binary is not deleted or re-pointed.
++        std::fs::remove_file(&other).expect("remove other");
++        assert!(!refresh_launcher(&launcher_path, &exe).expect("dangling foreign"));
++        assert_eq!(std::fs::read_link(&launcher_path).unwrap(), other);
++
++        // A launch from a temporary location never rewrites the launcher.
++        let translocated = temp_dir.path().join("AppTranslocation/X/d/dev-build");
++        std::fs::create_dir_all(translocated.parent().unwrap()).expect("translocated");
++        std::fs::write(&translocated, b"binary").expect("write translocated");
++        assert!(!launcher_needs_refresh(&launcher_path, &translocated));
++    }
++
+     #[test]
+     fn test_cli_install_error_mapping_to_ipc_error() {
+         use crate::ipc::error::IpcErrorCode;
+diff --git a/src-tauri/src/ipc/error.rs b/src-tauri/src/ipc/error.rs
+index 3b4670505..085c00f22 100644
+--- a/src-tauri/src/ipc/error.rs
++++ b/src-tauri/src/ipc/error.rs
+@@ -83,6 +83,9 @@ pub enum IpcErrorCode {
+     CliParentSymlinkDenied,
+     CliPlatformUnsupported,
+     CliExecutableNotFound,
++    /// The app runs from a location that vanishes on exit (macOS App Translocation, an AppImage
++    /// mount), so a launcher pointing there would dangle.
++    CliTemporaryExecutable,
+     InvalidArgument,
+     InternalError,
+     Unsupported,
+@@ -549,6 +552,10 @@ impl From<crate::ipc::cli_install::CliInstallError> for IpcError {
+                 Self::new(IpcErrorCode::CliExecutableNotFound, message)
+                     .with_details(json!({ "reason": reason }))
+             }
++            crate::ipc::cli_install::CliInstallError::TemporaryExecutable { path, location } => {
++                Self::new(IpcErrorCode::CliTemporaryExecutable, message)
++                    .with_details(json!({ "path": path.to_string_lossy(), "location": location }))
++            }
+             crate::ipc::cli_install::CliInstallError::HomeDirNotFound => {
+                 Self::new(IpcErrorCode::InvalidPath, message)
+             }
+diff --git a/src-tauri/src/ipc/updater.rs b/src-tauri/src/ipc/updater.rs
+index 2e22386f2..bcebba679 100644
+--- a/src-tauri/src/ipc/updater.rs
++++ b/src-tauri/src/ipc/updater.rs
+@@ -46,6 +46,27 @@ fn managed_externally_for(host: UpdateHost, bundle: Option<BundleType>) -> bool
+     }
+ }
+ 
++/// Updater targets every release publishes in `latest.json`: the `expectedTargets` of the updater
++/// kinds in `scripts/lib/release-contract.mjs` (`UPDATER_TARGETS`, cross-checked by
++/// `scripts/release-contract.test.mjs`).
++const PUBLISHED_UPDATER_TARGETS: [&str; 4] = [
++    "darwin-aarch64",
++    "darwin-x86_64",
++    "linux-x86_64",
++    "windows-x86_64",
++];
++
++/// A build for any other target (a self-built Linux/Windows ARM binary, say) has no entry in the
++/// manifest, so every check would fail with a missing-platform error. No published channel can
++/// update it, so it is treated as externally managed.
++fn has_published_target(target: Option<&str>) -> bool {
++    target.is_some_and(|target| PUBLISHED_UPDATER_TARGETS.contains(&target))
++}
++
++fn unpublished_target() -> bool {
++    !has_published_target(tauri_plugin_updater::target().as_deref())
++}
++
+ #[cfg(windows)]
+ fn has_package_identity() -> bool {
+     #[link(name = "kernel32")]
+@@ -65,6 +86,15 @@ fn has_package_identity() -> bool {
+ /// bundle term is always false here and keeps the whole decision in one place.
+ #[cfg(windows)]
+ pub fn updater_managed_externally() -> bool {
++    store_install() || unpublished_target()
++}
++
++/// Whether the Microsoft Store owns this install. Unlike [`updater_managed_externally`] this
++/// ignores the unpublished-target term, so callers that mean "Store install" (the distribution
++/// channel, the daemon's Task Scheduler supervisor) keep treating a self-built binary as an
++/// installer build.
++#[cfg(windows)]
++pub fn store_install() -> bool {
+     managed_externally_for(UpdateHost::current(), bundle_type())
+         || has_package_identity()
+         || std::env::var_os("FERRYX_STORE_BUILD").is_some()
+@@ -82,7 +112,7 @@ pub fn updater_managed_externally() -> bool {
+ /// in-app updater; a distribution package is updated by `dpkg`/`rpm` instead.
+ #[cfg(not(windows))]
+ pub fn updater_managed_externally() -> bool {
+-    managed_externally_for(UpdateHost::current(), bundle_type())
++    managed_externally_for(UpdateHost::current(), bundle_type()) || unpublished_target()
+ }
+ 
+ #[tauri::command]
+@@ -94,18 +124,23 @@ pub async fn cmd_updater_managed_externally() -> Result<bool, IpcError> {
+ /// updated by the Microsoft Store, NSIS installs by the in-app updater. macOS and the Linux
+ /// AppImage self-update; a Linux distribution package keeps the same `native` channel while
+ /// `updater_managed_externally` hides the in-app update card.
++///
++/// Store-ness is decided by package identity alone, so an install the updater cannot serve for
++/// another reason (an unpublished target) is still reported as the installer channel.
++#[cfg(windows)]
+ pub fn distribution_channel() -> &'static str {
+-    if cfg!(windows) {
+-        if updater_managed_externally() {
+-            "store"
+-        } else {
+-            "installer"
+-        }
++    if store_install() {
++        "store"
+     } else {
+-        "native"
++        "installer"
+     }
+ }
+ 
++#[cfg(not(windows))]
++pub fn distribution_channel() -> &'static str {
++    "native"
++}
++
+ #[tauri::command]
+ pub async fn cmd_distribution_channel() -> Result<&'static str, IpcError> {
+     Ok(distribution_channel())
+@@ -347,9 +382,12 @@ fn stall_window() -> Duration {
+ /// Stable update manifest; the same URL as `plugins.updater.endpoints` in tauri.conf.json.
+ pub const STABLE_UPDATE_ENDPOINT: &str =
+     "https://github.com/Indosaram/ferryx/releases/latest/download/latest.json";
+-/// Beta update manifest, uploaded next to `latest.json` on the latest release.
++/// Beta update manifest, served from the fixed `beta` release tag (`BETA_CHANNEL_TAG` and
++/// `BETA_MANIFEST_NAME` in `scripts/lib/release-contract.mjs`). `releases/latest` never resolves
++/// to a prerelease, so a beta build can only be reached through a tag that does not move with
++/// the stable release.
+ pub const BETA_UPDATE_ENDPOINT: &str =
+-    "https://github.com/Indosaram/ferryx/releases/latest/download/latest-beta.json";
++    "https://github.com/Indosaram/ferryx/releases/download/beta/latest-beta.json";
+ 
+ /// Endpoints for the update channel the user picked in Settings. Stable (the default, also for
+ /// any unknown value) keeps the configured endpoints. Beta asks `latest-beta.json` first and falls
+@@ -544,15 +582,61 @@ mod tests {
+             config["plugins"]["updater"]["endpoints"][0].as_str(),
+             Some(STABLE_UPDATE_ENDPOINT)
+         );
++        // Installers go forward only, like the daemon upgrade (`should_request_upgrade`).
++        assert_eq!(
++            config["bundle"]["windows"]["allowDowngrades"].as_bool(),
++            Some(false)
++        );
++    }
++
++    #[test]
++    fn beta_manifest_is_served_from_a_fixed_tag() {
++        // `releases/latest` never resolves to a prerelease, so the beta manifest must not be
++        // looked up there; stable stays on `releases/latest`.
++        assert_eq!(
++            BETA_UPDATE_ENDPOINT,
++            "https://github.com/Indosaram/ferryx/releases/download/beta/latest-beta.json"
++        );
++        assert!(!BETA_UPDATE_ENDPOINT.contains("/releases/latest/"));
++        assert_eq!(
++            STABLE_UPDATE_ENDPOINT,
++            "https://github.com/Indosaram/ferryx/releases/latest/download/latest.json"
++        );
++    }
++
++    #[test]
++    fn unpublished_updater_targets_are_managed_externally() {
++        for target in [
++            "darwin-aarch64",
++            "darwin-x86_64",
++            "linux-x86_64",
++            "windows-x86_64",
++        ] {
++            assert!(has_published_target(Some(target)), "{target}");
++        }
++        for target in [
++            "linux-aarch64",
++            "windows-aarch64",
++            "linux-armv7",
++            "windows-i686",
++        ] {
++            assert!(!has_published_target(Some(target)), "{target}");
++        }
++        // A platform the plugin cannot name has no manifest entry either.
++        assert!(!has_published_target(None));
++        // This test binary runs on a published host target, so it keeps the in-app updater.
++        if cfg!(target_arch = "x86_64") || cfg!(target_os = "macos") {
++            assert!(!unpublished_target());
++        }
+     }
+ 
+     #[test]
+     fn test_distribution_channel_non_windows() {
+         if !cfg!(windows) {
+             assert_eq!(distribution_channel(), "native");
+-            // A test binary is never packaged as a distribution package, so it keeps the
+-            // in-app updater.
+-            assert!(!updater_managed_externally());
++            // A test binary is never packaged as a distribution package, so only an
++            // unpublished host target takes it away from the in-app updater.
++            assert_eq!(updater_managed_externally(), unpublished_target());
+         }
+     }
+ 
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 0705739ba..a54d880c7 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1443,6 +1443,11 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
+                     "Could not arm the daemon supervisor; the daemon will be spawned detached"
+                 ),
+             });
++            // A CLI launcher installed earlier keeps working after the app is moved or the
++            // AppImage is swapped; a missing or foreign launcher is left alone.
++            tauri::async_runtime::spawn_blocking(
++                crate::ipc::cli_install::refresh_launcher_on_start,
++            );
+             #[cfg(target_os = "macos")]
+             if let Some(window) = app.get_webview_window("main") {
+                 if let Ok(raw_window) = window.ns_window() {
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+index bd5e0c836..d3b6cbe50 100644
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -70,7 +70,7 @@
+       "icons/icon.ico"
+     ],
+     "windows": {
+-      "allowDowngrades": true,
++      "allowDowngrades": false,
+       "webviewInstallMode": {
+         "type": "downloadBootstrapper",
+         "silent": true
+@@ -91,7 +91,7 @@
+     "linux": {
+       "deb": {
+         "depends": [
+-          "libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37",
++          "libwebkit2gtk-4.1-0",
+           "libgtk-3-0",
+           "libappindicator3-1 | libayatana-appindicator3-1",
+           "libasound2 | libasound2t64"
+diff --git a/ui/src/lib/updater.ts b/ui/src/lib/updater.ts
+index 9a154e74b..1ae05862d 100644
+--- a/ui/src/lib/updater.ts
++++ b/ui/src/lib/updater.ts
+@@ -12,12 +12,13 @@ export type UpdateChannel = "stable" | "beta";
+ /**
+  * Update manifests per channel. They mirror `STABLE_UPDATE_ENDPOINT` and `BETA_UPDATE_ENDPOINT` in
+  * src-tauri/src/ipc/updater.rs, which picks the endpoint from the channel this module sends; the UI
+- * never sends a URL. Beta falls back to the stable manifest when no beta manifest is published.
++ * never sends a URL. Beta reads the fixed `beta` release tag (`releases/latest` never resolves to a
++ * prerelease) and falls back to the stable manifest when no beta manifest is published.
+  */
+ export const UPDATE_ENDPOINTS: Record<UpdateChannel, readonly string[]> = {
+   stable: ["https://github.com/Indosaram/ferryx/releases/latest/download/latest.json"],
+   beta: [
+-    "https://github.com/Indosaram/ferryx/releases/latest/download/latest-beta.json",
++    "https://github.com/Indosaram/ferryx/releases/download/beta/latest-beta.json",
+     "https://github.com/Indosaram/ferryx/releases/latest/download/latest.json",
+   ],
+ };

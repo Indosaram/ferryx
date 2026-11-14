@@ -1,0 +1,6 @@
+M	scripts/install.ps1
+M	scripts/install.sh
+M	scripts/install.test.mjs
+M	site/package.json
+M	site/public/install.ps1
+M	site/public/install.sh

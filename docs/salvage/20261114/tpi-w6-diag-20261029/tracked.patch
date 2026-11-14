@@ -1,0 +1,1552 @@
+diff --git a/src-tauri/src/cli.rs b/src-tauri/src/cli.rs
+index 55064ad88..c9866f2b1 100644
+--- a/src-tauri/src/cli.rs
++++ b/src-tauri/src/cli.rs
+@@ -2763,6 +2763,10 @@ pub struct ServiceReport {
+     pub backend: &'static str,
+     pub installed: bool,
+     pub linger: Option<bool>,
++    /// Linux with linger off: the exact command that keeps the daemon alive past logout, plus
++    /// what `loginctl` said when enabling it failed.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub linger_hint: Option<String>,
+     pub pid: Option<u32>,
+     pub reason: Option<String>,
+ }
+@@ -2988,13 +2992,8 @@ pub fn native_service_backend() -> &'static str {
+ }
+ 
+ fn supervisor_unavailable_reason() -> String {
+-    #[cfg(target_os = "linux")]
+-    {
+-        if let Some(reason) = crate::daemon::supervisor_linux::availability().clone() {
+-            return reason;
+-        }
+-    }
+-    "no daemon supervisor is supported in this runtime".to_string()
++    crate::daemon::supervisor::unavailable_reason()
++        .unwrap_or_else(|| "no daemon supervisor is supported in this runtime".to_string())
+ }
+ 
+ /// Pid of the daemon answering on this machine's canonical endpoint. Read-only; on targets
+@@ -3011,27 +3010,71 @@ fn login_user() -> Option<String> {
+         .filter(|user| !user.is_empty())
+ }
+ 
++/// The user a linger hint names; linger is a Linux-only concept.
++fn linger_user() -> Option<String> {
++    #[cfg(target_os = "linux")]
++    {
++        login_user()
++    }
++    #[cfg(not(target_os = "linux"))]
++    {
++        None
++    }
++}
++
++/// Most of `loginctl`'s stderr a linger hint repeats.
++const LINGER_STDERR_CHARS: usize = 300;
++
++/// What to tell a user whose linger is off: the exact `sudo loginctl enable-linger <user>` and,
++/// when enabling it failed, what `loginctl` said. `None` when linger is on or not a Linux concept.
++fn linger_hint(user: Option<&str>, enabled: Option<bool>, loginctl_stderr: Option<&str>) -> Option<String> {
++    if enabled != Some(false) {
++        return None;
++    }
++    let mut hint = format!(
++        "linger is off, so the daemon stops when you log out; enable it with: sudo loginctl enable-linger {}",
++        user.unwrap_or("$USER")
++    );
++    let stderr = loginctl_stderr.map(str::trim).unwrap_or_default();
++    if !stderr.is_empty() {
++        let stderr: String = crate::daemon::diagnostics::redact_secrets(stderr)
++            .split_whitespace()
++            .collect::<Vec<_>>()
++            .join(" ")
++            .chars()
++            .take(LINGER_STDERR_CHARS)
++            .collect();
++        hint.push_str(&format!(" (loginctl: {stderr})"));
++    }
++    Some(hint)
++}
++
+ /// Linux: `loginctl enable-linger $USER` so the user manager (and a supervised daemon) outlives
+-/// the SSH session. `None` on other targets.
++/// the SSH session, with the hint to show when it did not work. `(None, None)` on other targets.
+ #[cfg(target_os = "linux")]
+-fn enable_linger() -> Option<bool> {
++fn enable_linger() -> (Option<bool>, Option<String>) {
+     let Some(user) = login_user() else {
+-        return Some(false);
++        return (Some(false), linger_hint(None, Some(false), None));
++    };
++    let output = std::process::Command::new("loginctl")
++        .args(["enable-linger", &user])
++        .stdin(std::process::Stdio::null())
++        .stdout(std::process::Stdio::null())
++        .stderr(std::process::Stdio::piped())
++        .output();
++    let (enabled, stderr) = match output {
++        Ok(output) => (
++            output.status.success(),
++            String::from_utf8_lossy(&output.stderr).into_owned(),
++        ),
++        Err(error) => (false, format!("cannot run loginctl: {error}")),
+     };
+-    Some(
+-        std::process::Command::new("loginctl")
+-            .args(["enable-linger", &user])
+-            .stdin(std::process::Stdio::null())
+-            .stdout(std::process::Stdio::null())
+-            .stderr(std::process::Stdio::null())
+-            .status()
+-            .is_ok_and(|status| status.success()),
+-    )
++    (Some(enabled), linger_hint(Some(user.as_str()), Some(enabled), Some(stderr.as_str())))
+ }
+ 
+ #[cfg(not(target_os = "linux"))]
+-fn enable_linger() -> Option<bool> {
+-    None
++fn enable_linger() -> (Option<bool>, Option<String>) {
++    (None, None)
+ }
+ 
+ #[cfg(target_os = "linux")]
+@@ -3124,7 +3167,7 @@ fn wait_for_answering_daemon(
+ 
+ fn detached_fallback(
+     runtime: &tokio::runtime::Runtime,
+-    linger: Option<bool>,
++    (linger, linger_hint): (Option<bool>, Option<String>),
+     reason: String,
+ ) -> ServiceReport {
+     // A daemon already answers: never start a second one and never touch the running one.
+@@ -3134,6 +3177,7 @@ fn detached_fallback(
+             backend: "detached",
+             installed: true,
+             linger,
++            linger_hint,
+             pid: Some(pid),
+             reason: Some(reason),
+         };
+@@ -3144,6 +3188,7 @@ fn detached_fallback(
+             backend: "detached",
+             installed: true,
+             linger,
++            linger_hint,
+             pid: wait_for_answering_daemon(runtime, std::time::Duration::from_secs(10))
+                 .or(Some(child_pid)),
+             reason: Some(reason),
+@@ -3153,6 +3198,7 @@ fn detached_fallback(
+             backend: "detached",
+             installed: false,
+             linger,
++            linger_hint,
+             pid: None,
+             reason: Some(format!("{reason}; detached start failed: {error}")),
+         },
+@@ -3163,7 +3209,7 @@ fn detached_fallback(
+ /// absent owner, under owner admission), else a detached `--daemon`. Never stops or replaces a
+ /// running daemon.
+ pub fn install_service(runtime: &tokio::runtime::Runtime) -> ServiceReport {
+-    let linger = enable_linger();
++    let (linger, linger_hint) = enable_linger();
+     let reason = if crate::daemon::supervisor::supported() {
+         // `ensure_if_absent` is `ensure()` behind owner admission: it starts the supervised job
+         // only when no daemon owns the endpoint and registers it for login.
+@@ -3174,6 +3220,7 @@ pub fn install_service(runtime: &tokio::runtime::Runtime) -> ServiceReport {
+                     backend: native_service_backend(),
+                     installed: true,
+                     linger,
++                    linger_hint,
+                     pid: answering_daemon_pid(runtime),
+                     reason: None,
+                 };
+@@ -3184,7 +3231,7 @@ pub fn install_service(runtime: &tokio::runtime::Runtime) -> ServiceReport {
+     } else {
+         supervisor_unavailable_reason()
+     };
+-    detached_fallback(runtime, linger, reason)
++    detached_fallback(runtime, (linger, linger_hint), reason)
+ }
+ 
+ /// `service status`: read-only.
+@@ -3192,6 +3239,7 @@ pub fn service_status(runtime: &tokio::runtime::Runtime) -> ServiceReport {
+     let supported = crate::daemon::supervisor::supported();
+     let unit = supported && crate::daemon::supervisor::installed();
+     let pid = answering_daemon_pid(runtime);
++    let linger = linger_status();
+     ServiceReport {
+         supervised: unit,
+         backend: if unit {
+@@ -3202,7 +3250,8 @@ pub fn service_status(runtime: &tokio::runtime::Runtime) -> ServiceReport {
+             "none"
+         },
+         installed: unit || pid.is_some(),
+-        linger: linger_status(),
++        linger,
++        linger_hint: linger_hint(linger_user().as_deref(), linger, None),
+         pid,
+         reason: (!supported).then(supervisor_unavailable_reason),
+     }
+@@ -3242,6 +3291,9 @@ pub fn render_service_report(report: &ServiceReport) -> String {
+     if let Some(linger) = report.linger {
+         text.push_str(&format!(" linger={linger}"));
+     }
++    if let Some(hint) = &report.linger_hint {
++        text.push_str(&format!(" linger_hint=\"{hint}\""));
++    }
+     if let Some(pid) = report.pid {
+         text.push_str(&format!(" pid={pid}"));
+     }
+@@ -4140,6 +4192,7 @@ mod tests {
+             backend: "detached",
+             installed: true,
+             linger: None,
++            linger_hint: None,
+             pid: Some(42),
+             reason: Some("systemd is not the init system".into()),
+         };
+@@ -4181,6 +4234,38 @@ mod tests {
+         assert_eq!(up_summary_exit_code(&not_running, true), UP_EXIT_OK);
+     }
+ 
++    #[test]
++    fn linger_hint_names_the_exact_command() {
++        let failed = linger_hint(
++            Some("alice"),
++            Some(false),
++            Some("Could not enable linger: Access denied\n"),
++        )
++        .expect("a hint");
++        assert!(failed.contains("sudo loginctl enable-linger alice"), "{failed}");
++        assert!(failed.ends_with("(loginctl: Could not enable linger: Access denied)"), "{failed}");
++
++        let unknown = linger_hint(None, Some(false), None).expect("a hint");
++        assert!(unknown.ends_with("sudo loginctl enable-linger $USER"), "{unknown}");
++        assert_eq!(linger_hint(Some("alice"), Some(true), Some("ignored")), None);
++        assert_eq!(linger_hint(Some("alice"), None, None), None);
++
++        let secret = linger_hint(Some("alice"), Some(false), Some("polkit token=abc123secretvalue")).unwrap();
++        assert!(!secret.contains("abc123secretvalue"), "{secret}");
++
++        let report = ServiceReport {
++            supervised: true,
++            backend: "systemd-user",
++            installed: true,
++            linger: Some(false),
++            linger_hint: Some(failed.clone()),
++            pid: None,
++            reason: None,
++        };
++        assert!(render_service_report(&report).contains(&format!(" linger_hint=\"{failed}\"")));
++        assert_eq!(serde_json::to_value(&report).unwrap()["lingerHint"], failed);
++    }
++
+     #[test]
+     fn service_parses_actions_and_json() {
+         assert_eq!(
+diff --git a/src-tauri/src/daemon/client.rs b/src-tauri/src/daemon/client.rs
+index 4c87bd36f..9be4aaf00 100644
+--- a/src-tauri/src/daemon/client.rs
++++ b/src-tauri/src/daemon/client.rs
+@@ -145,6 +145,129 @@ mod transport_pair_tests {
+             );
+         }
+     }
++
++    fn diagnostics_of(error: &IpcError) -> &serde_json::Value {
++        &error.details.as_ref().expect("details")["diagnostics"]
++    }
++
++    #[test]
++    fn a_connect_failure_names_its_stage_and_reason() {
++        let error = connect_failure(
++            IpcErrorCode::InternalError,
++            "Failed to spawn",
++            "spawn",
++            Some("permission denied token=abc123secretvalue"),
++        );
++        assert_eq!(error.code, IpcErrorCode::InternalError);
++        assert_eq!(error.message, "Failed to spawn");
++        let details = error.details.as_ref().unwrap();
++        assert_eq!(details["type"], "daemonConnectFailure");
++        assert_eq!(details["diagnostics"]["stage"], "spawn");
++        assert_eq!(
++            details["diagnostics"]["reason"],
++            "permission denied token=[redacted]"
++        );
++    }
++
++    #[test]
++    fn connect_diagnostics_name_the_socket_log_and_owner() {
++        let socket = Path::new("/tmp/ferryx-test-36/daemon.sock");
++        let log = Path::new("/home/u/.ferryx/logs/daemon.log");
++        let ownership = serde_json::json!({ "problem": "Path /tmp/ferryx-test-36 is owned by UID 0 (expected current UID 1000)" });
++
++        let plain = with_connect_diagnostics(
++            IpcError::new(IpcErrorCode::InternalError, "boom"),
++            socket,
++            Some(log),
++            ownership.clone(),
++            None,
++        );
++        assert_eq!(plain.details.as_ref().unwrap()["type"], "daemonConnectFailure");
++        let diagnostics = diagnostics_of(&plain);
++        assert_eq!(diagnostics["socketPath"], "/tmp/ferryx-test-36/daemon.sock");
++        assert_eq!(diagnostics["logPath"], "/home/u/.ferryx/logs/daemon.log");
++        assert_eq!(diagnostics["ownership"], ownership);
++        assert_eq!(diagnostics["supervisorError"], serde_json::Value::Null);
++
++        // A staged failure keeps its stage and gains the location.
++        let staged = with_connect_diagnostics(
++            connect_failure(IpcErrorCode::InternalError, "late", "connectAfterReady", None),
++            socket,
++            None,
++            serde_json::Value::Null,
++            None,
++        );
++        assert_eq!(diagnostics_of(&staged)["stage"], "connectAfterReady");
++        assert_eq!(diagnostics_of(&staged)["logPath"], serde_json::Value::Null);
++
++        // The retry decisions key on details.type, which must survive the annotation.
++        let stale = with_connect_diagnostics(
++            transport_pair_stale_error("stale"),
++            socket,
++            Some(log),
++            serde_json::Value::Null,
++            None,
++        );
++        assert!(transport_pair_is_stale(&stale));
++        assert_eq!(diagnostics_of(&stale)["socketPath"], "/tmp/ferryx-test-36/daemon.sock");
++
++        // Not a connect failure: left exactly as it was.
++        let mismatch = daemon_protocol_mismatch_error(5, 4);
++        assert_eq!(
++            with_connect_diagnostics(mismatch.clone(), socket, Some(log), serde_json::Value::Null, None),
++            mismatch
++        );
++    }
++
++    #[test]
++    fn supervisor_failures_are_reported_without_secrets() {
++        let key = format!("fxk_{}", "0123456789abcdef".repeat(4));
++        let reason = format!(
++            "codesign --verify failed for /Users/u/Library/Ferryx/runtime/g1/Ferryx.app; FERRYX_INSTALL_KEY={key} token=abc123secretvalue"
++        );
++        let error = with_connect_diagnostics(
++            IpcError::new(IpcErrorCode::DaemonBusy, "busy"),
++            Path::new("/tmp/ferryx-test-36/daemon.sock"),
++            None,
++            serde_json::Value::Null,
++            Some(reason.as_str()),
++        );
++        let text = diagnostics_of(&error)["supervisorError"].as_str().unwrap().to_string();
++        assert!(text.contains("codesign --verify failed for /Users/u/Library/Ferryx/runtime/g1/Ferryx.app"), "{text}");
++        assert!(!text.contains(&key), "{text}");
++        assert!(!text.contains("abc123secretvalue"), "{text}");
++        assert!(!serde_json::to_string(&error).unwrap().contains("abc123secretvalue"));
++    }
++
++    #[tokio::test]
++    async fn readiness_failures_name_their_stage() {
++        let closed = wait_for_daemon_ready(BufReader::new(tokio::io::empty()), Duration::from_secs(5))
++            .await
++            .unwrap_err();
++        assert_eq!(diagnostics_of(&closed)["stage"], "readinessClosed");
++
++        // The writer stays alive, so only the deadline can end the wait.
++        let (_writer, reader) = tokio::io::duplex(64);
++        let timed_out = wait_for_daemon_ready(BufReader::new(reader), Duration::from_millis(10))
++            .await
++            .unwrap_err();
++        assert_eq!(diagnostics_of(&timed_out)["stage"], "readinessTimeout");
++    }
++
++    #[test]
++    fn unrecognized_daemon_errors_keep_their_code() {
++        let handshake = handshake_error_for_response("boom".into(), Some("INTERNAL_ERROR"));
++        assert_eq!(handshake.details.as_ref().unwrap()["type"], "daemonHandshakeError");
++        assert_eq!(handshake.details.as_ref().unwrap()["daemonCode"], "INTERNAL_ERROR");
++        let manual = manual_ssh_response(DaemonResponse::Error {
++            message: "odd".into(),
++            code: Some("SOMETHING_NEW".into()),
++            details: None,
++        })
++        .unwrap_err();
++        assert_eq!(manual.code, IpcErrorCode::InternalError);
++        assert_eq!(manual.details.unwrap()["daemonCode"], "SOMETHING_NEW");
++    }
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -265,20 +388,128 @@ where
+                 return Ok(());
+             }
+         }
+-        Err(IpcError::new(
++        Err(connect_failure(
+             IpcErrorCode::InternalError,
+             "Daemon process stdout closed before emitting readiness signal",
++            "readinessClosed",
++            None,
+         ))
+     })
+     .await
+     .map_err(|_| {
+-        IpcError::new(
++        connect_failure(
+             IpcErrorCode::InternalError,
+             "Ferryx daemon startup timed out waiting for readiness signal",
++            "readinessTimeout",
++            None,
+         )
+     })?
+ }
+ 
++/// `details.type` of a daemon connect failure that carries `details.diagnostics`.
++const DAEMON_CONNECT_FAILURE: &str = "daemonConnectFailure";
++
++/// Most of the daemon's stderr a failed spawn reads, and the tail of it that is reported.
++const STDERR_READ_BYTES: u64 = 4096;
++const STDERR_TAIL_BYTES: usize = 2048;
++
++/// A connect failure at one named stage, with an optional (redacted) reason.
++fn connect_failure(
++    code: IpcErrorCode,
++    message: impl Into<String>,
++    stage: &str,
++    reason: Option<&str>,
++) -> IpcError {
++    IpcError::new(code, message).with_details(json!({
++        "type": DAEMON_CONNECT_FAILURE,
++        "diagnostics": {
++            "stage": stage,
++            "reason": crate::daemon::diagnostics::redacted_value(reason),
++        },
++    }))
++}
++
++/// Adds each key of `extra` to `details.diagnostics` unless it is already there. An error without
++/// details becomes a `daemonConnectFailure`; every existing detail key (the retry decisions key
++/// on `type`) is kept, and non-object details are left alone.
++fn merge_diagnostics(mut error: IpcError, extra: serde_json::Value) -> IpcError {
++    let serde_json::Value::Object(extra) = extra else {
++        return error;
++    };
++    let details = error
++        .details
++        .get_or_insert_with(|| json!({ "type": DAEMON_CONNECT_FAILURE }));
++    if let Some(details) = details.as_object_mut() {
++        if let Some(diagnostics) = details
++            .entry("diagnostics")
++            .or_insert_with(|| json!({}))
++            .as_object_mut()
++        {
++            for (key, value) in extra {
++                diagnostics.entry(key).or_insert(value);
++            }
++        }
++    }
++    error
++}
++
++/// Where to look when the daemon cannot be reached: the socket, the daemon log, who owns the
++/// runtime directory, and why the supervisor could not start it (codesign or staging failures
++/// surface there). Only connect-shaped failures are annotated.
++fn with_connect_diagnostics(
++    error: IpcError,
++    socket_path: &Path,
++    log_path: Option<&Path>,
++    ownership: serde_json::Value,
++    supervisor_error: Option<&str>,
++) -> IpcError {
++    if !matches!(
++        error.code,
++        IpcErrorCode::InternalError
++            | IpcErrorCode::IoError
++            | IpcErrorCode::DaemonBusy
++            | IpcErrorCode::HostUnavailable
++    ) {
++        return error;
++    }
++    merge_diagnostics(
++        error,
++        json!({
++            "socketPath": socket_path.display().to_string(),
++            "logPath": log_path.map(|path| path.display().to_string()),
++            "ownership": ownership,
++            "supervisorError": crate::daemon::diagnostics::redacted_value(supervisor_error),
++        }),
++    )
++}
++
++/// Kills a spawned daemon that failed its readiness wait and reports how it ended: the tail of
++/// its stderr (bounded in size and time, redacted) and its exit status.
++async fn spawned_daemon_failure(child: &mut tokio::process::Child) -> serde_json::Value {
++    use tokio::io::AsyncReadExt;
++    let _ = child.kill().await;
++    let mut captured = Vec::new();
++    if let Some(stderr) = child.stderr.take() {
++        let mut limited = stderr.take(STDERR_READ_BYTES);
++        let _ = tokio::time::timeout(
++            Duration::from_millis(500),
++            limited.read_to_end(&mut captured),
++        )
++        .await;
++    }
++    let start = captured.len().saturating_sub(STDERR_TAIL_BYTES);
++    let tail = String::from_utf8_lossy(&captured[start..]).trim().to_string();
++    let status = child.try_wait().ok().flatten();
++    #[cfg(unix)]
++    let signal = status.and_then(|status| std::os::unix::process::ExitStatusExt::signal(&status));
++    #[cfg(not(unix))]
++    let signal: Option<i32> = None;
++    json!({
++        "stderrTail": crate::daemon::diagnostics::redacted_value((!tail.is_empty()).then_some(tail.as_str())),
++        "exitStatus": status.map(|status| json!({ "code": status.code(), "signal": signal })),
++    })
++}
++
+ /// The pid of the daemon that answers on this machine's canonical endpoint, or `None` when no live
+ /// daemon owns it.
+ ///
+@@ -482,7 +713,10 @@ fn handshake_error_for_response(message: String, code: Option<&str>) -> IpcError
+         IpcError::new(IpcErrorCode::HostUnavailable, message)
+             .with_details(serde_json::json!({ "type": "daemonRetired" }))
+     } else {
+-        IpcError::new(IpcErrorCode::InternalError, message)
++        IpcError::new(IpcErrorCode::InternalError, message).with_details(json!({
++            "type": "daemonHandshakeError",
++            "daemonCode": code,
++        }))
+     }
+ }
+ 
+@@ -530,7 +764,8 @@ pub(crate) fn manual_ssh_response(
+             Some("SESSION_NOT_FOUND") => IpcError::new(IpcErrorCode::SessionNotFound, message),
+             Some(CODE_IO) => IpcError::new(IpcErrorCode::IoError, message)
+                 .with_details(serde_json::json!({ "code": code })),
+-            Some(_) => IpcError::new(IpcErrorCode::InternalError, message),
++            Some(_) => IpcError::new(IpcErrorCode::InternalError, message)
++                .with_details(serde_json::json!({ "type": "daemonError", "daemonCode": code })),
+             None => IpcError::new(
+                 IpcErrorCode::DaemonProtocolMismatch,
+                 format!("Daemon cannot inspect manual SSH sessions: {message}"),
+@@ -1298,7 +1533,10 @@ pub(crate) fn parse_attach_error_response(
+             "sessionId": session_id,
+         }))
+     } else {
+-        IpcError::new(IpcErrorCode::InternalError, message)
++        IpcError::new(IpcErrorCode::InternalError, message).with_details(serde_json::json!({
++            "type": "daemonAttachError",
++            "sessionId": session_id,
++        }))
+     }
+ }
+ 
+@@ -1336,6 +1574,9 @@ pub struct DaemonClient {
+     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
+     upgrade_requested: Arc<AtomicBool>,
+     spawn_lock: Arc<Mutex<()>>,
++    /// Why the supervisor could not take the daemon's lifetime on the last attempt (codesign or
++    /// staging failures surface here); reported with a failed connect.
++    supervisor_error: Arc<parking_lot::Mutex<Option<String>>>,
+ }
+ 
+ impl Default for DaemonClient {
+@@ -1347,17 +1588,7 @@ impl Default for DaemonClient {
+ impl DaemonClient {
+ 
+     pub fn new() -> Self {
+-        Self {
+-            socket_path: Self::resolve_default_socket_path(),
+-            connection: Arc::new(Mutex::new(None)),
+-            interactive_connection: Arc::new(Mutex::new(None)),
+-            spawn_connection: Arc::new(Mutex::new(None)),
+-            remote_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+-            local_connections: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+-            epoch: Arc::new(parking_lot::RwLock::new(None)),
+-            upgrade_requested: Arc::new(AtomicBool::new(false)),
+-            spawn_lock: Arc::new(Mutex::new(())),
+-        }
++        Self::new_with_socket(Self::resolve_default_socket_path())
+     }
+ 
+     pub fn new_with_socket(socket_path: PathBuf) -> Self {
+@@ -1371,6 +1602,7 @@ impl DaemonClient {
+             epoch: Arc::new(parking_lot::RwLock::new(None)),
+             upgrade_requested: Arc::new(AtomicBool::new(false)),
+             spawn_lock: Arc::new(Mutex::new(())),
++            supervisor_error: Arc::new(parking_lot::Mutex::new(None)),
+         }
+     }
+ 
+@@ -2548,6 +2780,7 @@ impl DaemonClient {
+     fn upgrade_rpc_client(&self) -> Self {
+         Self {
+             socket_path: self.socket_path.clone(),
++            supervisor_error: Arc::clone(&self.supervisor_error),
+             connection: Arc::new(Mutex::new(None)),
+             interactive_connection: Arc::new(Mutex::new(None)),
+             spawn_connection: Arc::new(Mutex::new(None)),
+@@ -2752,6 +2985,7 @@ impl DaemonClient {
+             .await;
+             match agent {
+                 Ok(true) => {
++                    *self.supervisor_error.lock() = None;
+                     tracing::info!(
+                         "Daemon lifetime handed to the supervisor"
+                     );
+@@ -2761,10 +2995,12 @@ impl DaemonClient {
+                         .wait_for_supervised_daemon(DAEMON_READY_TIMEOUT)
+                         .await
+                         .map_err(|error| {
+-                            IpcError::new(
++                            let mut busy = IpcError::new(
+                                 IpcErrorCode::DaemonBusy,
+                                 format!("The supervised daemon did not publish its endpoint: {}", error.message),
+-                            )
++                            );
++                            busy.details = error.details;
++                            busy
+                         });
+                 }
+                 // The job was already loaded and unchanged, so nothing was started (launchd ran it
+@@ -2773,10 +3009,13 @@ impl DaemonClient {
+                 Ok(false) => tracing::warn!(
+                     "The supervisor started nothing; spawning a detached daemon instead"
+                 ),
+-                Err(error) => tracing::warn!(
+-                    %error,
+-                    "Could not hand the daemon lifetime to the supervisor; spawning a detached daemon instead"
+-                ),
++                Err(error) => {
++                    tracing::warn!(
++                        %error,
++                        "Could not hand the daemon lifetime to the supervisor; spawning a detached daemon instead"
++                    );
++                    *self.supervisor_error.lock() = Some(error.message);
++                }
+             }
+             // No start was issued, so this caller's pending-start marker is withdrawn and the
+             // owner is classified again, immediately before the fallback spawn.
+@@ -2833,29 +3072,33 @@ impl DaemonClient {
+         // `exec`, so `pre_exec` is the only place this can happen.
+         crate::util::detach_launched_child(command.as_std_mut());
+         let mut child = command.spawn().map_err(|e| {
+-            IpcError::new(
++            connect_failure(
+                 IpcErrorCode::InternalError,
+                 format!(
+                     "Failed to spawn Ferryx daemon process ({}): {e}",
+                     binary_path.display()
+                 ),
++                "spawn",
++                Some(e.to_string().as_str()),
+             )
+         })?;
+         // The readiness-timeout kills below may only ever target this just-spawned child.
+         let spawned_pid = child.id();
+ 
+         let stdout = child.stdout.take().ok_or_else(|| {
+-            IpcError::new(
++            connect_failure(
+                 IpcErrorCode::InternalError,
+                 "Failed to capture daemon process stdout",
++                "captureStdout",
++                None,
+             )
+         })?;
+ 
+         if let Err(error) = wait_for_daemon_ready(BufReader::new(stdout), DAEMON_READY_TIMEOUT).await
+         {
+             debug_assert_eq!(child.id(), spawned_pid, "kill must target the spawned child");
+-            let _ = child.kill().await;
+-            return Err(error);
++            let ended = spawned_daemon_failure(&mut child).await;
++            return Err(merge_diagnostics(error, ended));
+         }
+ 
+         if let Err(error) = Self::validate_existing_socket_path(&self.socket_path) {
+@@ -2866,9 +3109,11 @@ impl DaemonClient {
+ 
+         // Exactly one connection attempt after the readiness event; never poll and never fall back.
+         Self::connect_socket(&self.socket_path).await.map_err(|e| {
+-            IpcError::new(
++            connect_failure(
+                 IpcErrorCode::InternalError,
+                 format!("Failed to connect to daemon socket after readiness signal: {e}"),
++                "connectAfterReady",
++                Some(e.to_string().as_str()),
+             )
+         })
+     }
+@@ -2888,10 +3133,12 @@ impl DaemonClient {
+                 return Ok(stream);
+             }
+             if tokio::time::Instant::now() >= deadline {
+-                return Err(IpcError::new(
++                return Err(connect_failure(
+                     IpcErrorCode::InternalError,
+                     "Timed out waiting for the supervised daemon to publish its endpoint"
+                         .to_string(),
++                    "supervisedEndpoint",
++                    None,
+                 ));
+             }
+             tokio::time::sleep(Duration::from_millis(100)).await;
+@@ -2923,6 +3170,13 @@ impl DaemonClient {
+     /// connected to, or presents one that boot rejects. The rejected attempt is never reported as
+     /// a request failure, because re-reading both halves is what makes the pair coherent again.
+     async fn connect_and_handshake(&self) -> Result<ActiveConnection, IpcError> {
++        match self.connect_and_handshake_retrying().await {
++            Err(error) => Err(self.annotate_connect_failure(error).await),
++            ok => ok,
++        }
++    }
++
++    async fn connect_and_handshake_retrying(&self) -> Result<ActiveConnection, IpcError> {
+         let mut retirement_deadline = None;
+         let mut refreshed_pair = false;
+         loop {
+@@ -2949,6 +3203,28 @@ impl DaemonClient {
+         }
+     }
+ 
++    /// [`with_connect_diagnostics`] for this client's endpoint: the socket, the daemon log, the
++    /// runtime directory's ownership and the last supervisor failure.
++    async fn annotate_connect_failure(&self, error: IpcError) -> IpcError {
++        let socket_path = self.socket_path.clone();
++        let supervisor_error = self.supervisor_error.lock().clone();
++        // A failed blocking task must never replace the connect failure it was annotating.
++        let unannotated = error.clone();
++        crate::ipc::run_blocking(move || {
++            let log_path = crate::daemon::logging::daemon_log_path();
++            let ownership = crate::daemon::diagnostics::runtime_ownership(&socket_path);
++            Ok(with_connect_diagnostics(
++                error,
++                &socket_path,
++                log_path.as_deref(),
++                ownership,
++                supervisor_error.as_deref(),
++            ))
++        })
++        .await
++        .unwrap_or(unannotated)
++    }
++
+     /// One attempt: the credential is read before the port is, so the token presented can never be
+     /// newer than the port it is presented to.
+     async fn connect_and_handshake_once(&self) -> Result<ActiveConnection, IpcError> {
+@@ -6923,7 +7199,10 @@ mod tests {
+         );
+         assert_eq!(err.code, IpcErrorCode::InternalError);
+         assert_eq!(err.message, "Session 'other-id' not found");
+-        assert!(err.details.is_none());
++        assert_eq!(
++            err.details,
++            Some(serde_json::json!({ "type": "daemonAttachError", "sessionId": "test-id" }))
++        );
+     }
+ 
+     #[test]
+@@ -6932,7 +7211,7 @@ mod tests {
+             parse_attach_error_response("Internal server error".to_string(), None, None, "test-id");
+         assert_eq!(err.code, IpcErrorCode::InternalError);
+         assert_eq!(err.message, "Internal server error");
+-        assert!(err.details.is_none());
++        assert_eq!(err.details.unwrap()["type"], "daemonAttachError");
+     }
+ 
+     #[test]
+@@ -6942,7 +7221,7 @@ mod tests {
+         let err =
+             parse_attach_error_response("Session ' not found".to_string(), None, None, "test-id");
+         assert_eq!(err.code, IpcErrorCode::InternalError);
+-        assert!(err.details.is_none());
++        assert_eq!(err.details.unwrap()["type"], "daemonAttachError");
+     }
+ 
+     #[test]
+diff --git a/src-tauri/src/daemon/control_server.rs b/src-tauri/src/daemon/control_server.rs
+index ecac1ce56..3e9b234f5 100644
+--- a/src-tauri/src/daemon/control_server.rs
++++ b/src-tauri/src/daemon/control_server.rs
+@@ -98,30 +98,7 @@ impl DaemonServer {
+                 self.handover_manager
+                     .register_authority_listener(AuthorityListenerRole::Control, listener.as_raw_fd())?;
+             }
+-            let server = Arc::clone(self);
+-            tokio::spawn(async move {
+-                let manager = Arc::clone(&server.handover_manager);
+-                loop {
+-                    // None: the successor serves this listener now; close this copy.
+-                    let Some(accepted) = manager.gated_accept(|| listener.accept()).await else {
+-                        drop(listener);
+-                        break;
+-                    };
+-                    match accepted {
+-                        Ok((stream, _)) => {
+-                            manager.note_accept(AuthorityListenerRole::Control);
+-                            let server = Arc::clone(&server);
+-                            tokio::spawn(async move {
+-                                server.handle_control_connection(stream, None).await;
+-                            });
+-                        }
+-                        Err(error) => {
+-                            tracing::error!("Control accept error: {error}");
+-                            break;
+-                        }
+-                    }
+-                }
+-            });
++            self.spawn_control_accept_loop(listener);
+         }
+ 
+         #[cfg(not(unix))]
+@@ -174,6 +151,37 @@ impl DaemonServer {
+         Ok(())
+     }
+ 
++    /// Serves control-v1 on one bound listener until it is handed to a successor. Also used for a
++    /// control socket rebound after the runtime directory was deleted (todo 36).
++    #[cfg(unix)]
++    pub(crate) fn spawn_control_accept_loop(self: &Arc<Self>, listener: UnixListener) {
++        use crate::daemon::handover::AuthorityListenerRole;
++        let server = Arc::clone(self);
++        tokio::spawn(async move {
++            let manager = Arc::clone(&server.handover_manager);
++            loop {
++                // None: the successor serves this listener now; close this copy.
++                let Some(accepted) = manager.gated_accept(|| listener.accept()).await else {
++                    drop(listener);
++                    break;
++                };
++                match accepted {
++                    Ok((stream, _)) => {
++                        manager.note_accept(AuthorityListenerRole::Control);
++                        let server = Arc::clone(&server);
++                        tokio::spawn(async move {
++                            server.handle_control_connection(stream, None).await;
++                        });
++                    }
++                    Err(error) => {
++                        tracing::error!("Control accept error: {error}");
++                        break;
++                    }
++                }
++            }
++        });
++    }
++
+     /// One task per daemon and the only retirement path for both RetireWhenIdle and Shutdown:
+     /// waits until a Retiring daemon is empty (nothing spawning or in flight, every response
+     /// already flushed, and nothing live unless a Shutdown confirmed those sessions), then writes
+diff --git a/src-tauri/src/daemon/logging.rs b/src-tauri/src/daemon/logging.rs
+index bcc97706c..2992cfb72 100644
+--- a/src-tauri/src/daemon/logging.rs
++++ b/src-tauri/src/daemon/logging.rs
+@@ -210,9 +210,10 @@ pub(crate) fn report_failure(error: &anyhow::Error) {
+     let _ = stderr.flush();
+ }
+ 
+-fn open_log() -> io::Result<std::fs::File> {
++/// `<data dir>/logs`, where the headless daemon writes `daemon.log`. Nothing is created.
++fn log_dir() -> Option<std::path::PathBuf> {
+     use std::path::PathBuf;
+-    let base = std::env::var_os("FERRYX_DATA_DIR")
++    std::env::var_os("FERRYX_DATA_DIR")
+         .map(PathBuf::from)
+         .or_else(|| {
+             #[cfg(windows)]
+@@ -228,10 +229,18 @@ fn open_log() -> io::Result<std::fs::File> {
+                 std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".ferryx"))
+             }
+         })
+-        .ok_or_else(|| {
+-            io::Error::new(io::ErrorKind::NotFound, "no private daemon data directory")
+-        })?;
+-    let dir = base.join("logs");
++        .map(|base| base.join("logs"))
++}
++
++/// The daemon log a failed connect points the user at. Nothing is created.
++pub(crate) fn daemon_log_path() -> Option<std::path::PathBuf> {
++    log_dir().map(|dir| dir.join("daemon.log"))
++}
++
++fn open_log() -> io::Result<std::fs::File> {
++    let dir = log_dir().ok_or_else(|| {
++        io::Error::new(io::ErrorKind::NotFound, "no private daemon data directory")
++    })?;
+     let mut builder = std::fs::DirBuilder::new();
+     builder.recursive(true);
+     #[cfg(unix)]
+diff --git a/src-tauri/src/daemon/mod.rs b/src-tauri/src/daemon/mod.rs
+index ca9135995..17331d285 100644
+--- a/src-tauri/src/daemon/mod.rs
++++ b/src-tauri/src/daemon/mod.rs
+@@ -6,6 +6,8 @@ pub mod client;
+ // Frozen, version-stable control channel ("control-v1"), separate from the data protocol.
+ pub mod control;
+ pub mod dag_service;
++// Redacted diagnostics a failed daemon connect or supervisor start carries (todo 36).
++pub(crate) mod diagnostics;
+ pub mod handover;
+ // Predecessor-authored handover request that authorizes one HandoverCandidate start (todo 8).
+ pub(crate) mod handover_request;
+diff --git a/src-tauri/src/daemon/server.rs b/src-tauri/src/daemon/server.rs
+index a6d76e74f..62b9973fb 100644
+--- a/src-tauri/src/daemon/server.rs
++++ b/src-tauri/src/daemon/server.rs
+@@ -964,8 +964,10 @@ fn validate_safe_ownership_and_type_for_uid(
+         .map_err(|e| format!("Failed to read metadata for {}: {e}", path.display()))?;
+     if meta.file_type().is_symlink() {
+         return Err(format!(
+-            "Path {} is a symlink, which is prohibited for daemon runtime",
+-            path.display()
++            "Path {} is a symlink, which is prohibited for daemon runtime (owned by UID {}, current UID {})",
++            path.display(),
++            meta.uid(),
++            expected_uid
+         ));
+     }
+     if meta.uid() != expected_uid {
+@@ -983,8 +985,10 @@ fn validate_safe_ownership_and_type_for_uid(
+     };
+     if !valid_type {
+         return Err(format!(
+-            "Path {} has an invalid runtime node type",
+-            path.display()
++            "Path {} has an invalid runtime node type (owned by UID {}, current UID {})",
++            path.display(),
++            meta.uid(),
++            expected_uid
+         ));
+     }
+     Ok(())
+@@ -1122,6 +1126,105 @@ pub(crate) fn ensure_runtime_directory(path: &Path) -> Result<(), String> {
+     Ok(())
+ }
+ 
++/// How often a serving daemon checks that its socket path still exists.
++#[cfg(unix)]
++const SOCKET_WATCH_INTERVAL: Duration = Duration::from_secs(2);
++
++/// Rebinds the daemon socket when it (or its whole runtime directory) was deleted under a running
++/// daemon, e.g. by a tmp cleaner. `Ok(None)` while the path exists. The recreated directory must
++/// belong to `expected_uid`; a refusal names the path and both UIDs.
++#[cfg(unix)]
++pub(crate) fn rebind_socket_if_vanished_for_uid(
++    socket_path: &Path,
++    expected_uid: libc::uid_t,
++) -> Result<Option<std::os::unix::net::UnixListener>, String> {
++    match fs::symlink_metadata(socket_path) {
++        Ok(_) => return Ok(None),
++        Err(error) if error.kind() == ErrorKind::NotFound => {}
++        Err(error) => {
++            return Err(format!(
++                "Failed to inspect daemon socket {}: {error}",
++                socket_path.display()
++            ))
++        }
++    }
++    let runtime_dir = socket_path
++        .parent()
++        .ok_or_else(|| format!("Daemon socket {} has no runtime directory", socket_path.display()))?;
++    fs::create_dir_all(runtime_dir).map_err(|error| {
++        format!(
++            "Failed to recreate daemon runtime directory {}: {error}",
++            runtime_dir.display()
++        )
++    })?;
++    validate_safe_ownership_and_type_for_uid(runtime_dir, RuntimeNodeKind::Directory, expected_uid)?;
++    fs::set_permissions(runtime_dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
++        format!(
++            "Failed to secure daemon runtime directory {}: {error}",
++            runtime_dir.display()
++        )
++    })?;
++    let listener = std::os::unix::net::UnixListener::bind(socket_path).map_err(|error| {
++        format!("Failed to rebind UDS socket at {}: {error}", socket_path.display())
++    })?;
++    listener
++        .set_nonblocking(true)
++        .map_err(|error| format!("Failed to configure the rebound daemon socket: {error}"))?;
++    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))
++        .map_err(|error| format!("Failed to secure daemon socket: {error}"))?;
++    validate_safe_ownership_and_type_for_uid(socket_path, RuntimeNodeKind::Socket, expected_uid)?;
++    Ok(Some(listener))
++}
++
++#[cfg(all(test, unix))]
++mod socket_rebind_tests {
++    use super::*;
++    use std::io::{Read, Write};
++
++    #[test]
++    fn a_deleted_runtime_directory_is_rebound() {
++        let dir = tempfile::tempdir().unwrap();
++        let runtime = dir.path().join("rt");
++        let socket = runtime.join("daemon.sock");
++        // SAFETY: `getuid` takes no arguments and returns the current process UID.
++        let uid = unsafe { libc::getuid() };
++        assert!(rebind_socket_if_vanished_for_uid(&socket, uid).unwrap().is_some());
++        fs::remove_dir_all(&runtime).unwrap();
++
++        let listener = rebind_socket_if_vanished_for_uid(&socket, uid)
++            .unwrap()
++            .expect("a vanished socket is rebound");
++        assert_eq!(fs::metadata(&runtime).unwrap().permissions().mode() & 0o777, 0o700);
++        assert_eq!(fs::symlink_metadata(&socket).unwrap().permissions().mode() & 0o777, 0o600);
++        validate_runtime_socket_path_for_uid(&socket, uid).expect("the rebound path is trusted");
++
++        let mut client = std::os::unix::net::UnixStream::connect(&socket).unwrap();
++        listener.set_nonblocking(false).unwrap();
++        let (mut served, _) = listener.accept().unwrap();
++        client.write_all(b"ping").unwrap();
++        let mut buf = [0u8; 4];
++        served.read_exact(&mut buf).unwrap();
++        assert_eq!(&buf, b"ping");
++
++        assert!(
++            rebind_socket_if_vanished_for_uid(&socket, uid).unwrap().is_none(),
++            "a present socket is left alone"
++        );
++    }
++
++    #[test]
++    fn a_rebind_refusal_names_the_path_and_uid() {
++        let dir = tempfile::tempdir().unwrap();
++        let socket = dir.path().join("rt").join("daemon.sock");
++        // SAFETY: `getuid` takes no arguments and returns the current process UID.
++        let foreign = unsafe { libc::getuid() }.wrapping_add(1);
++        let error = rebind_socket_if_vanished_for_uid(&socket, foreign).unwrap_err();
++        assert!(error.contains(&dir.path().join("rt").display().to_string()), "{error}");
++        assert!(error.contains(&format!("UID {foreign}")), "{error}");
++        assert!(!socket.exists(), "nothing is bound in a directory that failed validation");
++    }
++}
++
+ pub(crate) fn open_secure_lock_file(path: &Path) -> Result<File, String> {
+     match fs::symlink_metadata(path) {
+         Ok(_) => validate_safe_ownership_and_type(path, RuntimeNodeKind::RegularFile)?,
+@@ -4473,12 +4576,20 @@ impl DaemonServer {
+             }
+         }
+ 
++        Some(self.spawn_agent_state_accept_loop(listener))
++    }
++
++    /// Serves the agent-state ingress on one bound listener until it is handed to a successor.
++    /// Also used for an agent-state socket rebound after the runtime directory was deleted.
++    #[cfg(unix)]
++    fn spawn_agent_state_accept_loop(self: &Arc<Self>, listener: UnixListener) -> tokio::task::JoinHandle<()> {
++        use crate::daemon::handover::AuthorityListenerRole;
+         let server = Arc::clone(self);
+         let states = Arc::clone(&self.agent_states);
+         let sessions = self.session_service.clone();
+         let epoch = crate::scoped_contracts::Epoch(self.epoch);
+         let manager = Arc::clone(&self.handover_manager);
+-        Some(tokio::spawn(async move {
++        tokio::spawn(async move {
+             let mut clients = tokio::task::JoinSet::new();
+             loop {
+                 // None: the listener belongs to the successor now; close this copy.
+@@ -4496,7 +4607,7 @@ impl DaemonServer {
+                 while clients.try_join_next().is_some() {}
+                 clients.spawn(server.serve_agent_state_connection(states, sessions, epoch, stream));
+             }
+-        }))
++        })
+     }
+ 
+     /// Serves one connection on the unix agent-state socket: Ferryx's own `agentState` reports,
+@@ -5764,6 +5875,16 @@ impl DaemonServer {
+             }
+         }
+ 
++        // A tmp cleaner can delete the runtime directory under a running daemon; the listener
++        // keeps working but nobody can find it, so the path is checked and rebound (todo 36).
++        #[cfg(unix)]
++        let mut listener = listener;
++        #[cfg(unix)]
++        let mut socket_watch = tokio::time::interval(SOCKET_WATCH_INTERVAL);
++        #[cfg(unix)]
++        socket_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
++        #[cfg(unix)]
++        let mut last_rebind_error: Option<String> = None;
+         loop {
+             // Public accepts stop while a commit is decided and forever once this daemon has
+             // handed its listener to a successor (todo 8); the legacy socket is not gated. Once
+@@ -5771,7 +5892,27 @@ impl DaemonServer {
+             // path connectable with nobody accepting after the successor retired (run-int1
+             // Q08b), and it keeps serving its retained sessions on the legacy socket until
+             // check_retirement_if_empty exits the process.
+-            let Some(accepted) = self.handover_manager.gated_accept(|| listener.accept()).await else {
++            #[cfg(unix)]
++            let watched = tokio::select! {
++                accepted = self.handover_manager.gated_accept(|| listener.accept()) => Some(accepted),
++                _ = socket_watch.tick() => None,
++            };
++            #[cfg(unix)]
++            let Some(gated) = watched else {
++                if let Some(rebound) = self
++                    .rebind_vanished_socket(&socket_path, &mut last_rebind_error)
++                    .await
++                {
++                    listener = rebound;
++                    Arc::clone(&self).spawn_owner_publication(
++                        crate::daemon::owner_admission::AdmissionPaths::for_runtime(),
++                    );
++                }
++                continue;
++            };
++            #[cfg(not(unix))]
++            let gated = self.handover_manager.gated_accept(|| listener.accept()).await;
++            let Some(accepted) = gated else {
+                 drop(listener);
+                 std::future::pending::<()>().await;
+                 unreachable!("pending never resolves");
+@@ -5795,6 +5936,72 @@ impl DaemonServer {
+         Ok(())
+     }
+ 
++    /// The serving daemon's half of [`rebind_socket_if_vanished_for_uid`]: only an owner that
++    /// still holds its locks and has not handed its listener over rebinds, and the new listener
++    /// is registered so a later handover transfers it. Sessions are untouched either way. A
++    /// refusal is logged once per distinct message and retried on the next check.
++    #[cfg(unix)]
++    async fn rebind_vanished_socket(
++        &self,
++        socket_path: &Path,
++        last_error: &mut Option<String>,
++    ) -> Option<UnixListener> {
++        if !self.handover_manager.holds_lock_files()
++            || self.handover_manager.status() != crate::daemon::handover::HandoverStatus::Active
++        {
++            return None;
++        }
++        let path = socket_path.to_path_buf();
++        // SAFETY: `getuid` takes no arguments and returns the current process UID.
++        let uid = unsafe { libc::getuid() };
++        let rebound = crate::ipc::run_blocking(move || {
++            rebind_socket_if_vanished_for_uid(&path, uid).map_err(crate::ipc::IpcError::internal)
++        })
++        .await
++        .map_err(|error| error.message)
++        .and_then(|listener| {
++            listener
++                .map(|listener| {
++                    UnixListener::from_std(listener)
++                        .map_err(|error| format!("Failed to serve the rebound daemon socket: {error}"))
++                })
++                .transpose()
++        })
++        .and_then(|listener| {
++            if let Some(listener) = &listener {
++                use std::os::fd::AsRawFd;
++                if let Err(error) = self.handover_manager.register_authority_listener(
++                    crate::daemon::handover::AuthorityListenerRole::Canonical,
++                    listener.as_raw_fd(),
++                ) {
++                    // Never leave a path nobody serves: the next check binds it again.
++                    let _ = fs::remove_file(socket_path);
++                    return Err(error);
++                }
++            }
++            Ok(listener)
++        });
++        match rebound {
++            Ok(Some(listener)) => {
++                *last_error = None;
++                self.note_published_endpoint(socket_path);
++                tracing::warn!(
++                    path = %socket_path.display(),
++                    "Daemon socket path disappeared; rebound it and kept every session"
++                );
++                Some(listener)
++            }
++            Ok(None) => None,
++            Err(message) => {
++                if last_error.as_deref() != Some(message.as_str()) {
++                    tracing::error!(path = %socket_path.display(), %message, "Daemon socket path disappeared and could not be rebound");
++                    *last_error = Some(message);
++                }
++                None
++            }
++        }
++    }
++
+     fn resource_probes(&self) -> Vec<crate::daemon::resource_usage::SessionProbe> {
+         self.terminal_service
+             .list_sessions()
+diff --git a/src-tauri/src/daemon/supervisor.rs b/src-tauri/src/daemon/supervisor.rs
+index 242118928..288d61c58 100644
+--- a/src-tauri/src/daemon/supervisor.rs
++++ b/src-tauri/src/daemon/supervisor.rs
+@@ -82,6 +82,41 @@ pub fn supported() -> bool {
+     supported_in(&process_env, crate::daemon::server::is_dev_runtime()) && backend::available()
+ }
+ 
++/// Why no supervisor can own the daemon here, worded for Settings and `service status`; `None`
++/// when one can.
++pub fn unavailable_reason() -> Option<String> {
++    #[cfg(target_os = "linux")]
++    let host_reason = crate::daemon::supervisor_linux::availability().clone();
++    #[cfg(not(target_os = "linux"))]
++    let host_reason: Option<String> = None;
++    let dev_runtime = crate::daemon::server::is_dev_runtime();
++    unavailable_reason_for(
++        supported(),
++        host_reason,
++        dev_runtime || isolated_runtime(&process_env),
++    )
++}
++
++/// Pure policy behind [`unavailable_reason`]: the host's own reason (no systemd user manager,
++/// a container, WSL) wins over the runtime's isolation, which wins over the generic answer.
++fn unavailable_reason_for(
++    supported: bool,
++    host_reason: Option<String>,
++    isolated_or_dev: bool,
++) -> Option<String> {
++    if supported {
++        return None;
++    }
++    Some(match host_reason {
++        Some(reason) => format!("systemd user services are unavailable: {reason}"),
++        None if isolated_or_dev => {
++            "this is an isolated or development runtime, which never manages the login service"
++                .to_string()
++        }
++        None => "no daemon supervisor is supported in this runtime".to_string(),
++    })
++}
++
+ /// Name of the marker file that records the user's "do not autostart the daemon" choice.
+ const OPTOUT_FILE_NAME: &str = "daemon-supervisor.optout";
+ 
+@@ -890,6 +925,17 @@ mod tests {
+ 
+     #[test]
+     fn supervisor_is_unsupported_for_isolated_runtimes() {
++        assert_eq!(unavailable_reason_for(true, Some("ignored".into()), true), None);
++        assert_eq!(
++            unavailable_reason_for(false, Some("running inside a container".into()), true).as_deref(),
++            Some("systemd user services are unavailable: running inside a container")
++        );
++        assert!(unavailable_reason_for(false, None, true)
++            .is_some_and(|reason| reason.contains("isolated or development runtime")));
++        assert_eq!(
++            unavailable_reason_for(false, None, false).as_deref(),
++            Some("no daemon supervisor is supported in this runtime")
++        );
+         for key in ISOLATED_RUNTIME_ENV {
+             let isolated = env_of(&[(key, "/tmp/ferryx-fixture")]);
+             assert!(!supported_in(&isolated, false), "{key} must disable the supervisor");
+diff --git a/src-tauri/src/ipc/agent_integration.rs b/src-tauri/src/ipc/agent_integration.rs
+index 5fa9efa73..bc7e2f9f5 100644
+--- a/src-tauri/src/ipc/agent_integration.rs
++++ b/src-tauri/src/ipc/agent_integration.rs
+@@ -72,6 +72,16 @@ pub async fn cmd_agent_integration_remove_local() -> Result<RemovalReport, IpcEr
+ pub struct DaemonSupervisorStatus {
+     pub supported: bool,
+     pub enabled: bool,
++    /// Why the switch is unavailable on this host (`null` when supported), shown in Settings.
++    pub unavailable_reason: Option<String>,
++}
++
++fn supervisor_status(supported: bool, enabled: bool, reason: Option<String>) -> DaemonSupervisorStatus {
++    DaemonSupervisorStatus {
++        supported,
++        enabled: supported && enabled,
++        unavailable_reason: if supported { None } else { reason },
++    }
+ }
+ 
+ #[tauri::command]
+@@ -81,10 +91,20 @@ pub async fn cmd_daemon_supervisor_get() -> Result<DaemonSupervisorStatus, IpcEr
+         let enabled = supported
+             && !crate::daemon::supervisor::user_opted_out()
+             && crate::daemon::supervisor::installed();
++        let status = supervisor_status(
++            supported,
++            enabled,
++            crate::daemon::supervisor::unavailable_reason(),
++        );
+         // Settings > General reads this on mount; the line is the lifecycle QA's receipt that the
+         // Settings view opened before it walks focus to the switch (todo 12 Q10).
+-        tracing::info!(supported, enabled, "Daemon supervisor status read");
+-        Ok(DaemonSupervisorStatus { supported, enabled })
++        tracing::info!(
++            supported,
++            enabled,
++            unavailable_reason = status.unavailable_reason.as_deref(),
++            "Daemon supervisor status read"
++        );
++        Ok(status)
+     })
+     .await
+ }
+@@ -104,10 +124,11 @@ pub async fn cmd_daemon_supervisor_set(enabled: bool) -> Result<DaemonSupervisor
+         }
+         .map_err(|e| IpcError::internal(format!("daemon supervisor: {e}")))?;
+         let supported = crate::daemon::supervisor::supported();
+-        Ok(DaemonSupervisorStatus {
++        Ok(supervisor_status(
+             supported,
+-            enabled: supported && enabled,
+-        })
++            enabled,
++            crate::daemon::supervisor::unavailable_reason(),
++        ))
+     })
+     .await
+ }
+@@ -116,6 +137,28 @@ pub async fn cmd_daemon_supervisor_set(enabled: bool) -> Result<DaemonSupervisor
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn an_unsupported_supervisor_reports_why() {
++        let status = supervisor_status(
++            false,
++            true,
++            Some("systemd user services are unavailable: running inside a container".into()),
++        );
++        assert_eq!(
++            serde_json::to_value(&status).unwrap(),
++            serde_json::json!({
++                "supported": false,
++                "enabled": false,
++                "unavailableReason": "systemd user services are unavailable: running inside a container",
++            })
++        );
++        let supported = supervisor_status(true, true, Some("stale".into()));
++        assert_eq!(
++            serde_json::to_value(&supported).unwrap(),
++            serde_json::json!({ "supported": true, "enabled": true, "unavailableReason": null })
++        );
++    }
++
+     #[test]
+     fn an_older_daemon_is_reported_as_upgrade_required() {
+         // An older daemon cannot parse the request and answers with its untyped malformed-request
+diff --git a/ui/src/components/DaemonConnectionBanner.tsx b/ui/src/components/DaemonConnectionBanner.tsx
+index 5c6e30df3..a73e212b1 100644
+--- a/ui/src/components/DaemonConnectionBanner.tsx
++++ b/ui/src/components/DaemonConnectionBanner.tsx
+@@ -10,6 +10,11 @@ import {
+   restartPreviousTerminals,
+   type DaemonUpdatePending,
+ } from "../lib/updaterDaemonPending";
++import {
++  daemonDiagnosticsFrom,
++  formatDaemonDiagnostics,
++  redactSecrets,
++} from "../lib/daemonDiagnostics";
+ import { Button } from "./ui/button";
+ 
+ export type ProjectConnectionError = {
+@@ -83,11 +88,40 @@ function UpdatePendingActions(props: {
+   );
+ }
+ 
++function DiagnosticsRow(props: { label: string; value: string; testId: string; mono?: boolean }): JSX.Element {
++  return (
++    <div className="flex gap-2">
++      <dt className="shrink-0 text-muted-foreground">{props.label}</dt>
++      <dd
++        data-testid={props.testId}
++        className={props.mono ? "min-w-0 break-all font-mono text-foreground" : "min-w-0 text-foreground"}
++      >
++        {redactSecrets(props.value)}
++      </dd>
++    </div>
++  );
++}
++
+ export function DaemonConnectionBanner(props: {
+   error: ProjectConnectionError;
+   onRetry: () => void;
+ }): JSX.Element {
+   const { error, onRetry } = props;
++  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
++  const diagnostics = daemonDiagnosticsFrom(error);
++  const reason = diagnostics?.reason ?? diagnostics?.supervisorError ?? null;
++
++  const copyDiagnostics = async (): Promise<void> => {
++    try {
++      if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
++        throw new Error("clipboard unavailable");
++      }
++      await navigator.clipboard.writeText(formatDaemonDiagnostics(error));
++      setCopyState("copied");
++    } catch {
++      setCopyState("failed");
++    }
++  };
+ 
+   let title = "Couldn't open this project";
+   let body = error.message;
+@@ -123,6 +157,22 @@ export function DaemonConnectionBanner(props: {
+         <div className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
+           {body}
+         </div>
++        {diagnostics && (reason || diagnostics.socketPath || diagnostics.logPath) ? (
++          <dl
++            data-testid="daemon-connection-diagnostics"
++            className="mt-1.5 space-y-0.5 text-[11px]"
++          >
++            {reason ? (
++              <DiagnosticsRow label="Reason" value={reason} testId="daemon-diagnostics-reason" />
++            ) : null}
++            {diagnostics.socketPath ? (
++              <DiagnosticsRow label="Socket" value={diagnostics.socketPath} testId="daemon-diagnostics-socket" mono />
++            ) : null}
++            {diagnostics.logPath ? (
++              <DiagnosticsRow label="Log file" value={diagnostics.logPath} testId="daemon-diagnostics-log" mono />
++            ) : null}
++          </dl>
++        ) : null}
+         {updatePending ? (
+           <UpdatePendingActions initial={updatePending} onRetry={onRetry} />
+         ) : null}
+@@ -131,16 +181,40 @@ export function DaemonConnectionBanner(props: {
+         </div>
+       </div>
+ 
+-      <Button
+-        type="button"
+-        variant="secondary"
+-        size="sm"
+-        className="h-7 shrink-0 text-[11px]"
+-        data-testid="daemon-connection-retry"
+-        onClick={onRetry}
+-      >
+-        Retry
+-      </Button>
++      <div className="flex shrink-0 items-center gap-2">
++        {error.details ? (
++          <>
++            {copyState !== "idle" ? (
++              <span
++                data-testid="daemon-diagnostics-copy-status"
++                className="text-[11px] text-muted-foreground"
++              >
++                {copyState === "copied" ? "Copied" : "Copy failed"}
++              </span>
++            ) : null}
++            <Button
++              type="button"
++              variant="secondary"
++              size="sm"
++              className="h-7 text-[11px]"
++              data-testid="daemon-connection-copy-diagnostics"
++              onClick={() => void copyDiagnostics()}
++            >
++              Copy diagnostics
++            </Button>
++          </>
++        ) : null}
++        <Button
++          type="button"
++          variant="secondary"
++          size="sm"
++          className="h-7 shrink-0 text-[11px]"
++          data-testid="daemon-connection-retry"
++          onClick={onRetry}
++        >
++          Retry
++        </Button>
++      </div>
+     </div>
+   );
+ }
+diff --git a/ui/src/components/settings/GeneralSection.test.tsx b/ui/src/components/settings/GeneralSection.test.tsx
+index 4ef1bcf44..e4be37db8 100644
+--- a/ui/src/components/settings/GeneralSection.test.tsx
++++ b/ui/src/components/settings/GeneralSection.test.tsx
+@@ -154,4 +154,21 @@ describe("GeneralSection background service supervisor", () => {
+       screen.queryByRole("switch", { name: "Restart background service automatically" }),
+     ).toBeNull();
+   });
++
++  it("explains why the supervisor is unavailable", async () => {
++    native.getDaemonSupervisor.mockResolvedValue({
++      supported: false,
++      enabled: false,
++      unavailableReason: "systemd user services are unavailable: running inside a container",
++    });
++
++    render(<GeneralSection />);
++
++    expect(await screen.findByTestId("general-daemon-supervisor-unavailable")).toHaveTextContent(
++      "systemd user services are unavailable: running inside a container",
++    );
++    expect(
++      screen.queryByRole("switch", { name: "Restart background service automatically" }),
++    ).toBeNull();
++  });
+ });
+diff --git a/ui/src/components/settings/GeneralSection.tsx b/ui/src/components/settings/GeneralSection.tsx
+index 49bee94a6..f5bd3c06c 100644
+--- a/ui/src/components/settings/GeneralSection.tsx
++++ b/ui/src/components/settings/GeneralSection.tsx
+@@ -34,6 +34,7 @@ import {
+   getDaemonSupervisor,
+   installCliLauncher,
+   setDaemonSupervisor,
++  type DaemonSupervisorStatus,
+ } from "../../lib/tauri";
+ import { classifyNavigatorPlatform } from "../../lib/platform";
+ import { saveAdvancedFeatures, useAdvancedFeatures } from "../../lib/advancedFeatures";
+@@ -361,7 +362,7 @@ export function GeneralSection() {
+   const [managedExternally, setManagedExternally] = useState<boolean>(false);
+   const [sidebarOpenStartup, setSidebarOpenStartup] = useState<boolean>(() => loadSidebarOpenStartup());
+   const advancedFeatures = useAdvancedFeatures();
+-  const [supervisor, setSupervisor] = useState<{ supported: boolean; enabled: boolean } | null>(null);
++  const [supervisor, setSupervisor] = useState<DaemonSupervisorStatus | null>(null);
+   const [supervisorBusy, setSupervisorBusy] = useState(false);
+   const [supervisorError, setSupervisorError] = useState<string | null>(null);
+ 
+@@ -494,6 +495,21 @@ export function GeneralSection() {
+                 onCheckedChange={(checked) => void toggleSupervisor(checked)}
+               />
+             </SettingRow>
++          ) : supervisor?.unavailableReason ? (
++            <SettingRow
++              label="Restart background service automatically"
++              description={
++                <>
++                  Not available on this system:{" "}
++                  <span data-testid="general-daemon-supervisor-unavailable">
++                    {supervisor.unavailableReason}
++                  </span>
++                  .
++                </>
++              }
++            >
++              <span className="text-[11px] text-muted-foreground">Unavailable</span>
++            </SettingRow>
+           ) : null}
+         </div>
+         <CliLauncherCard />
+diff --git a/ui/src/lib/tauri.ts b/ui/src/lib/tauri.ts
+index 6cf04069f..f797825f0 100644
+--- a/ui/src/lib/tauri.ts
++++ b/ui/src/lib/tauri.ts
+@@ -1165,6 +1165,8 @@ export interface LocalRemovalReport {
+ export interface DaemonSupervisorStatus {
+   supported: boolean;
+   enabled: boolean;
++  /** Why the switch is unavailable on this host; null when supported. */
++  unavailableReason?: string | null;
+ }
+ 
+ export async function getAgentIntegration(): Promise<AgentIntegrationStatus> {

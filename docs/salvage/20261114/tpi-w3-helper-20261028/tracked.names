@@ -1,0 +1,16 @@
+M	scripts/build-msix.ps1
+M	scripts/build-remote-helpers.mjs
+M	scripts/build-remote-helpers.test.mjs
+M	src-tauri/examples/helper_manifest_check.rs
+M	src-tauri/resources/helpers/manifest.json
+M	src-tauri/src/ferryx_scope/ssh/helper_service_tests.rs
+M	src-tauri/src/ferryx_scope/ssh/process.rs
+M	src-tauri/src/ipc/ssh.rs
+M	src-tauri/src/ssh/direct.rs
+M	src-tauri/src/ssh/direct_tests.rs
+M	src-tauri/src/ssh/exec.rs
+M	src-tauri/src/ssh/helper_assets.rs
+M	src-tauri/src/ssh/helper_setup.rs
+M	src-tauri/src/ssh/helper_setup_tests.rs
+M	src-tauri/src/ssh/operations.rs
+M	src-tauri/src/ssh/runtime.rs

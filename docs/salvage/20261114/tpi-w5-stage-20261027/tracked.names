@@ -1,0 +1,8 @@
+M	src-tauri/src/daemon/launchd.rs
+M	src-tauri/src/daemon/runtime_stage.rs
+M	src-tauri/src/daemon/runtime_stage_tests.rs
+M	src-tauri/src/daemon/supervisor.rs
+M	src-tauri/src/daemon/supervisor_linux.rs
+M	src-tauri/src/daemon/supervisor_windows.rs
+M	src-tauri/src/remote/server.rs
+M	src-tauri/src/remote/tests.rs

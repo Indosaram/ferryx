@@ -1,0 +1,1898 @@
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index 284a760d4..66bc38799 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -257,6 +257,7 @@ windows-sys = { version = "0.59", default-features = false, features = [
+     "Win32_Networking_WinSock",
+     "Win32_Foundation",
+     "Win32_Storage_FileSystem",
++    "Win32_Storage_Packaging_Appx",
+     "Win32_System_IO",
+     "Win32_System_DataExchange",
+     "Win32_System_Memory",
+diff --git a/src-tauri/src/daemon/server.rs b/src-tauri/src/daemon/server.rs
+index a6d76e74f..3d222e465 100644
+--- a/src-tauri/src/daemon/server.rs
++++ b/src-tauri/src/daemon/server.rs
+@@ -4856,6 +4856,9 @@ impl DaemonServer {
+     ) -> Result<(), String> {
+         let runtime_dir = get_runtime_dir();
+         ensure_runtime_directory(&runtime_dir)?;
++        // Login-shell PATH discovery sources the user's rc chain; start it now so the first
++        // session spawn finds it ready instead of resolving agents against the bare process PATH.
++        crate::ipc::agents::prewarm_login_path();
+ 
+         // HandoverCandidate admission (todo 8). A successor generation's OS job runs plain
+         // `--daemon`; before any lock is taken it reads the predecessor's handover-request.json.
+diff --git a/src-tauri/src/daemon/session_service.rs b/src-tauri/src/daemon/session_service.rs
+index 7240101b3..5b4186345 100644
+--- a/src-tauri/src/daemon/session_service.rs
++++ b/src-tauri/src/daemon/session_service.rs
+@@ -2572,9 +2572,12 @@ impl DaemonSessionService {
+                             provider_session,
+                         )
+                         .map_err(|e| SpawnError::InvalidAgentResume(e.to_string()))?;
+-                        if crate::ipc::agents::resolve_binary(
++                        // Right after daemon start the login PATH may still be resolving; wait
++                        // for it as long as the pre-discovery code did (2 s) so a login-PATH-only
++                        // agent is not reported unsupported, while staying inside the spawn budget.
++                        if crate::ipc::agents::resolve_discovered_binary_within(
+                             &plan.program,
+-                            &crate::ipc::agents::search_paths(),
++                            std::time::Duration::from_secs(2),
+                         )
+                         .is_none()
+                         {
+diff --git a/src-tauri/src/ipc/agents.rs b/src-tauri/src/ipc/agents.rs
+index 2f8582512..1fab34818 100644
+--- a/src-tauri/src/ipc/agents.rs
++++ b/src-tauri/src/ipc/agents.rs
+@@ -1167,13 +1167,12 @@ fn gjc_session_id_from_path(path: &str) -> Option<String> {
+ }
+ 
+ pub fn detect_agents(names: &[String]) -> Vec<AgentDetection> {
+-    let search_paths = search_paths();
+     names
+         .iter()
+         .map(|name| name.trim())
+         .filter(|name| !name.is_empty())
+         .map(|name| {
+-            let path = resolve_binary(name, &search_paths);
++            let path = resolve_discovered_binary(name);
+             AgentDetection {
+                 name: name.to_string(),
+                 available: path.is_some(),
+@@ -1183,69 +1182,274 @@ pub fn detect_agents(names: &[String]) -> Vec<AgentDetection> {
+         .collect()
+ }
+ 
++/// The process PATH merged with the login-shell PATH once background discovery has finished.
++///
++/// Never blocks: the first call starts discovery on its own thread and returns the process PATH
++/// until it publishes, so a session spawn on an async path never waits for the user's rc chain.
+ pub(crate) fn search_paths() -> Vec<PathBuf> {
+-    static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+-    PATHS
+-        .get_or_init(|| {
+-            let mut dirs: Vec<PathBuf> = Vec::new();
+-            let mut push_all = |value: OsString| {
+-                for dir in env::split_paths(&value) {
+-                    if !dir.as_os_str().is_empty() && !dirs.contains(&dir) {
+-                        dirs.push(dir);
+-                    }
+-                }
+-            };
+-            if let Some(value) = env::var_os("PATH") {
+-                push_all(value);
+-            }
+-            if let Some(value) = login_shell_path() {
+-                push_all(value);
++    merged_search_paths(login_path_cache().current())
++}
++
++/// Starts login-shell PATH discovery without waiting for it, so later lookups find it ready.
++pub fn prewarm_login_path() {
++    login_path_cache();
++}
++
++/// Resolves `name` like `resolve_binary`, but when it is missing while discovery is still
++/// running, waits (bounded) for the login-shell PATH and tries again. Only for callers already
++/// on a blocking thread whose answer would otherwise be a false "not installed".
++pub(crate) fn resolve_discovered_binary(name: &str) -> Option<PathBuf> {
++    resolve_discovered_binary_within(name, LOGIN_PATH_TIMEOUT + std::time::Duration::from_secs(1))
++}
++
++/// `resolve_discovered_binary` with a caller-chosen cap on the wait for discovery, for callers
++/// inside a request budget (session spawn) that must answer before the client gives up.
++pub(crate) fn resolve_discovered_binary_within(
++    name: &str,
++    bound: std::time::Duration,
++) -> Option<PathBuf> {
++    #[cfg(test)]
++    if let Some(login) = TEST_LOGIN_PATH.with(|slot| slot.borrow().clone()) {
++        return resolve_with_cache(name, &login.0, bound);
++    }
++    resolve_with_cache(name, login_path_cache(), bound)
++}
++
++/// Test seam: a login-PATH discovery that the test publishes by hand, or never.
++#[cfg(test)]
++#[derive(Clone, Default)]
++pub(crate) struct PendingLoginPath(std::sync::Arc<LoginPathCache>);
++
++#[cfg(test)]
++impl PendingLoginPath {
++    pub(crate) fn publish(&self, path: Option<OsString>) {
++        self.0.publish(path);
++    }
++}
++
++#[cfg(test)]
++thread_local! {
++    static TEST_LOGIN_PATH: std::cell::RefCell<Option<PendingLoginPath>> = const { std::cell::RefCell::new(None) };
++}
++
++/// Runs `work` with `resolve_discovered_binary_within` on this thread reading `login` instead of
++/// the process-wide discovery.
++#[cfg(test)]
++pub(crate) fn with_login_path<T>(login: &PendingLoginPath, work: impl FnOnce() -> T) -> T {
++    struct Restore(Option<PendingLoginPath>);
++    impl Drop for Restore {
++        fn drop(&mut self) {
++            TEST_LOGIN_PATH.with(|slot| *slot.borrow_mut() = self.0.take());
++        }
++    }
++    let _restore = Restore(TEST_LOGIN_PATH.with(|slot| slot.replace(Some(login.clone()))));
++    work()
++}
++
++fn resolve_with_cache(
++    name: &str,
++    cache: &LoginPathCache,
++    bound: std::time::Duration,
++) -> Option<PathBuf> {
++    // One snapshot decides: a publish between the lookup and a separate "settled?" read would
++    // otherwise answer None for an agent the just-published PATH contains.
++    let snapshot = cache.lock().clone();
++    if let Some(found) = resolve_binary(name, &merged_search_paths(snapshot.clone().flatten())) {
++        return Some(found);
++    }
++    if snapshot.is_some() {
++        return None;
++    }
++    let login = cache.wait(bound);
++    resolve_binary(name, &merged_search_paths(login))
++}
++
++fn merged_search_paths(login: Option<OsString>) -> Vec<PathBuf> {
++    let mut dirs: Vec<PathBuf> = Vec::new();
++    let mut push_all = |value: OsString| {
++        for dir in env::split_paths(&value) {
++            if !dir.as_os_str().is_empty() && !dirs.contains(&dir) {
++                dirs.push(dir);
+             }
+-            dirs
+-        })
+-        .clone()
++        }
++    };
++    if let Some(value) = env::var_os("PATH") {
++        push_all(value);
++    }
++    if let Some(value) = login {
++        push_all(value);
++    }
++    dirs
+ }
+ 
+ // Terminals spawn through the user's login shell, so its PATH (Homebrew, nvm,
+ // mise, ~/.local/bin) is the search space that matches what a launched agent
+ // would actually resolve against - the GUI process PATH alone misses most of it.
+ //
+-// The wait below is bounded because of a measured hang: `-lic` makes the shell
+-// source the user's whole rc chain, and on a host whose rc chain runs `pyenv
+-// rehash` (pyenv's 60 s lock wait) the spawned child outlives any fixed caller
+-// budget - a live sample showed `zsh -lic printf %s "$PATH"` hanging alongside
+-// an 18 s-old `pyenv-rehash`, with `zsh -lic true` measuring 60.41 s wall, so
+-// session creation (`POST /api/v1/sessions`) never returned inside its 10 s
+-// budget. Resolution is now capped: on expiry the child is killed and reaped,
+-// and `None` keeps meaning "could not resolve", so callers fall back to the
+-// process PATH that `search_paths()` already collected.
+-//
+-// Reachable from async code: `search_paths()` initializes its OnceLock inline
+-// on the first caller, which can be `SessionService::spawn_owned` (async
+-// session creation), so this blocking wait runs on a Tokio worker thread for up
+-// to the bound below. Reported here; call sites deliberately not restructured.
+-fn login_shell_path() -> Option<OsString> {
+-    // 2 s: a healthy login shell resolves PATH in the tens-to-hundreds of ms
+-    // range (the measured pathological case was 60 s, 30x this bound), this
+-    // OnceLock runs at most once per process, and the caller's session-creation
+-    // budget is 10 s - leaving room for the rest of spawn on the fallback path.
+-    const RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+-    let shell = env::var("SHELL").ok().filter(|s| !s.trim().is_empty())?;
+-    let mut command = crate::util::no_window_command(&shell);
++// The bound exists because of a measured hang: an interactive login shell sources
++// the user's whole rc chain, and on a host whose rc chain runs `pyenv rehash`
++// (pyenv's 60 s lock wait) `zsh -lic true` measured 60.41 s wall. Discovery now
++// runs once per process on its own thread, so this bound only caps how long that
++// thread waits; no session spawn or Tokio worker waits on it.
++const LOGIN_PATH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
++
++/// Marker printed right before the PATH, so rc-chain output (banners, `fortune`) on stdout
++/// cannot be mistaken for it.
++const LOGIN_PATH_MARKER: &str = "__FERRYX_LOGIN_PATH__";
++
++#[derive(Default)]
++struct LoginPathCache {
++    // None while discovery runs; Some(result) once it published.
++    state: std::sync::Mutex<Option<Option<OsString>>>,
++    ready: std::sync::Condvar,
++}
++
++impl LoginPathCache {
++    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Option<OsString>>> {
++        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
++    }
++
++    fn publish(&self, value: Option<OsString>) {
++        *self.lock() = Some(value);
++        self.ready.notify_all();
++    }
++
++    fn current(&self) -> Option<OsString> {
++        self.lock().clone().flatten()
++    }
++
++    fn wait(&self, bound: std::time::Duration) -> Option<OsString> {
++        let guard = self.lock();
++        let (guard, _) = self
++            .ready
++            .wait_timeout_while(guard, bound, |state| state.is_none())
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        guard.clone().flatten()
++    }
++}
++
++fn login_path_cache() -> &'static LoginPathCache {
++    static CACHE: OnceLock<LoginPathCache> = OnceLock::new();
++    static START: std::sync::Once = std::sync::Once::new();
++    let cache = CACHE.get_or_init(LoginPathCache::default);
++    START.call_once(|| {
++        let spawned = std::thread::Builder::new()
++            .name("ferryx-login-path".into())
++            .spawn(move || cache.publish(discover_login_path()));
++        if let Err(error) = spawned {
++            tracing::debug!(%error, "login PATH discovery: could not start its thread");
++            cache.publish(None);
++        }
++    });
++    cache
++}
++
++fn discover_login_path() -> Option<OsString> {
++    let Some(shell) = crate::terminal::shell::login_shell_program() else {
++        tracing::debug!("login PATH discovery: no SHELL and no passwd shell");
++        return None;
++    };
++    discover_login_path_with(&shell, LOGIN_PATH_TIMEOUT)
++}
++
++/// The shell family decides how to ask for an interactive login shell and how to print PATH.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum LoginShellKind {
++    Posix,
++    Csh,
++    Fish,
++    Nushell,
++}
++
++impl LoginShellKind {
++    fn of(shell: &str) -> Self {
++        let name = shell.rsplit('/').next().unwrap_or(shell).trim_start_matches('-');
++        match name {
++            "csh" | "tcsh" => Self::Csh,
++            "fish" => Self::Fish,
++            "nu" | "nushell" => Self::Nushell,
++            _ => Self::Posix,
++        }
++    }
++
++    /// Arguments for the probe. Flags stay separate: `-lic` is rejected by shells that only
++    /// accept one bundled flag, and csh/tcsh honor `-l` only as the sole argument, so they get
++    /// an interactive shell (which reads ~/.cshrc and ~/.tcshrc, where csh users set PATH).
++    fn probe_args(self, printenv: &str) -> Vec<String> {
++        let posix = format!("echo {LOGIN_PATH_MARKER}; {printenv} PATH");
++        match self {
++            Self::Posix => vec!["-l".into(), "-i".into(), "-c".into(), posix],
++            Self::Csh => vec!["-i".into(), "-c".into(), posix],
++            // fish keeps PATH as a list; join it so the output has the POSIX shape.
++            Self::Fish => vec![
++                "-l".into(),
++                "-i".into(),
++                "-c".into(),
++                format!("echo {LOGIN_PATH_MARKER}; string join : $PATH"),
++            ],
++            Self::Nushell => vec![
++                "-l".into(),
++                "-i".into(),
++                "-c".into(),
++                format!("print \"{LOGIN_PATH_MARKER}\"; print ($env.PATH | str join \":\")"),
++            ],
++        }
++    }
++}
++
++/// Picks the line after the last marker and accepts it only when it is a usable PATH: every
++/// non-empty entry absolute and free of control characters, at least one entry present.
++fn parse_login_path_output(stdout: &[u8]) -> Result<OsString, &'static str> {
++    let text = String::from_utf8_lossy(stdout);
++    let mut lines = text.lines().map(|line| line.trim_end_matches('\r'));
++    let mut value = None;
++    while let Some(line) = lines.next() {
++        if line.trim() == LOGIN_PATH_MARKER {
++            value = lines.next();
++        }
++    }
++    let value = value.ok_or("marker missing from shell output")?.trim();
++    let entries: Vec<&str> = value.split(':').filter(|entry| !entry.is_empty()).collect();
++    if entries.is_empty() {
++        return Err("PATH is empty");
++    }
++    if entries
++        .iter()
++        .any(|entry| !entry.starts_with('/') || entry.chars().any(char::is_control))
++    {
++        return Err("PATH has a relative or malformed entry");
++    }
++    Ok(OsString::from(entries.join(":")))
++}
++
++fn printenv_program() -> &'static str {
++    ["/usr/bin/printenv", "/bin/printenv"]
++        .into_iter()
++        .find(|path| Path::new(path).is_file())
++        // NixOS and similar ship printenv only through PATH, which the rc chain has set by now.
++        .unwrap_or("printenv")
++}
++
++fn discover_login_path_with(shell: &str, timeout: std::time::Duration) -> Option<OsString> {
++    let kind = LoginShellKind::of(shell);
++    let mut command = crate::util::no_window_command(shell);
+     command
+-        .args(["-lic", "printf %s \"$PATH\""])
++        .args(kind.probe_args(printenv_program()))
+         .env("PROMPT_EOL_MARK", "")
+         .stdin(std::process::Stdio::null())
+         .stdout(std::process::Stdio::piped())
+-        // Captured-and-discarded, matching the old `.output()` semantics; we
+-        // never read stderr, so piping it could let a chatty rc chain fill the
+-        // pipe and trip the deadline.
++        // Never read; piping it could let a chatty rc chain fill the pipe and trip the deadline.
+         .stderr(std::process::Stdio::null());
+     without_controlling_terminal(&mut command);
+-    let mut child = command.spawn().ok()?;
+-    // Drain stdout on its own thread so a shell that writes more than a pipe
+-    // buffer cannot block on write until the deadline kills it (same pattern as
+-    // `run_clipboard_tool` in clipboard_image.rs).
++    let mut child = match command.spawn() {
++        Ok(child) => child,
++        Err(error) => {
++            tracing::debug!(shell, %error, "login PATH discovery: shell failed to spawn");
++            return None;
++        }
++    };
++    // Drain stdout on its own thread so a shell that writes more than a pipe buffer cannot
++    // block on write until the deadline kills it.
+     let Some(mut stdout_pipe) = child.stdout.take() else {
+         let _ = child.kill();
+         let _ = child.wait();
+@@ -1256,35 +1460,41 @@ fn login_shell_path() -> Option<OsString> {
+         let _ = std::io::Read::read_to_end(&mut stdout_pipe, &mut bytes);
+         bytes
+     });
+-    let deadline = std::time::Instant::now() + RESOLVE_TIMEOUT;
++    let deadline = std::time::Instant::now() + timeout;
+     let status = loop {
+         match child.try_wait() {
+             Ok(Some(status)) => break status,
+             Ok(None) if std::time::Instant::now() < deadline => {
+                 std::thread::sleep(std::time::Duration::from_millis(10));
+             }
+-            // Deadline expired or the child is unreapable: kill so it cannot
+-            // leak, then reap it, and treat the resolution as "could not
+-            // resolve" (None). Note this reaps the direct child only; a
+-            // grandchild the rc chain already spawned (e.g. `pyenv-rehash`)
+-            // is orphaned and finishes on its own.
+-            _ => {
++            // Kill and reap the direct child so it cannot leak; a grandchild the rc chain
++            // already spawned (e.g. `pyenv-rehash`) is orphaned and finishes on its own.
++            outcome => {
+                 let _ = child.kill();
+                 let _ = child.wait();
+                 let _ = drain.join();
++                tracing::debug!(
++                    shell,
++                    timeout_ms = timeout.as_millis() as u64,
++                    unreapable = outcome.is_err(),
++                    "login PATH discovery: shell did not finish in time"
++                );
+                 return None;
+             }
+         }
+     };
+     let bytes = drain.join().unwrap_or_default();
+     if !status.success() {
++        tracing::debug!(shell, code = ?status.code(), "login PATH discovery: shell exited non-zero");
+         return None;
+     }
+-    let value = String::from_utf8_lossy(&bytes).trim().to_string();
+-    if value.is_empty() {
+-        return None;
++    match parse_login_path_output(&bytes) {
++        Ok(value) => Some(value),
++        Err(reason) => {
++            tracing::debug!(shell, reason, "login PATH discovery: output rejected");
++            None
++        }
+     }
+-    Some(OsString::from(value))
+ }
+ 
+ /// Runs the child in a new session with no controlling terminal.
+@@ -1570,6 +1780,117 @@ mod tests {
+         assert!(results[2].path.is_none());
+     }
+ 
++    #[test]
++    fn login_path_probe_uses_per_shell_forms() {
++        let posix = LoginShellKind::of("/bin/zsh").probe_args("/usr/bin/printenv");
++        assert_eq!(&posix[..3], ["-l", "-i", "-c"]);
++        assert!(posix[3].ends_with("/usr/bin/printenv PATH"));
++        assert_eq!(LoginShellKind::of("-bash"), LoginShellKind::Posix);
++        let csh = LoginShellKind::of("/bin/tcsh").probe_args("/usr/bin/printenv");
++        assert_eq!(&csh[..2], ["-i", "-c"]);
++        assert_eq!(LoginShellKind::of("/usr/bin/csh"), LoginShellKind::Csh);
++        let fish = LoginShellKind::of("/opt/homebrew/bin/fish").probe_args("printenv");
++        assert!(fish[3].contains("string join : $PATH"));
++        let nu = LoginShellKind::of("/usr/local/bin/nu").probe_args("printenv");
++        assert!(nu[3].contains("str join"));
++    }
++
++    #[test]
++    fn login_path_output_shapes_parse_per_shell() {
++        let marker = LOGIN_PATH_MARKER;
++        // zsh/bash: rc-chain chatter before the marker, printenv output after it.
++        let zsh = format!("Welcome back\n{marker}\n/opt/homebrew/bin:/usr/bin:/bin\n");
++        assert_eq!(
++            parse_login_path_output(zsh.as_bytes()).unwrap(),
++            "/opt/homebrew/bin:/usr/bin:/bin"
++        );
++        let bash = format!("{marker}\r\n/home/u/.local/bin:/usr/bin\r\n");
++        assert_eq!(parse_login_path_output(bash.as_bytes()).unwrap(), "/home/u/.local/bin:/usr/bin");
++        // fish: the joined list; tcsh: printenv output identical to POSIX.
++        let fish = format!("{marker}\n/home/u/.cargo/bin:/usr/bin\n");
++        assert_eq!(parse_login_path_output(fish.as_bytes()).unwrap(), "/home/u/.cargo/bin:/usr/bin");
++        let tcsh = format!("{marker}\n/usr/local/bin:/usr/bin:\n");
++        assert_eq!(parse_login_path_output(tcsh.as_bytes()).unwrap(), "/usr/local/bin:/usr/bin");
++        // nushell prints after its banner; an echoed marker inside the banner is superseded.
++        let nu = format!("{marker} banner\n{marker}\n/home/u/.nix-profile/bin:/usr/bin\n");
++        assert_eq!(
++            parse_login_path_output(nu.as_bytes()).unwrap(),
++            "/home/u/.nix-profile/bin:/usr/bin"
++        );
++    }
++
++    #[test]
++    fn login_path_output_rejects_malformed_values() {
++        let marker = LOGIN_PATH_MARKER;
++        assert!(parse_login_path_output(b"/usr/bin:/bin\n").is_err(), "no marker");
++        assert!(parse_login_path_output(format!("{marker}\n").as_bytes()).is_err(), "empty");
++        let relative = format!("{marker}\nbin:/usr/bin\n");
++        assert!(parse_login_path_output(relative.as_bytes()).is_err());
++        let garbage = format!("{marker}\nzsh: command not found: printenv\n");
++        assert!(parse_login_path_output(garbage.as_bytes()).is_err());
++        let control = format!("{marker}\n/usr/bin:/b\u{1b}[0min\n");
++        assert!(parse_login_path_output(control.as_bytes()).is_err());
++    }
++
++    /// The probe runs a real POSIX shell end to end and returns the PATH it printed.
++    #[cfg(unix)]
++    #[test]
++    fn login_path_discovery_reads_a_real_posix_shell() {
++        let path = discover_login_path_with("/bin/sh", std::time::Duration::from_secs(10))
++            .expect("/bin/sh reports a PATH");
++        assert!(env::split_paths(&path).all(|dir| dir.is_absolute()), "{path:?}");
++    }
++
++    /// A shell that prints garbage yields no login PATH, so callers keep the process PATH.
++    #[cfg(unix)]
++    #[test]
++    fn login_path_discovery_rejects_a_shell_printing_garbage() {
++        use std::os::unix::fs::PermissionsExt as _;
++        let root = tempfile::tempdir().unwrap();
++        let shell = root.path().join("garbage-sh");
++        std::fs::write(&shell, format!("#!/bin/sh\necho {LOGIN_PATH_MARKER}\necho 'not a path'\n")).unwrap();
++        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
++        let shell = shell.to_string_lossy().into_owned();
++        assert_eq!(discover_login_path_with(&shell, std::time::Duration::from_secs(10)), None);
++    }
++
++    /// An agent only on the login PATH resolves once discovery publishes, even when the lookup
++    /// started before it did (the daemon-start race of a machine agent resume).
++    #[cfg(unix)]
++    #[test]
++    fn discovered_binary_waits_for_a_login_path_published_later() {
++        use std::os::unix::fs::PermissionsExt as _;
++        let root = tempfile::tempdir().unwrap();
++        let name = format!("ferryx-login-only-agent-{}", std::process::id());
++        let agent = root.path().join(&name);
++        std::fs::write(&agent, "#!/bin/sh\n").unwrap();
++        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
++        let cache = std::sync::Arc::new(LoginPathCache::default());
++        let publisher = {
++            let cache = std::sync::Arc::clone(&cache);
++            let dir = root.path().as_os_str().to_owned();
++            std::thread::spawn(move || cache.publish(Some(dir)))
++        };
++        let found = resolve_with_cache(&name, &cache, std::time::Duration::from_secs(30));
++        publisher.join().unwrap();
++        assert_eq!(found, Some(agent));
++    }
++
++    /// Discovery that never publishes cannot hold the caller past its bound.
++    #[test]
++    fn discovered_binary_wait_is_bounded() {
++        let cache = LoginPathCache::default();
++        let started = std::time::Instant::now();
++        let found = resolve_with_cache(
++            "ferryx-agent-that-does-not-exist",
++            &cache,
++            std::time::Duration::from_millis(200),
++        );
++        assert_eq!(found, None);
++        let elapsed = started.elapsed();
++        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
++    }
++
+     #[test]
+     fn test_agents_detect_rejects_path_shaped_names() {
+         let results = detect_agents(&["/bin/sh".into(), "../sh".into()]);
+diff --git a/src-tauri/src/ipc/notifications.rs b/src-tauri/src/ipc/notifications.rs
+index eb0fa3f85..bd2d1c3d0 100644
+--- a/src-tauri/src/ipc/notifications.rs
++++ b/src-tauri/src/ipc/notifications.rs
+@@ -23,7 +23,8 @@ use tauri::{AppHandle, Runtime, State};
+ #[cfg(any(target_os = "windows", target_os = "linux"))]
+ use tauri::Manager;
+ use tauri_plugin_dialog::DialogExt;
+-#[cfg(not(target_os = "macos"))]
++// macOS and Windows submit natively; only the remaining platforms show through the plugin.
++#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+ use tauri_plugin_notification::NotificationExt;
+ 
+ /// Native backend built on `tauri-plugin-notification`.
+@@ -56,38 +57,42 @@ impl<R: Runtime> NativeNotificationBackend for TauriNotificationBackend<R> {
+         {
+             crate::notification::permission::macos::submit_notification(content)
+         }
+-        // Windows/Linux: route clicks through notify-rust when the notification
+-        // carries a destination. notify-rust's `wait_for_response` gives us the
+-        // real activation the tauri plugin drops. Test / id-less notifications
+-        // (no target) still show through the plugin.
+-        #[cfg(any(target_os = "windows", target_os = "linux"))]
++        // Windows sends every toast through notify-rust, which picks the
++        // AppUserModelID for this install (MSIX package AUMID vs the NSIS/MSI
++        // shortcut identifier); the plugin always applies the config identifier,
++        // which a Store install does not register, so its toasts were dropped.
++        #[cfg(target_os = "windows")]
++        {
++            let identifier = self.app.config().identifier.clone();
++            crate::notification::notify_rust_adapter::submit_with_click_routing(
++                content,
++                &identifier,
++                Arc::clone(self.app.state::<Arc<NotificationActivations>>().inner()),
++            )
++        }
++        // Linux: route clicks through notify-rust when the notification carries
++        // a destination. notify-rust's `wait_for_response` gives us the real
++        // activation the tauri plugin drops. Test / id-less notifications (no
++        // target) still show through the plugin. `"Default"` is not a
++        // freedesktop sound name, and the plugin builder exposes no
++        // suppress-sound hint, so the sound setting is left to the server.
++        #[cfg(target_os = "linux")]
+         {
+             if content.target.is_some() {
+-                let app_id = self.app.config().identifier.clone();
++                let identifier = self.app.config().identifier.clone();
+                 return crate::notification::notify_rust_adapter::submit_with_click_routing(
+                     content,
+-                    &app_id,
++                    &identifier,
+                     Arc::clone(self.app.state::<Arc<NotificationActivations>>().inner()),
+                 );
+             }
+-            let builder = self
+-                .app
++            self.app
+                 .notification()
+                 .builder()
+                 .title(&content.title)
+-                .body(&content.body);
+-            // Windows renders an unset sound name as a silent toast, so the
+-            // default `System` choice has to name the platform default
+-            // explicitly; `Silent` stays unset, which is already silent there.
+-            // Linux is untouched: `"Default"` is not a freedesktop sound name,
+-            // and the plugin builder exposes no suppress-sound hint.
+-            #[cfg(target_os = "windows")]
+-            let builder = if content.sound == NotificationSound::System {
+-                builder.sound(crate::notification::notify_rust_adapter::DEFAULT_SOUND_NAME)
+-            } else {
+-                builder
+-            };
+-            builder.show().map_err(|error| error.to_string())
++                .body(&content.body)
++                .show()
++                .map_err(|error| error.to_string())
+         }
+         #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+         {
+diff --git a/src-tauri/src/ipc/project.rs b/src-tauri/src/ipc/project.rs
+index 25da8ff3b..4401c1e22 100644
+--- a/src-tauri/src/ipc/project.rs
++++ b/src-tauri/src/ipc/project.rs
+@@ -1,6 +1,6 @@
+ use crate::daemon::DaemonClient;
+ use crate::ipc::{run_blocking, IpcError};
+-use crate::worktree::{run_git, WorkspaceRegistry, WorktreeError, WorktreeManager};
++use crate::worktree::{run_git, GitUnavailableReason, WorkspaceRegistry, WorktreeError, WorktreeManager};
+ use serde::{Deserialize, Serialize};
+ use std::path::{Path, PathBuf};
+ use std::sync::Arc;
+@@ -167,6 +167,8 @@ fn register_canonical_project(
+     } else {
+         None
+     };
++    let git_unavailable = manager.git_unavailable().cloned();
++    let git_version = crate::worktree::git_probe().version;
+ 
+     if let Some((workspace_id, _)) = registry
+         .list()
+@@ -179,6 +181,8 @@ fn register_canonical_project(
+             git_root,
+             git_remote,
+             git_common_dir,
++            git_unavailable,
++            git_version,
+         });
+     }
+ 
+@@ -198,6 +202,8 @@ fn register_canonical_project(
+         git_root,
+         git_remote,
+         git_common_dir,
++        git_unavailable,
++        git_version,
+     })
+ }
+ 
+@@ -220,6 +226,13 @@ pub struct RegisteredProject {
+     pub git_remote: Option<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub git_common_dir: Option<PathBuf>,
++    /// Why a plain folder is not Git-backed (Git missing, macOS stub, dubious
++    /// ownership, or simply not a repository); `None` for Git repositories.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub git_unavailable: Option<GitUnavailableReason>,
++    /// `git --version` of this host, probed once per process.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub git_version: Option<String>,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+@@ -268,6 +281,14 @@ pub async fn cmd_project_register(
+     Ok(registered)
+ }
+ 
++/// Reports whether Git can run on this host and its version, probed once per process,
++/// so first-run onboarding can say what to install before a folder is picked.
++#[cfg(feature = "desktop")]
++#[tauri::command]
++pub async fn cmd_git_probe() -> Result<crate::worktree::GitProbe, IpcError> {
++    run_blocking(|| Ok(crate::worktree::git_probe())).await
++}
++
+ #[cfg(feature = "desktop")]
+ #[tauri::command]
+ pub async fn cmd_project_initial(
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 0705739ba..aad154e6c 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1696,6 +1696,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
+         cmd_remote_set_active_selection,
+         cmd_remote_get_active_selection,
+         cmd_project_initial,
++        cmd_git_probe,
+         cmd_boot_trace,
+         crate::ipc::system_resources::cmd_system_resources,
+         cmd_project_register,
+diff --git a/src-tauri/src/notification/notify_rust_adapter.rs b/src-tauri/src/notification/notify_rust_adapter.rs
+index df8277d51..ff307a31a 100644
+--- a/src-tauri/src/notification/notify_rust_adapter.rs
++++ b/src-tauri/src/notification/notify_rust_adapter.rs
+@@ -72,25 +72,90 @@ fn sound_policy(sound: NotificationSound, platform: NotificationPlatform) -> Sou
+ /// Only dev runs skip the AppUserModelID: a `cargo run` binary has no
+ /// Start-Menu shortcut, so applying an unregistered identifier there would
+ /// only lose the toast.
+-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
++#[cfg(any(target_os = "windows", test))]
+ fn is_dev_output_dir(dir: &std::path::Path) -> bool {
+     dir.ends_with("target/debug") || dir.ends_with("target/release")
+ }
+ 
++/// `<Application Id>` in `src-tauri/windows/msix/AppxManifest.xml`; a Store
++/// install's AUMID is `<PackageFamilyName>!<Application Id>`.
++#[cfg(any(target_os = "windows", test))]
++const MSIX_APPLICATION_ID: &str = "Ferryx";
++
++/// Which AppUserModelID a Windows toast must carry for this install.
++#[cfg(any(target_os = "windows", test))]
++#[derive(Debug, PartialEq, Eq)]
++enum ToastIdentity {
++    /// MSIX (Store): the package AUMID; the config identifier is unknown to Windows there.
++    Packaged(String),
++    /// NSIS/MSI: Tauri's installer templates stamp the config identifier on the
++    /// Start-Menu shortcut as `System.AppUserModel.ID`.
++    Installed(String),
++    /// `cargo run`: no shortcut exists, so no identifier is applied.
++    Dev,
++}
++
++#[cfg(any(target_os = "windows", test))]
++fn select_toast_identity(
++    package_family_name: Option<&str>,
++    exe_dir: Option<&std::path::Path>,
++    identifier: &str,
++) -> ToastIdentity {
++    if let Some(family) = package_family_name.filter(|family| !family.is_empty()) {
++        return ToastIdentity::Packaged(format!("{family}!{MSIX_APPLICATION_ID}"));
++    }
++    if exe_dir.is_some_and(is_dev_output_dir) {
++        return ToastIdentity::Dev;
++    }
++    ToastIdentity::Installed(identifier.to_string())
++}
++
++/// The package family name when this process runs from an MSIX package.
++#[cfg(target_os = "windows")]
++fn current_package_family_name() -> Option<String> {
++    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
++    use windows_sys::Win32::Storage::Packaging::Appx::GetCurrentPackageFamilyName;
++    static FAMILY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
++    FAMILY
++        .get_or_init(|| {
++            let mut length: u32 = 0;
++            // SAFETY:
++            // Category: Foreign Function Interface (FFI).
++            // Invariant: a null buffer with length 0 is the documented size query; the call
++            // only writes the required length into `length`. An unpackaged process gets
++            // APPMODEL_ERROR_NO_PACKAGE instead.
++            let code = unsafe { GetCurrentPackageFamilyName(&mut length, std::ptr::null_mut()) };
++            if code != ERROR_INSUFFICIENT_BUFFER || length == 0 {
++                return None;
++            }
++            let mut buffer = vec![0u16; length as usize];
++            // SAFETY:
++            // Category: Foreign Function Interface (FFI).
++            // Invariant: `buffer` is writable for `length` UTF-16 units, the size the
++            // previous call reported, and outlives the call.
++            let code = unsafe { GetCurrentPackageFamilyName(&mut length, buffer.as_mut_ptr()) };
++            if code != ERROR_SUCCESS {
++                return None;
++            }
++            let end = buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len());
++            String::from_utf16(&buffer[..end]).ok()
++        })
++        .clone()
++}
++
+ /// Show a notification and, when it carries a routing target, wait for the
+ /// user's click on a dedicated thread and route it.
+ ///
+ /// The user's sound setting is applied before showing, since `notify-rust`
+ /// leaves the alert entirely to the platform default otherwise.
+ ///
+-/// `app_id` is the Windows AppUserModelID applied to the toast; it is ignored
+-/// on Linux. Windows only shows the toast when that identifier matches the
+-/// `System.AppUserModel.ID` of an installed Start-Menu shortcut, and this repo
+-/// registers none yet, so the NSIS/MSI packaging must register `app_id` before
+-/// packaged Windows toasts can be relied on.
++/// `identifier` is the Tauri config identifier, ignored on Linux. On Windows
++/// the toast's AppUserModelID is chosen per install: the package AUMID for an
++/// MSIX install, the identifier for NSIS/MSI (whose Start-Menu shortcut
++/// carries it), and none for a dev run.
+ pub fn submit_with_click_routing(
+     content: &NotificationContent,
+-    _app_id: &str,
++    identifier: &str,
+     activations: Arc<NotificationActivations>,
+ ) -> Result<(), String> {
+     let mut builder = Notification::new();
+@@ -98,18 +163,28 @@ pub fn submit_with_click_routing(
+     #[cfg(target_os = "windows")]
+     {
+         let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+-        let dev_output = exe.parent().is_some_and(is_dev_output_dir);
+-        if !dev_output {
+-            // Nothing in this repo registers the identifier, and Windows only
+-            // delivers a toast whose AppUserModelID matches the installed
+-            // Start-Menu shortcut.
+-            tracing::warn!(
+-                app_id = %_app_id,
+-                "Windows toast delivery requires a registered AppUserModelID matching this identifier; an unpackaged or shortcut-less install may silently drop the toast"
+-            );
+-            builder.app_id(_app_id);
++        let family = current_package_family_name();
++        match select_toast_identity(family.as_deref(), exe.parent(), identifier) {
++            ToastIdentity::Packaged(app_id) => {
++                builder.app_id(&app_id);
++            }
++            ToastIdentity::Installed(app_id) => {
++                // Delivery depends on the installer's shortcut still existing; Windows drops a
++                // toast for an AUMID no shortcut registers without reporting an error.
++                static WARNED: std::sync::Once = std::sync::Once::new();
++                WARNED.call_once(|| {
++                    tracing::warn!(
++                        app_id = %app_id,
++                        "Windows toasts need the Start-Menu shortcut the installer registers with this AppUserModelID; without it they are dropped"
++                    );
++                });
++                builder.app_id(&app_id);
++            }
++            ToastIdentity::Dev => {}
+         }
+     }
++    #[cfg(not(target_os = "windows"))]
++    let _ = identifier;
+     #[cfg(target_os = "linux")]
+     builder.appname("Ferryx");
+ 
+@@ -254,6 +329,31 @@ mod tests {
+         assert!(!windows.suppress);
+     }
+ 
++    #[test]
++    fn toast_identity_selects_packaged_installed_or_dev() {
++        let installed_dir = std::path::Path::new(r"C:\Users\dev\AppData\Local\Ferryx");
++        let dev_dir = std::path::Path::new("/repo/src-tauri/target/debug");
++        assert_eq!(
++            select_toast_identity(Some("ProjectMaho.Ferryx_abc123"), Some(installed_dir), "com.ferryx.app"),
++            ToastIdentity::Packaged("ProjectMaho.Ferryx_abc123!Ferryx".into())
++        );
++        assert_eq!(
++            select_toast_identity(None, Some(installed_dir), "com.ferryx.app"),
++            ToastIdentity::Installed("com.ferryx.app".into())
++        );
++        assert_eq!(
++            select_toast_identity(Some(""), Some(installed_dir), "com.ferryx.app"),
++            ToastIdentity::Installed("com.ferryx.app".into())
++        );
++        assert_eq!(select_toast_identity(None, Some(dev_dir), "com.ferryx.app"), ToastIdentity::Dev);
++    }
++
++    #[test]
++    fn packaged_application_id_matches_the_msix_manifest() {
++        let manifest = include_str!("../../windows/msix/AppxManifest.xml");
++        assert!(manifest.contains(&format!("<Application Id=\"{MSIX_APPLICATION_ID}\"")));
++    }
++
+     #[test]
+     fn dev_output_detection_classifies_target_and_installed_dirs() {
+         assert!(is_dev_output_dir(std::path::Path::new(
+diff --git a/src-tauri/src/remote/workspace_api/worktrees.rs b/src-tauri/src/remote/workspace_api/worktrees.rs
+index fa6be606f..fe5da64f4 100644
+--- a/src-tauri/src/remote/workspace_api/worktrees.rs
++++ b/src-tauri/src/remote/workspace_api/worktrees.rs
+@@ -874,12 +874,9 @@ pub async fn mutate_worktree(
+                         }
+                         let commit = crate::worktree::run_git(
+                             manager.repo_root(),
+-                            &[
+-                                "rev-parse",
+-                                "--verify",
+-                                "--end-of-options",
+-                                &format!("{base}^{{commit}}"),
+-                            ],
++                            &crate::worktree::rev_parse_verify_args(&format!(
++                                "{base}^{{commit}}"
++                            )),
+                         )
+                         .map_err(|error| match error {
+                             WorktreeError::GitError { .. } => "BASE_REF_UNAVAILABLE".into(),
+diff --git a/src-tauri/src/terminal/shell.rs b/src-tauri/src/terminal/shell.rs
+index 2e04f69e6..68fd23926 100644
+--- a/src-tauri/src/terminal/shell.rs
++++ b/src-tauri/src/terminal/shell.rs
+@@ -415,6 +415,69 @@ where
+     "sh".to_string()
+ }
+ 
++/// The user's login shell: `SHELL` when set, else the passwd entry's shell. A GUI or systemd
++/// launch often has no `SHELL`, and the passwd entry is what a terminal login would start.
++pub(crate) fn login_shell_program() -> Option<String> {
++    choose_login_shell(std::env::var("SHELL").ok(), passwd_shell())
++}
++
++fn choose_login_shell(shell_env: Option<String>, passwd: Option<String>) -> Option<String> {
++    shell_env
++        .map(|shell| shell.trim().to_string())
++        .filter(|shell| !shell.is_empty())
++        .or_else(|| {
++            // Service accounts carry `nologin`/`false`, which would close every pane at once.
++            passwd.filter(|shell| {
++                let name = shell.rsplit('/').next().unwrap_or_default();
++                shell.starts_with('/') && name != "nologin" && name != "false"
++            })
++        })
++}
++
++#[cfg(unix)]
++fn passwd_shell() -> Option<String> {
++    let mut buffer = vec![0u8; 16 * 1024];
++    // SAFETY:
++    // Category: Foreign Function Interface (FFI).
++    // Invariant: `passwd` is a zeroed C POD and `buffer` stays alive and writable for
++    // `buffer.len()` bytes for the whole call; getpwuid_r writes only inside them and sets
++    // `result` to null or to `&passwd`. `pw_shell` then points into `buffer`, which outlives the
++    // copy below, and is a NUL-terminated string when non-null.
++    unsafe {
++        let mut passwd = std::mem::zeroed::<libc::passwd>();
++        let mut result: *mut libc::passwd = std::ptr::null_mut();
++        let code = libc::getpwuid_r(
++            libc::getuid(),
++            &mut passwd,
++            buffer.as_mut_ptr().cast(),
++            buffer.len(),
++            &mut result,
++        );
++        if code != 0 || result.is_null() || passwd.pw_shell.is_null() {
++            return None;
++        }
++        std::ffi::CStr::from_ptr(passwd.pw_shell)
++            .to_str()
++            .ok()
++            .map(str::to_string)
++    }
++}
++
++/// Windows has no passwd database; its default shell comes from PATH (pwsh/powershell).
++#[cfg(not(unix))]
++fn passwd_shell() -> Option<String> {
++    None
++}
++
++/// Process environment lookup for shell resolution, with `SHELL` falling back to the passwd
++/// entry so a launch without `SHELL` still starts the user's own shell.
++fn shell_resolution_env(var: &str) -> Option<String> {
++    if var == "SHELL" {
++        return login_shell_program();
++    }
++    std::env::var(var).ok()
++}
++
+ #[cfg(test)]
+ type PathDiscovery = std::sync::Arc<dyn Fn() -> Vec<std::path::PathBuf> + Send + Sync>;
+ #[cfg(test)]
+@@ -442,6 +505,20 @@ pub(crate) fn legacy_search_paths() -> Vec<std::path::PathBuf> {
+     crate::ipc::agents::search_paths()
+ }
+ 
++/// How long a resumed agent missing from the process PATH waits for login-PATH discovery right
++/// after daemon start: the 2 s the pre-discovery lookup blocked for.
++const AGENT_RESUME_LOGIN_PATH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
++
++/// Resolves a resumed agent's program. Callers run on a blocking worker (spawn_blocking).
++fn resolve_resume_agent(program: &str) -> Option<std::path::PathBuf> {
++    // A test that pinned PATH discovery owns the whole search space.
++    #[cfg(test)]
++    if PATH_DISCOVERY.with(|slot| slot.borrow().is_some()) {
++        return crate::ipc::agents::resolve_binary(program, &legacy_search_paths());
++    }
++    crate::ipc::agents::resolve_discovered_binary_within(program, AGENT_RESUME_LOGIN_PATH_WAIT)
++}
++
+ fn is_on_path(exe: &str) -> bool {
+     let search_paths = legacy_search_paths();
+     if search_paths.iter().any(|dir| dir.join(exe).is_file()) {
+@@ -593,13 +670,11 @@ pub fn resolve_startup_command(
+         startup,
+         TargetPlatform::CURRENT,
+         is_on_path,
+-        |var| std::env::var(var).ok(),
++        shell_resolution_env,
+     )?;
+     if let Some(TerminalStartup::AgentResume { .. }) = startup {
+         if !plan.program.contains('/') && !plan.program.contains('\\') {
+-            if let Some(resolved) =
+-                crate::ipc::agents::resolve_binary(&plan.program, &legacy_search_paths())
+-            {
++            if let Some(resolved) = resolve_resume_agent(&plan.program) {
+                 plan.program = resolved.to_string_lossy().to_string();
+             }
+         }
+@@ -607,7 +682,7 @@ pub fn resolve_startup_command(
+             preference,
+             TargetPlatform::CURRENT,
+             is_on_path,
+-            |var| std::env::var(var).ok(),
++            shell_resolution_env,
+         );
+         plan = wrap_agent_with_return_shell(plan, return_shell, TargetPlatform::CURRENT, |path| {
+             std::path::Path::new(path).exists()
+@@ -709,9 +784,12 @@ where
+ }
+ 
+ pub fn resolve_shell_command(preference: Option<&str>) -> CommandBuilder {
+-    let plan = resolve_shell_command_pure(preference, TargetPlatform::CURRENT, is_on_path, |var| {
+-        std::env::var(var).ok()
+-    });
++    let plan = resolve_shell_command_pure(
++        preference,
++        TargetPlatform::CURRENT,
++        is_on_path,
++        shell_resolution_env,
++    );
+     let mut cmd = CommandBuilder::new(&plan.program);
+     for arg in &plan.args {
+         cmd.arg(arg);
+@@ -1028,6 +1106,27 @@ mod tests {
+         assert_eq!(blank_env, "sh");
+     }
+ 
++    #[test]
++    fn login_shell_falls_back_to_the_passwd_shell_when_shell_is_unset() {
++        let passwd = || Some("/usr/bin/fish".to_string());
++        assert_eq!(choose_login_shell(Some(" /bin/zsh ".into()), passwd()).as_deref(), Some("/bin/zsh"));
++        assert_eq!(choose_login_shell(None, passwd()).as_deref(), Some("/usr/bin/fish"));
++        assert_eq!(choose_login_shell(Some("  ".into()), passwd()).as_deref(), Some("/usr/bin/fish"));
++        for unusable in ["/usr/sbin/nologin", "/bin/false", "fish", ""] {
++            assert_eq!(choose_login_shell(None, Some(unusable.into())), None, "{unusable}");
++        }
++        assert_eq!(choose_login_shell(None, None), None);
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn passwd_shell_reads_the_current_user_entry() {
++        // A container uid without a passwd entry legitimately has none.
++        if let Some(shell) = passwd_shell() {
++            assert!(shell.starts_with('/'), "{shell}");
++        }
++    }
++
+     #[test]
+     fn test_empty_and_whitespace_preference_treated_as_default() {
+         for pref in [
+@@ -1489,6 +1588,83 @@ mod tests {
+         let _ = cmd;
+     }
+ 
++    // `agy` (antigravity) stands in for an agent installed only on the login PATH.
++    #[cfg(unix)]
++    fn antigravity_resume() -> TerminalStartup {
++        TerminalStartup::AgentResume {
++            agent_type: "antigravity".to_string(),
++            provider_session: AgentProviderSession {
++                launcher: None,
++                key: AgentProviderSessionKey::SessionId,
++                id: "sess-agy-late-path".to_string(),
++                transcript_path: None,
++            },
++        }
++    }
++
++    #[cfg(unix)]
++    fn assert_agy_not_on_process_path() {
++        let process_path = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
++            .collect::<Vec<_>>();
++        assert_eq!(
++            crate::ipc::agents::resolve_binary("agy", &process_path),
++            None,
++            "precondition: this host has agy on its process PATH"
++        );
++    }
++
++    /// An agent only on the login PATH, resumed before discovery published, still resolves to
++    /// its absolute path once discovery publishes (the auto-resume right after daemon start).
++    #[cfg(unix)]
++    #[test]
++    fn local_resume_resolves_an_agent_from_a_login_path_published_later() {
++        use std::os::unix::fs::PermissionsExt as _;
++        assert_agy_not_on_process_path();
++        let root = tempfile::tempdir().unwrap();
++        let agent = root.path().join("agy");
++        std::fs::write(&agent, "#!/bin/sh\n").unwrap();
++        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
++        let login = crate::ipc::agents::PendingLoginPath::default();
++        let publisher = {
++            let login = login.clone();
++            let dir = root.path().as_os_str().to_owned();
++            std::thread::spawn(move || login.publish(Some(dir)))
++        };
++        let cmd = crate::ipc::agents::with_login_path(&login, || {
++            resolve_startup_command(None, Some(&antigravity_resume()))
++        })
++        .expect("resolve antigravity resume");
++        publisher.join().unwrap();
++        assert!(
++            cmd.get_argv()
++                .iter()
++                .any(|arg| arg.as_os_str() == agent.as_os_str()),
++            "{:?}",
++            cmd.get_argv()
++        );
++    }
++
++    /// Discovery that never publishes holds the local resume for the bounded wait only; the
++    /// agent then stays a bare name for the shell to report.
++    #[cfg(unix)]
++    #[test]
++    fn local_resume_wait_for_an_unpublished_login_path_is_bounded() {
++        assert_agy_not_on_process_path();
++        let login = crate::ipc::agents::PendingLoginPath::default();
++        let started = std::time::Instant::now();
++        let cmd = crate::ipc::agents::with_login_path(&login, || {
++            resolve_startup_command(None, Some(&antigravity_resume()))
++        })
++        .expect("resolve antigravity resume");
++        let elapsed = started.elapsed();
++        assert!(elapsed < std::time::Duration::from_secs(10), "{elapsed:?}");
++        assert!(
++            cmd.get_argv().iter().any(|arg| arg == "agy"),
++            "{:?}",
++            cmd.get_argv()
++        );
++    }
++
+     #[test]
+     fn test_resolve_startup_command_pure_fallback_to_shell() {
+         let plan =
+diff --git a/src-tauri/src/worktree/git.rs b/src-tauri/src/worktree/git.rs
+index a659ec651..1e55a6a0b 100644
+--- a/src-tauri/src/worktree/git.rs
++++ b/src-tauri/src/worktree/git.rs
+@@ -1,4 +1,5 @@
+ use crate::worktree::model::{DirtyFile, DirtyState, Worktree, WorktreeError};
++use serde::{Deserialize, Serialize};
+ use std::path::{Path, PathBuf};
+ 
+ #[cfg(unix)]
+@@ -940,8 +941,10 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
+             .map_err(WorktreeError::Io)?
+     };
+ 
+-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
++    // Lossy only for the error payload, which is display text. Successful stdout stays strict:
++    // it carries paths and refs, and a lossy decode would alias distinct native names (A08).
++    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
++    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+ 
+     if !output.status.success() {
+         return Err(WorktreeError::GitError {
+@@ -953,7 +956,152 @@ pub fn run_git<P: AsRef<Path>, S: AsRef<str>>(cwd: P, args: &[S]) -> Result<Stri
+     }
+ 
+     String::from_utf8(output.stdout)
+-        .map_err(|_| WorktreeError::ParseError("Invalid UTF-8 in Git stdout".into()))
++        .map_err(|_| WorktreeError::ParseError(NON_UTF8_STDOUT.into()))
++}
++
++/// `ParseError` text for Git stdout that is not UTF-8; `GitUnavailableReason` keys on it.
++const NON_UTF8_STDOUT: &str = "Invalid UTF-8 in Git stdout";
++
++/// Why a folder is served as a plain (terminal-only) folder instead of a Git repository.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(tag = "kind", rename_all = "camelCase")]
++pub enum GitUnavailableReason {
++    /// No `git` executable on PATH.
++    GitMissing,
++    /// macOS `/usr/bin/git` is the xcode-select stub and the Command Line Tools are not installed.
++    XcodeCommandLineToolsMissing,
++    /// Git refuses the repository because another user owns it (`safe.directory`).
++    #[serde(rename_all = "camelCase")]
++    DubiousOwnership { path: String },
++    /// Git works and the folder is simply not inside a repository.
++    NotARepository,
++    /// Git failed for another reason; `message` is its first stderr line.
++    GitFailed { message: String },
++    /// Git printed bytes that are not UTF-8 (a path or name in another encoding). They are not
++    /// decoded lossily: U+FFFD could alias a different real path.
++    NonUtf8Output,
++}
++
++impl GitUnavailableReason {
++    /// Classifies the failure of the repository probe (`git rev-parse`) or `git --version`.
++    pub fn classify(error: &WorktreeError) -> Self {
++        match error {
++            WorktreeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => Self::GitMissing,
++            WorktreeError::GitError { stderr, .. } => Self::classify_stderr(stderr),
++            WorktreeError::ParseError(message) if message == NON_UTF8_STDOUT => Self::NonUtf8Output,
++            other => Self::GitFailed {
++                message: other.to_string(),
++            },
++        }
++    }
++
++    fn classify_stderr(stderr: &str) -> Self {
++        let lower = stderr.to_ascii_lowercase();
++        if lower.contains("xcrun: error")
++            || lower.contains("xcode-select")
++            || lower.contains("no developer tools were found")
++        {
++            return Self::XcodeCommandLineToolsMissing;
++        }
++        if lower.contains("dubious ownership") {
++            // "fatal: detected dubious ownership in repository at '/path'"
++            let path = stderr
++                .split_once(" at '")
++                .and_then(|(_, rest)| rest.split_once('\''))
++                .map(|(path, _)| path.to_string())
++                .unwrap_or_default();
++            return Self::DubiousOwnership { path };
++        }
++        if lower.contains("not a git repository") {
++            return Self::NotARepository;
++        }
++        Self::GitFailed {
++            message: stderr.lines().next().unwrap_or_default().trim().to_string(),
++        }
++    }
++}
++
++/// Result of probing `git --version` once per process.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct GitProbe {
++    /// The version `git --version` reported, e.g. `2.43.0`.
++    pub version: Option<String>,
++    /// Set when Git cannot run at all (missing, macOS stub, broken install).
++    pub unavailable: Option<GitUnavailableReason>,
++}
++
++/// Probes `git --version` once per process and caches the answer.
++pub fn git_probe() -> GitProbe {
++    static PROBE: std::sync::OnceLock<GitProbe> = std::sync::OnceLock::new();
++    PROBE
++        .get_or_init(|| {
++            // Direct spawn, not `run_git`: a caller's request budget must not turn a slow
++            // first probe into a TIMEOUT cached for the whole process.
++            let output = crate::util::no_window_command("git")
++                .arg("--version")
++                .current_dir(std::env::temp_dir())
++                .stdin(std::process::Stdio::null())
++                .output();
++            let probe = match output {
++                Ok(output) if output.status.success() => GitProbe {
++                    version: parse_git_version(&String::from_utf8_lossy(&output.stdout)).map(
++                        |(major, minor, patch)| format!("{major}.{minor}.{patch}"),
++                    ),
++                    unavailable: None,
++                },
++                Ok(output) => GitProbe {
++                    version: None,
++                    unavailable: Some(GitUnavailableReason::classify_stderr(
++                        &String::from_utf8_lossy(&output.stderr),
++                    )),
++                },
++                Err(error) => GitProbe {
++                    version: None,
++                    unavailable: Some(GitUnavailableReason::classify(&WorktreeError::Io(error))),
++                },
++            };
++            tracing::info!(version = ?probe.version, unavailable = ?probe.unavailable, "git probe");
++            probe
++        })
++        .clone()
++}
++
++/// Parses `git version 2.39.3 (Apple Git-145)` or `git version 2.45.1.windows.1`.
++fn parse_git_version(stdout: &str) -> Option<(u32, u32, u32)> {
++    let version = stdout.trim().strip_prefix("git version ")?;
++    let mut parts = version
++        .split(|c: char| !c.is_ascii_digit())
++        .take(3)
++        .map(|part| part.parse::<u32>().ok());
++    let major = parts.next()??;
++    let minor = parts.next()??;
++    let patch = parts.next().flatten().unwrap_or(0);
++    Some((major, minor, patch))
++}
++
++/// `--end-of-options` arrived in Git 2.24; older Git rejects it as an unknown revision.
++fn supports_end_of_options(version: Option<(u32, u32, u32)>) -> bool {
++    // An unparsable version keeps the flag: every Git still shipped today is newer.
++    version.is_none_or(|(major, minor, _)| (major, minor) >= (2, 24))
++}
++
++/// `git rev-parse --verify <spec>` arguments, with `--end-of-options` when Git supports it.
++/// Callers must already reject a `spec` starting with `-`; the flag is defense in depth.
++pub fn rev_parse_verify_args(spec: &str) -> Vec<String> {
++    let version = git_probe().version.as_deref().and_then(|version| {
++        parse_git_version(&format!("git version {version}"))
++    });
++    verify_args_for(spec, version)
++}
++
++fn verify_args_for(spec: &str, version: Option<(u32, u32, u32)>) -> Vec<String> {
++    let mut args = vec!["rev-parse".to_string(), "--verify".to_string()];
++    if supports_end_of_options(version) {
++        args.push("--end-of-options".to_string());
++    }
++    args.push(spec.to_string());
++    args
+ }
+ 
+ fn decode_git_quoted_path(path: &str) -> Result<String, WorktreeError> {
+@@ -1347,6 +1495,108 @@ pub fn git_common_dir(repo_root: &Path) -> Option<PathBuf> {
+ mod tests {
+     use super::*;
+ 
++    fn git_error(stderr: &str) -> WorktreeError {
++        WorktreeError::GitError {
++            command: "git rev-parse --show-toplevel".into(),
++            stderr: stderr.into(),
++            stdout: String::new(),
++            code: Some(128),
++        }
++    }
++
++    #[test]
++    fn git_unavailable_reason_classifies_each_failure() {
++        let missing = WorktreeError::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
++        assert_eq!(GitUnavailableReason::classify(&missing), GitUnavailableReason::GitMissing);
++        assert_eq!(
++            GitUnavailableReason::classify(&git_error(
++                "xcrun: error: invalid active developer path (/Library/Developer/CommandLineTools), missing xcrun at: /Library/Developer/CommandLineTools/usr/bin/xcrun"
++            )),
++            GitUnavailableReason::XcodeCommandLineToolsMissing
++        );
++        assert_eq!(
++            GitUnavailableReason::classify(&git_error(
++                "fatal: detected dubious ownership in repository at '/srv/repo'\nTo add an exception for this directory, call:\n\n\tgit config --global --add safe.directory /srv/repo"
++            )),
++            GitUnavailableReason::DubiousOwnership { path: "/srv/repo".into() }
++        );
++        assert_eq!(
++            GitUnavailableReason::classify(&git_error(
++                "fatal: not a git repository (or any of the parent directories): .git"
++            )),
++            GitUnavailableReason::NotARepository
++        );
++        assert_eq!(
++            GitUnavailableReason::classify(&git_error("fatal: bad config line 1\nmore")),
++            GitUnavailableReason::GitFailed { message: "fatal: bad config line 1".into() }
++        );
++    }
++
++    #[test]
++    fn git_unavailable_reason_serializes_with_a_kind_tag() {
++        let json = serde_json::to_value(GitUnavailableReason::DubiousOwnership { path: "/r".into() }).unwrap();
++        assert_eq!(json, serde_json::json!({ "kind": "dubiousOwnership", "path": "/r" }));
++        let json = serde_json::to_value(GitUnavailableReason::XcodeCommandLineToolsMissing).unwrap();
++        assert_eq!(json, serde_json::json!({ "kind": "xcodeCommandLineToolsMissing" }));
++    }
++
++    #[test]
++    fn end_of_options_is_used_only_on_git_that_supports_it() {
++        assert_eq!(parse_git_version("git version 2.39.3 (Apple Git-145)\n"), Some((2, 39, 3)));
++        assert_eq!(parse_git_version("git version 2.45.1.windows.1"), Some((2, 45, 1)));
++        assert_eq!(parse_git_version("git version 1.8.3.1"), Some((1, 8, 3)));
++        assert_eq!(parse_git_version("garbage"), None);
++        assert_eq!(
++            verify_args_for("HEAD^{commit}", Some((2, 24, 0))),
++            ["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"]
++        );
++        assert_eq!(
++            verify_args_for("HEAD^{commit}", Some((2, 23, 9))),
++            ["rev-parse", "--verify", "HEAD^{commit}"]
++        );
++        assert_eq!(
++            verify_args_for("HEAD^{commit}", Some((1, 8, 3))),
++            ["rev-parse", "--verify", "HEAD^{commit}"]
++        );
++        assert!(verify_args_for("x", None).contains(&"--end-of-options".to_string()));
++    }
++
++    #[test]
++    fn git_probe_reports_the_installed_git_version() {
++        let probe = git_probe();
++        assert_eq!(probe.unavailable, None, "{probe:?}");
++        assert!(probe.version.is_some_and(|version| version.starts_with("2.")));
++    }
++
++    /// A repository whose root path is not UTF-8 cannot be addressed without aliasing (A08), so
++    /// it opens as a plain folder with a reported reason instead of passing as a non-repository.
++    #[cfg(target_os = "linux")]
++    #[test]
++    fn non_utf8_repository_root_is_reported_not_hidden() {
++        use std::os::unix::ffi::OsStrExt as _;
++        let root = tempfile::tempdir().unwrap();
++        let repo = root.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
++        std::fs::create_dir(&repo).unwrap();
++        run_git(&repo, &["init", "-q"]).unwrap();
++        let manager = crate::worktree::WorktreeManager::try_new(&repo).expect("folder registers");
++        assert!(!manager.is_git_backed());
++        assert_eq!(manager.git_unavailable(), Some(&GitUnavailableReason::NonUtf8Output));
++    }
++
++    /// Portable counterpart: real Git printing non-UTF-8 stdout (a blob holding `\xff`) fails
++    /// strictly and classifies as the typed non-UTF-8 reason.
++    #[test]
++    fn non_utf8_git_stdout_classifies_as_a_typed_reason() {
++        let root = tempfile::tempdir().unwrap();
++        run_git(root.path(), &["init", "-q"]).unwrap();
++        std::fs::write(root.path().join("latin1.txt"), b"caf\xe9 \xff\n").unwrap();
++        let object = run_git(root.path(), &["hash-object", "-w", "latin1.txt"]).unwrap();
++        let error = run_git(root.path(), &["cat-file", "blob", object.trim()]).unwrap_err();
++        assert_eq!(GitUnavailableReason::classify(&error), GitUnavailableReason::NonUtf8Output);
++        let json = serde_json::to_value(GitUnavailableReason::NonUtf8Output).unwrap();
++        assert_eq!(json, serde_json::json!({ "kind": "nonUtf8Output" }));
++    }
++
+     #[test]
+     fn git_path_argument_normalization_strips_windows_verbatim_prefixes() {
+         assert_eq!(
+diff --git a/src-tauri/src/worktree/manager.rs b/src-tauri/src/worktree/manager.rs
+index bb3053816..bbe8f3b22 100644
+--- a/src-tauri/src/worktree/manager.rs
++++ b/src-tauri/src/worktree/manager.rs
+@@ -1,6 +1,7 @@
+ use crate::worktree::git::{
+     git_branch_delete, git_branch_is_ancestor_of_head, git_status_porcelain, git_worktree_add,
+-    git_worktree_list, git_worktree_prune, git_worktree_remove, inspect_worktree, run_git,
++    git_worktree_list, git_worktree_prune, git_worktree_remove, inspect_worktree,
++    rev_parse_verify_args, run_git, GitUnavailableReason,
+ };
+ use crate::worktree::model::{
+     BranchDeletionPreview, CreateWorktreeOptions, DirtyState, ExternalWorktree, OrcaWorktreeInfo,
+@@ -91,6 +92,8 @@ impl WriterLeaseRegistry {
+ pub struct WorktreeManager {
+     repo_root: PathBuf,
+     git_backed: bool,
++    /// Why the folder is plain (terminal-only); `None` when it is Git-backed.
++    git_unavailable: Option<GitUnavailableReason>,
+     /// `<data>/worktree-settings.json`; `None` when no data directory resolves.
+     settings_path: Option<PathBuf>,
+     writer_leases: WriterLeaseRegistry,
+@@ -117,6 +120,7 @@ impl WorktreeManager {
+         Self {
+             repo_root: root,
+             git_backed: false,
++            git_unavailable: None,
+             settings_path: None,
+             writer_leases: WriterLeaseRegistry::default(),
+             delete_lock: Arc::new(Mutex::new(())),
+@@ -136,17 +140,32 @@ impl WorktreeManager {
+         }
+ 
+         // Plain-folder mode: a non-Git directory is a valid (terminal-only)
+-        // workspace root; only worktree operations are unavailable.
+-        let (repo_root, git_backed) = match run_git(&canonical, &["rev-parse", "--show-toplevel"]) {
+-            Ok(top_level) => match fs::canonicalize(PathBuf::from(top_level.trim())) {
+-                Ok(git_root) => (git_root, true),
+-                Err(_) => (canonical, false),
+-            },
+-            Err(_) => (canonical, false),
+-        };
++        // workspace root; only worktree operations are unavailable. The reason is
++        // kept so the UI can tell "install Git" apart from "not a repository".
++        let (repo_root, git_backed, git_unavailable) =
++            match run_git(&canonical, &["rev-parse", "--show-toplevel"]) {
++                Ok(top_level) => match fs::canonicalize(PathBuf::from(top_level.trim())) {
++                    Ok(git_root) => (git_root, true, None),
++                    Err(error) => (
++                        canonical,
++                        false,
++                        Some(GitUnavailableReason::GitFailed {
++                            message: error.to_string(),
++                        }),
++                    ),
++                },
++                Err(error) => {
++                    let reason = GitUnavailableReason::classify(&error);
++                    if reason != GitUnavailableReason::NotARepository {
++                        tracing::warn!(path = %canonical.display(), ?reason, "folder opened without Git");
++                    }
++                    (canonical, false, Some(reason))
++                }
++            };
+         Ok(Self {
+             repo_root,
+             git_backed,
++            git_unavailable,
+             settings_path: naming::settings_path(),
+             writer_leases: WriterLeaseRegistry::default(),
+             delete_lock: Arc::new(Mutex::new(())),
+@@ -243,6 +262,11 @@ impl WorktreeManager {
+         self.git_backed
+     }
+ 
++    /// Why worktree operations are unavailable; `None` for a Git-backed root.
++    pub fn git_unavailable(&self) -> Option<&GitUnavailableReason> {
++        self.git_unavailable.as_ref()
++    }
++
+     fn require_git_backed(&self) -> Result<(), WorktreeError> {
+         if self.git_backed {
+             Ok(())
+@@ -521,12 +545,7 @@ impl WorktreeManager {
+         }
+         let commit = run_git(
+             &self.repo_root,
+-            &[
+-                "rev-parse",
+-                "--verify",
+-                "--end-of-options",
+-                &format!("{base}^{{commit}}"),
+-            ],
++            &rev_parse_verify_args(&format!("{base}^{{commit}}")),
+         )?;
+         let parent = options
+             .path
+@@ -891,12 +910,7 @@ impl WorktreeManager {
+         let branch = branch.to_owned();
+         let head = run_git(
+             &self.repo_root,
+-            &[
+-                "rev-parse",
+-                "--verify",
+-                "--end-of-options",
+-                &format!("refs/heads/{branch}^{{commit}}"),
+-            ],
++            &rev_parse_verify_args(&format!("refs/heads/{branch}^{{commit}}")),
+         )?
+         .trim()
+         .to_owned();
+diff --git a/src-tauri/src/worktree/mod.rs b/src-tauri/src/worktree/mod.rs
+index 90f3d9087..1f7ad2bbe 100644
+--- a/src-tauri/src/worktree/mod.rs
++++ b/src-tauri/src/worktree/mod.rs
+@@ -64,6 +64,18 @@ pub mod tests {
+         assert!(matches!(err, WorktreeError::NotAGitRepository { .. }));
+     }
+ 
++    #[test]
++    fn plain_folder_records_why_git_is_unavailable() {
++        let temp_dir = TempDir::new().expect("failed to create temp dir");
++        let folder = temp_dir.path();
++        let manager = WorktreeManager::try_new(folder).expect("plain folder registers");
++        assert_eq!(manager.git_unavailable(), Some(&GitUnavailableReason::NotARepository));
++
++        let (_repo, git_manager) = setup_test_repo();
++        assert!(git_manager.is_git_backed());
++        assert_eq!(git_manager.git_unavailable(), None);
++    }
++
+     #[test]
+     fn branch_namespace_formatting_and_validation() {
+         assert_eq!(
+diff --git a/ui/src/App.notifications.test.tsx b/ui/src/App.notifications.test.tsx
+index 597345939..ef50eec7a 100644
+--- a/ui/src/App.notifications.test.tsx
++++ b/ui/src/App.notifications.test.tsx
+@@ -112,6 +112,8 @@ const { noteObservationInteraction } = await import("./lib/notificationCenter/ac
+ 
+ vi.mock("./lib/tauri", () => ({
+   listExternalWorktrees: vi.fn(async () => []),
++  // WelcomeWizard probes Git on its project step (task 35).
++  getGitProbe: vi.fn(async () => null),
+   listenDagRunUpdated: vi.fn(() => Promise.resolve(() => undefined)),
+   listenDagWatchStatus: vi.fn(async () => () => undefined),
+   // The notification coordinator re-consults the authoritative OS permission status before it
+diff --git a/ui/src/App.test.tsx b/ui/src/App.test.tsx
+index 7efa0dba6..5eb4dace7 100644
+--- a/ui/src/App.test.tsx
++++ b/ui/src/App.test.tsx
+@@ -209,6 +209,8 @@ vi.mock("./lib/tauri", () => ({
+   getInitialProject: native.getInitialProject,
+   getSystemPermissionsStatus: native.getSystemPermissionsStatus,
+   getCliLauncherStatus: native.getCliLauncherStatus,
++  // WelcomeWizard probes Git on its project step (task 35).
++  getGitProbe: vi.fn(async () => null),
+   getNotificationPermissionStatus: vi.fn(async () => ({ authorization: "authorized" as const })),
+   installCliLauncher: native.installCliLauncher,
+   listProjectBranches: native.listProjectBranches,
+diff --git a/ui/src/components/ProjectDialogs.test.tsx b/ui/src/components/ProjectDialogs.test.tsx
+index 3317f5c5e..7be627aa8 100644
+--- a/ui/src/components/ProjectDialogs.test.tsx
++++ b/ui/src/components/ProjectDialogs.test.tsx
+@@ -63,6 +63,7 @@ import {
+   deriveWorkspaceId,
+ } from "./ProjectDialogs";
+ import type { GitHubIssuePreview, RegisteredProject } from "../lib/tauri";
++import { Toaster, toast } from "./ui/sonner";
+ import type { SshHost } from "../lib/sshHosts";
+ import type { RemoteDirectoryListing } from "../lib/remoteDirectories";
+ 
+@@ -104,7 +105,12 @@ const mockHost2: SshHost = {
+   disabled: true,
+ };
+ 
+-afterEach(cleanup);
++afterEach(() => {
++  cleanup();
++  act(() => {
++    toast.dismiss();
++  });
++});
+ 
+ beforeEach(() => {
+   native.isTauriRuntime.mockReset();
+@@ -331,6 +337,37 @@ describe("AddProjectDialog Local flow", () => {
+     expect(onClose).toHaveBeenCalledOnce();
+   });
+ 
++  it("warns why Git cannot serve a folder that registered as a plain folder", async () => {
++    native.isTauriRuntime.mockReturnValue(true);
++    dialog.open.mockResolvedValue("/srv/shared/repo");
++    const registered: RegisteredProject = {
++      workspaceId: "repo",
++      repoRoot: "/srv/shared/repo",
++      gitRoot: null,
++      gitUnavailable: { kind: "dubiousOwnership", path: "/srv/shared/repo" },
++    };
++    native.registerProject.mockResolvedValue(registered);
++    const onRegistered = vi.fn();
++
++    render(
++      <>
++        <Toaster />
++        <AddProjectDialog onClose={vi.fn()} onRegistered={onRegistered} />
++      </>,
++    );
++    await act(async () => {
++      fireEvent.click(screen.getByTestId("project-type-local"));
++    });
++    await act(async () => {
++      fireEvent.click(screen.getByRole("button", { name: "Add Project" }));
++    });
++
++    expect(onRegistered).toHaveBeenCalledWith(registered);
++    expect(
++      await screen.findByText(/another user owns it.*safe\.directory \/srv\/shared\/repo/),
++    ).toBeInTheDocument();
++  });
++
+   it("appends -2 suffix when derived workspaceId conflicts with existing projects", async () => {
+     native.isTauriRuntime.mockReturnValue(true);
+     const pickerDef = deferred<string | null>();
+diff --git a/ui/src/components/ProjectDialogs.tsx b/ui/src/components/ProjectDialogs.tsx
+index 29ff7c4c2..9c8544a8f 100644
+--- a/ui/src/components/ProjectDialogs.tsx
++++ b/ui/src/components/ProjectDialogs.tsx
+@@ -29,9 +29,11 @@ import {
+   type RegisteredProject,
+ } from "../lib/tauri";
+ import type { Worktree } from "../lib/types";
++import { gitUnavailableMessage } from "./onboarding/FirstProjectStep";
+ import { RemoteDirectoryPicker } from "./RemoteDirectoryPicker";
+ import { PairedDaemonProjectForm } from "./PairedDaemonProjectForm";
+ import { useModalDialog } from "./useModalDialog";
++import { toast } from "./ui/sonner";
+ 
+ const fieldClass =
+   "h-8 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/45 focus:border-ring";
+@@ -44,6 +46,13 @@ function checkIsTauri(): boolean {
+   }
+ }
+ 
++/// A folder Git cannot serve still registers (as a plain folder); say why instead of
++/// silently dropping worktrees.
++function reportGitUnavailable(project: RegisteredProject): void {
++  const message = gitUnavailableMessage(project.gitUnavailable);
++  if (message) toast.warning(message);
++}
++
+ /// IPC failures arrive as structured `{ code, message }` objects (not `Error`
+ /// instances), so extract the reason from both shapes before falling back.
+ function extractErrorMessage(cause: unknown, fallback: string): string {
+@@ -242,6 +251,7 @@ export function AddProjectDialog({
+     try {
+       const project = await registerProject({ workspaceId: derivedId, repoPath: selectedPath });
+       if (dismissedRef.current || !isMountedRef.current) return;
++      reportGitUnavailable(project);
+       onRegisteredRef.current(project);
+       handleDismiss();
+     } catch (cause) {
+@@ -264,6 +274,7 @@ export function AddProjectDialog({
+     try {
+       const project = await registerProject({ workspaceId: trimmedWorkspaceId, repoPath: trimmedPath });
+       if (dismissedRef.current || !isMountedRef.current) return;
++      reportGitUnavailable(project);
+       onRegisteredRef.current(project);
+       handleDismiss();
+     } catch (cause) {
+diff --git a/ui/src/components/onboarding/FirstProjectStep.tsx b/ui/src/components/onboarding/FirstProjectStep.tsx
+index fad5a0716..302da77fa 100644
+--- a/ui/src/components/onboarding/FirstProjectStep.tsx
++++ b/ui/src/components/onboarding/FirstProjectStep.tsx
+@@ -1,13 +1,46 @@
+-import { ChevronRight, FolderPlus, Monitor } from "lucide-react";
++import { AlertCircle, ChevronRight, FolderPlus, Monitor } from "lucide-react";
++
++import type { GitUnavailableReason } from "../../lib/tauri";
++
++/** What the user should install or run so Git-backed worktrees work; null when nothing. */
++export function gitUnavailableMessage(reason: GitUnavailableReason | null | undefined): string | null {
++  switch (reason?.kind) {
++    case undefined:
++    case "notARepository":
++      return null;
++    case "gitMissing":
++      return "Git was not found. Install Git to use worktrees; folders still open as plain folders.";
++    case "xcodeCommandLineToolsMissing":
++      return "Git needs the Xcode Command Line Tools. Run `xcode-select --install`, then reopen the folder.";
++    case "dubiousOwnership":
++      return `Git refuses this folder because another user owns it. If you trust it, run \`git config --global --add safe.directory ${reason.path || "<folder>"}\`.`;
++    case "gitFailed":
++      return `Git failed: ${reason.message}`;
++    case "nonUtf8Output":
++      return "Git reported a file or folder name that is not UTF-8, so this folder opens without worktrees. Rename it to UTF-8 to use worktrees.";
++  }
++}
+ 
+ export function FirstProjectStep(props: {
+   onAddProject: () => void;
+   onConnectMachine: () => void;
++  gitUnavailable?: GitUnavailableReason | null;
+ }): JSX.Element {
+-  const { onAddProject, onConnectMachine } = props;
++  const { onAddProject, onConnectMachine, gitUnavailable } = props;
++  const gitMessage = gitUnavailableMessage(gitUnavailable);
+ 
+   return (
+     <div className="grid gap-2">
++      {gitMessage ? (
++        <div
++          role="status"
++          data-testid="onboarding-git-unavailable"
++          className="flex items-start gap-2 rounded-md border border-border px-3 py-2 text-[12px] leading-relaxed text-status-warning"
++        >
++          <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
++          <span>{gitMessage}</span>
++        </div>
++      ) : null}
+       <button
+         type="button"
+         data-testid="onboarding-add-project"
+diff --git a/ui/src/components/onboarding/WelcomeWizard.test.tsx b/ui/src/components/onboarding/WelcomeWizard.test.tsx
+index 1dc5332af..5982a8ed6 100644
+--- a/ui/src/components/onboarding/WelcomeWizard.test.tsx
++++ b/ui/src/components/onboarding/WelcomeWizard.test.tsx
+@@ -141,6 +141,21 @@ describe("WelcomeWizard", () => {
+     expect(onRemindLater).toHaveBeenCalledTimes(2);
+   });
+ 
++  it("project step shows the Git probe reason so the user knows what to install", async () => {
++    const loadGitProbe = vi.fn(async () => ({
++      version: null,
++      unavailable: { kind: "gitMissing" as const },
++    }));
++    render(
++      <WelcomeWizard
++        {...createDefaultProps({ steps: ["intro", "project"], initialStepIndex: 1, loadGitProbe })}
++      />
++    );
++
++    expect((await screen.findByTestId("onboarding-git-unavailable")).textContent).toMatch(/Git was not found/);
++    expect(loadGitProbe).toHaveBeenCalledTimes(1);
++  });
++
+   it('project step Add Project button calls onStepCompleted("project") then onAddProject', () => {
+     const onStepCompleted = vi.fn();
+     const onAddProject = vi.fn();
+diff --git a/ui/src/components/onboarding/WelcomeWizard.tsx b/ui/src/components/onboarding/WelcomeWizard.tsx
+index 91976bfa7..964647afa 100644
+--- a/ui/src/components/onboarding/WelcomeWizard.tsx
++++ b/ui/src/components/onboarding/WelcomeWizard.tsx
+@@ -4,6 +4,7 @@ import { Check, X } from "lucide-react";
+ import type { ResolvedAgent } from "../../lib/agentsSettings";
+ import { cn } from "../../lib/cn";
+ import type { OnboardingStepId } from "../../lib/onboarding";
++import { getGitProbe, type GitProbe, type GitUnavailableReason } from "../../lib/tauri";
+ import type { CliLauncherStatus } from "../../lib/types";
+ import { Button } from "../ui/button";
+ import { IconButton } from "../ui/IconButton";
+@@ -27,6 +28,7 @@ export type WelcomeWizardProps = {
+   onRemindLater: () => void;
+   loadCliStatus?: () => Promise<CliLauncherStatus>;
+   installCli?: () => Promise<CliLauncherStatus>;
++  loadGitProbe?: () => Promise<GitProbe | null>;
+   initialStepIndex?: number;
+ };
+ 
+@@ -69,6 +71,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
+     onRemindLater,
+     loadCliStatus,
+     installCli,
++    loadGitProbe = getGitProbe,
+     initialStepIndex = 0,
+   } = props;
+ 
+@@ -81,6 +84,27 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
+ 
+   const currentStepIndex = clampStepIndex(stepIndex, steps.length);
+   const currentStep = steps[currentStepIndex];
++
++  // Probe Git when the project step shows, so a missing Git or the macOS stub is
++  // explained before the user picks a folder that would silently open without worktrees.
++  const [gitUnavailable, setGitUnavailable] = useState<GitUnavailableReason | null>(null);
++  const loadGitProbeRef = useRef(loadGitProbe);
++  const onProjectStep = currentStep === "project";
++  useEffect(() => {
++    if (!onProjectStep) return;
++    let cancelled = false;
++    loadGitProbeRef.current().then(
++      (probe) => {
++        if (!cancelled) setGitUnavailable(probe?.unavailable ?? null);
++      },
++      () => {
++        if (!cancelled) setGitUnavailable(null);
++      },
++    );
++    return () => {
++      cancelled = true;
++    };
++  }, [onProjectStep]);
+   const isFirst = currentStepIndex === 0;
+   const isLast = currentStepIndex === steps.length - 1;
+ 
+@@ -180,6 +204,7 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
+               onStepCompleted("project");
+               onConnectMachine();
+             }}
++            gitUnavailable={gitUnavailable}
+           />
+         );
+       default:
+diff --git a/ui/src/lib/tauri.ts b/ui/src/lib/tauri.ts
+index 6cf04069f..05813dcbc 100644
+--- a/ui/src/lib/tauri.ts
++++ b/ui/src/lib/tauri.ts
+@@ -77,6 +77,8 @@ export type RegisteredProject = {
+   gitRoot?: string | null;
+   gitRemote?: string | null;
+   gitCommonDir?: string | null;
++  gitUnavailable?: GitUnavailableReason | null;
++  gitVersion?: string | null;
+   gitBranch?: string | null;
+   gitHead?: string | null;
+   hostLabel?: string;
+@@ -252,6 +254,26 @@ export async function revealPath(path: string) {
+   return invokeCommand<void>("cmd_path_reveal", { path });
+ }
+ 
++/** Why a folder is served without Git; mirrors `GitUnavailableReason` in worktree/git.rs. */
++export type GitUnavailableReason =
++  | { kind: "gitMissing" }
++  | { kind: "xcodeCommandLineToolsMissing" }
++  | { kind: "dubiousOwnership"; path: string }
++  | { kind: "notARepository" }
++  | { kind: "gitFailed"; message: string }
++  | { kind: "nonUtf8Output" };
++
++export type GitProbe = {
++  version: string | null;
++  unavailable: GitUnavailableReason | null;
++};
++
++/** Whether Git runs on this host; null outside the desktop shell. */
++export async function getGitProbe(): Promise<GitProbe | null> {
++  if (!isTauri()) return null;
++  return invokeCommand<GitProbe>("cmd_git_probe");
++}
++
+ export async function getInitialProject() {
+   return invokeCommand<RegisteredProject>("cmd_project_initial");
+ }

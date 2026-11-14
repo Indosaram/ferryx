@@ -1,0 +1,3 @@
+src-tauri/examples/ssh_prompt_qa.rs
+ui/src/components/settings/SshAuthPromptCard.test.tsx
+ui/src/components/settings/SshAuthPromptCard.tsx

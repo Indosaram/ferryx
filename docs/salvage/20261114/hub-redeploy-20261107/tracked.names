@@ -1,0 +1,6 @@
+M	src-tauri/resources/helpers/aarch64-apple-darwin/ferryx-remote-helper
+M	src-tauri/resources/helpers/aarch64-unknown-linux-gnu/ferryx-remote-helper
+M	src-tauri/resources/helpers/manifest.json
+M	src-tauri/resources/helpers/x86_64-apple-darwin/ferryx-remote-helper
+M	src-tauri/resources/helpers/x86_64-pc-windows-msvc/ferryx-remote-helper.exe
+M	src-tauri/resources/helpers/x86_64-unknown-linux-gnu/ferryx-remote-helper

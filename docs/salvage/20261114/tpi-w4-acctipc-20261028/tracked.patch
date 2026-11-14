@@ -1,0 +1,2523 @@
+diff --git a/docs/HEADLESS_LINUX_SERVER_DEPLOYMENT_GUIDE.md b/docs/HEADLESS_LINUX_SERVER_DEPLOYMENT_GUIDE.md
+index 289862a1d..621d5dc97 100644
+--- a/docs/HEADLESS_LINUX_SERVER_DEPLOYMENT_GUIDE.md
++++ b/docs/HEADLESS_LINUX_SERVER_DEPLOYMENT_GUIDE.md
+@@ -414,7 +414,7 @@ chmod 0600 ~/.ferryx/remote/remote-config.json
+ 
+ ### Verifying Gateway Configuration
+ 
+-Use the CLI to inspect the persisted configuration:
++Use the CLI to inspect the gateway:
+ 
+ ```bash
+ ferryx remote status
+@@ -422,7 +422,7 @@ ferryx remote status
+ 
+ Output:
+ ```text
+-status=ok port=43821 mode=localNetwork
++status=ok port=43821 daemon=running mode=localNetwork relayConnected=false
+ ```
+ 
+ For JSON format:
+@@ -433,12 +433,13 @@ ferryx remote status --json
+ 
+ Output:
+ ```json
+-{"status":"ok","port":43821,"mode":"localNetwork"}
++{"status":"ok","port":43821,"daemon":"running","mode":"relay","relayConnected":true,"relayUrl":"https://relay.ferryx.dev","relayUrlSource":"default"}
+ ```
+ 
+-Persisted status versus live health:
+-The `ferryx remote status` command reads static configuration from `~/.ferryx/remote/remote-config.json` (`src-tauri/src/cli.rs:361`).
+-It prints `status=ok` along with the configured port and mode, but does not query the running daemon over IPC. It returns `status=ok` even if the daemon is stopped or if the gateway failed to bind due to network interface errors.
++Live status versus saved config:
++`ferryx remote status` asks the running daemon over its local socket and reports the live mode, whether the relay tunnel is connected (`relayConnected`), and the relay URL in effect with its source (`config` for a saved URL, `default` for the built-in relay).
++When no daemon answers it prints `status=daemonNotRunning` (`"status":"daemonNotRunning"`, `"daemon":"notRunning"`, `"relayConnected":null`) with the mode saved in `~/.ferryx/remote/remote-config.json`; nothing live is claimed. A daemon that owns the socket but does not answer (for example one still running an older protocol version after an upgrade) is reported as `status=daemonUnreachable` (`"daemon":"unreachable"`).
++`ferryx-cli up` and `ferryx account enroll` turn relay mode on after enrolling when the saved mode is `off`; a `localNetwork` or `tailscale` mode chosen earlier is left unchanged.
+ To confirm that the remote gateway is actively listening, inspect open TCP sockets directly:
+ ```bash
+ ss -tulpn | grep 43821
+diff --git a/src-tauri/src/account/enroll_client.rs b/src-tauri/src/account/enroll_client.rs
+index 53f375148..a3450603c 100644
+--- a/src-tauri/src/account/enroll_client.rs
++++ b/src-tauri/src/account/enroll_client.rs
+@@ -360,10 +360,14 @@ fn requested_display_name(display_name: Option<&str>) -> Option<String> {
+         .map(str::to_string)
+ }
+ 
++/// Builder shared by every account-service HTTP client: the TLS backend and the default timeout.
++pub fn account_http_client_builder() -> reqwest::ClientBuilder {
++    reqwest::Client::builder().timeout(Duration::from_secs(15))
++}
++
+ #[allow(clippy::result_large_err)]
+ fn account_http_client() -> Result<reqwest::Client, EnrollError> {
+-    reqwest::Client::builder()
+-        .timeout(Duration::from_secs(15))
++    account_http_client_builder()
+         .build()
+         .map_err(|error| EnrollError::local("ACCOUNT_CLIENT_FAILED", error.to_string()))
+ }
+diff --git a/src-tauri/src/cli.rs b/src-tauri/src/cli.rs
+index 55064ad88..f45744af9 100644
+--- a/src-tauri/src/cli.rs
++++ b/src-tauri/src/cli.rs
+@@ -2370,6 +2370,12 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
+                 "Enrolled; the daemon keeps owning its identity and device tokens. \
+                  Existing paired devices and live terminals are unaffected."
+             );
++            enable_relay_on_this_machine(
++                &runtime,
++                &record.relay_origin,
++                std::time::Duration::ZERO,
++                std::time::Duration::ZERO,
++            );
+             Ok(())
+         }
+         AccountCliCommand::Login { email, origin } => {
+@@ -2383,7 +2389,7 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
+             };
+             let origin = account_cli_origin(origin)?;
+             let runtime = account_cli_runtime()?;
+-            runtime.block_on(async {
++            let record = runtime.block_on(async {
+                 let auth_resp = crate::account::enroll_client::request_device_auth(&origin, email)
+                     .await
+                     .map_err(|error| billing::from_enroll_error(&origin, &error))?;
+@@ -2427,8 +2433,15 @@ pub fn run_account_cli(command: AccountCliCommand) -> Result<(), AccountCliError
+                     "Enrolled successfully! The daemon keeps owning its identity and device tokens. \
+                      Existing paired devices and live terminals are unaffected."
+                 );
+-                Ok(())
+-            })
++                Ok(record)
++            })?;
++            enable_relay_on_this_machine(
++                &runtime,
++                &record.relay_origin,
++                std::time::Duration::ZERO,
++                std::time::Duration::ZERO,
++            );
++            Ok(())
+         }
+         AccountCliCommand::Plan { json, origin } => {
+             let origin = account_cli_origin(origin)?;
+@@ -2752,6 +2765,258 @@ pub struct UpEnrolled {
+     pub account_id: String,
+     pub machine_record_id: String,
+     pub relay_origin: String,
++    /// What `up` did to the remote gateway mode: `enabled` (the daemon switched to Relay),
++    /// `saved` (no daemon answered; Relay was saved for its next boot), `unchanged` (a mode
++    /// the user chose was kept) or `failed`.
++    pub relay_activation: &'static str,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub relay_activation_error: Option<String>,
++    pub remote: RemoteLiveStatus,
++}
++
++/// Remote gateway state as the running daemon reports it, or the saved config when no daemon
++/// answers (`daemon` is then `notRunning` or `unreachable` and nothing live is claimed).
++#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RemoteLiveStatus {
++    /// `running`, `notRunning` (no daemon owns the endpoint) or `unreachable` (a daemon owns it
++    /// but did not answer the request, e.g. it speaks another protocol version).
++    pub daemon: &'static str,
++    pub mode: crate::remote::RemoteNetworkMode,
++    /// `None` when no daemon answered: the tunnel state is unknown, not down.
++    pub relay_connected: Option<bool>,
++    /// The relay the gateway connects to in Relay mode.
++    pub relay_url: Option<String>,
++    /// `config` (saved relay URL) or `default` (built-in relay); `None` outside Relay mode.
++    pub relay_url_source: Option<&'static str>,
++}
++
++/// How long `up` and `account enroll` wait for the daemon endpoint before saving Relay to the
++/// config file the daemon restores at boot.
++const RELAY_DAEMON_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
++/// How long `up` waits for a just-enabled relay tunnel before reporting its current state.
++const RELAY_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
++
++/// The relay a gateway in `config` connects to, and where that URL came from.
++fn effective_relay_url(
++    config_mode: crate::remote::RemoteNetworkMode,
++    relay_url: Option<&str>,
++) -> (Option<String>, Option<&'static str>) {
++    if config_mode != crate::remote::RemoteNetworkMode::Relay {
++        return (None, None);
++    }
++    match relay_url.map(str::trim).filter(|url| !url.is_empty()) {
++        Some(url) => (Some(url.to_string()), Some("config")),
++        None => (
++            Some(crate::remote::state::DEFAULT_RELAY_URL.to_string()),
++            Some("default"),
++        ),
++    }
++}
++
++fn live_status_from_daemon(status: &crate::daemon::DaemonRemoteStatus) -> RemoteLiveStatus {
++    let (relay_url, relay_url_source) = effective_relay_url(status.mode, status.relay_url.as_deref());
++    RemoteLiveStatus {
++        daemon: "running",
++        mode: status.mode,
++        relay_connected: status.relay_connected,
++        relay_url,
++        relay_url_source,
++    }
++}
++
++/// The `daemon` marker for a status request that `error` failed: `notRunning` only when no daemon
++/// owns the endpoint; any other failure (e.g. a retiring daemon's handover timeout) is `unreachable`.
++fn daemon_absence(error: &crate::ipc::IpcError) -> &'static str {
++    if error.code == crate::ipc::IpcErrorCode::HostUnavailable
++        && error.message == crate::daemon::EXISTING_ONLY_NO_DAEMON_MESSAGE
++    {
++        "notRunning"
++    } else {
++        "unreachable"
++    }
++}
++
++fn live_status_from_saved(
++    saved: &crate::remote::RemoteGatewayConfig,
++    daemon: &'static str,
++) -> RemoteLiveStatus {
++    let (relay_url, relay_url_source) = effective_relay_url(saved.mode, saved.relay_url.as_deref());
++    RemoteLiveStatus {
++        daemon,
++        mode: saved.mode,
++        relay_connected: None,
++        relay_url,
++        relay_url_source,
++    }
++}
++
++fn saved_remote_config(config_path: Option<&std::path::Path>) -> crate::remote::RemoteGatewayConfig {
++    config_path
++        .and_then(crate::remote::state::load_persisted_config)
++        .unwrap_or_default()
++}
++
++/// The `relayActivationError` of an `unchanged` outcome caused by an unparseable remote config.
++const UNREADABLE_REMOTE_CONFIG_NOTE: &str =
++    "the saved remote config could not be read, so it was left as is";
++
++/// Outcome of [`enable_relay_after_enroll`].
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct RelayActivation {
++    pub outcome: &'static str,
++    pub error: Option<String>,
++    pub remote: RemoteLiveStatus,
++}
++
++/// Turns the relay on after an enrollment, the way the desktop does on its first pairing: only
++/// when the gateway is Off, so a LocalNetwork or Tailscale mode the user chose is never replaced.
++/// A running daemon is switched over IPC; when none answers on `client`'s endpoint, Relay is
++/// saved to `config_path`, which the daemon restores at boot.
++pub async fn enable_relay_after_enroll(
++    client: &crate::daemon::DaemonClient,
++    config_path: Option<&std::path::Path>,
++    relay_origin: &str,
++    connect_wait: std::time::Duration,
++) -> RelayActivation {
++    use crate::remote::{RemoteGatewayConfig, RemoteNetworkMode, REMOTE_GATEWAY_PORT};
++
++    let status = match client.remote_get_status().await {
++        Ok(status) => status,
++        Err(status_error) => {
++            let valid = crate::remote::relay_client::validate_relay_url(
++                relay_origin,
++                crate::remote::relay_client::is_insecure_relay_allowed(),
++            );
++            let (outcome, error) = match (config_path, valid) {
++                (_, Err(error)) => ("failed", Some(format!("invalid relay origin: {error}"))),
++                (Some(path), Ok(_)) => match crate::remote::state::persist_relay_if_off(path, relay_origin) {
++                    Ok(true) => ("saved", None),
++                    Ok(false) if crate::remote::state::load_persisted_config(path).is_none() => {
++                        ("unchanged", Some(UNREADABLE_REMOTE_CONFIG_NOTE.to_string()))
++                    }
++                    Ok(false) => ("unchanged", None),
++                    Err(error) => ("failed", Some(format!("cannot save the remote config: {error}"))),
++                },
++                (None, Ok(_)) => ("failed", Some("cannot resolve the remote config path".to_string())),
++            };
++            return RelayActivation {
++                outcome,
++                error,
++                remote: live_status_from_saved(
++                    &saved_remote_config(config_path),
++                    daemon_absence(&status_error),
++                ),
++            };
++        }
++    };
++    if status.mode != RemoteNetworkMode::Off {
++        return RelayActivation {
++            outcome: "unchanged",
++            error: None,
++            remote: live_status_from_daemon(&status),
++        };
++    }
++    // A daemon that booted from an unreadable config reports Off; switching it to Relay would
++    // make it overwrite that file, so the file and the daemon are both left alone.
++    if config_path.is_some_and(|path| {
++        path.exists() && crate::remote::state::load_persisted_config(path).is_none()
++    }) {
++        return RelayActivation {
++            outcome: "unchanged",
++            error: Some(UNREADABLE_REMOTE_CONFIG_NOTE.to_string()),
++            remote: live_status_from_daemon(&status),
++        };
++    }
++    let config = RemoteGatewayConfig {
++        mode: RemoteNetworkMode::Relay,
++        port: REMOTE_GATEWAY_PORT,
++        allow_control: status.allow_control,
++        relay_url: Some(relay_origin.to_string()),
++    };
++    if let Err(error) = client.remote_configure(config).await {
++        return RelayActivation {
++            outcome: "failed",
++            error: Some(error.message),
++            remote: live_status_from_daemon(&status),
++        };
++    }
++    // The tunnel connects in the background; report it once it is up or the wait ends.
++    let deadline = tokio::time::Instant::now() + connect_wait;
++    let latest = loop {
++        match client.remote_get_status().await {
++            Ok(status) => {
++                if status.relay_connected == Some(true) || tokio::time::Instant::now() >= deadline {
++                    break Ok(status);
++                }
++            }
++            Err(error) => break Err(daemon_absence(&error)),
++        }
++        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
++    };
++    RelayActivation {
++        outcome: "enabled",
++        error: None,
++        remote: match latest {
++            Ok(status) => live_status_from_daemon(&status),
++            Err(daemon) => live_status_from_saved(&saved_remote_config(config_path), daemon),
++        },
++    }
++}
++
++/// [`enable_relay_after_enroll`] against this machine's daemon and config file.
++fn enable_relay_on_this_machine(
++    runtime: &tokio::runtime::Runtime,
++    relay_origin: &str,
++    daemon_wait: std::time::Duration,
++    connect_wait: std::time::Duration,
++) -> RelayActivation {
++    let client = crate::daemon::DaemonClient::existing_only(daemon_wait);
++    let config_path = crate::remote::state::remote_config_path();
++    let activation = runtime.block_on(enable_relay_after_enroll(
++        &client,
++        config_path.as_deref(),
++        relay_origin,
++        connect_wait,
++    ));
++    eprintln!("{}", relay_activation_message(&activation, relay_origin));
++    activation
++}
++
++/// The human line `up` and `account enroll` print for `activation`.
++fn relay_activation_message(activation: &RelayActivation, relay_origin: &str) -> String {
++    let remote = &activation.remote;
++    match (activation.outcome, &activation.error) {
++        ("enabled", _) => format!("Relay enabled through {relay_origin}."),
++        ("saved", _) if remote.daemon == "unreachable" => format!(
++            "A daemon owns the endpoint but did not answer; relay mode through {relay_origin} was saved \
++             and applies when that daemon restarts."
++        ),
++        ("saved", _) => format!(
++            "No daemon answered; relay mode through {relay_origin} was saved and starts with the daemon."
++        ),
++        ("unchanged", Some(note)) => format!("Remote access was left unchanged: {note}."),
++        ("unchanged", None) if remote.mode == crate::remote::RemoteNetworkMode::Relay => {
++            match remote.relay_url.as_deref() {
++                Some(url) if url.trim_end_matches('/') != relay_origin.trim_end_matches('/') => format!(
++                    "Relay mode already uses {url}; it was not switched to {relay_origin}."
++                ),
++                _ if remote.daemon == "running" => {
++                    "Relay mode is already on; it is left unchanged.".to_string()
++                }
++                _ => "Relay mode is already saved for the next daemon start; it is left unchanged."
++                    .to_string(),
++            }
++        }
++        ("unchanged", None) => format!(
++            "Remote access mode {:?} was chosen before; it is left unchanged.",
++            remote.mode
++        ),
++        (_, error) => format!(
++            "Could not enable the relay: {}",
++            error.as_deref().unwrap_or("unknown error")
++        ),
++    }
+ }
+ 
+ /// How the daemon is kept running (`service` of the `up --json` summary and `service --json`).
+@@ -2843,6 +3108,16 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
+         install_service(&runtime)
+     };
+ 
++    // 6. Turn the relay on so the machine is reachable without a desktop. An unsupervised or
++    // skipped service gets one endpoint attempt; Relay is then saved for the daemon's boot.
++    let daemon_wait = if service.installed && !command.no_service {
++        RELAY_DAEMON_WAIT
++    } else {
++        std::time::Duration::ZERO
++    };
++    let activation =
++        enable_relay_on_this_machine(&runtime, &record.relay_origin, daemon_wait, RELAY_CONNECT_WAIT);
++
+     Ok(UpSummary {
+         cli_path: std::env::current_exe()
+             .map(|path| path.display().to_string())
+@@ -2852,6 +3127,9 @@ pub fn run_up_cli(command: UpCliCommand) -> Result<UpSummary, UpCliError> {
+             account_id: record.account_id,
+             machine_record_id: record.machine_record_id,
+             relay_origin: record.relay_origin,
++            relay_activation: activation.outcome,
++            relay_activation_error: activation.error,
++            remote: activation.remote,
+         }),
+         service,
+     })
+@@ -2909,6 +3187,11 @@ pub fn up_cli_main(args: &[String]) -> i32 {
+                         "Enrolled: account {} machine {} relay {}",
+                         enrolled.account_id, enrolled.machine_record_id, enrolled.relay_origin
+                     );
++                    println!(
++                        "remote relayActivation={} {}",
++                        enrolled.relay_activation,
++                        render_remote_live_status(&enrolled.remote)
++                    );
+                 }
+                 println!("{}", render_service_report(&summary.service));
+             }
+@@ -3293,76 +3576,69 @@ pub fn service_cli_main(args: &[String]) -> i32 {
+     }
+ }
+ 
+-/// Resolves the base directory Ferryx stores remote gateway state under,
+-/// mirroring the resolution used by [`remote_auth_manager`].
+-fn remote_state_dir() -> Option<std::path::PathBuf> {
+-    std::env::var_os("FERRYX_DATA_DIR")
+-        .map(std::path::PathBuf::from)
+-        .map(|dir| dir.join("remote"))
+-        .or_else(|| {
+-            #[cfg(windows)]
+-            {
+-                std::env::var_os("LOCALAPPDATA")
+-                    .map(|dir| std::path::PathBuf::from(dir).join("Ferryx").join("remote"))
+-                    .or_else(|| {
+-                        std::env::var_os("USERPROFILE")
+-                            .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
+-                    })
+-            }
+-            #[cfg(not(windows))]
+-            {
+-                std::env::var_os("HOME")
+-                    .map(|dir| std::path::PathBuf::from(dir).join(".ferryx").join("remote"))
+-            }
+-        })
+-}
+-
+-#[derive(Debug, serde::Serialize)]
++#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
++#[serde(rename_all = "camelCase")]
+ struct RemoteStatusOutput {
++    /// `ok` when the daemon answered; `daemonNotRunning` or `daemonUnreachable` when only the
++    /// saved config was read.
+     status: &'static str,
+     port: u16,
+-    mode: String,
++    #[serde(flatten)]
++    remote: RemoteLiveStatus,
+ }
+ 
+-/// Reads the persisted remote gateway config (`remote-config.json`) if one
+-/// exists, otherwise falls back to the default config, and reports the
+-/// configured port and mode. This does not require the daemon to be running.
+-fn remote_status_output() -> RemoteStatusOutput {
+-    let persisted = remote_state_dir()
+-        .map(|dir| dir.join("remote-config.json"))
+-        .and_then(|path| std::fs::read(path).ok())
+-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+-
+-    let default_config = crate::remote::RemoteGatewayConfig::default();
+-    let mode = persisted
+-        .as_ref()
+-        .and_then(|value| value.get("mode"))
+-        .and_then(|value| value.as_str())
+-        .map(str::to_string)
+-        .unwrap_or_else(|| {
+-            serde_json::to_value(default_config.mode)
+-                .ok()
+-                .and_then(|value| value.as_str().map(str::to_string))
+-                .unwrap_or_else(|| "off".to_string())
+-        });
+-    let port = persisted
+-        .as_ref()
+-        .and_then(|value| value.get("port"))
+-        .and_then(|value| value.as_u64())
+-        .and_then(|value| u16::try_from(value).ok())
+-        .unwrap_or(default_config.port);
+-
+-    RemoteStatusOutput {
+-        status: "ok",
+-        port,
+-        mode,
++/// Asks the running daemon for the live gateway state (mode, tunnel, effective relay). When no
++/// daemon answers, reports the saved `remote-config.json` and says whether the daemon is not
++/// running or did not answer, instead of claiming a live state.
++async fn remote_status_output(
++    client: &crate::daemon::DaemonClient,
++    config_path: Option<&std::path::Path>,
++) -> RemoteStatusOutput {
++    match client.remote_get_status().await {
++        Ok(status) => RemoteStatusOutput {
++            status: "ok",
++            port: status.port,
++            remote: live_status_from_daemon(&status),
++        },
++        Err(error) => {
++            let saved = saved_remote_config(config_path);
++            let remote = live_status_from_saved(&saved, daemon_absence(&error));
++            RemoteStatusOutput {
++                status: if remote.daemon == "notRunning" {
++                    "daemonNotRunning"
++                } else {
++                    "daemonUnreachable"
++                },
++                port: saved.port,
++                remote,
++            }
++        }
+     }
+ }
+ 
++fn render_remote_live_status(remote: &RemoteLiveStatus) -> String {
++    let mode = serde_json::to_value(remote.mode)
++        .ok()
++        .and_then(|value| value.as_str().map(str::to_string))
++        .unwrap_or_default();
++    let mut text = format!("daemon={} mode={mode}", remote.daemon);
++    match remote.relay_connected {
++        Some(connected) => text.push_str(&format!(" relayConnected={connected}")),
++        None => text.push_str(" relayConnected=unknown"),
++    }
++    if let (Some(url), Some(source)) = (&remote.relay_url, remote.relay_url_source) {
++        text.push_str(&format!(" relayUrl={url} relayUrlSource={source}"));
++    }
++    text
++}
++
+ pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
+     match command {
+         RemoteCliCommand::Status { json } => {
+-            let output = remote_status_output();
++            let runtime = account_cli_runtime().map_err(|error| error.message)?;
++            let client = crate::daemon::DaemonClient::existing_only(std::time::Duration::ZERO);
++            let config_path = crate::remote::state::remote_config_path();
++            let output = runtime.block_on(remote_status_output(&client, config_path.as_deref()));
+             if json {
+                 println!(
+                     "{}",
+@@ -3370,8 +3646,10 @@ pub fn run_remote_cli(command: RemoteCliCommand) -> Result<(), String> {
+                 );
+             } else {
+                 println!(
+-                    "status={} port={} mode={}",
+-                    output.status, output.port, output.mode
++                    "status={} port={} {}",
++                    output.status,
++                    output.port,
++                    render_remote_live_status(&output.remote)
+                 );
+             }
+             Ok(())
+@@ -4150,6 +4428,15 @@ mod tests {
+                 account_id: "acct".into(),
+                 machine_record_id: "rec".into(),
+                 relay_origin: "https://relay.example".into(),
++                relay_activation: "enabled",
++                relay_activation_error: None,
++                remote: RemoteLiveStatus {
++                    daemon: "running",
++                    mode: crate::remote::RemoteNetworkMode::Relay,
++                    relay_connected: Some(true),
++                    relay_url: Some("https://relay.example".into()),
++                    relay_url_source: Some("config"),
++                },
+             }),
+             service: service.clone(),
+         };
+@@ -4159,7 +4446,13 @@ mod tests {
+             serde_json::json!({
+                 "cliPath": "/home/u/.local/bin/ferryx-cli",
+                 "version": "1.0.0",
+-                "enrolled": {"accountId": "acct", "machineRecordId": "rec", "relayOrigin": "https://relay.example"},
++                "enrolled": {
++                    "accountId": "acct",
++                    "machineRecordId": "rec",
++                    "relayOrigin": "https://relay.example",
++                    "relayActivation": "enabled",
++                    "remote": {"daemon": "running", "mode": "relay", "relayConnected": true, "relayUrl": "https://relay.example", "relayUrlSource": "config"}
++                },
+                 "service": {"supervised": false, "backend": "detached", "installed": true, "linger": null, "pid": 42, "reason": "systemd is not the init system"}
+             })
+         );
+@@ -4181,6 +4474,249 @@ mod tests {
+         assert_eq!(up_summary_exit_code(&not_running, true), UP_EXIT_OK);
+     }
+ 
++    /// A daemon serving `config_path` on a private test socket, and an existing-only client of it.
++    #[cfg(unix)]
++    async fn up_test_daemon(
++        dir: &std::path::Path,
++    ) -> (
++        crate::daemon::DaemonClient,
++        Arc<crate::daemon::server::DaemonServer>,
++        tokio::task::JoinHandle<()>,
++    ) {
++        let socket_path = dir.join("daemon.sock");
++        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
++        let server = Arc::new(crate::daemon::server::DaemonServer::new_with_paths(
++            Some(dir.join("remote-config.json")),
++            Some(dir.join("remote-auth.json")),
++        ));
++        let serving = Arc::clone(&server);
++        let task = tokio::spawn(async move {
++            while let Ok((stream, _)) = listener.accept().await {
++                tokio::spawn(Arc::clone(&serving).handle_client(stream));
++            }
++        });
++        let client = crate::daemon::DaemonClient::existing_only_at(
++            socket_path,
++            std::time::Duration::from_secs(5),
++        );
++        (client, server, task)
++    }
++
++    /// A relay origin nothing listens on: the gateway enters Relay mode and its tunnel retries.
++    const UP_TEST_RELAY: &str = "http://127.0.0.1:9";
++
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn up_enables_relay_on_a_running_daemon_and_persists_it() {
++        let dir = tempfile::tempdir().unwrap();
++        let config_path = dir.path().join("remote-config.json");
++        let (client, server, task) = up_test_daemon(dir.path()).await;
++
++        let activation = enable_relay_after_enroll(
++            &client,
++            Some(&config_path),
++            UP_TEST_RELAY,
++            std::time::Duration::ZERO,
++        )
++        .await;
++
++        assert_eq!(activation.outcome, "enabled", "{:?}", activation.error);
++        assert_eq!(activation.remote.daemon, "running");
++        assert_eq!(activation.remote.mode, crate::remote::RemoteNetworkMode::Relay);
++        assert_eq!(activation.remote.relay_url.as_deref(), Some(UP_TEST_RELAY));
++        assert_eq!(activation.remote.relay_url_source, Some("config"));
++        let saved = crate::remote::state::load_persisted_config(&config_path).expect("saved config");
++        assert_eq!(saved.mode, crate::remote::RemoteNetworkMode::Relay);
++        assert_eq!(saved.relay_url.as_deref(), Some(UP_TEST_RELAY));
++
++        let status = remote_status_output(&client, Some(&config_path)).await;
++        let value = serde_json::to_value(&status).unwrap();
++        assert_eq!(value["status"], "ok");
++        assert_eq!(value["daemon"], "running");
++        assert_eq!(value["mode"], "relay");
++        assert!(value["relayConnected"].is_boolean(), "{value}");
++        assert_eq!(value["relayUrl"], UP_TEST_RELAY);
++        assert_eq!(value["relayUrlSource"], "config");
++
++        server
++            .handle_remote_configure(crate::remote::RemoteGatewayConfig::default())
++            .await
++            .unwrap();
++        task.abort();
++    }
++
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn up_leaves_a_user_chosen_mode_untouched() {
++        let dir = tempfile::tempdir().unwrap();
++        let config_path = dir.path().join("remote-config.json");
++        let (client, server, task) = up_test_daemon(dir.path()).await;
++        server
++            .handle_remote_configure(crate::remote::RemoteGatewayConfig {
++                mode: crate::remote::RemoteNetworkMode::LocalNetwork,
++                ..Default::default()
++            })
++            .await
++            .expect("enable local network");
++
++        let activation = enable_relay_after_enroll(
++            &client,
++            Some(&config_path),
++            UP_TEST_RELAY,
++            std::time::Duration::ZERO,
++        )
++        .await;
++
++        assert_eq!(activation.outcome, "unchanged");
++        assert_eq!(activation.remote.mode, crate::remote::RemoteNetworkMode::LocalNetwork);
++        assert_eq!(
++            server.remote_state().config.read().mode,
++            crate::remote::RemoteNetworkMode::LocalNetwork
++        );
++        let saved = crate::remote::state::load_persisted_config(&config_path).expect("saved config");
++        assert_eq!(saved.mode, crate::remote::RemoteNetworkMode::LocalNetwork);
++        assert_eq!(saved.relay_url, None);
++
++        server
++            .handle_remote_configure(crate::remote::RemoteGatewayConfig::default())
++            .await
++            .unwrap();
++        task.abort();
++    }
++
++    #[tokio::test]
++    async fn up_without_a_daemon_saves_relay_for_the_next_boot_and_status_says_so() {
++        let dir = tempfile::tempdir().unwrap();
++        let config_path = dir.path().join("remote-config.json");
++        let client = crate::daemon::DaemonClient::existing_only_at(
++            dir.path().join("absent.sock"),
++            std::time::Duration::ZERO,
++        );
++
++        let activation =
++            enable_relay_after_enroll(&client, Some(&config_path), UP_TEST_RELAY, std::time::Duration::ZERO)
++                .await;
++
++        assert_eq!(activation.outcome, "saved", "{:?}", activation.error);
++        assert_eq!(activation.remote.daemon, "notRunning");
++        assert_eq!(activation.remote.relay_connected, None);
++        let saved = crate::remote::state::load_persisted_config(&config_path).expect("saved config");
++        assert_eq!(saved.mode, crate::remote::RemoteNetworkMode::Relay);
++        assert_eq!(saved.relay_url.as_deref(), Some(UP_TEST_RELAY));
++
++        let value = serde_json::to_value(remote_status_output(&client, Some(&config_path)).await).unwrap();
++        assert_eq!(
++            value,
++            serde_json::json!({
++                "status": "daemonNotRunning",
++                "port": crate::remote::REMOTE_GATEWAY_PORT,
++                "daemon": "notRunning",
++                "mode": "relay",
++                "relayConnected": null,
++                "relayUrl": UP_TEST_RELAY,
++                "relayUrlSource": "config"
++            })
++        );
++
++        // A saved non-Off mode is kept, and a second run is a no-op.
++        crate::remote::state::persist_relay_if_off(&config_path, "http://127.0.0.1:10").unwrap();
++        assert_eq!(
++            crate::remote::state::load_persisted_config(&config_path).unwrap().relay_url.as_deref(),
++            Some(UP_TEST_RELAY)
++        );
++    }
++
++    #[tokio::test]
++    async fn up_without_a_daemon_leaves_an_unreadable_config_alone() {
++        let dir = tempfile::tempdir().unwrap();
++        let config_path = dir.path().join("remote-config.json");
++        std::fs::write(&config_path, b"{not json").unwrap();
++        let client = crate::daemon::DaemonClient::existing_only_at(
++            dir.path().join("absent.sock"),
++            std::time::Duration::ZERO,
++        );
++
++        let activation =
++            enable_relay_after_enroll(&client, Some(&config_path), UP_TEST_RELAY, std::time::Duration::ZERO)
++                .await;
++
++        assert_eq!(activation.outcome, "unchanged");
++        assert!(activation.error.is_some());
++        assert_eq!(activation.remote.daemon, "notRunning");
++        assert_eq!(std::fs::read(&config_path).unwrap(), b"{not json");
++    }
++
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn up_leaves_a_running_daemon_and_its_unreadable_config_alone() {
++        let dir = tempfile::tempdir().unwrap();
++        let config_path = dir.path().join("remote-config.json");
++        std::fs::write(&config_path, b"{not json").unwrap();
++        let (client, server, task) = up_test_daemon(dir.path()).await;
++
++        let activation = enable_relay_after_enroll(
++            &client,
++            Some(&config_path),
++            UP_TEST_RELAY,
++            std::time::Duration::ZERO,
++        )
++        .await;
++
++        assert_eq!(activation.outcome, "unchanged");
++        assert_eq!(activation.error.as_deref(), Some(UNREADABLE_REMOTE_CONFIG_NOTE));
++        assert_eq!(activation.remote.daemon, "running");
++        assert_eq!(activation.remote.mode, crate::remote::RemoteNetworkMode::Off);
++        assert_eq!(
++            server.remote_state().config.read().mode,
++            crate::remote::RemoteNetworkMode::Off
++        );
++        assert_eq!(std::fs::read(&config_path).unwrap(), b"{not json");
++        task.abort();
++    }
++
++    #[test]
++    fn relay_already_on_message_tells_live_saved_and_other_relay_apart() {
++        let origin = "https://relay.example";
++        let activation = |daemon: &'static str, relay_url: &str| RelayActivation {
++            outcome: "unchanged",
++            error: None,
++            remote: RemoteLiveStatus {
++                daemon,
++                mode: crate::remote::RemoteNetworkMode::Relay,
++                relay_connected: None,
++                relay_url: Some(relay_url.to_string()),
++                relay_url_source: Some("config"),
++            },
++        };
++        let live = relay_activation_message(&activation("running", origin), origin);
++        let saved = relay_activation_message(&activation("notRunning", origin), origin);
++        let unreachable = relay_activation_message(&activation("unreachable", origin), origin);
++        let other = relay_activation_message(&activation("running", "http://127.0.0.1:9"), origin);
++
++        assert_ne!(live, saved);
++        assert_eq!(saved, unreachable);
++        assert!(other.contains("http://127.0.0.1:9") && other.contains(origin), "{other}");
++        assert_ne!(other, live);
++        assert_eq!(
++            relay_activation_message(&activation("running", "https://relay.example/"), origin),
++            live
++        );
++    }
++
++    #[test]
++    fn daemon_absence_is_not_running_only_when_no_daemon_owns_the_endpoint() {
++        use crate::ipc::{IpcError, IpcErrorCode};
++        let no_daemon = IpcError::new(
++            IpcErrorCode::HostUnavailable,
++            crate::daemon::EXISTING_ONLY_NO_DAEMON_MESSAGE,
++        );
++        assert_eq!(daemon_absence(&no_daemon), "notRunning");
++        let handover = IpcError::new(IpcErrorCode::HostUnavailable, "Daemon handover handshake timed out");
++        assert_eq!(daemon_absence(&handover), "unreachable");
++        let mismatch = IpcError::new(IpcErrorCode::DaemonUpdatePending, "another protocol");
++        assert_eq!(daemon_absence(&mismatch), "unreachable");
++    }
++
+     #[test]
+     fn service_parses_actions_and_json() {
+         assert_eq!(
+diff --git a/src-tauri/src/daemon/client.rs b/src-tauri/src/daemon/client.rs
+index 4c87bd36f..36c244b1b 100644
+--- a/src-tauri/src/daemon/client.rs
++++ b/src-tauri/src/daemon/client.rs
+@@ -227,6 +227,23 @@ fn record_daemon_busy(channel: &crate::ipc::qa_barrier::QaBarrierChannel, error:
+     channel.append_receipt(DAEMON_CLIENT_BUSY_RECEIPT, &operation_id, daemon_busy_settlement(error));
+ }
+ 
++/// Message of the HostUnavailable error an existing-only client returns when no daemon owns the
++/// endpoint (as opposed to one that exists but did not answer).
++pub const EXISTING_ONLY_NO_DAEMON_MESSAGE: &str = "No daemon is running on this machine";
++
++/// Message of the HostUnavailable error an existing-only client returns when a daemon endpoint
++/// exists but cannot be reached (untrusted socket, or access refused).
++const EXISTING_ONLY_UNREACHABLE_MESSAGE: &str =
++    "A daemon endpoint exists on this machine but could not be reached";
++
++/// An existing-only client found a daemon speaking another protocol and leaves it alone.
++fn existing_only_mismatch() -> IpcError {
++    IpcError::new(
++        IpcErrorCode::DaemonUpdatePending,
++        "The running daemon speaks another protocol version",
++    )
++}
++
+ /// QA builds: records a DAEMON_BUSY outcome for the runner; every other error and build is a no-op.
+ async fn report_daemon_busy(error: &IpcError) {
+     #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
+@@ -1336,6 +1353,10 @@ pub struct DaemonClient {
+     epoch: Arc<parking_lot::RwLock<Option<u64>>>,
+     upgrade_requested: Arc<AtomicBool>,
+     spawn_lock: Arc<Mutex<()>>,
++    /// `Some(wait)`: only talk to a daemon that already owns the endpoint, waiting up to `wait`
++    /// for it to publish. Such a client never starts a daemon, never requests an upgrade and
++    /// reports a protocol mismatch without acting on it (CLI probes such as `remote status`).
++    existing_only: Option<Duration>,
+ }
+ 
+ impl Default for DaemonClient {
+@@ -1357,6 +1378,7 @@ impl DaemonClient {
+             epoch: Arc::new(parking_lot::RwLock::new(None)),
+             upgrade_requested: Arc::new(AtomicBool::new(false)),
+             spawn_lock: Arc::new(Mutex::new(())),
++            existing_only: None,
+         }
+     }
+ 
+@@ -1371,6 +1393,20 @@ impl DaemonClient {
+             epoch: Arc::new(parking_lot::RwLock::new(None)),
+             upgrade_requested: Arc::new(AtomicBool::new(false)),
+             spawn_lock: Arc::new(Mutex::new(())),
++            existing_only: None,
++        }
++    }
++
++    /// A client of the daemon that already owns this machine's endpoint; see `existing_only`.
++    pub fn existing_only(wait: Duration) -> Self {
++        Self::existing_only_at(Self::resolve_default_socket_path(), wait)
++    }
++
++    /// [`Self::existing_only`] against an explicit endpoint.
++    pub fn existing_only_at(socket_path: PathBuf, wait: Duration) -> Self {
++        Self {
++            existing_only: Some(wait),
++            ..Self::new_with_socket(socket_path)
+         }
+     }
+ 
+@@ -2556,6 +2592,7 @@ impl DaemonClient {
+             epoch: Arc::new(parking_lot::RwLock::new(None)),
+             upgrade_requested: Arc::clone(&self.upgrade_requested),
+             spawn_lock: Arc::new(Mutex::new(())),
++            existing_only: self.existing_only,
+         }
+     }
+ 
+@@ -2652,6 +2689,26 @@ impl DaemonClient {
+         });
+     }
+ 
++    /// Why an existing-only client reached no endpoint. Only an absent socket or one nothing
++    /// listens on (connection refused) means no daemon; a socket that fails the trust check or
++    /// refuses access belongs to an owner this client cannot reach.
++    async fn existing_only_absence(&self) -> IpcError {
++        let no_daemon = match fs::symlink_metadata(&self.socket_path) {
++            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
++            Ok(_) if Self::validate_existing_socket_path(&self.socket_path).is_err() => false,
++            Ok(_) => matches!(
++                Self::connect_socket(&self.socket_path).await,
++                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
++            ),
++        };
++        let message = if no_daemon {
++            EXISTING_ONLY_NO_DAEMON_MESSAGE
++        } else {
++            EXISTING_ONLY_UNREACHABLE_MESSAGE
++        };
++        IpcError::new(IpcErrorCode::HostUnavailable, message)
++    }
++
+     async fn try_connect_existing_socket(&self) -> Result<DaemonStream, std::io::Error> {
+         if fs::symlink_metadata(&self.socket_path).is_ok()
+             && Self::validate_existing_socket_path(&self.socket_path).is_ok()
+@@ -2680,6 +2737,12 @@ impl DaemonClient {
+         if let Ok(stream) = self.try_connect_existing_socket().await {
+             return Ok(stream);
+         }
++        if let Some(wait) = self.existing_only {
++            return match self.wait_for_supervised_daemon(wait).await {
++                Ok(stream) => Ok(stream),
++                Err(_) => Err(self.existing_only_absence().await),
++            };
++        }
+ 
+         // Bounded retry loop only if the socket file already exists on disk (e.g. during rolling handover when old
+         // daemon unlinks the socket and new daemon binds it). If no socket file exists, do not waste 200ms sleeping.
+@@ -3031,6 +3094,9 @@ impl DaemonClient {
+                 daemon_version,
+                 ..
+             } => {
++                if version != DAEMON_PROTOCOL_VERSION && self.existing_only.is_some() {
++                    return Err(existing_only_mismatch());
++                }
+                 if version != DAEMON_PROTOCOL_VERSION {
+                     // Never Shutdown, terminate, retarget or spawn over a live owner of another
+                     // protocol: report the pending update and leave the old owner running.
+@@ -3039,12 +3105,17 @@ impl DaemonClient {
+                     return Err(self.enter_update_pending(daemon_version).await);
+                 }
+                 *self.epoch.write() = Some(epoch);
+-                self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
++                if self.existing_only.is_none() {
++                    self.maybe_trigger_upgrade_if_stale(daemon_version, binary_mtime_ms);
++                }
+                 Ok(ActiveConnection {
+                     reader,
+                     writer: write_half,
+                 })
+             }
++            DaemonResponse::ProtocolMismatch { .. } if self.existing_only.is_some() => {
++                Err(existing_only_mismatch())
++            }
+             DaemonResponse::ProtocolMismatch { .. } => {
+                 drop(reader);
+                 drop(write_half);
+@@ -5248,6 +5319,30 @@ mod tests {
+     use tokio::net::UnixListener;
+     use tokio::sync::oneshot;
+ 
++    #[tokio::test]
++    async fn existing_only_reports_no_daemon_only_for_an_absent_or_refusing_socket() {
++        use std::os::unix::fs::PermissionsExt;
++        let directory = tempdir().unwrap();
++        let socket = directory.path().join("daemon.sock");
++        let client = DaemonClient::existing_only_at(socket.clone(), Duration::ZERO);
++
++        let absent = client.remote_get_status().await.unwrap_err();
++        assert_eq!(absent.code, IpcErrorCode::HostUnavailable);
++        assert_eq!(absent.message, EXISTING_ONLY_NO_DAEMON_MESSAGE);
++
++        // A socket file nothing listens on: connection refused, still no daemon.
++        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
++        assert_eq!(client.existing_only_absence().await.message, EXISTING_ONLY_NO_DAEMON_MESSAGE);
++
++        // A live listener this client may not connect to belongs to an owner it cannot reach.
++        std::fs::remove_file(&socket).unwrap();
++        let _listener = UnixListener::bind(&socket).unwrap();
++        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000)).unwrap();
++        let unreachable = client.existing_only_absence().await;
++        assert_eq!(unreachable.code, IpcErrorCode::HostUnavailable);
++        assert_eq!(unreachable.message, EXISTING_ONLY_UNREACHABLE_MESSAGE);
++    }
++
+     #[tokio::test]
+     async fn remote_input_socket_sessions_do_not_block_each_other() {
+         let directory = tempdir().unwrap();
+diff --git a/src-tauri/src/ipc/account.rs b/src-tauri/src/ipc/account.rs
+index 1d9d5190b..acd8ef891 100644
+--- a/src-tauri/src/ipc/account.rs
++++ b/src-tauri/src/ipc/account.rs
+@@ -1,4 +1,7 @@
++use std::time::Duration;
++
+ use serde::Serialize;
++use serde_json::json;
+ 
+ use super::error::{IpcError, IpcErrorCode};
+ use super::run_blocking;
+@@ -60,3 +63,622 @@ pub async fn cmd_account_enroll_this_machine(
+     })
+     .await
+ }
++
++/// Raw answer of one account-service call made on behalf of the desktop webview. The UI reads
++/// `body` exactly as it reads a `fetch` response, including the `{code, message, details}`
++/// envelope of a non-2xx status.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct AccountHttpResponse {
++    pub status: u16,
++    pub body: String,
++}
++
++const ACCOUNT_API_PREFIX: &str = "/api/account/v1/";
++const ATTACH_SESSION_PATH: &str = "/api/v1/attach/session";
++const ACCOUNT_HTTP_DEFAULT_TIMEOUT_MS: u64 = 15_000;
++const ACCOUNT_HTTP_MAX_TIMEOUT_MS: u64 = 60_000;
++const ACCOUNT_HTTP_MAX_REQUEST_BYTES: usize = 1024 * 1024;
++const ACCOUNT_HTTP_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
++
++#[derive(Debug)]
++struct AccountHttpRequest {
++    origin: String,
++    method: reqwest::Method,
++    path: String,
++    bearer: Option<String>,
++    body: Option<String>,
++    timeout: Duration,
++}
++
++fn account_error(code: &str, message: impl Into<String>, details: serde_json::Value) -> IpcError {
++    IpcError::new(IpcErrorCode::from_code_str(code), message).with_details(details)
++}
++
++/// Only the account API and the attach-session allocation are reachable, and only through a
++/// path that the URL parser keeps verbatim (no dot segments, query, fragment or empty segment).
++fn is_account_api_path(origin: &str, path: &str) -> bool {
++    let route = path == ATTACH_SESSION_PATH
++        || (path.starts_with(ACCOUNT_API_PREFIX) && path.len() > ACCOUNT_API_PREFIX.len());
++    let charset = path
++        .bytes()
++        .all(|byte| byte.is_ascii_alphanumeric() || b"-._~%/".contains(&byte));
++    if !route || !charset || path.contains("//") {
++        return false;
++    }
++    url::Url::parse(&format!("{origin}{path}"))
++        .is_ok_and(|url| url.path() == path && url.query().is_none() && url.fragment().is_none())
++}
++
++/// Validates one webview request before any byte leaves the machine. An invalid origin is a
++/// typed `INVALID_ACCOUNT_ORIGIN` error; nothing falls back to a default origin.
++fn account_http_request(
++    origin: &str,
++    method: &str,
++    path: &str,
++    bearer: Option<String>,
++    body: Option<String>,
++    timeout_ms: Option<u64>,
++) -> Result<AccountHttpRequest, IpcError> {
++    let normalized =
++        crate::account::origin::normalize_account_origin(origin.trim()).map_err(|error| {
++            account_error(
++                "INVALID_ACCOUNT_ORIGIN",
++                format!(
++                    "account origin {origin:?} cannot be used: {}",
++                    error.message
++                ),
++                json!({ "origin": origin, "reason": error.code }),
++            )
++        })?;
++    let method = match method {
++        "GET" => reqwest::Method::GET,
++        "POST" => reqwest::Method::POST,
++        other => {
++            return Err(account_error(
++                "INVALID_ARGUMENT",
++                format!("account request method {other:?} is not allowed"),
++                json!({ "method": other }),
++            ))
++        }
++    };
++    if !is_account_api_path(&normalized, path) {
++        return Err(account_error(
++            "INVALID_ARGUMENT",
++            format!("{path:?} is not an account API path"),
++            json!({ "path": path }),
++        ));
++    }
++    let bearer = bearer.filter(|token| !token.is_empty());
++    if bearer
++        .as_deref()
++        .is_some_and(|token| !token.bytes().all(|byte| byte.is_ascii_graphic()))
++    {
++        // The token itself never enters the error.
++        return Err(account_error(
++            "INVALID_ARGUMENT",
++            "account session token is malformed",
++            json!({ "path": path }),
++        ));
++    }
++    if let Some(body) = &body {
++        if method == reqwest::Method::GET {
++            return Err(account_error(
++                "INVALID_ARGUMENT",
++                "an account GET request carries no body",
++                json!({ "path": path }),
++            ));
++        }
++        if body.len() > ACCOUNT_HTTP_MAX_REQUEST_BYTES {
++            return Err(account_error(
++                "PAYLOAD_TOO_LARGE",
++                "account request body is too large",
++                json!({ "path": path, "limitBytes": ACCOUNT_HTTP_MAX_REQUEST_BYTES }),
++            ));
++        }
++    }
++    let timeout_ms = timeout_ms
++        .unwrap_or(ACCOUNT_HTTP_DEFAULT_TIMEOUT_MS)
++        .clamp(1, ACCOUNT_HTTP_MAX_TIMEOUT_MS);
++    Ok(AccountHttpRequest {
++        origin: normalized,
++        method,
++        path: path.to_string(),
++        bearer,
++        body,
++        timeout: Duration::from_millis(timeout_ms),
++    })
++}
++
++fn account_transport_error(origin: &str, timeout: Duration, error: reqwest::Error) -> IpcError {
++    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
++    if error.is_timeout() {
++        return account_error(
++            "REQUEST_TIMEOUT",
++            format!("account service at {origin} did not answer within {timeout_ms} ms"),
++            json!({ "origin": origin, "timeoutMs": timeout_ms }),
++        );
++    }
++    let error = error.without_url();
++    let cause = std::error::Error::source(&error)
++        .map(|source| format!(": {source}"))
++        .unwrap_or_default();
++    account_error(
++        "ACCOUNT_UNREACHABLE",
++        format!("account service at {origin} is unreachable: {error}{cause}"),
++        json!({ "origin": origin }),
++    )
++}
++
++/// Sends one validated request with the shared account client. Redirects are returned, never
++/// followed, so the bearer cannot be replayed to another host. The network I/O is async, so it
++/// never parks a runtime worker.
++async fn send_account_http_request(
++    request: AccountHttpRequest,
++) -> Result<AccountHttpResponse, IpcError> {
++    let AccountHttpRequest {
++        origin,
++        method,
++        path,
++        bearer,
++        body,
++        timeout,
++    } = request;
++    let client = crate::account::enroll_client::account_http_client_builder()
++        .timeout(timeout)
++        .redirect(reqwest::redirect::Policy::none())
++        .build()
++        .map_err(|error| IpcError::internal(format!("account HTTP client unavailable: {error}")))?;
++    let mut builder = client.request(method, format!("{origin}{path}"));
++    if let Some(bearer) = &bearer {
++        builder = builder.bearer_auth(bearer);
++    }
++    if let Some(body) = body {
++        builder = builder
++            .header(reqwest::header::CONTENT_TYPE, "application/json")
++            .body(body);
++    }
++    let mut response = builder
++        .send()
++        .await
++        .map_err(|error| account_transport_error(&origin, timeout, error))?;
++    let status = response.status().as_u16();
++    let mut bytes = Vec::new();
++    while let Some(chunk) = response
++        .chunk()
++        .await
++        .map_err(|error| account_transport_error(&origin, timeout, error))?
++    {
++        if bytes.len() + chunk.len() > ACCOUNT_HTTP_MAX_RESPONSE_BYTES {
++            return Err(account_error(
++                "ACCOUNT_BAD_RESPONSE",
++                format!("account service at {origin} sent a response larger than {ACCOUNT_HTTP_MAX_RESPONSE_BYTES} bytes"),
++                json!({ "origin": origin, "limitBytes": ACCOUNT_HTTP_MAX_RESPONSE_BYTES }),
++            ));
++        }
++        bytes.extend_from_slice(&chunk);
++    }
++    Ok(AccountHttpResponse {
++        status,
++        body: String::from_utf8_lossy(&bytes).into_owned(),
++    })
++}
++
++/// Account-service HTTP for the desktop webview: login, machines, grants, install keys,
++/// approvals and billing go through Rust so a self-hosted account origin works without
++/// widening the webview CSP.
++#[tauri::command]
++pub async fn cmd_account_http_request(
++    origin: String,
++    method: String,
++    path: String,
++    bearer: Option<String>,
++    body: Option<String>,
++    timeout_ms: Option<u64>,
++) -> Result<AccountHttpResponse, IpcError> {
++    let request = account_http_request(&origin, &method, &path, bearer, body, timeout_ms)?;
++    send_account_http_request(request).await
++}
++
++#[cfg(test)]
++mod tests {
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::sync::{Arc, Mutex};
++
++    use axum::http::{HeaderMap, StatusCode};
++    use axum::response::{IntoResponse, Redirect};
++    use axum::routing::{get, post};
++
++    use super::*;
++    use crate::account::mailer::{Mailer, MailerError};
++    use crate::account::service::{router, AccountState};
++
++    fn code(error: &IpcError) -> String {
++        error.code.to_string()
++    }
++
++    async fn call(
++        origin: &str,
++        method: &str,
++        path: &str,
++        bearer: Option<&str>,
++        body: Option<serde_json::Value>,
++        timeout_ms: Option<u64>,
++    ) -> Result<AccountHttpResponse, IpcError> {
++        cmd_account_http_request(
++            origin.to_string(),
++            method.to_string(),
++            path.to_string(),
++            bearer.map(str::to_string),
++            body.map(|body| body.to_string()),
++            timeout_ms,
++        )
++        .await
++    }
++
++    async fn serve(app: axum::Router) -> (String, tokio::task::JoinHandle<()>) {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
++            .await
++            .expect("bind");
++        let addr = listener.local_addr().expect("addr");
++        let server = tokio::spawn(async move {
++            let _ = axum::serve(listener, app).await;
++        });
++        (format!("http://{addr}"), server)
++    }
++
++    #[derive(Default)]
++    struct CapturingMailer {
++        links: Mutex<Vec<String>>,
++    }
++
++    impl Mailer for CapturingMailer {
++        fn send_magic_link(&self, _to: &str, url: &str) -> Result<(), MailerError> {
++            self.links.lock().expect("links").push(url.to_string());
++            Ok(())
++        }
++    }
++
++    #[test]
++    fn invalid_origin_is_a_typed_error_not_a_default() {
++        for origin in [
++            "",
++            "not a url",
++            "http://account.selfhost.test",
++            "https://user:secret@account.selfhost.test",
++            "https://account.selfhost.test/base",
++            "https://account.selfhost.test/?q=1",
++        ] {
++            let error =
++                account_http_request(origin, "GET", "/api/account/v1/health", None, None, None)
++                    .expect_err("an invalid origin must be refused");
++            assert_eq!(code(&error), "INVALID_ACCOUNT_ORIGIN", "origin {origin:?}");
++            assert_eq!(
++                error.details.as_ref().and_then(|d| d["origin"].as_str()),
++                Some(origin)
++            );
++        }
++        let request = account_http_request(
++            "https://account.selfhost.test/",
++            "GET",
++            "/api/account/v1/health",
++            None,
++            None,
++            None,
++        )
++        .expect("a self-hosted https origin is accepted as is");
++        assert_eq!(request.origin, "https://account.selfhost.test");
++        assert_eq!(
++            request.timeout,
++            Duration::from_millis(ACCOUNT_HTTP_DEFAULT_TIMEOUT_MS)
++        );
++    }
++
++    #[test]
++    fn only_account_api_paths_are_reachable() {
++        let origin = "https://account.selfhost.test";
++        for path in [
++            "/api/account/v1/machines",
++            "/api/account/v1/machines/rec%201/grants",
++            "/api/account/v1/billing/entitlement",
++            "/api/v1/attach/session",
++        ] {
++            assert!(
++                account_http_request(origin, "GET", path, None, None, None).is_ok(),
++                "{path} must be allowed"
++            );
++        }
++        for path in [
++            "",
++            "api/account/v1/machines",
++            "/api/account/v1/",
++            "/api/v1/pair/exchange",
++            "/api/account/v1/../../v1/pair/exchange",
++            "/api/account/v1/%2e%2e/%2E%2E/v1/pair/exchange",
++            "/api/account/v1/./machines",
++            "/api/account/v1//machines",
++            "/api/account/v1/machines?all=1",
++            "/api/account/v1/machines#x",
++            "/api/account/v1/machines@evil.test",
++        ] {
++            let error = account_http_request(origin, "GET", path, None, None, None)
++                .expect_err("a non-account path must be refused");
++            assert_eq!(code(&error), "INVALID_ARGUMENT", "path {path:?}");
++        }
++    }
++
++    #[test]
++    fn method_body_and_token_shape_are_checked_without_echoing_the_token() {
++        let origin = "https://account.selfhost.test";
++        let path = "/api/account/v1/machines";
++        for method in ["PUT", "DELETE", "get", "OPTIONS"] {
++            let error = account_http_request(origin, method, path, None, None, None)
++                .expect_err("only GET and POST are allowed");
++            assert_eq!(code(&error), "INVALID_ARGUMENT");
++        }
++        let error = account_http_request(origin, "GET", path, None, Some("{}".into()), None)
++            .expect_err("GET carries no body");
++        assert_eq!(code(&error), "INVALID_ARGUMENT");
++        let error = account_http_request(
++            origin,
++            "GET",
++            path,
++            Some("secret-token\r\nX-Injected: 1".into()),
++            None,
++            None,
++        )
++        .expect_err("a token with control bytes is refused");
++        assert_eq!(code(&error), "INVALID_ARGUMENT");
++        let rendered = serde_json::to_string(&error).expect("serialize");
++        assert!(
++            !rendered.contains("secret-token"),
++            "the token must not leak: {rendered}"
++        );
++        let request = account_http_request(
++            origin,
++            "POST",
++            path,
++            Some(String::new()),
++            None,
++            Some(10_000_000),
++        )
++        .expect("an empty bearer means no bearer");
++        assert_eq!(request.bearer, None);
++        assert_eq!(
++            request.timeout,
++            Duration::from_millis(ACCOUNT_HTTP_MAX_TIMEOUT_MS)
++        );
++    }
++
++    /// QA: a self-hosted account service on a non-relay origin (the real account router on
++    /// loopback) completes the desktop sign-in and machine listing through the IPC command.
++    #[tokio::test]
++    async fn self_hosted_account_service_sign_in_runs_through_ipc() {
++        let tmp = tempfile::tempdir().expect("temp");
++        let mailer = Arc::new(CapturingMailer::default());
++        let state = Arc::new(AccountState::new(
++            tmp.path(),
++            "https://account.selfhost.test",
++            mailer.clone(),
++        ));
++        let (origin, server) = serve(router(state)).await;
++
++        let health = call(&origin, "GET", "/api/account/v1/health", None, None, None)
++            .await
++            .expect("health");
++        assert_eq!(health.status, 200);
++
++        let requested = call(
++            &origin,
++            "POST",
++            "/api/account/v1/login/request",
++            None,
++            Some(json!({ "email": "owner@selfhost.test" })),
++            None,
++        )
++        .await
++        .expect("login request");
++        assert_eq!(
++            requested.status,
++            StatusCode::ACCEPTED.as_u16(),
++            "{}",
++            requested.body
++        );
++        let requested: serde_json::Value = serde_json::from_str(&requested.body).expect("json");
++        assert!(requested["loginHandle"]
++            .as_str()
++            .is_some_and(|handle| !handle.is_empty()));
++
++        let link = mailer
++            .links
++            .lock()
++            .expect("links")
++            .pop()
++            .expect("magic link sent");
++        let login_code = url::Url::parse(&link)
++            .expect("link")
++            .query_pairs()
++            .find(|(key, _)| key == "code")
++            .map(|(_, value)| value.into_owned())
++            .expect("code in link");
++        let consumed = call(
++            &origin,
++            "POST",
++            "/api/account/v1/login/consume",
++            None,
++            Some(json!({ "code": login_code })),
++            None,
++        )
++        .await
++        .expect("login consume");
++        assert_eq!(consumed.status, 200, "{}", consumed.body);
++        let consumed: serde_json::Value = serde_json::from_str(&consumed.body).expect("json");
++        let token = consumed["token"]
++            .as_str()
++            .expect("session token")
++            .to_string();
++
++        let machines = call(
++            &origin,
++            "GET",
++            "/api/account/v1/machines",
++            Some(token.as_str()),
++            None,
++            None,
++        )
++        .await
++        .expect("machines");
++        assert_eq!(machines.status, 200);
++        assert_eq!(
++            serde_json::from_str::<serde_json::Value>(&machines.body).expect("json"),
++            json!([])
++        );
++
++        let unauthorized = call(&origin, "GET", "/api/account/v1/machines", None, None, None)
++            .await
++            .expect("an HTTP error status is a response, not a transport error");
++        assert_eq!(unauthorized.status, 401);
++        let envelope: serde_json::Value = serde_json::from_str(&unauthorized.body).expect("json");
++        assert_eq!(
++            envelope["code"], "UNAUTHORIZED",
++            "the structured envelope reaches the UI"
++        );
++        server.abort();
++    }
++
++    #[tokio::test]
++    async fn bearer_is_sent_but_redirects_are_not_followed() {
++        let followed = Arc::new(AtomicUsize::new(0));
++        let target_hits = Arc::clone(&followed);
++        let app = axum::Router::new()
++            .route(
++                "/api/account/v1/echo",
++                post(|headers: HeaderMap, body: String| async move {
++                    let auth = headers
++                        .get("authorization")
++                        .and_then(|value| value.to_str().ok())
++                        .unwrap_or_default()
++                        .to_string();
++                    let content_type = headers
++                        .get("content-type")
++                        .and_then(|value| value.to_str().ok())
++                        .unwrap_or_default()
++                        .to_string();
++                    axum::Json(json!({ "auth": auth, "contentType": content_type, "body": body }))
++                }),
++            )
++            .route(
++                "/api/account/v1/moved",
++                get(|| async { Redirect::temporary("/api/account/v1/target") }),
++            )
++            .route(
++                "/api/account/v1/target",
++                get(move || {
++                    target_hits.fetch_add(1, Ordering::SeqCst);
++                    async { StatusCode::OK }
++                }),
++            );
++        let (origin, server) = serve(app).await;
++
++        let echoed = call(
++            &origin,
++            "POST",
++            "/api/account/v1/echo",
++            Some("tok-1"),
++            Some(json!({ "email": "a@b.test" })),
++            None,
++        )
++        .await
++        .expect("echo");
++        let echoed: serde_json::Value = serde_json::from_str(&echoed.body).expect("json");
++        assert_eq!(echoed["auth"], "Bearer tok-1");
++        assert_eq!(echoed["contentType"], "application/json");
++        assert_eq!(echoed["body"], r#"{"email":"a@b.test"}"#);
++
++        let moved = call(
++            &origin,
++            "GET",
++            "/api/account/v1/moved",
++            Some("tok-1"),
++            None,
++            None,
++        )
++        .await
++        .expect("redirect answer");
++        assert_eq!(moved.status, 307);
++        assert_eq!(
++            followed.load(Ordering::SeqCst),
++            0,
++            "a redirect must not be followed"
++        );
++        server.abort();
++    }
++
++    #[tokio::test]
++    async fn unreachable_origin_is_a_typed_error_naming_the_origin() {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
++            .await
++            .expect("bind");
++        let origin = format!("http://{}", listener.local_addr().expect("addr"));
++        drop(listener);
++        let error = call(
++            &origin,
++            "GET",
++            "/api/account/v1/health",
++            Some("tok-secret"),
++            None,
++            None,
++        )
++        .await
++        .expect_err("nothing listens");
++        assert_eq!(code(&error), "ACCOUNT_UNREACHABLE");
++        assert_eq!(
++            error.details.as_ref().and_then(|d| d["origin"].as_str()),
++            Some(origin.as_str())
++        );
++        assert!(error.message.contains(&origin), "{}", error.message);
++        assert!(!error.message.contains("tok-secret"));
++    }
++
++    #[tokio::test]
++    async fn slow_and_oversized_answers_are_typed_errors() {
++        let app = axum::Router::new()
++            .route(
++                "/api/account/v1/hang",
++                get(|| async {
++                    std::future::pending::<()>().await;
++                    StatusCode::OK
++                }),
++            )
++            .route(
++                "/api/account/v1/huge",
++                get(|| async {
++                    "x".repeat(ACCOUNT_HTTP_MAX_RESPONSE_BYTES + 1)
++                        .into_response()
++                }),
++            );
++        let (origin, server) = serve(app).await;
++
++        let error = call(
++            &origin,
++            "GET",
++            "/api/account/v1/hang",
++            None,
++            None,
++            Some(200),
++        )
++        .await
++        .expect_err("the request times out");
++        assert_eq!(code(&error), "REQUEST_TIMEOUT");
++        assert_eq!(
++            error.details.as_ref().and_then(|d| d["timeoutMs"].as_u64()),
++            Some(200)
++        );
++
++        let error = call(&origin, "GET", "/api/account/v1/huge", None, None, None)
++            .await
++            .expect_err("the response is too large");
++        assert_eq!(code(&error), "ACCOUNT_BAD_RESPONSE");
++        server.abort();
++    }
++}
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 0705739ba..0c11189ca 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1605,6 +1605,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
+         cmd_shortcuts_set_native_table,
+         crate::ipc::account::cmd_account_enrollment_status,
+         crate::ipc::account::cmd_account_enroll_this_machine,
++        crate::ipc::account::cmd_account_http_request,
+         crate::ipc::paired_host::paired_host_list,
+         crate::ipc::paired_host::paired_host_reachability_list,
+         crate::ipc::paired_host::paired_host_route_list,
+diff --git a/src-tauri/src/remote/state.rs b/src-tauri/src/remote/state.rs
+index ba433289b..1a8ebb0ef 100644
+--- a/src-tauri/src/remote/state.rs
++++ b/src-tauri/src/remote/state.rs
+@@ -994,15 +994,7 @@ impl RemoteGatewayState {
+         let (active_session_tx, _) = watch::channel(None);
+         let config = config_path
+             .as_deref()
+-            .and_then(|path| std::fs::read(path).ok())
+-            .and_then(|bytes| serde_json::from_slice::<PersistedRemoteGatewayConfig>(&bytes).ok())
+-            .map(|persisted| RemoteGatewayConfig {
+-                mode: persisted.mode,
+-                // Port is fixed; ignore persisted value so stale custom ports heal on load.
+-                port: REMOTE_GATEWAY_PORT,
+-                allow_control: persisted.allow_control,
+-                relay_url: persisted.relay_url,
+-            })
++            .and_then(load_persisted_config)
+             .unwrap_or_default();
+         let agent_events = Arc::new(crate::agent_control::events::AgentEventBus::new(
+             crate::agent_control::events::AGENT_EVENT_RETAIN,
+@@ -1483,8 +1475,70 @@ fn remote_data_dir() -> Option<PathBuf> {
+     resolve_remote_data_dir(|variable| std::env::var_os(variable))
+ }
+ 
++/// The gateway config a persistent daemon restores at boot (`remote-config.json`).
++pub fn remote_config_path() -> Option<PathBuf> {
++    remote_data_dir().map(|dir| dir.join("remote-config.json"))
++}
++
++/// The saved gateway config at `path`, read the way a daemon reads it at boot. `None` when the
++/// file is missing or unreadable, in which case the daemon starts from the default (Off).
++pub fn load_persisted_config(path: &std::path::Path) -> Option<RemoteGatewayConfig> {
++    let bytes = std::fs::read(path).ok()?;
++    let persisted = serde_json::from_slice::<PersistedRemoteGatewayConfig>(&bytes).ok()?;
++    Some(RemoteGatewayConfig {
++        mode: persisted.mode,
++        // Port is fixed; ignore persisted value so stale custom ports heal on load.
++        port: REMOTE_GATEWAY_PORT,
++        allow_control: persisted.allow_control,
++        relay_url: persisted.relay_url,
++    })
++}
++
++/// Saves Relay through `relay_url` at `path` when the saved mode is Off (or nothing is saved),
++/// so the next daemon boot connects to the relay. A mode the user chose is left untouched, and so
++/// is a file that exists but does not parse (corrupt, or a mode from a newer build).
++/// Returns whether the config was written.
++pub fn persist_relay_if_off(path: &std::path::Path, relay_url: &str) -> std::io::Result<bool> {
++    let saved = match load_persisted_config(path) {
++        Some(saved) => saved,
++        None if path.exists() => return Ok(false),
++        None => RemoteGatewayConfig::default(),
++    };
++    if saved.mode != RemoteNetworkMode::Off {
++        return Ok(false);
++    }
++    let config = RemoteGatewayConfig {
++        mode: RemoteNetworkMode::Relay,
++        relay_url: Some(relay_url.to_string()),
++        ..saved
++    };
++    write_private_json(path, &config.persisted_snapshot())?;
++    Ok(true)
++}
++
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn persist_relay_if_off_leaves_a_corrupt_config_file_alone() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("remote-config.json");
++        std::fs::write(&path, b"{not json").unwrap();
++
++        assert!(!persist_relay_if_off(&path, "https://relay.example").unwrap());
++        assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
++    }
++
++    #[test]
++    fn persist_relay_if_off_leaves_an_unknown_mode_alone() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("remote-config.json");
++        let saved = br#"{"mode":"meshVpn","port":43821,"allowControl":true}"#;
++        std::fs::write(&path, saved).unwrap();
++
++        assert!(!persist_relay_if_off(&path, "https://relay.example").unwrap());
++        assert_eq!(std::fs::read(&path).unwrap(), saved);
++    }
++
+     /// P19 (round 2): the trusted-overlay proof must FAIL CLOSED. An interface
+     /// name alone (utun/tun/tailscale) is not authoritative — without positive
+     /// Tailscale CLI confirmation the CGNAT address stays gated, and a CLI that
+diff --git a/ui/src/components/SettingsDialog.planNav.test.tsx b/ui/src/components/SettingsDialog.planNav.test.tsx
+index 24b240d93..cd1121eca 100644
+--- a/ui/src/components/SettingsDialog.planNav.test.tsx
++++ b/ui/src/components/SettingsDialog.planNav.test.tsx
+@@ -1,8 +1,7 @@
+ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+-import { DEFAULT_RELAY_ORIGIN } from "../lib/pairedHostInventory";
+-import { storeAccountSessionToken } from "../remote/accountSession";
++import { getConfiguredAccountOrigin, storeAccountSessionToken } from "../remote/accountSession";
+ import { SettingsDialog } from "./SettingsDialog";
+ import { observeDom, settle, settledTestId } from "../test/domSignals";
+ 
+@@ -91,7 +90,7 @@ describe("SettingsDialog plan navigation", () => {
+   });
+ 
+   it("offers the Plan section for a stored account session and mounts it on demand", async () => {
+-    storeAccountSessionToken("session-token-1", DEFAULT_RELAY_ORIGIN);
++    storeAccountSessionToken("session-token-1", getConfiguredAccountOrigin());
+     vi.stubGlobal("fetch", async () => jsonResponse(ENTITLEMENT));
+ 
+     render(<SettingsDialog open onClose={vi.fn()} initialSection="plan" />);
+@@ -126,8 +125,9 @@ describe("SettingsDialog plan navigation", () => {
+   });
+ 
+   it("drops the Plan navigation and falls back to General when the server answers 404", async () => {
+-    storeAccountSessionToken("session-token-1", DEFAULT_RELAY_ORIGIN);
+-    vi.stubGlobal("fetch", async () => jsonResponse({ code: "NOT_FOUND", message: "not found" }, 404));
++    storeAccountSessionToken("session-token-1", getConfiguredAccountOrigin());
++    const fetchSpy = vi.fn(async () => jsonResponse({ code: "NOT_FOUND", message: "not found" }, 404));
++    vi.stubGlobal("fetch", fetchSpy);
+ 
+     const fallbackSignal = settledTestId("general-section");
+     render(<SettingsDialog open onClose={vi.fn()} initialSection="plan" />);
+@@ -135,5 +135,7 @@ describe("SettingsDialog plan navigation", () => {
+     expect(await fallbackSignal).toBeInTheDocument();
+     expect(screen.queryByRole("button", { name: "Plan" })).toBeNull();
+     expect(screen.queryByTestId("plan-summary")).toBeNull();
++    // The fallback comes from the server's 404, not from a missing session.
++    expect(fetchSpy).toHaveBeenCalled();
+   });
+ });
+diff --git a/ui/src/components/SettingsDialog.tsx b/ui/src/components/SettingsDialog.tsx
+index 515784ad0..27471d40d 100644
+--- a/ui/src/components/SettingsDialog.tsx
++++ b/ui/src/components/SettingsDialog.tsx
+@@ -17,7 +17,7 @@ import { isMacShortcutPlatform } from "../lib/shortcuts";
+ import { useAdvancedFeatures } from "../lib/advancedFeatures";
+ import { useShortcutOverrides, useShortcutPreset } from "../lib/shortcutOverrides";
+ import { DEFAULT_TERMINAL_SETTINGS, useTerminalSettings } from "../lib/terminalSettings";
+-import { getConfiguredAccountOrigin, getStoredAccountSessionToken } from "../remote/accountSession";
++import { getConfiguredAccountOriginUnchecked, getStoredAccountSessionToken } from "../remote/accountSession";
+ import { AgentsSection } from "./settings/AgentsSection";
+ import { AppearanceSection } from "./settings/AppearanceSection";
+ import { BrowserSection } from "./settings/BrowserSection";
+@@ -85,7 +85,7 @@ interface PlanAuth {
+ }
+ 
+ function resolvePlanAuth(accountOrigin?: string): PlanAuth {
+-  const origin = accountOrigin ?? getConfiguredAccountOrigin();
++  const origin = accountOrigin ?? getConfiguredAccountOriginUnchecked();
+   return { origin, token: getStoredAccountSessionToken(origin) };
+ }
+ 
+diff --git a/ui/src/components/onboarding/AccountStep.tsx b/ui/src/components/onboarding/AccountStep.tsx
+index 59f6f13ce..5a1e00ade 100644
+--- a/ui/src/components/onboarding/AccountStep.tsx
++++ b/ui/src/components/onboarding/AccountStep.tsx
+@@ -7,7 +7,7 @@ import {
+ } from "../../lib/tauri";
+ import {
+   AccountSessionError,
+-  getConfiguredAccountOrigin,
++  getConfiguredAccountOriginUnchecked,
+   getStoredAccountSessionToken,
+   issueEnrollmentCode,
+ } from "../../remote/accountSession";
+@@ -61,7 +61,7 @@ function describeError(error: unknown): { code: string; message: string } {
+ }
+ 
+ export function AccountStep({ origin, deps, onLinked }: AccountStepProps): JSX.Element {
+-  const accountOrigin = origin ?? getConfiguredAccountOrigin();
++  const accountOrigin = origin ?? getConfiguredAccountOriginUnchecked();
+   const depsRef = useRef<AccountStepDeps>({ ...DEFAULT_DEPS, ...deps });
+   const onLinkedRef = useRef(onLinked);
+   onLinkedRef.current = onLinked;
+diff --git a/ui/src/components/settings/AccountSignIn.test.tsx b/ui/src/components/settings/AccountSignIn.test.tsx
+index a55b97af6..04120fbf4 100644
+--- a/ui/src/components/settings/AccountSignIn.test.tsx
++++ b/ui/src/components/settings/AccountSignIn.test.tsx
+@@ -42,7 +42,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
+       fireEvent.click(screen.getByRole("button", { name: "Send Magic Link" }));
+     });
+ 
+-    expect(requestSpy).toHaveBeenCalledWith("https://relay.ferryx.dev", "user@example.com");
++    expect(requestSpy).toHaveBeenCalledWith(window.location.origin, "user@example.com");
+ 
+     const infoMessage = screen.getByTestId("account-signin-info");
+     expect(infoMessage).not.toBeNull();
+@@ -52,7 +52,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
+       await vi.advanceTimersByTimeAsync(2000);
+     });
+     expect(pollSpy).toHaveBeenCalledTimes(1);
+-    expect(pollSpy).toHaveBeenCalledWith("https://relay.ferryx.dev", loginHandle);
++    expect(pollSpy).toHaveBeenCalledWith(window.location.origin, loginHandle);
+     expect(storeSpy).not.toHaveBeenCalled();
+     expect(onSignIn).not.toHaveBeenCalled();
+ 
+@@ -60,7 +60,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
+       await vi.advanceTimersByTimeAsync(2000);
+     });
+     expect(pollSpy).toHaveBeenCalledTimes(2);
+-    expect(storeSpy).toHaveBeenCalledWith("tok-1", "https://relay.ferryx.dev");
++    expect(storeSpy).toHaveBeenCalledWith("tok-1", window.location.origin);
+     expect(onSignIn).toHaveBeenCalledWith("tok-1", "user@example.com");
+ 
+     await act(async () => {
+@@ -106,7 +106,7 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
+       await vi.advanceTimersByTimeAsync(2000);
+     });
+     expect(pollSpy).toHaveBeenCalledTimes(2);
+-    expect(storeSpy).toHaveBeenCalledWith("tok-2", "https://relay.ferryx.dev");
++    expect(storeSpy).toHaveBeenCalledWith("tok-2", window.location.origin);
+     expect(onSignIn).toHaveBeenCalledWith("tok-2", "user2@example.com");
+ 
+     await act(async () => {
+@@ -157,4 +157,27 @@ describe("AccountSignIn - magic link auto sign-in polling", () => {
+     expect(storeSpy).not.toHaveBeenCalled();
+     expect(onSignIn).not.toHaveBeenCalled();
+   });
++
++  it("an invalid configured origin surfaces INVALID_ACCOUNT_ORIGIN instead of the hosted relay", async () => {
++    window.localStorage.setItem("ferryx.account.origin", "http://evil.example");
++    const fetchSpy = vi.fn();
++    vi.stubGlobal("fetch", fetchSpy);
++    try {
++      render(<AccountSignIn />);
++      fireEvent.change(screen.getByLabelText("Email Address"), {
++        target: { value: "user4@example.com" },
++      });
++      await act(async () => {
++        fireEvent.click(screen.getByRole("button", { name: "Send Magic Link" }));
++      });
++
++      const errorBanner = screen.getByTestId("account-signin-error");
++      expect(errorBanner.getAttribute("data-code")).toBe("INVALID_ACCOUNT_ORIGIN");
++      expect(errorBanner.textContent).toContain("http://evil.example");
++      expect(fetchSpy).not.toHaveBeenCalled();
++    } finally {
++      window.localStorage.removeItem("ferryx.account.origin");
++      vi.unstubAllGlobals();
++    }
++  });
+ });
+diff --git a/ui/src/components/settings/AccountSignIn.tsx b/ui/src/components/settings/AccountSignIn.tsx
+index faeb7ca17..a8acd0876 100644
+--- a/ui/src/components/settings/AccountSignIn.tsx
++++ b/ui/src/components/settings/AccountSignIn.tsx
+@@ -7,8 +7,8 @@ import {
+   pollLogin,
+   requestLogin,
+   storeAccountSessionToken,
++  getConfiguredAccountOriginUnchecked,
+ } from "../../remote/accountSession";
+-import { DEFAULT_RELAY_ORIGIN } from "../../lib/pairedHostInventory";
+ import { Button } from "../ui/button";
+ import { Input } from "../ui/input";
+ import { Label } from "../ui/label";
+@@ -23,7 +23,7 @@ const LOGIN_POLL_INTERVAL_MS = 2000;
+ const LOGIN_POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (TTL 600s)
+ 
+ export function AccountSignIn({
+-  origin = DEFAULT_RELAY_ORIGIN,
++  origin = getConfiguredAccountOriginUnchecked(),
+   onSignIn,
+   className = "",
+ }: AccountSignInProps) {
+diff --git a/ui/src/components/settings/RemoteSection.onboarding.test.tsx b/ui/src/components/settings/RemoteSection.onboarding.test.tsx
+index 5427236cd..8bbed7f09 100644
+--- a/ui/src/components/settings/RemoteSection.onboarding.test.tsx
++++ b/ui/src/components/settings/RemoteSection.onboarding.test.tsx
+@@ -14,7 +14,11 @@ const { isTauriMock, invokeMock } = vi.hoisted(() => ({
+ 
+ vi.mock("@tauri-apps/api/core", () => ({
+   isTauri: () => isTauriMock(),
+-  invoke: (...args: unknown[]) => invokeMock(...args),
++  // Desktop account HTTP runs through cmd_account_http_request; replay it as the stubbed fetch.
++  invoke: async (...args: unknown[]) =>
++    args[0] === "cmd_account_http_request"
++      ? (await import("../../test/accountIpcFetchBridge")).accountIpcViaFetch(args[1])
++      : invokeMock(...args),
+ }));
+ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+ vi.mock("./RemoteAccessSection", () => ({
+diff --git a/ui/src/components/settings/RemoteSection.reviewFixes.test.tsx b/ui/src/components/settings/RemoteSection.reviewFixes.test.tsx
+index 966d6f638..f04166074 100644
+--- a/ui/src/components/settings/RemoteSection.reviewFixes.test.tsx
++++ b/ui/src/components/settings/RemoteSection.reviewFixes.test.tsx
+@@ -16,7 +16,11 @@ const { isTauriMock, invokeMock } = vi.hoisted(() => ({
+ 
+ vi.mock("@tauri-apps/api/core", () => ({
+   isTauri: () => isTauriMock(),
+-  invoke: (...args: unknown[]) => invokeMock(...args),
++  // Desktop account HTTP runs through cmd_account_http_request; replay it as the stubbed fetch.
++  invoke: async (...args: unknown[]) =>
++    args[0] === "cmd_account_http_request"
++      ? (await import("../../test/accountIpcFetchBridge")).accountIpcViaFetch(args[1])
++      : invokeMock(...args),
+ }));
+ 
+ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+diff --git a/ui/src/components/settings/RemoteSection.test.tsx b/ui/src/components/settings/RemoteSection.test.tsx
+index 37a605565..7f96e66be 100644
+--- a/ui/src/components/settings/RemoteSection.test.tsx
++++ b/ui/src/components/settings/RemoteSection.test.tsx
+@@ -7,6 +7,7 @@ import { createPairedHostInventory, DEFAULT_RELAY_ORIGIN, type HostView, type Pa
+ import { resetSshHostsCache, type SshHost } from "../../lib/sshHosts";
+ import type { AccountMachineView } from "../../remote/accountSession";
+ import { resetTailscaleDiscoveryForTests, syncTailscaleMachines } from "../../lib/tailscaleDiscovery";
++import { settledQuery } from "../../test/domSignals";
+ 
+ const grantMocks = vi.hoisted(() => ({
+   attachKey: vi.fn(),
+@@ -49,7 +50,11 @@ const { isTauriMock, invokeMock } = vi.hoisted(() => ({
+ 
+ vi.mock("@tauri-apps/api/core", () => ({
+   isTauri: () => isTauriMock(),
+-  invoke: (...args: unknown[]) => invokeMock(...args),
++  // Desktop account HTTP runs through cmd_account_http_request; replay it as the stubbed fetch.
++  invoke: async (...args: unknown[]) =>
++    args[0] === "cmd_account_http_request"
++      ? (await import("../../test/accountIpcFetchBridge")).accountIpcViaFetch(args[1])
++      : invokeMock(...args),
+ }));
+ 
+ vi.mock("@tauri-apps/plugin-dialog", () => ({
+@@ -585,8 +590,12 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
+       );
+ 
+       expect(await screen.findByText("Enrolled Box")).toBeInTheDocument();
+-      const addProjectBtn = screen.getByRole("button", { name: "Add Project on Enrolled Box" });
+-      expect(addProjectBtn).toBeInTheDocument();
++      // The account machine list arrives asynchronously (on desktop through cmd_account_http_request),
++      // so the row can render before it is enabled: await the enabled state itself.
++      const addProjectBtn = await settledQuery(() => {
++        const button = screen.queryByRole("button", { name: "Add Project on Enrolled Box" });
++        return button && !button.hasAttribute("disabled") ? button : null;
++      });
+       expect(addProjectBtn).not.toBeDisabled();
+ 
+       fireEvent.click(addProjectBtn);
+diff --git a/ui/src/components/settings/RemoteSection.tsx b/ui/src/components/settings/RemoteSection.tsx
+index f07d8e1ac..e46abd008 100644
+--- a/ui/src/components/settings/RemoteSection.tsx
++++ b/ui/src/components/settings/RemoteSection.tsx
+@@ -12,7 +12,7 @@ import {
+   clearStoredAccountSessionToken,
+   getStoredAccountTokenOrigin,
+   logoutAccountSession,
+-  getConfiguredAccountOrigin,
++  getConfiguredAccountOriginUnchecked,
+   getStoredAccountSessionToken,
+   storeAccountOrigin,
+   approveMachineRequest,
+@@ -78,7 +78,7 @@ export function RemoteSection({
+   negotiate = defaultNegotiate,
+   accountSessionToken: accountSessionTokenProp,
+   accountOrigin: accountOriginProp,
+-  accountOriginResolver = getConfiguredAccountOrigin,
++  accountOriginResolver = getConfiguredAccountOriginUnchecked,
+   onAccountSessionChange,
+ }: RemoteSectionProps) {
+   const [configuredOrigin, setConfiguredOrigin] = useState(() => accountOriginResolver());
+@@ -642,7 +642,7 @@ export function RemoteSection({
+         <AccountSignIn
+           key={accountOrigin}
+           origin={accountOrigin}
+-          onSignIn={(tok) => { if (getConfiguredAccountOrigin() === accountOrigin) setAccountToken(tok); }}
++          onSignIn={(tok) => { if (getConfiguredAccountOriginUnchecked() === accountOrigin) setAccountToken(tok); }}
+         />
+       ) : (
+         <AccountBar
+diff --git a/ui/src/components/settings/RemoteSectionSignOut.test.tsx b/ui/src/components/settings/RemoteSectionSignOut.test.tsx
+index 14af55e97..618bd15ac 100644
+--- a/ui/src/components/settings/RemoteSectionSignOut.test.tsx
++++ b/ui/src/components/settings/RemoteSectionSignOut.test.tsx
+@@ -13,7 +13,11 @@ const { isTauriMock, invokeMock } = vi.hoisted(() => ({
+ 
+ vi.mock("@tauri-apps/api/core", () => ({
+   isTauri: () => isTauriMock(),
+-  invoke: (...args: unknown[]) => invokeMock(...args),
++  // Desktop account HTTP runs through cmd_account_http_request; replay it as the stubbed fetch.
++  invoke: async (...args: unknown[]) =>
++    args[0] === "cmd_account_http_request"
++      ? (await import("../../test/accountIpcFetchBridge")).accountIpcViaFetch(args[1])
++      : invokeMock(...args),
+ }));
+ 
+ vi.mock("@tauri-apps/plugin-dialog", () => ({
+diff --git a/ui/src/lib/billingApi.ts b/ui/src/lib/billingApi.ts
+index 1b958bdf8..331ecd3d1 100644
+--- a/ui/src/lib/billingApi.ts
++++ b/ui/src/lib/billingApi.ts
+@@ -22,6 +22,8 @@
+  * never on message text.
+  */
+ import {
++  AccountSessionError,
++  accountFetch,
+   getConfiguredAccountOrigin,
+   getStoredAccountSessionToken,
+ } from "../remote/accountSession";
+@@ -116,7 +118,7 @@ export interface BillingCallOptions {
+ interface ResolvedCall {
+   readonly base: string;
+   readonly sessionToken: string | null;
+-  readonly fetchImpl: typeof fetch;
++  readonly fetchImpl: (input: string, init: RequestInit) => Promise<Response>;
+   readonly signal: AbortSignal | undefined;
+   readonly timeoutMs: number;
+ }
+@@ -127,7 +129,13 @@ interface JsonRequest {
+ }
+ 
+ function resolveCall(options: BillingCallOptions): ResolvedCall {
+-  const origin = (options.accountOrigin ?? getConfiguredAccountOrigin()).trim().replace(/\/+$/, "");
++  let configured: string;
++  try {
++    configured = options.accountOrigin ?? getConfiguredAccountOrigin();
++  } catch (error) {
++    throw toBillingApiError(error);
++  }
++  const origin = configured.trim().replace(/\/+$/, "");
+   const sessionToken =
+     options.accountSessionToken === undefined
+       ? getStoredAccountSessionToken(origin)
+@@ -135,7 +143,8 @@ function resolveCall(options: BillingCallOptions): ResolvedCall {
+   return {
+     base: origin,
+     sessionToken,
+-    fetchImpl: options.fetchImpl ?? fetch,
++    // The desktop app reaches the account server through the backend (accountFetch).
++    fetchImpl: options.fetchImpl ?? accountFetch,
+     signal: options.signal,
+     timeoutMs: options.timeoutMs ?? BILLING_REQUEST_TIMEOUT_MS,
+   };
+@@ -317,6 +326,9 @@ function parseOrgMembers(payload: unknown): readonly OrgMember[] {
+ 
+ export function toBillingApiError(error: unknown): BillingApiError {
+   if (error instanceof BillingApiError) return error;
++  if (error instanceof AccountSessionError) {
++    return new BillingApiError(error.code, error.message, error.status ?? null, error.details ?? null);
++  }
+   if (error instanceof Error) {
+     return new BillingApiError("NETWORK_FAILED", error.message, null);
+   }
+diff --git a/ui/src/lib/tauri.test.ts b/ui/src/lib/tauri.test.ts
+index c141f6317..c38572cbd 100644
+--- a/ui/src/lib/tauri.test.ts
++++ b/ui/src/lib/tauri.test.ts
+@@ -62,6 +62,7 @@ import {
+   describeRejection,
+   getAccountEnrollmentStatus,
+   enrollThisMachine,
++  accountHttpRequest,
+   type AccountEnrollmentStatus,
+ } from "./tauri";
+ import { registerDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "./nativeTerminalLifecycle";
+@@ -962,4 +963,39 @@ describe("account enrollment API", () => {
+     });
+     expect(result).toEqual(status);
+   });
++
++  it("invokes cmd_account_http_request with the request and returns the raw answer", async () => {
++    const request = {
++      origin: "https://account.selfhost.test",
++      method: "GET" as const,
++      path: "/api/account/v1/machines",
++      bearer: "tok",
++      body: null,
++      timeoutMs: 15_000,
++    };
++    core.invoke.mockResolvedValueOnce({ status: 200, body: "[]" });
++    await expect(accountHttpRequest(request)).resolves.toEqual({ status: 200, body: "[]" });
++    expect(core.invoke).toHaveBeenCalledWith("cmd_account_http_request", request);
++  });
++
++  it("keeps the structured backend error of cmd_account_http_request", async () => {
++    core.invoke.mockRejectedValueOnce({
++      code: "ACCOUNT_UNREACHABLE",
++      message: "account service at https://account.selfhost.test is unreachable",
++      details: { origin: "https://account.selfhost.test" },
++    });
++    await expect(
++      accountHttpRequest({
++        origin: "https://account.selfhost.test",
++        method: "GET",
++        path: "/api/account/v1/health",
++        bearer: null,
++        body: null,
++        timeoutMs: 1_000,
++      }),
++    ).rejects.toMatchObject({
++      code: "ACCOUNT_UNREACHABLE",
++      details: { origin: "https://account.selfhost.test", command: "cmd_account_http_request" },
++    });
++  });
+ });
+diff --git a/ui/src/lib/tauri.ts b/ui/src/lib/tauri.ts
+index 6cf04069f..768dc624c 100644
+--- a/ui/src/lib/tauri.ts
++++ b/ui/src/lib/tauri.ts
+@@ -1563,6 +1563,31 @@ export async function enrollThisMachine(
+   });
+ }
+ 
++export type AccountHttpRequest = {
++  origin: string;
++  method: "GET" | "POST";
++  path: string;
++  bearer: string | null;
++  body: string | null;
++  timeoutMs: number;
++};
++
++export type AccountHttpResponse = {
++  status: number;
++  body: string;
++};
++
++/**
++ * One account-service call made by the desktop backend, so a self-hosted account origin works
++ * without widening the webview CSP. Failures are structured `{ code, message, details }`.
++ */
++export async function accountHttpRequest(request: AccountHttpRequest): Promise<AccountHttpResponse> {
++  if (!isTauri()) {
++    throw new Error("Account requests through the desktop backend are available only in the desktop app");
++  }
++  return invokeCommand<AccountHttpResponse>("cmd_account_http_request", request);
++}
++
+ export type DagRunUpdatedEvent = {
+   projectPath: string;
+   generation?: number;
+diff --git a/ui/src/remote/accountSession.onboarding.test.ts b/ui/src/remote/accountSession.onboarding.test.ts
+index 56c69dc87..660edfca1 100644
+--- a/ui/src/remote/accountSession.onboarding.test.ts
++++ b/ui/src/remote/accountSession.onboarding.test.ts
+@@ -181,8 +181,11 @@ describe("accountSession onboarding client", () => {
+ 
+   it("an invalid origin never receives the token", async () => {
+     fetchMock.mockResolvedValue(jsonResponse([]));
+-    await listPendingMachineRequests("http://evil.example", token);
+-    expect(lastCall().url.startsWith("http://evil.example")).toBe(false);
++    await expect(listPendingMachineRequests("http://evil.example", token)).rejects.toMatchObject({
++      code: "INVALID_ACCOUNT_ORIGIN",
++      details: { origin: "http://evil.example" },
++    });
++    expect(fetchMock).not.toHaveBeenCalled();
+   });
+ 
+   it("normalizeUserCode upper-cases, strips separators and re-inserts the dash", () => {
+diff --git a/ui/src/remote/accountSession.test.ts b/ui/src/remote/accountSession.test.ts
+index f6ed90e5d..66be94fb0 100644
+--- a/ui/src/remote/accountSession.test.ts
++++ b/ui/src/remote/accountSession.test.ts
+@@ -18,6 +18,7 @@ import {
+   storeAccountOrigin,
+   clearStoredAccountOrigin,
+   getConfiguredAccountOrigin,
++  getConfiguredAccountOriginUnchecked,
+   resolveAccountOrigin,
+   DEFAULT_ACCOUNT_ORIGIN,
+   ACCOUNT_ORIGIN_PROBE_STORAGE_KEY,
+@@ -925,9 +926,10 @@ describe("accountSession client module", () => {
+       clearStoredAccountOrigin();
+     });
+ 
+-    it("defaults to DEFAULT_RELAY_ORIGIN when no origin is configured", () => {
++    it("defaults a web build to its page origin when no origin is configured", () => {
+       expect(getStoredAccountOrigin()).toBeNull();
+-      expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
++      expect(getConfiguredAccountOrigin()).toBe(window.location.origin);
++      expect(getConfiguredAccountOrigin()).not.toBe(DEFAULT_RELAY_ORIGIN);
+     });
+ 
+     it("stores, retrieves, and clears configured account origin", () => {
+@@ -937,7 +939,7 @@ describe("accountSession client module", () => {
+ 
+       clearStoredAccountOrigin();
+       expect(getStoredAccountOrigin()).toBeNull();
+-      expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
++      expect(getConfiguredAccountOrigin()).toBe(window.location.origin);
+     });
+ 
+     it("does not expose a session issued by one account origin to another", () => {
+@@ -1211,10 +1213,20 @@ describe("accountSession review hardening", () => {
+     clearStoredAccountOrigin();
+   });
+ 
+-  it("never sends the account token to an invalid stored or passed origin", async () => {
++  it("an invalid stored or passed origin errors instead of defaulting, and never receives the token", async () => {
+     window.localStorage.setItem("ferryx.account.origin", "http://evil.example");
+     expect(getStoredAccountOrigin()).toBeNull();
+-    expect(getConfiguredAccountOrigin()).toBe(DEFAULT_RELAY_ORIGIN);
++    let configuredError: unknown;
++    try {
++      getConfiguredAccountOrigin();
++    } catch (err) {
++      configuredError = err;
++    }
++    expect(configuredError).toBeInstanceOf(AccountSessionError);
++    expect((configuredError as AccountSessionError).code).toBe("INVALID_ACCOUNT_ORIGIN");
++    expect((configuredError as AccountSessionError).details).toEqual({ origin: "http://evil.example" });
++    expect(getConfiguredAccountOriginUnchecked()).toBe("http://evil.example");
++    expect(getStoredAccountSessionToken()).toBeNull();
+     expect(() => storeAccountOrigin("https://user:pw@relay.example.com")).toThrow(AccountSessionError);
+ 
+     const urls: string[] = [];
+@@ -1222,8 +1234,15 @@ describe("accountSession review hardening", () => {
+       urls.push(String(input));
+       return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+     });
+-    await listMachines("http://evil.example", sessionToken);
+-    expect(urls).toEqual([`${DEFAULT_RELAY_ORIGIN}/api/account/v1/machines`]);
++    await expect(listMachines("http://evil.example", sessionToken)).rejects.toMatchObject({
++      code: "INVALID_ACCOUNT_ORIGIN",
++      details: { origin: "http://evil.example" },
++    });
++    await expect(listMachines("", sessionToken)).rejects.toMatchObject({ code: "INVALID_ACCOUNT_ORIGIN" });
++    await expect(requestLogin("https://relay.example.com/path", "a@b.test")).rejects.toMatchObject({
++      code: "INVALID_ACCOUNT_ORIGIN",
++    });
++    expect(urls).toEqual([]);
+   });
+ 
+   it("times out a hung account call and does not cache a timed-out origin probe", async () => {
+diff --git a/ui/src/remote/accountSession.ts b/ui/src/remote/accountSession.ts
+index 90b2b374c..16e534897 100644
+--- a/ui/src/remote/accountSession.ts
++++ b/ui/src/remote/accountSession.ts
+@@ -16,6 +16,9 @@ import {
+   setRemoteAuthToken,
+ } from "../lib/remoteClient";
+ import { DEFAULT_RELAY_ORIGIN } from "../lib/pairedHostInventory";
++import { isTauri } from "@tauri-apps/api/core";
++import { isDesktopShell } from "../lib/clientRuntime";
++import { accountHttpRequest, isStructuredIpcError } from "../lib/tauri";
+ 
+ export const ACCOUNT_TOKEN_HOST_ID = "account";
+ 
+@@ -165,15 +168,109 @@ export function normalizeAccountOrigin(value: unknown): string | null {
+   }
+ }
+ 
+-/** An invalid origin falls back to the default account origin so it never receives a token. */
++export const INVALID_ACCOUNT_ORIGIN = "INVALID_ACCOUNT_ORIGIN";
++
++function invalidAccountOriginError(origin: string): AccountSessionError {
++  return new AccountSessionError(
++    INVALID_ACCOUNT_ORIGIN,
++    `Account origin "${origin}" must be https (http only for localhost) without credentials, path, query or hash.`,
++    undefined,
++    { origin },
++  );
++}
++
++/**
++ * The origin a request may send account credentials to. An empty origin means the configured
++ * one; an invalid origin is a typed INVALID_ACCOUNT_ORIGIN error and never becomes a default.
++ */
+ function cleanOrigin(origin: string): string {
+   const trimmed = typeof origin === "string" ? origin.trim() : "";
+-  const candidate = trimmed || (typeof window !== "undefined" ? window.location.origin : "");
+-  return normalizeAccountOrigin(candidate) ?? DEFAULT_RELAY_ORIGIN;
++  const candidate = trimmed || getConfiguredAccountOrigin();
++  const normalized = normalizeAccountOrigin(candidate);
++  if (!normalized) throw invalidAccountOriginError(candidate);
++  return normalized;
++}
++
++/** Storage-key form of an origin. Never throws: an invalid origin keys its own entry. */
++function originStorageKey(origin: string): string {
++  const trimmed = typeof origin === "string" ? origin.trim() : "";
++  return normalizeAccountOrigin(trimmed) ?? trimmed;
+ }
+ 
+ const ACCOUNT_REQUEST_TIMEOUT_MS = 15_000;
+ const ERROR_BODY_MAX_CHARS = 200;
++/** Statuses a Response must be built without a body for. */
++const NULL_BODY_STATUSES = new Set([204, 205, 304]);
++
++/**
++ * True where account HTTP goes through the desktop backend: the desktop webview CSP admits only
++ * the hosted relay, so a self-hosted account origin is reachable only through Rust. Web builds
++ * and the mobile shell keep using fetch.
++ */
++export function accountRequestsUseIpc(): boolean {
++  return isDesktopShell(isTauri());
++}
++
++function accountAbortError(): DOMException {
++  return new DOMException("The account request was aborted.", "AbortError");
++}
++
++function rejectOnAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
++  return new Promise<T>((resolve, reject) => {
++    const onAbort = () => reject(accountAbortError());
++    signal.addEventListener("abort", onAbort, { once: true });
++    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
++  });
++}
++
++/**
++ * `fetch` for account-service URLs. In the desktop app the request runs in Rust through
++ * `cmd_account_http_request` (never following redirects); elsewhere it is plain `fetch`.
++ * A backend failure is an AccountSessionError carrying the structured `{ code, message, details }`.
++ */
++export async function accountFetch(
++  input: RequestInfo | URL,
++  init: RequestInit = {},
++  timeoutMs: number = ACCOUNT_REQUEST_TIMEOUT_MS,
++): Promise<Response> {
++  if (!accountRequestsUseIpc()) return fetch(input, init);
++  const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
++  const requestedMethod = (init.method ?? "GET").toUpperCase();
++  const method = requestedMethod === "GET" ? "GET" : requestedMethod === "POST" ? "POST" : null;
++  if (method === null) {
++    throw new AccountSessionError("INVALID_REQUEST", `Account request method ${requestedMethod} is not supported`);
++  }
++  const authorization = new Headers(init.headers).get("Authorization");
++  if (authorization !== null && !authorization.startsWith("Bearer ")) {
++    throw new AccountSessionError("INVALID_REQUEST", "Account requests carry only a bearer credential");
++  }
++  if (init.body !== undefined && init.body !== null && typeof init.body !== "string") {
++    throw new AccountSessionError("INVALID_REQUEST", "Account request bodies must be JSON text");
++  }
++  const signal = init.signal ?? null;
++  if (signal?.aborted) throw accountAbortError();
++  const pending = accountHttpRequest({
++    origin: url.origin,
++    method,
++    path: `${url.pathname}${url.search}${url.hash}`,
++    bearer: authorization === null ? null : authorization.slice("Bearer ".length),
++    body: typeof init.body === "string" ? init.body : null,
++    timeoutMs,
++  });
++  let answer: Awaited<typeof pending>;
++  try {
++    answer = await (signal ? rejectOnAbort(pending, signal) : pending);
++  } catch (err) {
++    if (!(err instanceof AccountSessionError) && isStructuredIpcError(err)) {
++      throw new AccountSessionError(err.code, err.message, undefined, err.details);
++    }
++    throw err;
++  }
++  if (!Number.isInteger(answer.status) || answer.status < 200 || answer.status > 599) {
++    throw new AccountSessionError("INVALID_RESPONSE", `Account service answered with HTTP ${answer.status}`, answer.status);
++  }
++  return new Response(NULL_BODY_STATUSES.has(answer.status) ? null : answer.body, { status: answer.status });
++}
+ 
+ async function fetchWithTimeout(
+   url: string,
+@@ -193,7 +290,7 @@ async function fetchWithTimeout(
+     else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+   }
+   try {
+-    return await fetch(url, { ...init, signal: controller.signal });
++    return await accountFetch(url, { ...init, signal: controller.signal }, timeoutMs);
+   } catch (err) {
+     if (timedOut) {
+       throw new AccountSessionError("REQUEST_TIMEOUT", `Account request timed out after ${timeoutMs}ms`);
+@@ -339,7 +436,7 @@ export function planLimitStateWithEntitlement(
+ }
+ 
+ function accountEntitlementStorageKey(origin: string): string {
+-  return `${ACCOUNT_ENTITLEMENT_STORAGE_KEY}:${cleanOrigin(origin)}`;
++  return `${ACCOUNT_ENTITLEMENT_STORAGE_KEY}:${originStorageKey(origin)}`;
+ }
+ 
+ export function storeAccountEntitlementSnapshot(
+@@ -422,9 +519,16 @@ export function clearStoredAccountEntitlementSnapshot(
+   }
+ }
+ 
+-export function getStoredAccountSessionToken(origin: string = getConfiguredAccountOrigin()): string | null {
++export function getStoredAccountSessionToken(origin?: string): string | null {
++  let expected: string;
++  try {
++    expected = cleanOrigin(origin ?? "");
++  } catch {
++    // No credential belongs to an invalid origin.
++    return null;
++  }
+   const issuer = typeof window !== "undefined" ? window.localStorage.getItem(ACCOUNT_TOKEN_ORIGIN_KEY) : null;
+-  if (issuer !== cleanOrigin(origin)) return null;
++  if (issuer !== expected) return null;
+   return getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
+ }
+ 
+@@ -442,8 +546,8 @@ function dispatchAccountSessionChanged(origin: string): void {
+   }
+ }
+ 
+-export function storeAccountSessionToken(token: string, origin: string = getConfiguredAccountOrigin()): void {
+-  const issuer = cleanOrigin(origin);
++export function storeAccountSessionToken(token: string, origin?: string): void {
++  const issuer = cleanOrigin(origin ?? "");
+   if (getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID) !== token) {
+     clearStoredAccountEntitlementSnapshot(issuer);
+   }
+@@ -462,7 +566,7 @@ export function clearStoredAccountSessionToken(): void {
+     clearAccountLastSelectedTarget();
+   }
+   if (issuer) clearStoredAccountEntitlementSnapshot(issuer);
+-  dispatchAccountSessionChanged(issuer ?? getConfiguredAccountOrigin());
++  dispatchAccountSessionChanged(issuer ?? getConfiguredAccountOriginUnchecked());
+ }
+ 
+ export const ACCOUNT_ORIGIN_STORAGE_KEY = "ferryx.account.origin";
+@@ -488,7 +592,7 @@ export function storeAccountOrigin(
+   const normalized = normalizeAccountOrigin(origin);
+   if (!normalized) {
+     throw new AccountSessionError(
+-      "INVALID_ACCOUNT_ORIGIN",
++      INVALID_ACCOUNT_ORIGIN,
+       "Account origin must be https (http only for localhost) without credentials, path, query or hash.",
+     );
+   }
+@@ -501,12 +605,38 @@ export function clearStoredAccountOrigin(
+   storage?.removeItem(ACCOUNT_ORIGIN_STORAGE_KEY);
+ }
+ 
++/**
++ * The account origin this client talks to. A stored origin wins. Otherwise the native app
++ * (desktop or mobile shell) uses the product default and a web build uses its page origin.
++ * An invalid stored or page origin throws a typed INVALID_ACCOUNT_ORIGIN error; it never
++ * falls back to the hosted relay.
++ */
+ export function getConfiguredAccountOrigin(
+   storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
+ ): string {
+-  const stored = getStoredAccountOrigin(storage);
+-  if (stored) return stored;
+-  return DEFAULT_RELAY_ORIGIN;
++  const stored = getMigratedItem(ACCOUNT_ORIGIN_STORAGE_KEY, storage)?.trim();
++  const pageOrigin = typeof window !== "undefined" ? window.location.origin : "";
++  const candidate = stored || (isTauri() ? DEFAULT_RELAY_ORIGIN : pageOrigin);
++  const origin = normalizeAccountOrigin(candidate);
++  if (!origin) throw invalidAccountOriginError(candidate);
++  return origin;
++}
++
++/**
++ * Render-safe {@link getConfiguredAccountOrigin}: an invalid configured origin is returned
++ * unchanged, so every account request made with it fails with INVALID_ACCOUNT_ORIGIN instead
++ * of reaching another origin.
++ */
++export function getConfiguredAccountOriginUnchecked(): string {
++  try {
++    return getConfiguredAccountOrigin();
++  } catch (err) {
++    if (err instanceof AccountSessionError && err.code === INVALID_ACCOUNT_ORIGIN) {
++      const origin = (err.details as { origin?: unknown } | undefined)?.origin;
++      return typeof origin === "string" ? origin : "";
++    }
++    throw err;
++  }
+ }
+ 
+ /**
+@@ -1580,7 +1710,7 @@ export interface AccountLastSelectedTarget {
+ }
+ 
+ export function makeAccountLastSelectedTargetKey(relayUrl: string): string {
+-  return `ferryx.account.last_target.${encodeURIComponent(cleanOrigin(relayUrl))}`;
++  return `ferryx.account.last_target.${encodeURIComponent(originStorageKey(relayUrl))}`;
+ }
+ 
+ export function getAccountLastSelectedTarget(relayUrl: string): AccountLastSelectedTarget | null {

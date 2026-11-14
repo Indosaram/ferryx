@@ -1,0 +1,10 @@
+M	docs/HEADLESS_LINUX_SERVER_DEPLOYMENT_GUIDE.md
+M	src-tauri/src/cli.rs
+M	src-tauri/src/daemon/client.rs
+M	src-tauri/src/paired_host/attach.rs
+M	src-tauri/src/paired_host/client.rs
+M	src-tauri/src/paired_host/client_tests.rs
+M	src-tauri/src/paired_host/secure_http.rs
+M	src-tauri/src/paired_host/service.rs
+M	src-tauri/src/remote/relay_client.rs
+M	src-tauri/src/remote/state.rs

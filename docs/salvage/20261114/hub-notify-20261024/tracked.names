@@ -1,0 +1,5 @@
+M	crates/ferryx-hub/src/hub.rs
+M	crates/ferryx-hub/src/mcp.rs
+M	crates/ferryx-hub/src/security.rs
+M	crates/ferryx-hub/src/sessions/mod.rs
+M	src-tauri/src/hub_runtime.rs

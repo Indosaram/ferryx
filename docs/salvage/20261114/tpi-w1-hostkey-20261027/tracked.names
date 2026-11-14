@@ -1,0 +1,15 @@
+M	src-tauri/src/ipc/dag.rs
+M	src-tauri/src/ipc/error.rs
+M	src-tauri/src/ipc/ssh.rs
+M	src-tauri/src/lib.rs
+M	src-tauri/src/ssh/config.rs
+M	src-tauri/src/ssh/mod.rs
+M	src-tauri/src/ssh/runtime.rs
+M	src-tauri/src/terminal/remote.rs
+M	src-tauri/src/terminal/remote_runtime_tests.rs
+M	ui/src/components/settings/AddMachineModal.test.tsx
+M	ui/src/components/settings/AddMachineModal.tsx
+M	ui/src/lib/sshHosts.ts
+M	ui/src/lib/sshRecovery.ts
+M	ui/src/lib/tauri.ts
+M	ui/src/lib/types.ts

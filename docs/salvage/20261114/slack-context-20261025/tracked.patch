@@ -1,0 +1,118 @@
+diff --git a/crates/ferryx-hub/src/chat/omo_parity_e2e.rs b/crates/ferryx-hub/src/chat/omo_parity_e2e.rs
+index ec6b72434..7796b2eb6 100644
+--- a/crates/ferryx-hub/src/chat/omo_parity_e2e.rs
++++ b/crates/ferryx-hub/src/chat/omo_parity_e2e.rs
+@@ -394,7 +394,7 @@ async fn e2e_a_mention_carries_topic_channel_context_forwards_and_attachments()
+         "contents of log.txt"
+     );
+     let expected = format!(
+-        "[Thu 2025-10-23 03:40:00 UTC] [Recent channel context]\nalice: build 42 is red\n\n\
++        "[Thu 2025-10-23 03:40:00 UTC] [Recent channel context]\nyou (bot): my own earlier reply\nalice: build 42 is red\n\n\
+          [Channel Topic]\nrelease train\n\nwhat broke?\n\n[Forwarded]\nKim: deploy failed at step 3\n\n\
+          [Attachment: log.txt (text/plain, 20 bytes) - {base}/files/log.txt | local path: {}]\n\n\
+          [Content of log.txt]:\n\ncontents of log.txt",
+@@ -459,6 +459,59 @@ async fn e2e_a_mention_carries_topic_channel_context_forwards_and_attachments()
+     assert!(admit(&strict, &thread_reply, "UBOT", true).is_none());
+ }
+ 
++#[tokio::test]
++async fn e2e_a_bare_top_level_message_sees_the_bots_last_report() {
++    // 2026-10-25: the bot posted a login alert top-level, the owner answered "ignore" top-level,
++    // and the fresh auto-thread session had never seen the alert.
++    let pool = crate::storage::memory().await.unwrap();
++    let (base, calls) = serve_scripted(
++        "UBOT",
++        vec![
++            ("conversations.info", vec![json!({"ok": true, "channel": {}})]),
++            (
++                "conversations.history",
++                vec![json!({"ok": true, "messages": [
++                    {"ts": "300.2", "user": "UOWNER", "text": "ignore"},
++                    {"ts": "300.1", "user": "UBOT", "text": "Two new logins: X and Threads"},
++                    {"ts": "299.0", "user": "UOWNER", "text": "merge to main"}
++                ]})],
++            ),
++            (
++                "users.info",
++                vec![json!({"ok": true, "user": {"real_name": "Indo"}})],
++            ),
++        ],
++    )
++    .await;
++    let payload = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
++        "type": "message", "user": "UOWNER", "channel": "CHOME", "ts": "300.2", "text": "ignore"}});
++    let admitted = admit(&config("ws://x".into()), &payload, "UBOT", false).unwrap();
++    assert_eq!(admitted.key.thread_id.as_deref(), Some("300.2"));
++    let dir = std::env::temp_dir().join(format!("ferryx-bare-top-{}", std::process::id()));
++    let prompt = with_test_api(base, "xoxb-test".into(), async {
++        prepare_prompt_in(&pool, &admitted, &dir).await
++    })
++    .await;
++    assert_eq!(
++        prompt,
++        "[Thu 1970-01-01 00:05:00 UTC] [Recent channel context]\nIndo: merge to main\n\
++         you (bot): Two new logins: X and Threads\n\nignore"
++    );
++    assert_eq!(calls_of(&calls, "conversations.history")[0]["latest"], "300.2");
++
++    // A reply inside a thread quotes its root instead and reads no channel history.
++    let (base, calls) = serve_scripted("UBOT", Vec::new()).await;
++    let reply = json!({"team_id": "T1", "authorizations": [{"user_id": "UBOT"}], "event": {
++        "type": "message", "user": "UOWNER", "channel": "CHOME", "ts": "301.2", "thread_ts": "301.1", "text": "ok"}});
++    let reply = admit(&config("ws://x".into()), &reply, "UBOT", false).unwrap();
++    with_test_api(base, "xoxb-test".into(), async {
++        prepare_prompt_in(&pool, &reply, &dir).await
++    })
++    .await;
++    assert!(calls_of(&calls, "conversations.history").is_empty());
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
+ #[tokio::test]
+ async fn e2e_messages_missed_while_down_are_answered_once_after_restart() {
+     use super::slack_backfill::{read_cursor, run, write_cursor, BotIdentity};
+diff --git a/crates/ferryx-hub/src/chat/slack_ingress.rs b/crates/ferryx-hub/src/chat/slack_ingress.rs
+index de3673267..4b195c943 100644
+--- a/crates/ferryx-hub/src/chat/slack_ingress.rs
++++ b/crates/ferryx-hub/src/chat/slack_ingress.rs
+@@ -15,6 +15,8 @@ const REFERENCED_CONTENT_CAP: usize = 500;
+ const DEFAULT_CHANNEL_CONTEXT_LIMIT: usize = 10;
+ const MAX_CHANNEL_CONTEXT_LIMIT: usize = 25;
+ const MAX_CONTEXT_LINE_CHARS: usize = 200;
++/// Author label of the bot's own earlier posts in channel context.
++const OWN_MESSAGE_AUTHOR: &str = "you (bot)";
+ /// omo inlined text attachments up to 100 KB.
+ const MAX_INLINED_ATTACHMENT_BYTES: u64 = 100 * 1024;
+ const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
+@@ -358,7 +360,11 @@ pub async fn enrich(input: &Enrich<'_>, content: &mut String, files: &mut Vec<Sl
+         && str_field(input.event, "text")
+             .is_some_and(|text| text.contains(&format!("<@{}>", input.bot_user)));
+     let limit = channel_context_limit();
+-    if flag("CHANNEL_CONTEXT", true) && mentioned && limit > 0 {
++    // A top-level message roots a fresh thread session (SLACK_AUTO_THREAD) that holds none of
++    // the channel's earlier messages, so it always gets them - the bot's own posts included,
++    // since a bare "ignore that" usually answers the bot's last report.
++    let fresh_top_level = thread_ts.is_none() && !input.root_known;
++    if flag("CHANNEL_CONTEXT", true) && (mentioned || fresh_top_level) && limit > 0 {
+         let fetched = match thread_ts {
+             Some(thread) => {
+                 let limit = (limit + 1).to_string();
+@@ -396,10 +402,16 @@ pub async fn enrich(input: &Enrich<'_>, content: &mut String, files: &mut Vec<Sl
+                 for message in messages.into_iter().skip(skip) {
+                     let text = str_field(&message, "text").unwrap_or_default();
+                     let author = str_field(&message, "user").unwrap_or_default();
+-                    if text.trim().is_empty() || author.is_empty() || author == input.bot_user {
++                    let own = !input.bot_user.is_empty() && author == input.bot_user;
++                    if text.trim().is_empty() || author.is_empty() || (own && input.root_known) {
+                         continue;
+                     }
+-                    history.push((user_name(author).await, text.to_owned()));
++                    let name = if own {
++                        OWN_MESSAGE_AUTHOR.to_owned()
++                    } else {
++                        user_name(author).await
++                    };
++                    history.push((name, text.to_owned()));
+                 }
+                 prepend(content, format_channel_context(&history));
+             }

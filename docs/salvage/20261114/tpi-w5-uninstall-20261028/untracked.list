@@ -1,0 +1,2 @@
+packaging/linux/deb-prerm.sh
+packaging/windows/installer-hooks.nsh

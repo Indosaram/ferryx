@@ -1,0 +1,877 @@
+diff --git a/scripts/build-msix.ps1 b/scripts/build-msix.ps1
+index ae3cfe1d2..840eff031 100644
+--- a/scripts/build-msix.ps1
++++ b/scripts/build-msix.ps1
+@@ -287,6 +287,8 @@ try {
+             "x86_64-pc-windows-msvc" { "ferryx-remote-helper.exe" }
+             "x86_64-unknown-linux-gnu" { "ferryx-remote-helper" }
+             "aarch64-unknown-linux-gnu" { "ferryx-remote-helper" }
++            "x86_64-unknown-linux-musl" { "ferryx-remote-helper" }
++            "aarch64-unknown-linux-musl" { "ferryx-remote-helper" }
+             "aarch64-apple-darwin" { "ferryx-remote-helper" }
+             "x86_64-apple-darwin" { "ferryx-remote-helper" }
+             default { throw "ERROR: Unsupported helper manifest.json target: $($artifact.target)" }
+diff --git a/scripts/build-remote-helpers.mjs b/scripts/build-remote-helpers.mjs
+index 7041b34f4..22895d098 100644
+--- a/scripts/build-remote-helpers.mjs
++++ b/scripts/build-remote-helpers.mjs
+@@ -5,13 +5,29 @@ import { resolve, join, dirname, relative, isAbsolute } from "node:path";
+ import { fileURLToPath } from "node:url";
+ 
+ const REPO_ROOT = resolve(import.meta.dirname, "..");
+-const TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"];
++// Linux remotes get the static musl helpers (no loader/libc dependency, so they also run on
++// Alpine); the glibc builds stay in the matrix as a fallback.
++const TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"];
+ export const REQUIRED_HELPER_CAPABILITIES = Object.freeze(["sshHelperV1", "dagSubscribeV1", "agentStateV1"]);
+ 
+ export function computeSha256(buffer) {
+   return createHash("sha256").update(buffer).digest("hex");
+ }
+ 
++// A static (or static-pie) executable has no PT_INTERP program header; a dynamic one names its
++// loader there, and that loader is exactly what is missing on a foreign libc.
++function elfHasInterpreter(bytes) {
++  assert(bytes.length >= 64, "truncated ELF header");
++  const phoff = Number(bytes.readBigUInt64LE(32));
++  const phentsize = bytes.readUInt16LE(54);
++  const phnum = bytes.readUInt16LE(56);
++  assert(phentsize >= 4 && phoff + phentsize * phnum <= bytes.length, "truncated ELF program headers");
++  for (let i = 0; i < phnum; i++) {
++    if (bytes.readUInt32LE(phoff + i * phentsize) === 3) return true;
++  }
++  return false;
++}
++
+ function findRsFiles(dir) {
+   assert(existsSync(dir), `Helper source directory missing: ${dir}`);
+   const entries = readdirSync(dir, { withFileTypes: true });
+@@ -124,6 +140,7 @@ export function stageHelpers({ repoRoot = REPO_ROOT, resourcesDir = join(repoRoo
+       assert.equal(bytes[4], 2, "ELF must be 64 bit");
+       assert.equal(bytes[5], 1, "ELF must be little endian");
+       assert.equal(bytes.readUInt16LE(18), target.startsWith("aarch64") ? 183 : 62, "ELF machine mismatch");
++      if (target.endsWith("-linux-musl")) assert(!elfHasInterpreter(bytes), `musl helper for ${target} must be statically linked (PT_INTERP present)`);
+     }
+ 
+     assert.ok(Array.isArray(receipt.capabilities), `capability evidence required for ${target}: run the built artifact's --capabilities on its build host`);
+diff --git a/scripts/build-remote-helpers.test.mjs b/scripts/build-remote-helpers.test.mjs
+index 6770d9386..0936d16a4 100644
+--- a/scripts/build-remote-helpers.test.mjs
++++ b/scripts/build-remote-helpers.test.mjs
+@@ -135,6 +135,33 @@ test('stager still rejects a Mach-O artifact published under a linux target', as
+   await assert.rejects(stage(root, { receipts: [{ ...r, target: 'aarch64-unknown-linux-gnu' }], requiredTargets: ['aarch64-unknown-linux-gnu'] }));
+   assert.equal(existsSync(join(root, 'out/manifest.json')), false);
+ });
++const ELF_MACHINE = { 'x86_64-unknown-linux-musl': 62, 'aarch64-unknown-linux-musl': 183 };
++function elfReceipt(root, elfTarget, { interpreter = false } = {}) {
++  const path = join(root, `helper-${elfTarget}`);
++  // Minimal ELF64 header with two program headers; PT_INTERP (3) marks a dynamic executable.
++  const bytes = Buffer.alloc(256);
++  Buffer.from([127, 69, 76, 70, 2, 1, 1]).copy(bytes, 0);
++  bytes.writeUInt16LE(3, 16);
++  bytes.writeUInt16LE(ELF_MACHINE[elfTarget], 18);
++  bytes.writeBigUInt64LE(64n, 32);
++  bytes.writeUInt16LE(56, 54);
++  bytes.writeUInt16LE(2, 56);
++  bytes.writeUInt32LE(6, 64);
++  bytes.writeUInt32LE(interpreter ? 3 : 1, 120);
++  writeFileSync(path, bytes);
++  const { fingerprint: sourceFingerprint, sources } = computeHelperSourceFingerprint(root);
++  return { target: elfTarget, profile: 'release', executable: path, sha256: computeSha256(bytes), helperVersion: FIXTURE_HELPER_VERSION, capabilities: [...REQUIRED_HELPER_CAPABILITIES], sourceFingerprint, sources };
++}
++for (const elfTarget of Object.keys(ELF_MACHINE)) test(`stager publishes static ${elfTarget} and rejects a dynamic one`, async t => {
++  const root = fixture(t);
++  await assert.rejects(stage(root, { receipts: [elfReceipt(root, elfTarget, { interpreter: true })], requiredTargets: [elfTarget] }), /statically linked/);
++  assert.equal(existsSync(join(root, 'out/manifest.json')), false);
++  const r = elfReceipt(root, elfTarget);
++  const manifest = await stage(root, { receipts: [r], requiredTargets: [elfTarget] });
++  assert.equal(manifest.artifacts[0].target, elfTarget);
++  assert.equal(manifest.artifacts[0].filename, 'ferryx-remote-helper');
++  assert.deepEqual(readFileSync(join(root, 'out', elfTarget, 'ferryx-remote-helper')), readFileSync(r.executable));
++});
+ test('stager rejects a receipt missing dagSubscribeV1 evidence even with matching version', async t => {
+   const root = fixture(t);
+   const r = receipt(root, { capabilities: ['sshHelperV1', 'agentStateV1'] });
+@@ -350,7 +377,8 @@ test('validateBundledHelpers rejects an incomplete shipped target matrix', async
+   try { validateBundledHelpers({ repoRoot: root, resourcesDir }); } catch (error) { failure = error; }
+   assert.equal(failure?.code, 'ERR_ASSERTION');
+   assert.deepEqual(failure.actual, [target]);
+-  assert.equal(failure.expected.length, 5);
++  assert.equal(failure.expected.length, 7);
++  assert.ok(failure.expected.includes('x86_64-unknown-linux-musl') && failure.expected.includes('aarch64-unknown-linux-musl'));
+ });
+ test('validateBundledHelpers rejects a duplicated shipped target', async t => {
+   const root = fixture(t);
+diff --git a/src-tauri/examples/helper_manifest_check.rs b/src-tauri/examples/helper_manifest_check.rs
+index 3be527c76..0bd6f6eee 100644
+--- a/src-tauri/examples/helper_manifest_check.rs
++++ b/src-tauri/examples/helper_manifest_check.rs
+@@ -6,6 +6,8 @@ fn main() {
+     let targets = [
+         ("x86_64-unknown-linux-gnu", ferryx_lib::ssh::helper_assets::HelperTarget::LinuxX86_64),
+         ("aarch64-unknown-linux-gnu", ferryx_lib::ssh::helper_assets::HelperTarget::LinuxAarch64),
++        ("x86_64-unknown-linux-musl", ferryx_lib::ssh::helper_assets::HelperTarget::LinuxMuslX86_64),
++        ("aarch64-unknown-linux-musl", ferryx_lib::ssh::helper_assets::HelperTarget::LinuxMuslAarch64),
+         ("aarch64-apple-darwin", ferryx_lib::ssh::helper_assets::HelperTarget::DarwinAarch64),
+         ("x86_64-apple-darwin", ferryx_lib::ssh::helper_assets::HelperTarget::DarwinX86_64),
+         ("x86_64-pc-windows-msvc", ferryx_lib::ssh::helper_assets::HelperTarget::WindowsX64),
+diff --git a/src-tauri/resources/helpers/manifest.json b/src-tauri/resources/helpers/manifest.json
+index 391638fa7..5c18dca70 100644
+--- a/src-tauri/resources/helpers/manifest.json
++++ b/src-tauri/resources/helpers/manifest.json
+@@ -35,6 +35,32 @@
+         "agentStateV1"
+       ]
+     },
++    {
++      "target": "x86_64-unknown-linux-musl",
++      "filename": "ferryx-remote-helper",
++      "sha256": "2f5c657ec7cd31b87e7ec7cdf00a85e88deba4d8b0f6a2baa66a8bc8fecd01d6",
++      "byteLength": 1535576,
++      "capabilities": [
++        "sshHelperV1",
++        "dagStreamingV1",
++        "dagSubscribeV1",
++        "agentHookV1",
++        "agentStateV1"
++      ]
++    },
++    {
++      "target": "aarch64-unknown-linux-musl",
++      "filename": "ferryx-remote-helper",
++      "sha256": "f69b807bd8bea1fc74c042fe23379928c1b64dd86fc85b7718f9c7ab4a851e16",
++      "byteLength": 1393248,
++      "capabilities": [
++        "sshHelperV1",
++        "dagStreamingV1",
++        "dagSubscribeV1",
++        "agentHookV1",
++        "agentStateV1"
++      ]
++    },
+     {
+       "target": "aarch64-apple-darwin",
+       "filename": "ferryx-remote-helper",
+diff --git a/src-tauri/src/ipc/ssh.rs b/src-tauri/src/ipc/ssh.rs
+index 32621dd97..7a183b750 100644
+--- a/src-tauri/src/ipc/ssh.rs
++++ b/src-tauri/src/ipc/ssh.rs
+@@ -471,14 +471,23 @@ pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
+     };
+     // Non-installing helper check, only when the host is reachable. Any probe
+     // failure (timeout, transport error) classifies to Unknown, never an Err.
+-    let helper = match &environment {
+-        Some(environment) => Some(crate::ssh::helper_setup::probe_ready(&host, environment).await),
+-        None => None,
++    // A present helper that cannot run stays Missing (so setup reinstalls it) but
++    // reports why through last_error instead of reading as plain "not installed".
++    let (helper, helper_exec_failure) = match &environment {
++        Some(environment) => {
++            let (state, exec_failure) =
++                crate::ssh::helper_setup::probe_ready_detailed(&host, environment).await;
++            (Some(state), exec_failure)
++        }
++        None => (None, None),
+     };
+     SshTargetSummary {
+         host,
+         reachable,
+-        last_error: diagnostic.as_ref().map(|e| e.message.clone()),
++        last_error: diagnostic
++            .as_ref()
++            .map(|e| e.message.clone())
++            .or(helper_exec_failure),
+         environment,
+         helper,
+         diagnostic,
+@@ -805,20 +814,19 @@ pub async fn cmd_ssh_install_ferryx_node<R: Runtime>(
+     parse_node_install_report(&output)
+ }
+ 
++fn parse_helper_target(
++    target_triple: &str,
++) -> Result<crate::ssh::helper_assets::HelperTarget, IpcError> {
++    crate::ssh::helper_assets::HelperTarget::from_triple(target_triple).ok_or_else(|| {
++        IpcError::new(
++            IpcErrorCode::Unsupported,
++            format!("Unsupported target triple for helper asset: '{target_triple}'"),
++        )
++    })
++}
++
+ pub fn resolve_bundled_helper_binary(target_triple: &str) -> Result<PathBuf, IpcError> {
+-    let parsed_target = match target_triple {
+-        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
+-        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
+-        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
+-        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
+-        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
+-        _ => {
+-            return Err(IpcError::new(
+-                IpcErrorCode::Unsupported,
+-                format!("Unsupported target triple for helper asset: '{target_triple}'"),
+-            ));
+-        }
+-    };
++    let parsed_target = parse_helper_target(target_triple)?;
+ 
+     let mut helper_dir_candidates = Vec::new();
+ 
+@@ -858,19 +866,7 @@ pub fn bundled_helper_path<R: Runtime>(
+     app: &AppHandle<R>,
+     target_triple: &str,
+ ) -> Result<PathBuf, IpcError> {
+-    let parsed_target = match target_triple {
+-        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
+-        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
+-        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
+-        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
+-        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
+-        _ => {
+-            return Err(IpcError::new(
+-                IpcErrorCode::Unsupported,
+-                format!("Unsupported target triple for helper asset: '{target_triple}'"),
+-            ));
+-        }
+-    };
++    let parsed_target = parse_helper_target(target_triple)?;
+ 
+     let mut helper_dir_candidates = Vec::new();
+     if let Ok(resource_dir) = app.path().resource_dir() {
+diff --git a/src-tauri/src/ssh/helper_assets.rs b/src-tauri/src/ssh/helper_assets.rs
+index 34beb813c..435da3361 100644
+--- a/src-tauri/src/ssh/helper_assets.rs
++++ b/src-tauri/src/ssh/helper_assets.rs
+@@ -5,10 +5,16 @@ use std::path::{Path, PathBuf};
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+ pub enum HelperTarget {
++    /// glibc build. Still shipped as a fallback; Linux remotes resolve to the musl build.
+     #[serde(rename = "x86_64-unknown-linux-gnu")]
+     LinuxX86_64,
+     #[serde(rename = "aarch64-unknown-linux-gnu")]
+     LinuxAarch64,
++    /// Static musl build: runs on any Linux userland (glibc, musl/Alpine, minimal images).
++    #[serde(rename = "x86_64-unknown-linux-musl")]
++    LinuxMuslX86_64,
++    #[serde(rename = "aarch64-unknown-linux-musl")]
++    LinuxMuslAarch64,
+     #[serde(rename = "aarch64-apple-darwin")]
+     DarwinAarch64,
+     #[serde(rename = "x86_64-apple-darwin")]
+@@ -22,6 +28,8 @@ impl HelperTarget {
+         match self {
+             Self::LinuxX86_64 => "x86_64-unknown-linux-gnu",
+             Self::LinuxAarch64 => "aarch64-unknown-linux-gnu",
++            Self::LinuxMuslX86_64 => "x86_64-unknown-linux-musl",
++            Self::LinuxMuslAarch64 => "aarch64-unknown-linux-musl",
+             Self::DarwinAarch64 => "aarch64-apple-darwin",
+             Self::DarwinX86_64 => "x86_64-apple-darwin",
+             Self::WindowsX64 => "x86_64-pc-windows-msvc",
+@@ -32,11 +40,27 @@ impl HelperTarget {
+         match self {
+             Self::LinuxX86_64
+             | Self::LinuxAarch64
++            | Self::LinuxMuslX86_64
++            | Self::LinuxMuslAarch64
+             | Self::DarwinAarch64
+             | Self::DarwinX86_64 => "ferryx-remote-helper",
+             Self::WindowsX64 => "ferryx-remote-helper.exe",
+         }
+     }
++
++    pub fn from_triple(triple: &str) -> Option<Self> {
++        [
++            Self::LinuxX86_64,
++            Self::LinuxAarch64,
++            Self::LinuxMuslX86_64,
++            Self::LinuxMuslAarch64,
++            Self::DarwinAarch64,
++            Self::DarwinX86_64,
++            Self::WindowsX64,
++        ]
++        .into_iter()
++        .find(|target| target.triple() == triple)
++    }
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+@@ -83,9 +107,11 @@ pub fn resolve_target_from_probe(platform: &str, arch: &str) -> Result<HelperTar
+     let norm_arch = arch.trim().to_lowercase();
+ 
+     match norm_platform.as_str() {
++        // The static musl helper needs no loader or libc, so it runs on glibc and musl
++        // (Alpine) userlands alike; a glibc build exits 127 on a musl remote.
+         "linux" => match norm_arch.as_str() {
+-            "x86_64" | "amd64" => Ok(HelperTarget::LinuxX86_64),
+-            "aarch64" | "arm64" => Ok(HelperTarget::LinuxAarch64),
++            "x86_64" | "amd64" => Ok(HelperTarget::LinuxMuslX86_64),
++            "aarch64" | "arm64" => Ok(HelperTarget::LinuxMuslAarch64),
+             _ => Err(IpcError::new(
+                 IpcErrorCode::Unsupported,
+                 format!("Unsupported remote CPU architecture for Linux: '{arch}'"),
+@@ -332,26 +358,48 @@ mod tests {
+     use tempfile::TempDir;
+ 
+     #[test]
+-    fn resolve_target_normalizes_linux_x86_64() {
++    fn resolve_target_prefers_static_musl_on_linux_x86_64() {
+         assert_eq!(
+             resolve_target_from_probe("linux", "x86_64").unwrap(),
+-            HelperTarget::LinuxX86_64
++            HelperTarget::LinuxMuslX86_64
+         );
+         assert_eq!(
+             resolve_target_from_probe("Linux", "amd64").unwrap(),
+-            HelperTarget::LinuxX86_64
++            HelperTarget::LinuxMuslX86_64
+         );
+     }
+ 
+     #[test]
+-    fn resolve_target_normalizes_linux_aarch64() {
++    fn resolve_target_prefers_static_musl_on_linux_aarch64() {
+         assert_eq!(
+             resolve_target_from_probe("linux", "aarch64").unwrap(),
+-            HelperTarget::LinuxAarch64
++            HelperTarget::LinuxMuslAarch64
+         );
+         assert_eq!(
+             resolve_target_from_probe("Linux", "arm64").unwrap(),
+-            HelperTarget::LinuxAarch64
++            HelperTarget::LinuxMuslAarch64
++        );
++    }
++
++    #[test]
++    fn linux_targets_round_trip_their_triples() {
++        for (target, triple) in [
++            (HelperTarget::LinuxMuslX86_64, "x86_64-unknown-linux-musl"),
++            (HelperTarget::LinuxMuslAarch64, "aarch64-unknown-linux-musl"),
++            (HelperTarget::LinuxX86_64, "x86_64-unknown-linux-gnu"),
++            (HelperTarget::LinuxAarch64, "aarch64-unknown-linux-gnu"),
++        ] {
++            assert_eq!(target.triple(), triple);
++            assert_eq!(target.filename(), "ferryx-remote-helper");
++            assert_eq!(
++                serde_json::to_value(target).unwrap(),
++                serde_json::json!(triple)
++            );
++            assert_eq!(HelperTarget::from_triple(triple), Some(target));
++        }
++        assert_eq!(
++            HelperTarget::from_triple("x86_64-unknown-linux-gnux32"),
++            None
+         );
+     }
+ 
+diff --git a/src-tauri/src/ssh/helper_setup.rs b/src-tauri/src/ssh/helper_setup.rs
+index 560baf0fa..3db8000d8 100644
+--- a/src-tauri/src/ssh/helper_setup.rs
++++ b/src-tauri/src/ssh/helper_setup.rs
+@@ -37,8 +37,8 @@ struct DeferredPayload {
+ /// Honest Terminal Helper readiness from a bounded, non-installing remote check.
+ ///
+ /// `Installed` means the helper binary was observed present (and executable on
+-/// POSIX) at the default location. `Missing` means the remote explicitly
+-/// reported the binary absent or not executable. `Unknown` covers every other
++/// POSIX) and answered `--version`. `Missing` means the remote explicitly
++/// reported the binary absent, not executable, or unrunnable. `Unknown` covers every other
+ /// outcome (timeout, transport failure, unexpected output): no claim is made.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -51,6 +51,9 @@ pub enum HelperProbeState {
+ /// Stdout marker printed by the probe script when the helper binary checks out.
+ const PROBE_READY_MARKER: &str = "FERRYX_HELPER_READY";
+ 
++/// Stderr marker printed by the probe script when the binary exists but `--version` fails.
++const PROBE_UNRUNNABLE_MARKER: &str = "FERRYX_ERR_HELPER_UNRUNNABLE";
++
+ #[derive(Debug, Deserialize)]
+ struct HelperReadyEvent {
+     event: String,
+@@ -355,13 +358,38 @@ pub(crate) fn map_ensure_started_error(err: IpcError, location: &HelperLocation)
+         return err;
+     }
+ 
+-    let is_missing = exit_code == Some(127) || (exit_code == Some(1) && has_missing_marker);
++    // Exit 127 alone is not proof of absence: a shell also returns 127 when the binary exists
++    // but its ELF interpreter does not (a glibc helper on musl/Alpine). Only the explicit marker
++    // printed after the existence check means "not installed".
++    let is_missing = has_missing_marker && matches!(exit_code, Some(127) | Some(1));
+     let is_permissions =
+         exit_code == Some(126) || (exit_code == Some(1) && has_not_executable_marker);
++    let is_exec_failure = exit_code == Some(127) && !has_missing_marker;
+ 
+     let cause = err.details.clone();
+ 
+-    if is_missing {
++    if is_exec_failure {
++        let mut details = serde_json::json!({
++            "stage": "helper_exec_failed",
++            "operation": "helper_startup_readiness",
++            "executable": location.executable,
++            "root": location.root,
++            "exitCode": 127,
++            "stderr": stderr,
++        });
++        if let Some(c) = cause {
++            details["cause"] = c;
++        }
++        IpcError::new(
++            IpcErrorCode::Unsupported,
++            format!(
++                "Remote helper at '{}' exists but could not be executed on this host: {}",
++                location.executable,
++                stderr.trim()
++            ),
++        )
++        .with_details(details)
++    } else if is_missing {
+         let mut details = serde_json::json!({
+             "stage": "helper_missing",
+             "operation": "helper_startup_readiness",
+@@ -495,6 +523,8 @@ fn classify_probe_error(err: &IpcError) -> HelperProbeState {
+         || err.message.contains("FERRYX_ERR_HELPER_MISSING");
+     let has_not_executable_marker = stderr.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE")
+         || err.message.contains("FERRYX_ERR_HELPER_NOT_EXECUTABLE");
++    let has_unrunnable_marker =
++        stderr.contains(PROBE_UNRUNNABLE_MARKER) || err.message.contains(PROBE_UNRUNNABLE_MARKER);
+ 
+     // Contradictory signals are untrustworthy: claim nothing.
+     if (has_missing_marker && (has_not_executable_marker || exit_code == Some(126)))
+@@ -505,9 +535,11 @@ fn classify_probe_error(err: &IpcError) -> HelperProbeState {
+ 
+     // Windows sshd.exe normalizes child exit codes to 1, so the explicit
+     // stderr sentinels are the reliable signal there; POSIX adds 127/126.
+-    // Both sentinels mean the helper is not usable at its default location.
++    // Every sentinel means the helper is not usable at its default location;
++    // an unrunnable binary must be replaced just like a missing one.
+     if has_missing_marker
+         || has_not_executable_marker
++        || has_unrunnable_marker
+         || exit_code == Some(127)
+         || exit_code == Some(126)
+     {
+@@ -538,76 +570,136 @@ pub fn probe_locations(
+ /// Tests existence (plus executability on POSIX) at candidate locations:
+ /// first checks `qualified_location` for the current bundled helper version,
+ /// falling back to unversioned `default_location` for legacy installs.
+-/// It never writes, never installs, and never executes or spawns the helper,
+-/// so no persistent remote process can linger. Remote platform dispatch and
+-/// the bounded exec helper mirror `ensure_started`.
++/// It never writes or installs. In the same round trip it runs `--version`,
++/// which exits immediately and spawns nothing persistent, because a present
++/// binary can still be unrunnable (a glibc build on a musl host exits 127):
++/// that case prints `FERRYX_ERR_HELPER_UNRUNNABLE` and reads as Missing so the
++/// caller reinstalls. Remote platform dispatch and the bounded exec helper
++/// mirror `ensure_started`.
+ fn probe_ready_script(environment: &RemoteEnvironment, location: &HelperLocation) -> String {
+     match environment.platform {
+         RemotePlatform::Posix => format!(
+             "exe={}; \
+              if [ ! -f \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_MISSING\\n' >&2; exit 127; fi; \
+              if [ ! -x \"$exe\" ]; then printf 'FERRYX_ERR_HELPER_NOT_EXECUTABLE\\n' >&2; exit 126; fi; \
++             out=$(\"$exe\" --version 2>&1); rc=$?; \
++             if [ \"$rc\" -ne 0 ]; then printf 'FERRYX_ERR_HELPER_UNRUNNABLE exit=%s %s\\n' \"$rc\" \"$(printf '%s\\n' \"$out\" | head -n 1)\" >&2; exit 1; fi; \
+              printf 'FERRYX_HELPER_READY\\n'",
+             direct::quote_posix(&location.executable)
+         ),
+         RemotePlatform::Windows => format!(
+             "$exe = {}; \
+              if (-not [System.IO.File]::Exists($exe)) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_MISSING'); exit 127; }}; \
++             try {{ $out = (& $exe --version 2>&1 | Out-String).Trim(); $rc = $LASTEXITCODE }} catch {{ $out = $_.Exception.Message; $rc = -1 }}; \
++             if ($rc -ne 0) {{ [Console]::Error.WriteLine('FERRYX_ERR_HELPER_UNRUNNABLE exit=' + $rc + ' ' + ($out -split '\\r?\\n')[0]); exit 1; }}; \
+              [Console]::WriteLine('FERRYX_HELPER_READY')",
+             runtime::powershell_data(&location.executable)
+         ),
+     }
+ }
+ 
+-pub(super) async fn probe_ready_at_with<F, Fut>(
++/// User-facing reason a present helper failed its probe `--version` run, taken from the
++/// `FERRYX_ERR_HELPER_UNRUNNABLE exit=<code> <first output line>` sentinel. `None` when the
++/// probe did not observe a present-but-unrunnable binary (absent, not executable, transport).
++pub(crate) fn probe_exec_failure(err: &IpcError, location: &HelperLocation) -> Option<String> {
++    if classify_probe_error(err) != HelperProbeState::Missing {
++        return None;
++    }
++    let stderr = err
++        .details
++        .as_ref()
++        .and_then(|d| d.get("stderr"))
++        .and_then(|s| s.as_str())
++        .unwrap_or("");
++    let detail = stderr.lines().chain(err.message.lines()).find_map(|line| {
++        line.split_once(PROBE_UNRUNNABLE_MARKER)
++            .map(|(_, rest)| rest.trim().to_owned())
++    })?;
++    Some(format!(
++        "Remote helper at '{}' exists but could not be executed on this host ({detail}); reinstall it.",
++        location.executable
++    ))
++}
++
++async fn probe_ready_at_detailed_with<F, Fut>(
+     environment: &RemoteEnvironment,
+     location: &HelperLocation,
+     mut run: F,
+-) -> HelperProbeState
++) -> (HelperProbeState, Option<String>)
+ where
+     F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+     Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+ {
+     let script = probe_ready_script(environment, location);
+     match run(environment.executor, script, Duration::from_secs(10)).await {
+-        Ok(stdout) => classify_probe_result(Ok(&stdout)),
+-        Err(err) => classify_probe_result(Err(&err)),
++        Ok(stdout) => (classify_probe_result(Ok(&stdout)), None),
++        Err(err) => (
++            classify_probe_result(Err(&err)),
++            probe_exec_failure(&err, location),
++        ),
+     }
+ }
+ 
+-pub(super) async fn probe_ready_with<F, Fut>(
++pub(super) async fn probe_ready_at_with<F, Fut>(
++    environment: &RemoteEnvironment,
++    location: &HelperLocation,
++    run: F,
++) -> HelperProbeState
++where
++    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
++    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
++{
++    probe_ready_at_detailed_with(environment, location, run)
++        .await
++        .0
++}
++
++pub(super) async fn probe_ready_detailed_with<F, Fut>(
+     host: &SshHost,
+     environment: &RemoteEnvironment,
+     mut run: F,
+-) -> HelperProbeState
++) -> (HelperProbeState, Option<String>)
+ where
+     F: FnMut(RemoteExecutor, String, Duration) -> Fut,
+     Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
+ {
+     let locations = match probe_locations(host, environment) {
+         Ok(locs) => locs,
+-        Err(_) => return HelperProbeState::Unknown,
++        Err(_) => return (HelperProbeState::Unknown, None),
+     };
+     let mut last_state = HelperProbeState::Missing;
++    let mut exec_failure = None;
+     for location in &locations {
+-        let state = probe_ready_at_with(environment, location, &mut run).await;
++        let (state, failure) = probe_ready_at_detailed_with(environment, location, &mut run).await;
+         if state == HelperProbeState::Installed {
+-            return HelperProbeState::Installed;
++            return (HelperProbeState::Installed, None);
+         }
+         last_state = state;
++        exec_failure = exec_failure.or(failure);
+     }
+-    last_state
++    (last_state, exec_failure)
+ }
+ 
+ pub async fn probe_ready(host: &SshHost, environment: &RemoteEnvironment) -> HelperProbeState {
+-    probe_ready_with(host, environment, |executor, script, timeout| async move {
++    probe_ready_detailed(host, environment).await.0
++}
++
++/// `probe_ready` plus the exec-failure reason when a present helper binary could not run
++/// (see [`probe_exec_failure`]); same single round trip per location.
++pub async fn probe_ready_detailed(
++    host: &SshHost,
++    environment: &RemoteEnvironment,
++) -> (HelperProbeState, Option<String>) {
++    probe_ready_detailed_with(host, environment, |executor, script, timeout| async move {
+         let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+-        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
+-            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+-            details["operation"] = "helper_readiness_probe".into();
+-            details["executor"] = executor.program().into();
+-            err
+-        })
++        direct::bounded_output(&plan, timeout)
++            .await
++            .map_err(|mut err| {
++                let details = err.details.get_or_insert_with(|| serde_json::json!({}));
++                details["operation"] = "helper_readiness_probe".into();
++                details["executor"] = executor.program().into();
++                err
++            })
+     })
+     .await
+ }
+@@ -617,15 +709,21 @@ pub async fn probe_ready_at(
+     environment: &RemoteEnvironment,
+     location: &HelperLocation,
+ ) -> HelperProbeState {
+-    probe_ready_at_with(environment, location, |executor, script, timeout| async move {
+-        let plan = direct::ssh_plan(host, executor.command(&script), false)?;
+-        direct::bounded_output(&plan, timeout).await.map_err(|mut err| {
+-            let details = err.details.get_or_insert_with(|| serde_json::json!({}));
+-            details["operation"] = "helper_readiness_probe".into();
+-            details["executor"] = executor.program().into();
+-            err
+-        })
+-    })
++    probe_ready_at_with(
++        environment,
++        location,
++        |executor, script, timeout| async move {
++            let plan = direct::ssh_plan(host, executor.command(&script), false)?;
++            direct::bounded_output(&plan, timeout)
++                .await
++                .map_err(|mut err| {
++                    let details = err.details.get_or_insert_with(|| serde_json::json!({}));
++                    details["operation"] = "helper_readiness_probe".into();
++                    details["executor"] = executor.program().into();
++                    err
++                })
++        },
++    )
+     .await
+ }
+ 
+diff --git a/src-tauri/src/ssh/helper_setup_tests.rs b/src-tauri/src/ssh/helper_setup_tests.rs
+index 320b9cb48..63a152eb0 100644
+--- a/src-tauri/src/ssh/helper_setup_tests.rs
++++ b/src-tauri/src/ssh/helper_setup_tests.rs
+@@ -202,16 +202,43 @@ fn ssh_helper_setup_readiness_parser_rejects_missing_ready_event() {
+ }
+ 
+ #[test]
+-fn ssh_helper_setup_ensure_started_exit_code_127_maps_to_missing_helper() {
++fn ssh_helper_setup_ensure_started_bare_exit_127_maps_to_exec_failed() {
+     let location = HelperLocation {
+         executable: "/home/u/.ferryx/bin/helper".into(),
+         root: "/home/u/.ferryx/helper/qa".into(),
+     };
++    // What busybox sh prints when a glibc helper's ELF interpreter is absent on Alpine.
+     let raw_err =
+         IpcError::new(IpcErrorCode::IoError, "exit 127").with_details(serde_json::json!({
+             "stage": "execution",
+             "exitCode": 127,
+-            "stderr": "sh: helper: not found",
++            "stderr": "sh: /home/u/.ferryx/bin/helper: not found",
++        }));
++    let mapped = map_ensure_started_error(raw_err, &location);
++    assert_eq!(mapped.code, IpcErrorCode::Unsupported);
++    let details = mapped.details.as_ref().expect("details");
++    assert_eq!(
++        details.get("stage").and_then(serde_json::Value::as_str),
++        Some("helper_exec_failed")
++    );
++    assert_eq!(
++        details.get("stderr").and_then(serde_json::Value::as_str),
++        Some("sh: /home/u/.ferryx/bin/helper: not found")
++    );
++    assert!(!mapped.message.contains("not installed"));
++}
++
++#[test]
++fn ssh_helper_setup_ensure_started_exit_127_with_marker_maps_to_missing_helper() {
++    let location = HelperLocation {
++        executable: "/home/u/.ferryx/bin/helper".into(),
++        root: "/home/u/.ferryx/helper/qa".into(),
++    };
++    let raw_err =
++        IpcError::new(IpcErrorCode::IoError, "exit 127").with_details(serde_json::json!({
++            "stage": "execution",
++            "exitCode": 127,
++            "stderr": "FERRYX_ERR_HELPER_MISSING\n",
+         }));
+     let mapped = map_ensure_started_error(raw_err, &location);
+     assert_eq!(mapped.code, IpcErrorCode::CliExecutableNotFound);
+@@ -430,6 +457,164 @@ fn ssh_helper_setup_probe_classifies_not_executable_sentinel_as_missing() {
+     );
+ }
+ 
++#[test]
++fn ssh_helper_setup_probe_classifies_unrunnable_sentinel_as_missing() {
++    let err = IpcError::new(IpcErrorCode::IoError, "SSH command failed (exit 1)").with_details(
++        serde_json::json!({
++            "stage": "execution",
++            "exitCode": 1,
++            "stderr": "FERRYX_ERR_HELPER_UNRUNNABLE sh: helper: not found\n",
++        }),
++    );
++    assert_eq!(classify_probe_result(Err(&err)), HelperProbeState::Missing);
++}
++
++fn probe_err(exit_code: i64, stderr: &str) -> IpcError {
++    IpcError::new(IpcErrorCode::IoError, "SSH command failed").with_details(serde_json::json!({
++        "stage": "execution",
++        "exitCode": exit_code,
++        "stderr": stderr,
++    }))
++}
++
++#[test]
++fn ssh_helper_setup_probe_exec_failure_reports_present_but_unrunnable_binary() {
++    let location = HelperLocation {
++        executable: "/home/u/.ferryx/bin/helper".into(),
++        root: "/home/u/.ferryx/helper/qa".into(),
++    };
++    // What the probe prints when a glibc helper is present on a musl host.
++    let unrunnable = probe_err(
++        1,
++        "FERRYX_ERR_HELPER_UNRUNNABLE exit=127 sh: /home/u/.ferryx/bin/helper: not found\n",
++    );
++    assert_eq!(
++        classify_probe_result(Err(&unrunnable)),
++        HelperProbeState::Missing
++    );
++    let text = probe_exec_failure(&unrunnable, &location).expect("exec failure text");
++    assert!(text.contains("/home/u/.ferryx/bin/helper"), "{text}");
++    assert!(
++        text.contains("exit=127 sh: /home/u/.ferryx/bin/helper: not found"),
++        "{text}"
++    );
++    assert!(!text.contains("FERRYX_ERR_"), "{text}");
++
++    // An absent binary, a non-executable one, and a transport failure are not exec failures.
++    for err in [
++        probe_err(127, "FERRYX_ERR_HELPER_MISSING\n"),
++        probe_err(126, "FERRYX_ERR_HELPER_NOT_EXECUTABLE\n"),
++        probe_err(255, "FERRYX_ERR_HELPER_UNRUNNABLE exit=127 x\n"),
++    ] {
++        assert_eq!(probe_exec_failure(&err, &location), None, "{err:?}");
++    }
++}
++
++#[tokio::test]
++async fn ssh_helper_setup_detailed_probe_carries_exec_failure_for_connection_test() {
++    let host = sample_host("qa-host-probe-unrunnable");
++    let env = sample_posix_env("/home/testuser");
++    let qualified = qualified_location(
++        &host,
++        &env,
++        crate::ssh::helper_runtime::process::HELPER_VERSION,
++    )
++    .expect("qualified_location");
++    let quoted_qualified = direct::quote_posix(&qualified.executable);
++    // Qualified helper present but unrunnable, legacy default absent.
++    let (state, exec_failure) = probe_ready_detailed_with(&host, &env, |_, script, _| {
++        std::future::ready(Err(if script.contains(&quoted_qualified) {
++            probe_err(
++                1,
++                "FERRYX_ERR_HELPER_UNRUNNABLE exit=127 sh: helper: not found\n",
++            )
++        } else {
++            probe_err(127, "FERRYX_ERR_HELPER_MISSING\n")
++        }))
++    })
++    .await;
++    assert_eq!(
++        state,
++        HelperProbeState::Missing,
++        "must still route to reinstall"
++    );
++    let text = exec_failure.expect("connection test must carry the exec failure");
++    assert!(text.contains(&qualified.executable), "{text}");
++    assert!(text.contains("exit=127 sh: helper: not found"), "{text}");
++
++    // Both locations absent: plain Missing, no exec-failure text.
++    let (state, exec_failure) = probe_ready_detailed_with(&host, &env, |_, _, _| {
++        std::future::ready(Err(probe_err(127, "FERRYX_ERR_HELPER_MISSING\n")))
++    })
++    .await;
++    assert_eq!((state, exec_failure), (HelperProbeState::Missing, None));
++}
++
++/// Runs the real POSIX probe script locally with the same error shape as `bounded_output`.
++#[cfg(unix)]
++async fn probe_local_executable(executable: &Path) -> (HelperProbeState, Option<String>) {
++    let location = HelperLocation {
++        executable: executable.to_string_lossy().into_owned(),
++        root: "/unused".into(),
++    };
++    probe_ready_at_detailed_with(
++        &sample_posix_env("/home/testuser"),
++        &location,
++        |_, script, _| {
++            let output = Command::new("sh").args(["-c", &script]).output().unwrap();
++            std::future::ready(if output.status.success() {
++                Ok(output.stdout)
++            } else {
++                Err(
++                    IpcError::new(IpcErrorCode::IoError, "SSH command failed").with_details(
++                        serde_json::json!({
++                            "stage": "execution",
++                            "exitCode": output.status.code(),
++                            "stderr": String::from_utf8_lossy(&output.stderr),
++                        }),
++                    ),
++                )
++            })
++        },
++    )
++    .await
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn ssh_helper_setup_probe_requires_the_binary_to_run() {
++    use std::os::unix::fs::PermissionsExt;
++    let dir = tempfile::tempdir().unwrap();
++    let write_exe = |name: &str, body: &str| {
++        let path = dir.path().join(name);
++        std::fs::write(&path, body).unwrap();
++        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
++        path
++    };
++    let runs = write_exe("runs", "#!/bin/sh\necho ferryx-remote-helper 2026.1027.1\n");
++    // A present, executable file whose interpreter is absent: the shell reports 127, exactly as a
++    // glibc helper does on a musl host.
++    let unrunnable = write_exe("unrunnable", "#!/nonexistent/ld-linux-x86-64.so.2\n");
++
++    assert_eq!(
++        probe_local_executable(&runs).await,
++        (HelperProbeState::Installed, None)
++    );
++    let (state, exec_failure) = probe_local_executable(&unrunnable).await;
++    assert_eq!(
++        state,
++        HelperProbeState::Missing,
++        "a binary that cannot run must not read as installed"
++    );
++    let text = exec_failure.expect("present-but-unrunnable must report why");
++    assert!(text.contains("exit="), "{text}");
++    assert!(text.contains(&*unrunnable.to_string_lossy()), "{text}");
++    assert_eq!(
++        probe_local_executable(&dir.path().join("absent")).await,
++        (HelperProbeState::Missing, None)
++    );
++}
++
+ #[test]
+ fn ssh_helper_setup_probe_classifies_timeout_as_unknown() {
+     let err = runtime::error(
+@@ -1127,6 +1312,18 @@ fn ssh_helper_setup_probe_locations_checks_qualified_before_default() {
+     assert_eq!(locs_win[1], expected_win_default);
+ }
+ 
++async fn probe_ready_with<F, Fut>(
++    host: &SshHost,
++    environment: &RemoteEnvironment,
++    run: F,
++) -> HelperProbeState
++where
++    F: FnMut(RemoteExecutor, String, Duration) -> Fut,
++    Fut: std::future::Future<Output = Result<Vec<u8>, IpcError>>,
++{
++    probe_ready_detailed_with(host, environment, run).await.0
++}
++
+ #[tokio::test]
+ async fn ssh_helper_setup_probe_and_version_routing_qualified_present_default_absent() {
+     let host = sample_host("qa-host-probe-qualified");

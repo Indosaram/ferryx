@@ -1,0 +1,79 @@
+diff --git a/src-tauri/resources/helpers/aarch64-apple-darwin/ferryx-remote-helper b/src-tauri/resources/helpers/aarch64-apple-darwin/ferryx-remote-helper
+index bdfd68b2a..a3262b5a9 100755
+Binary files a/src-tauri/resources/helpers/aarch64-apple-darwin/ferryx-remote-helper and b/src-tauri/resources/helpers/aarch64-apple-darwin/ferryx-remote-helper differ
+diff --git a/src-tauri/resources/helpers/aarch64-unknown-linux-gnu/ferryx-remote-helper b/src-tauri/resources/helpers/aarch64-unknown-linux-gnu/ferryx-remote-helper
+index b7b6d35df..b3b22308d 100755
+Binary files a/src-tauri/resources/helpers/aarch64-unknown-linux-gnu/ferryx-remote-helper and b/src-tauri/resources/helpers/aarch64-unknown-linux-gnu/ferryx-remote-helper differ
+diff --git a/src-tauri/resources/helpers/manifest.json b/src-tauri/resources/helpers/manifest.json
+index a613839e7..7c20ddf34 100644
+--- a/src-tauri/resources/helpers/manifest.json
++++ b/src-tauri/resources/helpers/manifest.json
+@@ -2,7 +2,7 @@
+   "schemaVersion": 1,
+   "helperVersion": "2026.1101.1",
+   "protocolVersion": 1,
+-  "sourceFingerprint": "3abee5f47f6a90c6db3778605d496ab87bd6250ad8cf38fc566dd01101eff413",
++  "sourceFingerprint": "97c718a41a023bb89296a41671b6f3dcc11fe565cf2c3a912108fbd3de62a604",
+   "requiredCapabilities": [
+     "sshHelperV1",
+     "dagSubscribeV1",
+@@ -12,8 +12,8 @@
+     {
+       "target": "x86_64-unknown-linux-gnu",
+       "filename": "ferryx-remote-helper",
+-      "sha256": "6fc7b37820e026a5cc2fc51bf12d6e1ac7364e55f0927d2bd45414b6ff14d1b3",
+-      "byteLength": 1523424,
++      "sha256": "32455a03be4eaad64beaa5ab3dc21198d97eebfb500fa391cdacae43e2e85add",
++      "byteLength": 1581744,
+       "capabilities": [
+         "sshHelperV1",
+         "dagStreamingV1",
+@@ -25,8 +25,8 @@
+     {
+       "target": "aarch64-unknown-linux-gnu",
+       "filename": "ferryx-remote-helper",
+-      "sha256": "ff08c3c8abfe269e220cac05ef1c3da73e3b6dbe924e2cf70f1386ccb09f243f",
+-      "byteLength": 1366176,
++      "sha256": "2854f1b1b6fbac7f2ffd8c528a093ab748826544e59ef5b53e9f867367e632da",
++      "byteLength": 1402296,
+       "capabilities": [
+         "sshHelperV1",
+         "dagStreamingV1",
+@@ -38,7 +38,7 @@
+     {
+       "target": "aarch64-apple-darwin",
+       "filename": "ferryx-remote-helper",
+-      "sha256": "ecbf06cd713979339f64857c8e2aa3ddf642cd6f9a8a276217e4e6ea132f5f62",
++      "sha256": "b37e179efc4624a9849124ccccecc587898bbcb95785ed0477ac72925be03622",
+       "byteLength": 1590640,
+       "capabilities": [
+         "sshHelperV1",
+@@ -51,8 +51,8 @@
+     {
+       "target": "x86_64-apple-darwin",
+       "filename": "ferryx-remote-helper",
+-      "sha256": "4c0f381bc4e58e7e582c02850d50624b5df04f3d5ef0320ac8b32403c9c2f194",
+-      "byteLength": 1651360,
++      "sha256": "608724037102ddcf3504bb7717c30be198ca0dd9c042da47998ad1b6724127e2",
++      "byteLength": 1655456,
+       "capabilities": [
+         "sshHelperV1",
+         "dagStreamingV1",
+@@ -64,7 +64,7 @@
+     {
+       "target": "x86_64-pc-windows-msvc",
+       "filename": "ferryx-remote-helper.exe",
+-      "sha256": "c6467772360191a42ff0fcdf14fd8619cfbc72ca47644e5bd1705e959a9703b1",
++      "sha256": "56265194f1692539c95486d0731f7c3fb100c3000cb0d8bf08512afdb11db1f3",
+       "byteLength": 1388032,
+       "capabilities": [
+         "sshHelperV1",
+diff --git a/src-tauri/resources/helpers/x86_64-apple-darwin/ferryx-remote-helper b/src-tauri/resources/helpers/x86_64-apple-darwin/ferryx-remote-helper
+index 06d85737b..df71395d7 100755
+Binary files a/src-tauri/resources/helpers/x86_64-apple-darwin/ferryx-remote-helper and b/src-tauri/resources/helpers/x86_64-apple-darwin/ferryx-remote-helper differ
+diff --git a/src-tauri/resources/helpers/x86_64-pc-windows-msvc/ferryx-remote-helper.exe b/src-tauri/resources/helpers/x86_64-pc-windows-msvc/ferryx-remote-helper.exe
+index 64369a6e3..b71f7b897 100755
+Binary files a/src-tauri/resources/helpers/x86_64-pc-windows-msvc/ferryx-remote-helper.exe and b/src-tauri/resources/helpers/x86_64-pc-windows-msvc/ferryx-remote-helper.exe differ
+diff --git a/src-tauri/resources/helpers/x86_64-unknown-linux-gnu/ferryx-remote-helper b/src-tauri/resources/helpers/x86_64-unknown-linux-gnu/ferryx-remote-helper
+index a12363db9..3d05cd22f 100755
+Binary files a/src-tauri/resources/helpers/x86_64-unknown-linux-gnu/ferryx-remote-helper and b/src-tauri/resources/helpers/x86_64-unknown-linux-gnu/ferryx-remote-helper differ
