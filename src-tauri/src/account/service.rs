@@ -126,10 +126,13 @@ impl AccountState {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_default();
+        let origin: String = origin.into();
         Self {
             data_dir: data_dir.into(),
-            origin: origin.into(),
-            relay_origin: crate::remote::state::DEFAULT_RELAY_URL.to_string(),
+            // A self-hosted service advertises itself as the relay unless told otherwise,
+            // never the hosted relay.
+            relay_origin: origin.clone(),
+            origin,
             deployment_mode: DeploymentMode::SelfHost,
             mailer,
             login_requests_per_hour: DEFAULT_LOGIN_REQUESTS_PER_HOUR,
@@ -1934,6 +1937,17 @@ mod tests {
             .to_string();
         assert!(!token.is_empty(), "email token must not be empty");
         token
+    }
+
+    #[test]
+    fn relay_origin_defaults_to_the_account_origin_not_the_hosted_relay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path()));
+        let state = AccountState::new(tmp.path(), "https://account.example", mailer);
+        assert_eq!(state.relay_origin, "https://account.example");
+        let state = state.with_relay_origin("https://relay.example");
+        assert_eq!(state.relay_origin, "https://relay.example");
+        assert_eq!(state.origin, "https://account.example");
     }
 
     #[tokio::test]

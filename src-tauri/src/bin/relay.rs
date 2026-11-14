@@ -14,6 +14,18 @@
 //! The relay origin advertised in machine records can be configured via
 //! `FERRYX_ACCOUNT_RELAY_ORIGIN`, falling back to the resolved account origin.
 //!
+//! - `FERRYX_ACCOUNT_ORIGIN`: public origin of the embedded account service. Required in
+//!   selfhost mode (commercial mode defaults to the hosted relay); must be `https`, or `http`
+//!   on loopback.
+//! - `--bind <ip>` / `FERRYX_RELAY_BIND`: listen address, default `0.0.0.0`; `[::]` listens on
+//!   IPv6 and `127.0.0.1` / `::1` keep the relay on loopback behind a local reverse proxy.
+//! - Mail: `RESEND_API_KEY` with `FERRYX_MAIL_FROM`, or `FERRYX_MAIL_WEBHOOK_URL`. Without
+//!   either the relay refuses to start unless `FERRYX_MAIL_DEV_FILE=1` (development only)
+//!   spools magic links to `<account data dir>/mail`.
+//! - `FERRYX_DOWNLOADS_DIR`: the directory `/download/<artifact>` serves CLI binaries from.
+//!   Unset, commercial mode keeps its `~/.ferryx/downloads` default and selfhost mode
+//!   redirects downloads to the GitHub release; `~/bin` is never served.
+//!
 //! HTTPS (optional; without these flags the relay serves plain HTTP exactly as before):
 //!
 //! - `--tls-domain <name>` / `FERRYX_RELAY_TLS_DOMAIN` (repeatable, comma-separated): obtain
@@ -26,15 +38,25 @@
 //!   serve an operator-provided certificate instead of ACME.
 //!
 //! With TLS enabled the port defaults to `443` instead of `8787`.
+//!
+//! Behind a reverse proxy (cloudflared, nginx, ...):
+//!
+//! - `FERRYX_RELAY_TRUSTED_PROXIES`: comma-separated CIDRs (or bare addresses) of the proxies
+//!   whose `X-Forwarded-For` / `CF-Connecting-IP` headers name the real client
+//!   (`CF-Connecting-IP` only when no `X-Forwarded-For` is present). Unset, every
+//!   forwarding header is ignored and rate limits apply to the socket peer address. A
+//!   malformed entry refuses to start.
 
 use base64::Engine as _;
 use ferryx_lib::remote::relay_server::{
-    relay_router_with_account, spawn_session_reaper, spawn_suspension_sweeper, RelayState,
+    parse_trusted_proxies, relay_router_with_account, spawn_session_reaper,
+    spawn_suspension_sweeper, RelayState, TrustedProxy, DEFAULT_RELAY_URL,
 };
 use ferryx_lib::remote::relay_tls::{self, AcmeSettings, TlsAcceptorMode};
 use ferryx_lib::account::origin::{
     deployment_mode_with, missing_lemon_squeezy_env_vars, DeploymentMode,
 };
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -59,10 +81,13 @@ enum TlsConfig {
 
 struct RelayConfig {
     port: u16,
+    bind: IpAddr,
+    account_origin: String,
     machine_tokens: Vec<String>,
     account_public_key: Option<String>,
     deployment_mode: DeploymentMode,
     tls: TlsConfig,
+    trusted_proxies: Vec<TrustedProxy>,
 }
 
 fn split_list(value: &str) -> impl Iterator<Item = String> + '_ {
@@ -83,6 +108,45 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
+/// A listen address without a port: `0.0.0.0`, `::`, `[::]`, `127.0.0.1`, `[::1]` or
+/// `localhost`.
+fn parse_bind(value: &str) -> Result<IpAddr, String> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("localhost") {
+        return Ok(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    unbracketed.parse().map_err(|_| {
+        format!(
+            "invalid bind address {value:?}: expected an IP address such as 0.0.0.0, [::] or \
+             127.0.0.1, without a port (use --port)"
+        )
+    })
+}
+
+/// Selfhost mode must name its own account origin; only commercial mode keeps the hosted
+/// relay as its default. Either way the value is normalized like every other account origin.
+fn resolve_account_origin(mode: DeploymentMode, raw: Option<String>) -> Result<String, String> {
+    let raw = match non_empty(raw) {
+        Some(value) => value,
+        None => match mode {
+            DeploymentMode::SelfHost => {
+                return Err(
+                    "selfhost mode requires FERRYX_ACCOUNT_ORIGIN, the public origin \
+                     users reach this relay at (https, or http on loopback)"
+                        .into(),
+                )
+            }
+            DeploymentMode::Commercial => DEFAULT_RELAY_URL.to_string(),
+        },
+    };
+    ferryx_lib::account::origin::normalize_account_origin(raw.trim())
+        .map_err(|err| format!("FERRYX_ACCOUNT_ORIGIN: {err}"))
+}
+
 fn parse_args(args: &[String]) -> Result<RelayConfig, String> {
     parse_args_with(args, |name| std::env::var(name).ok())
 }
@@ -95,6 +159,14 @@ fn parse_args_with(
 ) -> Result<RelayConfig, String> {
     let deployment_mode = deployment_mode_with(&env)
         .map_err(|err| format!("configuration error: {}", err.message))?;
+    let account_origin = resolve_account_origin(deployment_mode, env("FERRYX_ACCOUNT_ORIGIN"))?;
+    // Empty means unset (systemd `Environment=FERRYX_RELAY_BIND=`); whitespace-only is a
+    // typo and is rejected by parse_bind rather than silently falling back to 0.0.0.0.
+    let mut bind = env("FERRYX_RELAY_BIND")
+        .filter(|value| !value.is_empty())
+        .map(|value| parse_bind(&value))
+        .transpose()
+        .map_err(|err| format!("FERRYX_RELAY_BIND: {err}"))?;
 
     let mut port: Option<u16> = env("FERRYX_RELAY_PORT").and_then(|value| value.parse().ok());
     let mut machine_tokens: Vec<String> = env("FERRYX_RELAY_MACHINE_TOKENS")
@@ -109,6 +181,11 @@ fn parse_args_with(
     let mut tls_staging = env("FERRYX_RELAY_TLS_STAGING").is_some_and(|value| parse_flag(&value));
     let mut tls_cert = non_empty(env("FERRYX_RELAY_TLS_CERT")).map(PathBuf::from);
     let mut tls_key = non_empty(env("FERRYX_RELAY_TLS_KEY")).map(PathBuf::from);
+    let trusted_proxies = env("FERRYX_RELAY_TRUSTED_PROXIES")
+        .map(|value| parse_trusted_proxies(&value))
+        .transpose()
+        .map_err(|err| format!("FERRYX_RELAY_TRUSTED_PROXIES: {err}"))?
+        .unwrap_or_default();
 
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -126,6 +203,7 @@ fn parse_args_with(
                         .map_err(|_| format!("invalid --port value: {value}"))?,
                 );
             }
+            "--bind" => bind = Some(parse_bind(&value_of("--bind")?)?),
             "--machine-token" => {
                 machine_tokens.push(value_of("--machine-token")?);
             }
@@ -181,10 +259,13 @@ fn parse_args_with(
 
     Ok(RelayConfig {
         port: port.unwrap_or(default_port),
+        bind: bind.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        account_origin,
         machine_tokens,
         account_public_key,
         deployment_mode,
         tls,
+        trusted_proxies,
     })
 }
 
@@ -291,11 +372,17 @@ async fn main() {
         }
     }
 
-    let state = RelayState::new(config.machine_tokens);
+    let state = match RelayState::try_new(config.machine_tokens) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("ferryx-relay: {err}");
+            std::process::exit(2);
+        }
+    };
+    state.set_trusted_proxies(config.trusted_proxies);
     spawn_session_reaper(state.clone());
 
-    let origin = std::env::var("FERRYX_ACCOUNT_ORIGIN")
-        .unwrap_or_else(|_| "https://relay.ferryx.dev".into());
+    let origin = config.account_origin;
     let relay_origin = std::env::var("FERRYX_ACCOUNT_RELAY_ORIGIN")
         .ok()
         .map(|value| value.trim().to_string())
@@ -315,7 +402,25 @@ async fn main() {
             }
         },
     };
-    let mailer = ferryx_lib::account::mailer::create_production_mailer(Some(data_dir.join("mail")));
+    let mailer = match ferryx_lib::account::mailer::create_production_mailer(data_dir.join("mail"))
+    {
+        Ok(chosen) => {
+            if let Some(dir) = &chosen.spool_dir {
+                let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.clone());
+                eprintln!(
+                    "ferryx-relay: WARNING: {}=1: magic links are NOT emailed; they are written \
+                     to {} (development only)",
+                    ferryx_lib::account::mailer::MAIL_DEV_FILE_ENV,
+                    dir.display()
+                );
+            }
+            chosen.mailer
+        }
+        Err(err) => {
+            eprintln!("ferryx-relay: {err}");
+            std::process::exit(2);
+        }
+    };
     let account_state = Arc::new(
         ferryx_lib::account::service::AccountState::new(&data_dir, &origin, mailer)
             .with_relay_origin(relay_origin)
@@ -351,7 +456,7 @@ async fn main() {
             ferryx_lib::account::billing::notices::spawn_billing_notice_sweeper(account_state);
     }
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.port));
+    let addr = std::net::SocketAddr::new(config.bind, config.port);
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(listener) => listener,
         Err(err) => {
@@ -401,6 +506,8 @@ mod tests {
             .collect();
         vars.entry("FERRYX_DEPLOYMENT_MODE".into())
             .or_insert_with(|| "selfhost".into());
+        vars.entry("FERRYX_ACCOUNT_ORIGIN".into())
+            .or_insert_with(|| "https://relay.example.com".into());
         let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
         parse_args_with(&args, |name| vars.get(name).cloned())
     }
@@ -511,6 +618,128 @@ mod tests {
         ] {
             assert!(parse(args, &[]).is_err(), "{args:?} must be rejected");
         }
+    }
+
+    #[test]
+    fn trusted_proxies_default_to_none_and_reject_malformed_cidrs() {
+        assert!(parse(&[], &[]).unwrap().trusted_proxies.is_empty());
+        let config = parse(
+            &[],
+            &[(
+                "FERRYX_RELAY_TRUSTED_PROXIES",
+                "127.0.0.1/32, ::1, 10.0.0.0/8",
+            )],
+        )
+        .unwrap();
+        assert_eq!(config.trusted_proxies.len(), 3);
+        for value in ["10.0.0.0/33", "not-an-ip", "10.0.0.0/", "10.0.0.0/8,bogus"] {
+            assert!(
+                parse(&[], &[("FERRYX_RELAY_TRUSTED_PROXIES", value)]).is_err(),
+                "{value:?} must be rejected"
+            );
+        }
+    }
+    #[test]
+    fn selfhost_requires_an_account_origin_and_normalizes_it() {
+        let err = parse(&[], &[("FERRYX_ACCOUNT_ORIGIN", "")])
+            .err()
+            .expect("unset origin");
+        assert!(err.contains("FERRYX_ACCOUNT_ORIGIN"), "{err}");
+        assert!(parse(&[], &[("FERRYX_ACCOUNT_ORIGIN", "   ")]).is_err());
+        assert_eq!(
+            parse(
+                &[],
+                &[("FERRYX_ACCOUNT_ORIGIN", " https://Relay.Example.com/ ")]
+            )
+            .unwrap()
+            .account_origin,
+            "https://relay.example.com"
+        );
+        assert_eq!(
+            parse(&[], &[("FERRYX_ACCOUNT_ORIGIN", "http://127.0.0.1:8787")])
+                .unwrap()
+                .account_origin,
+            "http://127.0.0.1:8787"
+        );
+        for value in [
+            "http://relay.example.com",
+            "https://relay.example.com/path",
+            "not a url",
+        ] {
+            let err = parse(&[], &[("FERRYX_ACCOUNT_ORIGIN", value)])
+                .err()
+                .unwrap_or_else(|| panic!("{value:?} must be rejected"));
+            assert!(
+                err.starts_with("FERRYX_ACCOUNT_ORIGIN: ACCOUNT_ORIGIN_"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn commercial_mode_keeps_the_hosted_account_origin_default() {
+        let config = parse(
+            &[],
+            &[
+                ("FERRYX_DEPLOYMENT_MODE", "commercial"),
+                ("FERRYX_ACCOUNT_ORIGIN", ""),
+            ],
+        )
+        .unwrap();
+        assert_eq!(config.account_origin, DEFAULT_RELAY_URL);
+    }
+
+    #[test]
+    fn bind_defaults_to_all_ipv4_and_accepts_ipv6_and_loopback() {
+        assert_eq!(
+            parse(&[], &[]).unwrap().bind,
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+        for (value, expected) in [
+            ("[::]", "::"),
+            ("::", "::"),
+            ("127.0.0.1", "127.0.0.1"),
+            ("[::1]", "::1"),
+            ("localhost", "127.0.0.1"),
+        ] {
+            let expected: IpAddr = expected.parse().unwrap();
+            assert_eq!(
+                parse(&["--bind", value], &[]).unwrap().bind,
+                expected,
+                "{value}"
+            );
+            assert_eq!(
+                parse(&[], &[("FERRYX_RELAY_BIND", value)]).unwrap().bind,
+                expected,
+                "{value}"
+            );
+        }
+        assert_eq!(
+            parse(&["--bind", "::1"], &[("FERRYX_RELAY_BIND", "0.0.0.0")])
+                .unwrap()
+                .bind,
+            "::1".parse::<IpAddr>().unwrap(),
+            "the flag wins over the environment"
+        );
+        for value in ["127.0.0.1:8787", "relay.example.com", "[::1", ""] {
+            assert!(
+                parse(&["--bind", value], &[]).is_err(),
+                "{value:?} must be rejected"
+            );
+        }
+        assert!(parse(&["--bind"], &[]).is_err());
+        assert!(parse(&[], &[("FERRYX_RELAY_BIND", "bogus")]).is_err());
+        for value in [" ", "\t", "  \n"] {
+            let err = parse(&[], &[("FERRYX_RELAY_BIND", value)])
+                .err()
+                .unwrap_or_else(|| panic!("{value:?} must be rejected, not treated as unset"));
+            assert!(err.contains("FERRYX_RELAY_BIND"), "{err}");
+        }
+        assert_eq!(
+            parse(&[], &[("FERRYX_RELAY_BIND", "")]).unwrap().bind,
+            "0.0.0.0".parse::<IpAddr>().unwrap(),
+            "an empty value is unset"
+        );
     }
 }
 

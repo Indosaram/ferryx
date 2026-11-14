@@ -100,8 +100,8 @@ All commercial deployments must configure the following exact environment variab
 | `FERRYX_BILLING_PAID_PLANS` | No | Paid-plan launch switch (`src-tauri/src/account/origin.rs`). Unset or any value other than `open` keeps only Free open: `POST /api/account/v1/billing/checkout` and `POST /api/account/v1/billing/quantity` answer `403 PLAN_COMING_SOON` ("Paid plans are coming soon", `details.plan`) and make no Lemon Squeezy call. Set `open` to sell paid plans. Entitlement reads, webhooks, enforcement and the Free limit are unaffected. |
 | `FERRYX_RELAY_ACCOUNT_PUBLIC_KEY` | Yes (relay and enrolled hosts) | Operator-pinned account-service Ed25519 public key. The relay uses it to authenticate account-signed payloads; an enrolled host uses it to verify billing leases. Without it a host holds no lease and the direct path stays refused (fail closed). |
 | `RESEND_API_KEY` | No | Resend API key. When set and non-empty, login mail is sent through Resend. |
-| `FERRYX_MAIL_FROM` | No | Sender address for Resend mail; defaults to `Ferryx <login@ferryx.dev>`. Used only with `RESEND_API_KEY`. |
-| `FERRYX_MAIL_WEBHOOK_URL` | No | Mail delivery webhook used when `RESEND_API_KEY` is unset. Without either, mail is written to files (`FERRYX_MAIL_DIR`). |
+| `FERRYX_MAIL_FROM` | With `RESEND_API_KEY` | Sender address for Resend mail. `ferryx-relay` refuses to start when `RESEND_API_KEY` is set without it. |
+| `FERRYX_MAIL_WEBHOOK_URL` | No | Mail delivery webhook used when `RESEND_API_KEY` is unset. Without either, `ferryx-relay` refuses to start unless `FERRYX_MAIL_DEV_FILE=1` (development only) writes links to `<account data dir>/mail`. |
 | `FERRYX_MAIL_WEBHOOK_TOKEN` | No | Optional token sent with `FERRYX_MAIL_WEBHOOK_URL` requests. |
 
 ### 3.2 Systemd Drop-in Unit Example (Linux Production)

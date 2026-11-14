@@ -426,23 +426,68 @@ impl Mailer for WebhookMailer {
     }
 }
 
-pub fn create_production_mailer(fallback_dir: Option<PathBuf>) -> Arc<dyn Mailer> {
-    if let Ok(key) = std::env::var("RESEND_API_KEY") {
-        if !key.is_empty() {
-            let from_address = std::env::var("FERRYX_MAIL_FROM")
-                .unwrap_or_else(|_| "Ferryx <login@ferryx.dev>".to_string());
-            return Arc::new(ResendMailer::new(key, from_address));
-        }
+/// Development-only switch that lets the relay spool magic links to files instead of
+/// refusing to start without a mail transport.
+pub const MAIL_DEV_FILE_ENV: &str = "FERRYX_MAIL_DEV_FILE";
+
+/// The mail transport chosen at startup.
+pub struct ProductionMailer {
+    pub mailer: Arc<dyn Mailer>,
+    /// Set when links are spooled to this directory instead of being emailed.
+    pub spool_dir: Option<PathBuf>,
+}
+
+/// Picks Resend, then a webhook, from the process environment. Without either it refuses
+/// unless [`MAIL_DEV_FILE_ENV`] is set, in which case links go to files under `spool_dir`.
+pub fn create_production_mailer(spool_dir: PathBuf) -> Result<ProductionMailer, String> {
+    create_production_mailer_with(|name| std::env::var(name).ok(), spool_dir)
+}
+
+/// [`create_production_mailer`] with an injectable environment lookup.
+pub fn create_production_mailer_with(
+    env: impl Fn(&str) -> Option<String>,
+    spool_dir: PathBuf,
+) -> Result<ProductionMailer, String> {
+    let set = |name: &str| env(name).filter(|value| !value.trim().is_empty());
+    if let Some(key) = set("RESEND_API_KEY") {
+        let from_address = set("FERRYX_MAIL_FROM").ok_or(
+            "RESEND_API_KEY is set but FERRYX_MAIL_FROM is not; set FERRYX_MAIL_FROM to a \
+             sender address on a domain verified with Resend",
+        )?;
+        return Ok(ProductionMailer {
+            mailer: Arc::new(ResendMailer::new(key, from_address)),
+            spool_dir: None,
+        });
     }
-    if let Ok(webhook) = std::env::var("FERRYX_MAIL_WEBHOOK_URL") {
-        if !webhook.is_empty() {
-            let token = std::env::var("FERRYX_MAIL_WEBHOOK_TOKEN").ok();
-            return Arc::new(WebhookMailer::new(webhook, token));
+    if let Some(webhook) = set("FERRYX_MAIL_WEBHOOK_URL") {
+        let webhook = webhook.trim().to_string();
+        match url::Url::parse(&webhook) {
+            Ok(parsed) if matches!(parsed.scheme(), "http" | "https") && parsed.has_host() => {}
+            _ => {
+                return Err(format!(
+                    "FERRYX_MAIL_WEBHOOK_URL={webhook:?} is not an http(s) URL; set it to the \
+                     endpoint that receives magic-link mail, e.g. https://hooks.example.com/mail"
+                ))
+            }
         }
+        let token = env("FERRYX_MAIL_WEBHOOK_TOKEN");
+        return Ok(ProductionMailer {
+            mailer: Arc::new(WebhookMailer::new(webhook, token)),
+            spool_dir: None,
+        });
     }
-    Arc::new(FileMailer::with_dir(
-        fallback_dir.unwrap_or_else(|| PathBuf::from("mail")),
-    ))
+    if !set(MAIL_DEV_FILE_ENV).is_some_and(|value| value.trim() == "1") {
+        return Err(format!(
+            "no mail transport configured, so magic-link logins could never reach users; set \
+             RESEND_API_KEY and FERRYX_MAIL_FROM, or FERRYX_MAIL_WEBHOOK_URL. For development \
+             only, {MAIL_DEV_FILE_ENV}=1 writes the links to {} instead",
+            spool_dir.display()
+        ));
+    }
+    Ok(ProductionMailer {
+        mailer: Arc::new(FileMailer::with_dir(spool_dir.clone())),
+        spool_dir: Some(spool_dir),
+    })
 }
 
 #[cfg(test)]
@@ -689,25 +734,104 @@ mod tests {
         assert_eq!(payload["portalUrl"], "https://portal.example.com/manage");
     }
 
+    fn lookup(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| vars.get(name).cloned()
+    }
+
     #[test]
-    fn create_production_mailer_falls_back_to_file_mailer() {
-        const KEYS: [&str; 3] = [
-            "RESEND_API_KEY",
-            "FERRYX_MAIL_WEBHOOK_URL",
-            "FERRYX_MAIL_WEBHOOK_TOKEN",
-        ];
-        let saved: Vec<(&'static str, Option<String>)> =
-            KEYS.iter().map(|&k| (k, std::env::var(k).ok())).collect();
-        for (k, v) in &saved {
-            match v {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
+    fn create_production_mailer_requires_a_transport_or_the_dev_flag() {
+        let spool = PathBuf::from("/srv/ferryx/mail");
+        for vars in [
+            &[][..],
+            &[("RESEND_API_KEY", ""), ("FERRYX_MAIL_WEBHOOK_URL", "  ")][..],
+            &[(MAIL_DEV_FILE_ENV, "0")][..],
+            &[(MAIL_DEV_FILE_ENV, "true")][..],
+        ] {
+            let err = create_production_mailer_with(lookup(vars), spool.clone())
+                .err()
+                .unwrap_or_else(|| panic!("{vars:?} must refuse to start"));
+            for named in [
+                "RESEND_API_KEY",
+                "FERRYX_MAIL_WEBHOOK_URL",
+                MAIL_DEV_FILE_ENV,
+            ] {
+                assert!(err.contains(named), "{err} must name {named}");
             }
         }
 
+        let resend = create_production_mailer_with(
+            lookup(&[
+                ("RESEND_API_KEY", "re_x"),
+                ("FERRYX_MAIL_FROM", "Ops <a@example.com>"),
+            ]),
+            spool.clone(),
+        )
+        .expect("resend");
+        assert!(resend.spool_dir.is_none());
+        let webhook = create_production_mailer_with(
+            lookup(&[("FERRYX_MAIL_WEBHOOK_URL", "https://hooks.example.com/mail")]),
+            spool.clone(),
+        )
+        .expect("webhook");
+        assert!(webhook.spool_dir.is_none());
+    }
+
+    #[test]
+    fn create_production_mailer_rejects_a_malformed_webhook_url() {
+        for bad in [
+            "not a url",
+            "hooks.example.com/mail",
+            "ftp://hooks.example.com/mail",
+            "https://",
+            "mailto:a@example.com",
+        ] {
+            let err = create_production_mailer_with(
+                lookup(&[("FERRYX_MAIL_WEBHOOK_URL", bad)]),
+                PathBuf::from("mail"),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("{bad:?} must refuse to start"));
+            assert!(err.contains("FERRYX_MAIL_WEBHOOK_URL"), "{err}");
+        }
+        for good in [
+            "http://127.0.0.1:9000/mail",
+            " https://hooks.example.com/mail ",
+        ] {
+            create_production_mailer_with(
+                lookup(&[("FERRYX_MAIL_WEBHOOK_URL", good)]),
+                PathBuf::from("mail"),
+            )
+            .unwrap_or_else(|err| panic!("{good:?} must be accepted: {err}"));
+        }
+    }
+
+    #[test]
+    fn create_production_mailer_requires_mail_from_with_resend() {
+        for from in [None, Some(""), Some("   ")] {
+            let mut vars = vec![("RESEND_API_KEY", "re_x")];
+            if let Some(from) = from {
+                vars.push(("FERRYX_MAIL_FROM", from));
+            }
+            let err = create_production_mailer_with(lookup(&vars), PathBuf::from("mail"))
+                .err()
+                .expect("Resend without a sender must refuse");
+            assert!(err.contains("FERRYX_MAIL_FROM"), "{err}");
+        }
+    }
+
+    #[test]
+    fn create_production_mailer_falls_back_to_file_mailer_only_with_dev_flag() {
         let temp_dir =
             std::env::temp_dir().join(format!("ferryx-test-prod-mail-{}", uuid::Uuid::new_v4()));
-        let mailer = create_production_mailer(Some(temp_dir.clone()));
+        let chosen =
+            create_production_mailer_with(lookup(&[(MAIL_DEV_FILE_ENV, "1")]), temp_dir.clone())
+                .expect("dev flag enables the file mailer");
+        assert_eq!(chosen.spool_dir.as_deref(), Some(temp_dir.as_path()));
+        let mailer = chosen.mailer;
         let url = "https://ferryx.dev/auth/magic?token=prodtest987654";
         let res = mailer.send_magic_link("erin@example.com", url);
         assert!(
@@ -724,11 +848,5 @@ mod tests {
         assert_eq!(content, url);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
-        for (k, v) in saved {
-            match v {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
-            }
-        }
     }
 }

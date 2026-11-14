@@ -111,17 +111,20 @@ sudo install -m 755 src-tauri/target/release/ferryx-relay /usr/local/bin/ferryx-
 | :--- | :--- | :--- | :--- |
 | `FERRYX_DEPLOYMENT_MODE` | none | unset (required) | Deployment mode: must be set explicitly to `selfhost` for private relays or `commercial` for managed relays. |
 | `FERRYX_RELAY_PORT` | `--port <u16>` | `8787` (`443` when TLS is enabled) | TCP port for the HTTP(S) and WebSocket listener. |
+| `FERRYX_RELAY_BIND` | `--bind <ip>` | `0.0.0.0` | Listen address without a port. `[::]` listens on IPv6 (and IPv4 where the OS maps it); `127.0.0.1` or `[::1]` keeps the relay reachable only by a reverse proxy on the same host. |
 | `FERRYX_RELAY_TLS_DOMAIN` | `--tls-domain <name>` | unset | Enables built-in HTTPS with automatic Let's Encrypt certificates for this name. Repeat the flag or comma-separate names for several domains. See [Built-in HTTPS](#built-in-https-no-reverse-proxy). |
 | `FERRYX_RELAY_TLS_CONTACT` | `--tls-contact <email>` | unset | Contact email for the ACME account (expiry and policy notices). |
 | `FERRYX_RELAY_TLS_CACHE_DIR` | `--tls-cache-dir <path>` | `~/.ferryx/relay-tls` | Persists the ACME account key and issued certificates across restarts. |
 | `FERRYX_RELAY_TLS_STAGING` | `--tls-staging` | off | `1` uses the Let's Encrypt staging directory (untrusted test certificates, generous rate limits). |
 | `FERRYX_RELAY_TLS_CERT` / `FERRYX_RELAY_TLS_KEY` | `--tls-cert <pem>` / `--tls-key <pem>` | unset | Serve your own PEM certificate chain and private key instead of ACME. Both are required together and cannot be combined with the ACME options. |
-| `FERRYX_ACCOUNT_ORIGIN` | none | `https://relay.ferryx.dev` | Canonical public HTTPS URL for account auth and magic links. |
+| `FERRYX_ACCOUNT_ORIGIN` | none | required in `selfhost` mode | Canonical public HTTPS URL for account auth and magic links (`http` only on loopback). A self-hosted relay without it refuses to start; only `commercial` mode defaults to `https://relay.ferryx.dev`. |
 | `FERRYX_ACCOUNT_RELAY_ORIGIN` | none | Value of `FERRYX_ACCOUNT_ORIGIN` | Public WebSocket relay URL advertised in machine records. |
 | `FERRYX_ACCOUNT_DATA_DIR` | none | `~/.ferryx/account-data` | Directory where signing keys, accounts, and mail are stored. |
 | `FERRYX_RELAY_MACHINE_TOKENS` | `--machine-token <tok>` | (empty) | Comma-separated list of pre-shared machine tokens. |
 | `FERRYX_RELAY_ACCOUNT_PUBLIC_KEY` | `--account-public-key <key>` | unset | Base64-encoded public key of the embedded account authority to enable signed grant submission; unset leaves that route closed. |
 | `FERRYX_RELAY_DATA_DIR` | none | `~/.ferryx/relay` | Durable machine key registry; override for a dedicated service user. |
+| `FERRYX_RELAY_TRUSTED_PROXIES` | none | unset | Comma-separated CIDRs (or single addresses) of reverse proxies in front of the relay, for example `127.0.0.1/32,::1` for a local cloudflared or nginx. Only connections from these peers have `X-Forwarded-For` / `CF-Connecting-IP` honored, so each client gets its own rate-limit bucket. When `X-Forwarded-For` is present it alone decides (a malformed hop, such as `addr:port`, falls back to the proxy's address) and `CF-Connecting-IP` is used only when no `X-Forwarded-For` header exists; unset, forwarding headers are ignored and every proxied client shares the proxy's bucket. A malformed entry stops the relay at startup. |
+| `FERRYX_DOWNLOADS_DIR` | none | selfhost: unset; commercial: `~/.ferryx/downloads` | The only directory `/download/<artifact>` serves CLI binaries from. Unset, a selfhost relay redirects those requests to the GitHub release, while a commercial relay serves `~/.ferryx/downloads`; other directories such as `~/bin` are never consulted. |
 | `FERRYX_UI_DIST_DIR` | none | packaged/build-dependent | Directory containing the built remote web app (`ui/dist`); required when the server binary has no bundled UI assets. |
 | `FERRYX_RELAY_FALLBACK_URLS` | none | unset | Set on a **daemon**, not the relay: comma-separated HTTPS relay origins to try when the configured relay refuses or drops the control channel. |
 
@@ -142,6 +145,8 @@ the variable for the service or shell that launches the relay:
 ```bash
 # Linux / macOS
 export FERRYX_DEPLOYMENT_MODE="selfhost"
+export FERRYX_ACCOUNT_ORIGIN="https://relay.example.com"
+export FERRYX_MAIL_WEBHOOK_URL="https://hooks.example.com/send-email"
 ferryx-relay --port 8787
 ```
 
@@ -166,13 +171,14 @@ You can authenticate daemons connecting to `/tunnel/control` in two ways:
 
 ### Mail Delivery Setup
 
-When users log in, the account service generates a time-limited magic link. Three mailer backends are supported via environment variables:
+When users log in, the account service generates a time-limited magic link. The relay refuses to start until one of these mail backends is configured:
 
 #### 1. Resend API
 ```bash
 export RESEND_API_KEY="re_123456789"
 export FERRYX_MAIL_FROM="Ferryx <login@yourdomain.com>"
 ```
+`FERRYX_MAIL_FROM` is required with `RESEND_API_KEY`; use a sender on a domain you verified with Resend.
 
 #### 2. HTTP Webhook
 The service issues an HTTP POST request with `{"to": "user@example.com", "url": "https://..."}`:
@@ -181,8 +187,8 @@ export FERRYX_MAIL_WEBHOOK_URL="https://hooks.yourdomain.com/send-email"
 export FERRYX_MAIL_WEBHOOK_TOKEN="optional-secret-bearer-token"
 ```
 
-#### 3. File Mailer (Default Fallback)
-If neither Resend nor a webhook is configured, the server creates one `.txt` file per login request under `$FERRYX_ACCOUNT_DATA_DIR/mail/`:
+#### 3. File Mailer (Development Only)
+If neither Resend nor a webhook is configured, the relay exits at startup naming these variables. For a local test, set `FERRYX_MAIL_DEV_FILE=1` and the server instead creates one `.txt` file per login request under `$FERRYX_ACCOUNT_DATA_DIR/mail/`, printing that directory in a startup warning:
 ```bash
 # Example file path: /var/lib/ferryx/account/mail/magic-link-<timestamp>-<uuid>.txt
 ```
@@ -237,9 +243,10 @@ Enable and start the service:
 Build the remote web client with `bun run --cwd ui build` and copy the resulting `ui/dist`
 into `/var/lib/ferryx/ui-dist` with permissions readable by the `ferryx` service account.
 Without those assets the account API can work but the browser UI will not be usable. Provide a
-private `/etc/ferryx/relay.env` for mail credentials, or use the file mailer for an explicitly
-local test; do not include real secrets in the unit file. Ensure port 8787 is reachable only by
-the proxy on the relay host: this binary itself binds `0.0.0.0`, not `127.0.0.1`.
+private `/etc/ferryx/relay.env` for mail credentials (the relay will not start without them unless
+`FERRYX_MAIL_DEV_FILE=1` enables the file mailer for an explicitly local test); do not include real
+secrets in the unit file. The relay binds `0.0.0.0` by default; behind a reverse proxy on the same
+host set `FERRYX_RELAY_BIND=127.0.0.1` so port 8787 is reachable only by the proxy.
 
 ```bash
 sudo systemctl daemon-reload
@@ -259,6 +266,8 @@ before.
 
 ```bash
 export FERRYX_DEPLOYMENT_MODE=selfhost
+export FERRYX_ACCOUNT_ORIGIN=https://relay.example.com
+export FERRYX_MAIL_WEBHOOK_URL=https://hooks.example.com/send-email
 ferryx-relay --tls-domain relay.example.com --tls-contact ops@example.com
 ```
 
@@ -552,7 +561,7 @@ Never check `identity.json` or `signing-key.json` into source control. These fil
 
 ### 3. Magic Link Email Fails (`MAIL_FAILED`)
 - **Cause**: Invalid Resend API key, unreachable webhook URL, or a missing/unwritable parent `$FERRYX_ACCOUNT_DATA_DIR` when using the file mailer.
-- **Fix**: Create `$FERRYX_ACCOUNT_DATA_DIR` before starting the relay, owned and writable by its service user (for example the systemd setup above). Without an external email provider, inspect its `mail/` file spool for the generated link.
+- **Fix**: Create `$FERRYX_ACCOUNT_DATA_DIR` before starting the relay, owned and writable by its service user (for example the systemd setup above). When testing with `FERRYX_MAIL_DEV_FILE=1`, inspect its `mail/` file spool for the generated link.
 
 ### 4. Multiple Daemons Competing for the Same Token
 - **Cause**: Reusing the same pre-shared machine token across multiple hosts.
