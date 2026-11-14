@@ -63,6 +63,11 @@ pub struct CandidatePath {
     pub base_origin: String,
     pub auth_token: Option<String>,
     pub expected_machine_id: Option<String>,
+    /// How long THIS candidate may take before it is given up on. Direct routes are probes that
+    /// should answer quickly; a relay is only reachable through a cold handshake that legitimately
+    /// takes longer. Without a per-candidate budget the short probe deadline applied to both, so a
+    /// stale direct route could make a host unattachable over a relay that would have answered.
+    pub probe_budget: Option<Duration>,
 }
 
 impl CandidatePath {
@@ -72,6 +77,7 @@ impl CandidatePath {
             base_origin: base_origin.into(),
             auth_token,
             expected_machine_id: None,
+            probe_budget: None,
         }
     }
 
@@ -86,6 +92,7 @@ impl CandidatePath {
             base_origin: base_origin.into(),
             auth_token,
             expected_machine_id,
+            probe_budget: None,
         }
     }
 }
@@ -115,10 +122,18 @@ where
     let mut set = tokio::task::JoinSet::new();
     for candidate in candidates.iter().cloned() {
         let fut = connect(candidate.clone());
+        let path = candidate.path;
+        let budget = candidate.probe_budget.unwrap_or(deadline);
         set.spawn(async move {
-            match fut.await {
+            // A candidate with a longer budget is allowed to outlive the shared probe deadline;
+            // the select loop keeps waiting for it while the short-budget candidates are gone.
+            let outcome = match tokio::time::timeout(budget, fut).await {
+                Ok(result) => result,
+                Err(_) => Err(()),
+            };
+            match outcome {
                 Ok((channel, rtt)) => Some(SelectedChannel {
-                    path: candidate.path,
+                    path,
                     base_origin: candidate.base_origin,
                     channel,
                     rtt,
@@ -128,7 +143,16 @@ where
         });
     }
 
-    let timeout_fut = tokio::time::sleep(deadline);
+    // The whole race waits for the LONGEST candidate budget: each task already enforces its own
+    // budget internally, so a short-budget candidate reports its failure on time while a candidate
+    // that is allowed more time is still running. Aborting everything at the shortest deadline is
+    // what denied the relay the establishment budget it needs.
+    let overall = candidates
+        .iter()
+        .map(|candidate| candidate.probe_budget.unwrap_or(deadline))
+        .max()
+        .unwrap_or(deadline);
+    let timeout_fut = tokio::time::sleep(overall);
     tokio::pin!(timeout_fut);
 
     let mut winner: Option<SelectedChannel<T>> = None;
@@ -141,16 +165,17 @@ where
                 break;
             }
             Some(res) = set.join_next() => {
+                // FIRST SUCCESS WINS. The candidate that just completed a handshake is the only
+                // route PROVEN reachable right now, and the channel it produced is consumed by
+                // the win. Holding that channel open to compare RTTs against a slower route would
+                // trade a working channel for one that may still fail, so RTT is carried on
+                // SelectedChannel for the caller's telemetry only - it is not a selection key.
+                // (The previous code compared RTTs and then broke immediately in the same arm,
+                // which made the comparison unreachable and the contract look like best-RTT.)
                 if let Ok(Some(channel)) = res {
-                    let is_better = match &winner {
-                        None => true,
-                        Some(current) => (channel.rtt, channel.path.tie_break_rank()) < (current.rtt, current.path.tie_break_rank()),
-                    };
-                    if is_better {
-                        winner = Some(channel);
-                        set.abort_all();
-                        break;
-                    }
+                    winner = Some(channel);
+                    set.abort_all();
+                    break;
                 }
                 if set.is_empty() {
                     break;
@@ -215,13 +240,40 @@ pub fn direct_candidate(
 pub fn resolve_attach_base_origin(
     session_id: &str,
     candidates: &[CandidatePath],
+    machine_id: &str,
     fallback_relay_origin: &str,
 ) -> String {
+    // A candidate naming a DIFFERENT machine is never chosen, whatever its position: a stale
+    // paired record must not steer this client onto another host. Defence in depth, not the
+    // primary binding: today's builder stamps every candidate with the same recorded id, so what
+    // really pins the machine is the id in the Noise prologue. This filter is kept so a future
+    // caller that mixes candidates cannot silently dial a foreign route.
+    let matches_this_machine = |candidate: &&CandidatePath| {
+        candidate
+            .expected_machine_id
+            .as_deref()
+            .is_none_or(|expected| expected == machine_id)
+    };
+    // A pinned origin is reused only when it is one of THIS machine's candidates. Otherwise a
+    // reused session id, whose earlier allocation pinned a foreign route, would be sent there and
+    // the filter below would never run.
     if let Some(existing) = GLOBAL_SESSION_ATTACH_ORIGINS.get(session_id) {
-        return existing;
+        if candidates
+            .iter()
+            .filter(matches_this_machine)
+            .any(|candidate| candidate.base_origin == existing)
+        {
+            return existing;
+        }
     }
+    // The relay is the only origin guaranteed to reach the machine: a direct route that just lost
+    // the race is exactly the one most likely to be stale, so a blind `first()` fallback would
+    // retry the failed path instead of the working one.
     candidates
-        .first()
+        .iter()
+        .filter(matches_this_machine)
+        .find(|c| c.path == AttachPath::Relay)
+        .or_else(|| candidates.iter().find(|candidate| matches_this_machine(candidate)))
         .map(|c| c.base_origin.as_str())
         .unwrap_or(fallback_relay_origin)
         .to_string()
@@ -386,6 +438,174 @@ mod tests {
         assert_eq!(candidate.path, AttachPath::Direct);
         assert_eq!(candidate.base_origin, "http://127.0.0.1:7");
         assert_eq!(candidate.expected_machine_id.as_deref(), Some("m"));
+    }
+
+    /// A candidate that names another machine must never be dialled: the client would complete a
+    /// handshake with a host it did not mean to reach. It is dropped, not failed, so the relay
+    /// candidate in the same set still attaches.
+    /// The accept-side gate: a candidate that names another machine must not be chosen even when
+    /// it is the only direct route and even when it sorts first. The candidates here are hand-built:
+    /// production currently stamps every candidate with the same recorded id, so this pins the
+    /// contract of the filter rather than reproducing a sequence the real builder emits.
+    #[test]
+    fn a_candidate_for_another_machine_is_never_chosen() {
+        let session_id = "session-accept-side-machine-pin";
+        release_attach_origin(session_id);
+
+        let candidates = vec![
+            CandidatePath::with_expected_machine_id(
+                AttachPath::Direct,
+                "http://127.0.0.1:43821",
+                Some("token".into()),
+                Some("a-different-machine".into()),
+            ),
+            CandidatePath::with_expected_machine_id(
+                AttachPath::Relay,
+                "https://relay.example.com",
+                Some("token".into()),
+                Some("a-different-machine".into()),
+            ),
+        ];
+
+        let origin = resolve_attach_base_origin(
+            session_id,
+            &candidates,
+            "the-machine-this-client-paired-with",
+            "https://fallback.example.com",
+        );
+
+        assert_eq!(
+            origin, "https://fallback.example.com",
+            "every candidate names another machine, so the relay fallback is the only safe origin"
+        );
+    }
+
+    /// The same gate with a usable relay present: the other machine's direct route is skipped and
+    /// the relay that names THIS machine wins.
+    #[test]
+    fn a_matching_relay_wins_over_a_foreign_direct_route() {
+        let session_id = "session-accept-side-machine-pin-relay";
+        release_attach_origin(session_id);
+
+        let candidates = vec![
+            CandidatePath::with_expected_machine_id(
+                AttachPath::Direct,
+                "http://127.0.0.1:43821",
+                Some("token".into()),
+                Some("a-different-machine".into()),
+            ),
+            CandidatePath::with_expected_machine_id(
+                AttachPath::Relay,
+                "https://relay.example.com",
+                Some("token".into()),
+                Some("this-machine".into()),
+            ),
+        ];
+
+        let origin = resolve_attach_base_origin(
+            session_id,
+            &candidates,
+            "this-machine",
+            "https://fallback.example.com",
+        );
+
+        assert_eq!(
+            origin, "https://relay.example.com",
+            "the foreign direct route is skipped, the matching relay is used"
+        );
+    }
+
+    #[test]
+    fn candidates_naming_another_machine_are_dropped() {
+        let candidates = vec![
+            CandidatePath::with_expected_machine_id(
+                AttachPath::Direct,
+                "http://127.0.0.1:7",
+                Some("t".into()),
+                Some("other-machine".into()),
+            ),
+            CandidatePath::with_expected_machine_id(
+                AttachPath::Relay,
+                "https://relay.example.com",
+                Some("t".into()),
+                Some("this-machine".into()),
+            ),
+            CandidatePath::new(AttachPath::Lan, "http://192.168.1.9:7", Some("t".into())),
+        ];
+
+        let eligible = super::super::attach::eligible_candidates(&candidates, "this-machine");
+
+        assert_eq!(eligible.len(), 2, "the foreign-machine route is dropped");
+        assert!(eligible.iter().all(|c| c.expected_machine_id.as_deref() != Some("other-machine")));
+        assert!(eligible.iter().any(|c| c.path == AttachPath::Relay));
+        assert!(
+            eligible.iter().any(|c| c.path == AttachPath::Lan),
+            "a candidate with no pinned machine stays eligible"
+        );
+    }
+
+    #[test]
+    fn a_pinned_origin_for_another_machine_is_not_reused() {
+        let session = format!("pinned-foreign-{}", uuid::Uuid::new_v4());
+        super::confirm_attach_origin(&session, "https://foreign.example.com");
+        let candidates = vec![CandidatePath::with_expected_machine_id(
+            AttachPath::Relay,
+            "https://relay.this-machine.example",
+            Some("t".into()),
+            Some("this-machine".into()),
+        )];
+
+        let origin =
+            super::resolve_attach_base_origin(&session, &candidates, "this-machine", "https://fallback");
+
+        assert_eq!(
+            origin, "https://relay.this-machine.example",
+            "an origin pinned by an earlier allocation for another machine must not be dialled"
+        );
+    }
+
+    #[test]
+    fn a_pinned_origin_that_is_this_machines_candidate_is_reused() {
+        let session = format!("pinned-own-{}", uuid::Uuid::new_v4());
+        super::confirm_attach_origin(&session, "https://relay.this-machine.example");
+        let candidates = vec![CandidatePath::with_expected_machine_id(
+            AttachPath::Relay,
+            "https://relay.this-machine.example",
+            Some("t".into()),
+            Some("this-machine".into()),
+        )];
+
+        assert_eq!(
+            super::resolve_attach_base_origin(&session, &candidates, "this-machine", "https://fallback"),
+            "https://relay.this-machine.example",
+            "a pin that still matches this machine's route is kept"
+        );
+    }
+
+    /// The relay is the only origin guaranteed to reach the machine, so the fallback for a session
+    /// that has not been pinned yet must never be a direct route that just failed the race.
+    #[test]
+    fn an_unpinned_fallback_prefers_the_relay_over_a_stale_direct_route() {
+        let session_id = "session-unpinned-fallback-prefers-relay";
+        release_attach_origin(session_id);
+
+        let candidates = vec![
+            CandidatePath::new(AttachPath::Direct, "http://127.0.0.1:43821", Some("token".into())),
+            CandidatePath::new(AttachPath::Relay, "https://relay.example.com", Some("token".into())),
+        ];
+
+        let origin = resolve_attach_base_origin(
+            session_id,
+            &candidates,
+            "machine-this-client-is",
+            "https://fallback.example.com",
+        );
+
+        assert_eq!(
+            origin, "https://relay.example.com",
+            "a blind first() fallback would retry the direct route that just lost"
+        );
+        release_attach_origin(session_id);
     }
 
     #[tokio::test]

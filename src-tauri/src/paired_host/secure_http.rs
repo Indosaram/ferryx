@@ -4,11 +4,14 @@
 //! session: the client allocates it (`POST /api/v1/attach/session?e2e=1`), dials
 //! `/tunnel/opaque/{session}`, runs the existing Noise initiator (`paired_host::attach`),
 //! and speaks plain HTTP/1.1 to the machine's loopback gateway inside the encrypted frames.
-//! The relay only ever carries ciphertext. Nothing here touches the direct (LAN) path.
+//! The relay only ever carries ciphertext. A host with a verified direct route may instead be
+//! dialled over that loopback origin; the same encrypted handshake runs on either socket, and an
+//! unavailable direct route simply loses the race to the relay.
 use super::{
-    attach::{attach_relay_session, RelayAttachedStream},
+    attach::{attach_relay_session_with_candidates, RelayAttachedStream},
     client::ClientError,
     inventory::HostAttach,
+    path_select::{AttachPath, CandidatePath},
 };
 use crate::remote::attach_crypto::MAX_ATTACH_FRAME;
 use crate::remote::relay_server::SessionKind;
@@ -33,7 +36,7 @@ use tokio_tungstenite::{
 pub const CLIENT_BUILD: &str = concat!("ferryx/", env!("CARGO_PKG_VERSION"));
 pub const CLIENT_BUILD_HEADER: &str = "x-ferryx-client-build";
 /// Bound on one allocation + tunnel dial + handshake.
-const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
+pub const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bound on a response status line plus headers.
 const MAX_RESPONSE_HEAD: usize = 64 * 1024;
 /// Bound on an allocation answer.
@@ -391,10 +394,42 @@ pub struct SecureHttpSession {
     stream: RelayAttachedStream,
 }
 
+/// The candidate paths for one attach attempt: a verified direct route for `host_id`, plus the
+/// relay. The direct candidate carries the machine id we already know this host to be, so a
+/// stale route to a different machine cannot complete the attach.
+fn attach_candidates(
+    host_id: Option<&str>,
+    relay_origin: &str,
+    machine_id: &str,
+    bearer: &str,
+) -> Vec<CandidatePath> {
+    let mut candidates = Vec::with_capacity(2);
+    // Grant redemption has no host record yet (the pairing exchange is what creates one), so it
+    // runs relay-only. Everything attached to a known host races its verified direct route.
+    if let Some(host_id) = host_id {
+        if let Some(direct) = super::path_select::direct_candidate(
+            &super::direct_route::GLOBAL_DIRECT_ROUTES,
+            host_id,
+            Some(bearer.to_string()),
+            Some(machine_id.to_string()),
+        ) {
+            candidates.push(direct);
+        }
+    }
+    candidates.push(CandidatePath::with_expected_machine_id(
+        AttachPath::Relay,
+        relay_origin.to_string(),
+        Some(bearer.to_string()),
+        Some(machine_id.to_string()),
+    ));
+    candidates
+}
+
 /// Allocates an opaque session with `allocation_bearer` (device token, or an account
 /// session while redeeming a grant) and completes the attach handshake.
 async fn establish_stream(
     http: &reqwest::Client,
+    host_id: Option<&str>,
     relay_origin: &str,
     allocation_bearer: &str,
     machine_id: &str,
@@ -406,15 +441,33 @@ async fn establish_stream(
     tokio::time::timeout(ESTABLISH_TIMEOUT, async {
         let session_id =
             allocate_e2e_session(http, &relay_origin, allocation_bearer, machine_id, kind).await?;
-        let attached = attach_relay_session(
-            &relay_origin,
-            &session_id,
-            machine_id,
-            &attach.machine_attach_public_key,
-            &attach.enrollment_epoch,
-            &dir,
-        )
-        .await;
+        let candidates = attach_candidates(host_id, &relay_origin, machine_id, allocation_bearer);
+        // Only a candidate set with a real alternative is raced. A relay-only set must keep the
+        // original single dial under the full establishment budget: the race deadline is three
+        // seconds, far shorter than a cold relay handshake, and the session it allocates cannot be
+        // re-dialled once the losing attempt is aborted.
+        let attached = if candidates.iter().any(|c| c.path != AttachPath::Relay) {
+            attach_relay_session_with_candidates(
+                &relay_origin,
+                &session_id,
+                machine_id,
+                &attach.machine_attach_public_key,
+                &attach.enrollment_epoch,
+                &dir,
+                &candidates,
+            )
+            .await
+        } else {
+            super::attach::attach_relay_session(
+                &relay_origin,
+                &session_id,
+                machine_id,
+                &attach.machine_attach_public_key,
+                &attach.enrollment_epoch,
+                &dir,
+            )
+            .await
+        };
         // The origin record only matters while a session is being dialled.
         super::path_select::release_attach_origin(&session_id);
         attached.map_err(|error| {
@@ -429,6 +482,7 @@ async fn establish_stream(
 impl SecureHttpSession {
     pub async fn establish(
         http: &reqwest::Client,
+        host_id: Option<&str>,
         relay_origin: &str,
         allocation_bearer: &str,
         machine_id: &str,
@@ -436,6 +490,7 @@ impl SecureHttpSession {
     ) -> Result<Self, ClientError> {
         establish_stream(
             http,
+            host_id,
             relay_origin,
             allocation_bearer,
             machine_id,
@@ -532,6 +587,7 @@ pub async fn shared_request(
     let establish = || {
         SecureHttpSession::establish(
             target.http,
+            Some(target.host_id),
             target.relay_origin,
             target.bearer,
             target.machine_id,
@@ -580,6 +636,7 @@ pub async fn open_secure_websocket(
     let invalid = || ClientError::local("INVALID_REQUEST");
     let secure = establish_stream(
         target.http,
+        Some(target.host_id),
         target.relay_origin,
         target.bearer,
         target.machine_id,
@@ -685,6 +742,43 @@ mod tests {
             bodies[1],
             serde_json::json!({ "machineId": "machine-a", "sessionKind": "remoteDesktop" })
         );
+    }
+
+    /// A known host that has published a verified direct route must race it, not fall back to a
+    /// relay-only dial: that regression is invisible at runtime (attach still succeeds, just
+    /// slower and over the relay), so it has to be pinned here.
+    #[test]
+    fn a_published_direct_route_becomes_an_attach_candidate() {
+        use super::super::direct_route::{DirectGuard, GLOBAL_DIRECT_ROUTES};
+
+        let host_id = "candidate-test-host";
+        let route = "http://127.0.0.1:43821";
+        let epoch = GLOBAL_DIRECT_ROUTES
+            .begin_attempt(host_id, std::time::Instant::now())
+            .expect("the test host has no competing attempt");
+        assert!(GLOBAL_DIRECT_ROUTES.publish(host_id, epoch, route.into(), DirectGuard::default()));
+
+        let candidates =
+            attach_candidates(Some(host_id), "https://relay.example.com", "m1", "tok");
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].path, AttachPath::Direct);
+        assert_eq!(candidates[0].base_origin, route);
+        assert_eq!(candidates[0].expected_machine_id.as_deref(), Some("m1"));
+        assert_eq!(candidates[1].path, AttachPath::Relay);
+        assert_eq!(candidates[1].expected_machine_id.as_deref(), Some("m1"));
+
+        GLOBAL_DIRECT_ROUTES.reset(host_id);
+    }
+
+    /// Grant redemption runs before the host record exists, so it must stay relay-only: a direct
+    /// candidate there would be looked up under an id the machine never published.
+    #[test]
+    fn a_host_without_an_id_attaches_over_the_relay_only() {
+        let candidates = attach_candidates(None, "https://relay.example.com", "m1", "tok");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, AttachPath::Relay);
     }
 
     #[test]

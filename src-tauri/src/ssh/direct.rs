@@ -14,22 +14,108 @@ fn invalid(message: &str) -> IpcError {
     IpcError::new(IpcErrorCode::InvalidPath, message)
 }
 
+/// The single rule for what may appear as an ssh host token, shared by host validation and by the
+/// argv builder so the two can never disagree about what is safe to hand ssh.
+fn valid_token(value: &str, extra: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value.len() <= 1024
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+}
+
+/// A jump host is a comma-separated list of tokens. Blank means "no jump host", which is what the
+/// saved field defaults to.
+/// [user@]host[:port], or a bracketed IPv6 literal with an optional :port.
+fn validate_host_port(host: &str) -> Result<(), IpcError> {
+    if let Some(after) = host.strip_prefix('[') {
+        let Some((inner, tail)) = after.split_once(']') else {
+            return Err(invalid("Unclosed bracket in SSH jump host"));
+        };
+        // Brackets mean an IPv6 literal. A character whitelist is not a literal: [::::] and
+        // [not-an-ip] pass it. The address is parsed instead, so only a real IPv6 can be bracketed.
+        if inner.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(invalid("Invalid IPv6 literal in SSH jump host"));
+        }
+        if tail.is_empty() {
+            return Ok(());
+        }
+        let Some(port) = tail.strip_prefix(':') else {
+            return Err(invalid("Invalid SSH jump host"));
+        };
+        return validate_port(port);
+    }
+    // Unbracketed: brackets are not a legal hostname character, so a stray one is malformed
+    // rather than something ssh might resolve.
+    if host.contains('[') || host.contains(']') {
+        return Err(invalid("Invalid SSH jump host"));
+    }
+    match host.split_once(':') {
+        Some((name, port)) => {
+            if name.is_empty() {
+                return Err(invalid("Invalid SSH jump host"));
+            }
+            validate_port(port)
+        }
+        None => Ok(()),
+    }
+}
+
+fn validate_port(port: &str) -> Result<(), IpcError> {
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid("Invalid SSH jump host port"));
+    }
+    match port.parse::<u32>() {
+        Ok(value) if (1..=65535).contains(&value) => Ok(()),
+        _ => Err(invalid("SSH jump host port out of range")),
+    }
+}
+
+pub fn validate_jump_host(jump: &str) -> Result<(), IpcError> {
+    let trimmed = jump.trim();
+    if trimmed.is_empty() {
+        return Err(invalid("Empty SSH jump host"));
+    }
+    // Each part is [user@]host[:port]. Validating the whole part as one token let `a@-Ffoo`
+    // through: it does not START with `-`, yet the host after `@` does, and a leading dash is what
+    // turns a destination into an option or a config override for ssh. The host half is therefore
+    // checked on its own.
+    for part in trimmed.split(',') {
+        let part = part.trim();
+        let (user, host) = match part.rsplit_once('@') {
+            Some((user, host)) => (Some(user), host),
+            None => (None, part),
+        };
+        if let Some(user) = user {
+            if user.is_empty() || !valid_token(user, "._-") {
+                return Err(invalid("Invalid SSH jump host user"));
+            }
+        }
+        if !valid_token(host, "._-:[]") || host.starts_with('-') {
+            return Err(invalid("Invalid SSH jump host"));
+        }
+        // Character safety is not structure: bastion:notaport, bastion:99999, [broken and []:22
+        // are all made of allowed characters yet ssh cannot resolve them, and a bare host:abc
+        // silently becomes a different destination. The shape is therefore parsed too.
+        validate_host_port(host)?;
+    }
+    Ok(())
+}
+
 pub fn validate_host(host: &SshHost) -> Result<(), IpcError> {
-    let token = |value: &str, extra: &str| {
-        !value.is_empty()
-            && !value.starts_with('-')
-            && value.len() <= 1024
-            && value
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
-    };
+    let token = valid_token;
     if !token(&host.hostname, "._-:[]")
         || host.username.as_deref().is_some_and(|u| !token(u, "._-"))
         || host.port == Some(0)
+        // A blank jump host is absent, not invalid: the saved field defaults to empty, and
+        // rejecting it would refuse every ordinary host that never configured a bastion. The
+        // same trimming is applied when the argv is built (`ssh::exec::jump_target`), so
+        // validation and execution agree on what counts as "no jump host".
         || host
             .jump_host
             .as_deref()
-            .is_some_and(|j| j.split(',').any(|part| !token(part, "._-@:[]")))
+            .is_some_and(|j| !j.trim().is_empty() && validate_jump_host(j).is_err())
     {
         return Err(invalid("Invalid SSH hostname, username, port or jump host"));
     }
@@ -111,7 +197,7 @@ pub fn ssh_plan(
     validate_host(host)?;
     super::password::require(host)?;
     let program = super::exec::resolve_ssh_program()?;
-    let mut args = super::exec::interactive_argv(host);
+    let mut args = super::exec::interactive_argv(host)?;
     args.remove(0);
     if !interactive {
         args[0] = "-T".into();

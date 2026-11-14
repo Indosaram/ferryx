@@ -126,6 +126,7 @@ import {
   isTauriRuntime,
   listWorktrees,
   loadSession,
+  onSessionCorrupted,
   onWorktreeChanged,
   onCloseTabMenu,
   onSelectWorktreeMenu,
@@ -508,13 +509,42 @@ export function App() {
       return;
     }
     let cancelled = false;
+    // Register before the first loadSession(): the backend quarantines a corrupt file and emits
+    // `session_corrupted` while that command runs, so a listener mounted later (inside
+    // WorkspaceApp, which only renders after bootstrap) would miss the one event that says where
+    // the person's layout went. Registration is asynchronous, so the load waits for it: starting
+    // the load first would race the event it is meant to report.
+    const corruption = onSessionCorrupted((backupPath) => {
+      toast.error("Session layout could not be read", {
+        id: "session-corrupted",
+        description: `The unreadable file was kept at ${backupPath}, so a starting-from-empty window can be recovered from it.`,
+        duration: 15000,
+      });
+    });
+    const corruptionReady = Promise.resolve(corruption).then(
+      (dispose) => dispose,
+      (error: unknown) => {
+        // A listener that failed to register costs the backup path notice, never the session load.
+        console.warn("Session corruption listener unavailable:", error);
+        return () => undefined;
+      },
+    );
+    const loadSessionAfterSubscription = async () => {
+      // A listener that never settles must not stall startup: loading the session is the priority
+      // and the corruption notice is only a notification, so it is given a bounded wait.
+      await Promise.race([
+        corruptionReady,
+        new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+      ]);
+      return loadSession().catch(() => null);
+    };
     void bootTrace("initial.start");
     void withTimeout(getInitialProject(), STARTUP_TIMEOUT_MS, "cmd_project_initial")
       .then(async (startup) => {
         void bootTrace("initial.ok");
         const storedBootstrap = loadProjectBootstrap();
         // loadSession is window-scoped by the backend: a secondary window reads only its own file.
-        const savedSession = await loadSession().catch(() => null);
+        const savedSession = await loadSessionAfterSubscription();
         const recovered = recoverProjectBootstrap(savedSession);
         const prepared = isPrimary
           ? canonicalizeProjectBootstrap(
@@ -549,7 +579,7 @@ export function App() {
         void bootTrace("initial.error", { message: String(errorMsg).slice(0, 200), details: error });
         if (!cancelled) {
           const storedBootstrap = loadProjectBootstrap();
-          const savedSession = await loadSession().catch(() => null);
+          const savedSession = await loadSessionAfterSubscription();
           const recovered = recoverProjectBootstrap(savedSession);
           if (!isPrimary) {
             const prepared = secondaryWindowBootstrap(storedBootstrap, recovered);
@@ -601,6 +631,7 @@ export function App() {
       });
     return () => {
       cancelled = true;
+      void corruptionReady.then((dispose) => dispose());
     };
   }, [isNativeRuntime, isPrimary]);
 
