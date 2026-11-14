@@ -1648,13 +1648,29 @@ export async function buildHost({
       if (dmgPath && existsSync(dmgPath)) {
         execFileSync("cp", [dmgPath, join(artifactsOutDir, "Ferryx_universal.dmg")]);
       }
+      // A universal binary is assembled with lipo, which invalidates whatever signature each
+      // slice carried, so the shipped CLI and remote-desktop client arrive unsigned
+      // (measured: `codesign --verify` -> "code object is not signed at all"). Sign them here
+      // with the same hardened-runtime identity as the app bundle.
+      const signStandalone = (artifactName) => {
+        const target = join(artifactsOutDir, artifactName);
+        if (!existsSync(target) || !macSigningIdentity) return;
+        execFileSync(
+          "codesign",
+          ["--force", "--timestamp", "--options", "runtime", "--sign", macSigningIdentity, target],
+          { stdio: "pipe" },
+        );
+        execFileSync("codesign", ["--verify", "--strict", "--verbose=2", target], { stdio: "pipe" });
+      };
       const universalCli = join(universalRel, "ferryx-cli");
       if (existsSync(universalCli)) {
         execFileSync("cp", [universalCli, join(artifactsOutDir, "ferryx-cli-darwin-universal")]);
+        signStandalone("ferryx-cli-darwin-universal");
       }
       const universalRdClient = join(universalRel, "ferryx-rd-client");
       if (existsSync(universalRdClient)) {
         execFileSync("cp", [universalRdClient, join(artifactsOutDir, "ferryx-rd-client-darwin-universal")]);
+        signStandalone("ferryx-rd-client-darwin-universal");
       }
     } else {
       const scpCommand = process.env.FERRYX_SCP_COMMAND || "scp";
