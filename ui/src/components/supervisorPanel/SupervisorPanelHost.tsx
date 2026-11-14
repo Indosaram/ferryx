@@ -43,6 +43,12 @@ export type SupervisorPanelHostProps = {
   loadWorktrees?: () => Promise<readonly WorktreeOnBranch[]>;
   /** The project whose worktrees a hand-off may use; absent, no worktree is listed. */
   workspaceId?: string | null;
+  /**
+   * The workspace the backend registry has accepted. Listing worktrees before
+   * registration completes fails with WORKSPACE_NOT_FOUND, so the read waits for
+   * this to match `workspaceId` — the same gate the workspace runtime uses.
+   */
+  registeredWorkspaceId?: string | null;
 };
 
 async function adoptResult(call: Promise<SupervisorCallResult>): Promise<LeaseAdoptResult> {
@@ -68,6 +74,7 @@ export function SupervisorPanelHost({
   loadPrs = getSupervisorPrs,
   loadWorktrees,
   workspaceId = null,
+  registeredWorkspaceId,
 }: SupervisorPanelHostProps) {
   const [snapshot, setSnapshot] = useState<PanelSnapshot | null>(null);
   const [prLane, setPrLane] = useState<PrLane | null>(null);
@@ -140,6 +147,10 @@ export function SupervisorPanelHost({
   const loadWorktreesRef = useRef(loadWorktrees);
   loadWorktreesRef.current = loadWorktrees;
   useEffect(() => {
+    // A host whose registration was rejected cannot list worktrees: the read
+    // would fail with WORKSPACE_NOT_FOUND and (with no host at all) look like a
+    // local listing. Wait until registration accepts this workspace.
+    if (registeredWorkspaceId !== undefined && registeredWorkspaceId !== workspaceId) return;
     const read = loadWorktreesRef.current ?? (workspaceId ? () => listWorktrees(workspaceId) : null);
     if (!read) return;
     let disposed = false;
@@ -152,7 +163,7 @@ export function SupervisorPanelHost({
     return () => {
       disposed = true;
     };
-  }, [prLane, workspaceId]);
+  }, [prLane, registeredWorkspaceId, workspaceId]);
 
   // After an accepted write the hub is read again; only the newest read lands, and a failed
   // read keeps what is on screen.

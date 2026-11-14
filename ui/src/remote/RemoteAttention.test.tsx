@@ -188,6 +188,10 @@ function ticketed(inner: typeof fetch): typeof fetch {
     // The browser view's session probe fires once the context is known; answered by URL (no
     // browsers listed) so it never consumes a response a test queued for its own sequence.
     if (url.includes("/api/v1/browser/sessions")) return jsonResponse([]);
+    // The voice status probe rides along with the workspace read. Answered here by URL like the
+    // probes above: left to fall through, it consumes one response from the sequence a test
+    // queued, so the read after the selection answers with the pre-selection snapshot.
+    if (url.includes("/api/v1/voice/status")) return jsonResponse({ available: false, sttSource: null, speakAvailable: false, speakReason: null });
     const sidebar = sidebarFixtureResponse(url);
     if (sidebar !== null) return sidebar;
     return inner(input, init);
