@@ -5148,6 +5148,7 @@ mod local_control_isolation_tests {
                                     home: "/home".to_string(),
                                     temp: "/tmp".to_string(),
                                     git: true,
+                                    runtime_dir: None,
                                 },
                                 helper: crate::ssh::helper_setup::HelperLocation {
                                     executable: "/bin/helper".to_string(),

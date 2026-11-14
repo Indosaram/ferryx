@@ -138,7 +138,7 @@ mod tailscale_sync_tests {
 
     #[tokio::test]
     async fn target_reports_authentication_and_provisioning_failures() {
-        let env = crate::ssh::runtime::RemoteEnvironment { platform: crate::ssh::runtime::RemotePlatform::Posix, executor: crate::ssh::runtime::RemoteExecutor::Sh, version: "Linux".into(), home: "/home/test".into(), temp: "/tmp".into(), git: true };
+        let env = crate::ssh::runtime::RemoteEnvironment { platform: crate::ssh::runtime::RemotePlatform::Posix, executor: crate::ssh::runtime::RemoteExecutor::Sh, version: "Linux".into(), home: "/home/test".into(), temp: "/tmp".into(), git: true, runtime_dir: None };
         let h = host("test", "host", crate::ssh::SshHostSource::Tailscale);
         let failed = sync_tailscale_target_with(h.clone(), || async { Err(IpcError::new(IpcErrorCode::IoError, "authentication failed")) }, |_| async { panic!("must not provision after failed detection") }).await.unwrap();
         assert!(!failed.reachable);
@@ -471,14 +471,23 @@ pub async fn ssh_test_connection_summary(host: SshHost) -> SshTargetSummary {
     };
     // Non-installing helper check, only when the host is reachable. Any probe
     // failure (timeout, transport error) classifies to Unknown, never an Err.
-    let helper = match &environment {
-        Some(environment) => Some(crate::ssh::helper_setup::probe_ready(&host, environment).await),
-        None => None,
+    // A present helper that cannot run stays Missing (so setup reinstalls it) but
+    // reports why through last_error instead of reading as plain "not installed".
+    let (helper, helper_exec_failure) = match &environment {
+        Some(environment) => {
+            let (state, exec_failure) =
+                crate::ssh::helper_setup::probe_ready_detailed(&host, environment).await;
+            (Some(state), exec_failure)
+        }
+        None => (None, None),
     };
     SshTargetSummary {
         host,
         reachable,
-        last_error: diagnostic.as_ref().map(|e| e.message.clone()),
+        last_error: diagnostic
+            .as_ref()
+            .map(|e| e.message.clone())
+            .or(helper_exec_failure),
         environment,
         helper,
         diagnostic,
@@ -504,6 +513,29 @@ pub async fn cmd_ssh_test_connection(
         clear_password_in_daemon(&daemon_client, host).await?;
     }
     Ok(summary)
+}
+
+/// Connects once with host-key acceptance redirected into a private temporary file and reports
+/// the keys the server presented, for the user to compare before trusting.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_scan_host_key(
+    host: SshHost,
+) -> Result<crate::ssh::host_key::HostKeyScan, IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    crate::ssh::host_key::scan(&host).await
+}
+
+/// Pins the host key into the user's known_hosts only when a fresh scan still presents the
+/// fingerprint the user confirmed.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_trust_host_key(
+    host: SshHost,
+    fingerprint_sha256: String,
+) -> Result<(), IpcError> {
+    let _transaction = SSH_CREDENTIAL_TRANSACTION.lock().await;
+    crate::ssh::host_key::trust(&host, fingerprint_sha256).await
 }
 
 #[cfg(feature = "desktop")]
@@ -805,20 +837,19 @@ pub async fn cmd_ssh_install_ferryx_node<R: Runtime>(
     parse_node_install_report(&output)
 }
 
+fn parse_helper_target(
+    target_triple: &str,
+) -> Result<crate::ssh::helper_assets::HelperTarget, IpcError> {
+    crate::ssh::helper_assets::HelperTarget::from_triple(target_triple).ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!("Unsupported target triple for helper asset: '{target_triple}'"),
+        )
+    })
+}
+
 pub fn resolve_bundled_helper_binary(target_triple: &str) -> Result<PathBuf, IpcError> {
-    let parsed_target = match target_triple {
-        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
-        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
-        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
-        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
-        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
-        _ => {
-            return Err(IpcError::new(
-                IpcErrorCode::Unsupported,
-                format!("Unsupported target triple for helper asset: '{target_triple}'"),
-            ));
-        }
-    };
+    let parsed_target = parse_helper_target(target_triple)?;
 
     let mut helper_dir_candidates = Vec::new();
 
@@ -858,19 +889,7 @@ pub fn bundled_helper_path<R: Runtime>(
     app: &AppHandle<R>,
     target_triple: &str,
 ) -> Result<PathBuf, IpcError> {
-    let parsed_target = match target_triple {
-        "x86_64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxX86_64,
-        "aarch64-unknown-linux-gnu" => crate::ssh::helper_assets::HelperTarget::LinuxAarch64,
-        "x86_64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinX86_64,
-        "aarch64-apple-darwin" => crate::ssh::helper_assets::HelperTarget::DarwinAarch64,
-        "x86_64-pc-windows-msvc" => crate::ssh::helper_assets::HelperTarget::WindowsX64,
-        _ => {
-            return Err(IpcError::new(
-                IpcErrorCode::Unsupported,
-                format!("Unsupported target triple for helper asset: '{target_triple}'"),
-            ));
-        }
-    };
+    let parsed_target = parse_helper_target(target_triple)?;
 
     let mut helper_dir_candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {

@@ -266,6 +266,7 @@ mod tests {
             home: "/home/test".into(),
             temp: "/tmp".into(),
             git: false,
+            runtime_dir: None,
         }
     }
 

@@ -5,11 +5,27 @@ import { resolve, join, dirname, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
-const TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"];
+// Linux remotes get the static musl helpers (no loader/libc dependency, so they also run on
+// Alpine); the glibc builds stay in the matrix as a fallback.
+const TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"];
 export const REQUIRED_HELPER_CAPABILITIES = Object.freeze(["sshHelperV1", "dagSubscribeV1", "agentStateV1"]);
 
 export function computeSha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+// A static (or static-pie) executable has no PT_INTERP program header; a dynamic one names its
+// loader there, and that loader is exactly what is missing on a foreign libc.
+function elfHasInterpreter(bytes) {
+  assert(bytes.length >= 64, "truncated ELF header");
+  const phoff = Number(bytes.readBigUInt64LE(32));
+  const phentsize = bytes.readUInt16LE(54);
+  const phnum = bytes.readUInt16LE(56);
+  assert(phentsize >= 4 && phoff + phentsize * phnum <= bytes.length, "truncated ELF program headers");
+  for (let i = 0; i < phnum; i++) {
+    if (bytes.readUInt32LE(phoff + i * phentsize) === 3) return true;
+  }
+  return false;
 }
 
 function findRsFiles(dir) {
@@ -124,6 +140,7 @@ export function stageHelpers({ repoRoot = REPO_ROOT, resourcesDir = join(repoRoo
       assert.equal(bytes[4], 2, "ELF must be 64 bit");
       assert.equal(bytes[5], 1, "ELF must be little endian");
       assert.equal(bytes.readUInt16LE(18), target.startsWith("aarch64") ? 183 : 62, "ELF machine mismatch");
+      if (target.endsWith("-linux-musl")) assert(!elfHasInterpreter(bytes), `musl helper for ${target} must be statically linked (PT_INTERP present)`);
     }
 
     assert.ok(Array.isArray(receipt.capabilities), `capability evidence required for ${target}: run the built artifact's --capabilities on its build host`);

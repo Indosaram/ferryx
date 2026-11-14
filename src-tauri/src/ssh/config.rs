@@ -29,7 +29,8 @@ pub fn parse_ssh_config_with_dir(text: &str, config_dir: Option<&Path>) -> Vec<C
     hosts
 }
 
-fn dirs_fallback_ssh_dir() -> Option<PathBuf> {
+/// The user's `~/.ssh` directory as OpenSSH resolves it on this platform.
+pub(crate) fn dirs_fallback_ssh_dir() -> Option<PathBuf> {
     preferred_ssh_home(
         std::env::var_os("HOME"),
         std::env::var_os("USERPROFILE"),

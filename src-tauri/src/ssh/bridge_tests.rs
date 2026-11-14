@@ -58,6 +58,7 @@ fn sample_env() -> RemoteEnvironment {
         home: "/tmp".to_string(),
         temp: "/tmp".to_string(),
         git: true,
+        runtime_dir: None,
     }
 }
 
