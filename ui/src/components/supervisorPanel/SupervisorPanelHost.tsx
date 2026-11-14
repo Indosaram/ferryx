@@ -221,8 +221,6 @@ export function SupervisorPanelHost({
               />
             </div>
           ) : null}
-          <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} voiceConversation={voiceConversation} />
-          <ProjectMemorySwitches actions={projectMemory} />
           <PanelSurface snapshot={snapshot} actions={actions} nowMs={tick} goals={goals} computerLabel="this computer" transcript={transcript} voiceConversation={voiceConversation} prLane={prLane} worktrees={worktrees} />
           <ProjectMemorySwitches actions={projectMemory} />
         </div>
