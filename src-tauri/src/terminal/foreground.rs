@@ -51,6 +51,75 @@ impl ProcessTransition {
     }
 }
 
+/// Tracks whether any program other than the shell held the terminal, so its exit can reset
+/// the input modes it may have left behind.
+///
+/// A full-screen program enables terminal input modes to read keys precisely -- the kitty
+/// keyboard protocol (`CSI > u`) and xterm `modifyOtherKeys` (`CSI > 4 ; 2 m`) -- and disables
+/// them again on its own way out. A program killed with a signal that cannot be handled never
+/// runs that teardown, so the modes stay enabled in the terminal that owns the state. Arrow keys
+/// are then encoded in the program's format, which a shell prompt cannot parse and prints as
+/// literal characters. The shell owning the foreground again is the evidence that this program
+/// is gone.
+///
+/// Bracketed paste (`CSI ? 2004`) is deliberately not part of this: every interactive shell
+/// re-enables it at each prompt (measured for zsh), so it heals on its own, and clearing it
+/// after the shell already announced it would leave the shell believing paste is guarded while
+/// a multi-line paste executes line by line.
+#[derive(Default)]
+pub(crate) struct KeyboardModeTransition {
+    /// A program other than the shell has owned the foreground since the last shell sample.
+    program_observed: bool,
+}
+
+/// The sequences that restore the two input modes a killed program cannot restore itself.
+///
+/// Each one is the documented "off" for a mode a full-screen program turns on:
+/// - `CSI < 8 u` pops every entry of the kitty keyboard protocol stack. The 8 is the stack
+///   depth, so a pop that large resets it instead of unwinding one level, which is what a
+///   dead program's leftover push needs.
+/// - `CSI > 4 ; 0 m` is xterm `modifyOtherKeys` reset.
+///
+/// These are mode changes, not output: feeding them to the terminal's own state changes how
+/// later keys are encoded without drawing anything or disturbing scrollback. A full reset
+/// (`ESC c`) is deliberately not used here because it would erase the screen the user is
+/// still reading.
+pub(crate) const KEYBOARD_MODE_RESET: &[u8] = b"\x1b[<8u\x1b[>4;0m";
+
+/// The positive evidence that a program which may have changed input modes has exited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyboardModeEdge {
+    /// A program held the terminal and the shell owns it again now.
+    ProgramExited,
+}
+
+impl KeyboardModeTransition {
+    /// A sample of the pane's foreground ownership.
+    ///
+    /// Only a program that held the terminal can have changed these modes, and only the shell
+    /// owning the foreground again proves it stopped holding them. A suspended program (Ctrl-Z)
+    /// is treated like a running one on purpose: it is still alive with the pane as its
+    /// controlling terminal and still expects its own encoding when resumed. `shell_alone` is
+    /// not consulted because a leftover background child keeps it false for the rest of the
+    /// pane's life, which would suppress the restore exactly when it is most needed.
+    pub(crate) fn observe(&mut self, current: Option<Foreground>) -> Option<KeyboardModeEdge> {
+        // Unknown ownership is not evidence in either direction.
+        let current = current?;
+        match current {
+            Foreground::Shell => {
+                let had_program = self.program_observed;
+                self.program_observed = false;
+                had_program.then_some(KeyboardModeEdge::ProgramExited)
+            }
+            // Agents and unclassified programs alike can leave the modes enabled.
+            Foreground::Agent { .. } | Foreground::Other => {
+                self.program_observed = true;
+                None
+            }
+        }
+    }
+}
+
 /// One session's classification against a tick's process listing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Observation {
@@ -1730,6 +1799,121 @@ mod tests {
             observer.observe(Some(Foreground::Shell)),
             None,
             "one release per exit"
+        );
+    }
+
+    #[test]
+    fn keyboard_modes_reset_only_after_a_program_held_the_terminal() {
+        let mut modes = KeyboardModeTransition::default();
+        assert_eq!(
+            modes.observe(Some(Foreground::Shell)),
+            None,
+            "a prompt that was never taken over has nothing to restore"
+        );
+        assert_eq!(
+            modes.observe(Some(Foreground::Other)),
+            None,
+            "the program's own exit is not observable while it still holds the terminal"
+        );
+        assert_eq!(
+            modes.observe(Some(Foreground::Shell)),
+            Some(KeyboardModeEdge::ProgramExited),
+            "the shell owns the terminal again, so the program that held it is gone"
+        );
+        assert_eq!(
+            modes.observe(Some(Foreground::Shell)),
+            None,
+            "one restore per program"
+        );
+    }
+
+    #[test]
+    fn keyboard_modes_reset_after_an_agent_exits() {
+        let mut modes = KeyboardModeTransition::default();
+        assert_eq!(
+            modes.observe(Some(Foreground::Agent { pid: 42, agent: "omo" })),
+            None
+        );
+        assert_eq!(
+            modes.observe(Some(Foreground::Shell)),
+            Some(KeyboardModeEdge::ProgramExited)
+        );
+    }
+
+    #[test]
+    fn a_background_child_does_not_suppress_the_restore() {
+        // A pane that once backgrounded anything keeps `shell_alone` false for the rest of its
+        // life, so the restore must not depend on it: otherwise the exact panes most likely to
+        // be running killed programs would never be repaired.
+        let mut modes = KeyboardModeTransition::default();
+        assert_eq!(modes.observe(Some(Foreground::Other)), None);
+        assert_eq!(
+            modes.observe(Some(Foreground::Shell)),
+            Some(KeyboardModeEdge::ProgramExited)
+        );
+    }
+
+    #[test]
+    fn unknown_ownership_neither_arms_nor_fires_the_restore() {
+        let mut modes = KeyboardModeTransition::default();
+        assert_eq!(modes.observe(None), None);
+        assert_eq!(
+            modes.observe(Some(Foreground::Shell)),
+            None,
+            "an unreadable process listing is not evidence that a program ran"
+        );
+        assert_eq!(modes.observe(Some(Foreground::Other)), None);
+        assert_eq!(
+            modes.observe(None),
+            None,
+            "a failed sample must not consume the pending restore"
+        );
+        assert_eq!(
+            modes.observe(Some(Foreground::Shell)),
+            Some(KeyboardModeEdge::ProgramExited)
+        );
+    }
+
+    #[test]
+    fn the_restore_disables_every_mode_a_killed_program_leaves_enabled() {
+        // Property, not a copy of the literal: each mode a full-screen program enables and a
+        // shell never re-asserts must have its documented "off" present.
+        assert!(
+            KEYBOARD_MODE_RESET.windows(5).any(|w| w == b"\x1b[<8u"),
+            "the kitty keyboard protocol stack must be popped to empty"
+        );
+        assert!(
+            KEYBOARD_MODE_RESET.windows(7).any(|w| w == b"\x1b[>4;0m"),
+            "modifyOtherKeys must be reset"
+        );
+    }
+
+    #[test]
+    fn the_restore_leaves_paste_guarding_to_the_shell() {
+        // A shell re-asserts bracketed paste at every prompt, so clearing it here would race
+        // that announcement: the shell would still believe a multi-line paste arrives guarded
+        // while the terminal has already stopped wrapping it, executing each line.
+        assert!(
+            !KEYBOARD_MODE_RESET.windows(7).any(|w| w == b"\x1b[?2004"),
+            "bracketed paste must not be touched by the restore"
+        );
+    }
+
+    #[test]
+    fn the_restore_leaves_the_screen_and_scrollback_intact() {
+        // The user is still reading the pane when a program dies, so the restore must be a mode
+        // change only: no RIS, no erase-in-display, no alternate-screen switch.
+        assert!(
+            !KEYBOARD_MODE_RESET.windows(2).any(|w| w == b"\x1bc".as_slice()),
+            "a full reset would erase the screen and scrollback"
+        );
+        assert!(
+            !KEYBOARD_MODE_RESET.contains(&b'J'),
+            "erase-in-display would destroy output the user still needs"
+        );
+        assert!(
+            !KEYBOARD_MODE_RESET.contains(&b'H') && !KEYBOARD_MODE_RESET.contains(&b'f'),
+            "moving the cursor would corrupt the prompt the shell just drew"
         );
     }
 

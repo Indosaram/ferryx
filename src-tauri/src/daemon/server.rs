@@ -5551,6 +5551,11 @@ impl DaemonServer {
         tokio::spawn(async move {
             let mut transitions =
                 HashMap::<String, crate::terminal::foreground::ProcessTransition>::new();
+            // Per session: whether a program other than the shell held the terminal. When the
+            // shell owns it again, that program's exit is proven and the input modes it may
+            // have enabled are restored (a killed program cannot restore them itself).
+            let mut keyboard_modes =
+                HashMap::<String, crate::terminal::foreground::KeyboardModeTransition>::new();
             // Each session's cheap foreground marker (tcgetpgrp on Unix) as of the last full
             // listing. An idle pane's foreground cannot change without this marker changing,
             // so the full listing only runs on a change, a due probe, or the slow refresh.
@@ -5582,6 +5587,7 @@ impl DaemonServer {
                     })
                     .collect();
                 transitions.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
+                keyboard_modes.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
                 probes.retain(|id, _| sessions.iter().any(|(live, _)| live == id));
                 server
                     .protocol_reporters
@@ -5672,6 +5678,29 @@ impl DaemonServer {
                                         .entry(id.clone())
                                         .or_default()
                                         .observe(observation);
+                                    // A program that took the terminal may have enabled the kitty
+                                    // keyboard protocol or modifyOtherKeys and been killed before it
+                                    // could undo them. Restore both as soon as the shell owns the
+                                    // foreground again, so the next keys are not encoded in a format
+                                    // the shell cannot parse. The listing's `shell_alone` is not
+                                    // required: a leftover background child keeps it false for the
+                                    // rest of the pane's life, which would suppress the restore in
+                                    // exactly the panes that ran a killable program.
+                                    if keyboard_modes
+                                        .entry(id.clone())
+                                        .or_default()
+                                        .observe(observation)
+                                        .is_some()
+                                    {
+                                        // Publish returns None when the session's hub is
+                                        // gone; the retain above already drops dead sessions,
+                                        // so a miss here is teardown and needs no recovery.
+                                        let _ = server.terminal_service.output_hub().publish(
+                                            &id,
+                                            crate::terminal::foreground::KEYBOARD_MODE_RESET
+                                                .to_vec(),
+                                        );
+                                    }
                                     match observation {
                                         Some(crate::terminal::foreground::Foreground::Agent {
                                             pid,
