@@ -26,6 +26,7 @@ export const HOOKS = Object.freeze([
   { id: 'candidateAcceptCounters', owner: 'todo 8 (qa_producers.rs note_authority_stage: per-stage acceptCounts of every inherited listener in handover-authority.receipt.jsonl)', files: ['src-tauri/src/daemon/qa_producers.rs'], pattern: /pub const AUTHORITY_STAGE: &str = "handover-authority"[\s\S]*"acceptCounts": accept_counts/, scenarios: ['Q08', 'Q08b'], platforms: ['mac', 'linux'] },
   { id: 'forceFallback', owner: 'todo 12 (FERRYX_QA_FORCE_FALLBACK=1 under local-split-qa routes connect_or_spawn to the detached fallback)', files: ['src-tauri/src/daemon/owner_admission.rs'], pattern: /FORCE_FALLBACK_ENV: &str = "FERRYX_QA_FORCE_FALLBACK"/, scenarios: ['Q06', 'Q06w'] },
   { id: 'detachGuard', owner: 'todo 6 carry-over (Windows detach guard returns DAEMON_DETACH_UNAVAILABLE inside a no-breakaway job)', files: ['src-tauri/src/daemon/client.rs'], pattern: /code = "DAEMON_DETACH_UNAVAILABLE"/, scenarios: ['Q06w'], platforms: ['windows'] },
+  { id: 'qaHostBootOverride', owner: 'adoption todo 14 (host_boot.rs honors FERRYX_QA_HOST_BOOT_TIME_MS under local-split-qa while FERRYX_QA_RUN_ID is set)', files: ['src-tauri/src/host_boot.rs'], pattern: /QA_HOST_BOOT_TIME_ENV: &str = "FERRYX_QA_HOST_BOOT_TIME_MS"[\s\S]*qa_host_boot_override\(run_id/, scenarios: ['Q14'] },
 ]);
 
 /** todo 8's FERRYX_QA_HANDOVER_FAULT commit-phase values (daemon/qa_producers.rs). */
