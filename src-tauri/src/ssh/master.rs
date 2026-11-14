@@ -298,6 +298,7 @@ mod tests {
             source: super::super::SshHostSource::Manual,
             auth_method: SshAuthMethod::Key,
             disabled: None,
+            shell: None,
         }
     }
 

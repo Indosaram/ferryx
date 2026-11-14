@@ -289,7 +289,7 @@ mod tests {
             AttachPath::Direct,
             "http://127.0.0.1:1",
             None,
-            "machine-a".into(),
+            Some("machine-a".into()),
         );
         assert!(super::super::attach::candidate_names_expected_machine_for_test(
             &candidate,
