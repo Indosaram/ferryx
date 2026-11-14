@@ -1,16 +1,19 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Activity, ChevronDown, ChevronRight, RefreshCw, X } from "lucide-react";
 
 import {
   RESOURCE_SAMPLE_INTERVAL_MS,
+  SSH_RESOURCE_SAMPLE_INTERVAL_MS,
   appendHistory,
   fetchPairedResources,
+  fetchSshResources,
   fetchSystemResources,
   formatBytes,
   formatDuration,
   formatPercent,
   groupSessionsByWorktree,
   resourceHosts,
+  sshResourceHosts,
   unavailableLabel,
   usageRatio,
   type HostResourceSnapshot,
@@ -20,11 +23,14 @@ import {
   type SessionResourceUsage,
 } from "../lib/systemResources";
 import { closeTerminal } from "../lib/tauri";
+import { listSshHosts, type SshHost } from "../lib/sshHosts";
 import { remoteHostStore, type HostEndpoint } from "../state/remoteHostStore";
 import { cn } from "../lib/cn";
 import { IconButton } from "./ui/IconButton";
 
 const LOCAL_KEY = "local";
+/** SSH samples share the pane with paired ones, so their keys are namespaced apart. */
+const SSH_KEY_PREFIX = "ssh:";
 
 function errorMessage(error: unknown): string {
   if (typeof error === "string") return error;
@@ -254,6 +260,8 @@ export function SystemResourcesDialog({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [paired, setPaired] = useState<Readonly<Record<string, PairedResourceResult>>>({});
+  const [sshHosts, setSshHosts] = useState<readonly SshHost[]>([]);
+  const [sshResults, setSshResults] = useState<Readonly<Record<string, PairedResourceResult>>>({});
   const [history, setHistory] = useState<Readonly<Record<string, ResourceHistory>>>({});
   const [sort, setSort] = useState<ResourceSort>("memory");
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
@@ -266,6 +274,14 @@ export function SystemResourcesDialog({
   const hosts = resourceHosts(hostMap);
   // Generation is part of the key: a re-paired host must not keep its predecessor's samples.
   const hostKey = hosts.map((host) => `${host.hostId}\u0000${host.generation}`).join("\n");
+  // `resourceHosts` returns a fresh array every render, so the names are keyed by value: a memo on
+  // the array identity would rebuild every render and re-arm the SSH sampling effect forever.
+  const pairedNamesKey = hosts.map((host) => hostLabel(host).trim().toLowerCase()).join("\u0000");
+  const sshTargets = useMemo(
+    // One machine can be both paired and reachable over SSH; a paired row owns the name.
+    () => sshResourceHosts(sshHosts, pairedNamesKey.split("\u0000")),
+    [pairedNamesKey, sshHosts],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -335,6 +351,39 @@ export function SystemResourcesDialog({
     };
   }, [hostKey]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void listSshHosts().then((next) => {
+      if (!cancelled) setSshHosts(next);
+    }).catch(() => {
+      // A host store that cannot be read leaves the pane with the machines it does know.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (sshTargets.length === 0) return;
+    let cancelled = false;
+    const timers = new Map<string, number>();
+    const sample = async (host: SshHost) => {
+      const result = await fetchSshResources(host);
+      if (cancelled) return;
+      setSshResults((prev) => ({ ...prev, [host.id]: result }));
+      if (result.status === "sampled") {
+        setHistory((prev) => ({ ...prev, [`${SSH_KEY_PREFIX}${host.id}`]: appendHistory(prev[`${SSH_KEY_PREFIX}${host.id}`], result.snapshot) }));
+      }
+      timers.set(host.id, window.setTimeout(() => void sample(host), SSH_RESOURCE_SAMPLE_INTERVAL_MS));
+    };
+    sshTargets.forEach((host) => void sample(host));
+    return () => {
+      cancelled = true;
+      timers.forEach((timer) => window.clearTimeout(timer));
+      setSshResults({});
+    };
+  }, [sshTargets]);
+
   const refreshAll = useCallback(() => {
     void refresh();
     for (const host of hosts) {
@@ -342,7 +391,12 @@ export function SystemResourcesDialog({
         if (alive.current) setPaired((prev) => ({ ...prev, [host.hostId]: result }));
       });
     }
-  }, [refresh, hosts]);
+    for (const host of sshTargets) {
+      void fetchSshResources(host).then((result) => {
+        if (alive.current) setSshResults((prev) => ({ ...prev, [host.id]: result }));
+      });
+    }
+  }, [refresh, hosts, sshTargets]);
 
   const toggle = useCallback((key: string) => {
     setCollapsed((prev) => {
@@ -400,7 +454,9 @@ export function SystemResourcesDialog({
           <Activity aria-hidden="true" className="size-4 text-muted-foreground" />
           <span className="text-sm font-semibold text-foreground">System resources</span>
           <span className="text-[11px] text-muted-foreground">
-            {1 + hosts.length} {hosts.length === 0 ? "machine" : "machines"}
+            {1 + hosts.length + sshTargets.length} {
+              hosts.length + sshTargets.length === 0 ? "machine" : "machines"
+            }
           </span>
           <span className="ml-auto flex items-center gap-1">
             <IconButton label="Refresh now" size="sm" onClick={refreshAll}>
@@ -454,6 +510,31 @@ export function SystemResourcesDialog({
                 title={label}
                 snapshot={result?.status === "sampled" ? result.snapshot : null}
                 history={history[host.hostId]}
+                notice={notice}
+                sort={sort}
+                collapsed={collapsed}
+                onToggle={toggle}
+                onKill={null}
+              />
+            );
+          })}
+          {sshTargets.map((host) => {
+            const machineKey = `${SSH_KEY_PREFIX}${host.id}`;
+            const result = sshResults[host.id];
+            const notice = !result
+              ? `Reading ${host.label}…`
+              : result.status === "unreachable"
+                ? `Couldn't sample ${host.label} over SSH; its resources are unknown.`
+                : result.status === "update-required"
+                  ? `Update Ferryx on ${host.label} to see its resources.`
+                  : null;
+            return (
+              <MachineSection
+                key={machineKey}
+                machineKey={machineKey}
+                title={host.label}
+                snapshot={result?.status === "sampled" ? result.snapshot : null}
+                history={history[machineKey]}
                 notice={notice}
                 sort={sort}
                 collapsed={collapsed}

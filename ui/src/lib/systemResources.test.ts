@@ -3,11 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   appendHistory,
   fetchPairedResources,
+  fetchSshResources,
   formatBytes,
   formatDuration,
   formatPercent,
   groupSessionsByWorktree,
   resourceHosts,
+  sshResourceHosts,
   RESOURCE_HISTORY_LIMIT,
   sessionsByCost,
   unavailableLabel,
@@ -17,6 +19,7 @@ import {
   type SessionResourceUsage,
 } from "./systemResources";
 import type { HostEndpoint } from "../state/remoteHostStore";
+import type { SshHost } from "./sshHosts";
 
 function session(overrides: Partial<SessionResourceUsage>): SessionResourceUsage {
   return {
@@ -116,6 +119,28 @@ describe("systemResources", () => {
     await expect(fetchPairedResources(host, answer({ hostId: "h1", result: { kind: "resources", data: { platform: 1 } } })))
       .resolves.toEqual({ status: "unreachable" });
     await expect(fetchPairedResources(host, answer(null))).resolves.toEqual({ status: "unreachable" });
+  });
+
+  it("keeps every dialable SSH host, sorted by label, and drops disabled or paired ones", () => {
+    const ssh = (id: string, label: string, disabled?: boolean): SshHost =>
+      ({ id, label, hostname: `${id}.ts.net`, source: "manual", authMethod: "agent", disabled });
+    expect(sshResourceHosts([ssh("b", "zulu"), ssh("a", "alpha", true), ssh("c", "mike")])
+      .map((entry) => entry.label)).toEqual(["mike", "zulu"]);
+    // One machine can be paired and reachable over SSH; it must not appear twice.
+    expect(sshResourceHosts([ssh("b", "maho-mac"), ssh("c", "mike")], ["  MAHO-MAC "])
+      .map((entry) => entry.label)).toEqual(["mike"]);
+    expect(sshResourceHosts([ssh("b", "maho-mac")], [""]).map((entry) => entry.label))
+      .toEqual(["maho-mac"]);
+  });
+
+  it("samples an SSH host through its own command and never counts a refusal as idle", async () => {
+    const call = vi.fn(async () => sample);
+    await expect(fetchSshResources({ id: "ssh-1" }, call)).resolves.toEqual({ status: "sampled", snapshot: sample });
+    expect(call).toHaveBeenCalledWith("cmd_ssh_host_resources", { hostId: "ssh-1" });
+    await expect(fetchSshResources({ id: "ssh-1" }, vi.fn(async () => { throw { code: "TRANSPORT" }; })))
+      .resolves.toEqual({ status: "unreachable" });
+    await expect(fetchSshResources({ id: "ssh-1" }, vi.fn(async () => ({ platform: 1 }))))
+      .resolves.toEqual({ status: "unreachable" });
   });
 
   it("lists only paired machine-grant hosts, by name", () => {

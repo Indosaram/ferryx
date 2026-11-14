@@ -13,6 +13,7 @@ pub mod operations;
 pub mod password;
 pub mod projects;
 pub mod remote_hooks;
+pub mod resources;
 pub mod runtime;
 pub mod state_bridge;
 #[cfg(unix)]

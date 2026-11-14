@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { HostEndpoint } from "../state/remoteHostStore";
+import type { SshHost } from "./sshHosts";
 
 export type SessionResourceUsage = {
   sessionId: string;
@@ -31,6 +32,9 @@ export type HostResourceSnapshot = {
 
 export const RESOURCE_SAMPLE_INTERVAL_MS = 2000;
 
+/** An SSH sample spawns a whole `ssh` child, so it runs far less often than a local one. */
+export const SSH_RESOURCE_SAMPLE_INTERVAL_MS = 15000;
+
 export async function fetchSystemResources(): Promise<HostResourceSnapshot> {
   return await invoke<HostResourceSnapshot>("cmd_system_resources");
 }
@@ -51,6 +55,42 @@ export function resourceHosts(hosts: Readonly<Record<string, HostEndpoint>>): Ho
   return Object.values(hosts)
     .filter((host) => host.authStatus === "paired" && host.grantScope === "machine" && host.generation)
     .sort((a, b) => (a.displayName ?? a.name).localeCompare(b.displayName ?? b.name));
+}
+
+/**
+ * An SSH host is sampled over its own connection instead of a paired gateway.
+ *
+ * A disabled host cannot be dialled, so it is left out rather than rendered as unreachable, and
+ * a host whose machine is already paired is excluded: one machine must not appear twice with its
+ * numbers split across two rows.
+ */
+export function sshResourceHosts(
+  hosts: readonly SshHost[],
+  pairedNames: Iterable<string> = [],
+): SshHost[] {
+  const taken = new Set<string>();
+  for (const name of pairedNames) {
+    const normalized = name.trim().toLowerCase();
+    if (normalized !== "") taken.add(normalized);
+  }
+  return hosts
+    .filter((host) => !host.disabled && !taken.has(host.label.trim().toLowerCase()))
+    .slice()
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** Routes to `cmd_ssh_host_resources`; a host that fails is unknown, never idle. */
+export async function fetchSshResources(
+  host: Pick<SshHost, "id">,
+  call: (command: "cmd_ssh_host_resources", args: { hostId: string }) => Promise<unknown>
+    = (command, args) => invoke<unknown>(command, args),
+): Promise<PairedResourceResult> {
+  try {
+    const raw = await call("cmd_ssh_host_resources", { hostId: host.id });
+    return isSnapshot(raw) ? { status: "sampled", snapshot: raw } : { status: "unreachable" };
+  } catch {
+    return { status: "unreachable" };
+  }
 }
 
 function errorCode(error: unknown): string | null {

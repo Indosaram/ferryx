@@ -4,14 +4,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HostResourceSnapshot } from "../lib/systemResources";
 import { remoteHostStore, type HostEndpoint } from "../state/remoteHostStore";
 
-const { fetchSystemResources, fetchPairedResources } = vi.hoisted(() => ({
+const { fetchSystemResources, fetchPairedResources, fetchSshResources, listSshHosts } = vi.hoisted(() => ({
   fetchSystemResources: vi.fn(),
   fetchPairedResources: vi.fn(),
+  fetchSshResources: vi.fn(),
+  listSshHosts: vi.fn(),
 }));
 
 vi.mock("../lib/systemResources", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/systemResources")>();
-  return { ...actual, fetchSystemResources, fetchPairedResources };
+  return { ...actual, fetchSystemResources, fetchPairedResources, fetchSshResources };
+});
+
+vi.mock("../lib/sshHosts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/sshHosts")>();
+  return { ...actual, listSshHosts };
 });
 
 import { SystemResourcesDialog } from "./SystemResourcesDialog";
@@ -54,6 +61,9 @@ const snapshot: HostResourceSnapshot = {
 beforeEach(() => {
   fetchSystemResources.mockReset();
   fetchPairedResources.mockReset();
+  fetchSshResources.mockReset();
+  listSshHosts.mockReset();
+  listSshHosts.mockResolvedValue([]);
   remoteHostStore.reset();
 });
 
@@ -260,6 +270,97 @@ describe("SystemResourcesDialog", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("shows SSH hosts beside paired machines and reports an unreachable one", async () => {
+    fetchSystemResources.mockResolvedValue(snapshot);
+    listSshHosts.mockResolvedValue([
+      { id: "ssh-mac", label: "maho-mac", hostname: "100.65.239.35", source: "manual", authMethod: "agent" },
+      { id: "ssh-off", label: "retired-box", hostname: "10.0.0.9", source: "config", authMethod: "key", disabled: true },
+    ]);
+    fetchSshResources.mockImplementation(async (host: { id: string }) => {
+      if (host.id === "ssh-mac") {
+        return {
+          status: "sampled",
+          snapshot: { ...snapshot, platform: "macos", cpuCount: 14, sessions: [
+            { sessionId: "ssh-session-1", pid: 91, worktreePath: "/Users/i552267/code/ferryx", cpuPercent: 7, residentBytes: 2048, processCount: 3 },
+          ] },
+        };
+      }
+      return { status: "unreachable" };
+    });
+    render(<SystemResourcesDialog onClose={() => undefined} />);
+
+    await waitFor(() => expect(screen.getAllByTestId("resource-machine")).toHaveLength(2));
+    const machines = screen.getAllByTestId("resource-machine");
+    expect(machines.map((machine) => machine.getAttribute("aria-label"))).toEqual(["This machine", "maho-mac"]);
+    expect(machines[1]).toHaveTextContent("macos · 14 cores");
+    expect(machines[1]).toHaveTextContent("ssh-session-1");
+    expect(fetchSshResources.mock.calls.map(([host]) => host.id)).toEqual(["ssh-mac"]);
+    expect(screen.getByText("2 machines")).toBeInTheDocument();
+  });
+
+  it("shows a machine once when it is both paired and an SSH host", async () => {
+    fetchSystemResources.mockResolvedValue(snapshot);
+    withHosts([pairedHost("h-maho-mac", "maho-mac")]);
+    listSshHosts.mockResolvedValue([
+      { id: "ssh-mac", label: "Maho-Mac", hostname: "100.65.239.35", source: "manual", authMethod: "agent" },
+    ]);
+    fetchPairedResources.mockResolvedValue({ status: "update-required" });
+    render(<SystemResourcesDialog onClose={() => undefined} />);
+
+    await waitFor(() => expect(screen.getAllByTestId("resource-machine")).toHaveLength(2));
+    const machines = screen.getAllByTestId("resource-machine");
+    expect(machines.map((machine) => machine.getAttribute("aria-label"))).toEqual(["This machine", "maho-mac"]);
+    expect(fetchSshResources).not.toHaveBeenCalled();
+    expect(screen.getByText("2 machines")).toBeInTheDocument();
+  });
+
+  it("samples each SSH host once and never re-arms itself on its own state", async () => {
+    // A memo keyed on the derived host array re-armed the sampling effect on every render, so the
+    // dialog spun without ever settling. A re-render must not call the sampler again: bounding the
+    // mock means a regression fails here instead of spinning the worker forever.
+    fetchSystemResources.mockResolvedValue(snapshot);
+    listSshHosts.mockResolvedValue([
+      { id: "ssh-mac", label: "maho-mac", hostname: "100.65.239.35", source: "manual", authMethod: "agent" },
+    ]);
+    fetchSshResources.mockImplementation(async () => {
+      if (fetchSshResources.mock.calls.length > 5) throw new Error("the SSH sampler re-armed itself");
+      return { status: "unreachable" };
+    });
+    render(<SystemResourcesDialog onClose={() => undefined} />);
+
+    await waitFor(() => expect(screen.getAllByTestId("resource-machine")).toHaveLength(2));
+    expect(fetchSshResources).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /Collapse maho-mac/ }));
+    expect(fetchSshResources).toHaveBeenCalledTimes(1);
+  });
+
+  it("says an SSH host it could not sample is unknown rather than idle", async () => {
+    fetchSystemResources.mockResolvedValue(snapshot);
+    listSshHosts.mockResolvedValue([
+      { id: "ssh-mac", label: "maho-mac", hostname: "100.65.239.35", source: "manual", authMethod: "agent" },
+    ]);
+    fetchSshResources.mockResolvedValue({ status: "unreachable" });
+    render(<SystemResourcesDialog onClose={() => undefined} />);
+
+    await waitFor(() => expect(screen.getAllByTestId("resource-machine")).toHaveLength(2));
+    const machine = screen.getAllByTestId("resource-machine")[1]!;
+    expect(machine).toHaveAttribute("aria-label", "maho-mac");
+    expect(machine).toHaveTextContent("Couldn't sample maho-mac over SSH; its resources are unknown.");
+    expect(machine).not.toHaveTextContent("No terminal sessions are running on this machine.");
+    expect(machine).not.toHaveTextContent("%");
+  });
+
+  it("keeps the pane usable when the SSH host store cannot be read", async () => {
+    fetchSystemResources.mockResolvedValue(snapshot);
+    listSshHosts.mockRejectedValue({ code: "IO_ERROR", message: "no store" });
+    render(<SystemResourcesDialog onClose={() => undefined} />);
+
+    await screen.findAllByTestId("resource-session-row");
+    expect(screen.getAllByTestId("resource-machine")).toHaveLength(1);
+    expect(fetchSshResources).not.toHaveBeenCalled();
   });
 
   it("closes on Escape and on a backdrop press, but not on a press inside the panel", async () => {

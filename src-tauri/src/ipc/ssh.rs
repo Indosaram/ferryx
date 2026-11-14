@@ -368,6 +368,22 @@ pub async fn cmd_ssh_list_hosts<R: Runtime>(app: AppHandle<R>) -> Result<Vec<Ssh
     run_blocking(move || Ok(load_store(&path)?.hosts)).await
 }
 
+/// One resource sample from an SSH host named by its store id.
+///
+/// The host id is resolved from the daemon-owned store rather than trusted from the caller, so
+/// this reads a machine the user actually configured and never an arbitrary address.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn cmd_ssh_host_resources<R: Runtime>(
+    app: AppHandle<R>,
+    host_id: String,
+) -> Result<crate::daemon::resource_usage::HostResourceSnapshot, IpcError> {
+    let path = get_ssh_store_path(&app)?;
+    let host = run_blocking(move || crate::ssh::projects::enabled_host(&path, &host_id)).await?;
+    let environment = crate::ssh::runtime::detect(&host).await?;
+    crate::ssh::resources::sample(&host, &environment).await
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_ssh_import_config<R: Runtime>(
