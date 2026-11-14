@@ -3807,6 +3807,8 @@ pub fn run_daemon_headless(
     crate::daemon::supervisor_linux::capture_notify_socket();
     #[cfg(target_os = "linux")]
     let supervisor_unavailable = crate::daemon::supervisor_linux::availability().clone();
+    // A malformed STUN list is refused by name instead of silently using the default servers.
+    crate::paired_host::direct_connect::configured_stun_servers()?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

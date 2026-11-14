@@ -34,7 +34,8 @@ mod host_task;
 
 #[derive(Debug, Clone)]
 pub struct DirectHostConfig {
-    /// `host:port` STUN servers (non-443), resolved only after the offer verifies.
+    /// `host:port` STUN servers (non-443), resolved only after the offer verifies. Empty
+    /// (`FERRYX_STUN_SERVERS=off`) disables the direct path: offers get no direct answer.
     pub stun_servers: Vec<String>,
     /// Budget for DNS + STUN before the answer is sent.
     pub stun_deadline: Duration,
@@ -54,7 +55,8 @@ pub struct DirectHostConfig {
 impl Default for DirectHostConfig {
     fn default() -> Self {
         Self {
-            stun_servers: vec!["stun.l.google.com:19302".into(), "stun.cloudflare.com:3478".into()],
+            stun_servers: crate::paired_host::direct_connect::configured_stun_servers()
+                .unwrap_or_default(),
             stun_deadline: Duration::from_secs(3),
             connect_deadline: Duration::from_secs(3),
             max_sessions: 8,
@@ -245,6 +247,10 @@ async fn negotiate(
     manager: &DirectHostManager,
 ) -> Result<DirectAnswerEnvelope, Response> {
     authorize(&state, headers).await?;
+    // STUN disabled on this host: answer "no direct" before any parsing, DNS or UDP work.
+    if manager.config.stun_servers.is_empty() {
+        return Err(machine_error(StatusCode::NOT_FOUND, "DIRECT_DISABLED"));
+    }
     let bad_request = || machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST");
     if body.len() > MAX_DIRECT_BODY_BYTES {
         return Err(machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"));

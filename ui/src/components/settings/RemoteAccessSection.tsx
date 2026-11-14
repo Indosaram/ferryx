@@ -375,6 +375,32 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
         ) : null}
       </div>
 
+      <div
+        role="note"
+        aria-label="Security caveats"
+        data-testid="remote-access-caveats"
+        className="mt-6 space-y-2 rounded-md border border-border p-3 text-[11px] text-muted-foreground"
+      >
+        <div className="flex items-center gap-1.5 text-[12px] font-semibold text-foreground">
+          <AlertTriangle className="size-3.5 shrink-0" />
+          Security caveats
+        </div>
+        <ul className="list-disc space-y-1 pl-4">
+          <li data-testid="caveat-machine-grant">
+            A machine Control grant is code execution: a paired machine or desktop can browse raw filesystem paths and run programs as this user. Only pair machines and desktops you control.
+          </li>
+          <li data-testid="caveat-auto-trust">
+            Automatic direct trust is on by default: machines your account attests are trusted for direct connections. Turn it off above or set <code className="font-mono">FERRYX_DIRECT_AUTO_TRUST=0</code>.
+          </li>
+          <li data-testid="caveat-lan-http">
+            Local network mode is plain HTTP with control enabled; the LAN listener only starts after an explicit insecure opt-in. Use it only on a network you trust, or put a TLS proxy in front of it.
+          </li>
+          <li data-testid="caveat-stun">
+            Direct connections ask public STUN servers (stun.l.google.com, stun.cloudflare.com) for this machine&apos;s public address. Set <code className="font-mono">FERRYX_STUN_SERVERS=off</code> to stop these lookups and stay on the relay, or list your own host:port servers.
+          </li>
+        </ul>
+      </div>
+
       <div className="mt-8 space-y-3">
         <h3 className="text-[12px] font-semibold">Authorized Devices</h3>
         {devicesError ? <p role="alert">Authorized devices unavailable. Reopen this section to retry.</p> : null}

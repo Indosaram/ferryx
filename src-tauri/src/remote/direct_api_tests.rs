@@ -158,6 +158,34 @@ async fn unknown_protocol_version_gets_no_direct() {
 }
 
 #[tokio::test]
+async fn stun_disabled_host_answers_no_direct_before_any_udp() {
+    let fx = fixture(true);
+    let headers = bearer(&fx.state, DeviceAccessScope::Machine);
+    let body = offer_body(&client_key(), &fx.host_id, 1);
+    let manager = DirectHostManager::new(DirectHostConfig {
+        now_ms: fixed_now,
+        stun_servers: Vec::new(),
+        ..DirectHostConfig::default()
+    });
+    let response = tokio::time::timeout(
+        LIMIT,
+        handle_offer(Arc::clone(&fx.state), &headers, &body, &manager),
+    )
+    .await
+    .expect("bounded negotiation");
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    assert_eq!(
+        (status, manager.udp_binds(), manager.active_tasks()),
+        (404, 0, 0)
+    );
+    assert!(text.contains("DIRECT_DISABLED"), "{text}");
+}
+
+#[tokio::test]
 async fn verified_offer_without_local_gateway_binds_no_udp() {
     let fx = fixture(true);
     let headers = bearer(&fx.state, DeviceAccessScope::Machine);

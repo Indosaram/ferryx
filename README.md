@@ -106,6 +106,21 @@ machine enrollment, and the separate desktop account and gateway settings.
 - Outbound encrypted relay tunnel: no inbound SSH, open ports, or public IP needed
 - Native terminal split-panes and remote Git worktrees run directly on the machine
 
+Before you pair, know what you are turning on (details in [SECURITY.md](SECURITY.md) and the
+[privacy declaration](site/src/content/docs/privacy.md)):
+
+- A machine Control grant is code execution: the paired desktop can browse raw filesystem paths
+  and run programs as the daemon's OS user. Only pair machines and desktops you control.
+- Automatic direct trust is on by default: machines your account attests are trusted for the
+  direct path. Pin keys manually (`ferryx direct-trust`) or set `FERRYX_DIRECT_AUTO_TRUST=0`.
+- Local network mode is plain HTTP and WebSockets with control enabled; the LAN listener only
+  starts after an explicit insecure opt-in. Use it only on a network you trust or behind a
+  TLS-terminating proxy.
+- The direct path asks public STUN servers (`stun.l.google.com:19302`,
+  `stun.cloudflare.com:3478`) for each machine's public address. Set `FERRYX_STUN_SERVERS=off`
+  on a machine to stop its lookups and keep its sessions on the relay, or list your own
+  `host:port` servers (IPv4 address or hostname).
+
 ```bash
 # 1. One-line install ferryx-cli on the remote machine (Linux x64, macOS)
 curl -fsSL https://relay.ferryx.dev/install.sh | bash

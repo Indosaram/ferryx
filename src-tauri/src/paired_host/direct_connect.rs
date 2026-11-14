@@ -32,6 +32,67 @@ pub const DIRECT_ATTEMPT_BUDGET: Duration = Duration::from_secs(3);
 const PUNCH_BUDGET: Duration = Duration::from_millis(1200);
 const QUIC_SERVER_NAME: &str = "ferryx-direct";
 pub const DEFAULT_STUN_SERVERS: [&str; 2] = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
+/// Comma- or space-separated `host:port` STUN servers (IPv4 address or DNS name; the direct path
+/// is IPv4-only) read by client and host. Unset means [`DEFAULT_STUN_SERVERS`]; empty, `off`,
+/// `none` or `0` disables STUN, the direct path with it, and keeps sessions on the relay. A
+/// malformed value, including a bracketed IPv6 host, is refused at daemon startup.
+pub const STUN_SERVERS_ENV: &str = "FERRYX_STUN_SERVERS";
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum StunConfigError {
+    #[error("invalid {STUN_SERVERS_ENV} entry {0:?}: expected host:port")]
+    InvalidEntry(String),
+}
+
+/// Parses a [`STUN_SERVERS_ENV`] value; `None` (unset) yields the defaults.
+pub fn stun_servers_from(value: Option<&str>) -> Result<Vec<String>, StunConfigError> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_STUN_SERVERS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect());
+    };
+    if matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "off" | "none" | "0"
+    ) {
+        return Ok(Vec::new());
+    }
+    value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let valid = entry.rsplit_once(':').is_some_and(|(host, port)| {
+                host.split('.').all(|label| {
+                    !label.is_empty()
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                }) && port.parse::<u16>().is_ok_and(|port| port != 0)
+            });
+            if valid {
+                Ok(entry.to_owned())
+            } else {
+                Err(StunConfigError::InvalidEntry(entry.to_owned()))
+            }
+        })
+        .collect()
+}
+
+/// This process's STUN servers from [`STUN_SERVERS_ENV`]. Runtime callers treat an error as an
+/// empty list (no STUN, relay only); daemon startup refuses it.
+pub fn configured_stun_servers() -> Result<Vec<String>, StunConfigError> {
+    let raw = std::env::var_os(STUN_SERVERS_ENV);
+    let value = raw
+        .as_deref()
+        .map(|value| {
+            value
+                .to_str()
+                .ok_or_else(|| StunConfigError::InvalidEntry(value.to_string_lossy().into_owned()))
+        })
+        .transpose()?;
+    stun_servers_from(value)
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DirectConnectError {
@@ -59,6 +120,8 @@ pub struct DirectAttempt {
     pub host_machine_id: String,
     pub signing_key: SigningKey,
     pub host_key: VerifyingKey,
+    /// `host:port` STUN servers; empty disables the direct path for this attempt.
+    pub stun_servers: Vec<String>,
 }
 
 struct Worker {
@@ -93,6 +156,10 @@ pub fn ensure_direct<C>(
 ) where
     C: Future<Output = ()> + Send + 'static,
 {
+    if attempt.stun_servers.is_empty() {
+        tracing::debug!(host_id = %attempt.host_id, "STUN disabled; staying on relay");
+        return;
+    }
     let mut workers = WORKERS.lock();
     match workers.get(&attempt.host_id) {
         Some(w) if w.generation >= generation && !w.handle.is_finished() => return,
@@ -193,10 +260,10 @@ pub(crate) fn offer_url(base_url: &str) -> Result<Url, DirectConnectError> {
     Ok(url)
 }
 
-async fn stun_servers() -> Vec<SocketAddr> {
+async fn stun_servers(names: &[String]) -> Vec<SocketAddr> {
     let mut out = Vec::new();
-    for name in DEFAULT_STUN_SERVERS {
-        if let Ok(addrs) = tokio::net::lookup_host(name).await {
+    for name in names {
+        if let Ok(addrs) = tokio::net::lookup_host(name.as_str()).await {
             out.extend(addrs.filter(SocketAddr::is_ipv4));
         }
     }
@@ -208,9 +275,10 @@ async fn negotiate(
     attempt: &DirectAttempt,
 ) -> Result<(String, quinn::Connection, DirectGuard), DirectConnectError> {
     let socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await.map_err(transport)?;
-    let public_endpoint = discover_public_endpoint(&socket, &stun_servers().await)
-        .await
-        .map_err(transport)?;
+    let public_endpoint =
+        discover_public_endpoint(&socket, &stun_servers(&attempt.stun_servers).await)
+            .await
+            .map_err(transport)?;
     let cert = generate_ephemeral_cert().map_err(transport)?;
     let punch_nonce: [u8; 32] = rand::random();
     let envelope = DirectOfferEnvelope {
