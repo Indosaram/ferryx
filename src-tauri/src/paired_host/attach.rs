@@ -8,6 +8,9 @@ use crate::paired_host::path_select::{
 use crate::remote::attach_client::{attach_opaque_session, load_or_generate_client_attach_identity};
 use crate::remote::attach_crypto::{SecureStream, WebSocketByteStream};
 
+type AttachSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
 pub type RelayAttachedStream =
     SecureStream<WebSocketByteStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>;
 
@@ -28,6 +31,20 @@ fn attach_ws_url(base_origin: &str, session_id: &str, is_relay: bool) -> String 
     } else {
         format!("{trimmed}/tunnel/opaque/{session_id}")
     }
+}
+
+/// Relay paths honor the configured HTTP proxy; direct paths (LAN, Tailscale, SSH forward)
+/// never go through one.
+async fn connect_attach_socket(
+    url: String,
+    is_relay: bool,
+) -> Result<AttachSocket, tokio_tungstenite::tungstenite::Error> {
+    let (stream, _) = if is_relay {
+        crate::remote::relay_client::proxy::connect_websocket(url).await?
+    } else {
+        tokio_tungstenite::connect_async(url).await?
+    };
+    Ok(stream)
 }
 
 pub struct AttachCandidates<'a> {
@@ -53,7 +70,7 @@ pub async fn attach_paired_session_with_candidates(
             .iter()
             .any(|c| c.base_origin == existing && c.path != AttachPath::Relay);
         let url = attach_ws_url(&existing, session_id, is_relay);
-        let (stream, _) = tokio_tungstenite::connect_async(url).await?;
+        let stream = connect_attach_socket(url, is_relay).await?;
         let attached = attach_opaque_session(
             stream,
             &identity,
@@ -88,9 +105,7 @@ pub async fn attach_paired_session_with_candidates(
                     let is_relay = candidate.path == AttachPath::Relay;
                     let url = attach_ws_url(&candidate.base_origin, &s, is_relay);
                     let start = std::time::Instant::now();
-                    let (stream, _) = tokio_tungstenite::connect_async(url)
-                        .await
-                        .map_err(|_| ())?;
+                    let stream = connect_attach_socket(url, is_relay).await.map_err(|_| ())?;
                     let attached = attach_opaque_session(
                         stream,
                         &id_clone,
@@ -119,7 +134,7 @@ pub async fn attach_paired_session_with_candidates(
         .any(|c| c.base_origin == chosen_origin && c.path != AttachPath::Relay);
     let url = attach_ws_url(&chosen_origin, session_id, is_relay);
 
-    let (stream, _) = tokio_tungstenite::connect_async(url).await?;
+    let stream = connect_attach_socket(url, is_relay).await?;
     let attached = attach_opaque_session(
         stream,
         &identity,

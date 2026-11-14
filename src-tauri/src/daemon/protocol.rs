@@ -481,6 +481,13 @@ pub struct DaemonRemoteStatus {
     pub bound_address: Option<String>,
     #[serde(default)]
     pub relay_url: Option<String>,
+    /// The relay URL the daemon resolved and dials (saved relayUrl, `FERRYX_RELAY_URL`, the
+    /// enrollment relay origin or the default, in that order), and which one supplied it
+    /// (`config`, `env`, `enrollment`, `default`). Absent when no relay runs, or from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_relay_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_relay_url_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2310,6 +2317,8 @@ mod tests {
                 is_running: true,
                 bound_address: Some("0.0.0.0:43821".to_string()),
                 relay_url: None,
+                resolved_relay_url: None,
+                resolved_relay_url_source: None,
                 machine_id: None,
                 relay_connected: None,
                 control_channel_connected: None,

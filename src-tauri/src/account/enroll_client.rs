@@ -81,9 +81,29 @@ pub fn enrollment_record_path() -> Option<PathBuf> {
 }
 
 pub fn load_enrollment_record() -> Option<AccountEnrollmentRecord> {
-    let path = enrollment_record_path()?;
+    load_enrollment_record_at(&enrollment_record_path()?)
+}
+
+/// Reads the record at `path`. A relay origin on the retired relay host is migrated to the
+/// current relay and written back once, with a deprecation warning.
+fn load_enrollment_record_at(path: &std::path::Path) -> Option<AccountEnrollmentRecord> {
     let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let mut record: AccountEnrollmentRecord = serde_json::from_slice(&bytes).ok()?;
+    if let Some(migrated) =
+        crate::remote::relay_client::migrate_retired_relay_origin(&record.relay_origin)
+    {
+        record.relay_origin = migrated;
+        match write_private_json(path, &record) {
+            Ok(()) => crate::remote::relay_client::warn_retired_relay_migrated(
+                &path.display().to_string(),
+            ),
+            Err(error) => tracing::warn!(
+                "could not save migrated relay origin to {}: {error}",
+                path.display()
+            ),
+        }
+    }
+    Some(record)
 }
 
 pub fn platform_name(platform: Platform) -> &'static str {
@@ -171,20 +191,17 @@ pub async fn enroll_machine_named(
     )
     .map_err(|error| EnrollError::local("ACCOUNT_SIGN_FAILED", error))?;
 
-    let request = AccountEnrollRequest {
-        api_version: 1,
-        enrollment_code: enrollment_code.to_string(),
-        machine_id: identity.machine_id.clone(),
-        display_name: requested_display_name(display_name)
-            .unwrap_or_else(|| identity.display_name.clone()),
-        public_key: identity.public_key.clone(),
-        attach_public_key: attach.public_key.clone(),
-        platform: current_platform(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
+    let request = enroll_request(
+        &identity,
+        &attach.public_key,
+        enrollment_code,
+        display_name,
         nonce,
         timestamp,
         signature,
-    };
+        crate::remote::state::remote_config_path().as_deref(),
+        std::env::var(crate::remote::relay_client::RELAY_FALLBACK_URLS_ENV).ok().as_deref(),
+    );
 
     let enroll_url = format!("{origin}/api/account/v1/machines/enroll");
     let response = client
@@ -223,6 +240,61 @@ pub async fn enroll_machine_named(
     }
 
     Ok(record)
+}
+
+/// The enrollment request body. It publishes the fallback relay origins this daemon is configured
+/// with ([`configured_relay_fallback_origins_in`]) so the machine record can carry them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enroll_request(
+    identity: &crate::remote::auth::MachineIdentity,
+    attach_public_key: &str,
+    enrollment_code: &str,
+    display_name: Option<&str>,
+    nonce: String,
+    timestamp: u64,
+    signature: String,
+    remote_config_path: Option<&std::path::Path>,
+    fallback_env: Option<&str>,
+) -> AccountEnrollRequest {
+    AccountEnrollRequest {
+        api_version: 1,
+        enrollment_code: enrollment_code.to_string(),
+        machine_id: identity.machine_id.clone(),
+        display_name: requested_display_name(display_name)
+            .unwrap_or_else(|| identity.display_name.clone()),
+        public_key: identity.public_key.clone(),
+        attach_public_key: attach_public_key.to_string(),
+        platform: current_platform(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        nonce,
+        timestamp,
+        signature,
+        relay_fallback_origins: configured_relay_fallback_origins_in(remote_config_path, fallback_env),
+    }
+}
+
+/// The fallback relay origins this machine's daemon fails over to, published on enrollment: the
+/// saved `relayFallbackUrls` in `remote_config_path`, then `fallback_env`
+/// (`FERRYX_RELAY_FALLBACK_URLS`), each validated (insecure entries dropped with a warning),
+/// deduplicated in order. The account service applies the full origin policy on receipt.
+pub fn configured_relay_fallback_origins_in(
+    remote_config_path: Option<&std::path::Path>,
+    fallback_env: Option<&str>,
+) -> Vec<String> {
+    let saved = remote_config_path
+        .and_then(crate::remote::state::load_persisted_config_with_fallbacks)
+        .map(|(_, fallbacks)| fallbacks)
+        .unwrap_or_default();
+    let mut origins: Vec<String> = Vec::new();
+    for origin in crate::remote::relay_client::valid_fallback_relay_urls(saved)
+        .into_iter()
+        .chain(crate::remote::relay_client::fallback_relay_urls_from(fallback_env))
+    {
+        if !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    origins
 }
 
 pub async fn request_machine_grant(
@@ -496,6 +568,42 @@ mod tests {
         enrollment_code_hash, verify_account_enrollment, AuthManager, DevicePermission,
     };
 
+    /// D26-4 join (daemon config -> enroll body): the enrollment request publishes the saved
+    /// `relayFallbackUrls`, then `FERRYX_RELAY_FALLBACK_URLS`, in order and deduplicated.
+    #[test]
+    fn the_enroll_body_publishes_the_configured_fallback_origins() {
+        let dir = tempfile::tempdir().expect("temp");
+        let config = dir.path().join("remote-config.json");
+        std::fs::write(
+            &config,
+            r#"{"mode":"relay","port":43821,"allowControl":true,
+                "relayFallbackUrls":["https://saved-b.example.com","https://saved-a.example.com"]}"#,
+        )
+        .unwrap();
+        let identity = load_or_generate_machine_identity(dir.path()).expect("identity");
+        let request = enroll_request(
+            &identity,
+            "attach-key",
+            "code",
+            None,
+            "nonce".into(),
+            1,
+            "sig".into(),
+            Some(&config),
+            Some("https://env.example.com,https://saved-a.example.com"),
+        );
+        assert_eq!(
+            request.relay_fallback_origins,
+            [
+                "https://saved-b.example.com",
+                "https://saved-a.example.com",
+                "https://env.example.com"
+            ]
+        );
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(body["relayFallbackOrigins"][2], "https://env.example.com");
+    }
+
     #[test]
     fn enrollment_leaves_existing_device_tokens_alone() {
         let dir = tempfile::tempdir().expect("temp");
@@ -583,6 +691,33 @@ mod tests {
         assert_eq!(round_tripped, record);
         let identity_path = dir.path().join("identity.json");
         assert!(!identity_path.exists(), "enrollment never creates the machine identity");
+    }
+
+    #[test]
+    fn retired_relay_origin_in_enrollment_record_is_migrated_and_written_back() {
+        let dir = tempfile::tempdir().expect("temp");
+        let path = dir.path().join(ACCOUNT_ENROLLMENT_FILE);
+        let mut record = AccountEnrollmentRecord {
+            account_id: "acct-1".into(),
+            machine_record_id: "machine-record-1".into(),
+            account_origin: "https://account.example".into(),
+            relay_origin: "https://relay.checka.cc".into(),
+            enrollment_epoch: "2".into(),
+            enrolled_at: 1,
+        };
+        write_private_json(&path, &record).expect("write");
+        let loaded = load_enrollment_record_at(&path).expect("load");
+        assert_eq!(loaded.relay_origin, "https://relay.ferryx.dev");
+        let on_disk: AccountEnrollmentRecord =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("parse");
+        assert_eq!(on_disk, loaded);
+        let before = std::fs::read(&path).expect("read");
+        assert_eq!(load_enrollment_record_at(&path).expect("reload"), loaded);
+        assert_eq!(std::fs::read(&path).expect("read"), before, "migration is idempotent");
+
+        record.relay_origin = "https://relay.checka.cc.example".into();
+        write_private_json(&path, &record).expect("write");
+        assert_eq!(load_enrollment_record_at(&path).expect("load"), record, "look-alike host untouched");
     }
 
     #[test]

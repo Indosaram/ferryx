@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavigation";
-import { DEFAULT_MACHINE_LABEL, nativePairedHostCommands, pairedHostInventory } from "../../lib/pairedHostInventory";
+import { buildRedeemGrantRequest, DEFAULT_MACHINE_LABEL, nativePairedHostCommands, pairedHostInventory } from "../../lib/pairedHostInventory";
 import type { PairedHostContext } from "../../lib/pairedDaemonProject";
 import { extractIpcErrorMessage, resetSshHostsCache, useSshHosts, type SshHost } from "../../lib/sshHosts";
 import { isTailscaleProvisioned, syncTailscaleMachines, useTailscaleDiscovery, useTailscaleTargetsByHost } from "../../lib/tailscaleDiscovery";
@@ -402,15 +402,9 @@ export function RemoteSection({
           clientPublicKey,
           { grantScope: "machine" },
         );
-        await nativePairedHostCommands.redeemGrant({
-          relayOrigin: grant.relayOrigin || accountOrigin,
-          machineId: machine.machineId,
-          displayLabel: machine.displayName,
-          pairingToken: grant.pairingToken,
-          machineAttachPublicKey: grant.machineAttachPublicKey,
-          enrollmentEpoch: String(machine.enrollmentEpoch),
-          accountSessionToken: accountToken,
-        });
+        await nativePairedHostCommands.redeemGrant(
+          buildRedeemGrantRequest(grant, machine, accountOrigin, accountToken, capabilities),
+        );
         await refreshAccountMachines(
           accountToken,
           accountOrigin,

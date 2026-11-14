@@ -252,6 +252,10 @@ pub struct RedeemGrantRequest {
     pub machine_attach_public_key: String,
     pub enrollment_epoch: String,
     pub account_session_token: Secret,
+    /// The machine record's fallback relay origins (`relayFallbackOrigins` of the grant), tried
+    /// in order after `relay_origin`. Insecure entries are dropped with a warning.
+    #[serde(default)]
+    pub relay_fallback_origins: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -357,8 +361,11 @@ impl PairedHostService {
                 #[cfg(test)]
                 loopback_http: false,
             })),
+            // Only ever talks to the paired relay origin (pair exchange, `/host/{machine}`
+            // capabilities, E2E session allocation), so it honors the relay proxy policy. The
+            // direct path to a host goes through `MachineClient`'s unproxied client.
             http: reqwest::Client::builder()
-                .no_proxy()
+                .proxy(crate::remote::relay_client::proxy::reqwest_proxy())
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(12))
@@ -572,6 +579,28 @@ impl PairedHostService {
             return inventory::normalize_test_loopback_origin(value).map_err(Into::into);
         }
         inventory::normalize_origin(value).map_err(Into::into)
+    }
+    /// What a redeemed grant stores for the host: the machine attach key and epoch, plus the
+    /// grant's fallback relay origins under the host relay origin's policy. They are kept for
+    /// device-token sessions only; redemption itself dials `origin` alone.
+    pub(crate) fn redeem_host_attach(
+        &self,
+        request: &RedeemGrantRequest,
+        origin: &str,
+    ) -> inventory::HostAttach {
+        #[cfg(test)]
+        let loopback_http = self.loopback_http || crate::remote::relay_client::is_insecure_relay_allowed();
+        #[cfg(not(test))]
+        let loopback_http = crate::remote::relay_client::is_insecure_relay_allowed();
+        inventory::HostAttach {
+            machine_attach_public_key: request.machine_attach_public_key.clone(),
+            enrollment_epoch: request.enrollment_epoch.clone(),
+            relay_fallback_origins: inventory::normalize_fallback_origins_policy(
+                &request.relay_fallback_origins,
+                origin,
+                loopback_http,
+            ),
+        }
     }
     pub async fn list(&self) -> Result<Vec<HostView>> {
         self.run(|store| Ok(store.list())).await
@@ -906,10 +935,7 @@ impl PairedHostService {
         {
             return Err(ServiceError::invalid());
         }
-        let attach = inventory::HostAttach {
-            machine_attach_public_key: request.machine_attach_public_key,
-            enrollment_epoch: request.enrollment_epoch,
-        };
+        let attach = self.redeem_host_attach(&request, &origin);
         if !attach.is_valid() {
             return Err(ServiceError::invalid());
         }
@@ -922,6 +948,8 @@ impl PairedHostService {
             &request.account_session_token.0,
             &request.machine_id,
             &attach,
+            // The account session must never reach an unauthenticated fallback origin.
+            super::secure_http::RelayFallback::PrimaryOnly,
         )
         .await
         .map_err(client_error)?;
@@ -972,6 +1000,7 @@ impl PairedHostService {
                 &exchanged.token.0,
                 &request.machine_id,
                 &attach,
+                super::secure_http::RelayFallback::DeviceToken,
             )
             .await
             .map_err(client_error)?;

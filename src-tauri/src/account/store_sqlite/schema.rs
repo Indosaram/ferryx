@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Schema version written by the original table set, before the onboarding migration.
 const BASE_SCHEMA_VERSION: u32 = 1;
@@ -245,6 +245,9 @@ pub fn init_schema(conn: &mut Connection) -> Result<(), String> {
     if user_version < 2 {
         migrate_to_v2(conn)?;
     }
+    if user_version < 3 {
+        super::migration::migrate_to_v3(conn)?;
+    }
 
     Ok(())
 }
@@ -292,8 +295,8 @@ fn migrate_to_v2(conn: &mut Connection) -> Result<(), String> {
         "#,
     )
     .map_err(|error| format!("Failed to apply v2 onboarding migration: {error}"))?;
-    tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
-        .map_err(|error| format!("Failed to set user_version to {CURRENT_SCHEMA_VERSION}: {error}"))?;
+    tx.pragma_update(None, "user_version", 2)
+        .map_err(|error| format!("Failed to set user_version to 2: {error}"))?;
     tx.commit()
         .map_err(|error| format!("Failed to commit v2 onboarding migration: {error}"))
 }

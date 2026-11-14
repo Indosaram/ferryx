@@ -81,6 +81,7 @@ fn seed_owner(fx: &Fixture) -> (String, String) {
                     public_key: "pk".into(),
                     attach_public_key: "apk".into(),
                     relay_origin: "https://relay.test".into(),
+                    relay_fallback_origins: Vec::new(),
                     platform: "linux".into(),
                     enrollment_epoch: 1,
                     enrolled_at: 1,

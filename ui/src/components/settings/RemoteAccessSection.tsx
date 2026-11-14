@@ -265,7 +265,7 @@ export function RemoteAccessSection({ detailsOnly = false, hideTitle = false }: 
   if (detailsOnly) return <section aria-label="Gateway diagnostics" className="space-y-2 text-sm">
     {statusError ? <p role="alert">Gateway status unavailable.</p> : null}
     <dl><dt>Configured mode</dt><dd>{status?.mode ?? "Unavailable"}</dd>
-      <dt>Effective relay</dt><dd>{status?.relayUrl ?? "None"}</dd>
+      <dt>Effective relay</dt><dd data-testid="effective-relay">{status?.resolvedRelayUrl ?? status?.relayUrl ?? "None"}{status?.resolvedRelayUrl && status.resolvedRelayUrlSource ? ` (${status.resolvedRelayUrlSource})` : ""}</dd>
       <dt>Local endpoint / port</dt><dd>{status?.boundAddress ?? status?.localIp ?? "Unavailable"} / {status?.port ?? "Unavailable"}</dd>
       <dt>Listener</dt><dd>{status?.enabled ? "Running" : "Stopped"}</dd>
       <dt>Relay / control channel</dt><dd>{String(status?.relayConnected ?? false)} / {String(status?.controlChannelConnected ?? false)}</dd></dl>

@@ -6742,6 +6742,8 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::RemoteGetStatus) => {
                     let config = self.remote_state.config.read().clone();
+                    // The relay the daemon resolved, or the fallback it failed over to.
+                    let resolved_relay = self.remote_state.active_relay();
                     let is_running = *self.remote_state.is_running.read();
                     let bound_address = self.remote_state.bound_address.read().clone();
                     let identity = crate::remote::auth::canonical_identity_dir()
@@ -6773,6 +6775,9 @@ impl DaemonServer {
                             is_running,
                             bound_address,
                             relay_url: config.relay_url,
+                            resolved_relay_url: resolved_relay.as_ref().map(|(url, _)| url.clone()),
+                            resolved_relay_url_source: resolved_relay
+                                .map(|(_, source)| source.code().to_string()),
                             machine_id,
                             relay_connected,
                             control_channel_connected,
@@ -7068,6 +7073,8 @@ impl DaemonServer {
                         capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY.into());
                         capabilities.push(crate::paired_host::route_view::PAIRED_HOST_ROUTE_CAPABILITY.into());
                         capabilities.push("pairedHostE2EV1".into());
+                        // RedeemGrantRequest accepts relayFallbackOrigins (older daemons reject it).
+                        capabilities.push("pairedHostRelayFallbackV1".into());
                     }
                     capabilities.push(crate::paired_host::file_read::PAIRED_FILE_READ_PROXY_CAPABILITY.into());
                     #[cfg(unix)]
@@ -7142,13 +7149,8 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::RemoteAllocateAttachSession) => {
                     let client = self.remote_state.relay_client.read().clone();
-                    let relay_origin = self
-                        .remote_state
-                        .config
-                        .read()
-                        .relay_url
-                        .clone()
-                        .unwrap_or_default();
+                    let config = self.remote_state.config.read().clone();
+                    let relay_origin = crate::remote::state::resolve_relay_url(&config).0;
                     match client {
                         None => DaemonResponse::Error {
                             message: "relay mode is not running".into(),
@@ -7212,20 +7214,14 @@ impl DaemonServer {
                     if self.remote_state.relay_pairing.read().is_none() {
                         let mode = self.remote_state.config.read().mode;
                         if mode == RemoteNetworkMode::Off {
-                            let relay_url = std::env::var("FERRYX_RELAY_URL")
-                                .ok()
-                                .filter(|s| !s.trim().is_empty())
-                                .or_else(|| self.remote_state.config.read().relay_url.clone())
-                                .or_else(|| Some(crate::remote::relay_server::DEFAULT_RELAY_URL.to_string()));
-                            if let Some(relay_url) = relay_url {
-                                let mut config = self.remote_state.config.read().clone();
-                                config.mode = RemoteNetworkMode::Relay;
-                                config.relay_url = Some(relay_url);
-                                if let Err(e) = self.handle_remote_configure(config).await {
-                                    config_error = Some(e);
-                                } else {
-                                    auto_configured = true;
-                                }
+                            let mut config = self.remote_state.config.read().clone();
+                            let (relay_url, _) = crate::remote::state::resolve_relay_url(&config);
+                            config.mode = RemoteNetworkMode::Relay;
+                            config.relay_url = Some(relay_url);
+                            if let Err(e) = self.handle_remote_configure(config).await {
+                                config_error = Some(e);
+                            } else {
+                                auto_configured = true;
                             }
                         }
                     }
@@ -7256,20 +7252,15 @@ impl DaemonServer {
                                     .await
                                 {
                                     Ok(info) => {
-                                        let effective_relay_url = self
-                                            .remote_state
-                                            .config
-                                            .read()
-                                            .relay_url
-                                            .clone()
-                                            .or_else(|| {
-                                                std::env::var("FERRYX_RELAY_URL")
-                                                    .ok()
-                                                    .filter(|s| !s.trim().is_empty())
-                                            })
-                                            .or_else(|| {
-                                                Some(crate::remote::relay_server::DEFAULT_RELAY_URL.to_string())
-                                            });
+                                        // The relay this code is registered with: the one the
+                                        // control channel uses now (a fallback after failover).
+                                        let effective_relay_url = match self.remote_state.active_relay() {
+                                            Some((url, _)) => Some(url),
+                                            None => {
+                                                let config = self.remote_state.config.read().clone();
+                                                Some(crate::remote::state::resolve_relay_url(&config).0)
+                                            }
+                                        };
                                         DaemonResponse::RemotePairingCodeOk {
                                             code: info.pin,
                                             pairing_token: Some(info.pairing_token),
@@ -10756,6 +10747,106 @@ mod tests {
             }
             other => panic!("Expected RemotePairingCodeOk, got {other:?}"),
         }
+
+        drop(write_half);
+        let _ = server_task.await;
+        relay_task.abort();
+    }
+
+    /// D20-2: the daemon's `RemoteGetStatus` reports the relay URL it resolved and the source,
+    /// through every path that records it: start (env source), `replace_relay` on a relay ->
+    /// relay reconfigure (config source), and `stop()` clears it.
+    #[tokio::test]
+    async fn remote_get_status_reports_the_resolved_relay_through_start_replace_and_stop() {
+        let _env = crate::remote::state::RELAY_URL_ENV_TEST_LOCK.lock().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let relay_state = crate::remote::relay_server::RelayState::new_with_key_store(
+            vec![],
+            temp_dir.path().join("keys.json"),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mock_relay_url = format!("http://{}", listener.local_addr().unwrap());
+        let relay_task = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                crate::remote::relay_server::relay_router(relay_state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
+        });
+
+        let server = Arc::new(DaemonServer::new());
+        let (client_stream, server_stream) = UnixStream::pair().expect("unix pair");
+        let server_clone = Arc::clone(&server);
+        let server_task = tokio::spawn(async move {
+            server_clone.handle_client(server_stream).await;
+        });
+        let (read_half, mut write_half) = client_stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        async fn get_status(
+            reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+            write_half: &mut tokio::net::unix::OwnedWriteHalf,
+        ) -> crate::daemon::protocol::DaemonRemoteStatus {
+            let mut json = serde_json::to_string(&DaemonRequest::RemoteGetStatus).unwrap();
+            json.push('\n');
+            write_half.write_all(json.as_bytes()).await.unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            match serde_json::from_str::<DaemonResponse>(line.trim()).unwrap() {
+                DaemonResponse::RemoteStatusOk { status } => status,
+                other => panic!("Expected RemoteStatusOk, got {other:?}"),
+            }
+        }
+
+        // Start: no saved relayUrl, the URL comes from FERRYX_RELAY_URL (set only while the
+        // gateway resolves it, under the lock every test that sets this variable holds).
+        std::env::set_var(crate::remote::state::RELAY_URL_ENV, &mock_relay_url);
+        let started = server
+            .configure_gateway(RemoteGatewayConfig {
+                mode: RemoteNetworkMode::Relay,
+                port: 0,
+                relay_url: None,
+                ..Default::default()
+            })
+            .await;
+        std::env::remove_var(crate::remote::state::RELAY_URL_ENV);
+        started.expect("start the relay gateway");
+        let status = get_status(&mut reader, &mut write_half).await;
+        assert_eq!(status.relay_url, None, "nothing is saved");
+        assert_eq!(status.resolved_relay_url.as_deref(), Some(mock_relay_url.as_str()));
+        assert_eq!(status.resolved_relay_url_source.as_deref(), Some("env"));
+
+        // Relay -> relay reconfigure swaps only the supervisor (replace_relay): the record
+        // follows, now from the saved config.
+        let saved = mock_relay_url.clone();
+        server
+            .configure_gateway(RemoteGatewayConfig {
+                mode: RemoteNetworkMode::Relay,
+                port: 0,
+                relay_url: Some(saved.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("reconfigure the relay");
+        let status = get_status(&mut reader, &mut write_half).await;
+        assert_eq!(status.relay_url.as_deref(), Some(saved.as_str()));
+        assert_eq!(status.resolved_relay_url.as_deref(), Some(saved.as_str()));
+        assert_eq!(status.resolved_relay_url_source.as_deref(), Some("config"));
+
+        // Off stops the gateway; stop() clears the record.
+        server
+            .configure_gateway(RemoteGatewayConfig {
+                mode: RemoteNetworkMode::Off,
+                port: 0,
+                ..Default::default()
+            })
+            .await
+            .expect("turn the gateway off");
+        let status = get_status(&mut reader, &mut write_half).await;
+        assert_eq!(status.resolved_relay_url, None);
+        assert_eq!(status.resolved_relay_url_source, None);
+        assert_eq!(server.remote_state.active_relay(), None);
 
         drop(write_half);
         let _ = server_task.await;

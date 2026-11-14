@@ -88,6 +88,7 @@ fn seed_machine(fx: &Fixture, owner: &str, machine_id: &str, public_key: &str) {
                     public_key: public_key.clone(),
                     attach_public_key: public_key,
                     relay_origin: ORIGIN.to_string(),
+                    relay_fallback_origins: Vec::new(),
                     platform: "linux".to_string(),
                     enrollment_epoch: 1,
                     enrolled_at: 1,
@@ -161,6 +162,7 @@ async fn enroll(fx: &Fixture, machine: &MachineIdentity, code: &str) -> (u16, Va
         nonce,
         timestamp: now,
         signature,
+        relay_fallback_origins: Vec::new(),
     };
     post(
         fx,

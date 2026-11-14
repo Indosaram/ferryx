@@ -27,6 +27,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+pub(crate) mod proxy;
+
 type ControlSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 const REGISTER_ACK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -287,10 +289,10 @@ const LOCAL_GATEWAY_ADDR: &str = "127.0.0.1:43821";
 
 /// Initial delay before the first reconnect attempt after a dropped or
 /// failed control connection.
-const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+pub(crate) const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Ceiling on the reconnect backoff delay.
-const MAX_BACKOFF: Duration = Duration::from_secs(30);
+pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Notification pushed down the control channel when a client asks to open
 /// a new session against this daemon. Mirrors
@@ -318,6 +320,8 @@ pub struct RelayClient {
     /// Further relay origins tried in order when the current one refuses or drops the control
     /// channel (a warm standby reached directly, bypassing DNS failover). Empty by default.
     fallback_urls: Arc<Vec<String>>,
+    /// Which input supplied `relay_url` when the daemon resolved it (status reporting only).
+    resolved_source: crate::remote::state::RelayUrlSource,
     /// Index into `[relay_url, fallback_urls..]` of the endpoint in use. Data channels follow
     /// the control channel, so both always reach the same relay process.
     active_endpoint: Arc<std::sync::atomic::AtomicUsize>,
@@ -386,6 +390,7 @@ impl RelayClient {
         Self {
             relay_url: relay_url.into(),
             fallback_urls: Arc::new(Vec::new()),
+            resolved_source: crate::remote::state::RelayUrlSource::Config,
             active_endpoint: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pairing: PairingCoordinator::new(machine_token.clone(), tx),
             machine_token,
@@ -426,6 +431,7 @@ impl RelayClient {
         Self {
             relay_url: relay_url.into(),
             fallback_urls: Arc::new(Vec::new()),
+            resolved_source: crate::remote::state::RelayUrlSource::Config,
             active_endpoint: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pairing: PairingCoordinator::new_with_auth(identity.machine_id.clone(), tx, auth),
             machine_token: String::new(),
@@ -466,6 +472,22 @@ impl RelayClient {
         self
     }
 
+    /// Records which input supplied the primary relay URL, so status reports the daemon's own
+    /// resolution rather than one redone elsewhere.
+    pub fn with_resolved_source(mut self, source: crate::remote::state::RelayUrlSource) -> Self {
+        self.resolved_source = source;
+        self
+    }
+
+    /// The primary relay URL this client was built with.
+    pub fn relay_url(&self) -> &str {
+        &self.relay_url
+    }
+
+    pub fn resolved_source(&self) -> crate::remote::state::RelayUrlSource {
+        self.resolved_source
+    }
+
     /// The relay origin the control and data channels currently target.
     pub fn active_relay_url(&self) -> &str {
         let index = self
@@ -504,6 +526,12 @@ impl RelayClient {
         self
     }
 
+    /// Test hook: the failover step a dropped control session takes.
+    #[cfg(test)]
+    pub(crate) fn fail_over_for_test(&self) {
+        self.advance_endpoint();
+    }
+
     pub fn pairing_coordinator(&self) -> PairingCoordinator {
         self.pairing.clone()
     }
@@ -538,7 +566,7 @@ impl RelayClient {
                 request.headers_mut().insert("x-ferryx-machine-id", val);
             }
         }
-        let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
+        let (mut socket, _) = proxy::connect_websocket(request).await?;
         if let Some(identity) = &self.identity {
             tokio::time::timeout(REGISTER_ACK_TIMEOUT, async {
                 let challenge: ControlChallenge = read_control_json(&mut socket).await?;
@@ -806,7 +834,7 @@ impl RelayClient {
     /// frames bidirectionally between it and the local loopback gateway
     /// until either side disconnects.
     async fn handle_session(&self, session_id: &str, opaque: bool) -> anyhow::Result<()> {
-        let (ws, _response) = tokio_tungstenite::connect_async(self.data_url(session_id)).await?;
+        let (ws, _response) = proxy::connect_websocket(self.data_url(session_id)).await?;
         let gateway = TcpStream::connect(&self.gateway_addr).await?;
         if !opaque {
             return proxy_ws_to_tcp(ws, gateway).await;
@@ -1004,50 +1032,73 @@ pub fn validate_relay_url(
 /// equivalent, trimming any trailing slash so path segments can be
 /// appended directly.
 pub fn to_ws_base(url: &str) -> Result<String, RelayUrlSecurityError> {
-    validate_relay_url(&live_relay_url(url), is_insecure_relay_allowed())
+    validate_relay_url(url, is_insecure_relay_allowed())
 }
 
 /// Comma-separated relay origins a daemon fails over to when its configured relay is down.
 pub const RELAY_FALLBACK_URLS_ENV: &str = "FERRYX_RELAY_FALLBACK_URLS";
 
-/// Parses [`RELAY_FALLBACK_URLS_ENV`], dropping entries that fail relay URL validation (and
-/// the retired relay.checka.cc origin), so a typo can never downgrade the transport.
-pub fn fallback_relay_urls_from(value: Option<&str>) -> Vec<String> {
-    value
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .filter(|url| {
-            let retired = url.trim_end_matches('/') == RETIRED_RELAY_ORIGIN;
+/// Keeps the fallback relay origins that pass relay URL validation, in order, so a typo or an
+/// insecure entry can never downgrade the transport. The retired origin is dropped too: saved
+/// lists are migrated at load, and an environment list cannot name it.
+pub fn valid_fallback_relay_urls<I, S>(urls: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    urls.into_iter()
+        .filter_map(|url| {
+            let url = url.as_ref().trim();
+            if url.is_empty() {
+                return None;
+            }
+            let retired = migrate_retired_relay_origin(url).is_some();
             let valid = validate_relay_url(url, is_insecure_relay_allowed()).is_ok();
             if retired || !valid {
                 tracing::warn!("ignoring relay fallback URL {url}");
+                return None;
             }
-            !retired && valid
+            Some(url.to_string())
         })
-        .map(str::to_string)
         .collect()
+}
+
+/// Parses [`RELAY_FALLBACK_URLS_ENV`] through [`valid_fallback_relay_urls`].
+pub fn fallback_relay_urls_from(value: Option<&str>) -> Vec<String> {
+    valid_fallback_relay_urls(value.unwrap_or_default().split(','))
 }
 
 pub fn fallback_relay_urls_from_env() -> Vec<String> {
     fallback_relay_urls_from(std::env::var(RELAY_FALLBACK_URLS_ENV).ok().as_deref())
 }
 
-/// The retired public relay hostname. Pairings and daemon configs saved before the move to
-/// relay.ferryx.dev still carry it (host ids embed it), and it no longer resolves to a relay.
+/// The retired public relay origin (now `relay.ferryx.dev`). Never connected to: it is only the
+/// input of [`migrate_retired_relay_origin`], which rewrites saved configs, enrollment records,
+/// pairings and account machine records once at load.
+///
+/// Deprecated: delete this constant and the migration once no supported release can still have
+/// saved it, i.e. one release after every install has loaded its state on a build carrying the
+/// migration (tracked with the plaintext relay removal in ROADMAP.md "Next").
 pub const RETIRED_RELAY_ORIGIN: &str = "https://relay.checka.cc";
 
-/// Rewrites a URL on the retired relay origin to the same path on the current default relay,
-/// leaving every other URL untouched. Stored ids keep the old origin; only connections move.
-pub fn live_relay_url(url: &str) -> std::borrow::Cow<'_, str> {
+/// `Some` with the same path on [`crate::remote::state::DEFAULT_RELAY_URL`] when `url` is on the
+/// retired origin (exact origin match: `relay.checka.cc.example` is a different host), else `None`.
+pub fn migrate_retired_relay_origin(url: &str) -> Option<String> {
     match url.strip_prefix(RETIRED_RELAY_ORIGIN) {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => std::borrow::Cow::Owned(format!(
-            "{}{rest}",
-            crate::remote::state::DEFAULT_RELAY_URL
-        )),
-        _ => std::borrow::Cow::Borrowed(url),
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            Some(format!("{}{rest}", crate::remote::state::DEFAULT_RELAY_URL))
+        }
+        _ => None,
     }
+}
+
+/// The deprecation warning a load migration logs once, when it rewrites and saves `what`.
+pub fn warn_retired_relay_migrated(what: &str) {
+    tracing::warn!(
+        "deprecated relay origin {RETIRED_RELAY_ORIGIN} in {what} migrated to {}; the retired \
+         origin is no longer contacted",
+        crate::remote::state::DEFAULT_RELAY_URL
+    );
 }
 
 /// Proxies frames bidirectionally between a relay data-channel WebSocket
@@ -1566,19 +1617,42 @@ mod tests {
     }
 
     #[test]
-    fn retired_relay_origin_connects_through_the_current_relay() {
+    fn retired_origin_migration_is_exact_and_path_preserving() {
         assert_eq!(
-            live_relay_url("https://relay.checka.cc/host/m-1"),
-            "https://relay.ferryx.dev/host/m-1"
+            migrate_retired_relay_origin("https://relay.checka.cc/host/m-1").as_deref(),
+            Some("https://relay.ferryx.dev/host/m-1")
         );
-        assert_eq!(live_relay_url("https://relay.checka.cc"), "https://relay.ferryx.dev");
-        assert_eq!(to_ws_base("https://relay.checka.cc").unwrap(), "wss://relay.ferryx.dev");
+        assert_eq!(
+            migrate_retired_relay_origin("https://relay.checka.cc").as_deref(),
+            Some("https://relay.ferryx.dev")
+        );
         // A different host that merely shares the prefix is left alone.
-        assert_eq!(
-            live_relay_url("https://relay.checka.cc.example/host/m-1"),
-            "https://relay.checka.cc.example/host/m-1"
-        );
-        assert_eq!(live_relay_url("https://relay.example.com"), "https://relay.example.com");
+        assert_eq!(migrate_retired_relay_origin("https://relay.checka.cc.example/host/m-1"), None);
+        assert_eq!(migrate_retired_relay_origin("https://relay.example.com"), None);
+        // Idempotent: a migrated value is not migrated again.
+        assert_eq!(migrate_retired_relay_origin("https://relay.ferryx.dev/host/m-1"), None);
+        // The connection path no longer rewrites anything.
+        assert_eq!(to_ws_base("https://relay.checka.cc").unwrap(), "wss://relay.checka.cc");
+    }
+
+    #[test]
+    fn persisted_fallback_list_keeps_order_and_rejects_insecure_entries() {
+        let urls = valid_fallback_relay_urls([
+            "https://first.example.com",
+            "http://insecure.example.com",
+            "ftp://wrong.example.com",
+            " https://second.example.com ",
+            "https://relay.checka.cc",
+        ]);
+        assert_eq!(urls, ["https://first.example.com", "https://second.example.com"]);
+        let client = RelayClient::new("https://primary.example.com", "tok").with_fallback_urls(urls);
+        assert_eq!(client.control_url(), "wss://primary.example.com/tunnel/control");
+        client.advance_endpoint();
+        assert_eq!(client.control_url(), "wss://first.example.com/tunnel/control");
+        client.advance_endpoint();
+        assert_eq!(client.control_url(), "wss://second.example.com/tunnel/control");
+        client.advance_endpoint();
+        assert_eq!(client.active_relay_url(), "https://primary.example.com");
     }
 
     #[test]
@@ -1623,6 +1697,36 @@ mod tests {
         let client = RelayClient::new("https://relay.example.com", "tok");
         client.advance_endpoint();
         assert_eq!(client.active_relay_url(), "https://relay.example.com");
+    }
+
+    /// D26-5: after a failover, status/pairing (`active_relay`) report the fallback the control
+    /// channel switched to, with the primary's source, and return to the primary afterwards.
+    #[test]
+    fn active_relay_follows_a_failover_to_the_fallback() {
+        let state = crate::remote::state::RemoteGatewayState::new(
+            std::sync::Arc::new(crate::terminal::TerminalService::default()),
+            crate::worktree::WorkspaceRegistry::new(),
+        );
+        assert_eq!(state.active_relay(), None);
+        let client = RelayClient::new("https://primary.example.com", "tok")
+            .with_fallback_urls(["https://standby.example.com"])
+            .with_resolved_source(crate::remote::state::RelayUrlSource::Env);
+        *state.resolved_relay.write() = Some((
+            client.relay_url().to_string(),
+            client.resolved_source(),
+        ));
+        *state.relay_client.write() = Some(client.clone());
+        assert_eq!(
+            state.active_relay(),
+            Some(("https://primary.example.com".into(), crate::remote::state::RelayUrlSource::Env))
+        );
+        client.advance_endpoint();
+        assert_eq!(
+            state.active_relay(),
+            Some(("https://standby.example.com".into(), crate::remote::state::RelayUrlSource::Env))
+        );
+        client.advance_endpoint();
+        assert_eq!(state.active_relay().unwrap().0, "https://primary.example.com");
     }
 
     #[test]

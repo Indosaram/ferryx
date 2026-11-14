@@ -1367,6 +1367,7 @@ mod tests {
                             public_key: "public-key".to_string(),
                             attach_public_key: "attach-public-key".to_string(),
                             relay_origin: "https://relay.test".to_string(),
+                            relay_fallback_origins: Vec::new(),
                             platform: "linux".to_string(),
                             enrollment_epoch: 1,
                             enrolled_at: t0,

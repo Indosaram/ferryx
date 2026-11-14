@@ -91,6 +91,19 @@ describe("RemoteAccessSection", () => {
     vi.useRealTimers();
   });
 
+  it("shows the relay the daemon resolved, with its source, in the diagnostics", async () => {
+    // D20-1: the diagnostics show the relay the daemon resolved, not only the saved relayUrl.
+    getRemoteStatus.mockResolvedValue({ ...relayStatus, relayUrl: null, resolvedRelayUrl: "https://relay.selfhost.example", resolvedRelayUrlSource: "env" });
+    const resolved = await act(async () => render(<RemoteAccessSection detailsOnly />));
+    await waitFor(() => expect(screen.getByTestId("effective-relay")).toHaveTextContent("https://relay.selfhost.example (env)"));
+    resolved.unmount();
+    getRemoteStatus.mockResolvedValue({ ...relayStatus, relayUrl: "https://saved.example" });
+    const saved = await act(async () => render(<RemoteAccessSection detailsOnly />));
+    await waitFor(() => expect(screen.getByTestId("effective-relay")).toHaveTextContent(/^https:\/\/saved\.example$/));
+    saved.unmount();
+    getRemoteStatus.mockResolvedValue(enabledStatus);
+  });
+
   it("must not render a Generate QR button", async () => {
     render(<RemoteAccessSection />);
     expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();

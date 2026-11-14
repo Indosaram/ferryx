@@ -32,6 +32,11 @@ pub struct AccountEnrollRequest {
     pub nonce: String,
     pub timestamp: u64,
     pub signature: String,
+    /// Fallback relay origins this machine's daemon is configured to fail over to, in order
+    /// (saved `relayFallbackUrls`). Stored on the machine record so clients can try them too.
+    /// Not covered by the enrollment signature; the account service re-validates every entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_fallback_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +58,8 @@ pub struct AccountMachineView {
     pub public_key: String,
     pub attach_public_key: String,
     pub relay_origin: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_fallback_origins: Vec<String>,
     pub platform: Platform,
     pub online: bool,
     pub enrollment_epoch: String,
@@ -98,6 +105,9 @@ pub struct AccountGrantResponse {
     pub grant_id: String,
     pub machine_id: String,
     pub relay_origin: String,
+    /// The machine record's fallback relay origins, tried in order after `relay_origin`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_fallback_origins: Vec<String>,
     pub pairing_token: String,
     pub machine_attach_public_key: String,
     pub grant_scope: AccountGrantScope,

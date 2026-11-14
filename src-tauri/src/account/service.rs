@@ -450,10 +450,27 @@ pub struct MachineViewResponse {
     pub public_key: String,
     pub attach_public_key: String,
     pub relay_origin: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub relay_fallback_origins: Vec<String>,
     pub platform: String,
     pub online: bool,
     pub enrollment_epoch: u64,
     pub last_seen_at: u64,
+}
+
+/// Most fallback relay origins one machine record keeps.
+pub const MAX_RELAY_FALLBACK_ORIGINS: usize = 8;
+
+/// The fallback relay origins a daemon published at enrollment, as the machine record keeps them:
+/// each entry normalised under the same origin policy as a paired host's relay origin
+/// ([`crate::paired_host::inventory::normalize_fallback_origins`]: https only unless the
+/// insecure-relay opt-in allows loopback http; no userinfo, path, query or fragment), failures
+/// dropped with a warning, duplicates and the primary removed, order kept, at most
+/// [`MAX_RELAY_FALLBACK_ORIGINS`].
+pub fn published_relay_fallback_origins(published: &[String], primary: &str) -> Vec<String> {
+    let bounded: Vec<String> =
+        published.iter().filter(|origin| origin.len() <= 2048).cloned().collect();
+    crate::paired_host::inventory::normalize_fallback_origins(&bounded, primary)
 }
 
 impl MachineViewResponse {
@@ -465,6 +482,7 @@ impl MachineViewResponse {
             public_key: record.public_key.clone(),
             attach_public_key: record.attach_public_key.clone(),
             relay_origin: record.relay_origin.clone(),
+            relay_fallback_origins: record.relay_fallback_origins.clone(),
             platform: record.platform.clone(),
             online,
             enrollment_epoch: record.enrollment_epoch,
@@ -1314,6 +1332,8 @@ pub async fn enroll(
 
     let state_clone = state.clone();
     let request_clone = request.clone();
+    let relay_fallback_origins =
+        published_relay_fallback_origins(&request.relay_fallback_origins, &state.relay_origin);
     let (user_id, machine_record_id, epoch) = crate::ipc::run_blocking(move || {
         Ok((|| -> Result<(String, String, u64), ApiError> {
             let decision = state_clone.mutate(|store| {
@@ -1454,6 +1474,7 @@ pub async fn enroll(
                         public_key: request_clone.public_key.clone(),
                         attach_public_key: request_clone.attach_public_key.clone(),
                         relay_origin: state_clone.relay_origin.clone(),
+                        relay_fallback_origins: relay_fallback_origins.clone(),
                         platform,
                         enrollment_epoch: epoch,
                         enrolled_at: machine.enrolled_at,
@@ -1473,6 +1494,7 @@ pub async fn enroll(
                         public_key: request_clone.public_key.clone(),
                         attach_public_key: request_clone.attach_public_key.clone(),
                         relay_origin: state_clone.relay_origin.clone(),
+                        relay_fallback_origins: relay_fallback_origins.clone(),
                         platform,
                         enrollment_epoch: 1,
                         enrolled_at: now,
@@ -1645,7 +1667,7 @@ pub async fn issue_grant(
 
     let relay_url = format!(
         "{}/api/v1/attach/grant",
-        crate::remote::relay_client::live_relay_url(&machine.relay_origin).trim_end_matches('/')
+        machine.relay_origin.trim_end_matches('/')
     );
     let rollback_grant = || {
         let rollback_state = state.clone();
@@ -1777,6 +1799,7 @@ pub async fn issue_grant(
         grant_id: grant.grant_id,
         machine_id: machine.machine_id,
         relay_origin: machine.relay_origin,
+        relay_fallback_origins: machine.relay_fallback_origins,
         pairing_token,
         machine_attach_public_key: machine.attach_public_key,
         grant_scope: request.grant_scope,
@@ -1908,6 +1931,59 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The daemon publishes its fallback relays at enrollment; the record keeps the valid ones in
+    /// order (insecure, duplicate and primary entries dropped) and every client view carries them.
+    #[tokio::test]
+    async fn enrollment_stores_the_published_fallback_origins_on_the_machine_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mailer = Arc::new(crate::account::mailer::FileMailer::with_dir(tmp.path().join("mail")));
+        let state = Arc::new(
+            AccountState::new(tmp.path(), "https://relay.test", mailer)
+                .with_relay_origin("https://relay.test"),
+        );
+        let now = now_secs();
+        state
+            .mutate(|store| {
+                store.users.insert(
+                    "u-fb".into(),
+                    UserRecord { user_id: "u-fb".into(), email: "fb@example.com".into(), created_at: now },
+                );
+                store.enrollment_codes.insert(
+                    crate::remote::auth::enrollment_code_hash("fb-code"),
+                    EnrollmentCodeRecord {
+                        user_id: "u-fb".into(),
+                        account_origin: "https://relay.test".into(),
+                        expires_at: now + 3600,
+                        ..Default::default()
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+        let identity = test_identity("fb-machine");
+        let mut request = test_enroll_request(&state, &identity, "fb-code");
+        request.relay_fallback_origins = vec![
+            "https://standby-b.example.com/".into(),
+            "http://insecure.example.com".into(),
+            "https://relay.test".into(),
+            "https://standby-a.example.com".into(),
+            "https://standby-b.example.com".into(),
+        ];
+        let response = enroll(State(state.clone()), Bytes::from(serde_json::to_vec(&request).unwrap()))
+            .await
+            .expect("enrollment succeeds");
+        let stored = state.load().unwrap().machines[&response.0.machine_record_id].clone();
+        assert_eq!(
+            stored.relay_fallback_origins,
+            ["https://standby-b.example.com", "https://standby-a.example.com"]
+        );
+        let view = serde_json::to_value(MachineViewResponse::from_record(&stored, true)).unwrap();
+        assert_eq!(
+            view["relayFallbackOrigins"],
+            serde_json::json!(["https://standby-b.example.com", "https://standby-a.example.com"])
+        );
+    }
 
     fn read_magic_link(mail_dir: &std::path::Path) -> String {
         let entries: Vec<_> = std::fs::read_dir(mail_dir)
@@ -2340,6 +2416,7 @@ mod tests {
             public_key: STANDARD.encode([1u8; 32]),
             attach_public_key,
             relay_origin: relay_origin.to_string(),
+            relay_fallback_origins: Vec::new(),
             platform: "macos".to_string(),
             enrollment_epoch: 1,
             enrolled_at: now,
@@ -2419,6 +2496,22 @@ mod tests {
         let (session_token, machine) = setup_test_user_and_machine(&state, &relay_origin);
 
         let device_attach_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        // D26-4 join (record -> grant): the machine record's fallback relay origins travel in
+        // the grant response, in order.
+        let record_fallbacks = vec![
+            "https://standby-b.example.com".to_string(),
+            "https://standby-a.example.com".to_string(),
+        ];
+        state
+            .mutate(|store| {
+                store
+                    .machines
+                    .get_mut(&machine.machine_record_id)
+                    .expect("fixture machine")
+                    .relay_fallback_origins = record_fallbacks.clone();
+                Ok(())
+            })
+            .unwrap();
         let device_attach_public = x25519_dalek::PublicKey::from(&device_attach_secret);
         let device_attach_key = STANDARD.encode(device_attach_public.as_bytes());
 
@@ -2448,6 +2541,7 @@ mod tests {
         .expect("grant issuance and delivery must succeed");
 
         assert_eq!(response.0.machine_id, machine.machine_id);
+        assert_eq!(response.0.relay_fallback_origins, record_fallbacks);
         assert!(response.0.sealed_offer.is_some());
 
         let (raw_body, submission) = rx.recv().await.expect("relay must receive submission");
@@ -3036,6 +3130,7 @@ mod tests {
             nonce: challenge.nonce,
             timestamp: now,
             signature,
+            relay_fallback_origins: Vec::new(),
         }
     }
 
@@ -3054,6 +3149,7 @@ mod tests {
                     public_key: format!("pubkey-filler-{user_id}-{index}"),
                     attach_public_key: format!("attachkey-filler-{user_id}-{index}"),
                     relay_origin: "https://relay.test".into(),
+                    relay_fallback_origins: Vec::new(),
                     platform: "linux".into(),
                     enrollment_epoch: 1,
                     enrolled_at: now,
@@ -3303,6 +3399,7 @@ mod tests {
                         public_key: "pubkey-second-reenroll".into(),
                         attach_public_key: "attachkey-second-reenroll".into(),
                         relay_origin: "https://relay.test".into(),
+                        relay_fallback_origins: Vec::new(),
                         platform: "linux".into(),
                         enrollment_epoch: 1,
                         enrolled_at: now,
@@ -3418,6 +3515,7 @@ mod tests {
                         public_key: id1.public_key.clone(),
                         attach_public_key: id1.public_key.clone(),
                         relay_origin: "https://relay.test".into(),
+                        relay_fallback_origins: Vec::new(),
                         platform: "linux".into(),
                         enrollment_epoch: 1,
                         enrolled_at: now,
@@ -3436,6 +3534,7 @@ mod tests {
                         public_key: id2.public_key.clone(),
                         attach_public_key: id2.public_key.clone(),
                         relay_origin: "https://relay.test".into(),
+                        relay_fallback_origins: Vec::new(),
                         platform: "linux".into(),
                         enrollment_epoch: 1,
                         enrolled_at: now,
@@ -3830,6 +3929,7 @@ mod tests {
                             public_key: format!("pubkey-owner-{i}"),
                             attach_public_key: format!("attachkey-owner-{i}"),
                             relay_origin: "https://relay.test".into(),
+                            relay_fallback_origins: Vec::new(),
                             platform: "linux".into(),
                             enrollment_epoch: 1,
                             enrolled_at: now,
@@ -3848,6 +3948,7 @@ mod tests {
                             public_key: format!("pubkey-member-{i}"),
                             attach_public_key: format!("attachkey-member-{i}"),
                             relay_origin: "https://relay.test".into(),
+                            relay_fallback_origins: Vec::new(),
                             platform: "linux".into(),
                             enrollment_epoch: 1,
                             enrolled_at: now,
@@ -3934,6 +4035,7 @@ mod tests {
                         public_key: "pk-1".into(),
                         attach_public_key: "apk-1".into(),
                         relay_origin: "https://relay.test".into(),
+                        relay_fallback_origins: Vec::new(),
                         platform: "linux".into(),
                         enrollment_epoch: 1,
                         enrolled_at: now,

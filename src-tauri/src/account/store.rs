@@ -174,6 +174,11 @@ pub struct MachineRecord {
     pub public_key: String,
     pub attach_public_key: String,
     pub relay_origin: String,
+    /// Relay origins the machine also connects through when `relay_origin` is down, in the order
+    /// it tries them, as published by its daemon at enrollment. Clients try them after the
+    /// primary. Absent on older records, which load as an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_fallback_origins: Vec<String>,
     pub platform: String,
     pub enrollment_epoch: u64,
     pub enrolled_at: u64,
@@ -504,6 +509,7 @@ mod tests {
             public_key: "pk".into(),
             attach_public_key: "apk".into(),
             relay_origin: "https://relay.example.com".into(),
+            relay_fallback_origins: Vec::new(),
             platform: "linux".into(),
             enrollment_epoch: 1,
             enrolled_at: 1000,

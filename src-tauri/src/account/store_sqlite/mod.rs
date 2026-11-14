@@ -89,6 +89,7 @@ where
     ensure_writable(dir).map_err(E::from)?;
     let mut conn = open_sqlite_connection(dir).map_err(E::from)?;
     migration::maybe_import_legacy_json(&mut conn, dir).map_err(E::from)?;
+    migration::migrate_retired_relay_origins(&conn).map_err(E::from)?;
 
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -124,6 +125,7 @@ pub fn save_sqlite_store(dir: &Path, store: &AccountStore) -> Result<(), String>
     ensure_writable(dir)?;
     let mut conn = open_sqlite_connection(dir)?;
     migration::maybe_import_legacy_json(&mut conn, dir)?;
+    migration::migrate_retired_relay_origins(&conn)?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| format!("Failed to begin immediate transaction: {error}"))?;

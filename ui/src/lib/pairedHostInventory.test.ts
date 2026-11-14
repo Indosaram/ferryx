@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { createRemoteHostStore, remoteHostKey, REMOTE_HOST_STORAGE_KEY } from "../state/remoteHostStore";
 import { bootTrace } from "./tauri";
-import { createPairedHostInventory, nativePairedHostCommands, normalizeRelayOrigin, parsePairingInvite, type HostView, type PairedHostCommands } from "./pairedHostInventory";
+import { buildRedeemGrantRequest, createPairedHostInventory, nativePairedHostCommands, normalizeRelayOrigin, parsePairingInvite, type HostView, type PairedHostCommands } from "./pairedHostInventory";
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 vi.mock("./tauri", () => ({ bootTrace: vi.fn().mockResolvedValue(undefined) }));
@@ -541,6 +541,35 @@ it("R4-N1: migrateLegacy cleans legacy storage when native migrate event arrives
   expect(raw).not.toBeNull();
   expect(JSON.parse(raw!).hosts[hostId].deviceToken).toBeUndefined();
   expect(store.getState().hosts[hostId].authStatus).toBe("paired");
+});
+
+it("sends relayFallbackOrigins on a grant redemption only to a daemon that advertises pairedHostRelayFallbackV1", () => {
+  const grant = {
+    relayOrigin: "https://relay.example",
+    pairingToken: "pt",
+    machineAttachPublicKey: "key",
+    relayFallbackOrigins: ["https://standby.example"],
+  };
+  const machine = { machineId: "m-1", displayName: "Box", enrollmentEpoch: 3 };
+  const base = { pairedHostInventoryV1: true, pairedDaemonProxyV1: true, pairedHostE2EV1: true };
+  // An older daemon (no capability) rejects the unknown field: it must be omitted entirely.
+  for (const caps of [base, { ...base, pairedHostRelayFallbackV1: false }, null]) {
+    const request = buildRedeemGrantRequest(grant, machine, "https://account.example", "acct", caps);
+    expect(request).not.toHaveProperty("relayFallbackOrigins");
+    expect(request).toMatchObject({ relayOrigin: "https://relay.example", enrollmentEpoch: "3", accountSessionToken: "acct" });
+  }
+  const current = buildRedeemGrantRequest(grant, machine, "https://account.example", "acct", { ...base, pairedHostRelayFallbackV1: true });
+  expect(current.relayFallbackOrigins).toEqual(["https://standby.example"]);
+  // An empty list is never sent.
+  const empty = buildRedeemGrantRequest({ ...grant, relayFallbackOrigins: [] }, machine, "https://account.example", "acct", { ...base, pairedHostRelayFallbackV1: true });
+  expect(empty).not.toHaveProperty("relayFallbackOrigins");
+});
+
+it("normalises pairedHostRelayFallbackV1 from the native capability answer", async () => {
+  vi.mocked(invoke).mockResolvedValueOnce({ pairedHostInventoryV1: true, pairedDaemonProxyV1: true, pairedHostE2EV1: true });
+  expect((await nativePairedHostCommands.capabilities()).pairedHostRelayFallbackV1).toBe(false);
+  vi.mocked(invoke).mockResolvedValueOnce({ pairedHostInventoryV1: true, pairedDaemonProxyV1: true, pairedHostRelayFallbackV1: true });
+  expect((await nativePairedHostCommands.capabilities()).pairedHostRelayFallbackV1).toBe(true);
 });
 
 

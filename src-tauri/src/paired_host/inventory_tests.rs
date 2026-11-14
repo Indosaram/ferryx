@@ -609,6 +609,7 @@ fn host_attach() -> HostAttach {
         // base64 of 32 bytes
         machine_attach_public_key: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=".into(),
         enrollment_epoch: "7".into(),
+        relay_fallback_origins: Vec::new(),
     }
 }
 
@@ -653,16 +654,164 @@ fn an_old_row_without_attach_still_loads_and_leases_no_attach() {
 }
 
 #[test]
+fn a_host_attach_keeps_the_machine_record_fallback_origins_in_order() {
+    let root = fixture();
+    let input = pairing("attach-fallbacks");
+    let mut store = Inventory::open(root.path()).unwrap();
+    let attach = HostAttach {
+        relay_fallback_origins: vec![
+            "https://standby-b.example.com".into(),
+            "https://standby-a.example.com".into(),
+        ],
+        ..host_attach()
+    };
+    let row = store.pair_attached(&input, None, attach.clone()).unwrap();
+    let disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(path(root.path())).unwrap()).unwrap();
+    assert_eq!(
+        disk["hosts"][&row.host_id]["attach"]["relayFallbackOrigins"],
+        serde_json::json!(["https://standby-b.example.com", "https://standby-a.example.com"])
+    );
+    drop(store);
+    let mut reopened = Inventory::open(root.path()).unwrap();
+    let lease = reopened.capture(&row.host_id, row.generation).unwrap();
+    assert_eq!(lease.attach(), Some(&attach));
+    root.close().unwrap();
+}
+
+#[test]
 fn an_invalid_host_attach_is_refused() {
     let root = fixture();
     let mut store = Inventory::open(root.path()).unwrap();
     let short = HostAttach {
         machine_attach_public_key: "AQID".into(),
         enrollment_epoch: "7".into(),
+        relay_fallback_origins: Vec::new(),
     };
     assert_eq!(
         store.pair_attached(&pairing("attach-bad"), None, short).unwrap_err(),
         InventoryError::InvalidInput
     );
     root.close().unwrap();
+}
+
+/// D26-4 join (redeem -> inventory): what a redeemed grant stores keeps the grant's fallback relay
+/// origins, normalised under the primary's policy, in order.
+#[test]
+fn a_redeemed_grant_stores_its_fallback_origins_on_the_host_attach() {
+    let root = fixture();
+    let service = super::service::PairedHostService::open(root.path().to_path_buf());
+    let request = super::service::RedeemGrantRequest {
+        relay_origin: "https://relay.example.com".into(),
+        machine_id: "m-redeem".into(),
+        display_label: "box".into(),
+        pairing_token: super::service::Secret("pt".into()),
+        machine_attach_public_key: host_attach().machine_attach_public_key,
+        enrollment_epoch: "7".into(),
+        account_session_token: super::service::Secret("acct".into()),
+        relay_fallback_origins: vec![
+            "https://standby-b.example.com/".into(),
+            "http://insecure.example.com".into(),
+            "https://standby-a.example.com".into(),
+        ],
+    };
+    let attach = service.redeem_host_attach(&request, "https://relay.example.com");
+    assert_eq!(
+        attach.relay_fallback_origins,
+        ["https://standby-b.example.com", "https://standby-a.example.com"]
+    );
+    assert!(attach.is_valid());
+    root.close().unwrap();
+}
+
+/// D26-1 end to end: `redeem_grant` carries the account session bearer. With a dead primary and a
+/// listening https fallback (valid under every policy, no insecure opt-in needed), the fallback
+/// receives no connection at all, so the account session never reaches it.
+#[tokio::test]
+async fn grant_redemption_never_dials_a_fallback_with_the_account_session() {
+    use tokio::io::AsyncReadExt;
+    let root = fixture();
+    let service = super::service::PairedHostService::open_test_loopback(root.path().to_path_buf());
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_origin = format!("http://{}", dead.local_addr().unwrap());
+    drop(dead);
+    let fallback = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fallback_origin = format!("https://{}", fallback.local_addr().unwrap());
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let sink = std::sync::Arc::clone(&received);
+    let listener = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = fallback.accept().await {
+            sink.lock().unwrap().extend_from_slice(b"<connection>");
+            let mut buf = vec![0u8; 4096];
+            if let Ok(n) = stream.read(&mut buf).await {
+                sink.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        }
+    });
+    let secret = "ACCOUNT-SESSION-SECRET-redeem";
+    let request = super::service::RedeemGrantRequest {
+        relay_origin: dead_origin.clone(),
+        machine_id: "m-redeem".into(),
+        display_label: "box".into(),
+        pairing_token: super::service::Secret("pt".into()),
+        machine_attach_public_key: host_attach().machine_attach_public_key,
+        enrollment_epoch: "7".into(),
+        account_session_token: super::service::Secret(secret.into()),
+        relay_fallback_origins: vec![fallback_origin.clone()],
+    };
+    // The fallback is a stored, dialable origin for this host: only the bearer rule keeps it out.
+    assert_eq!(
+        service.redeem_host_attach(&request, &dead_origin).relay_fallback_origins,
+        std::slice::from_ref(&fallback_origin)
+    );
+    let result = service.redeem_grant(request).await;
+    assert!(result.is_err(), "the dead primary cannot redeem");
+    listener.abort();
+    let seen = String::from_utf8_lossy(&received.lock().unwrap()).to_string();
+    assert!(seen.is_empty(), "grant redemption dialled the fallback: {seen:?}");
+    root.close().unwrap();
+}
+
+#[test]
+fn a_pairing_on_the_retired_relay_origin_moves_to_the_current_relay_and_keeps_its_id() {
+    let root = fixture();
+    let retired_id = "https://relay.checka.cc/host/m-1";
+    let lookalike_id = "https://relay.checka.cc.example/host/m-2";
+    let row = |origin: &str, machine: &str| {
+        serde_json::json!({
+            "relayOrigin": origin, "machineId": machine, "displayLabel": machine,
+            "grantScope": "machine", "deviceToken": "fixture-token", "generation": "3",
+            "authStatus": "paired"
+        })
+    };
+    let saved = serde_json::json!({
+        "version": 1,
+        "hosts": {
+            retired_id: row("https://relay.checka.cc", "m-1"),
+            lookalike_id: row("https://relay.checka.cc.example", "m-2"),
+        },
+        "generations": { retired_id: "3", lookalike_id: "3" },
+    });
+    fs::write(path(root.path()), serde_json::to_vec(&saved).unwrap()).unwrap();
+
+    let store = Inventory::open(root.path()).unwrap();
+    let hosts = store.list();
+    let moved = hosts.iter().find(|h| h.host_id == retired_id).expect("id kept");
+    assert_eq!(moved.relay_origin, "https://relay.ferryx.dev");
+    assert_eq!(moved.generation, Epoch(3));
+    let lookalike = hosts.iter().find(|h| h.host_id == lookalike_id).unwrap();
+    assert_eq!(lookalike.relay_origin, "https://relay.checka.cc.example", "look-alike untouched");
+    assert_eq!(
+        super::direct_client::relay_base(moved).unwrap().as_str(),
+        "https://relay.ferryx.dev/host/m-1"
+    );
+
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(path(root.path())).unwrap()).unwrap();
+    assert_eq!(on_disk["hosts"][retired_id]["relayOrigin"], "https://relay.ferryx.dev");
+    drop(store);
+    let before = fs::read(path(root.path())).unwrap();
+    let reopened = Inventory::open(root.path()).unwrap();
+    assert_eq!(reopened.list(), hosts);
+    assert_eq!(fs::read(path(root.path())).unwrap(), before, "migration is idempotent");
 }

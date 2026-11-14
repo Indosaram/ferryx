@@ -7429,8 +7429,14 @@ pub(crate) fn cors_origin_allowed(
         }
     }
     let relay_override = state.config.read().relay_url.clone();
+    // The relay URL the daemon actually resolved (it may come from FERRYX_RELAY_URL or the
+    // enrollment record rather than the saved config), and the one it uses now after a failover.
+    let resolved_relay = state.resolved_relay.read().as_ref().map(|(url, _)| url.clone());
+    let active_relay = state.active_relay().map(|(url, _)| url);
     let relay_allowed = std::iter::once(crate::remote::state::DEFAULT_RELAY_URL)
         .chain(relay_override.as_deref())
+        .chain(resolved_relay.as_deref())
+        .chain(active_relay.as_deref())
         .filter_map(web_origin)
         .any(|allowed| allowed == origin);
     relay_allowed
@@ -7753,10 +7759,11 @@ impl RemoteServerHandle {
         relay_url: Option<&str>,
         address: SocketAddr,
     ) -> Result<crate::remote::relay_client::RelayClient, String> {
-        let url = relay_url
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .unwrap_or(crate::remote::state::DEFAULT_RELAY_URL);
+        let (url, source) = crate::remote::state::resolve_relay_url(&crate::remote::state::RemoteGatewayConfig {
+            relay_url: relay_url.map(str::to_string),
+            ..Default::default()
+        });
+        let url = url.as_str();
         crate::remote::relay_client::validate_relay_url(
             url,
             crate::remote::relay_client::is_insecure_relay_allowed(),
@@ -7783,7 +7790,8 @@ impl RemoteServerHandle {
         Ok(client
             .with_machine_id(&identity.machine_id)
             .with_auth_manager((*state.auth_manager).clone())
-            .with_fallback_urls(crate::remote::relay_client::fallback_relay_urls_from_env()))
+            .with_fallback_urls(relay_fallback_urls(&state))
+            .with_resolved_source(source))
     }
 
     /// Swap only the outbound supervisor; HTTP connections and PTY ownership stay intact.
@@ -7803,6 +7811,7 @@ impl RemoteServerHandle {
             epoch,
         });
         *state.relay_client.write() = Some(client.clone());
+        *state.resolved_relay.write() = Some((client.relay_url().to_string(), client.resolved_source()));
         self.published_pairing = Some((state, epoch));
         self.relay_task = Some(tokio::spawn(async move { client.run().await }));
         prev_task
@@ -7829,6 +7838,7 @@ impl RemoteServerHandle {
             if slot.as_ref().is_some_and(|current| current.epoch == epoch) {
                 *slot = None;
                 *state.relay_client.write() = None;
+                *state.resolved_relay.write() = None;
             }
         }
         let _ = self.shutdown_tx.send(());
@@ -7918,6 +7928,14 @@ pub async fn start_remote_server_with_resolver(
     .await
 }
 
+/// Failover order after the primary relay: saved `relayFallbackUrls`, then
+/// `FERRYX_RELAY_FALLBACK_URLS`. Both lists drop insecure and retired entries.
+fn relay_fallback_urls(state: &RemoteGatewayState) -> Vec<String> {
+    let mut urls = state.relay_fallback_urls();
+    urls.extend(crate::remote::relay_client::fallback_relay_urls_from_env());
+    urls
+}
+
 pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
     state: Arc<RemoteGatewayState>,
     resolver: Arc<dyn crate::remote::state::InterfaceResolver>,
@@ -7928,20 +7946,11 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
         return Err("Remote gateway is OFF".into());
     }
 
-    let relay_url = config
-        .relay_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .or_else(|| {
-            if config.mode == RemoteNetworkMode::Relay {
-                Some(crate::remote::state::DEFAULT_RELAY_URL)
-            } else {
-                None
-            }
-        });
+    let relay_resolved = (config.mode == RemoteNetworkMode::Relay)
+        .then(|| crate::remote::state::resolve_relay_url(&config));
+    let relay_url = relay_resolved.as_ref().map(|(url, _)| url.clone());
     if config.mode == RemoteNetworkMode::Relay {
-        if let Some(url) = relay_url {
+        if let Some(url) = relay_url.as_deref() {
             crate::remote::relay_client::validate_relay_url(
                 url,
                 crate::remote::relay_client::is_insecure_relay_allowed(),
@@ -8112,7 +8121,7 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             }
             let client = client
                 .with_auth_manager((*state.auth_manager).clone())
-                .with_fallback_urls(crate::remote::relay_client::fallback_relay_urls_from_env());
+                .with_fallback_urls(relay_fallback_urls(&state));
             // Publish the one relay pairing authority so daemon/GUI pairing registers
             // its PIN with the relay instead of minting a local-only code.
             let epoch = crate::remote::state::RELAY_PAIRING_EPOCH
@@ -8123,6 +8132,7 @@ pub async fn start_remote_server_with_resolver_and_insecure_opt_in(
             });
             published_pairing = Some((Arc::clone(&state), epoch));
             *state.relay_client.write() = Some(client.clone());
+            *state.resolved_relay.write() = relay_resolved.clone();
             // run invokes connect_control and keeps servicing reverse tunnels/reconnects.
             tokio::spawn(async move { client.run().await })
         });

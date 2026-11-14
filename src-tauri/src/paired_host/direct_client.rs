@@ -17,17 +17,20 @@ pub(crate) struct RequestBase {
 }
 
 pub(crate) fn request_base(host: &HostView) -> Result<RequestBase, ClientError> {
-    let invalid = || ClientError::local("INVALID_REQUEST");
     if let Some((origin, epoch)) = GLOBAL_DIRECT_ROUTES.direct_for(&host.host_id) {
         if let Ok(url) = Url::parse(&origin) {
             return Ok(RequestBase { url, direct_epoch: Some(epoch) });
         }
     }
-    Ok(RequestBase {
-        url: Url::parse(&crate::remote::relay_client::live_relay_url(&host.host_id))
-            .map_err(|_| invalid())?,
-        direct_epoch: None,
-    })
+    Ok(RequestBase { url: relay_base(host)?, direct_epoch: None })
+}
+
+/// The relay request base for `host`, built from its saved relay origin and machine id. The
+/// host id stays an opaque identity: it may still name a relay origin that was migrated since.
+pub(crate) fn relay_base(host: &HostView) -> Result<Url, ClientError> {
+    let invalid = || ClientError::local("INVALID_REQUEST");
+    let key = super::inventory::host_key(&host.relay_origin, &host.machine_id).map_err(|_| invalid())?;
+    Url::parse(&key).map_err(|_| invalid())
 }
 
 /// A request over the direct adapter failed at the transport level: fall back.

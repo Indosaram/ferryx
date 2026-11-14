@@ -6,6 +6,18 @@ use crate::account::store::{
     SessionRecord, SubscriptionRecord, UserRecord,
 };
 
+/// A machine's fallback relay origins as stored: NULL for none (also what rows written before the
+/// v3 column read as), else a JSON array.
+fn encode_origin_list(origins: &[String]) -> Option<String> {
+    (!origins.is_empty()).then(|| serde_json::to_string(origins).unwrap_or_else(|_| "[]".into()))
+}
+
+/// Inverse of [`encode_origin_list`]. A value that does not parse loads as no fallbacks rather than
+/// failing the whole store: the list is advisory, the primary origin still works.
+fn decode_origin_list(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default()
+}
+
 pub fn load_store_from_connection(conn: &Connection) -> Result<AccountStore, String> {
     let mut store = AccountStore::default();
 
@@ -114,7 +126,8 @@ pub fn load_store_from_connection(conn: &Connection) -> Result<AccountStore, Str
         let mut stmt = conn
             .prepare(
                 "SELECT machine_record_id, user_id, machine_id, display_name, public_key, \
-                 attach_public_key, relay_origin, platform, enrollment_epoch, enrolled_at, last_seen_at \
+                 attach_public_key, relay_origin, platform, enrollment_epoch, enrolled_at, last_seen_at, \
+                 relay_fallback_origins \
                  FROM machines",
             )
             .map_err(|err| format!("Failed to prepare machines query: {err}"))?;
@@ -128,6 +141,7 @@ pub fn load_store_from_connection(conn: &Connection) -> Result<AccountStore, Str
                     public_key: row.get(4)?,
                     attach_public_key: row.get(5)?,
                     relay_origin: row.get(6)?,
+                    relay_fallback_origins: decode_origin_list(row.get::<_, Option<String>>(11)?),
                     platform: row.get(7)?,
                     enrollment_epoch: row.get::<_, i64>(8)? as u64,
                     enrolled_at: row.get::<_, i64>(9)? as u64,
@@ -501,13 +515,14 @@ pub fn save_store_to_transaction(tx: &Transaction, store: &AccountStore) -> Resu
             .prepare(
                 "INSERT INTO machines (machine_record_id, user_id, machine_id, display_name, \
                  public_key, attach_public_key, relay_origin, platform, enrollment_epoch, \
-                 enrolled_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+                 enrolled_at, last_seen_at, relay_fallback_origins) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
                  ON CONFLICT(machine_record_id) DO UPDATE SET \
                  user_id=excluded.user_id, machine_id=excluded.machine_id, display_name=excluded.display_name, \
                  public_key=excluded.public_key, attach_public_key=excluded.attach_public_key, \
                  relay_origin=excluded.relay_origin, platform=excluded.platform, \
                  enrollment_epoch=excluded.enrollment_epoch, enrolled_at=excluded.enrolled_at, \
-                 last_seen_at=excluded.last_seen_at",
+                 last_seen_at=excluded.last_seen_at, relay_fallback_origins=excluded.relay_fallback_origins",
             )
             .map_err(|e| format!("Failed to prepare machine upsert: {e}"))?;
         for machine in store.machines.values() {
@@ -523,7 +538,8 @@ pub fn save_store_to_transaction(tx: &Transaction, store: &AccountStore) -> Resu
                     machine.platform,
                     machine.enrollment_epoch as i64,
                     machine.enrolled_at as i64,
-                    machine.last_seen_at as i64
+                    machine.last_seen_at as i64,
+                    encode_origin_list(&machine.relay_fallback_origins)
                 ])
                 .map_err(|e| {
                     format!("Failed to upsert machine {}: {e}", machine.machine_record_id)

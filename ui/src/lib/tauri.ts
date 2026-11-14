@@ -1202,6 +1202,11 @@ export type RemoteGatewayStatus = {
   boundAddress: string | null;
   localIp: string | null;
   relayUrl: string | null;
+  /** The relay the running gateway actually uses (the saved relayUrl, FERRYX_RELAY_URL, the
+   * enrollment relay origin or the default, or the fallback it failed over to). */
+  resolvedRelayUrl?: string | null;
+  /** Where the primary relay URL came from: `config`, `env`, `enrollment` or `default`. */
+  resolvedRelayUrlSource?: string | null;
   // N5 (round 2): direct-gateway gate projection — lets the UI distinguish a
   // gated LAN listener from ordinary running status.
   gateStatus?: RemoteGatewayGateStatus | null;

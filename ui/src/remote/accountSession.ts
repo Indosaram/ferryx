@@ -91,6 +91,7 @@ export interface AccountMachineView {
   publicKey: string;
   attachPublicKey: string;
   relayOrigin: string;
+  relayFallbackOrigins?: string[];
   platform: string;
   online: boolean;
   enrollmentEpoch: string | number;
@@ -114,6 +115,7 @@ export interface AccountGrantResponse {
   machineAttachPublicKey: string;
   grantScope: "mirror" | "machine";
   expiresAt: number;
+  relayFallbackOrigins?: string[];
 }
 
 export interface AllocateSessionResponse {

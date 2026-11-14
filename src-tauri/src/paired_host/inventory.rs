@@ -90,12 +90,20 @@ pub struct Pairing {
 pub struct HostAttach {
     pub machine_attach_public_key: String,
     pub enrollment_epoch: String,
+    /// The account machine record's fallback relay origins, dialled in order after the host's
+    /// relay origin when it cannot reach the machine. Absent on older rows (empty list).
+    /// Entries are re-validated at dial time; an insecure one is skipped with a warning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_fallback_origins: Vec<String>,
 }
 impl HostAttach {
     /// Non-empty, control-free, and the key is base64 of exactly 32 bytes.
     pub fn is_valid(&self) -> bool {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         valid_text(&self.enrollment_epoch, 256)
+            && self.relay_fallback_origins.len()
+                <= crate::account::service::MAX_RELAY_FALLBACK_ORIGINS
+            && self.relay_fallback_origins.iter().all(|origin| valid_text(origin, 2048))
             && valid_text(&self.machine_attach_public_key, 256)
             && STANDARD
                 .decode(&self.machine_attach_public_key)
@@ -247,6 +255,42 @@ fn normalize_origin_policy(input: &str, loopback_http: bool) -> Result<String> {
     Ok(url.origin().ascii_serialization())
 }
 
+/// Machine-record fallback relay origins under the host relay origin's own policy
+/// ([`normalize_origin`]: https only unless the insecure-relay opt-in allows loopback http; no
+/// userinfo, path, query or fragment), normalised to a bare origin, in order, without duplicates of
+/// `primary` or of each other, at most [`crate::account::service::MAX_RELAY_FALLBACK_ORIGINS`].
+/// Entries that fail are dropped with a warning.
+pub fn normalize_fallback_origins(entries: &[String], primary: &str) -> Vec<String> {
+    normalize_fallback_origins_policy(
+        entries,
+        primary,
+        crate::remote::relay_client::is_insecure_relay_allowed(),
+    )
+}
+pub(crate) fn normalize_fallback_origins_policy(
+    entries: &[String],
+    primary: &str,
+    loopback_http: bool,
+) -> Vec<String> {
+    let primary = normalize_origin_policy(primary, loopback_http)
+        .unwrap_or_else(|_| primary.trim_end_matches('/').to_owned());
+    let mut kept: Vec<String> = Vec::new();
+    for entry in entries {
+        match normalize_origin_policy(entry, loopback_http) {
+            Ok(origin) => {
+                if origin != primary
+                    && !kept.contains(&origin)
+                    && kept.len() < crate::account::service::MAX_RELAY_FALLBACK_ORIGINS
+                {
+                    kept.push(origin);
+                }
+            }
+            Err(_) => tracing::warn!("ignoring relay fallback URL {entry}"),
+        }
+    }
+    kept
+}
+
 /// A stored origin that is a loopback `http` relay and nothing else wrong with the URL.
 fn saved_loopback_http_origin(origin: &str) -> bool {
     normalize_origin_policy(origin, true).ok().as_deref() == Some(origin)
@@ -325,6 +369,32 @@ fn pairing_record(
         },
     ))
 }
+/// A row's id is `host_key(relay_origin, machine_id)`, or the same key on the retired relay
+/// origin for a row whose origin was migrated: ids are identities (workspace ids derive from
+/// them), so the migration keeps them and only moves the connection origin.
+fn host_id_matches(id: &str, row: &Record) -> bool {
+    use crate::remote::relay_client::{migrate_retired_relay_origin, RETIRED_RELAY_ORIGIN};
+    host_key(&row.relay_origin, &row.machine_id).ok().as_deref() == Some(id)
+        || (migrate_retired_relay_origin(RETIRED_RELAY_ORIGIN).as_deref()
+            == Some(row.relay_origin.as_str())
+            && host_key(RETIRED_RELAY_ORIGIN, &row.machine_id).ok().as_deref() == Some(id))
+}
+
+/// Moves rows saved on the retired relay origin to the current relay in place; `true` when any
+/// row changed. Host ids and generations are kept (see [`host_id_matches`]).
+fn migrate_retired_relay_origins(disk: &mut Disk) -> bool {
+    let mut changed = false;
+    for row in disk.hosts.values_mut() {
+        if let Some(migrated) =
+            crate::remote::relay_client::migrate_retired_relay_origin(&row.relay_origin)
+        {
+            row.relay_origin = migrated;
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn load(path: &Path, loopback_http: bool) -> Result<Disk> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -350,7 +420,7 @@ fn load(path: &Path, loopback_http: bool) -> Result<Disk> {
         let tolerated_loopback =
             !origin_matches && !loopback_http && saved_loopback_http_origin(&row.relay_origin);
         if (!origin_matches && !tolerated_loopback)
-            || host_key(&row.relay_origin, &row.machine_id).ok().as_ref() != Some(id)
+            || !host_id_matches(id, row)
             || !valid_text(&row.display_label, 256)
             || disk.generations.get(id) != Some(&row.generation)
         {
@@ -389,7 +459,17 @@ impl Inventory {
     }
     fn open_policy(private_data_dir: &Path, loopback_http: bool) -> Result<Self> {
         let path = private_data_dir.join(FILE_NAME);
-        let disk = load(&path, loopback_http)?;
+        let mut disk = load(&path, loopback_http)?;
+        if migrate_retired_relay_origins(&mut disk) {
+            // Same atomic writer and read-back check as every other commit; on failure the file
+            // keeps its original bytes and this open fails closed like any unreadable store.
+            crate::remote::auth::write_private_json(&path, &disk)
+                .map_err(|_| InventoryError::Unavailable)?;
+            if load(&path, loopback_http).ok().as_ref() != Some(&disk) {
+                return Err(InventoryError::Unavailable);
+            }
+            crate::remote::relay_client::warn_retired_relay_migrated(&path.display().to_string());
+        }
         let insecure = insecure_entries(&disk, loopback_http);
         Ok(Self {
             path,

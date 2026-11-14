@@ -171,6 +171,7 @@ pub(crate) mod test_support {
                     public_key: public_key.to_string(),
                     attach_public_key: String::new(),
                     relay_origin: "https://relay.test".to_string(),
+                    relay_fallback_origins: Vec::new(),
                     platform: "test".to_string(),
                     enrollment_epoch: 1 + index as u64,
                     enrolled_at: 1,

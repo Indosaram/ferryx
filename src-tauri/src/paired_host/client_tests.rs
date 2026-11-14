@@ -1832,3 +1832,61 @@ fn discover_repos_route_and_desktop_id_rewrite() {
     assert!(encoded.get("registeredWorkspaceId").is_none());
     assert_eq!(encoded["target"], json!({"kind": "pairedDaemon", "hostId": "host-1"}));
 }
+
+/// A forward/CONNECT proxy that counts connections and refuses every request with 502.
+async fn counting_proxy() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).await.unwrap_or(0) == 1
+                {
+                    head.push(byte[0]);
+                }
+                let _ = stream
+                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+    (format!("http://{address}"), hits)
+}
+
+#[tokio::test]
+async fn direct_path_requests_never_use_the_proxy_even_for_a_dns_name() {
+    let (proxy, hits) = counting_proxy().await;
+    let env = move |name: &str| {
+        matches!(
+            name,
+            "FERRYX_RELAY_PROXY" | "HTTPS_PROXY" | "HTTP_PROXY" | "ALL_PROXY"
+        )
+        .then(|| proxy.clone())
+    };
+    let client = MachineClient::with_relay_proxy(
+        crate::remote::relay_client::proxy::reqwest_proxy_with(env),
+    );
+    // A direct-LAN host addressed by a name the destination rules would proxy.
+    let url = "http://nas.direct-qa.invalid:9/api/v1/capabilities";
+    let direct = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.http_for(false).get(url).send(),
+    )
+    .await;
+    assert!(
+        !matches!(direct, Ok(Ok(_))),
+        "no proxy may answer for the direct path"
+    );
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // The relay path with the same environment still goes through the proxy.
+    let relayed = client.http_for(true).get(url).send().await.unwrap();
+    assert_eq!(relayed.status(), reqwest::StatusCode::BAD_GATEWAY);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

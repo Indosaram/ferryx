@@ -404,7 +404,7 @@ Relay mode connects outbound to a relay coordinator. The default public relay UR
 }
 ```
 
-Specify `"relayUrl"` in this configuration file for deterministic restoration across daemon restarts. `FERRYX_RELAY_URL` is only used when auto-configuring from Off during pairing (`src-tauri/src/daemon/server.rs:1956`), not during standard startup restoration (`src-tauri/src/remote/server.rs:2270`).
+The daemon picks its relay in one order, at startup and on every reconnect: the saved `relayUrl` in `remote-config.json`, then `FERRYX_RELAY_URL` in the daemon's environment, then the `relayOrigin` of the account enrollment record, then the default `https://relay.ferryx.dev` (`resolve_relay_url`, `src-tauri/src/remote/state.rs`). Blank values are skipped; an insecure value is rejected, not replaced by a later source. The daemon logs the URL and its source, and `ferryx-cli remote status` reports the URL and source the daemon itself resolved. Specify `"relayUrl"` in this file to pin the relay regardless of environment or enrollment.
 
 Set permissions on the configuration file:
 
@@ -414,7 +414,7 @@ chmod 0600 ~/.ferryx/remote/remote-config.json
 
 ### Verifying Gateway Configuration
 
-Use the CLI to inspect the persisted configuration:
+Use the CLI to inspect the gateway:
 
 ```bash
 ferryx remote status
@@ -422,7 +422,7 @@ ferryx remote status
 
 Output:
 ```text
-status=ok port=43821 mode=localNetwork
+status=ok port=43821 daemon=running mode=localNetwork relayConnected=false
 ```
 
 For JSON format:
@@ -433,12 +433,13 @@ ferryx remote status --json
 
 Output:
 ```json
-{"status":"ok","port":43821,"mode":"localNetwork"}
+{"status":"ok","port":43821,"daemon":"running","mode":"relay","relayConnected":true,"relayUrl":"https://relay.ferryx.dev","relayUrlSource":"default"}
 ```
 
-Persisted status versus live health:
-The `ferryx remote status` command reads static configuration from `~/.ferryx/remote/remote-config.json` (`src-tauri/src/cli.rs:361`).
-It prints `status=ok` along with the configured port and mode, but does not query the running daemon over IPC. It returns `status=ok` even if the daemon is stopped or if the gateway failed to bind due to network interface errors.
+Live status versus saved config:
+`ferryx remote status` asks the running daemon over its local socket and reports the live mode, whether the relay tunnel is connected (`relayConnected`), and the relay URL in effect with its source (`config` for a saved URL, `default` for the built-in relay).
+When no daemon answers it prints `status=daemonNotRunning` (`"status":"daemonNotRunning"`, `"daemon":"notRunning"`, `"relayConnected":null`) with the mode saved in `~/.ferryx/remote/remote-config.json`; nothing live is claimed. A daemon that owns the socket but does not answer (for example one still running an older protocol version after an upgrade) is reported as `status=daemonUnreachable` (`"daemon":"unreachable"`).
+`ferryx-cli up` and `ferryx account enroll` turn relay mode on after enrolling when the saved mode is `off`; a `localNetwork` or `tailscale` mode chosen earlier is left unchanged.
 To confirm that the remote gateway is actively listening, inspect open TCP sockets directly:
 ```bash
 ss -tulpn | grep 43821
@@ -657,7 +658,7 @@ Set environment variables in your systemd unit or shell profile:
 * `FERRYX_RUNTIME_DIR`: Relocates `/tmp/rorca-<UID>` (`src-tauri/src/daemon/server.rs:128`).
 * `FERRYX_DATA_DIR`: Relocates `~/.ferryx/` (`src-tauri/src/daemon/server.rs:271`) and SSH host registry (`:862`). Does not relocate session checkpoints.
 * `FERRYX_SESSION_DIR`: Relocates session checkpoint storage (`src-tauri/src/daemon/server.rs:44,302,1013`).
-* `FERRYX_RELAY_URL`: Used during Off-to-Relay pairing (`src-tauri/src/daemon/server.rs:1956`) and IPC fallback (`src-tauri/src/ipc/remote.rs:307`). Headless servers should configure `"relayUrl"` in `remote-config.json` for deterministic startup restoration.
+* `FERRYX_RELAY_URL`: The daemon's relay when no `"relayUrl"` is saved in `remote-config.json`; it wins over the enrollment record's `relayOrigin` and the default (order: `relayUrl` > `FERRYX_RELAY_URL` > enrollment `relayOrigin` > default). It must be set in the daemon's environment (the systemd unit), not only in the shell running `ferryx-cli`.
 * `FERRYX_MACHINE_TOKEN`: Supplies a pre-shared token for relay tunnels instead of machine identity signatures (`src-tauri/src/remote/server.rs:2283-2293,2347-2365`).
 
 ---

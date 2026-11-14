@@ -79,3 +79,63 @@ async fn cors_rejects_an_unlisted_origin_and_allows_the_relay_origin() {
 
     server.abort();
 }
+
+/// D2: a relay the daemon resolved from FERRYX_RELAY_URL or its enrollment (not saved in the
+/// config) is admitted too, and only while it is the recorded resolution.
+#[tokio::test]
+async fn cors_allows_the_relay_the_daemon_actually_resolved() {
+    let state = Arc::new(RemoteGatewayState::new(
+        Arc::new(TerminalService::default()),
+        WorkspaceRegistry::new(),
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = Arc::clone(&state);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, create_remote_router(served)).await.unwrap();
+    });
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let api = "/api/v1/capabilities";
+    let env_relay = "https://relay.from-env.example";
+
+    assert_eq!(preflight(&http, addr, api, env_relay).await, None, "not resolved yet");
+    *state.resolved_relay.write() = Some((
+        format!("{env_relay}/"),
+        crate::remote::state::RelayUrlSource::Env,
+    ));
+    assert_eq!(preflight(&http, addr, api, env_relay).await.as_deref(), Some(env_relay));
+    *state.resolved_relay.write() = None;
+    assert_eq!(preflight(&http, addr, api, env_relay).await, None, "cleared with the relay");
+    server.abort();
+}
+
+/// D26-5: after the relay client fails over, CORS admits the fallback it now uses (and still the
+/// resolved primary); a fallback that is configured but not active stays refused.
+#[tokio::test]
+async fn cors_allows_the_fallback_relay_after_a_failover() {
+    let state = Arc::new(RemoteGatewayState::new(
+        Arc::new(TerminalService::default()),
+        WorkspaceRegistry::new(),
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = Arc::clone(&state);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, create_remote_router(served)).await.unwrap();
+    });
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let api = "/api/v1/capabilities";
+    let (primary, standby) = ("https://primary.selfhost.example", "https://standby.selfhost.example");
+    let client = crate::remote::relay_client::RelayClient::new(primary, "tok")
+        .with_fallback_urls([standby])
+        .with_resolved_source(crate::remote::state::RelayUrlSource::Config);
+    *state.resolved_relay.write() =
+        Some((primary.to_string(), crate::remote::state::RelayUrlSource::Config));
+    *state.relay_client.write() = Some(client.clone());
+
+    assert_eq!(preflight(&http, addr, api, standby).await, None, "standby is not active yet");
+    client.fail_over_for_test();
+    assert_eq!(preflight(&http, addr, api, standby).await.as_deref(), Some(standby));
+    assert_eq!(preflight(&http, addr, api, primary).await.as_deref(), Some(primary));
+    server.abort();
+}

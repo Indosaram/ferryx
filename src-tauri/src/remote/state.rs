@@ -66,14 +66,140 @@ impl RemoteGatewayConfig {
         RemoteRestartPolicy::RestoreListener
     }
 
-    fn persisted_snapshot(&self) -> PersistedRemoteGatewayConfig {
+    fn persisted_snapshot(&self, relay_fallback_urls: &[String]) -> PersistedRemoteGatewayConfig {
         PersistedRemoteGatewayConfig {
             mode: self.mode,
             port: self.port,
             allow_control: self.allow_control,
             restart_policy: self.restart_policy(),
             relay_url: self.relay_url.clone(),
+            relay_fallback_urls: relay_fallback_urls.to_vec(),
         }
+    }
+}
+
+/// Environment override for the relay origin when no relay URL is saved in the config.
+pub const RELAY_URL_ENV: &str = "FERRYX_RELAY_URL";
+
+/// Held by every test that sets [`RELAY_URL_ENV`], so two of them never interleave.
+#[cfg(test)]
+pub(crate) static RELAY_URL_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Which input supplied the relay URL [`resolve_relay_url`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayUrlSource {
+    /// `relayUrl` saved in the gateway config.
+    Config,
+    /// [`RELAY_URL_ENV`].
+    Env,
+    /// `relayOrigin` of the account enrollment record.
+    Enrollment,
+    /// [`DEFAULT_RELAY_URL`].
+    Default,
+}
+
+impl RelayUrlSource {
+    /// Inverse of [`Self::code`].
+    pub fn from_code(code: &str) -> Option<Self> {
+        [Self::Config, Self::Env, Self::Enrollment, Self::Default]
+            .into_iter()
+            .find(|source| source.code() == code)
+    }
+
+    /// Machine-readable name, as reported by `ferryx-cli` status (`relayUrlSource`).
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Env => "env",
+            Self::Enrollment => "enrollment",
+            Self::Default => "default",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Config => "config relayUrl",
+            Self::Env => RELAY_URL_ENV,
+            Self::Enrollment => "enrollment relayOrigin",
+            Self::Default => "default",
+        }
+    }
+}
+
+/// The relay URL the daemon connects to and reports, in one order: the saved `relay_url`, then
+/// [`RELAY_URL_ENV`], then the enrollment record's relay origin, then [`DEFAULT_RELAY_URL`].
+/// Blank values are skipped. The result is not validated: callers pass it to
+/// `validate_relay_url`, so an insecure origin is rejected rather than replaced by a later source.
+pub fn resolve_relay_url(config: &RemoteGatewayConfig) -> (String, RelayUrlSource) {
+    let env = std::env::var(RELAY_URL_ENV).ok();
+    let enrollment = crate::account::enroll_client::load_enrollment_record()
+        .map(|record| record.relay_origin);
+    let (url, source) =
+        resolve_relay_url_from(config.relay_url.as_deref(), env.as_deref(), enrollment.as_deref());
+    let url = crate::remote::relay_client::migrate_retired_relay_origin(&url).unwrap_or(url);
+    tracing::info!("{}", relay_url_log_line(&url, source));
+    (url, source)
+}
+
+fn resolve_relay_url_from(
+    config: Option<&str>,
+    env: Option<&str>,
+    enrollment: Option<&str>,
+) -> (String, RelayUrlSource) {
+    [
+        (config, RelayUrlSource::Config),
+        (env, RelayUrlSource::Env),
+        (enrollment, RelayUrlSource::Enrollment),
+    ]
+    .into_iter()
+    .find_map(|(value, source)| {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| (value.to_string(), source))
+    })
+    .unwrap_or_else(|| (DEFAULT_RELAY_URL.to_string(), RelayUrlSource::Default))
+}
+
+fn relay_url_log_line(url: &str, source: RelayUrlSource) -> String {
+    format!("relay URL {url} (source: {})", source.label())
+}
+
+#[cfg(test)]
+mod relay_url_resolution_tests {
+    use super::*;
+
+    /// (saved relay_url, FERRYX_RELAY_URL, enrollment relayOrigin, expected url, expected source)
+    type Case = (Option<&'static str>, Option<&'static str>, Option<&'static str>, &'static str, RelayUrlSource);
+
+    #[test]
+    fn relay_url_precedence_table() {
+        let cases: [Case; 6] = [
+            (Some("https://saved.example"), Some("https://env.example"), Some("https://enrolled.example"), "https://saved.example", RelayUrlSource::Config),
+            (None, Some("https://env.example"), Some("https://enrolled.example"), "https://env.example", RelayUrlSource::Env),
+            (Some("  "), Some(" https://env.example "), None, "https://env.example", RelayUrlSource::Env),
+            (None, None, Some("https://enrolled.example"), "https://enrolled.example", RelayUrlSource::Enrollment),
+            (None, Some(""), Some("https://enrolled.example"), "https://enrolled.example", RelayUrlSource::Enrollment),
+            (None, None, None, DEFAULT_RELAY_URL, RelayUrlSource::Default),
+        ];
+        for (config, env, enrollment, url, source) in cases {
+            let resolved = resolve_relay_url_from(config, env, enrollment);
+            assert_eq!(resolved, (url.to_string(), source), "{config:?} {env:?} {enrollment:?}");
+            assert_eq!(
+                relay_url_log_line(&resolved.0, resolved.1),
+                format!("relay URL {url} (source: {})", source.label())
+            );
+        }
+        assert_eq!(RelayUrlSource::Env.label(), "FERRYX_RELAY_URL");
+    }
+
+    #[test]
+    fn insecure_env_origin_is_returned_for_rejection_not_skipped() {
+        // A bad override must surface as a validation error, never fall through to the owner's relay.
+        let (url, source) =
+            resolve_relay_url_from(None, Some("http://relay.example.com"), Some("https://enrolled.example"));
+        assert_eq!((url.as_str(), source), ("http://relay.example.com", RelayUrlSource::Env));
+        assert!(crate::remote::relay_client::validate_relay_url(&url, false).is_err());
     }
 }
 
@@ -754,6 +880,9 @@ struct PersistedRemoteGatewayConfig {
     restart_policy: RemoteRestartPolicy,
     #[serde(default)]
     relay_url: Option<String>,
+    /// Relay origins tried in order after `relay_url` refuses or drops the control channel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relay_fallback_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -830,6 +959,12 @@ pub struct RemoteGatewayState {
     /// call this gateway's `/api/v1/*` routes cross-origin, so the CORS allowlist admits them.
     pub cors_saved_host_origins: RwLock<Vec<String>>,
     config_path: Option<PathBuf>,
+    /// Saved `relayFallbackUrls`, kept beside `config` so a config replacement keeps them.
+    pub relay_fallback_urls: RwLock<Vec<String>>,
+    /// The relay URL the running gateway actually resolved and dials, with its source, recorded
+    /// where the daemon resolves it (start and relay replacement). `None` when no relay runs.
+    /// Status reports and CORS read this instead of resolving again in another process or env.
+    pub resolved_relay: RwLock<Option<(String, RelayUrlSource)>>,
     pub desktop_event_sink: RwLock<Option<DesktopEventSink>>,
     /// The single relay pairing authority owned by the running gateway.
     ///
@@ -992,17 +1127,9 @@ impl RemoteGatewayState {
         let (event_tx, _) = broadcast::channel(1024);
         let (active_selection_tx, _) = watch::channel(None);
         let (active_session_tx, _) = watch::channel(None);
-        let config = config_path
+        let (config, relay_fallback_urls) = config_path
             .as_deref()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<PersistedRemoteGatewayConfig>(&bytes).ok())
-            .map(|persisted| RemoteGatewayConfig {
-                mode: persisted.mode,
-                // Port is fixed; ignore persisted value so stale custom ports heal on load.
-                port: REMOTE_GATEWAY_PORT,
-                allow_control: persisted.allow_control,
-                relay_url: persisted.relay_url,
-            })
+            .and_then(load_persisted_config_with_fallbacks)
             .unwrap_or_default();
         let agent_events = Arc::new(crate::agent_control::events::AgentEventBus::new(
             crate::agent_control::events::AGENT_EVENT_RETAIN,
@@ -1062,6 +1189,8 @@ impl RemoteGatewayState {
             bound_address: RwLock::new(None),
             cors_saved_host_origins: RwLock::new(Vec::new()),
             config_path,
+            relay_fallback_urls: RwLock::new(relay_fallback_urls),
+            resolved_relay: RwLock::new(None),
             desktop_event_sink: RwLock::new(None),
             relay_pairing: RwLock::new(None),
             relay_client: RwLock::new(None),
@@ -1406,7 +1535,27 @@ impl RemoteGatewayState {
         let Some(path) = self.config_path.as_deref() else {
             return Ok(());
         };
-        write_private_json(path, &self.config.read().persisted_snapshot())
+        let fallbacks = self.relay_fallback_urls.read().clone();
+        write_private_json(path, &self.config.read().persisted_snapshot(&fallbacks))
+    }
+
+    /// The saved fallback origins that still pass relay URL validation, in order.
+    pub fn relay_fallback_urls(&self) -> Vec<String> {
+        crate::remote::relay_client::valid_fallback_relay_urls(self.relay_fallback_urls.read().iter())
+    }
+
+    /// The relay the running gateway is connected through right now, and the source of its
+    /// primary: the recorded resolution, except that after a failover the URL is the fallback
+    /// the relay client switched to (`RelayClient::active_relay_url`). `None` when no relay runs.
+    pub fn active_relay(&self) -> Option<(String, RelayUrlSource)> {
+        let (primary, source) = self.resolved_relay.read().clone()?;
+        let active = self
+            .relay_client
+            .read()
+            .as_ref()
+            .map(|client| client.active_relay_url().to_string())
+            .unwrap_or(primary);
+        Some((active, source))
     }
 
     /// The agent-control switch, the excluded devices and the newest audit records.
@@ -1483,8 +1632,178 @@ fn remote_data_dir() -> Option<PathBuf> {
     resolve_remote_data_dir(|variable| std::env::var_os(variable))
 }
 
+/// The gateway config a persistent daemon restores at boot (`remote-config.json`).
+pub fn remote_config_path() -> Option<PathBuf> {
+    remote_data_dir().map(|dir| dir.join("remote-config.json"))
+}
+
+/// The saved gateway config at `path`, read the way a daemon reads it at boot. `None` when the
+/// file is missing or unreadable, in which case the daemon starts from the default (Off).
+pub fn load_persisted_config(path: &std::path::Path) -> Option<RemoteGatewayConfig> {
+    load_persisted_config_with_fallbacks(path).map(|(config, _)| config)
+}
+
+/// [`load_persisted_config`] plus the saved `relayFallbackUrls`. A value on the retired relay
+/// origin is migrated to the current relay and written back once, with a deprecation warning.
+pub fn load_persisted_config_with_fallbacks(
+    path: &std::path::Path,
+) -> Option<(RemoteGatewayConfig, Vec<String>)> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut persisted = serde_json::from_slice::<PersistedRemoteGatewayConfig>(&bytes).ok()?;
+    if migrate_persisted_relay_origins(&mut persisted) {
+        match write_private_json(path, &persisted) {
+            Ok(()) => crate::remote::relay_client::warn_retired_relay_migrated(&path.display().to_string()),
+            Err(error) => tracing::warn!("could not save migrated relay origin to {}: {error}", path.display()),
+        }
+    }
+    Some((
+        RemoteGatewayConfig {
+            mode: persisted.mode,
+            // Port is fixed; ignore persisted value so stale custom ports heal on load.
+            port: REMOTE_GATEWAY_PORT,
+            allow_control: persisted.allow_control,
+            relay_url: persisted.relay_url,
+        },
+        persisted.relay_fallback_urls,
+    ))
+}
+
+/// Rewrites retired-origin values in place; `true` when anything changed. Duplicates a
+/// migration creates in the fallback list (or of the primary) are dropped, keeping order.
+fn migrate_persisted_relay_origins(persisted: &mut PersistedRemoteGatewayConfig) -> bool {
+    use crate::remote::relay_client::migrate_retired_relay_origin;
+    let mut changed = false;
+    if let Some(migrated) = persisted.relay_url.as_deref().and_then(migrate_retired_relay_origin) {
+        persisted.relay_url = Some(migrated);
+        changed = true;
+    }
+    let mut fallbacks: Vec<String> = Vec::new();
+    for url in std::mem::take(&mut persisted.relay_fallback_urls) {
+        let url = match migrate_retired_relay_origin(&url) {
+            Some(migrated) => {
+                changed = true;
+                migrated
+            }
+            None => url,
+        };
+        if persisted.relay_url.as_deref() != Some(url.as_str()) && !fallbacks.contains(&url) {
+            fallbacks.push(url);
+        }
+    }
+    persisted.relay_fallback_urls = fallbacks;
+    changed
+}
+
+/// Saves Relay through `relay_url` at `path` when the saved mode is Off (or nothing is saved),
+/// so the next daemon boot connects to the relay. A mode the user chose is left untouched, and so
+/// is a file that exists but does not parse (corrupt, or a mode from a newer build).
+/// Returns whether the config was written.
+pub fn persist_relay_if_off(path: &std::path::Path, relay_url: &str) -> std::io::Result<bool> {
+    let (saved, fallbacks) = match load_persisted_config_with_fallbacks(path) {
+        Some(saved) => saved,
+        None if path.exists() => return Ok(false),
+        None => Default::default(),
+    };
+    if saved.mode != RemoteNetworkMode::Off {
+        return Ok(false);
+    }
+    let config = RemoteGatewayConfig {
+        mode: RemoteNetworkMode::Relay,
+        relay_url: Some(relay_url.to_string()),
+        ..saved
+    };
+    write_private_json(path, &config.persisted_snapshot(&fallbacks))?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod relay_origin_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn retired_relay_origin_in_saved_config_is_migrated_and_written_back_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-config.json");
+        std::fs::write(
+            &path,
+            br#"{"mode":"relay","port":43821,"allowControl":true,"relayUrl":"https://relay.checka.cc/host/m-1","relayFallbackUrls":["https://relay.checka.cc","https://relay.ferryx.dev","https://relay.checka.cc.example"]}"#,
+        )
+        .unwrap();
+
+        let (config, fallbacks) = load_persisted_config_with_fallbacks(&path).unwrap();
+        assert_eq!(config.relay_url.as_deref(), Some("https://relay.ferryx.dev/host/m-1"));
+        // The look-alike host is untouched; the migrated duplicate collapses.
+        assert_eq!(fallbacks, ["https://relay.ferryx.dev", "https://relay.checka.cc.example"]);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("relay.checka.cc\""), "{saved}");
+        assert!(!saved.contains("relay.checka.cc/"), "{saved}");
+
+        // Idempotent: the second load changes nothing on disk.
+        let before = std::fs::read(&path).unwrap();
+        let (again, again_fallbacks) = load_persisted_config_with_fallbacks(&path).unwrap();
+        assert_eq!((again.relay_url, again_fallbacks), (config.relay_url, fallbacks));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn saved_fallbacks_round_trip_through_gateway_state_and_drop_insecure_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-config.json");
+        std::fs::write(
+            &path,
+            br#"{"mode":"off","port":43821,"allowControl":true,"relayFallbackUrls":["https://standby.example.com","http://insecure.example.com"]}"#,
+        )
+        .unwrap();
+        let state = RemoteGatewayState::new_with_paths(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+            Some(path.clone()),
+            None,
+        );
+        assert_eq!(state.relay_fallback_urls(), ["https://standby.example.com"]);
+        state.config.write().relay_url = Some("https://relay.example.com".into());
+        state.persist_config().unwrap();
+        let (config, fallbacks) = load_persisted_config_with_fallbacks(&path).unwrap();
+        assert_eq!(config.relay_url.as_deref(), Some("https://relay.example.com"));
+        assert_eq!(fallbacks, ["https://standby.example.com", "http://insecure.example.com"]);
+        // persist_relay_if_off keeps the saved list too.
+        assert!(persist_relay_if_off(&path, "https://relay.example.com").unwrap());
+        assert_eq!(load_persisted_config_with_fallbacks(&path).unwrap().1.len(), 2);
+    }
+
+    #[test]
+    fn resolve_relay_url_never_returns_the_retired_origin() {
+        let config = RemoteGatewayConfig {
+            relay_url: Some("https://relay.checka.cc".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_relay_url(&config), ("https://relay.ferryx.dev".to_string(), RelayUrlSource::Config));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn persist_relay_if_off_leaves_a_corrupt_config_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-config.json");
+        std::fs::write(&path, b"{not json").unwrap();
+
+        assert!(!persist_relay_if_off(&path, "https://relay.example").unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
+    }
+
+    #[test]
+    fn persist_relay_if_off_leaves_an_unknown_mode_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote-config.json");
+        let saved = br#"{"mode":"meshVpn","port":43821,"allowControl":true}"#;
+        std::fs::write(&path, saved).unwrap();
+
+        assert!(!persist_relay_if_off(&path, "https://relay.example").unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+    }
+
     /// P19 (round 2): the trusted-overlay proof must FAIL CLOSED. An interface
     /// name alone (utun/tun/tailscale) is not authoritative — without positive
     /// Tailscale CLI confirmation the CGNAT address stays gated, and a CLI that

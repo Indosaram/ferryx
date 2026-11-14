@@ -85,10 +85,28 @@ impl AsyncWrite for PairedStream {
 }
 
 /// Dials a `ws`/`wss` URL over TCP the way `connect_async_with_config(.., true)` does
-/// (Nagle off, default rustls roots for `wss`), yielding the shared socket type.
+/// (Nagle off, default rustls roots for `wss`), yielding the shared socket type. `relay` is
+/// the path kind: a relay is reached through the configured HTTP proxy, a direct path never
+/// is, however its address looks.
 pub async fn connect_net_websocket(
     request: tungstenite::handshake::client::Request,
     config: WebSocketConfig,
+    relay: bool,
+) -> Result<PairedSocket, tungstenite::Error> {
+    connect_net_websocket_with(
+        request,
+        config,
+        relay,
+        &crate::remote::relay_client::proxy::process_env,
+    )
+    .await
+}
+
+async fn connect_net_websocket_with(
+    request: tungstenite::handshake::client::Request,
+    config: WebSocketConfig,
+    relay: bool,
+    env: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> Result<PairedSocket, tungstenite::Error> {
     use tungstenite::error::UrlError;
     let uri = request.uri();
@@ -106,7 +124,12 @@ pub async fn connect_net_websocket(
             _ => None,
         })
         .ok_or(tungstenite::Error::Url(UrlError::UnsupportedUrlScheme))?;
-    let tcp = TcpStream::connect((host.as_str(), port)).await?;
+    let tcp = if relay {
+        let secure = uri.scheme_str() == Some("wss");
+        crate::remote::relay_client::proxy::dial_with(secure, &host, port, env).await?
+    } else {
+        TcpStream::connect((host.as_str(), port)).await?
+    };
     tcp.set_nodelay(true)?;
     let (socket, _) = tokio_tungstenite::client_async_tls_with_config(
         request,
@@ -383,22 +406,122 @@ pub struct SecureHttpSession {
     stream: RelayAttachedStream,
 }
 
+/// The relay origins to dial for `attach`, in order: the host's relay origin, then the machine
+/// record's fallback origins that pass the same origin policy as the host's own relay origin
+/// ([`super::inventory::normalize_fallback_origins`]: https only unless the insecure-relay opt-in
+/// allows loopback http, no userinfo, path, query or fragment). A failing entry is dropped with a
+/// warning and never dialled. Duplicates of an earlier entry are skipped.
+pub fn relay_dial_origins(relay_origin: &str, attach: &HostAttach) -> Vec<String> {
+    relay_dial_origins_policy(
+        relay_origin,
+        attach,
+        crate::remote::relay_client::is_insecure_relay_allowed(),
+    )
+}
+
+/// [`relay_dial_origins`] with the loopback-http opt-in passed explicitly.
+pub(crate) fn relay_dial_origins_policy(
+    relay_origin: &str,
+    attach: &HostAttach,
+    loopback_http: bool,
+) -> Vec<String> {
+    let primary = relay_origin.trim_end_matches('/').to_owned();
+    let mut origins = vec![primary.clone()];
+    origins.extend(super::inventory::normalize_fallback_origins_policy(
+        &attach.relay_fallback_origins,
+        &primary,
+        loopback_http,
+    ));
+    origins
+}
+
+/// Which relay origins a session may be allocated on, by what the allocation bearer is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayFallback {
+    /// The bearer is this host's own device token: the machine record's fallback origins may be
+    /// tried after the primary (they are the same machine's own relays).
+    DeviceToken,
+    /// The bearer is the account session (grant redemption). It authorises the whole account, and
+    /// the record's fallback list is published by the machine and not authenticated, so the
+    /// session is only ever sent to the host's primary relay origin.
+    PrimaryOnly,
+}
+
+/// Whether a failure on one relay origin justifies trying the next: the relay (or the path to it)
+/// could not carry the session. Answers about the credential or the request are final.
+fn try_next_relay(error: &ClientError) -> bool {
+    matches!(error.code.as_str(), "HOST_UNAVAILABLE" | "TIMEOUT")
+}
+
+/// The origins one allocation may be sent to under `fallback`.
+pub fn allocation_origins(relay_origin: &str, attach: &HostAttach, fallback: RelayFallback) -> Vec<String> {
+    match fallback {
+        RelayFallback::DeviceToken => relay_dial_origins(relay_origin, attach),
+        RelayFallback::PrimaryOnly => vec![relay_origin.trim_end_matches('/').to_owned()],
+    }
+}
+
 /// Allocates an opaque session with `allocation_bearer` (device token, or an account
-/// session while redeeming a grant) and completes the attach handshake.
+/// session while redeeming a grant) and completes the attach handshake. The host's relay origin
+/// is tried first, then (device tokens only, see [`RelayFallback`]) the machine record's fallback
+/// origins in order.
 async fn establish_stream(
     http: &reqwest::Client,
     relay_origin: &str,
     allocation_bearer: &str,
     machine_id: &str,
     attach: &HostAttach,
+    fallback: RelayFallback,
 ) -> Result<RelayAttachedStream, ClientError> {
-    let relay_origin = crate::remote::relay_client::live_relay_url(relay_origin).into_owned();
+    dial_relay_origins(&allocation_origins(relay_origin, attach, fallback), |origin| async move {
+        establish_stream_at(http, &origin, allocation_bearer, machine_id, attach).await
+    })
+    .await
+}
+
+/// Tries `dial` on each origin in order, waiting the relay client's reconnect backoff
+/// ([`crate::remote::relay_client::INITIAL_BACKOFF`], doubling, capped at
+/// [`crate::remote::relay_client::MAX_BACKOFF`]) between attempts. Stops at the first success or
+/// at a failure that another relay cannot fix; otherwise answers the last failure.
+pub(crate) async fn dial_relay_origins<T, F, Fut>(
+    origins: &[String],
+    mut dial: F,
+) -> Result<T, ClientError>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<T, ClientError>>,
+{
+    use crate::remote::relay_client::{INITIAL_BACKOFF, MAX_BACKOFF};
+    let mut last = ClientError::local("HOST_UNAVAILABLE");
+    let mut backoff = INITIAL_BACKOFF;
+    for (index, origin) in origins.iter().enumerate() {
+        if index > 0 {
+            tokio::time::sleep(backoff).await;
+            backoff = std::cmp::min(backoff * 2, MAX_BACKOFF);
+            tracing::warn!("paired host relay failover: trying fallback relay origin {origin}");
+        }
+        match dial(origin.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(error) if try_next_relay(&error) => last = error,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last)
+}
+
+async fn establish_stream_at(
+    http: &reqwest::Client,
+    relay_origin: &str,
+    allocation_bearer: &str,
+    machine_id: &str,
+    attach: &HostAttach,
+) -> Result<RelayAttachedStream, ClientError> {
     let dir = client_attach_dir()?;
     tokio::time::timeout(ESTABLISH_TIMEOUT, async {
         let session_id =
-            allocate_e2e_session(http, &relay_origin, allocation_bearer, machine_id).await?;
+            allocate_e2e_session(http, relay_origin, allocation_bearer, machine_id).await?;
         let attached = attach_relay_session(
-            &relay_origin,
+            relay_origin,
             &session_id,
             machine_id,
             &attach.machine_attach_public_key,
@@ -424,8 +547,9 @@ impl SecureHttpSession {
         allocation_bearer: &str,
         machine_id: &str,
         attach: &HostAttach,
+        fallback: RelayFallback,
     ) -> Result<Self, ClientError> {
-        establish_stream(http, relay_origin, allocation_bearer, machine_id, attach)
+        establish_stream(http, relay_origin, allocation_bearer, machine_id, attach, fallback)
             .await
             .map(|stream| Self { stream })
     }
@@ -518,6 +642,7 @@ pub async fn shared_request(
             target.bearer,
             target.machine_id,
             target.attach,
+            RelayFallback::DeviceToken,
         )
     };
     let (mut session, reused) = match guard.take() {
@@ -566,6 +691,7 @@ pub async fn open_secure_websocket(
         target.bearer,
         target.machine_id,
         target.attach,
+        RelayFallback::DeviceToken,
     )
     .await?;
     let (local, gateway) = tokio::io::duplex(256 * 1024);
@@ -644,6 +770,302 @@ pub fn warn_repair_required(host_id: &str, generation: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn attach_with(fallbacks: &[&str]) -> HostAttach {
+        HostAttach {
+            machine_attach_public_key: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=".into(),
+            enrollment_epoch: "1".into(),
+            relay_fallback_origins: fallbacks.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// A client connecting to a machine through its account record dials the primary, then the
+    /// record's fallbacks in order; insecure and malformed record entries are never dialled.
+    #[tokio::test(start_paused = true)]
+    async fn machine_record_fallbacks_are_tried_in_order_and_insecure_entries_are_never_dialled() {
+        let attach = attach_with(&[
+            "https://first.example.com/",
+            "http://insecure.example.com",
+            "ftp://wrong.example.com",
+            "https://primary.example.com",
+            "https://second.example.com",
+        ]);
+        let origins = relay_dial_origins("https://primary.example.com", &attach);
+        assert_eq!(
+            origins,
+            [
+                "https://primary.example.com",
+                "https://first.example.com",
+                "https://second.example.com"
+            ]
+        );
+
+        let dialled = std::sync::Mutex::new(Vec::new());
+        let started = tokio::time::Instant::now();
+        let reached = dial_relay_origins(&origins, |origin| {
+            dialled.lock().unwrap().push((origin.clone(), started.elapsed()));
+            async move {
+                if origin == "https://second.example.com" {
+                    Ok(origin)
+                } else {
+                    Err(ClientError::local("HOST_UNAVAILABLE"))
+                }
+            }
+        })
+        .await
+        .expect("the second fallback answers");
+        assert_eq!(reached, "https://second.example.com");
+        let dialled = dialled.into_inner().unwrap();
+        let order: Vec<&str> = dialled.iter().map(|(o, _)| o.as_str()).collect();
+        assert_eq!(order, origins.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(!order.iter().any(|o| o.contains("insecure") || o.starts_with("ftp")));
+        // The relay client's backoff: 500 ms before the first fallback, doubled before the next.
+        use crate::remote::relay_client::INITIAL_BACKOFF;
+        assert_eq!(dialled[0].1, Duration::ZERO);
+        assert_eq!(dialled[1].1, INITIAL_BACKOFF);
+        assert_eq!(dialled[2].1, INITIAL_BACKOFF * 3);
+    }
+
+    /// A refusal another relay cannot fix (a revoked token) stops the walk at the primary.
+    #[tokio::test(start_paused = true)]
+    async fn a_credential_refusal_does_not_fail_over() {
+        let origins = relay_dial_origins(
+            "https://primary.example.com",
+            &attach_with(&["https://first.example.com"]),
+        );
+        let mut calls = 0;
+        let error = dial_relay_origins(&origins, |_| {
+            calls += 1;
+            async { Err::<(), _>(ClientError::local("UNAUTHORIZED")) }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "UNAUTHORIZED");
+        assert_eq!(calls, 1);
+    }
+
+    /// D26-3: a record fallback must pass the primary's own origin policy. Without the opt-in,
+    /// plaintext loopback, ws://, userinfo and path/query entries are all dropped; https bare
+    /// origins are kept (normalised); with the opt-in, loopback http is accepted like a primary.
+    #[test]
+    fn fallback_origins_use_the_primary_origin_policy() {
+        let rejected = [
+            "http://127.0.0.1:18911",
+            "http://localhost:18911",
+            "ws://127.0.0.1:18911",
+            "https://user:pass@evil.example.com",
+            "https://evil.example.com/some/path?q=1",
+            "https://evil.example.com/?q=1",
+            "https://evil.example.com/#frag",
+            "http://relay.example.com",
+            "http://10.0.0.9:18911",
+            "wss://relay.example.com",
+            " https://padded.example.com",
+        ];
+        for entry in rejected {
+            let origins = relay_dial_origins_policy(
+                "https://primary.example.com",
+                &attach_with(&[entry]),
+                false,
+            );
+            assert_eq!(origins, ["https://primary.example.com"], "{entry} must be dropped");
+        }
+        let kept = relay_dial_origins_policy(
+            "https://primary.example.com",
+            &attach_with(&["https://ok.example.com/", "https://PRIMARY.example.com", "https://ok.example.com"]),
+            false,
+        );
+        assert_eq!(kept, ["https://primary.example.com", "https://ok.example.com"]);
+        let opted_in = relay_dial_origins_policy(
+            "https://primary.example.com",
+            &attach_with(&["http://127.0.0.1:18911", "http://10.0.0.9:18911"]),
+            true,
+        );
+        assert_eq!(opted_in, ["https://primary.example.com", "http://127.0.0.1:18911"]);
+        // The account service stores fallbacks under the same policy.
+        assert!(crate::account::service::published_relay_fallback_origins(
+            &rejected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "https://primary.example.com",
+        )
+        .iter()
+        .all(|kept| !kept.starts_with("http://") && !kept.contains('@') && !kept.contains('?')));
+    }
+
+    /// D26-1: the account session bearer (grant redemption) is only ever sent to the primary.
+    /// With a dead primary and a listening fallback, the fallback receives nothing at all.
+    #[tokio::test]
+    async fn the_account_session_bearer_never_reaches_a_fallback_origin() {
+        use tokio::io::AsyncReadExt;
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_origin = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        let fallback = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fallback_origin = format!("http://{}", fallback.local_addr().unwrap());
+        let received = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink = Arc::clone(&received);
+        let listener = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = fallback.accept().await {
+                let mut buf = vec![0u8; 4096];
+                if let Ok(n) = stream.read(&mut buf).await {
+                    sink.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+            }
+        });
+        let attach = attach_with(&[&fallback_origin]);
+        // Under the loopback opt-in the fallback passes the origin policy, so only the bearer
+        // rule keeps the account session away from it.
+        assert_eq!(
+            relay_dial_origins_policy(&dead_origin, &attach, true),
+            [dead_origin.clone(), fallback_origin.clone()],
+            "device-token sessions may use the fallback"
+        );
+        assert_eq!(
+            allocation_origins(&dead_origin, &attach, RelayFallback::PrimaryOnly),
+            std::slice::from_ref(&dead_origin)
+        );
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let secret = "ACCOUNT-SESSION-SECRET-d26";
+        // The real redemption entry point with the policy redeem_inner uses.
+        let result = SecureHttpSession::establish(
+            &http,
+            &dead_origin,
+            secret,
+            "m-1",
+            &attach,
+            RelayFallback::PrimaryOnly,
+        )
+        .await;
+        assert!(result.is_err(), "the dead primary cannot allocate");
+        // A device-token dial over the same record does reach the fallback (positive control:
+        // proves the listener would have seen a connection).
+        let control = establish_stream_at(&http, &fallback_origin, "DEVICE-TOKEN-control", "m-1", &attach);
+        let _ = tokio::time::timeout(Duration::from_secs(5), control).await;
+        listener.abort();
+        let seen = String::from_utf8_lossy(&received.lock().unwrap()).to_string();
+        assert!(seen.contains("DEVICE-TOKEN-control"), "control dial must reach the listener: {seen:?}");
+        assert!(!seen.contains(secret), "the account session leaked to a fallback: {seen:?}");
+    }
+
+    /// QA only (`--ignored`, run by the netns QA script against its own relay and daemon):
+    /// a machine record whose primary origin is dead and whose fallbacks are an insecure origin
+    /// and the good relay. Prints the dial order and the outcome; never touches a real relay.
+    #[tokio::test]
+    #[ignore = "QA probe: needs QA_* env and local relay processes"]
+    async fn qa_machine_record_fallback_against_local_relays() {
+        let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("{name} unset"));
+        let (primary, machine, token) = (var("QA_PRIMARY"), var("QA_MACHINE"), var("QA_TOKEN"));
+        let fallbacks: Vec<String> = var("QA_FALLBACKS").split(',').map(str::to_string).collect();
+        let attach = HostAttach {
+            machine_attach_public_key: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=".into(),
+            enrollment_epoch: "1".into(),
+            relay_fallback_origins: fallbacks,
+        };
+        // The QA relays are loopback http, which (as for a primary) needs the insecure-relay opt-in.
+        let origins = relay_dial_origins_policy(&primary, &attach, true);
+        println!("QA-DIAL-PLAN {origins:?}");
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = dial_relay_origins(&origins, |origin| {
+            let (http, machine, token) = (http.clone(), machine.clone(), token.clone());
+            async move {
+                let result = allocate_e2e_session(&http, &origin, &token, &machine).await;
+                println!("QA-DIALLED {origin} -> {:?}", result.as_ref().map_err(|e| &e.code));
+                result
+            }
+        })
+        .await;
+        println!("QA-RESULT {:?}", result.map_err(|e| e.code));
+    }
+
+    /// End to end over loopback: the record's primary refuses connections, an insecure public
+    /// fallback is skipped, and the allocation reaches the good fallback.
+    #[tokio::test]
+    async fn allocation_reaches_the_good_fallback_when_the_primary_is_down() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_origin = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        let good = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good_origin = format!("http://{}", good.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = good.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let mut head = Vec::new();
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).await.unwrap();
+                head.extend_from_slice(&buf[..n]);
+            }
+            let body = br#"{"sessionId":"s-1","machineId":"m-1","opaque":true}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            String::from_utf8_lossy(&head).to_string()
+        });
+        let attach = attach_with(&["http://insecure.example.com", &good_origin]);
+        // Loopback http is allowed here only through the explicit opt-in, as for a primary.
+        let origins = relay_dial_origins_policy(&dead_origin, &attach, true);
+        assert_eq!(origins, [dead_origin.clone(), good_origin.clone()]);
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let session = dial_relay_origins(&origins, |origin| {
+            let http = http.clone();
+            async move { allocate_e2e_session(&http, &origin, "tok", "m-1").await }
+        })
+        .await
+        .expect("the good fallback allocates");
+        assert_eq!(session, "s-1");
+        let head = server.await.unwrap();
+        assert!(head.starts_with("POST /api/v1/attach/session?e2e=1"), "{head}");
+    }
+    #[tokio::test]
+    async fn only_a_relay_websocket_consults_the_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).await.unwrap_or(0) == 1
+                {
+                    head.push(byte[0]);
+                }
+                let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+            }
+        });
+        let env = move |name: &str| {
+            matches!(
+                name,
+                "FERRYX_RELAY_PROXY" | "HTTPS_PROXY" | "HTTP_PROXY" | "ALL_PROXY"
+            )
+            .then(|| proxy.clone())
+        };
+        let request = || {
+            "ws://nas.direct-qa.invalid:9/api/v1/terminal/s"
+                .into_client_request()
+                .unwrap()
+        };
+        // A direct path addressed by a DNS name: dialled without the proxy.
+        let direct = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_net_websocket_with(request(), WebSocketConfig::default(), false, &env),
+        )
+        .await;
+        assert!(!matches!(direct, Ok(Ok(_))));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // The relay path with the same environment is tunnelled through the proxy.
+        let error = connect_net_websocket_with(request(), WebSocketConfig::default(), true, &env)
+            .await
+            .err()
+            .expect("the relay dial must fail at the proxy");
+        assert!(error.to_string().contains("relay proxy"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn a_content_length_response_completes_only_when_the_body_has_arrived() {

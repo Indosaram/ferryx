@@ -147,6 +147,14 @@ pub struct RemoteGatewayStatusResponse {
     pub local_ip: Option<String>,
     pub restart_policy: RemoteRestartPolicy,
     pub relay_url: Option<String>,
+    /// The relay the running gateway actually uses (saved relayUrl > FERRYX_RELAY_URL >
+    /// enrollment relayOrigin > default, or the fallback it failed over to). `relay_url` stays
+    /// the saved value. Absent while no relay runs or from a daemon that does not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_relay_url: Option<String>,
+    /// Where the primary of `resolved_relay_url` came from: `config`, `env`, `enrollment`, `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_relay_url_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -189,6 +197,91 @@ pub struct CreatePairingCodeResponse {
     pub relay_url: Option<String>,
 }
 
+/// The desktop status for a daemon-owned gateway: the daemon's own view, including the relay URL
+/// it resolved and its source, plus this process's insecure modes and local IP.
+pub(crate) fn status_from_daemon(
+    status: crate::daemon::protocol::DaemonRemoteStatus,
+    local_ip: Option<String>,
+    local_insecure: Vec<String>,
+) -> RemoteGatewayStatusResponse {
+    let mut insecure_modes = status.insecure_modes;
+    for mode in local_insecure {
+        if !insecure_modes.contains(&mode) {
+            insecure_modes.push(mode);
+        }
+    }
+    RemoteGatewayStatusResponse {
+        enabled: status.is_running,
+        mode: status.mode,
+        port: status.port,
+        bound_address: status.bound_address,
+        local_ip,
+        restart_policy: RemoteRestartPolicy::RestoreListener,
+        relay_url: status.relay_url,
+        resolved_relay_url: status.resolved_relay_url,
+        resolved_relay_url_source: status.resolved_relay_url_source,
+        machine_id: status.machine_id,
+        relay_connected: status.relay_connected,
+        control_channel_connected: status.control_channel_connected,
+        gate_status: status.gate_status,
+        gate_reason: status.gate_reason,
+        insecure_modes,
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    /// D20-1: the desktop status carries the daemon's resolved relay URL and source, while
+    /// `relayUrl` stays the saved value (here none: the URL came from FERRYX_RELAY_URL).
+    #[test]
+    fn the_desktop_status_carries_the_daemons_resolved_relay() {
+        let status = crate::daemon::protocol::DaemonRemoteStatus {
+            mode: RemoteNetworkMode::Relay,
+            port: REMOTE_GATEWAY_PORT,
+            allow_control: true,
+            is_running: true,
+            bound_address: None,
+            relay_url: None,
+            resolved_relay_url: Some("https://relay.selfhost.example".into()),
+            resolved_relay_url_source: Some("env".into()),
+            machine_id: Some("m-1".into()),
+            relay_connected: Some(true),
+            control_channel_connected: Some(true),
+            gate_status: None,
+            gate_reason: None,
+            insecure_modes: vec!["relay".into()],
+        };
+        let response = status_from_daemon(status, Some("10.0.0.2".into()), vec!["direct".into(), "relay".into()]);
+        assert_eq!(response.relay_url, None);
+        assert_eq!(response.resolved_relay_url.as_deref(), Some("https://relay.selfhost.example"));
+        assert_eq!(response.resolved_relay_url_source.as_deref(), Some("env"));
+        assert_eq!(response.insecure_modes, ["relay", "direct"]);
+        let wire = serde_json::to_value(&response).unwrap();
+        assert_eq!(wire["resolvedRelayUrl"], "https://relay.selfhost.example");
+        assert_eq!(wire["resolvedRelayUrlSource"], "env");
+        assert!(wire["relayUrl"].is_null());
+    }
+
+    /// D20-1: the in-process gateway reports `RemoteGatewayState::active_relay`, not the saved URL.
+    #[test]
+    fn the_in_process_status_source_is_the_recorded_resolution() {
+        let state = RemoteGatewayState::new(
+            Arc::new(crate::terminal::TerminalService::default()),
+            crate::worktree::WorkspaceRegistry::new(),
+        );
+        assert_eq!(state.active_relay(), None);
+        *state.resolved_relay.write() = Some((
+            "https://relay.enrolled.example".into(),
+            crate::remote::state::RelayUrlSource::Enrollment,
+        ));
+        let (url, source) = state.active_relay().unwrap();
+        assert_eq!(url, "https://relay.enrolled.example");
+        assert_eq!(source.code(), "enrollment");
+    }
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn cmd_remote_status(
@@ -203,27 +296,7 @@ pub async fn cmd_remote_status(
     match &manager.inner {
         RemoteGatewayManagerInner::Daemon(client) => {
             let status = client.remote_get_status().await?;
-            let mut insecure_modes = status.insecure_modes;
-            for mode in local_insecure {
-                if !insecure_modes.contains(&mode) {
-                    insecure_modes.push(mode);
-                }
-            }
-            Ok(RemoteGatewayStatusResponse {
-                enabled: status.is_running,
-                mode: status.mode,
-                port: status.port,
-                bound_address: status.bound_address,
-                local_ip,
-                restart_policy: RemoteRestartPolicy::RestoreListener,
-                relay_url: status.relay_url,
-                machine_id: status.machine_id,
-                relay_connected: status.relay_connected,
-                control_channel_connected: status.control_channel_connected,
-                gate_status: status.gate_status,
-                gate_reason: status.gate_reason,
-                insecure_modes,
-            })
+            Ok(status_from_daemon(status, local_ip, local_insecure))
         }
         RemoteGatewayManagerInner::State {
             state,
@@ -241,6 +314,7 @@ pub async fn cmd_remote_status(
                 let relay_client = state.relay_client.read();
                 crate::remote::relay_client::relay_connection_flags(relay_client.as_ref())
             };
+            let resolved_relay = state.active_relay();
             Ok(RemoteGatewayStatusResponse {
                 enabled: is_running,
                 mode: config.mode,
@@ -249,6 +323,8 @@ pub async fn cmd_remote_status(
                 local_ip,
                 restart_policy: config.restart_policy(),
                 relay_url: config.relay_url,
+                resolved_relay_url: resolved_relay.as_ref().map(|(url, _)| url.clone()),
+                resolved_relay_url_source: resolved_relay.map(|(_, source)| source.code().to_string()),
                 machine_id,
                 relay_connected,
                 control_channel_connected,
@@ -386,17 +462,8 @@ pub async fn cmd_remote_pairing_create(
                     .generate_pairing_with_permission(std::time::Duration::from_secs(60), perm)
                     .await
                     .map_err(IpcError::internal)?;
-                let effective_relay = state
-                    .config
-                    .read()
-                    .relay_url
-                    .clone()
-                    .or_else(|| {
-                        std::env::var("FERRYX_RELAY_URL")
-                            .ok()
-                            .filter(|s| !s.trim().is_empty())
-                    })
-                    .or_else(|| Some(crate::remote::relay_server::DEFAULT_RELAY_URL.to_string()));
+                let config = state.config.read().clone();
+                let effective_relay = Some(crate::remote::state::resolve_relay_url(&config).0);
                 Ok(CreatePairingCodeResponse {
                     code: info.pin,
                     expires_in_seconds: 60,

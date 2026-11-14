@@ -30,12 +30,17 @@ export interface RedeemGrantRequest {
   machineAttachPublicKey: string;
   enrollmentEpoch: string;
   accountSessionToken: string;
+  /** The machine record's fallback relay origins, tried in order after relayOrigin. */
+  relayFallbackOrigins?: string[];
 }
 export interface PairedHostCapabilities {
   pairedHostInventoryV1: boolean;
   pairedDaemonProxyV1: boolean;
   /** The daemon redeems grants and carries relay traffic end-to-end encrypted. */
   pairedHostE2EV1?: boolean;
+  /** The daemon accepts `relayFallbackOrigins` on a grant redemption. Older daemons reject the
+   * unknown field, so it is sent only when this is true. */
+  pairedHostRelayFallbackV1?: boolean;
 }
 
 export interface PairedHostError {
@@ -150,7 +155,11 @@ export const nativePairedHostCommands: PairedHostCommands = {
   list: () => command("paired_host_list"),
   capabilities: async () => {
     const answer = await command<PairedHostCapabilities>("paired_host_capabilities");
-    return { ...answer, pairedHostE2EV1: typeof answer.pairedHostE2EV1 === "boolean" ? answer.pairedHostE2EV1 : false };
+    return {
+      ...answer,
+      pairedHostE2EV1: typeof answer.pairedHostE2EV1 === "boolean" ? answer.pairedHostE2EV1 : false,
+      pairedHostRelayFallbackV1: answer.pairedHostRelayFallbackV1 === true,
+    };
   },
   pair: request => command("paired_host_pair", request),
   forget: request => command("paired_host_forget", request),
@@ -164,6 +173,39 @@ export const nativePairedHostCommands: PairedHostCommands = {
 };
 function validGeneration(value: unknown): value is string {
   return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 18446744073709551615n;
+}
+
+/** The grant fields a redemption needs, as an account grant response carries them. */
+export interface RedeemableGrant {
+  relayOrigin?: string;
+  pairingToken: string;
+  machineAttachPublicKey: string;
+  relayFallbackOrigins?: string[];
+}
+
+/** The redemption request for `grant`. The machine record's fallback relay origins are included
+ * only when the daemon advertises `pairedHostRelayFallbackV1`: an older daemon rejects the field
+ * as unknown and the whole redemption would fail. */
+export function buildRedeemGrantRequest(
+  grant: RedeemableGrant,
+  machine: { machineId: string; displayName: string; enrollmentEpoch: string | number },
+  accountOrigin: string,
+  accountSessionToken: string,
+  capabilities: PairedHostCapabilities | null,
+): RedeemGrantRequest {
+  const request: RedeemGrantRequest = {
+    relayOrigin: grant.relayOrigin || accountOrigin,
+    machineId: machine.machineId,
+    displayLabel: machine.displayName,
+    pairingToken: grant.pairingToken,
+    machineAttachPublicKey: grant.machineAttachPublicKey,
+    enrollmentEpoch: String(machine.enrollmentEpoch),
+    accountSessionToken,
+  };
+  if (capabilities?.pairedHostRelayFallbackV1 === true && grant.relayFallbackOrigins?.length) {
+    request.relayFallbackOrigins = grant.relayFallbackOrigins;
+  }
+  return request;
 }
 
 export function normalizeRelayOrigin(value: string): string {
