@@ -762,6 +762,8 @@ mod tests {
             home: "/home/user".into(),
             temp: "/tmp".into(),
             git: true,
+            os: "Linux".into(),
+            arch: "x86_64".into(),
         };
         let err = create_remote(
             &host,

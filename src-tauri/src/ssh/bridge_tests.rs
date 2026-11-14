@@ -58,6 +58,8 @@ fn sample_env() -> RemoteEnvironment {
         home: "/tmp".to_string(),
         temp: "/tmp".to_string(),
         git: true,
+        os: "Darwin".into(),
+        arch: "x86_64".into(),
     }
 }
 

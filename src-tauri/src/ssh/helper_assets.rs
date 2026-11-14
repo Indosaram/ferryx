@@ -5,10 +5,16 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HelperTarget {
+    /// glibc build. Still shipped as a fallback; Linux remotes resolve to the musl build.
     #[serde(rename = "x86_64-unknown-linux-gnu")]
     LinuxX86_64,
     #[serde(rename = "aarch64-unknown-linux-gnu")]
     LinuxAarch64,
+    /// Static musl build: runs on any Linux userland (glibc, musl/Alpine, minimal images).
+    #[serde(rename = "x86_64-unknown-linux-musl")]
+    LinuxMuslX86_64,
+    #[serde(rename = "aarch64-unknown-linux-musl")]
+    LinuxMuslAarch64,
     #[serde(rename = "aarch64-apple-darwin")]
     DarwinAarch64,
     #[serde(rename = "x86_64-apple-darwin")]
@@ -22,6 +28,8 @@ impl HelperTarget {
         match self {
             Self::LinuxX86_64 => "x86_64-unknown-linux-gnu",
             Self::LinuxAarch64 => "aarch64-unknown-linux-gnu",
+            Self::LinuxMuslX86_64 => "x86_64-unknown-linux-musl",
+            Self::LinuxMuslAarch64 => "aarch64-unknown-linux-musl",
             Self::DarwinAarch64 => "aarch64-apple-darwin",
             Self::DarwinX86_64 => "x86_64-apple-darwin",
             Self::WindowsX64 => "x86_64-pc-windows-msvc",
@@ -32,10 +40,26 @@ impl HelperTarget {
         match self {
             Self::LinuxX86_64
             | Self::LinuxAarch64
+            | Self::LinuxMuslX86_64
+            | Self::LinuxMuslAarch64
             | Self::DarwinAarch64
             | Self::DarwinX86_64 => "ferryx-remote-helper",
             Self::WindowsX64 => "ferryx-remote-helper.exe",
         }
+    }
+
+    pub fn from_triple(triple: &str) -> Option<Self> {
+        [
+            Self::LinuxX86_64,
+            Self::LinuxAarch64,
+            Self::LinuxMuslX86_64,
+            Self::LinuxMuslAarch64,
+            Self::DarwinAarch64,
+            Self::DarwinX86_64,
+            Self::WindowsX64,
+        ]
+        .into_iter()
+        .find(|target| target.triple() == triple)
     }
 }
 
@@ -78,14 +102,33 @@ pub fn compute_file_sha256(path: &Path) -> Result<String, std::io::Error> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Refuses a remote OS no helper is built for (the BSDs, Solaris, ...), so detection reports it
+/// at connection test instead of passing and failing later at helper selection.
+pub fn require_helper_os(os: &str) -> Result<(), IpcError> {
+    match os.trim().to_lowercase().as_str() {
+        "linux" | "darwin" | "windows" => Ok(()),
+        _ => Err(IpcError::new(
+            IpcErrorCode::Unsupported,
+            format!("Ferryx has no remote helper for this OS ('{}')", os.trim()),
+        )
+        .with_details(serde_json::json!({
+            "stage": "environment",
+            "reason": "no_helper_for_os",
+            "os": os.trim(),
+        }))),
+    }
+}
+
 pub fn resolve_target_from_probe(platform: &str, arch: &str) -> Result<HelperTarget, IpcError> {
     let norm_platform = platform.trim().to_lowercase();
     let norm_arch = arch.trim().to_lowercase();
 
     match norm_platform.as_str() {
+        // The static musl helper needs no loader or libc, so it runs on glibc and musl
+        // (Alpine) userlands alike; a glibc build exits 127 on a musl remote.
         "linux" => match norm_arch.as_str() {
-            "x86_64" | "amd64" => Ok(HelperTarget::LinuxX86_64),
-            "aarch64" | "arm64" => Ok(HelperTarget::LinuxAarch64),
+            "x86_64" | "amd64" => Ok(HelperTarget::LinuxMuslX86_64),
+            "aarch64" | "arm64" => Ok(HelperTarget::LinuxMuslAarch64),
             _ => Err(IpcError::new(
                 IpcErrorCode::Unsupported,
                 format!("Unsupported remote CPU architecture for Linux: '{arch}'"),
@@ -111,10 +154,7 @@ pub fn resolve_target_from_probe(platform: &str, arch: &str) -> Result<HelperTar
             "Ambiguous remote platform 'posix'; explicit operating system identification is required (e.g. Linux)"
                 .to_string(),
         )),
-        _ => Err(IpcError::new(
-            IpcErrorCode::Unsupported,
-            format!("Unsupported remote operating system platform: '{platform}'"),
-        )),
+        _ => Err(require_helper_os(platform).unwrap_err()),
     }
 }
 
@@ -332,26 +372,48 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn resolve_target_normalizes_linux_x86_64() {
+    fn resolve_target_prefers_static_musl_on_linux_x86_64() {
         assert_eq!(
             resolve_target_from_probe("linux", "x86_64").unwrap(),
-            HelperTarget::LinuxX86_64
+            HelperTarget::LinuxMuslX86_64
         );
         assert_eq!(
             resolve_target_from_probe("Linux", "amd64").unwrap(),
-            HelperTarget::LinuxX86_64
+            HelperTarget::LinuxMuslX86_64
         );
     }
 
     #[test]
-    fn resolve_target_normalizes_linux_aarch64() {
+    fn resolve_target_prefers_static_musl_on_linux_aarch64() {
         assert_eq!(
             resolve_target_from_probe("linux", "aarch64").unwrap(),
-            HelperTarget::LinuxAarch64
+            HelperTarget::LinuxMuslAarch64
         );
         assert_eq!(
             resolve_target_from_probe("Linux", "arm64").unwrap(),
-            HelperTarget::LinuxAarch64
+            HelperTarget::LinuxMuslAarch64
+        );
+    }
+
+    #[test]
+    fn linux_targets_round_trip_their_triples() {
+        for (target, triple) in [
+            (HelperTarget::LinuxMuslX86_64, "x86_64-unknown-linux-musl"),
+            (HelperTarget::LinuxMuslAarch64, "aarch64-unknown-linux-musl"),
+            (HelperTarget::LinuxX86_64, "x86_64-unknown-linux-gnu"),
+            (HelperTarget::LinuxAarch64, "aarch64-unknown-linux-gnu"),
+        ] {
+            assert_eq!(target.triple(), triple);
+            assert_eq!(target.filename(), "ferryx-remote-helper");
+            assert_eq!(
+                serde_json::to_value(target).unwrap(),
+                serde_json::json!(triple)
+            );
+            assert_eq!(HelperTarget::from_triple(triple), Some(target));
+        }
+        assert_eq!(
+            HelperTarget::from_triple("x86_64-unknown-linux-gnux32"),
+            None
         );
     }
 
@@ -413,6 +475,20 @@ mod tests {
             let res = resolve_target_from_probe(os, arch);
             assert!(res.is_err(), "expected error for os='{os}' arch='{arch}'");
             assert_eq!(res.unwrap_err().code, IpcErrorCode::Unsupported);
+        }
+    }
+
+    #[test]
+    fn bsd_is_refused_with_the_no_helper_reason() {
+        for os in ["FreeBSD", "OpenBSD", "NetBSD", "SunOS"] {
+            let err = require_helper_os(os).unwrap_err();
+            assert_eq!(err.code, IpcErrorCode::Unsupported);
+            assert_eq!(err.details.as_ref().unwrap()["reason"], "no_helper_for_os");
+            let err = resolve_target_from_probe(os, "amd64").unwrap_err();
+            assert_eq!(err.details.unwrap()["reason"], "no_helper_for_os");
+        }
+        for os in ["Linux", "Darwin", "Windows"] {
+            assert!(require_helper_os(os).is_ok());
         }
     }
 

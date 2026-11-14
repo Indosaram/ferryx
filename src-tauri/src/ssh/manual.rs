@@ -230,6 +230,8 @@ fn environment_from(executor: RemoteExecutor, output: &[u8], marker: &str) -> Re
         home: fields[2].into(),
         temp: fields[3].into(),
         git: false,
+        os: String::new(),
+        arch: String::new(),
     })
 }
 

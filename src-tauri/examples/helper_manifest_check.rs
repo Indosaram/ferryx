@@ -6,6 +6,8 @@ fn main() {
     let targets = [
         ("x86_64-unknown-linux-gnu", ferryx_lib::ssh::helper_assets::HelperTarget::LinuxX86_64),
         ("aarch64-unknown-linux-gnu", ferryx_lib::ssh::helper_assets::HelperTarget::LinuxAarch64),
+        ("x86_64-unknown-linux-musl", ferryx_lib::ssh::helper_assets::HelperTarget::LinuxMuslX86_64),
+        ("aarch64-unknown-linux-musl", ferryx_lib::ssh::helper_assets::HelperTarget::LinuxMuslAarch64),
         ("aarch64-apple-darwin", ferryx_lib::ssh::helper_assets::HelperTarget::DarwinAarch64),
         ("x86_64-apple-darwin", ferryx_lib::ssh::helper_assets::HelperTarget::DarwinX86_64),
         ("x86_64-pc-windows-msvc", ferryx_lib::ssh::helper_assets::HelperTarget::WindowsX64),

@@ -266,6 +266,8 @@ mod tests {
             home: "/home/test".into(),
             temp: "/tmp".into(),
             git: false,
+            os: "Linux".into(),
+            arch: "x86_64".into(),
         }
     }
 

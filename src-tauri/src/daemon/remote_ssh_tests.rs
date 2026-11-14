@@ -1171,8 +1171,7 @@ async fn remote_ssh_first_spawn_provisions_qualified_helper_child() {
         !exe_dir.ends_with("deps"),
         "the fixture must run from its private copy, never the shared build directory"
     );
-    let target_triple = crate::ipc::ssh::resolve_remote_target_triple(&host, &environment)
-        .await
+    let target_triple = crate::ipc::ssh::resolve_remote_target_triple(&environment)
         .expect("resolve the remote helper target");
     assert_eq!(
         target_triple,
