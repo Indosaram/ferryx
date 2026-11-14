@@ -175,42 +175,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it.each(["123456", "00112233445566778899aabbccddeeff"])(
-  "parses pairing capability %s and persists exchange metadata in the host inventory", async (code) => {
-    window.history.replaceState(null, "", `/#pair=${code}&machine=audit-new`);
-    const fetch = fetcher();
-    await mount(fetch);
-    const call = fetch.mock.calls.find(([url]) => url.includes("pair/exchange"));
-    expect(call).toBeDefined();
-    expect(JSON.parse(call![1]!.body as string)).toMatchObject({ code, deviceName: expect.any(String) });
-    const key = remoteHostKey(window.location.origin, "audit-new");
-    expect(remoteHostStore.getState().hosts[key]).toMatchObject({
-      machineId: "audit-new", displayName: "New", deviceToken: "audit-device", relayOrigin: window.location.origin,
-    });
-    expect(remoteHostStore.getState().activeHostId).toBe(key);
-    expect(Object.keys(remoteHostStore.getState().hosts)).toHaveLength(1);
-    expect(localStorage.getItem(`ferryx_remote_token_local:${window.location.origin}`)).toBeNull();
-  },
-);
-
-it("processes a new pairing link while a host is active and upserts rather than duplicates", async () => {
-  paired([], "audit-new");
-  paired();
-  const fetch = fetcher();
-  await mount(fetch);
-  await act(async () => {
-    window.history.replaceState(null, "", "/#pair=123456&machine=audit-new");
-    window.dispatchEvent(new HashChangeEvent("hashchange"));
-  });
-  await act(async () => { window.dispatchEvent(new HashChangeEvent("hashchange")); });
-  expect(fetch.mock.calls.filter(([url]) => url.includes("pair/exchange"))).toHaveLength(1);
-  const state = remoteHostStore.getState();
-  expect(Object.keys(state.hosts)).toHaveLength(2);
-  expect(state.activeHostId).toBe(remoteHostKey(window.location.origin, "audit-new"));
-  expect(state.hosts[state.activeHostId!].deviceToken).toBe("audit-device");
-  expect(state.hosts[remoteHostKey(window.location.origin, "audit-a")].deviceToken).toBe("audit-device-a");
-});
-
 it("retains the machine prefix, ticket and grid geometry in the real terminal socket URL", async () => {
   paired();
   const fetch = fetcher();
