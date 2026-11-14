@@ -26,10 +26,19 @@
 //!   serve an operator-provided certificate instead of ACME.
 //!
 //! With TLS enabled the port defaults to `443` instead of `8787`.
+//!
+//! Behind a reverse proxy (cloudflared, nginx, ...):
+//!
+//! - `FERRYX_RELAY_TRUSTED_PROXIES`: comma-separated CIDRs (or bare addresses) of the proxies
+//!   whose `X-Forwarded-For` / `CF-Connecting-IP` headers name the real client
+//!   (`CF-Connecting-IP` only when no `X-Forwarded-For` is present). Unset, every
+//!   forwarding header is ignored and rate limits apply to the socket peer address. A
+//!   malformed entry refuses to start.
 
 use base64::Engine as _;
 use ferryx_lib::remote::relay_server::{
-    relay_router_with_account, spawn_session_reaper, spawn_suspension_sweeper, RelayState,
+    parse_trusted_proxies, relay_router_with_account, spawn_session_reaper,
+    spawn_suspension_sweeper, RelayState, TrustedProxy,
 };
 use ferryx_lib::remote::relay_tls::{self, AcmeSettings, TlsAcceptorMode};
 use ferryx_lib::account::origin::{
@@ -63,6 +72,7 @@ struct RelayConfig {
     account_public_key: Option<String>,
     deployment_mode: DeploymentMode,
     tls: TlsConfig,
+    trusted_proxies: Vec<TrustedProxy>,
 }
 
 fn split_list(value: &str) -> impl Iterator<Item = String> + '_ {
@@ -109,6 +119,11 @@ fn parse_args_with(
     let mut tls_staging = env("FERRYX_RELAY_TLS_STAGING").is_some_and(|value| parse_flag(&value));
     let mut tls_cert = non_empty(env("FERRYX_RELAY_TLS_CERT")).map(PathBuf::from);
     let mut tls_key = non_empty(env("FERRYX_RELAY_TLS_KEY")).map(PathBuf::from);
+    let trusted_proxies = env("FERRYX_RELAY_TRUSTED_PROXIES")
+        .map(|value| parse_trusted_proxies(&value))
+        .transpose()
+        .map_err(|err| format!("FERRYX_RELAY_TRUSTED_PROXIES: {err}"))?
+        .unwrap_or_default();
 
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -185,6 +200,7 @@ fn parse_args_with(
         account_public_key,
         deployment_mode,
         tls,
+        trusted_proxies,
     })
 }
 
@@ -292,6 +308,7 @@ async fn main() {
     }
 
     let state = RelayState::new(config.machine_tokens);
+    state.set_trusted_proxies(config.trusted_proxies);
     spawn_session_reaper(state.clone());
 
     let origin = std::env::var("FERRYX_ACCOUNT_ORIGIN")
@@ -510,6 +527,26 @@ mod tests {
             &["--tls-domain"][..],
         ] {
             assert!(parse(args, &[]).is_err(), "{args:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn trusted_proxies_default_to_none_and_reject_malformed_cidrs() {
+        assert!(parse(&[], &[]).unwrap().trusted_proxies.is_empty());
+        let config = parse(
+            &[],
+            &[(
+                "FERRYX_RELAY_TRUSTED_PROXIES",
+                "127.0.0.1/32, ::1, 10.0.0.0/8",
+            )],
+        )
+        .unwrap();
+        assert_eq!(config.trusted_proxies.len(), 3);
+        for value in ["10.0.0.0/33", "not-an-ip", "10.0.0.0/", "10.0.0.0/8,bogus"] {
+            assert!(
+                parse(&[], &[("FERRYX_RELAY_TRUSTED_PROXIES", value)]).is_err(),
+                "{value:?} must be rejected"
+            );
         }
     }
 }
