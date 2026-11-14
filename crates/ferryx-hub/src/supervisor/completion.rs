@@ -348,7 +348,8 @@ impl CompletionDriver {
                 if reason == StopReason::NoFurtherProgress
                     && matches!(held, Ok(Verification::Held { .. }))
                 {
-                    self.lessons_hurt(&goal.goal_id, &summary).await;
+                    self.lessons_hurt(&goal.goal_id, &summary, Some(&run.request_id))
+                        .await;
                 }
                 held
             }
@@ -501,8 +502,9 @@ impl CompletionDriver {
 
     /// The goal ended without converging: its injected lessons hurt, and the judge is asked
     /// once whether `summary` teaches a lesson. Lesson bookkeeping never fails the decision.
-    async fn lessons_hurt(&self, goal_id: &str, summary: &str) {
-        match super::lessons::goal_failed(&self.pool, &self.judge, goal_id, summary).await {
+    async fn lessons_hurt(&self, goal_id: &str, summary: &str, turn_ref: Option<&str>) {
+        match super::lessons::goal_failed(&self.pool, &self.judge, goal_id, summary, turn_ref).await
+        {
             Ok(Some(lesson)) => {
                 tracing::info!(goal = %goal_id, lesson = %lesson.id, "a lesson was recorded");
             }
@@ -593,11 +595,24 @@ impl CompletionDriver {
             .map(|binding| binding.host_id)
             .unwrap_or_default();
         let asked = instruction.trim().to_owned();
-        let instruction = format!(
+        let mut instruction = format!(
             "{}\n\n{}",
             instruction.trim(),
             grant_text(cwd.as_deref().unwrap_or(""), &binding_host, &grant)
         );
+        let turn_block = super::lessons::injection_block_with_ids_for_turn(
+            &self.pool,
+            super::lessons::LessonDomain::Goal,
+            &goal.project_id,
+            &[&asked],
+        )
+        .await?;
+        let mut injected_lessons = Vec::new();
+        if let Some((block, ids)) = turn_block {
+            instruction.push_str("\n\n");
+            instruction.push_str(&block);
+            injected_lessons = ids;
+        }
         let mut tx = self.pool.begin_write().await?;
         let now = require_goal(&mut tx, &goal.goal_id).await?;
         if check_revision(&now, goal.revision).is_err() || now.run_state != RunState::Verifying {
@@ -679,7 +694,15 @@ impl CompletionDriver {
             if detail.starts_with(TURN_LIMIT) {
                 let summary =
                     format!("{asked} (the turn budget ran out with {unproven} unproven)");
-                self.lessons_hurt(&goal.goal_id, &summary).await;
+                let turn_ref: Option<String> = sqlx::query_scalar(
+                    "SELECT request_id FROM supervisor_dispatches
+                     WHERE goal_id = ? AND state = 'settled' ORDER BY id DESC LIMIT 1",
+                )
+                .bind(&goal.goal_id)
+                .fetch_optional(&self.pool)
+                .await?;
+                self.lessons_hurt(&goal.goal_id, &summary, turn_ref.as_deref())
+                    .await;
             }
             return Ok(Verification::Held {
                 state: RunState::AwaitingOwner,
@@ -718,6 +741,12 @@ impl CompletionDriver {
         )
         .await?;
         tx.commit().await?;
+        if let Err(error) =
+            super::lessons::note_turn_injected(&self.pool, &dispatch.request_id, &injected_lessons)
+                .await
+        {
+            tracing::warn!(%error, request_id = %dispatch.request_id, "turn lessons were not recorded");
+        }
         super::changes::announce(&goal.goal_id);
         wakes::poke();
         super::dispatcher::poke();
@@ -821,7 +850,9 @@ impl CompletionDriver {
         .await?;
         tx.commit().await?;
         super::changes::announce(&goal.goal_id);
-        if let Err(error) = super::lessons::goal_completed(&self.pool, &goal.goal_id).await {
+        if let Err(error) =
+            super::lessons::goal_completed(&self.pool, &goal.goal_id, Some(&run.request_id)).await
+        {
             tracing::warn!(%error, goal = %goal.goal_id, "injected lessons were not marked helped");
         }
         wakes::poke();

@@ -750,6 +750,7 @@ async fn admit_scoped(
         pool,
         super::lessons::LessonDomain::Goal,
         &scope.project_id,
+        &[&work.title, &work.instruction, source.body],
     )
     .await
     {
@@ -796,6 +797,15 @@ async fn admit_scoped(
     let subject = super::lessons::goal_subject(&admission.receipt.goal_id);
     if let Err(error) = super::lessons::note_injected(pool, &subject, &injected_lessons).await {
         tracing::warn!(%error, %subject, "injected lessons were not recorded");
+    }
+    if let Err(error) = super::lessons::note_turn_injected(
+        pool,
+        &admission.receipt.dispatch_request_id,
+        &injected_lessons,
+    )
+    .await
+    {
+        tracing::warn!(%error, %subject, "turn lessons were not recorded");
     }
     if terms.owner_hold.is_none() {
         super::dispatcher::poke();

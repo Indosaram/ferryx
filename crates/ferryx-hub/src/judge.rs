@@ -43,6 +43,8 @@ pub enum Purpose {
     ReportDirective,
     /// Lesson ledger: rules learned from a closed goal or an objected report.
     LessonReflect,
+    /// Lesson ledger: authors a reusable rule after the reflection gate accepts it.
+    LessonAuthor,
 }
 
 /// The fixed instruction of every engine choice call: its stable prompt prefix.
@@ -68,6 +70,7 @@ impl Purpose {
             Self::DirectiveConflict => "directive_conflict",
             Self::ReportDirective => "report_directive",
             Self::LessonReflect => "lesson_reflect",
+            Self::LessonAuthor => "lesson_author",
         }
     }
 
@@ -87,6 +90,7 @@ impl Purpose {
             // Never an offered option: the outbound gate records "unchecked" rather than guess.
             Self::ReportDirective => "unchecked",
             Self::LessonReflect => "no_lesson",
+            Self::LessonAuthor => "no_lesson",
         }
     }
 
@@ -105,6 +109,7 @@ impl Purpose {
             Self::ReportSalience => "action",
             Self::ReportDirective => "unchecked",
             Self::LessonReflect => "no_lesson",
+            Self::LessonAuthor => "no_lesson",
         }
     }
 
