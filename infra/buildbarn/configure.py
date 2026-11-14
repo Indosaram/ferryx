@@ -98,16 +98,20 @@ def render(hosts, cfg):
     files['coordinator/storage.json'] = dict(base, grpcServers=server(f'{address}:8981'), supportedCompressors=['ZSTD'], contentAddressableStorageServer=cas_server(local_cas), actionCache={'backend': local_store(state + '/storage-ac', 20 * MIB), 'getAuthorizer': ALLOW, 'putAuthorizer': ALLOW})
     files['coordinator/scheduler.json'] = dict(base, clientGrpcServers=server('127.0.0.1:8982'), workerGrpcServers=server(f'{address}:8983'), buildQueueStateGrpcServers=server('127.0.0.1:8984'), contentAddressableStorage=cas, executeAuthorizer=ALLOW, modifyDrainsAuthorizer=ALLOW, killOperationsAuthorizer=ALLOW, synchronizeAuthorizer=ALLOW, actionRouter={'simple': {'platformKeyExtractor': {'action': {}}, 'invocationKeyExtractors': [{'correlatedInvocationsId': {}}, {'toolInvocationId': {}}], 'initialSizeClassAnalyzer': {'defaultExecutionTimeout': '1800s', 'maximumExecutionTimeout': '7200s'}}}, platformQueueWithNoWorkersTimeout='60s')
     files['coordinator/frontend.json'] = dict(base, grpcServers=server(f'{address}:8980'), schedulers={'': {'endpoint': {'address': '127.0.0.1:8982'}}}, supportedCompressors=['ZSTD'], contentAddressableStorageServer=cas_server(cas), actionCache={'backend': ac, 'getAuthorizer': ALLOW, 'putAuthorizer': ALLOW}, executeAuthorizer=ALLOW)
-    manifest = {'upstream': UPSTREAM, 'workers': {}, 'excluded': sorted(set(hosts) - set(workers)), 'coordinator_directories': [state + '/' + name + '/persistent_state' for name in ('storage-cs', 'storage-cms', 'storage-ac')]}
+    inventory_supplied = hosts is not None
+    if hosts is None:
+        hosts = {name: {} for name in workers}
+    manifest = {'inventory_supplied': inventory_supplied, 'upstream': UPSTREAM, 'workers': {}, 'excluded': sorted(set(hosts) - set(workers)), 'coordinator_directories': [state + '/' + name + '/persistent_state' for name in ('storage-cs', 'storage-cms', 'storage-ac')]}
     for name, w in sorted(workers.items()):
         if name not in hosts:
-            fail(f'{name}: absent from picker roster')
+            fail(f'{name}: absent from inventory')
         if set(w) != {'os', 'arch', 'toolchain', 'concurrency', 'state_dir'}:
             fail(f'{name}: requires os, arch, toolchain, concurrency, state_dir')
         if w['os'] not in ('linux', 'darwin') or w['arch'] not in ('x86_64', 'aarch64'):
             fail(f'{name}: only native Linux/macOS x86_64/aarch64 workers supported')
         expected = 'ssh-darwin' if w['os'] == 'darwin' else 'ssh-unix'
-        if hosts[name]['transport'] != expected:
+        token(name, 'worker name')
+        if inventory_supplied and hosts[name]['transport'] != expected:
             fail(f'{name}: transport does not match explicit native OS')
         if type(w['concurrency']) is not int or not 1 <= w['concurrency'] <= 64:
             fail(f'{name}: concurrency must be an integer from 1 to 64')
@@ -115,7 +119,7 @@ def render(hosts, cfg):
         socket = root + '/runner.sock'
         if len(socket.encode()) > 100:
             fail(f'{name}: runner socket path exceeds portable limit')
-        properties = {'OSFamily': w['os'], 'ISA': w['arch'], 'ferryx-toolchain': token(w['toolchain'], 'toolchain')}
+        properties = {'OSFamily': w['os'], 'ISA': w['arch'], 'toolchain-id': token(w['toolchain'], 'toolchain')}
         runner = {'endpoint': {'address': 'unix:' + socket}, 'concurrency': w['concurrency'], 'maximumFilePoolFileCount': 10000, 'maximumFilePoolSizeBytes': GIB, 'platform': {'properties': [{'name': key, 'value': val} for key, val in sorted(properties.items())]}, 'workerId': {'hostname': name}}
         files[f'workers/{name}/runner.json'] = {'buildDirectoryPath': root + '/build', 'grpcServers': [{'listenPaths': [socket], 'authenticationPolicy': ALLOW}]}
         files[f'workers/{name}/worker.json'] = dict(base, blobstore={'actionCache': ac, 'contentAddressableStorage': cas}, scheduler={'address': f'{address}:8983'}, buildDirectories=[{'native': {'buildDirectoryPath': root + '/build', 'cacheDirectoryPath': root + '/cache', 'maximumCacheFileCount': 10000, 'maximumCacheSizeBytes': GIB, 'cacheReplacementPolicy': 'LEAST_RECENTLY_USED'}, 'runners': [runner]}], filePool={'blockDevice': {'file': {'path': root + '/filepool', 'sizeBytes': GIB}}}, inputDownloadConcurrency=10, outputUploadConcurrency=10, directoryCache={'maximumCount': 1000, 'maximumSizeBytes': MIB, 'cacheReplacementPolicy': 'LEAST_RECENTLY_USED'})
@@ -142,7 +146,7 @@ def _platforms(ctx):
             local_enabled = False,
             remote_enabled = True,
             remote_execution_properties = %s,
-            remote_execution_use_case = "ferryx-buildbarn",
+            remote_execution_use_case = "buildbarn",
             remote_output_paths = "output_paths",
         ),
     )
@@ -155,7 +159,7 @@ def _smoke(ctx):
     for index in range(8):
         output = ctx.actions.declare_output("worker-{}.txt".format(index))
         ctx.actions.run(
-            ["/bin/sh", "-c", 'hostname > "$1" && printf "ferryx-buildbarn-%%s-%%s\\n" "$2" "$3" >> "$1"', "--", output.as_output(), str(index), ctx.attrs.nonce],
+            ["/bin/sh", "-c", 'hostname > "$1" && printf "buildbarn-smoke-%%s-%%s\\n" "$2" "$3" >> "$1"', "--", output.as_output(), str(index), ctx.attrs.nonce],
             category = "cluster_smoke",
             identifier = str(index),
         )
@@ -185,12 +189,20 @@ def write_output(destination, files):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--hosts', type=Path, default=Path(os.environ.get('FERRYX_BUILD_HOSTS_FILE', str(Path.home() / '.config/ferryx/build-hosts'))))
+    inventory = parser.add_mutually_exclusive_group()
+    inventory.add_argument('--hosts', type=Path, help='optional name/transport/target inventory')
+    inventory.add_argument('--ferryx-inventory', action='store_true', help='opt in to FERRYX_BUILD_HOSTS_FILE or ~/.config/ferryx/build-hosts')
     parser.add_argument('--profile', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     try:
-        files = render(roster(args.hosts.read_text()), json.loads(args.profile.read_text()))
+        hosts_path = args.hosts
+        if args.ferryx_inventory:
+            hosts_path = Path(os.environ.get('FERRYX_BUILD_HOSTS_FILE', str(Path.home() / '.config/ferryx/build-hosts')))
+        elif hosts_path is None and os.environ.get('BUILDBARN_HOSTS_FILE'):
+            hosts_path = Path(os.environ['BUILDBARN_HOSTS_FILE'])
+        hosts = roster(hosts_path.read_text()) if hosts_path is not None else None
+        files = render(hosts, json.loads(args.profile.read_text()))
         write_output(args.output, files)
     except (ValueError, OSError, TypeError, KeyError) as error:
         parser.exit(2, f'configuration error: {error}\n')

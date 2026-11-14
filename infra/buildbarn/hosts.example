@@ -1,4 +1,5 @@
-# Same format as ~/.config/ferryx/build-hosts. Names here are fictional.
+# Optional inventory: name transport target [disk_GB [ram_GB]]. Fictional hosts.
+# Compatible with the Ferryx picker format, but not required by the renderer.
 linux-a ssh-unix builder@linux-a 40 8
 linux-b ssh-unix builder@linux-b 40 8
 mac-a ssh-darwin builder@mac-a 40 8
