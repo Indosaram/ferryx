@@ -1,0 +1,5 @@
+# Same format as ~/.config/ferryx/build-hosts. Names here are fictional.
+linux-a ssh-unix builder@linux-a 40 8
+linux-b ssh-unix builder@linux-b 40 8
+mac-a ssh-darwin builder@mac-a 40 8
+windows-a ssh-win32 builder@windows-a
