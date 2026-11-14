@@ -85,10 +85,28 @@ impl AsyncWrite for PairedStream {
 }
 
 /// Dials a `ws`/`wss` URL over TCP the way `connect_async_with_config(.., true)` does
-/// (Nagle off, default rustls roots for `wss`), yielding the shared socket type.
+/// (Nagle off, default rustls roots for `wss`), yielding the shared socket type. `relay` is
+/// the path kind: a relay is reached through the configured HTTP proxy, a direct path never
+/// is, however its address looks.
 pub async fn connect_net_websocket(
     request: tungstenite::handshake::client::Request,
     config: WebSocketConfig,
+    relay: bool,
+) -> Result<PairedSocket, tungstenite::Error> {
+    connect_net_websocket_with(
+        request,
+        config,
+        relay,
+        &crate::remote::relay_client::proxy::process_env,
+    )
+    .await
+}
+
+async fn connect_net_websocket_with(
+    request: tungstenite::handshake::client::Request,
+    config: WebSocketConfig,
+    relay: bool,
+    env: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> Result<PairedSocket, tungstenite::Error> {
     use tungstenite::error::UrlError;
     let uri = request.uri();
@@ -106,7 +124,12 @@ pub async fn connect_net_websocket(
             _ => None,
         })
         .ok_or(tungstenite::Error::Url(UrlError::UnsupportedUrlScheme))?;
-    let tcp = TcpStream::connect((host.as_str(), port)).await?;
+    let tcp = if relay {
+        let secure = uri.scheme_str() == Some("wss");
+        crate::remote::relay_client::proxy::dial_with(secure, &host, port, env).await?
+    } else {
+        TcpStream::connect((host.as_str(), port)).await?
+    };
     tcp.set_nodelay(true)?;
     let (socket, _) = tokio_tungstenite::client_async_tls_with_config(
         request,
@@ -644,6 +667,55 @@ pub fn warn_repair_required(host_id: &str, generation: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_a_relay_websocket_consults_the_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).await.unwrap_or(0) == 1
+                {
+                    head.push(byte[0]);
+                }
+                let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+            }
+        });
+        let env = move |name: &str| {
+            matches!(
+                name,
+                "FERRYX_RELAY_PROXY" | "HTTPS_PROXY" | "HTTP_PROXY" | "ALL_PROXY"
+            )
+            .then(|| proxy.clone())
+        };
+        let request = || {
+            "ws://nas.direct-qa.invalid:9/api/v1/terminal/s"
+                .into_client_request()
+                .unwrap()
+        };
+        // A direct path addressed by a DNS name: dialled without the proxy.
+        let direct = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_net_websocket_with(request(), WebSocketConfig::default(), false, &env),
+        )
+        .await;
+        assert!(!matches!(direct, Ok(Ok(_))));
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // The relay path with the same environment is tunnelled through the proxy.
+        let error = connect_net_websocket_with(request(), WebSocketConfig::default(), true, &env)
+            .await
+            .err()
+            .expect("the relay dial must fail at the proxy");
+        assert!(error.to_string().contains("relay proxy"), "{error}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn a_content_length_response_completes_only_when_the_body_has_arrived() {

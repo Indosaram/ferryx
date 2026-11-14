@@ -27,6 +27,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+pub(crate) mod proxy;
+
 type ControlSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 const REGISTER_ACK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -538,7 +540,7 @@ impl RelayClient {
                 request.headers_mut().insert("x-ferryx-machine-id", val);
             }
         }
-        let (mut socket, _) = tokio_tungstenite::connect_async(request).await?;
+        let (mut socket, _) = proxy::connect_websocket(request).await?;
         if let Some(identity) = &self.identity {
             tokio::time::timeout(REGISTER_ACK_TIMEOUT, async {
                 let challenge: ControlChallenge = read_control_json(&mut socket).await?;
@@ -806,7 +808,7 @@ impl RelayClient {
     /// frames bidirectionally between it and the local loopback gateway
     /// until either side disconnects.
     async fn handle_session(&self, session_id: &str, opaque: bool) -> anyhow::Result<()> {
-        let (ws, _response) = tokio_tungstenite::connect_async(self.data_url(session_id)).await?;
+        let (ws, _response) = proxy::connect_websocket(self.data_url(session_id)).await?;
         let gateway = TcpStream::connect(&self.gateway_addr).await?;
         if !opaque {
             return proxy_ws_to_tcp(ws, gateway).await;
