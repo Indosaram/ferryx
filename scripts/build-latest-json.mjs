@@ -17,11 +17,15 @@ import { fileURLToPath } from "node:url";
 
 import { verifyMinisign } from "./lib/minisign-verify.mjs";
 import {
+  BETA_MANIFEST_NAME,
+  evaluateFloorCheck,
+  FLOOR_CHECKS,
   isSafeRelativePath,
   KIND_DEFINITIONS,
   parsePlan,
   parseReceipt,
   requiredKinds,
+  STABLE_MANIFEST_NAME,
   VALID_HOSTS,
 } from "./lib/release-contract.mjs";
 
@@ -72,6 +76,23 @@ function loadDefaultPublicKey() {
 }
 
 /**
+ * Reads bundle.macOS.minimumSystemVersion from the checked-in Tauri config, or null.
+ */
+export function loadDefaultMacosMinimum() {
+  const candidates = [
+    join(process.cwd(), "src-tauri", "tauri.conf.json"),
+    resolve(dirname(fileURLToPath(import.meta.url)), "..", "src-tauri", "tauri.conf.json"),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      const minimum = JSON.parse(readFileSync(p, "utf8")).bundle?.macOS?.minimumSystemVersion;
+      if (minimum) return minimum;
+    }
+  }
+  return null;
+}
+
+/**
  * Assembles and verifies a complete release inventory based on release plan and host receipts.
  *
  * @param {object} options
@@ -80,6 +101,9 @@ function loadDefaultPublicKey() {
  * @param {string} options.artifactsDir
  * @param {string} options.outDir
  * @param {string} [options.publicKey]
+ * @param {string} [options.floorWaiver] explicit floor-gate opt-out reason (local dev/test only);
+ *   defaults to FERRYX_RELEASE_FLOOR_WAIVER
+ * @param {string} [options.macosMinimum] defaults to bundle.macOS.minimumSystemVersion
  * @returns {{ outDir: string, plan: object, receipts: object[], manifest: object, files: string[] }}
  */
 export function assembleRelease(options) {
@@ -182,6 +206,47 @@ export function assembleRelease(options) {
     if (!expectedKinds.includes(foundKind)) {
       throw new Error(`Unexpected artifact kind '${foundKind}' not permitted by release plan`);
     }
+  }
+
+  // 3b. Release floor gate: every recorded floor measurement is re-evaluated against the
+  // advertised floors (the recorded pass flag is not trusted). A receipt without floor results,
+  // or one built under a waiver, is refused unless this assembly is explicitly waived as well.
+  const floorWaiver = options.floorWaiver ?? (process.env.FERRYX_RELEASE_FLOOR_WAIVER || null);
+  const macosMinimum = options.macosMinimum ?? loadDefaultMacosMinimum();
+  const floorFailures = [];
+  for (const receipt of receipts) {
+    if (!receipt.floors) {
+      floorFailures.push(`${receipt.host}: receipt carries no floor results`);
+      continue;
+    }
+    if (receipt.floors.waiver) {
+      floorFailures.push(`${receipt.host}: built under floor waiver "${receipt.floors.waiver}"`);
+    }
+    for (const art of receipt.artifacts) {
+      for (const check of FLOOR_CHECKS[art.kind]) {
+        const recorded = receipt.floors.checks.find((c) => c.kind === art.kind && c.check === check);
+        if (!recorded) {
+          floorFailures.push(`${receipt.host} ${art.kind} ${check}: no recorded result`);
+          continue;
+        }
+        // The host measured against the plan-commit minimum; a different minimum here means the
+        // recorded check and this re-evaluation disagree about the floor, so refuse.
+        if (check === "macos-minos" && recorded.limit !== macosMinimum) {
+          floorFailures.push(
+            `${receipt.host} ${art.kind} ${check}: built against minimum ${JSON.stringify(recorded.limit)}, but this assembly uses ${JSON.stringify(macosMinimum)}`,
+          );
+          continue;
+        }
+        const fresh = evaluateFloorCheck({ kind: art.kind, check, measured: recorded.measured, macosMinimum });
+        if (!fresh.pass) floorFailures.push(`${receipt.host} ${art.kind} ${check}: ${fresh.reason}`);
+      }
+    }
+  }
+  if (floorFailures.length > 0) {
+    if (!floorWaiver) {
+      throw new Error(`Release floor gate failed: ${floorFailures.join("; ")}`);
+    }
+    console.warn(`Release floor gate waived (${floorWaiver}): ${floorFailures.join("; ")}`);
   }
 
   // 4. Verify artifact contents and signatures in filesystem
@@ -353,10 +418,13 @@ export function assembleRelease(options) {
       stagedFiles.set(targetName, sourcePath);
     }
 
-    // Write latest.json FIRST
-    const latestPath = join(stagingDir, "latest.json");
-    writeFileSync(latestPath, JSON.stringify(manifest, null, 2) + "\n");
-    stagedFiles.set("latest.json", "manifest");
+    // Write the manifests FIRST. latest-beta.json carries the same signed-artifact manifest, so
+    // the beta channel's fixed tag can be pointed at any published release, stable or beta.
+    const manifestText = JSON.stringify(manifest, null, 2) + "\n";
+    for (const manifestName of [STABLE_MANIFEST_NAME, BETA_MANIFEST_NAME]) {
+      writeFileSync(join(stagingDir, manifestName), manifestText);
+      stagedFiles.set(manifestName, "manifest");
+    }
 
     // Stage artifacts, signatures, and stable aliases
     for (const { artifact, kindDef, fullPath, fullSigPath, sigContent } of validatedArtifacts) {

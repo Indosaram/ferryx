@@ -83,6 +83,9 @@ pub enum IpcErrorCode {
     CliParentSymlinkDenied,
     CliPlatformUnsupported,
     CliExecutableNotFound,
+    /// The app runs from a location that vanishes on exit (macOS App Translocation, an AppImage
+    /// mount), so a launcher pointing there would dangle.
+    CliTemporaryExecutable,
     InvalidArgument,
     InternalError,
     Unsupported,
@@ -548,6 +551,10 @@ impl From<crate::ipc::cli_install::CliInstallError> for IpcError {
             crate::ipc::cli_install::CliInstallError::ExecutableNotFound(reason) => {
                 Self::new(IpcErrorCode::CliExecutableNotFound, message)
                     .with_details(json!({ "reason": reason }))
+            }
+            crate::ipc::cli_install::CliInstallError::TemporaryExecutable { path, location } => {
+                Self::new(IpcErrorCode::CliTemporaryExecutable, message)
+                    .with_details(json!({ "path": path.to_string_lossy(), "location": location }))
             }
             crate::ipc::cli_install::CliInstallError::HomeDirNotFound => {
                 Self::new(IpcErrorCode::InvalidPath, message)

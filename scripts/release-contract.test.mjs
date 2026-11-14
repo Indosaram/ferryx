@@ -1,11 +1,35 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  BETA_CHANNEL_TAG,
+  BETA_MANIFEST_NAME,
   parsePlan,
   parseReceipt,
   requiredKinds,
+  STABLE_MANIFEST_NAME,
+  UPDATER_TARGETS,
 } from "./lib/release-contract.mjs";
+
+test("updater targets and manifest URLs match the desktop updater", () => {
+  const updaterRs = readFileSync(new URL("../src-tauri/src/ipc/updater.rs", import.meta.url), "utf8");
+  const targetsBlock = updaterRs.match(/const PUBLISHED_UPDATER_TARGETS: \[&str; \d+\] = \[([^\]]*)\]/);
+  assert.ok(targetsBlock, "PUBLISHED_UPDATER_TARGETS not found in updater.rs");
+  const rustTargets = [...targetsBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+  assert.deepEqual(rustTargets, [...UPDATER_TARGETS]);
+  assert.deepEqual([...UPDATER_TARGETS], ["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"]);
+
+  const endpoint = (name) => updaterRs.match(new RegExp(`pub const ${name}: &str =\\s*"([^"]+)"`))?.[1];
+  assert.equal(
+    endpoint("BETA_UPDATE_ENDPOINT"),
+    `https://github.com/Indosaram/ferryx/releases/download/${BETA_CHANNEL_TAG}/${BETA_MANIFEST_NAME}`,
+  );
+  assert.equal(
+    endpoint("STABLE_UPDATE_ENDPOINT"),
+    `https://github.com/Indosaram/ferryx/releases/latest/download/${STABLE_MANIFEST_NAME}`,
+  );
+});
 
 function makeValidPlan(overrides = {}) {
   return {
@@ -282,13 +306,13 @@ test("parsePlan validates sourceDateEpoch and createdAt", () => {
 
 // ------------------- requiredKinds tests -------------------
 
-test("requiredKinds returns standard 7 kinds without NSIS migration", () => {
+test("requiredKinds returns standard 8 kinds without NSIS migration", () => {
   const plan = makeValidPlan();
   const kinds = requiredKinds(plan);
-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal"]);
+  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "cli-windows-amd64"]);
 });
 
-test("requiredKinds returns 8 kinds when nsisMigration is true", () => {
+test("requiredKinds returns 9 kinds when nsisMigration is true", () => {
   const plan = makeValidPlan({
     channels: { store: true, nsisMigration: true },
     requiredTargets: [
@@ -299,7 +323,7 @@ test("requiredKinds returns 8 kinds when nsisMigration is true", () => {
     ],
   });
   const kinds = requiredKinds(plan);
-  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "nsis"]);
+  assert.deepEqual(kinds, ["macos-updater", "dmg", "appimage", "deb", "msix", "cli-linux-amd64", "cli-darwin-universal", "cli-windows-amd64", "nsis"]);
 });
 
 // ------------------- parseReceipt tests -------------------
@@ -795,6 +819,33 @@ test("parseReceipt accepts receipts containing cli-darwin-universal from host ma
   assert.equal(parsedAlt.artifacts[0].name, "ferryx-cli");
 });
 
+test("parseReceipt accepts cli-windows-amd64 only from maho-win with its .exe name", () => {
+  const plan = makeValidPlan();
+  const cli = {
+    kind: "cli-windows-amd64",
+    name: "ferryx-cli-windows-amd64.exe",
+    relPath: "windows/ferryx-cli-windows-amd64.exe",
+    bytes: 12345678,
+    sha256: "6623456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    signatureRelPath: null,
+    targets: [],
+  };
+  const winReceipt = makeValidReceipt("maho-win", plan);
+  winReceipt.artifacts.push(cli);
+  const parsed = parseReceipt(winReceipt, plan);
+  assert.ok(parsed.artifacts.some((a) => a.kind === "cli-windows-amd64"));
+
+  assert.throws(
+    () => parseReceipt(makeValidReceipt("omaki", plan, { artifacts: [{ ...cli, relPath: "linux/ferryx-cli-windows-amd64.exe" }] }), plan),
+    /kind 'cli-windows-amd64' not permitted for host 'omaki'/i,
+  );
+  // The bare `ferryx-cli` alias of the other CLI kinds is not a Windows CLI name.
+  assert.throws(
+    () => parseReceipt(makeValidReceipt("maho-win", plan, { artifacts: [{ ...cli, name: "ferryx-cli.exe", relPath: "windows/ferryx-cli.exe" }] }), plan),
+    /does not match allowed extensions/i,
+  );
+});
+
 test("parseReceipt enforces permitted hosts and targets for cli artifacts", () => {
   const plan = makeValidPlan();
 
@@ -857,3 +908,19 @@ test("parseReceipt enforces permitted hosts and targets for cli artifacts", () =
 });
 
 
+
+test("parseReceipt accepts recorded floor gate results and rejects malformed ones", () => {
+  const plan = makeValidPlan();
+  const receipt = makeValidReceipt("omaki", plan);
+  receipt.floors = {
+    waiver: null,
+    checks: [{ kind: "appimage", check: "glibc", limit: "2.35", measured: "2.35", pass: true }],
+  };
+  assert.deepEqual(parseReceipt(receipt, plan).floors, receipt.floors);
+
+  const bad = (floors) => parseReceipt({ ...makeValidReceipt("omaki", plan), floors }, plan);
+  assert.throws(() => bad({ checks: [] }), /floors missing required property: waiver/i);
+  assert.throws(() => bad({ waiver: "", checks: [] }), /floors\.waiver must be null or a non-empty reason/);
+  assert.throws(() => bad({ waiver: null, checks: [{ kind: "appimage", check: "crt", pass: true }] }), /unknown check 'crt' for kind 'appimage'/);
+  assert.throws(() => bad({ waiver: null, checks: [{ kind: "deb", check: "glibc", pass: "yes" }] }), /floors\.checks\[0\]\.pass must be a boolean/);
+});

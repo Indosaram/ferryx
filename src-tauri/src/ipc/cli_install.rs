@@ -26,6 +26,14 @@ pub enum CliInstallError {
     #[error("Failed to determine canonical active executable: {0}")]
     ExecutableNotFound(String),
 
+    #[error(
+        "Ferryx is running from a temporary location ({location}) that disappears when it quits, so the CLI launcher would break: {path}. Move Ferryx to a permanent folder (for example /Applications or ~/Applications), relaunch it, and install the CLI again."
+    )]
+    TemporaryExecutable {
+        path: PathBuf,
+        location: &'static str,
+    },
+
     #[error("User home directory could not be determined")]
     HomeDirNotFound,
 
@@ -117,11 +125,51 @@ pub fn resolve_launcher_status(
     ))
 }
 
+/// The executable the launcher points at. Inside an AppImage the running binary lives in a
+/// mount (`$APPDIR`) that vanishes on exit, so the AppImage file itself (`$APPIMAGE`) is the stable
+/// target; it is used only when the running binary really is inside that AppImage's `$APPDIR`, so
+/// a build started from a terminal that merely inherited those variables keeps its own path.
 pub fn get_canonical_active_executable() -> Result<PathBuf, CliInstallError> {
     let current =
         std::env::current_exe().map_err(|e| CliInstallError::ExecutableNotFound(e.to_string()))?;
-    let canonical = std::fs::canonicalize(&current).unwrap_or(current);
-    Ok(canonical)
+    let appimage = std::env::var_os("APPIMAGE");
+    let appdir = std::env::var_os("APPDIR");
+    Ok(resolve_launcher_target(
+        &current,
+        appimage.as_deref().map(Path::new),
+        appdir.as_deref().map(Path::new),
+    ))
+}
+
+pub fn resolve_launcher_target(
+    current_exe: &Path,
+    appimage: Option<&Path>,
+    appdir: Option<&Path>,
+) -> PathBuf {
+    let canonical =
+        std::fs::canonicalize(current_exe).unwrap_or_else(|_| current_exe.to_path_buf());
+    if let (Some(appimage), Some(appdir)) = (appimage, appdir) {
+        let appdir = std::fs::canonicalize(appdir).unwrap_or_else(|_| appdir.to_path_buf());
+        if appimage.is_absolute() && appimage.is_file() && canonical.starts_with(&appdir) {
+            return appimage.to_path_buf();
+        }
+    }
+    canonical
+}
+
+/// Names the temporary location `path` lives in, if any: macOS App Translocation runs a
+/// quarantined app from a randomized read-only mount, and an AppImage runs from a `.mount_*`
+/// directory; both disappear when the app quits.
+pub fn temporary_executable_location(path: &Path) -> Option<&'static str> {
+    path.components().find_map(|component| match component {
+        std::path::Component::Normal(name) if name == "AppTranslocation" => {
+            Some("macOS App Translocation")
+        }
+        std::path::Component::Normal(name) if name.to_string_lossy().starts_with(".mount_") => {
+            Some("AppImage mount")
+        }
+        _ => None,
+    })
 }
 
 pub fn check_launcher_status(launcher_path: &Path, active_exe: Option<&Path>) -> CliLauncherStatus {
@@ -196,6 +244,12 @@ pub fn install_launcher(
             active_exe.display()
         ))
     })?;
+    if let Some(location) = temporary_executable_location(&canonical_active_exe) {
+        return Err(CliInstallError::TemporaryExecutable {
+            path: canonical_active_exe,
+            location,
+        });
+    }
 
     let parent = launcher_path
         .parent()
@@ -272,6 +326,79 @@ pub fn install_launcher(
         launcher_path,
         Some(&canonical_active_exe),
     ))
+}
+
+/// Whether an existing launcher should be re-pointed at `target` when the app starts. Only a
+/// symlink the user already installed is considered, and only when it is clearly a stale Ferryx
+/// launcher: it points into a temporary app location, or it dangles and its old target was the
+/// same executable (same file name, or another AppImage) that has since moved or been replaced.
+/// A missing launcher, a regular file, or a working link to some other binary is left alone.
+pub fn launcher_needs_refresh(launcher_path: &Path, target: &Path) -> bool {
+    let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    // A launch from a temporary location has no stable target to re-point at.
+    if temporary_executable_location(&target).is_some() {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(launcher_path) else {
+        return false;
+    };
+    if !meta.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(old_target) = std::fs::read_link(launcher_path) else {
+        return false;
+    };
+    match std::fs::canonicalize(launcher_path) {
+        Ok(resolved) => resolved != target && temporary_executable_location(&old_target).is_some(),
+        Err(_) => {
+            let is_appimage = |path: &Path| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
+            };
+            temporary_executable_location(&old_target).is_some()
+                || (old_target.file_name().is_some()
+                    && old_target.file_name() == target.file_name())
+                || (is_appimage(&old_target) && is_appimage(&target))
+        }
+    }
+}
+
+/// Re-points a stale launcher at `target` (see [`launcher_needs_refresh`]). The link is replaced
+/// atomically, so the user's launcher is never removed without being re-created. Returns whether
+/// the launcher was re-pointed.
+pub fn refresh_launcher(launcher_path: &Path, target: &Path) -> Result<bool, CliInstallError> {
+    if !launcher_needs_refresh(launcher_path, target) {
+        return Ok(false);
+    }
+    install_launcher(launcher_path, target)?;
+    Ok(true)
+}
+
+/// Start-up re-check of the CLI launcher, so moving the app or swapping the AppImage does not
+/// leave `ferryx` on PATH dangling. Debug builds never touch the user's launcher.
+pub fn refresh_launcher_on_start() {
+    if !cfg!(unix) || cfg!(debug_assertions) {
+        return;
+    }
+    let (Ok(launcher_path), Ok(target)) = (
+        get_default_launcher_path(),
+        get_canonical_active_executable(),
+    ) else {
+        return;
+    };
+    match refresh_launcher(&launcher_path, &target) {
+        Ok(true) => tracing::info!(
+            launcher = %launcher_path.display(),
+            target = %target.display(),
+            "Re-pointed the CLI launcher at the current app location"
+        ),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            %error,
+            launcher = %launcher_path.display(),
+            "Could not re-point the CLI launcher at the current app location"
+        ),
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -616,6 +743,206 @@ mod tests {
         let status_broken = check_launcher_status(&launcher_path, Some(&other_exe));
         assert!(!status_broken.is_installed);
         assert!(status_broken.is_symlink);
+    }
+
+    #[test]
+    fn test_temporary_executable_location_names_ephemeral_app_paths() {
+        assert_eq!(
+            temporary_executable_location(Path::new(
+                "/private/var/folders/xy/T/AppTranslocation/5E1F/d/Ferryx.app/Contents/MacOS/ferryx"
+            )),
+            Some("macOS App Translocation")
+        );
+        assert_eq!(
+            temporary_executable_location(Path::new("/tmp/.mount_FerryxAbC123/usr/bin/ferryx")),
+            Some("AppImage mount")
+        );
+        for stable in [
+            "/Applications/Ferryx.app/Contents/MacOS/ferryx",
+            "/home/u/Applications/Ferryx_amd64.AppImage",
+            "/home/u/AppTranslocationNotes/ferryx",
+        ] {
+            assert_eq!(
+                temporary_executable_location(Path::new(stable)),
+                None,
+                "{stable}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_install_refuses_translocated_executable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let macos_dir = temp_dir
+            .path()
+            .join("AppTranslocation/5E1F/d/Ferryx.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos_dir).expect("create translocated bundle");
+        let exe = macos_dir.join("ferryx");
+        std::fs::write(&exe, b"binary").expect("write exe");
+        let launcher_path = temp_dir.path().join("bin").join("ferryx");
+
+        let err = install_launcher(&launcher_path, &exe).expect_err("must refuse translocation");
+        match &err {
+            CliInstallError::TemporaryExecutable { path, location } => {
+                assert_eq!(*location, "macOS App Translocation");
+                assert_eq!(path, &std::fs::canonicalize(&exe).unwrap());
+            }
+            other => panic!("expected TemporaryExecutable, got {other:?}"),
+        }
+        assert!(std::fs::symlink_metadata(&launcher_path).is_err());
+
+        let ipc: IpcError = err.into();
+        assert_eq!(
+            ipc.code,
+            crate::ipc::error::IpcErrorCode::CliTemporaryExecutable
+        );
+        assert_eq!(
+            ipc.details.as_ref().unwrap()["location"],
+            "macOS App Translocation"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_launcher_target_prefers_appimage_only_inside_its_mount() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let appimage = temp_dir.path().join("Ferryx_amd64.AppImage");
+        std::fs::write(&appimage, b"appimage").expect("write appimage");
+        let appdir = temp_dir.path().join(".mount_FerryxAbC");
+        std::fs::create_dir_all(appdir.join("usr/bin")).expect("create mount");
+        let mounted_exe = appdir.join("usr/bin/ferryx");
+        std::fs::write(&mounted_exe, b"binary").expect("write mounted exe");
+        let other_exe = temp_dir.path().join("self-built-ferryx");
+        std::fs::write(&other_exe, b"binary").expect("write other exe");
+
+        assert_eq!(
+            resolve_launcher_target(&mounted_exe, Some(&appimage), Some(&appdir)),
+            appimage
+        );
+        // A binary outside the AppImage mount that merely inherited the variables keeps its path.
+        assert_eq!(
+            resolve_launcher_target(&other_exe, Some(&appimage), Some(&appdir)),
+            std::fs::canonicalize(&other_exe).unwrap()
+        );
+        // A missing AppImage file or a relative path is never used.
+        let missing = temp_dir.path().join("gone.AppImage");
+        assert_eq!(
+            resolve_launcher_target(&mounted_exe, Some(&missing), Some(&appdir)),
+            std::fs::canonicalize(&mounted_exe).unwrap()
+        );
+        assert_eq!(
+            resolve_launcher_target(
+                &mounted_exe,
+                Some(Path::new("Ferryx_amd64.AppImage")),
+                Some(&appdir)
+            ),
+            std::fs::canonicalize(&mounted_exe).unwrap()
+        );
+        assert_eq!(
+            resolve_launcher_target(&other_exe, None, None),
+            std::fs::canonicalize(&other_exe).unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_refresh_repoints_launcher_after_app_bundle_moves() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let old_root = temp_dir.path().join("Applications");
+        let bundle_exe = Path::new("Ferryx.app/Contents/MacOS/ferryx");
+        std::fs::create_dir_all(old_root.join(bundle_exe).parent().unwrap()).expect("bundle");
+        std::fs::write(old_root.join(bundle_exe), b"binary").expect("write exe");
+        let launcher_path = temp_dir.path().join("bin").join("ferryx");
+        install_launcher(&launcher_path, &old_root.join(bundle_exe)).expect("install");
+
+        // The user moves the bundle; the launcher now dangles.
+        let new_root = temp_dir.path().join("Moved");
+        std::fs::rename(&old_root, &new_root).expect("move bundle");
+        assert!(std::fs::canonicalize(&launcher_path).is_err());
+        let new_exe = new_root.join(bundle_exe);
+
+        // The next start re-points it and leaves a working link afterwards.
+        assert!(refresh_launcher(&launcher_path, &new_exe).expect("refresh"));
+        assert_eq!(
+            std::fs::canonicalize(&launcher_path).unwrap(),
+            std::fs::canonicalize(&new_exe).unwrap()
+        );
+        assert!(check_launcher_status(&launcher_path, Some(&new_exe)).is_installed);
+        assert!(!refresh_launcher(&launcher_path, &new_exe).expect("second refresh"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_refresh_repoints_swapped_appimage_and_mount_links() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let launcher_path = temp_dir.path().join("bin").join("ferryx");
+        let old_appimage = temp_dir.path().join("Ferryx_2026.1027.5_amd64.AppImage");
+        std::fs::write(&old_appimage, b"old").expect("write old");
+        install_launcher(&launcher_path, &old_appimage).expect("install");
+
+        // Swapped for a newer AppImage with a different file name.
+        std::fs::remove_file(&old_appimage).expect("remove old");
+        let new_appimage = temp_dir.path().join("Ferryx_2026.1028.1_amd64.AppImage");
+        std::fs::write(&new_appimage, b"new").expect("write new");
+        assert!(refresh_launcher(&launcher_path, &new_appimage).expect("refresh"));
+        assert_eq!(
+            std::fs::canonicalize(&launcher_path).unwrap(),
+            std::fs::canonicalize(&new_appimage).unwrap()
+        );
+
+        // A launcher an older build pointed into a still-mounted AppImage is moved to the file.
+        let mount_exe = temp_dir.path().join(".mount_FerryxAbC/usr/bin/ferryx");
+        std::fs::create_dir_all(mount_exe.parent().unwrap()).expect("mount");
+        std::fs::write(&mount_exe, b"binary").expect("write mount exe");
+        let staged = temp_dir.path().join("bin").join("staged");
+        std::os::unix::fs::symlink(&mount_exe, &staged).expect("stage link");
+        std::fs::rename(&staged, &launcher_path).expect("replace link");
+        assert!(refresh_launcher(&launcher_path, &new_appimage).expect("refresh mount"));
+        assert_eq!(
+            std::fs::canonicalize(&launcher_path).unwrap(),
+            std::fs::canonicalize(&new_appimage).unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_refresh_leaves_missing_foreign_and_unrelated_launchers_alone() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let exe = temp_dir.path().join("app").join("ferryx");
+        std::fs::create_dir_all(exe.parent().unwrap()).expect("app dir");
+        std::fs::write(&exe, b"binary").expect("write exe");
+        let bin = temp_dir.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        let launcher_path = bin.join("ferryx");
+
+        // Never installed: nothing is created.
+        assert!(!refresh_launcher(&launcher_path, &exe).expect("missing"));
+        assert!(std::fs::symlink_metadata(&launcher_path).is_err());
+
+        // A regular file is the user's own launcher.
+        std::fs::write(&launcher_path, b"#!/bin/sh\n").expect("write file");
+        assert!(!refresh_launcher(&launcher_path, &exe).expect("file"));
+        assert_eq!(std::fs::read(&launcher_path).unwrap(), b"#!/bin/sh\n");
+        std::fs::remove_file(&launcher_path).expect("remove file");
+
+        // A working link to another binary stays as the user set it.
+        let other = temp_dir.path().join("dev-build");
+        std::fs::write(&other, b"dev").expect("write other");
+        std::os::unix::fs::symlink(&other, &launcher_path).expect("link other");
+        assert!(!refresh_launcher(&launcher_path, &exe).expect("working link"));
+        assert_eq!(std::fs::read_link(&launcher_path).unwrap(), other);
+
+        // A dangling link to a differently named binary is not deleted or re-pointed.
+        std::fs::remove_file(&other).expect("remove other");
+        assert!(!refresh_launcher(&launcher_path, &exe).expect("dangling foreign"));
+        assert_eq!(std::fs::read_link(&launcher_path).unwrap(), other);
+
+        // A launch from a temporary location never rewrites the launcher.
+        let translocated = temp_dir.path().join("AppTranslocation/X/d/dev-build");
+        std::fs::create_dir_all(translocated.parent().unwrap()).expect("translocated");
+        std::fs::write(&translocated, b"binary").expect("write translocated");
+        assert!(!launcher_needs_refresh(&launcher_path, &translocated));
     }
 
     #[test]
