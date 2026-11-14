@@ -31,12 +31,12 @@
 | 平台 | 软件包 | |
 | :--- | :--- | :--- |
 | **macOS** | 通用 DMG（Apple Silicon 和 Intel） | [`.dmg`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_universal.dmg) |
-| **Windows** | 安装程序（x64，未进行代码签名；Microsoft Store 版本正在等待认证） | [`.exe`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_x64-setup.exe) |
+| **Windows** | Microsoft Store（x64，已签名，自动更新） | [Store](https://apps.microsoft.com/detail/9NLHQL5JNLM4)（`winget install --source msstore 9NLHQL5JNLM4`） |
 | **Linux** | 便携式 AppImage（x64） | [`.AppImage`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.AppImage) |
 | **Linux** | Debian / Ubuntu 软件包（x64） | [`.deb`](https://github.com/Indosaram/ferryx/releases/latest/download/Ferryx_amd64.deb) |
 | **Linux（无头）** | 服务器 / VPS PTY 守护进程和 CLI（x64） | [`install.sh`](https://relay.ferryx.dev/install.sh)（`curl -fsSL https://relay.ferryx.dev/install.sh | bash`） |
 
-macOS、Windows 和 Linux 的下载链接会指向最新版本。进行本地发行版组装时，会将无头版 `ferryx-cli` 放在 Linux AppImage 和 `.deb` 旁边（文件名为
+macOS 和 Linux 的下载链接会指向最新版本。Windows 请通过 Microsoft Store 安装；部分发行版还会附带一个直接安装用的 `.exe` 安装程序（未进行代码签名），请在[发行版页面](https://github.com/Indosaram/ferryx/releases/latest)查看是否提供，而不要依赖固定链接。进行本地发行版组装时，会将无头版 `ferryx-cli` 放在 Linux AppImage 和 `.deb` 旁边（文件名为
 `ferryx-cli-linux-amd64`）；如果存在通用 macOS CLI，也会将其作为
 `ferryx-cli-darwin-universal` 一同放置。因此，上面的一行安装命令在发行版包含当前构建产物时会解析到该产物，否则会安全失败。请使用与二进制文件一同发布的 `SHA256SUMS.txt` 验证下载：
 

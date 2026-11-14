@@ -23,10 +23,58 @@ export const GITHUB_RELEASE_DOWNLOAD_BASE = 'https://github.com/Indosaram/ferryx
 /**
  * Canonical Microsoft Store product page for Ferryx (ProductId 9NLHQL5JNLM4), verified live by
  * `bun scripts/store-listing-status.mjs`. The Store is the signed Windows channel with automatic
- * background updates; the GitHub release .exe stays available as the secondary unsigned installer.
+ * background updates. The GitHub release .exe is offered only when the release publishes it.
  */
 export const MICROSOFT_STORE_URL = 'https://apps.microsoft.com/detail/9NLHQL5JNLM4';
 export const MICROSOFT_STORE_SEARCH_URL = MICROSOFT_STORE_URL;
+
+/**
+ * The direct NSIS installer is optional in the release contract: a Store-only release
+ * (`--nsis-migration` omitted) publishes no `Ferryx_x64-setup.exe`, so linking it unconditionally
+ * would 404. The site offers it only when the build sets PUBLIC_FERRYX_WINDOWS_INSTALLER=true,
+ * which the deployer does after confirming the latest release ships that asset.
+ */
+const WINDOWS_INSTALLER_ASSET: DownloadAsset = {
+  id: 'windows-installer',
+  name: 'Windows Installer (.exe)',
+  architecture: 'x64',
+  fileType: '.exe',
+  url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
+  // The direct installer is not Authenticode-signed (the signed channel is the Microsoft
+  // Store above), so SmartScreen warns on first run; saying so here avoids surprise.
+  notes: 'Direct installer (not code-signed). SmartScreen shows a warning — check SHA256SUMS.txt before running',
+};
+
+/** Windows entry: the Microsoft Store always, the direct installer only when it is published. */
+export function windowsPlatform(installerPublished: boolean): PlatformConfig {
+  return {
+    id: 'windows',
+    name: 'Windows',
+    badge: 'Windows 10/11 (64-bit)',
+    systemReqs: 'x64 Architecture with WebView2',
+    defaultAsset: {
+      id: 'windows-store',
+      name: 'Microsoft Store',
+      architecture: 'x64 · MSIX',
+      fileType: 'Store',
+      url: MICROSOFT_STORE_URL,
+      recommended: true,
+      notes: 'Signed by Microsoft Store with automatic updates (or winget install --source msstore 9NLHQL5JNLM4)',
+    },
+    assets: [
+      {
+        id: 'windows-store',
+        name: 'Microsoft Store',
+        architecture: 'x64 · MSIX (signed)',
+        fileType: 'Store',
+        url: MICROSOFT_STORE_URL,
+        recommended: true,
+        notes: 'Signed by the Microsoft Store with automatic updates (winget install --source msstore 9NLHQL5JNLM4)',
+      },
+      ...(installerPublished ? [WINDOWS_INSTALLER_ASSET] : []),
+    ],
+  };
+}
 
 export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = {
   macos: {
@@ -55,42 +103,7 @@ export const PLATFORMS: Record<'macos' | 'windows' | 'linux', PlatformConfig> = 
       },
     ],
   },
-  windows: {
-    id: 'windows',
-    name: 'Windows',
-    badge: 'Windows 10/11 (64-bit)',
-    systemReqs: 'x64 Architecture with WebView2',
-    defaultAsset: {
-      id: 'windows-store',
-      name: 'Microsoft Store',
-      architecture: 'x64 · MSIX',
-      fileType: 'Store',
-      url: MICROSOFT_STORE_URL,
-      recommended: true,
-      notes: 'Signed by Microsoft Store with automatic updates (or winget install --source msstore 9NLHQL5JNLM4)',
-    },
-    assets: [
-      {
-        id: 'windows-store',
-        name: 'Microsoft Store',
-        architecture: 'x64 · MSIX (signed)',
-        fileType: 'Store',
-        url: MICROSOFT_STORE_URL,
-        recommended: true,
-        notes: 'Signed by the Microsoft Store with automatic updates (winget install --source msstore 9NLHQL5JNLM4)',
-      },
-      {
-        id: 'windows-installer',
-        name: 'Windows Installer (.exe)',
-        architecture: 'x64',
-        fileType: '.exe',
-        url: `${GITHUB_RELEASE_DOWNLOAD_BASE}/Ferryx_x64-setup.exe`,
-        // The direct installer is not Authenticode-signed (the signed channel is the Microsoft
-        // Store above), so SmartScreen warns on first run; saying so here avoids surprise.
-        notes: 'Direct installer (not code-signed). SmartScreen shows a warning — check SHA256SUMS.txt before running',
-      },
-    ],
-  },
+  windows: windowsPlatform(import.meta.env.PUBLIC_FERRYX_WINDOWS_INSTALLER === 'true'),
   linux: {
     id: 'linux',
     name: 'Linux',
