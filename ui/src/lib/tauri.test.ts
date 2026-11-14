@@ -62,6 +62,7 @@ import {
   describeRejection,
   getAccountEnrollmentStatus,
   enrollThisMachine,
+  accountHttpRequest,
   type AccountEnrollmentStatus,
 } from "./tauri";
 import { registerDurableNativeBinding, resetNativeTerminalLifecycleForTest } from "./nativeTerminalLifecycle";
@@ -961,5 +962,40 @@ describe("account enrollment API", () => {
       enrollmentCode: "code-123",
     });
     expect(result).toEqual(status);
+  });
+
+  it("invokes cmd_account_http_request with the request and returns the raw answer", async () => {
+    const request = {
+      origin: "https://account.selfhost.test",
+      method: "GET" as const,
+      path: "/api/account/v1/machines",
+      bearer: "tok",
+      body: null,
+      timeoutMs: 15_000,
+    };
+    core.invoke.mockResolvedValueOnce({ status: 200, body: "[]" });
+    await expect(accountHttpRequest(request)).resolves.toEqual({ status: 200, body: "[]" });
+    expect(core.invoke).toHaveBeenCalledWith("cmd_account_http_request", request);
+  });
+
+  it("keeps the structured backend error of cmd_account_http_request", async () => {
+    core.invoke.mockRejectedValueOnce({
+      code: "ACCOUNT_UNREACHABLE",
+      message: "account service at https://account.selfhost.test is unreachable",
+      details: { origin: "https://account.selfhost.test" },
+    });
+    await expect(
+      accountHttpRequest({
+        origin: "https://account.selfhost.test",
+        method: "GET",
+        path: "/api/account/v1/health",
+        bearer: null,
+        body: null,
+        timeoutMs: 1_000,
+      }),
+    ).rejects.toMatchObject({
+      code: "ACCOUNT_UNREACHABLE",
+      details: { origin: "https://account.selfhost.test", command: "cmd_account_http_request" },
+    });
   });
 });

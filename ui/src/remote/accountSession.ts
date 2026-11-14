@@ -16,6 +16,9 @@ import {
   setRemoteAuthToken,
 } from "../lib/remoteClient";
 import { DEFAULT_RELAY_ORIGIN } from "../lib/pairedHostInventory";
+import { isTauri } from "@tauri-apps/api/core";
+import { isDesktopShell } from "../lib/clientRuntime";
+import { accountHttpRequest, isStructuredIpcError } from "../lib/tauri";
 
 export const ACCOUNT_TOKEN_HOST_ID = "account";
 
@@ -165,15 +168,109 @@ export function normalizeAccountOrigin(value: unknown): string | null {
   }
 }
 
-/** An invalid origin falls back to the default account origin so it never receives a token. */
+export const INVALID_ACCOUNT_ORIGIN = "INVALID_ACCOUNT_ORIGIN";
+
+function invalidAccountOriginError(origin: string): AccountSessionError {
+  return new AccountSessionError(
+    INVALID_ACCOUNT_ORIGIN,
+    `Account origin "${origin}" must be https (http only for localhost) without credentials, path, query or hash.`,
+    undefined,
+    { origin },
+  );
+}
+
+/**
+ * The origin a request may send account credentials to. An empty origin means the configured
+ * one; an invalid origin is a typed INVALID_ACCOUNT_ORIGIN error and never becomes a default.
+ */
 function cleanOrigin(origin: string): string {
   const trimmed = typeof origin === "string" ? origin.trim() : "";
-  const candidate = trimmed || (typeof window !== "undefined" ? window.location.origin : "");
-  return normalizeAccountOrigin(candidate) ?? DEFAULT_RELAY_ORIGIN;
+  const candidate = trimmed || getConfiguredAccountOrigin();
+  const normalized = normalizeAccountOrigin(candidate);
+  if (!normalized) throw invalidAccountOriginError(candidate);
+  return normalized;
+}
+
+/** Storage-key form of an origin. Never throws: an invalid origin keys its own entry. */
+function originStorageKey(origin: string): string {
+  const trimmed = typeof origin === "string" ? origin.trim() : "";
+  return normalizeAccountOrigin(trimmed) ?? trimmed;
 }
 
 const ACCOUNT_REQUEST_TIMEOUT_MS = 15_000;
 const ERROR_BODY_MAX_CHARS = 200;
+/** Statuses a Response must be built without a body for. */
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
+/**
+ * True where account HTTP goes through the desktop backend: the desktop webview CSP admits only
+ * the hosted relay, so a self-hosted account origin is reachable only through Rust. Web builds
+ * and the mobile shell keep using fetch.
+ */
+export function accountRequestsUseIpc(): boolean {
+  return isDesktopShell(isTauri());
+}
+
+function accountAbortError(): DOMException {
+  return new DOMException("The account request was aborted.", "AbortError");
+}
+
+function rejectOnAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(accountAbortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+/**
+ * `fetch` for account-service URLs. In the desktop app the request runs in Rust through
+ * `cmd_account_http_request` (never following redirects); elsewhere it is plain `fetch`.
+ * A backend failure is an AccountSessionError carrying the structured `{ code, message, details }`.
+ */
+export async function accountFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs: number = ACCOUNT_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  if (!accountRequestsUseIpc()) return fetch(input, init);
+  const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+  const requestedMethod = (init.method ?? "GET").toUpperCase();
+  const method = requestedMethod === "GET" ? "GET" : requestedMethod === "POST" ? "POST" : null;
+  if (method === null) {
+    throw new AccountSessionError("INVALID_REQUEST", `Account request method ${requestedMethod} is not supported`);
+  }
+  const authorization = new Headers(init.headers).get("Authorization");
+  if (authorization !== null && !authorization.startsWith("Bearer ")) {
+    throw new AccountSessionError("INVALID_REQUEST", "Account requests carry only a bearer credential");
+  }
+  if (init.body !== undefined && init.body !== null && typeof init.body !== "string") {
+    throw new AccountSessionError("INVALID_REQUEST", "Account request bodies must be JSON text");
+  }
+  const signal = init.signal ?? null;
+  if (signal?.aborted) throw accountAbortError();
+  const pending = accountHttpRequest({
+    origin: url.origin,
+    method,
+    path: `${url.pathname}${url.search}${url.hash}`,
+    bearer: authorization === null ? null : authorization.slice("Bearer ".length),
+    body: typeof init.body === "string" ? init.body : null,
+    timeoutMs,
+  });
+  let answer: Awaited<typeof pending>;
+  try {
+    answer = await (signal ? rejectOnAbort(pending, signal) : pending);
+  } catch (err) {
+    if (!(err instanceof AccountSessionError) && isStructuredIpcError(err)) {
+      throw new AccountSessionError(err.code, err.message, undefined, err.details);
+    }
+    throw err;
+  }
+  if (!Number.isInteger(answer.status) || answer.status < 200 || answer.status > 599) {
+    throw new AccountSessionError("INVALID_RESPONSE", `Account service answered with HTTP ${answer.status}`, answer.status);
+  }
+  return new Response(NULL_BODY_STATUSES.has(answer.status) ? null : answer.body, { status: answer.status });
+}
 
 async function fetchWithTimeout(
   url: string,
@@ -193,7 +290,7 @@ async function fetchWithTimeout(
     else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
   }
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await accountFetch(url, { ...init, signal: controller.signal }, timeoutMs);
   } catch (err) {
     if (timedOut) {
       throw new AccountSessionError("REQUEST_TIMEOUT", `Account request timed out after ${timeoutMs}ms`);
@@ -339,7 +436,7 @@ export function planLimitStateWithEntitlement(
 }
 
 function accountEntitlementStorageKey(origin: string): string {
-  return `${ACCOUNT_ENTITLEMENT_STORAGE_KEY}:${cleanOrigin(origin)}`;
+  return `${ACCOUNT_ENTITLEMENT_STORAGE_KEY}:${originStorageKey(origin)}`;
 }
 
 export function storeAccountEntitlementSnapshot(
@@ -422,9 +519,16 @@ export function clearStoredAccountEntitlementSnapshot(
   }
 }
 
-export function getStoredAccountSessionToken(origin: string = getConfiguredAccountOrigin()): string | null {
+export function getStoredAccountSessionToken(origin?: string): string | null {
+  let expected: string;
+  try {
+    expected = cleanOrigin(origin ?? "");
+  } catch {
+    // No credential belongs to an invalid origin.
+    return null;
+  }
   const issuer = typeof window !== "undefined" ? window.localStorage.getItem(ACCOUNT_TOKEN_ORIGIN_KEY) : null;
-  if (issuer !== cleanOrigin(origin)) return null;
+  if (issuer !== expected) return null;
   return getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID);
 }
 
@@ -442,8 +546,8 @@ function dispatchAccountSessionChanged(origin: string): void {
   }
 }
 
-export function storeAccountSessionToken(token: string, origin: string = getConfiguredAccountOrigin()): void {
-  const issuer = cleanOrigin(origin);
+export function storeAccountSessionToken(token: string, origin?: string): void {
+  const issuer = cleanOrigin(origin ?? "");
   if (getRemoteAuthToken(ACCOUNT_TOKEN_HOST_ID) !== token) {
     clearStoredAccountEntitlementSnapshot(issuer);
   }
@@ -462,7 +566,7 @@ export function clearStoredAccountSessionToken(): void {
     clearAccountLastSelectedTarget();
   }
   if (issuer) clearStoredAccountEntitlementSnapshot(issuer);
-  dispatchAccountSessionChanged(issuer ?? getConfiguredAccountOrigin());
+  dispatchAccountSessionChanged(issuer ?? getConfiguredAccountOriginUnchecked());
 }
 
 export const ACCOUNT_ORIGIN_STORAGE_KEY = "ferryx.account.origin";
@@ -488,7 +592,7 @@ export function storeAccountOrigin(
   const normalized = normalizeAccountOrigin(origin);
   if (!normalized) {
     throw new AccountSessionError(
-      "INVALID_ACCOUNT_ORIGIN",
+      INVALID_ACCOUNT_ORIGIN,
       "Account origin must be https (http only for localhost) without credentials, path, query or hash.",
     );
   }
@@ -501,12 +605,38 @@ export function clearStoredAccountOrigin(
   storage?.removeItem(ACCOUNT_ORIGIN_STORAGE_KEY);
 }
 
+/**
+ * The account origin this client talks to. A stored origin wins. Otherwise the native app
+ * (desktop or mobile shell) uses the product default and a web build uses its page origin.
+ * An invalid stored or page origin throws a typed INVALID_ACCOUNT_ORIGIN error; it never
+ * falls back to the hosted relay.
+ */
 export function getConfiguredAccountOrigin(
   storage: (Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>) | null = typeof window !== "undefined" && window.localStorage ? window.localStorage : null,
 ): string {
-  const stored = getStoredAccountOrigin(storage);
-  if (stored) return stored;
-  return DEFAULT_RELAY_ORIGIN;
+  const stored = getMigratedItem(ACCOUNT_ORIGIN_STORAGE_KEY, storage)?.trim();
+  const pageOrigin = typeof window !== "undefined" ? window.location.origin : "";
+  const candidate = stored || (isTauri() ? DEFAULT_RELAY_ORIGIN : pageOrigin);
+  const origin = normalizeAccountOrigin(candidate);
+  if (!origin) throw invalidAccountOriginError(candidate);
+  return origin;
+}
+
+/**
+ * Render-safe {@link getConfiguredAccountOrigin}: an invalid configured origin is returned
+ * unchanged, so every account request made with it fails with INVALID_ACCOUNT_ORIGIN instead
+ * of reaching another origin.
+ */
+export function getConfiguredAccountOriginUnchecked(): string {
+  try {
+    return getConfiguredAccountOrigin();
+  } catch (err) {
+    if (err instanceof AccountSessionError && err.code === INVALID_ACCOUNT_ORIGIN) {
+      const origin = (err.details as { origin?: unknown } | undefined)?.origin;
+      return typeof origin === "string" ? origin : "";
+    }
+    throw err;
+  }
 }
 
 /**
@@ -1580,7 +1710,7 @@ export interface AccountLastSelectedTarget {
 }
 
 export function makeAccountLastSelectedTargetKey(relayUrl: string): string {
-  return `ferryx.account.last_target.${encodeURIComponent(cleanOrigin(relayUrl))}`;
+  return `ferryx.account.last_target.${encodeURIComponent(originStorageKey(relayUrl))}`;
 }
 
 export function getAccountLastSelectedTarget(relayUrl: string): AccountLastSelectedTarget | null {

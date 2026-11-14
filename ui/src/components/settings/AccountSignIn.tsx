@@ -7,8 +7,8 @@ import {
   pollLogin,
   requestLogin,
   storeAccountSessionToken,
+  getConfiguredAccountOriginUnchecked,
 } from "../../remote/accountSession";
-import { DEFAULT_RELAY_ORIGIN } from "../../lib/pairedHostInventory";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -23,7 +23,7 @@ const LOGIN_POLL_INTERVAL_MS = 2000;
 const LOGIN_POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (TTL 600s)
 
 export function AccountSignIn({
-  origin = DEFAULT_RELAY_ORIGIN,
+  origin = getConfiguredAccountOriginUnchecked(),
   onSignIn,
   className = "",
 }: AccountSignInProps) {

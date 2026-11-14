@@ -22,6 +22,8 @@
  * never on message text.
  */
 import {
+  AccountSessionError,
+  accountFetch,
   getConfiguredAccountOrigin,
   getStoredAccountSessionToken,
 } from "../remote/accountSession";
@@ -116,7 +118,7 @@ export interface BillingCallOptions {
 interface ResolvedCall {
   readonly base: string;
   readonly sessionToken: string | null;
-  readonly fetchImpl: typeof fetch;
+  readonly fetchImpl: (input: string, init: RequestInit) => Promise<Response>;
   readonly signal: AbortSignal | undefined;
   readonly timeoutMs: number;
 }
@@ -127,7 +129,13 @@ interface JsonRequest {
 }
 
 function resolveCall(options: BillingCallOptions): ResolvedCall {
-  const origin = (options.accountOrigin ?? getConfiguredAccountOrigin()).trim().replace(/\/+$/, "");
+  let configured: string;
+  try {
+    configured = options.accountOrigin ?? getConfiguredAccountOrigin();
+  } catch (error) {
+    throw toBillingApiError(error);
+  }
+  const origin = configured.trim().replace(/\/+$/, "");
   const sessionToken =
     options.accountSessionToken === undefined
       ? getStoredAccountSessionToken(origin)
@@ -135,7 +143,8 @@ function resolveCall(options: BillingCallOptions): ResolvedCall {
   return {
     base: origin,
     sessionToken,
-    fetchImpl: options.fetchImpl ?? fetch,
+    // The desktop app reaches the account server through the backend (accountFetch).
+    fetchImpl: options.fetchImpl ?? accountFetch,
     signal: options.signal,
     timeoutMs: options.timeoutMs ?? BILLING_REQUEST_TIMEOUT_MS,
   };
@@ -317,6 +326,9 @@ function parseOrgMembers(payload: unknown): readonly OrgMember[] {
 
 export function toBillingApiError(error: unknown): BillingApiError {
   if (error instanceof BillingApiError) return error;
+  if (error instanceof AccountSessionError) {
+    return new BillingApiError(error.code, error.message, error.status ?? null, error.details ?? null);
+  }
   if (error instanceof Error) {
     return new BillingApiError("NETWORK_FAILED", error.message, null);
   }

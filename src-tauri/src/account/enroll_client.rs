@@ -360,10 +360,14 @@ fn requested_display_name(display_name: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Builder shared by every account-service HTTP client: the TLS backend and the default timeout.
+pub fn account_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().timeout(Duration::from_secs(15))
+}
+
 #[allow(clippy::result_large_err)]
 fn account_http_client() -> Result<reqwest::Client, EnrollError> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
+    account_http_client_builder()
         .build()
         .map_err(|error| EnrollError::local("ACCOUNT_CLIENT_FAILED", error.to_string()))
 }

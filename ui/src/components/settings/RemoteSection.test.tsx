@@ -7,6 +7,7 @@ import { createPairedHostInventory, DEFAULT_RELAY_ORIGIN, type HostView, type Pa
 import { resetSshHostsCache, type SshHost } from "../../lib/sshHosts";
 import type { AccountMachineView } from "../../remote/accountSession";
 import { resetTailscaleDiscoveryForTests, syncTailscaleMachines } from "../../lib/tailscaleDiscovery";
+import { settledQuery } from "../../test/domSignals";
 
 const grantMocks = vi.hoisted(() => ({
   attachKey: vi.fn(),
@@ -49,7 +50,11 @@ const { isTauriMock, invokeMock } = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => isTauriMock(),
-  invoke: (...args: unknown[]) => invokeMock(...args),
+  // Desktop account HTTP runs through cmd_account_http_request; replay it as the stubbed fetch.
+  invoke: async (...args: unknown[]) =>
+    args[0] === "cmd_account_http_request"
+      ? (await import("../../test/accountIpcFetchBridge")).accountIpcViaFetch(args[1])
+      : invokeMock(...args),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -585,8 +590,12 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       );
 
       expect(await screen.findByText("Enrolled Box")).toBeInTheDocument();
-      const addProjectBtn = screen.getByRole("button", { name: "Add Project on Enrolled Box" });
-      expect(addProjectBtn).toBeInTheDocument();
+      // The account machine list arrives asynchronously (on desktop through cmd_account_http_request),
+      // so the row can render before it is enabled: await the enabled state itself.
+      const addProjectBtn = await settledQuery(() => {
+        const button = screen.queryByRole("button", { name: "Add Project on Enrolled Box" });
+        return button && !button.hasAttribute("disabled") ? button : null;
+      });
       expect(addProjectBtn).not.toBeDisabled();
 
       fireEvent.click(addProjectBtn);

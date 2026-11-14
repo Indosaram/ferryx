@@ -1,8 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_RELAY_ORIGIN } from "../lib/pairedHostInventory";
-import { storeAccountSessionToken } from "../remote/accountSession";
+import { getConfiguredAccountOrigin, storeAccountSessionToken } from "../remote/accountSession";
 import { SettingsDialog } from "./SettingsDialog";
 import { observeDom, settle, settledTestId } from "../test/domSignals";
 
@@ -91,7 +90,7 @@ describe("SettingsDialog plan navigation", () => {
   });
 
   it("offers the Plan section for a stored account session and mounts it on demand", async () => {
-    storeAccountSessionToken("session-token-1", DEFAULT_RELAY_ORIGIN);
+    storeAccountSessionToken("session-token-1", getConfiguredAccountOrigin());
     vi.stubGlobal("fetch", async () => jsonResponse(ENTITLEMENT));
 
     render(<SettingsDialog open onClose={vi.fn()} initialSection="plan" />);
@@ -126,8 +125,9 @@ describe("SettingsDialog plan navigation", () => {
   });
 
   it("drops the Plan navigation and falls back to General when the server answers 404", async () => {
-    storeAccountSessionToken("session-token-1", DEFAULT_RELAY_ORIGIN);
-    vi.stubGlobal("fetch", async () => jsonResponse({ code: "NOT_FOUND", message: "not found" }, 404));
+    storeAccountSessionToken("session-token-1", getConfiguredAccountOrigin());
+    const fetchSpy = vi.fn(async () => jsonResponse({ code: "NOT_FOUND", message: "not found" }, 404));
+    vi.stubGlobal("fetch", fetchSpy);
 
     const fallbackSignal = settledTestId("general-section");
     render(<SettingsDialog open onClose={vi.fn()} initialSection="plan" />);
@@ -135,5 +135,7 @@ describe("SettingsDialog plan navigation", () => {
     expect(await fallbackSignal).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Plan" })).toBeNull();
     expect(screen.queryByTestId("plan-summary")).toBeNull();
+    // The fallback comes from the server's 404, not from a missing session.
+    expect(fetchSpy).toHaveBeenCalled();
   });
 });

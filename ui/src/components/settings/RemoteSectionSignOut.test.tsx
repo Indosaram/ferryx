@@ -13,7 +13,11 @@ const { isTauriMock, invokeMock } = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => isTauriMock(),
-  invoke: (...args: unknown[]) => invokeMock(...args),
+  // Desktop account HTTP runs through cmd_account_http_request; replay it as the stubbed fetch.
+  invoke: async (...args: unknown[]) =>
+    args[0] === "cmd_account_http_request"
+      ? (await import("../../test/accountIpcFetchBridge")).accountIpcViaFetch(args[1])
+      : invokeMock(...args),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({

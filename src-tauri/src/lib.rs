@@ -1605,6 +1605,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         cmd_shortcuts_set_native_table,
         crate::ipc::account::cmd_account_enrollment_status,
         crate::ipc::account::cmd_account_enroll_this_machine,
+        crate::ipc::account::cmd_account_http_request,
         crate::ipc::paired_host::paired_host_list,
         crate::ipc::paired_host::paired_host_reachability_list,
         crate::ipc::paired_host::paired_host_route_list,

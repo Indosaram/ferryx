@@ -17,7 +17,7 @@ import { isMacShortcutPlatform } from "../lib/shortcuts";
 import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { useShortcutOverrides, useShortcutPreset } from "../lib/shortcutOverrides";
 import { DEFAULT_TERMINAL_SETTINGS, useTerminalSettings } from "../lib/terminalSettings";
-import { getConfiguredAccountOrigin, getStoredAccountSessionToken } from "../remote/accountSession";
+import { getConfiguredAccountOriginUnchecked, getStoredAccountSessionToken } from "../remote/accountSession";
 import { AgentsSection } from "./settings/AgentsSection";
 import { AppearanceSection } from "./settings/AppearanceSection";
 import { BrowserSection } from "./settings/BrowserSection";
@@ -85,7 +85,7 @@ interface PlanAuth {
 }
 
 function resolvePlanAuth(accountOrigin?: string): PlanAuth {
-  const origin = accountOrigin ?? getConfiguredAccountOrigin();
+  const origin = accountOrigin ?? getConfiguredAccountOriginUnchecked();
   return { origin, token: getStoredAccountSessionToken(origin) };
 }
 
