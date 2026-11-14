@@ -78,7 +78,28 @@ python3 infra/buildbarn/runtime_smoke.py --bin-dir /path/to/bin --evidence /path
 Final-output materialization is explicitly forced with `--materializations all`,
 verified in pinned [`commands/build.rs`](https://github.com/meta/buck2/blob/e8edae33cd7cbc6d042c58bb55a2a900ac6ad489/app/buck2_client/src/commands/build.rs).
 This bypasses configuration-dependent defaults (including agent-specific skips).
-The negative check establishes fail-closed behavior after workers are removed;
-it does not yet classify the server status code from log text. Successful prior
-identical commands, live coordinators, a cold nonce, no outputs and a nonzero exit
-reduce ambiguity, but diagnosing a failure's exact RPC cause requires its logs.
+The negative check requires the actual scheduler error text
+`No workers exist for instance name prefix`, live coordinators, a cold nonce,
+no materialized outputs, and nonzero exit. A timeout is still a failure.
+Service logs and Buck build logs use distinct filenames; bounded final tails
+are printed to CI output on failure, with full logs retained in artifacts.
+
+## Buck2 / Buildbarn platform compatibility
+
+The first real runtime exposed a protocol mismatch, not a missing platform rule:
+[pinned Buck2 command generation](https://github.com/meta/buck2/blob/e8edae33cd7cbc6d042c58bb55a2a900ac6ad489/app/buck2_execute/src/execute/command_executor.rs)
+stores capabilities in deprecated `Command.platform`. Current Buildbarn's
+[ActionKeyExtractor](https://github.com/buildbarn/bb-remote-execution/blob/c9ba98cf52456c400278f45a9679635daa40dcd2/pkg/scheduler/platform/action_key_extractor.go)
+reads only `Action.platform`; its old Action/Command fallback was removed.
+
+Each generated Buck cell now uses an RE instance prefix matching its capability
+profile, for example `linux-x86_64-shell-v1`. Workers register that same prefix
+and their full OS/ISA/toolchain properties. Buildbarn's supported demultiplexing
+router maps empty Action.platform requests for that explicit prefix to those
+properties using a static extractor. Matching workers still share a queue.
+Different profiles retain different queues; no global platform constraints are
+removed. Unknown prefixes have no compatibility rewrite and no matching workers.
+This is routing for trusted clients, not authentication or tenant isolation.
+Future clients that populate Action.platform use the unchanged default extractor.
+
+Source schema: [PlatformKeyExtractorConfiguration and DemultiplexingActionRouterConfiguration](https://github.com/buildbarn/bb-remote-execution/blob/c9ba98cf52456c400278f45a9679635daa40dcd2/pkg/proto/configuration/scheduler/scheduler.proto).
