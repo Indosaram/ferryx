@@ -34,7 +34,11 @@ function answers(overrides: {
 
 describe("VoiceSection", () => {
   it("explains that voice is off and never claims a key it does not have", async () => {
-    answers({});
+    // The shared default fixture reports a Codex sign-in (sttSource: "codex"), which is the
+    // opposite of "voice is off": this case has to state the no-sign-in status itself.
+    answers({
+      status: { available: false, sttSource: null, speakAvailable: false, speakReason: "No speech provider is configured." },
+    });
     render(<VoiceSection />);
 
     await waitFor(() => expect(screen.getByLabelText("Speech provider API key")).toBeTruthy());
