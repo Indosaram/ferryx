@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { rebootTarget, preBootSession, classifyPreBootPanes, absentPattern, STANDBY_PREFIX, QA_HOST_BOOT_TIME_ENV, BOOT_OVERRIDE_RECEIPT } from './scenarios/q14.mjs';
+import { seededProjectBootstrap } from './scenarios/q14.mjs';
 import { RUNNERS, assertRunnersComplete } from './run.mjs';
 import { SCENARIO_IDS, applicable } from './lib/summary.mjs';
 import { probeHooks, missingHooksFor } from './lib/hooks.mjs';
@@ -93,3 +94,17 @@ test('classifyPreBootPanes counts panes still bound to a pre-boot id as Reconnec
   const gone = classifyPreBootPanes(saved({ 'q14-pane-0-r': 'b-zzz' }), { workspaceId: 'qa', panes, liveIds: [] });
   assert.deepEqual([gone.counts.other, gone.counts.missing], [1, 1]);
 });
+
+test('seededProjectBootstrap leaves only the reboot target so an earlier scenario project cannot win the restore', () => {
+  const target = rebootTarget(null, { workspaceId: 'qa-daemon-lifetime', repoDir: '/r' });
+  const out = seededProjectBootstrap(target);
+  assert.deepEqual(out.projects.map((p) => p.workspaceId), ['qa-daemon-lifetime']);
+  assert.equal(out.activeProjectId, 'qa-daemon-lifetime');
+  assert.equal(out.projects[0].repoRoot, '/r');
+  assert.deepEqual(out.projects[0].target, { kind: 'local' });
+  // The rollout Q11 leaves behind is a second, unrelated project: the reset must not carry it.
+  const afterQ11 = [{ workspaceId: 'ssh:9aee', repoRoot: '/s' }, ...out.projects];
+  assert.equal(afterQ11.length, 2);
+  assert.deepEqual(seededProjectBootstrap(target).projects.map((p) => p.workspaceId), ['qa-daemon-lifetime']);
+});
+

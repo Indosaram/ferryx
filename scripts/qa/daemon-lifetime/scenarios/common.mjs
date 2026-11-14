@@ -105,6 +105,25 @@ export async function dataConn(ctx, runtimeDir = ctx.layout.runtime, opts = {}) 
   };
 }
 
+/**
+ * A data connection that is open right now. ctx.state.conn outlives the generation that opened it:
+ * a scenario that retired its owner (or failed and was recovered by recoverOwnerAfterException)
+ * leaves a handle whose socket is already closed, and the next ctx.state.conn.call() rejects with
+ * "data closed" from the agent instead of the scenario naming what it needed (run 20261108t222622z
+ * Q14 recorded only that string). Reuses ctx.state.conn when its handshake handle is still live.
+ */
+export async function liveDataConn(ctx, opts = {}) {
+  const current = ctx.state.conn;
+  if (current) {
+    const alive = await current.describe().then(() => true, () => false);
+    if (alive) return current;
+    await current.close().catch(() => {});
+    ctx.state.conn = null;
+  }
+  ctx.state.conn = await dataConn(ctx, ctx.layout.runtime, opts);
+  return ctx.state.conn;
+}
+
 export async function controlConn(ctx, runtimeDir = ctx.layout.runtime) {
   const opened = await ctx.agent.call('controlOpen', { runtimeDir });
   if (opened.handle === null) return null;
@@ -253,6 +272,27 @@ export function requireOwner(ctx, result) {
 /** <FERRYX_DATA_DIR>/remote/machine-workspaces.v1.json (server.rs catalog_path, auth.rs canonical_remote_dir). */
 export function workspaceCatalogFile(ctx) {
   return hjoin(ctx.layout.data, 'remote', 'machine-workspaces.v1.json');
+}
+
+/**
+ * The GUI's persisted project list, stored by the webview in its localStorage database under
+ * <FERRYX_DATA_DIR>/webview/localstorage. App.tsx activates a workspace from this list before it
+ * consults the saved session, so a QA scenario that seeds a session must also own the list.
+ * WebKit stores localStorage values as UTF-16LE BLOBs in ItemTable; the keys are canonical
+ * (ui/src/lib/storageKeys.ts).
+ */
+export function webviewProjectKeys() {
+  return { projects: 'ferryx.projects', activeProject: 'ferryx.active-project' };
+}
+
+/**
+ * The QA window's webview profile: lib.rs qa_primary_window_profile puts it at
+ * <runDir>/webview (the barriers directory's parent), not under FERRYX_DATA_DIR.
+ * WebKitGTK keeps localStorage in <profile>/localstorage/<origin>.localstorage.
+ */
+export function webviewLocalStorageFile(ctx) {
+  const base = hjoin(ctx.layout.root, 'webview', 'localstorage');
+  return { dir: base, db: hjoin(base, 'tauri_localhost_0.localstorage') };
 }
 
 /**

@@ -469,14 +469,26 @@ export async function runBenchmark(opts, { log = (line) => console.error(line) }
   }
 }
 
-/** Companion client (headless stand-in for the GUI): attaches to every session named on stdin. */
+/**
+ * Companion client (headless stand-in for the GUI): attaches to every session named on stdin.
+ *
+ * Each attach needs its own data connection: the daemon answers Attach and then hands that socket
+ * to the session stream (server.rs DaemonRequest::Attach ends with `return` after
+ * serve_attach_stream), so a second Attach on the same connection can never be read. The control
+ * connection below stays attached to nothing; it exists to report the daemon's death.
+ */
 async function runCompanion(opts) {
-  const { conn } = await connectData(opts.runtimeDir, qaPlatform(opts.platform));
-  conn.closedPromise.then(() => process.exit(0));
+  const platform = qaPlatform(opts.platform);
+  const control = await connectData(opts.runtimeDir, platform);
+  control.conn.closedPromise.then(() => process.exit(0));
+  const streams = [];
   process.stdout.write('COMPANION_READY\n');
   for await (const line of readline.createInterface({ input: process.stdin })) {
     const m = /^attach (\S+)$/.exec(line.trim());
-    if (m) await conn.call(D.attach(m[1], 0));
+    if (!m) continue;
+    const { conn } = await connectData(opts.runtimeDir, platform);
+    streams.push(conn);
+    conn.call(D.attach(m[1], 0)).catch(() => {});
   }
   process.exit(0);
 }

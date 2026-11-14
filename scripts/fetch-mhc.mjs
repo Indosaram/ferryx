@@ -245,7 +245,8 @@ function singleTopDir(dir) {
 export function verifyMhcManifest(mhcDir, triple) {
   const manifest = JSON.parse(readFileSync(join(mhcDir, "manifest.json"), "utf8"));
   const binary = manifest.layout?.binary;
-  if (binary !== "mhc") throw new Error(`mhc manifest layout.binary is ${JSON.stringify(binary)}, expected "mhc"`);
+  const expectedBinary = exeName(triple, "mhc");
+  if (binary !== expectedBinary) throw new Error(`mhc manifest layout.binary is ${JSON.stringify(binary)}, expected ${JSON.stringify(expectedBinary)}`);
   for (const executable of manifest.executables ?? []) {
     const file = join(mhcDir, executable.path);
     const actual = sha256(readFileSync(file));

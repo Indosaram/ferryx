@@ -8,7 +8,7 @@ import { data as D, isLive, liveSessions } from '../lib/wire.mjs';
 import {
   evidence, dataConn, controlConn, ownerIdentity, nonceRoundTrip, assertSameOwner, retireOwner, freshOwner, nonce,
   echoCommand, interrupt, setAsideHeadCatalog, requireOwner, SHELL_READY_TIMEOUT_MS, DAEMON_READY_TIMEOUT_MS,
-  enterKey,
+  enterKey, liveDataConn,
 } from './common.mjs';
 import { startSshd, sshRestoreSession, recordSshHelper } from '../lib/sshd.mjs';
 import { typeVerified, renderEcho, renderConptyInput } from '../lib/typeverified.mjs';
@@ -39,7 +39,15 @@ const autostarts = (reg) => reg.runAtLoad ?? reg.enabled ?? reg.logonTrigger;
  * section buttons (no Plan entry: a fresh QA profile has no account token, SettingsDialog.tsx:95)
  * and the three General controls before the switch. Space toggles the focused Radix switch.
  */
-export const SUPERVISOR_SWITCH_TABS = 1 + 9 + 3;
+// Order inside General (ui/src/components/settings/GeneralSection.tsx): confirm-close-tab
+// (general-confirm-close-tab), show-sidebar-on-startup, the Session Restore Policy Select, then
+// advanced-features — four focusable controls — and only then the supervisor switch
+// (general-daemon-supervisor). The old count stopped at three, so Space flipped advanced-features
+// and the opt-out marker was never written (run 20261110t180429z Q10: settings receipt OK,
+// marker absent). Keep this in step with General's control list.
+export const SUPERVISOR_SWITCH_TABS = 1 + 9 + 4;
+/** Neighbouring controls probed after the expected position, so a shifted layout still lands. */
+export const SUPERVISOR_SWITCH_PROBES = 4;
 
 /** GUI log line of cmd_daemon_supervisor_get (ipc/agent_integration.rs), which General calls on mount. */
 export const SETTINGS_OPENED_RECEIPT = 'Daemon supervisor status read';
@@ -78,19 +86,53 @@ export async function openSettings(ctx, logFile) {
  */
 async function toggleAutostartOffThroughSettings(ctx, optout, logFile) {
   if (!ctx.mahord) throw new Error('the settings toggle needs MahoRD on remote hosts');
+  // A leftover pairing modal ("The verification time has expired") from an earlier scenario can
+  // own the focus stack: the settings receipt still lands because General mounts behind it, but the
+  // Tab/Space walk then drives the modal and no opt-out marker is written (run 20261110t162427z Q10:
+  // marker absent, screenshot showed the expired-QR dialog over a blank window). Dismiss overlays
+  // before opening; Escape on a bare window is a no-op.
+  for (let i = 0; i < 2; i += 1) {
+    await ctx.mahord.key('Escape');
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
   const opened = await openSettings(ctx, logFile);
   if (!opened.opened) {
     return { opened, marker: false, before: null, after: await ctx.mahord.screenshot().catch(() => null) };
   }
   // The receipt is logged when cmd_daemon_supervisor_get answers, which is what renders the switch,
   // so focus is walked only after the switch exists.
-  for (let i = 0; i < SUPERVISOR_SWITCH_TABS; i += 1) await ctx.mahord.key('Tab');
-  const before = await ctx.mahord.screenshot().catch(() => null);
-  await ctx.mahord.key('Space');
-  const marker = await ctx.agent.call('waitPath', { file: optout, deadlineMs: 30_000 });
-  const after = await ctx.mahord.screenshot().catch(() => null);
+  let before = null;
+  let after = null;
+  let marker = false;
+  let attempts = 0;
+  // Walk to the switch, then keep advancing one control at a time: General gains and loses
+  // focusable controls (a Select, the Advanced features switch) as the product evolves, so a
+  // single hardcoded count silently toggles the wrong switch when the layout shifts. The marker is
+  // the only success signal (the product writes it inside cmd_daemon_supervisor_set_autostart), so
+  // Space on a neighbour is harmless and the walk ends the moment it lands. Bounded by
+  // SUPERVISOR_SWITCH_PROBES.
+  for (let attempt = 1; attempt <= 2 && !marker; attempt += 1) {
+    attempts = attempt;
+    if (attempt === 1) {
+      for (let i = 0; i < SUPERVISOR_SWITCH_TABS; i += 1) await ctx.mahord.key('Tab');
+    }
+    for (let probe = 0; probe < SUPERVISOR_SWITCH_PROBES && !marker; probe += 1) {
+      before = await ctx.mahord.screenshot().catch(() => null);
+      await ctx.mahord.key('Space');
+      marker = await ctx.agent.call('waitPath', { file: optout, deadlineMs: 3_000 }) === true;
+      after = await ctx.mahord.screenshot().catch(() => null);
+      if (!marker) await ctx.mahord.key('Tab');
+    }
+    if (marker) break;
+    await ctx.mahord.key('Escape');
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (attempt === 1) {
+      const reopened = await openSettings(ctx, logFile);
+      if (!reopened.opened) break;
+    }
+  }
   await ctx.mahord.key('Escape');
-  return { opened, marker, before, after };
+  return { opened, marker, before, after, attempts };
 }
 
 /** remove_autostart runs right after the marker write in the same command: wait for its effect. */
@@ -333,7 +375,11 @@ export function appenderCommand(platform, file) {
  */
 export function q11Marker(platform) {
   const marker = nonce('UNCERTAIN').replace('_', '');
-  return platform === 'windows' ? marker.toLowerCase() : marker;
+  // Lowercase everywhere: MahoRD's synthetic keyboard on omarchy loses Shift chords (the marker
+  // stalled at its second character, "U", in runs 20261109t114157z / t122230z / t125041z — see
+  // notes/facts/omarchy-mahord-type-text-drops-keys-q11-2026-10-22.md). A lowercase marker is still
+  // a unique nonce, so the assertion proves exactly as much about GUI input delivery.
+  return marker.toLowerCase();
 }
 
 /** The appended lines with CRLF (Add-Content on Windows) read as LF. */
@@ -347,9 +393,11 @@ export async function Q11(ctx, result) {
   if (!ctx.mahord) return block(result, 'GUI_INPUT_UNAVAILABLE', 'Q11 types the marker through the GUI with MahoRD');
   ctx.sshd = ctx.sshd ?? await startSshd(ctx);
   if (ctx.sshd.unavailable) return block(result, 'SSHD_UNAVAILABLE', ctx.sshd.unavailable);
-  const conn = ctx.state.conn;
-  // An earlier scenario that failed before handing back a data connection leaves none.
-  if (!conn) return block(result, 'NO_DATA_CONNECTION', 'no data connection from the previous scenario');
+  // Q03b/Q14 retire their owner before this runs, so ctx.state.conn can be a handle whose socket is
+  // already closed: the agent then rejects with a bare "data closed" (run 20261109t090549z) instead
+  // of the scenario naming what it needed. liveDataConn reuses it only while its handshake is live.
+  const conn = await liveDataConn(ctx).catch(() => null);
+  if (!conn) return block(result, 'NO_DATA_CONNECTION', 'no live data connection from the previous scenario');
   const spawned = await conn.call(D.spawnSsh({ clientRequestId: `qa-q11-${nonce('R')}`, workspaceId: ctx.sshd.workspaceId, hostStorePath: ctx.sshd.hostStorePath }), 60_000);
   assertion(result, 'SSH session spawned against the private sshd', spawned.type === 'spawnOk', spawned);
   if (spawned.type !== 'spawnOk') return;
@@ -472,7 +520,11 @@ export async function Q11(ctx, result) {
   await evidence(ctx, result, 'ssh-input.log', raw ?? '');
   const count = log.stdout.split(marker).length - 1;
   assertion(result, 'remote log contains the marker exactly once (no replay of the uncertain write)', count === 1, count);
-  assertion(result, 'remote log holds only the committed marker line (the held Enter was not replayed)', log.stdout === `${marker}\n`, JSON.stringify(log.stdout));
+  // One committed line per Enter this runner actually sent: a resend after a slow write-applied
+  // receipt legitimately adds its own line once the hold releases (run 20261110t162427z Q11:
+  // enterSends=2 produced "marker\n\n"). A product replay of the held write would add MORE newlines
+  // than were sent, so the count is what proves the daemon did not replay it.
+  assertion(result, 'remote log holds exactly one committed line per sent Enter (the held Enter was not replayed)', log.stdout === `${marker}${'\n'.repeat(enterSends)}`, { text: JSON.stringify(log.stdout), enterSends });
   await conn2.call(D.close(sid));
   await ctx.state.conn.close().catch(() => {});
   ctx.state.conn = conn2;

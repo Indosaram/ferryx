@@ -9,25 +9,46 @@
 export const HOSTS = Object.freeze({
   mac: Object.freeze({
     platform: 'mac',
-    name: 'this-mac',
+    name: 'maho-mac',
+    // kind 'local': the lane runs on maho-mac itself; an ssh hop back to this same host times out
+    // ('ssh: connect to host 100.65.239.35 port 22: Operation timed out', run 20261109t125235z),
+    // exactly as it did on omarchy before that lane went local.
     transport: { kind: 'local' },
-    canonical: '/Volumes/T9-Mac/project/ferryx',
-    worktreeRoot: '/Volumes/T9-Mac/project/ferryx-wt',
+    address: '100.65.239.35',
+    user: 'i552267',
+    canonical: '/Users/i552267/code/ferryx',
+    worktreeRoot: '/Users/i552267/code/ferryx-wt',
     cargoTarget: '/tmp/ferryx-daemon-lifetime-qa-target',
-    evidenceRoot: '/Volumes/T9-Mac/project/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
+    evidenceRoot: '/Users/i552267/code/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
-    node: 'node',
+    node: '/opt/homebrew/bin/node',
+    buildEnv: { ZIG: '/Users/i552267/tools/zig-aarch64-macos-0.17.0/zig' },
     gui: { kind: 'mac-local' },
     exeSuffix: '',
   }),
   linux: Object.freeze({
     platform: 'linux',
     name: 'omarchy',
-    transport: { kind: 'ssh', target: 'omarchy', address: '100.91.254.71', user: 'indo' },
+    // kind 'local': the lane runs on omarchy itself; an ssh hop back to this same host timed out
+    // ('ssh: connect to host omarchy port 22: Connection timed out', run 20261109t085910z).
+    transport: { kind: 'local' },
+    address: '100.91.254.71',
+    user: 'indo',
     canonical: '/home/indo/code/ferryx',
     worktreeRoot: '/home/indo/code/ferryx-wt',
     cargoTarget: '/home/indo/code/ferryx-wt/.target-w5qa-20261019',
-    guiEnv: { WAYLAND_DISPLAY: 'wayland-1', DISPLAY: ':0', XDG_RUNTIME_DIR: '/run/user/1000' },
+    // Drive the GUI through Xwayland, not the native Wayland socket. On this host Hyprland's
+    // wp_linux_drm_syncobj_v1 path kills every new toplevel with
+    //   wl_display.error(wp_linux_drm_syncobj_surface_v1, 4, "Missing acquire timeline")
+    // which GDK reports as "Error 71 (Protocol error) dispatching to Wayland display" (measured
+    // 2026-11-10 on runs 133936z/141803z/142912z and on a direct binary launch; the same binary
+    // stayed up for the full 12 s timeout under DISPLAY=:0 + GDK_BACKEND=x11). Pin X11 so the
+    // harness does not depend on that compositor path.
+    guiEnv: {
+      DISPLAY: ':0',
+      XDG_RUNTIME_DIR: '/run/user/1000',
+      GDK_BACKEND: 'x11',
+    },
     evidenceRoot: '/home/indo/code/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
     // Bulk run storage (artifacts, data with the staged daemon-runtime copies, logs) goes on the home
@@ -36,27 +57,52 @@ export const HOSTS = Object.freeze({
     // handover-<uuid>.sock keeps a path well inside the 108-byte sun_path limit.
     storageRoot: '/home/indo/code/ferryx-wt/.qaruns',
     node: 'node',
+    // CARGO_BUILD_JOBS=1: omarchy has 31 GiB RAM and six QA builds share one target dir, each
+    // rustc mapping the multi-hundred-MB libferryx_lib.rlib. Parallel rustc pushed the box into
+    // 64 GiB of swap and earlyoom killed a sibling, which deadlocked the bump build on the cargo
+    // jobserver (run 20261108t222710z: rustc sat in futex_do_wait with 34s CPU after 38min while
+    // build-bump.log froze at 08:14). One job keeps peak RSS under the limit.
+    // CARGO_BUILD_BUILD_DIR is deliberately not set: omarchy's ~/.cargo/config.toml pins
+    // build.build-dir to /mnt/build/ws{workspace-root}, and this worktree's entry there is a
+    // symlink to /home (set 2026-11-09 after that SSD hit 100% and failed the bump build with
+    // "LLVM ERROR: IO failure on output stream: Disk quota exceeded", runs 20261109t015929z and
+    // 20261109t064625z). Redirecting the variable itself would invalidate every cached absolute
+    // path in the build dir and force a full rebuild.
+    buildEnv: { CARGO_BUILD_JOBS: '1' },
+    // The handover_v1 tree predates the ghostty Zig upgrade and pins Zig 0.16.0,
+    // while master requires 0.17.0. They cannot share one ZIG value.
+    v1BuildEnv: { ZIG: '/home/indo/.local/zig-0.16.0/zig' },
     gui: { kind: 'mahord', host: '100.91.254.71', pairingId: 'AF12D209-AB76-401E-BDB2-0D80E01FC2C8' },
     exeSuffix: '',
   }),
   windows: Object.freeze({
     platform: 'windows',
     name: 'maho-win',
-    transport: { kind: 'ssh', target: 'maho-win', address: '100.68.224.49', user: 'sook', shell: 'cmd' }, // sshd DefaultShell is cmd.exe (measured 2026-10-19)
+    // kind 'local': the lane runs inside the maho-win session itself; an ssh hop back to this same
+    // host looped through sshd and died with 'connect to host maho-win port 22: Connection timed out'.
+    transport: { kind: 'local' },
     canonical: 'C:\\Users\\sook\\ferryx',
     worktreeRoot: 'C:\\Users\\sook\\ferryx-wt',
-    cargoTarget: 'C:\\Users\\sook\\ferryx-wt\\.target-w5qa-20261019',
+    cargoTarget: 'C:\\Users\\sook\\ferryx-wt\\.target-dlq1107-20261108',
     // CARGO_INCREMENTAL=0: six QA builds share one target dir, and incremental caches filled
     // maho-win's C: (r4 v1bump failed with os error 112 after A, B, C and bump had passed).
-    buildEnv: { ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.17.0\\zig.exe', CARGO_INCREMENTAL: '0' },
+    // CARGO_BUILD_JOBS=2: six parallel rustc processes each map the multi-hundred-MB
+    // libferryx_lib.rlib, and the combined commit charge exhausts the Windows pagefile
+    // (E0786 / "os error 1455", paging file too small). Two jobs keep it under the limit.
+    buildEnv: {
+      ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.17.0\\zig.exe',
+      CARGO_INCREMENTAL: '0',
+      CARGO_BUILD_JOBS: '1',
+    },
     evidenceRoot: 'C:\\Users\\sook\\ferryx-wt\\.evidence\\daemon-independent-lifetime-20261017',
     // No '-' or '_' in the 8.3 form: the GUI launch types a short path through MahoRD, which drops
     // both on maho-win. Measured: C:\Users\sook\ferryx-wt\qaruns\<runId>\l1.cmd ->
     // C:\Users\sook\FERRYX~1\qaruns\202610~1\l1.cmd. The old .qa-daemon-lifetime was QA-DAE~1.
     runRoot: 'C:\\Users\\sook\\ferryx-wt\\qaruns',
     node: 'node',
-    // The 4F8ADF2E pairing is stale; 9929DC13 is the one that completes a handshake (2026-10-15).
-    gui: { kind: 'mahord', host: '100.68.224.49', pairingId: '9929DC13-3841-4182-A399-9E1323F961A2', physical: { width: 3840, height: 1600 } },
+    // The 4F8ADF2E/9929DC13 pairings are stale; A73C40A7 is the record present in the host's
+    // client-pairings.json after the 2026-11-08 re-registration.
+    gui: { kind: 'mahord', host: '100.68.224.49', pairingId: 'A73C40A7-38A9-4B48-B17B-C1FCE4B61133', physical: { width: 3840, height: 1600 } },
     exeSuffix: '.exe',
   }),
 });
@@ -87,21 +133,24 @@ export function worktreePaths(host, slug) {
 export function buildPlan({ host, runDir, worktree, v1Worktree, baselineWorktree }) {
   const targetEnv = { ...(host.buildEnv ?? {}), CARGO_TARGET_DIR: host.cargoTarget };
   const config = host.platform === 'windows' ? `${runDir}\\tauri.qa.json` : `${runDir}/tauri.qa.json`;
-  const tauri = (features, salt, cwd) => ({
+  const tauri = (features, salt, cwd, envOverride) => ({
     cwd,
     command: 'cargo',
     // Linux and Windows run target/debug/ferryx directly; only macOS uses the .app bundle.
     args: ['tauri', 'build', '--debug', ...(host.platform === 'mac' ? [] : ['--no-bundle']), '--features', features, '--config', config],
-    env: { ...targetEnv, FERRYX_QA_BUILD_SALT: salt },
+    env: { ...targetEnv, ...(envOverride ?? {}), FERRYX_QA_BUILD_SALT: salt },
   });
   return {
     A: tauri('local-split-qa', 'A', worktree),
     B: tauri('local-split-qa', 'B', worktree),
     C: tauri('local-split-qa', 'C', worktree),
     bump: tauri('local-split-qa,qa-protocol-bump', 'BUMP', worktree),
-    v1bump: v1Worktree ? tauri('local-split-qa,qa-protocol-bump', 'V1', v1Worktree) : null,
+    v1bump: v1Worktree ? tauri('local-split-qa,qa-protocol-bump', 'V1', v1Worktree, host.v1BuildEnv) : null,
+    // The pre-plan baseline is the same revision generation as v1bump, so it pins the older
+    // toolchain too: without host.v1BuildEnv the ghostty build script rejects the current Zig
+    // ('Incompatible Zig version 0.17.0: libghostty-vt requires Zig 0.16.0', run 175303z).
     baseline: baselineWorktree
-      ? { cwd: baselineWorktree, command: 'cargo', args: ['build', '--manifest-path', 'src-tauri/Cargo.toml'], env: { ...(host.buildEnv ?? {}), CARGO_TARGET_DIR: `${host.cargoTarget}-baseline` } }
+      ? { cwd: baselineWorktree, command: 'cargo', args: ['build', '--manifest-path', 'src-tauri/Cargo.toml'], env: { ...(host.buildEnv ?? {}), ...(host.v1BuildEnv ?? {}), CARGO_TARGET_DIR: `${host.cargoTarget}-baseline` } }
       : null,
   };
 }

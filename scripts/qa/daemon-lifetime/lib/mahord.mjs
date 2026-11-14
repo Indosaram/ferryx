@@ -3,7 +3,9 @@
 // used by scripts/qa/fixtures/native-configured-adapters.mjs.
 
 import { spawn } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { hjoin } from './hostpath.mjs';
 import { withDeadline } from './proc.mjs';
 
 export const TOOLS = Object.freeze({ click: 'remote_mouse_click', type: 'remote_type_text', key: 'remote_key_press', hotkey: 'remote_hotkey', screenshot: 'remote_take_screenshot' });
@@ -18,7 +20,80 @@ export function mahordArgs({ host, pairingId }) {
  * reports "Dispatched successfully" (only3 Q13: host-run.log 07:39:53 heartbeat timeout, then
  * g15/g16 Win+R reached nothing and both failure screenshots were the same stale frame).
  */
-export async function connectMahord(gui, { binary = 'maho-client', log = () => {}, open = openMahord } = {}) {
+// MahoRD was renamed: its host is ferryx-rd-host and its client is ferryx-rd-client. The harness
+// kept shelling out to the retired 'maho-client' name, which no longer exists on maho-mac at all
+// (NO_MAHO_CLIENT) and is off PATH on omarchy (ENOENT), so Q11 could never type into a Mac GUI.
+// ferryx-rd-client already exposes the same MCP surface (--mcp, --host, --pairing-id, and the
+// remote_* tool names), so prefer it and keep maho-client only as a pre-rename fallback.
+const RENAMED_CLIENT = 'ferryx-rd-client';
+const LEGACY_CLIENT = 'maho-client';
+
+function hasBinary(binary, env = process.env) {
+  // PATH scan rather than Bun.which: the harness must behave the same when a caller imports this
+  // module from plain node for its unit tests.
+  const exts = process.platform === 'win32' ? String(env.PATHEXT ?? '.EXE;.CMD').split(';') : [''];
+  for (const dir of String(env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':')) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      try {
+        if (statSync(hjoin(dir, binary + ext)).isFile()) return true;
+      } catch {
+        // not here
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Where a user-installed RD client usually lands but a service manager's PATH does not carry:
+ * systemd --user and an ssh command both start with a minimal PATH, so a binary at
+ * ~/.local/bin is invisible to a plain PATH scan (omarchy 2026-11-10: ENOENT for both names
+ * while /home/indo/.local/bin/maho-client existed and was executable).
+ */
+function installDirs(env = process.env) {
+  const home = env.HOME ?? '';
+  return [
+    home && hjoin(home, '.local/bin'),
+    '/usr/local/bin',
+    '/opt/homebrew/bin',
+    home && hjoin(home, 'bin'),
+  ].filter(Boolean);
+}
+
+/** Absolute path of an RD client that exists on this host, or null. */
+export function findMahordBinary(env = process.env) {
+  for (const name of [RENAMED_CLIENT, LEGACY_CLIENT]) {
+    if (hasBinary(name, env)) return name;
+    for (const dir of installDirs(env)) {
+      try {
+        if (statSync(hjoin(dir, name)).isFile()) return hjoin(dir, name);
+      } catch {
+        // not here
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The RD client to drive a remote GUI, preferring the shipped name over the retired one.
+ * Returns null when the host has neither, so the caller reports an actionable blocker instead
+ * of spawning a name that cannot resolve.
+ */
+export function resolveMahordBinary(explicit, env = process.env) {
+  if (explicit) return explicit;
+  if (env.FERRYX_RD_CLIENT) return env.FERRYX_RD_CLIENT;
+  return findMahordBinary(env);
+}
+
+export async function connectMahord(gui, { binary = resolveMahordBinary(), log = () => {}, open = openMahord } = {}) {
+  if (!binary) {
+    throw new Error(
+      'no RD client on PATH: install ferryx-rd-client (or the pre-rename maho-client) and retry; '
+        + 'set FERRYX_RD_CLIENT to an absolute path to override',
+    );
+  }
   let current = await open(gui, { binary, log });
   let reconnects = 0;
   const via = (name) => (...args) => current[name](...args);
