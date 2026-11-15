@@ -93,11 +93,16 @@ pub(crate) fn resolve_agent_resume_cwd(
     }
     roots.sort();
     roots.dedup();
-    // A caller-supplied path is only read for `omo`, and only after it is proven to lie inside
-    // these roots. Every other agent names its session by id alone on this path; a path arriving
-    // for one of them did not come from a spawn this daemon built, so it is refused rather than
-    // read. (`verify_machine_resume_cwd` never reaches this: it refuses a path before calling.)
-    if provider_session.transcript_path.is_some() && agent != "omo" {
+    // A caller-supplied path is read only for an `OmoCompatible` pair (omo, or maho hosted by the
+    // mhc launcher that writes omo's layout), and only after `open_beneath` proves it lies inside
+    // these roots. Keying this on the agent name refused every reloaded mhc pane, whose report
+    // carries `maho` plus the transcript path mhc opened. Any other pair names its session by id
+    // alone; a path arriving for one did not come from a spawn this daemon built, so it is refused.
+    // (`verify_machine_resume_cwd` never reaches this: it refuses a path before calling.)
+    if provider_session.transcript_path.is_some()
+        && crate::daemon::protocol::store_semantics(&agent, provider_session.launcher)
+            != crate::daemon::protocol::StoreSemantics::OmoCompatible
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Agent transcript path is not accepted for this agent",
@@ -742,7 +747,26 @@ mod tests {
     }
 
     #[test]
-    fn a_transcript_path_is_refused_for_every_agent_but_omo() {
+    fn a_reloaded_mhc_pane_resumes_from_the_transcript_path_it_reported() {
+        // The state a reloaded mhc pane persists: agent `maho`, launcher `mhc`, and the path of the
+        // record mhc opened under omo's store. Refusing it left the pane unrestartable.
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/ferryx");
+        let store = home.path().join(".omo/agent/sessions");
+        fs::create_dir_all(&store).unwrap();
+        let path = transcript(&store, SESSION_ID, &cwd);
+
+        let _env = ResumeEnv::new(home.path());
+        let mut reported = maho_session(SESSION_ID);
+        reported.transcript_path = Some(path.to_string_lossy().into_owned());
+        assert_eq!(
+            resolve_agent_resume_cwd(Some(&startup("maho", reported))).unwrap(),
+            Some(cwd)
+        );
+    }
+
+    #[test]
+    fn a_transcript_path_is_refused_for_a_pair_that_is_not_omo_compatible() {
         let home = tempfile::tempdir().unwrap();
         let cwd = home.path().join("project/ferryx");
         let store = home.path().join(".maho/agent/sessions");
@@ -750,11 +774,28 @@ mod tests {
         let path = transcript(&store, SESSION_ID, &cwd);
 
         let _env = ResumeEnv::new(home.path());
-        let mut inside_its_own_store = maho_session(SESSION_ID);
-        inside_its_own_store.transcript_path = Some(path.to_string_lossy().into_owned());
+        let mut unlaunched = maho_session(SESSION_ID);
+        unlaunched.launcher = None;
+        unlaunched.transcript_path = Some(path.to_string_lossy().into_owned());
         assert!(
-            resolve_agent_resume_cwd(Some(&startup("maho", inside_its_own_store))).is_err(),
-            "only a local omo pane supplies a path on this channel"
+            resolve_agent_resume_cwd(Some(&startup("maho", unlaunched))).is_err(),
+            "a maho pane not hosted by mhc never supplies a path on this channel"
+        );
+    }
+
+    #[test]
+    fn a_reported_mhc_transcript_outside_every_store_root_is_never_read() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("project/ferryx");
+        let path = transcript(elsewhere.path(), SESSION_ID, &cwd);
+
+        let _env = ResumeEnv::new(home.path());
+        let mut escape = maho_session(SESSION_ID);
+        escape.transcript_path = Some(path.to_string_lossy().into_owned());
+        assert!(
+            resolve_agent_resume_cwd(Some(&startup("maho", escape))).is_err(),
+            "admitting maho's path must not admit a record outside the store roots"
         );
     }
 

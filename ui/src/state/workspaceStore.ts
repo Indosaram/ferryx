@@ -1994,7 +1994,11 @@ export function useWorkspaceStore({
 
       const localSessionId = createId("session");
       const newLeafId = createId("leaf");
+      // The reliable local split creates a plain shell only: its prepare and create stages refuse a
+      // `startup` (src-tauri ipc/terminal.rs), so an agent continuation takes the spawn path below,
+      // which resolves the startup itself. Routing it here failed every "Continue in new pane".
       const reliableLocal =
+        !options.startup &&
         !isRemoteWorkspaceId(sourceSession.workspaceId || workspaceId) &&
         !isPairedWorkspaceId(sourceSession.workspaceId || workspaceId);
       const session: LocalSplitSession = {

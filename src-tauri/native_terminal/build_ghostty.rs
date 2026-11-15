@@ -3,7 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const EXPECTED_GHOSTTY_SHA: &str = "83fb95624b0439ee660c2679b43b38c8b63769cd";
+/// Ghostty v1.4.0 plus two upstream PageList memory-safety fixes (1b8b3f55b, dcdb1674c) on the
+/// `ferryx/v1.4.0-pin-fixes` branch of Indosaram/ghostty. The snapshot wire revision stays
+/// `GHOSTTY_CLEAN_REVISION`: neither fix changes the snapshot format.
+pub const EXPECTED_GHOSTTY_SHA: &str = "0d3ac625e0b41098b2a907a2863f37d9bd68b3a5";
 pub const REQUIRED_ZIG_VERSION: &str = "0.17.0";
 
 /// Version of the shared libghostty-vt artifact cache layout and of the `zig build`
