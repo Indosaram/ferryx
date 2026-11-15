@@ -14,8 +14,16 @@ function replaceRequired(source, pattern, replacement, label) {
  * `team` is APPLE_DEVELOPMENT_TEAM (undefined leaves signing to Xcode/owner).
  */
 export function patchProjectYml(source, team) {
+  // Idempotent: strip the lines this patch owns so re-running it (with a different team, or after a
+  // project was generated earlier) rewrites them instead of appending duplicates. DEVELOPMENT_TEAM is
+  // only stripped when a team is being written, so an init without one cannot drop a template value.
+  let owned = source
+    .replace(/^ *TARGETED_DEVICE_FAMILY: "1"\n/gm, "")
+    .replace(/^ *ITSAppUsesNonExemptEncryption: false\n/gm, "")
+    .replace(/^ *NSMicrophoneUsageDescription: .*\n/gm, "");
+  if (team) owned = owned.replace(/^ *DEVELOPMENT_TEAM: [A-Z0-9]+\n/gm, "");
   let s = replaceRequired(
-    source,
+    owned,
     /(\n    settings:\n      base:\n)/,
     `$1        TARGETED_DEVICE_FAMILY: "1"\n${team ? `        DEVELOPMENT_TEAM: ${team}\n` : ""}`,
     "app target settings.base",

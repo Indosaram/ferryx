@@ -20,8 +20,11 @@ function patch(file, transform) {
   writeFileSync(target, transform(readFileSync(target, "utf8")));
 }
 const yml = readFileSync(path.join(apple, "project.yml"), "utf8");
-// Idempotent: re-running the script on an already patched project leaves it alone.
-if (!yml.includes("PrivacyInfo.xcprivacy")) patch("project.yml", s => patchProjectYml(s, team));
+// Re-patch when the spec does not yet reflect the requested team: a project generated earlier
+// still carries the old signing settings, and skipping here left it without a DEVELOPMENT_TEAM
+// forever (xcodebuild then refuses with "requires a development team").
+const needsYmlPatch = !yml.includes("PrivacyInfo.xcprivacy") || (team !== undefined && !yml.includes(`DEVELOPMENT_TEAM: ${team}`));
+if (needsYmlPatch) patch("project.yml", s => patchProjectYml(s, team));
 patch("LaunchScreen.storyboard", patchLaunchScreen);
 // The entitlements file is part of the generated target, so push APNs capability must be
 // re-applied here or a regenerated project would ship without it.

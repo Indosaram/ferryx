@@ -73,6 +73,27 @@ describe("ios patches", () => {
     expect(patchProjectYml(yml, undefined)).toContain("      - path: PrivacyInfo.xcprivacy\n        buildPhase: resources\n");
   });
 
+  // A project generated before the team was known still carries the old signing settings, so
+  // re-running init must add the team rather than skip. Measured: xcodebuild refused the build with
+  // "Signing for ferryx-mobile_iOS requires a development team".
+  test("patching a second time adds a team the first run did not have, without duplicating lines", () => {
+    const first = patchProjectYml(yml, undefined);
+    const second = patchProjectYml(first, "ABCDE12345");
+    expect(second).toContain("        DEVELOPMENT_TEAM: ABCDE12345\n");
+    expect(second.match(/TARGETED_DEVICE_FAMILY/g)).toHaveLength(1);
+    expect(second.match(/ITSAppUsesNonExemptEncryption/g)).toHaveLength(1);
+    expect(second.match(/NSMicrophoneUsageDescription/g)).toHaveLength(1);
+    expect(second.match(/PrivacyInfo\.xcprivacy/g)).toHaveLength(1);
+  });
+
+  test("changing the team rewrites it instead of stacking a second value", () => {
+    const a = patchProjectYml(yml, "AAAAAAAAAA");
+    const b = patchProjectYml(a, "BBBBBBBBBB");
+    expect(b).toContain("        DEVELOPMENT_TEAM: BBBBBBBBBB\n");
+    expect(b).not.toContain("AAAAAAAAAA");
+    expect(b.match(/DEVELOPMENT_TEAM/g)).toHaveLength(1);
+  });
+
   test("Info.plist gains ITSAppUsesNonExemptEncryption=false, or flips an existing true", () => {
     const plist = `<?xml version="1.0"?>\n<plist version="1.0">\n<dict>\n\t<key>CFBundleName</key>\n\t<string>Ferryx</string>\n</dict>\n</plist>\n`;
     expect(patchInfoPlist(plist)).toMatch(/<key>ITSAppUsesNonExemptEncryption<\/key>\n\t<false\/>\n<\/dict>/);
