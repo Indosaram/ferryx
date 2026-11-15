@@ -83,6 +83,9 @@ describe("ios patches", () => {
     expect(second.match(/TARGETED_DEVICE_FAMILY/g)).toHaveLength(1);
     expect(second.match(/ITSAppUsesNonExemptEncryption/g)).toHaveLength(1);
     expect(second.match(/NSMicrophoneUsageDescription/g)).toHaveLength(1);
+    // The fixture is a raw handlebars template and keeps its own `{{apple.development-team}}`
+    // line, so count concrete team ids rather than every DEVELOPMENT_TEAM mention.
+    expect(second.match(/DEVELOPMENT_TEAM: [A-Z0-9]{10}\b/g)).toHaveLength(1);
     expect(second.match(/PrivacyInfo\.xcprivacy/g)).toHaveLength(1);
   });
 
@@ -91,7 +94,9 @@ describe("ios patches", () => {
     const b = patchProjectYml(a, "BBBBBBBBBB");
     expect(b).toContain("        DEVELOPMENT_TEAM: BBBBBBBBBB\n");
     expect(b).not.toContain("AAAAAAAAAA");
-    expect(b.match(/DEVELOPMENT_TEAM/g)).toHaveLength(1);
+    // The fixture is a raw handlebars template, so its own unresolved
+    // `{{apple.development-team}}` line is still there; count only concrete team ids.
+    expect(b.match(/DEVELOPMENT_TEAM: [A-Z0-9]{10}\b/g)).toHaveLength(1);
   });
 
   test("Info.plist gains ITSAppUsesNonExemptEncryption=false, or flips an existing true", () => {
