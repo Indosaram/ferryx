@@ -57,6 +57,7 @@ import type {
   BrowserState,
   BrowserTab,
   LayoutState,
+  TabPaneLayout,
   PaneContent,
   ReconnectLifecycle,
   RegisteredProject,
@@ -5020,6 +5021,27 @@ function getAllTabs(state: WorkspaceState): WorkspaceTab[] {
   return [...state.layout.tabs, ...Object.values(state.worktreeLayouts ?? {}).flatMap((l) => l.tabs)];
 }
 
+/**
+ * Looks a tab up across the active layout and every worktree layout. Close-guard callers must
+ * use this rather than `state.layout.tabs`, which only holds the groups of the active worktree.
+ */
+export function getTabById(state: WorkspaceState, tabId: string): WorkspaceTab | undefined {
+  return getAllTabs(state).find((tab) => tab.id === tabId);
+}
+
+/**
+ * The pane layout that owns `tabId`, whichever worktree group it belongs to.
+ */
+export function getTabLayoutById(state: WorkspaceState, tabId: string): TabPaneLayout | undefined {
+  const active = state.layout.layoutsByTabId?.[tabId];
+  if (active) return active;
+  for (const layout of Object.values(state.worktreeLayouts ?? {})) {
+    const tabLayout = layout.layoutsByTabId?.[tabId];
+    if (tabLayout) return tabLayout;
+  }
+  return undefined;
+}
+
 function getTabSessionIdsForLayout(layout: LayoutState, tabId: string): Set<string> {
   const tab = layout.tabs.find((candidate) => candidate.id === tabId);
   if (!tab || !isTerminalTab(tab)) return new Set<string>();
@@ -5105,6 +5127,104 @@ function getDisposableSessionsForTab(state: WorkspaceState, tabId: string): Term
     result.push(session);
   }
   return result;
+}
+
+/**
+ * A backend session is "live" when a close would destroy something the user can still
+ * return to: a real daemon PTY (not a standby placeholder) that has not already exited.
+ */
+function isLiveBackendSession(session: TerminalSession): boolean {
+  if (!session.backendSessionId) return false;
+  if (isStandbyBackendSessionId(session.backendSessionId)) return false;
+  if (session.lifecycle === "exited" || session.lifecycle === "failed") return false;
+  return true;
+}
+
+/**
+ * Sessions that closing `tabId` would tear down and that are still live. This is the set the
+ * close guard prompts for; it is deliberately narrower than every session the tab owns, so a
+ * tab whose PTYs already exited closes without a prompt.
+ */
+export function getLiveSessionsForTab(state: WorkspaceState, tabId: string): TerminalSession[] {
+  const tab = getAllTabs(state).find((candidate) => candidate.id === tabId);
+  if (!tab || !isTerminalTab(tab)) return [];
+  return getDisposableSessionsForTab(state, tabId).filter(isLiveBackendSession);
+}
+
+/** Every session the given tabs own that closing all of them would dispose of. */
+export function getSessionsForTabs(state: WorkspaceState, tabIds: readonly string[]): TerminalSession[] {
+  const closing = new Set(tabIds);
+  const closingSessions = new Set<string>();
+  for (const tabId of closing) {
+    for (const sessionId of getTabSessionIds(state, tabId)) closingSessions.add(sessionId);
+  }
+  const survivors = new Set<string>();
+  for (const tab of getAllTabs(state)) {
+    if (closing.has(tab.id)) continue;
+    for (const sessionId of getTabSessionIds(state, tab.id)) survivors.add(sessionId);
+  }
+  const result: TerminalSession[] = [];
+  for (const sessionId of closingSessions) {
+    if (survivors.has(sessionId)) continue;
+    const session = state.sessions[sessionId];
+    if (session) result.push(session);
+  }
+  return result;
+}
+
+/**
+ * Sessions that closing one leaf of a split `tabId` would tear down and that are still live.
+ * A single-leaf tab delegates to the whole-tab rule because closing that leaf closes the tab.
+ */
+export function getLiveSessionsForPane(state: WorkspaceState, tabId: string, leafId: string): TerminalSession[] {
+  const tabLayout = getTabLayoutById(state, tabId);
+  if (!tabLayout) return [];
+  if (tabLayout.root.type === "leaf") return getLiveSessionsForTab(state, tabId);
+  const sessionId = tabLayout.sessionIdsByLeafId?.[leafId];
+  if (!sessionId) return [];
+  const sharingLeaves = Object.values(tabLayout.sessionIdsByLeafId ?? {}).filter((id) => id === sessionId);
+  if (sharingLeaves.length > 1) return [];
+  if (isSessionReferencedOutsideTab(state, sessionId, tabId)) return [];
+  const session = state.sessions[sessionId];
+  if (!session || !isLiveBackendSession(session)) return [];
+  return [session];
+}
+
+export type CloseBatchMode = "others" | "left" | "right";
+
+/**
+ * Sessions that closing every tab in `tabIds` together would tear down, and that are still live.
+ *
+ * Per-tab `getLiveSessionsForTab` is the wrong input for a batch: a session shared by two tabs
+ * inside the batch is "referenced outside" each single tab, so it would be skipped even though
+ * the batch destroys it. Reference outside the whole batch is what matters here.
+ */
+export function getLiveSessionsForTabs(state: WorkspaceState, tabIds: readonly string[]): TerminalSession[] {
+  const result: TerminalSession[] = [];
+  const seenBackends = new Set<string>();
+  for (const session of getSessionsForTabs(state, tabIds)) {
+    if (!isLiveBackendSession(session)) continue;
+    const key = session.backendSessionId ?? session.id;
+    if (seenBackends.has(key)) continue;
+    seenBackends.add(key);
+    result.push(session);
+  }
+  return result;
+}
+
+/**
+ * Tab ids `closeOtherTabs`/`closeTabsToLeft`/`closeTabsToRight` would close for `tabId`,
+ * in the same order the store closes them. Shared so the close guard assesses exactly the
+ * batch the store is about to execute.
+ */
+export function getCloseBatchTabIds(state: WorkspaceState, tabId: string, mode: CloseBatchMode): string[] {
+  const group = getGroupForTab(state.layout, tabId);
+  const tabs = group ? getTabsForGroup(state.layout, group.id) : [];
+  if (mode === "others") return tabs.filter((tab) => tab.id !== tabId && !tab.pinned).map((tab) => tab.id);
+  const index = tabs.findIndex((tab) => tab.id === tabId);
+  if (index < 0) return [];
+  const slice = mode === "right" ? tabs.slice(index + 1) : tabs.slice(0, index);
+  return slice.filter((tab) => !tab.pinned).map((tab) => tab.id);
 }
 
 function sessionWorktreePath(session: TerminalSession | undefined): string {

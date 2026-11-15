@@ -1,15 +1,34 @@
 import { useEffect } from "react";
 
+type ConfirmCloseKind = "pane" | "tab" | "batch";
+
 type ConfirmCloseTabDialogProps = {
   tabLabel: string;
-  kind?: "pane" | "tab";
+  kind?: ConfirmCloseKind;
+  /** Tabs the close would remove; only meaningful for a batch close. */
+  tabCount?: number;
   activeAgentCount?: number;
+  /** Live backend sessions (shells or agents) the close would destroy. */
+  liveSessionCount?: number;
   onCancel: () => void;
   onConfirm: () => void;
 };
 
-export function ConfirmCloseTabDialog({ tabLabel, kind = "tab", activeAgentCount = 0, onCancel, onConfirm }: ConfirmCloseTabDialogProps) {
-  const title = kind === "pane" ? "Close pane" : "Close tab";
+function titleFor(kind: ConfirmCloseKind): string {
+  if (kind === "pane") return "Close pane";
+  return kind === "batch" ? "Close tabs" : "Close tab";
+}
+
+export function ConfirmCloseTabDialog({
+  tabLabel,
+  kind = "tab",
+  tabCount = 0,
+  activeAgentCount = 0,
+  liveSessionCount = 0,
+  onCancel,
+  onConfirm,
+}: ConfirmCloseTabDialogProps) {
+  const title = titleFor(kind);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -19,6 +38,10 @@ export function ConfirmCloseTabDialog({ tabLabel, kind = "tab", activeAgentCount
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [onCancel]);
+
+  const subject = kind === "batch"
+    ? `${tabCount === 1 ? "1 tab" : `${tabCount} tabs`} next to “${tabLabel}”`
+    : `${kind === "pane" ? "pane in " : ""}“${tabLabel}”`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={onCancel}>
@@ -31,7 +54,12 @@ export function ConfirmCloseTabDialog({ tabLabel, kind = "tab", activeAgentCount
       >
         <header className="border-b border-border px-4 py-3 text-sm font-semibold text-foreground">{title}</header>
         <div className="selectable space-y-4 p-4 text-xs">
-          <p className="text-muted-foreground">Close {kind === "pane" ? "pane in " : ""}“{tabLabel}”? Its terminal or browser session will be released.</p>
+          <p className="text-muted-foreground">Close {subject}? Its terminal or browser session will be released.</p>
+          {liveSessionCount > 0 ? (
+            <p className="text-muted-foreground">
+              {liveSessionCount === 1 ? "1 running session will be terminated." : `${liveSessionCount} running sessions will be terminated.`}
+            </p>
+          ) : null}
           {activeAgentCount > 0 ? (
             <p className="text-muted-foreground">
               {activeAgentCount === 1 ? "1 running agent will be terminated." : `${activeAgentCount} running agents will be terminated.`}

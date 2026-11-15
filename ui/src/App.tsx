@@ -198,6 +198,7 @@ import { ensureTerminalEvents } from "./lib/terminalEvents";
 import { useTerminalSettings } from "./lib/terminalSettings";
 import { resolveWorktreeOwnerId } from "./lib/worktreeOwnership";
 import { createClosedTabStack } from "./lib/closedTabStack";
+import { assessClose, reassessConfirmedClose, type CloseTarget } from "./lib/closeGuard";
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import { useDesktopSidebarPublisher } from "./lib/desktopSidebarSync";
@@ -222,7 +223,7 @@ import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { describeLadderRow, listShortcutWorktrees } from "./state/shortcutLadder";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
-import { getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { getTabById, getTabLayoutById, getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 import { activityStateOfGroup, groupOf, type AttentionBySessionId } from "./lib/attentionGroup";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
@@ -2384,12 +2385,14 @@ function WorkspaceApp({
     unreadWorktreePaths: state.unreadWorktreePaths,
     agents,
   });
-  const [pendingTabClose, setPendingTabClose] = useState<{
-    kind: "pane" | "tab";
-    tabId: string;
-    leafId?: string;
+  const [pendingClose, setPendingClose] = useState<{
+    target: CloseTarget;
     label: string;
-    activeAgentCount: number;
+    /** What the dialog calls this close. A single-leaf pane close removes the whole tab. */
+    kind: "pane" | "tab" | "batch";
+    tabCount: number;
+    liveSessionCount: number;
+    runningAgentCount: number;
   } | null>(null);
   const [worktreeStatuses, setWorktreeStatuses] = useState<Record<string, DirtyState | undefined>>({});
   // The agent chosen in the Add Worktree dialog for a worktree created in a non-active project
@@ -3188,20 +3191,47 @@ function WorkspaceApp({
   }, [handleAddTerminalTab]);
 
   const closedTabStackRef = useRef(createClosedTabStack());
+  const closingTargetsRef = useRef(new Set<string>());
 
-  const handleCloseTab = useCallback(
-    (tabId: string) => {
-      if (activeRemoteHostRef.current) return;
-      const tab = stateRef.current.layout.tabs.find((candidate) => candidate.id === tabId);
-      if (!tab || tab.pinned) return;
-      if (tab.kind === "browser" && tab.url) {
+  const performClose = useCallback(
+    (target: CloseTarget) => {
+      const key = target.kind === "pane"
+        ? `pane:${target.tabId}:${target.leafId}`
+        : target.kind === "batch"
+          ? `batch:${target.mode}:${target.tabId}`
+          : `tab:${target.tabId}`;
+      if (closingTargetsRef.current.has(key)) return;
+      closingTargetsRef.current.add(key);
+      const settle = () => closingTargetsRef.current.delete(key);
+
+      if (target.kind === "batch") {
+        const batch = target.mode === "others"
+          ? closeOtherTabs(target.tabId)
+          : target.mode === "right"
+            ? closeTabsToRight(target.tabId)
+            : closeTabsToLeft(target.tabId);
+        void batch.catch(reportRuntimeError).finally(settle);
+        return;
+      }
+
+      // A pane close stays a pane close: the store's `closePane` delegates to `closeTab`
+      // itself when the leaf is the tab's only pane, so promoting here would change which
+      // store command runs for every split-less tab.
+      if (target.kind === "pane") {
+        void closePane(target.tabId, target.leafId).catch(reportRuntimeError).finally(settle);
+        return;
+      }
+
+      const currentState = stateRef.current;
+      const tab = getTabById(currentState, target.tabId);
+      if (tab?.kind === "browser" && tab.url) {
         closedTabStackRef.current.push({
           kind: "browser",
           url: tab.url,
           profileId: tab.profileId,
           worktreePath: tab.worktreePath,
         });
-      } else if (tab.kind === "file") {
+      } else if (tab?.kind === "file") {
         closedTabStackRef.current.push({
           kind: "file",
           source: {
@@ -3218,21 +3248,61 @@ function WorkspaceApp({
           },
         });
       }
+      void closeTab(target.tabId).catch(reportRuntimeError).finally(settle);
+    },
+    [closeOtherTabs, closePane, closeTab, closeTabsToLeft, closeTabsToRight, reportRuntimeError],
+  );
+
+  const requestClose = useCallback(
+    (target: CloseTarget) => {
+      if (activeRemoteHostRef.current) return;
       const currentState = stateRef.current;
-      const sessionIds = tab.kind === "terminal"
-        ? Object.values(currentState.layout.layoutsByTabId?.[tabId]?.sessionIdsByLeafId ?? {}).filter(Boolean)
-        : [];
-      const activeAgentCount = sessionIds.filter((sessionId) => {
-        const activity = currentState.activityBySessionId?.[sessionId];
-        return activity?.state === "working" || activity?.state === "waiting";
-      }).length;
-      if (activeAgentCount > 0 || generalSettings.confirmCloseTab) {
-        setPendingTabClose({ kind: "tab", tabId: tab.id, label: isTerminalTab(tab) ? staticTabLabel(tab) : tab.label, activeAgentCount });
+      const runningSessionIds = new Set<string>();
+      for (const [sessionId, activity] of Object.entries(currentState.activityBySessionId ?? {})) {
+        if (activity?.state === "working" || activity?.state === "waiting") runningSessionIds.add(sessionId);
+      }
+      const labelForTab = (tabId: string) => {
+        const tab = getTabById(stateRef.current, tabId);
+        if (!tab) return "";
+        return isTerminalTab(tab) ? staticTabLabel(tab) : tab.label;
+      };
+      const assessment = assessClose(
+        { state: currentState, confirmAlways: generalSettings.confirmCloseTab, runningSessionIds, labelForTab },
+        target,
+      );
+      if (assessment.decision === "refuse") return;
+      if (assessment.decision === "close") {
+        performClose(assessment.target);
         return;
       }
-      void closeTab(tabId).catch(reportRuntimeError);
+      setPendingClose({
+        target: assessment.target,
+        label: assessment.label,
+        // A pane that is the tab's only leaf closes the tab, so it is presented as a tab close.
+        kind: assessment.target.kind === "pane"
+          && getTabLayoutById(stateRef.current, assessment.target.tabId)?.root.type === "leaf"
+          ? "tab"
+          : assessment.target.kind,
+        tabCount: assessment.tabCount,
+        liveSessionCount: assessment.liveSessions.length,
+        runningAgentCount: assessment.runningAgentCount,
+      });
     },
-    [closeTab, generalSettings.confirmCloseTab, reportRuntimeError],
+    [generalSettings.confirmCloseTab, performClose],
+  );
+
+  const handleCloseTab = useCallback(
+    (tabId: string) => {
+      requestClose({ kind: "tab", tabId });
+    },
+    [requestClose],
+  );
+
+  const handleClosePane = useCallback(
+    (tabId: string, leafId: string) => {
+      requestClose({ kind: "pane", tabId, leafId });
+    },
+    [requestClose],
   );
 
   const handleReopenClosedBrowserTab = useCallback(() => {
@@ -3269,30 +3339,6 @@ function WorkspaceApp({
     [reportRuntimeError],
   );
 
-  const handleClosePane = useCallback(
-    (tabId: string, leafId: string) => {
-      if (activeRemoteHostRef.current) return;
-      const currentState = stateRef.current;
-      const tabLayout = currentState.layout.layoutsByTabId?.[tabId];
-      if (tabLayout?.root.type === "leaf") {
-        const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
-        const sessionIds = tab?.kind === "terminal"
-          ? Object.values(tabLayout.sessionIdsByLeafId ?? {}).filter(Boolean)
-          : [];
-        const activeAgentCount = sessionIds.filter((sessionId) => {
-          const activity = currentState.activityBySessionId?.[sessionId];
-          return activity?.state === "working" || activity?.state === "waiting";
-        }).length;
-        if (activeAgentCount > 0 || (generalSettings.confirmCloseTab && !tab?.pinned)) {
-          setPendingTabClose({ kind: "tab", tabId, leafId, label: tab && isTerminalTab(tab) ? staticTabLabel(tab) : (tab?.label ?? ""), activeAgentCount });
-          return;
-        }
-      }
-      void closePane(tabId, leafId).catch(reportRuntimeError);
-    },
-    [closePane, generalSettings.confirmCloseTab, reportRuntimeError],
-  );
-
   const handleCloseActiveSurface = useCallback(() => {
     if (activeRemoteHostRef.current) return;
     const currentState = stateRef.current;
@@ -3313,38 +3359,45 @@ function WorkspaceApp({
   }, [handleClosePane, handleCloseTab]);
 
   const handleConfirmTabClose = useCallback(() => {
-    if (!pendingTabClose) return;
-    const { tabId, leafId } = pendingTabClose;
-    setPendingTabClose(null);
-    if (leafId) {
-      void closePane(tabId, leafId).catch(reportRuntimeError);
-    } else {
-      void closeTab(tabId).catch(reportRuntimeError);
+    if (!pendingClose) return;
+    const confirmed = pendingClose;
+    setPendingClose(null);
+    // Re-assess against live state: a session may have exited, or the target may already be
+    // gone, while the dialog was open. Executing a stale target would close something the
+    // user never saw.
+    const runningSessionIds = new Set<string>();
+    for (const [sessionId, activity] of Object.entries(stateRef.current.activityBySessionId ?? {})) {
+      if (activity?.state === "working" || activity?.state === "waiting") runningSessionIds.add(sessionId);
     }
-  }, [closePane, closeTab, pendingTabClose, reportRuntimeError]);
+    const stillValid = reassessConfirmedClose(
+      { state: stateRef.current, confirmAlways: true, runningSessionIds, labelForTab: () => confirmed.label },
+      confirmed.target,
+    );
+    if (!stillValid) return;
+    performClose(confirmed.target);
+  }, [pendingClose, performClose]);
+
+  const handleCancelTabClose = useCallback(() => setPendingClose(null), []);
 
   const handleCloseOtherTabs = useCallback(
     (tabId: string) => {
-      if (activeRemoteHostRef.current) return;
-      void closeOtherTabs(tabId).catch(reportRuntimeError);
+      requestClose({ kind: "batch", mode: "others", tabId });
     },
-    [closeOtherTabs, reportRuntimeError],
+    [requestClose],
   );
 
   const handleCloseTabsToRight = useCallback(
     (tabId: string) => {
-      if (activeRemoteHostRef.current) return;
-      void closeTabsToRight(tabId).catch(reportRuntimeError);
+      requestClose({ kind: "batch", mode: "right", tabId });
     },
-    [closeTabsToRight, reportRuntimeError],
+    [requestClose],
   );
 
   const handleCloseTabsToLeft = useCallback(
     (tabId: string) => {
-      if (activeRemoteHostRef.current) return;
-      void closeTabsToLeft(tabId).catch(reportRuntimeError);
+      requestClose({ kind: "batch", mode: "left", tabId });
     },
-    [closeTabsToLeft, reportRuntimeError],
+    [requestClose],
   );
 
   const handleCycleTab = useCallback(
@@ -3408,8 +3461,8 @@ function WorkspaceApp({
     const activeLayout = currentState.layout.layoutsByTabId?.[activeTab.id];
     if (!activeLayout || activeLayout.root.type === "leaf") return;
     const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
-    void closePane(activeTab.id, activeLeafId).catch(reportRuntimeError);
-  }, [closePane, reportRuntimeError]);
+    requestClose({ kind: "pane", tabId: activeTab.id, leafId: activeLeafId });
+  }, [requestClose]);
 
   const handleCyclePaneFocus = useCallback(
     (offset: number) => {
@@ -3946,8 +3999,6 @@ function WorkspaceApp({
     }
     setDeleteTarget(worktree);
   }, []);
-  const handleCancelTabClose = useCallback(() => setPendingTabClose(null), []);
-
   const handleAddBrowserTab = useCallback(
     (url?: string, profileId?: string) => {
       const targetUrl = url ?? newBrowserTabUrl();
@@ -5094,11 +5145,13 @@ function WorkspaceApp({
           onConfirm={handleConfirmRemoveProject}
         />
       ) : null}
-      {pendingTabClose ? (
+      {pendingClose ? (
         <ConfirmCloseTabDialog
-          tabLabel={pendingTabClose.label}
-          kind={pendingTabClose.kind}
-          activeAgentCount={pendingTabClose.activeAgentCount}
+          tabLabel={pendingClose.label}
+          kind={pendingClose.kind}
+          tabCount={pendingClose.tabCount}
+          liveSessionCount={pendingClose.liveSessionCount}
+          activeAgentCount={pendingClose.runningAgentCount}
           onCancel={handleCancelTabClose}
           onConfirm={handleConfirmTabClose}
         />
