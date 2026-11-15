@@ -310,7 +310,17 @@ pub struct PanelSources {
     pub escalations: Option<Arc<dyn EscalationSource>>,
 }
 
-/// Assembles the panel snapshot. `log` is every action entry updated since `since_ms` and
+/// A legacy refusal row that records no action: an unknown-agent incident whose session moved
+/// on by itself, written before refusals waited a confirmation window. Hidden from the panel,
+/// never deleted. Every such row names its session as evidence, so evidence is not the test.
+pub fn is_refusal_noise(entry: &ActionEntry) -> bool {
+    entry.kind == crate::supervisor::panel_contract::ActionKind::Finished
+        && entry.incident_key.starts_with("recovery:refused:")
+        && entry.summary.ends_with("no longer needs recovery")
+}
+
+/// Assembles the panel snapshot. `log` is every action entry updated since `since_ms` (minus
+/// [`is_refusal_noise`] rows) and
 /// `handling` its live subset. A store that fails is logged and shown empty, never an error for
 /// the whole panel. With no hub running (`hub_running == false`) the panel asks for setup.
 pub async fn assemble_panel(
@@ -327,6 +337,7 @@ pub async fn assemble_panel(
         }),
         None => Vec::new(),
     };
+    let log: Vec<ActionEntry> = log.into_iter().filter(|e| !is_refusal_noise(e)).collect();
     let rules: Vec<StandingRule> = match &sources.rules {
         Some(store) => store.list().await.unwrap_or_else(|error| {
             tracing::warn!(%error, "panel: rule store unavailable");
@@ -597,6 +608,38 @@ mod tests {
         assert!(unconfigured.log.is_empty());
         assert!(unconfigured.rules.is_empty());
         assert_eq!(unconfigured.sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_panel_hides_legacy_refusal_noise_without_deleting_it() {
+        use crate::supervisor::panel_contract::{ActionKind, EvidenceRef};
+        let evidence = vec![EvidenceRef { kind: "session".into(), id: "mac:s1".into() }];
+        let mut noise = action(1, false);
+        noise.kind = ActionKind::Finished;
+        noise.incident_key = "recovery:refused:mac:s1:g0".into();
+        noise.summary = "work s1 no longer needs recovery".into();
+        noise.evidence = evidence.clone();
+        // Same incident shape, but the supervisor escalated it: kept.
+        let mut asked = noise.clone();
+        asked.id = 2;
+        asked.incident_key = "recovery:refused:mac:s1:g1".into();
+        asked.kind = ActionKind::Escalated;
+        asked.summary = "Left work s1 alone: no known resume text for agent omo".into();
+        // A real retry that finished: kept.
+        let mut retried = noise.clone();
+        retried.id = 3;
+        retried.incident_key = "recovery:upstream:mac:g0".into();
+        retried.summary = "work s1 no longer needs recovery".into();
+        let rows = vec![noise.clone(), asked, retried];
+        let sources = PanelSources {
+            log: Some(Arc::new(FakeLog(rows.clone()))),
+            ..PanelSources::default()
+        };
+        let panel = assemble_panel(&sources, Vec::new(), false, true, 0).await;
+        assert_eq!(panel.log.iter().map(|e| e.id).collect::<Vec<_>>(), vec![2, 3]);
+        assert!(is_refusal_noise(&noise));
+        // The store itself still returns every row.
+        assert_eq!(sources.log.unwrap().list_today(0).await.unwrap(), rows);
     }
 
     fn attended(session_id: &str, demand: &str) -> Value {

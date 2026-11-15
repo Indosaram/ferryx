@@ -1117,13 +1117,26 @@ async fn the_stop_answer_interrupts_each_session_once_and_leaves_them_alone() {
     assert!(!rows[0].live);
 }
 
+/// Steps a refused session through both confirmation windows: the card opens after one, the
+/// Escalated row follows once the card has been visible for another.
+async fn refuse_visibly(rig: &Rig) {
+    rig.step(30_000).await;
+    assert!(rig.opened().is_empty(), "no card inside the confirmation window");
+    rig.step(30_000).await;
+    assert_eq!(rig.opened().len(), 1, "card after the window");
+    assert!(rig.rows().is_empty(), "no row before the card was visible for a window");
+    rig.step(60_000).await;
+    assert_eq!(rig.rows().len(), 1, "{:?}", rig.rows());
+    assert_eq!(rig.rows()[0].kind, ActionKind::Escalated);
+}
+
 #[tokio::test]
 async fn a_refused_row_and_card_are_cleared_when_the_session_moves_on() {
     let rig = rig(vec![session("mac-2", "s1", "omo", "working", "screen", T0)], BAD_GATEWAY);
     rig.sched.tick().await;
     rig.outbreak(BAD_GATEWAY);
     rig.sched.tick().await;
-    assert_eq!(rig.opened().len(), 1);
+    refuse_visibly(&rig).await;
     assert!(rig.rows()[0].live);
     rig.outbreak("all good, carrying on with the task");
     rig.step(30_000).await;
@@ -1134,8 +1147,12 @@ async fn a_refused_row_and_card_are_cleared_when_the_session_moves_on() {
     // Fresh trouble is a new incident with its own key and card.
     rig.outbreak(BAD_GATEWAY);
     rig.step(30_000).await;
+    for _ in 0..4 {
+        rig.step(30_000).await;
+    }
     assert_eq!(rig.opened().len(), 2);
     assert_eq!(rig.rows().len(), 2);
+    assert_ne!(rig.rows()[0].incident_key, rig.rows()[1].incident_key);
 }
 
 #[tokio::test]
@@ -1144,12 +1161,78 @@ async fn a_refused_row_and_card_are_cleared_when_the_session_ends() {
     rig.sched.tick().await;
     rig.outbreak(BAD_GATEWAY);
     rig.sched.tick().await;
+    refuse_visibly(&rig).await;
     rig.fleet.0.lock().unwrap().clear();
     for _ in 0..4 {
         rig.step(30_000).await;
     }
     assert_eq!(rig.cards.resolved.lock().unwrap().len(), 1);
+    assert_eq!(rig.rows().len(), 1);
     assert!(!rig.rows()[0].live);
+}
+
+#[tokio::test]
+async fn a_transient_refusal_opens_no_card_and_writes_no_row() {
+    // GAP-S10: an unknown-agent fault that clears inside the confirmation window is no
+    // action of the supervisor's, so the action log and the owner never see it.
+    let rig = rig(vec![session("mac-2", "s1", "omo", "working", "screen", T0)], BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.step(30_000).await;
+    rig.outbreak("all good, carrying on with the task");
+    rig.step(20_000).await;
+    for _ in 0..10 {
+        rig.step(30_000).await;
+    }
+    assert!(rig.opened().is_empty(), "{:?}", rig.opened());
+    assert!(rig.rows().is_empty(), "{:?}", rig.rows());
+    assert_eq!(*rig.log.writes.lock().unwrap(), 0);
+    assert!(rig.world.ops().is_empty());
+    // Same for a session that ends inside the window.
+    rig.outbreak(BAD_GATEWAY);
+    rig.step(30_000).await;
+    rig.fleet.0.lock().unwrap().clear();
+    for _ in 0..6 {
+        rig.step(30_000).await;
+    }
+    assert!(rig.opened().is_empty(), "{:?}", rig.opened());
+    assert!(rig.rows().is_empty(), "{:?}", rig.rows());
+}
+
+#[tokio::test]
+async fn a_card_withdrawn_before_its_row_writes_no_row() {
+    let rig = rig(vec![session("mac-2", "s1", "omo", "working", "screen", T0)], BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.step(60_000).await;
+    assert_eq!(rig.opened().len(), 1);
+    rig.outbreak("all good, carrying on with the task");
+    rig.step(30_000).await;
+    assert_eq!(rig.cards.resolved.lock().unwrap().len(), 1, "card withdrawn");
+    for _ in 0..6 {
+        rig.step(30_000).await;
+    }
+    assert!(rig.rows().is_empty(), "{:?}", rig.rows());
+}
+
+#[tokio::test]
+async fn an_incident_with_a_retry_keeps_one_row_edited_in_place() {
+    let rig = rig(vec![session("mac-2", "s1", "claude", "working", "screen", T0)], BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.outbreak(BAD_GATEWAY);
+    rig.sched.tick().await;
+    rig.world.up.store(true, Ordering::SeqCst);
+    for _ in 0..6 {
+        rig.step(30_000).await;
+    }
+    assert_eq!(rig.world.sends_to(&SessionRef::new("mac-2", "s1")), 1);
+    assert!(*rig.log.writes.lock().unwrap() >= 2, "written, then edited");
+    let rows = rig.rows();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].kind, ActionKind::Resumed);
+    assert!(!rows[0].live);
 }
 
 #[tokio::test]
