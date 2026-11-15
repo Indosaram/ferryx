@@ -639,6 +639,22 @@ export async function shareSupervisorTranscriptFile(fileName: string, text: stri
   return invokeCommand<boolean>("share_text_file", { fileName, text });
 }
 
+/** What the native iPhone/iPad shell returns from `request_push_permission`. */
+export type NativePushRegistration = { token: string; sandbox: boolean };
+
+/**
+ * The native iPhone/iPad companion: asks for alert permission and registers with APNs
+ * (`request_push_permission` in `mobile/src-tauri`). Resolves to the device token and the APNs
+ * environment it belongs to, or null when the platform registers no token. A denied prompt
+ * rejects with the reason.
+ *
+ * Only the native shell can do this: an iOS WKWebView has no `PushManager`, so the Web Push path
+ * in `lib/pushSubscription.ts` never applies there.
+ */
+export async function requestNativePushPermission(): Promise<NativePushRegistration | null> {
+  return invokeCommand<NativePushRegistration | null>("request_push_permission", {});
+}
+
 /** Stops one session straight through agent control, not via the engine. */
 export async function stopSupervisedSession(sessionRef: string): Promise<void> {
   if (!isTauri()) throw toIpcError(new Error("The supervisor is reachable only in the desktop app"));

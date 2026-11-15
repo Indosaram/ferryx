@@ -3,6 +3,30 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+/**
+ * The native iOS shell cannot be produced by `isMobileCompanion`'s build-time flag inside a
+ * test, so the runtime module and the Tauri bridge are both replaced. `vi.hoisted` is required
+ * because `vi.mock` factories are lifted above the imports they replace.
+ */
+const nativeShellState = vi.hoisted(() => ({
+  mobile: false,
+  permission: (async () => null) as () => Promise<unknown>,
+}));
+
+vi.mock("./clientRuntime", () => ({
+  isMobileCompanion: () => nativeShellState.mobile,
+  isIosCompanion: () => nativeShellState.mobile,
+  isDesktopShell: (hasTauri: boolean) => hasTauri && !nativeShellState.mobile,
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (command: string) =>
+    command === "request_push_permission"
+      ? nativeShellState.permission()
+      : Promise.reject(new Error(`unexpected command ${command}`)),
+  isTauri: () => true,
+}));
+
 import {
   disablePhoneAlerts,
   enablePhoneAlerts,
@@ -42,6 +66,64 @@ afterEach(() => {
     restorers.pop()?.();
   }
   vi.unstubAllGlobals();
+  nativeShellState.mobile = false;
+  nativeShellState.permission = async () => null;
+});
+
+describe("pushSubscription on the native iOS shell", () => {
+  function nativeShell(permission: () => Promise<unknown>, requests: string[]) {
+    nativeShellState.mobile = true;
+    nativeShellState.permission = permission;
+    const request = vi.fn(async (path: string) => {
+      requests.push(path);
+      return new Response(null, { status: 204 });
+    });
+    return request;
+  }
+
+  it("registers an APNs token instead of a Web Push subscription", async () => {
+    const requests: string[] = [];
+    const request = nativeShell(async () => ({ token: "ab".repeat(32), sandbox: true }), requests);
+
+    await expect(
+      enablePhoneAlerts(request as never, { phoneNeedsInput: true, phoneFinishedMode: "longTurns" }),
+    ).resolves.toBe("enabled");
+
+    expect(requests).toEqual(["/api/v1/push/apns"]);
+    const sent = JSON.parse(
+      String((request as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0][1].body),
+    );
+    expect(sent).toMatchObject({
+      token: "ab".repeat(32),
+      // The sandbox flag must travel with the token, or a development build is sent to
+      // production and APNs answers BadDeviceToken.
+      sandbox: true,
+      phoneNeedsInput: true,
+      phoneFinishedMode: "longTurns",
+    });
+  });
+
+  it("reports an error when the native shell returns no token", async () => {
+    const requests: string[] = [];
+    const request = nativeShell(async () => null, requests);
+
+    await expect(
+      enablePhoneAlerts(request as never, { phoneNeedsInput: true, phoneFinishedMode: "off" }),
+    ).resolves.toBe("error");
+    expect(requests).toEqual([]);
+  });
+
+  it("reports an error when the permission prompt is refused", async () => {
+    const requests: string[] = [];
+    const request = nativeShell(async () => {
+      throw new Error("notifications were not allowed");
+    }, requests);
+
+    await expect(
+      enablePhoneAlerts(request as never, { phoneNeedsInput: true, phoneFinishedMode: "off" }),
+    ).resolves.toBe("error");
+    expect(requests).toEqual([]);
+  });
 });
 
 describe("pushSubscription service worker registration", () => {

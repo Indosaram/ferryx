@@ -74,6 +74,27 @@ fn resolve_sandbox(override_value: Option<&str>, debug_build: bool) -> bool {
     }
 }
 
+#[cfg(target_os = "ios")]
+pub fn register_at_launch(app: tauri::AppHandle) {
+    // The delegate must exist before the request goes out: APNs can answer on the next run loop,
+    // and a selector added after that answer is a callback nobody is left to receive. Both steps
+    // therefore run inside one main-thread block, install first.
+    let _ = app.run_on_main_thread(move || {
+        ios::install_delegate_methods_now();
+        use objc2::MainThreadMarker;
+        use objc2_ui_kit::UIApplication;
+        // A fresh install has never asked, so this is also what makes the token exist. iOS
+        // shows the prompt only while the app is foregrounded, which launch satisfies.
+        match MainThreadMarker::new() {
+            Some(mtm) => {
+                UIApplication::sharedApplication(mtm).registerForRemoteNotifications();
+                ios::record_launch_note("delegate installed, registerForRemoteNotifications sent");
+            }
+            None => ios::record_launch_note("no main thread marker at launch"),
+        }
+    });
+}
+
 /// Asks for alert permission, registers with APNs, and returns the registered token and the
 /// APNs environment that token belongs to.
 ///
@@ -111,30 +132,76 @@ mod ios {
     }
 
     pub(super) fn handle_token(bytes: &[u8]) {
-        set_registered(hex_token(bytes));
+        let token = hex_token(bytes);
+        record_token_for_diagnostics(&token);
+        set_registered(token);
         notify_waiter();
     }
 
+    /// Drops the token into the app container so a device-side check can read the exact value a
+    /// run registered. The token is not a secret worth guarding beyond the app sandbox: it only
+    /// addresses notifications for this install, and Apple invalidates it on uninstall.
+    fn record_token_for_diagnostics(token: &str) {
+        let Some(documents) = app_container_documents() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&documents);
+        let _ = std::fs::write(documents.join("apns-token.txt"), token);
+    }
+
+    /// `$HOME/Documents` inside the sandbox: iOS sets `HOME` to the app container.
+    fn app_container_documents() -> Option<std::path::PathBuf> {
+        Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join("Documents"))
+    }
+
+    /// Leaves a breadcrumb for the launch path so a device check can tell "never called" from
+    /// "called and APNs stayed silent", which look identical from outside the app.
+    pub(super) fn record_launch_note(note: &str) {
+        let Some(documents) = app_container_documents() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&documents);
+        let _ = std::fs::write(documents.join("apns-launch.txt"), note);
+    }
+
     pub(super) fn handle_failure(reason: String) {
+        record_failure_for_diagnostics(&reason);
         set_failed(reason);
         notify_waiter();
     }
 
+    fn record_failure_for_diagnostics(reason: &str) {
+        let Some(documents) = app_container_documents() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&documents);
+        let _ = std::fs::write(documents.join("apns-error.txt"), reason);
+    }
+
     /// Adds the APNs callbacks to the app delegate `tao` already registered, rather than
     /// installing a second delegate or replacing an existing method.
+    ///
+    /// Hop to the main thread and install; callers that already run there use
+    /// [`install_delegate_methods_now`] instead, because a queued hop would land after the APNs
+    /// request and miss the answer it is waiting to receive.
     pub(super) fn install_delegate_methods(app: tauri::AppHandle) {
+        let _ = app.run_on_main_thread(install_delegate_methods_now);
+    }
+
+    /// The class patching itself. Must run on the main thread, and must finish before
+    /// `registerForRemoteNotifications` is sent.
+    pub(super) fn install_delegate_methods_now() {
         use objc2::runtime::{AnyClass, AnyObject, Sel};
         use std::ffi::CStr;
         use std::sync::Once;
 
         static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let _ = app.run_on_main_thread(|| unsafe {
-                let Some(class) = AnyClass::get(c"AppDelegate") else {
-                    set_failed("the app delegate was not registered".into());
-                    return;
-                };
-                let raw = (&*class) as *const AnyClass as *mut AnyClass;
+        ONCE.call_once(|| unsafe {
+            let Some(class) = AnyClass::get(c"AppDelegate") else {
+                set_failed("the app delegate was not registered".into());
+                return;
+            };
+            let raw = (&*class) as *const AnyClass as *mut AnyClass;
 
                 extern "C-unwind" fn did_register(
                     _this: &AnyObject,
@@ -162,6 +229,25 @@ mod ios {
                         format!("APNs registration failed: {}", error.localizedDescription())
                     };
                     handle_failure(reason);
+                }
+                // Registration is only honoured while the app is active. `setup` runs before the
+                // scene finishes activating, and an early request is dropped with no callback at
+                // all — indistinguishable from a broken delegate. Requesting here rather than at
+                // an arbitrary delay ties the call to the state iOS actually requires.
+                extern "C-unwind" fn did_become_active(_this: &AnyObject, _cmd: Sel) {
+                    if matches!(super::current(), Registration::Registered(_)) {
+                        return;
+                    }
+                    use objc2::MainThreadMarker;
+                    use objc2_ui_kit::UIApplication;
+                    match MainThreadMarker::new() {
+                        Some(mtm) => {
+                            UIApplication::sharedApplication(mtm)
+                                .registerForRemoteNotifications();
+                            record_launch_note("active: registerForRemoteNotifications sent");
+                        }
+                        None => record_launch_note("didBecomeActive off the main thread"),
+                    }
                 }
 
                 const VOID_OBJECT: &CStr = c"v@:@";
@@ -195,7 +281,17 @@ mod ios {
                             .to_string(),
                     );
                 }
-            });
+                // `applicationDidBecomeActive:` is a `v@:` method: it takes no argument.
+                let active_sel = Sel::register(c"applicationDidBecomeActive:");
+                let _ = objc2::ffi::class_addMethod(
+                    raw,
+                    active_sel,
+                    std::mem::transmute::<
+                        extern "C-unwind" fn(&AnyObject, Sel),
+                        objc2::runtime::Imp,
+                    >(did_become_active),
+                    c"v@:".as_ptr(),
+                );
         });
     }
 

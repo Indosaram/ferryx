@@ -15,6 +15,15 @@ pub fn run() {
             share::share_text_file,
             apns::request_push_permission
         ])
+        .setup(|_app| {
+            // Register with APNs at launch so the token exists before the user opens Settings:
+            // the delegate callbacks are what mint it, and a token that only appears after a
+            // gesture leaves the first alerts after enabling silently undeliverable. iOS shows
+            // the permission prompt on its own schedule; registration itself needs no gesture.
+            #[cfg(target_os = "ios")]
+            apns::register_at_launch(_app.handle().clone());
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("failed to run Ferryx mobile");
 }
