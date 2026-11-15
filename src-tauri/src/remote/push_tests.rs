@@ -595,3 +595,59 @@ fn preferences_update_only_the_callers_subscriptions() {
     assert!(body.phone_needs_input);
     assert_eq!(body.phone_finished_mode, FinishedMode::LongTurns);
 }
+
+/// The APNs mutators take `apns` before `subscriptions`, which is the reverse of `mutate`. If
+/// they ever go back to taking it, a concurrent web-push write and an APNs write deadlock; this
+/// test runs both so that regression cannot hide behind a single-threaded pass.
+#[test]
+fn apns_subscriptions_persist_and_do_not_interleave_with_web_push_writes() {
+    use crate::remote::apns::ApnsEnvironment;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(PUSH_SUBSCRIPTIONS_FILE);
+    let store = PushStore::load(Some(path.clone()));
+    let token = "ab".repeat(32);
+
+    store
+        .subscribe_apns("d1", &token, ApnsEnvironment::Sandbox, true)
+        .unwrap();
+    store
+        .subscribe(
+            "d1",
+            PushSubscribeRequest {
+                endpoint: "https://fcm.googleapis.com/fcm/send/a".to_string(),
+                keys: PushSubscriptionKeys { p256dh: "k".into(), auth: "a".into() },
+                phone_needs_input: true,
+                phone_finished_mode: FinishedMode::LongTurns,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(store.list_apns().len(), 1);
+    assert_eq!(store.list_subscriptions().len(), 1);
+    let reloaded = PushStore::load(Some(path.clone()));
+    assert_eq!(reloaded.list_apns()[0].environment, ApnsEnvironment::Sandbox);
+    assert_eq!(reloaded.list_apns()[0].token, token);
+
+    // Re-subscribing the same token must replace the stored environment rather than duplicate
+    // it: a phone that moved to a distribution build has to start receiving production pushes.
+    store
+        .subscribe_apns("d1", &token, ApnsEnvironment::Production, false)
+        .unwrap();
+    let stored = store.list_apns();
+    assert_eq!(stored.len(), 1, "one row per token");
+    assert_eq!(stored[0].environment, ApnsEnvironment::Production);
+    assert!(!stored[0].needs_input, "the latest preference wins");
+
+    // Another device may not adopt a token it does not own, and its removal must not succeed.
+    assert!(store
+        .subscribe_apns("d2", &token, ApnsEnvironment::Production, true)
+        .is_err());
+    assert!(store.unsubscribe_apns("d2", &token).is_err());
+    assert_eq!(store.list_apns().len(), 1);
+
+    // A gone token is dropped, and the drop survives a reload.
+    store.remove_gone_apns(&token).unwrap();
+    assert!(store.list_apns().is_empty());
+    assert!(PushStore::load(Some(path)).list_apns().is_empty());
+}

@@ -4252,6 +4252,27 @@ async fn push_subscribe(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/v1/push/apns`: an iOS install registers its APNs device token, because a WKWebView
+/// cannot create a Web Push subscription the way a browser does.
+async fn push_apns_subscribe(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::remote::push::PushApnsSubscribeRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    use crate::remote::apns::ApnsEnvironment;
+    let device = push_device(&state, &headers)?;
+    let environment = if payload.sandbox {
+        ApnsEnvironment::Sandbox
+    } else {
+        ApnsEnvironment::Production
+    };
+    push_store_write(&state, move |store| {
+        store.subscribe_apns(&device.id, &payload.token, environment, payload.phone_needs_input)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn push_unsubscribe(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -9024,6 +9045,7 @@ pub(crate) fn cors_origin_allowed(
             path,
             "/api/v1/push/vapid-public-key"
                 | "/api/v1/push/subscribe"
+                | "/api/v1/push/apns"
                 | "/api/v1/push/unsubscribe"
                 | "/api/v1/push/preferences"
                 | "/api/v1/push/session-mute"
@@ -9546,10 +9568,12 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/push/panel-presence", post(push_panel_presence))
         .route("/api/v1/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/v1/push/subscribe", post(push_subscribe))
+        .route("/api/v1/push/apns", post(push_apns_subscribe))
         .route("/api/v1/push/unsubscribe", post(push_unsubscribe))
         .route("/api/v1/push/preferences", post(push_preferences))
         .route("/api/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/push/subscribe", post(push_subscribe))
+        .route("/api/push/apns", post(push_apns_subscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/preferences", post(push_preferences))
         .fallback(remote_fallback)
