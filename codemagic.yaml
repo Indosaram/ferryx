@@ -51,7 +51,7 @@ workflows:
         script: |
           set -e
           export PATH="$HOME/.bun/bin:$PATH"
-          bun install --frozen-lockfile
+          bun install --cwd ui --frozen-lockfile
           bun run --cwd ui build
           test -d ui/dist && echo "ui/dist present"
 
