@@ -47,6 +47,14 @@ workflows:
           echo "PATH=$HOME/zig-aarch64-macos-${ZIG_VERSION}:$PATH" >> "$CM_ENV"
           zig version
 
+      - name: Build frontend UI
+        script: |
+          set -e
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun install --frozen-lockfile
+          bun run --cwd ui build
+          test -d ui/dist && echo "ui/dist present"
+
       - name: Fetch FFmpeg SDK
         script: |
           set -e
