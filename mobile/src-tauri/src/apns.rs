@@ -133,6 +133,7 @@ mod ios {
 
     pub(super) fn handle_token(bytes: &[u8]) {
         let token = hex_token(bytes);
+        record_launch_note(&format!("token received {}", token.len()));
         record_token_for_diagnostics(&token);
         set_registered(token);
         notify_waiter();
@@ -270,27 +271,6 @@ mod ios {
                     };
                     handle_failure(reason);
                 }
-                // Registration is only honoured while the app is active. `setup` runs before the
-                // scene finishes activating, and an early request is dropped with no callback at
-                // all — indistinguishable from a broken delegate. Requesting here rather than at
-                // an arbitrary delay ties the call to the state iOS actually requires.
-                extern "C-unwind" fn did_become_active(_this: &AnyObject, _cmd: Sel) {
-                    record_launch_note("applicationDidBecomeActive: ran");
-                    if matches!(super::current(), Registration::Registered(_)) {
-                        return;
-                    }
-                    use objc2::MainThreadMarker;
-                    use objc2_ui_kit::UIApplication;
-                    match MainThreadMarker::new() {
-                        Some(mtm) => {
-                            UIApplication::sharedApplication(mtm)
-                                .registerForRemoteNotifications();
-                            record_launch_note("active: registerForRemoteNotifications sent");
-                        }
-                        None => record_launch_note("didBecomeActive off the main thread"),
-                    }
-                }
-
                 const VOID_OBJECT: &CStr = c"v@:@";
                 let registered_sel =
                     Sel::register(c"application:didRegisterForRemoteNotificationsWithDeviceToken:");
@@ -330,22 +310,86 @@ mod ios {
                             .to_string(),
                     );
                 }
-                // `applicationDidBecomeActive:` is a `v@:` method: it takes no argument.
-                let active_sel = Sel::register(c"applicationDidBecomeActive:");
-                let added_active = objc2::ffi::class_addMethod(
-                    raw,
-                    active_sel,
-                    std::mem::transmute::<
-                        extern "C-unwind" fn(&AnyObject, Sel),
-                        objc2::runtime::Imp,
-                    >(did_become_active),
-                    c"v@:".as_ptr(),
-                );
-                record_launch_note(&format!(
-                    "class_addMethod applicationDidBecomeActive: {}",
-                    added_active.as_bool()
-                ));
+                // UIKit reads the delegate's `respondsToSelector:` answers once, when the delegate
+                // is assigned, and caches them. `tao` assigned it before these methods existed, so
+                // without a re-assignment iOS never dispatches either callback (measured on device:
+                // methods added, no token and no failure). Setting it again makes UIKit re-read.
+                reassign_app_delegate();
+                observe_did_become_active();
         });
+    }
+
+    /// Re-assigns the live app delegate to itself so UIKit refreshes its cached selector table.
+    /// `UIApplication.delegate` does not own the object, so the delegate is retained across the
+    /// nil assignment and one extra retain is leaked to keep it alive for the process lifetime.
+    unsafe fn reassign_app_delegate() {
+        use objc2::rc::Retained;
+        use objc2::runtime::AnyObject;
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            record_launch_note("delegate re-assign skipped: off the main thread");
+            return;
+        };
+        let app = objc2_ui_kit::UIApplication::sharedApplication(mtm);
+        let delegate: Option<Retained<AnyObject>> = objc2::msg_send![&*app, delegate];
+        let Some(delegate) = delegate else {
+            record_launch_note("delegate re-assign skipped: nil delegate");
+            return;
+        };
+        let _: () = objc2::msg_send![&*app, setDelegate: std::ptr::null_mut::<AnyObject>()];
+        let _: () = objc2::msg_send![&*app, setDelegate: &*delegate];
+        std::mem::forget(delegate);
+        record_launch_note("delegate re-assigned");
+    }
+
+    /// Registration is only honoured while the app is active, and a request sent before the
+    /// scene finishes activating can be dropped with no callback. An `NSNotificationCenter`
+    /// observer does not depend on the delegate's selector cache, unlike an added
+    /// `applicationDidBecomeActive:` method, which was measured never to run.
+    unsafe fn observe_did_become_active() {
+        use objc2::rc::Retained;
+        use objc2::runtime::{AnyClass, AnyObject};
+        let (Some(center_class), Some(queue_class)) =
+            (AnyClass::get(c"NSNotificationCenter"), AnyClass::get(c"NSOperationQueue"))
+        else {
+            record_launch_note("active observer skipped: Foundation classes not found");
+            return;
+        };
+        let center: Retained<AnyObject> = objc2::msg_send![center_class, defaultCenter];
+        let main_queue: Retained<AnyObject> = objc2::msg_send![queue_class, mainQueue];
+        // The value of the `UIApplicationDidBecomeActiveNotification` constant; names match by
+        // string equality.
+        let name = objc2_foundation::NSString::from_str("UIApplicationDidBecomeActiveNotification");
+        let block = block2::RcBlock::new(|_notification: *mut AnyObject| {
+            if matches!(super::current(), Registration::Registered(_)) {
+                return;
+            }
+            use objc2::MainThreadMarker;
+            use objc2_ui_kit::UIApplication;
+            // The observer is queued on the main operation queue.
+            match MainThreadMarker::new() {
+                Some(mtm) => {
+                    UIApplication::sharedApplication(mtm).registerForRemoteNotifications();
+                    record_launch_note(
+                        "active (notification): registerForRemoteNotifications sent",
+                    );
+                }
+                None => record_launch_note("active (notification) off the main thread"),
+            }
+        });
+        let observer: Option<Retained<AnyObject>> = objc2::msg_send![
+            &*center,
+            addObserverForName: &*name,
+            object: std::ptr::null_mut::<AnyObject>(),
+            queue: &*main_queue,
+            usingBlock: &*block
+        ];
+        // The center retains a block observer until it is removed, which this process never
+        // does, so dropping our reference keeps it registered.
+        if observer.is_some() {
+            record_launch_note("active observer installed");
+        } else {
+            record_launch_note("active observer was not installed");
+        }
     }
 
     fn nsdata_bytes(data: &objc2_foundation::NSData) -> Vec<u8> {
