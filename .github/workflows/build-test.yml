@@ -27,7 +27,10 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push must not kill an in-flight main run: the macOS leg compiles for ~30 minutes
+  # before the suites start, so cancelling mid-compilation produced a permanently
+  # "cancelled" signal that looked like a failure. PR branches still supersede themselves.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # =========================================================================
@@ -231,7 +234,6 @@ jobs:
   # 1. FRONTEND UI VALIDATION
   # =========================================================================
   ui-check:
-    if: github.event_name == 'workflow_dispatch' && inputs.legacy == true
     name: UI Build & Typecheck
     runs-on: ubuntu-latest
     steps:
@@ -323,7 +325,6 @@ jobs:
   # 2. RUST BACKEND VALIDATION ACROSS PLATFORMS
   # =========================================================================
   rust-check:
-    if: github.event_name == 'workflow_dispatch' && inputs.legacy == true
     name: Rust Check (${{ matrix.os_name }})
     runs-on: ${{ matrix.platform }}
     # Same CMake 4 policy floor as the precheck job: audiopus_sys 0.2.2 bundles Opus with a
