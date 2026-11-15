@@ -55,6 +55,21 @@ workflows:
           bun run --cwd ui build
           test -d ui/dist && echo "ui/dist present"
 
+      - name: Isolate TMPDIR for fixture repositories
+        script: |
+          set -e
+          ISOLATED_TMPDIR="$CM_BUILD_DIR/../ferryx-ci-tmp"
+          mkdir -p "$ISOLATED_TMPDIR"
+          echo "TMPDIR=$ISOLATED_TMPDIR" >> "$CM_ENV"
+          echo "GIT_CEILING_DIRECTORIES=$ISOLATED_TMPDIR" >> "$CM_ENV"
+          echo "TMPDIR=$ISOLATED_TMPDIR GIT_CEILING_DIRECTORIES=$ISOLATED_TMPDIR"
+
+      - name: Build remote helper
+        script: |
+          set -e
+          . "$HOME/.cargo/env"
+          cargo build --manifest-path remote-helper/Cargo.toml
+
       - name: Fetch FFmpeg SDK
         script: |
           set -e
