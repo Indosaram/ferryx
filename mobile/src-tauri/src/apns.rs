@@ -155,18 +155,38 @@ mod ios {
     }
 
     /// Leaves a breadcrumb for the launch path so a device check can tell "never called" from
-    /// "called and APNs stayed silent", which look identical from outside the app.
+    /// "called and APNs stayed silent", which look identical from outside the app. Each note is
+    /// appended as its own line, prefixed with Unix epoch seconds.millis, so a later note never
+    /// hides an earlier one.
     pub(super) fn record_launch_note(note: &str) {
+        use std::io::Write;
         let Some(documents) = app_container_documents() else {
             return;
         };
         let _ = std::fs::create_dir_all(&documents);
-        let _ = std::fs::write(documents.join("apns-launch.txt"), note);
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| format!("{}.{:03}", elapsed.as_secs(), elapsed.subsec_millis()))
+            .unwrap_or_else(|_| "0.000".into());
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(documents.join("apns-launch.txt"))
+        {
+            let _ = writeln!(file, "{stamp} {note}");
+        }
+    }
+
+    /// `set_failed` that also reaches disk: the in-memory state dies with the process, and a
+    /// device check can only read the file.
+    fn fail_setup(reason: String) {
+        record_launch_note(&format!("set_failed: {reason}"));
+        set_failed(reason);
     }
 
     pub(super) fn handle_failure(reason: String) {
         record_failure_for_diagnostics(&reason);
-        set_failed(reason);
+        fail_setup(reason);
         notify_waiter();
     }
 
@@ -197,8 +217,28 @@ mod ios {
 
         static ONCE: Once = Once::new();
         ONCE.call_once(|| unsafe {
-            let Some(class) = AnyClass::get(c"AppDelegate") else {
-                set_failed("the app delegate was not registered".into());
+            // H1 diagnostics: the methods must land on the class of the live delegate object,
+            // not merely on a class named `AppDelegate`.
+            let live_class = match objc2::MainThreadMarker::new() {
+                Some(mtm) => {
+                    let app = objc2_ui_kit::UIApplication::sharedApplication(mtm);
+                    let delegate: Option<objc2::rc::Retained<AnyObject>> =
+                        objc2::msg_send![&*app, delegate];
+                    match delegate {
+                        Some(delegate) => delegate.class().name().to_string_lossy().into_owned(),
+                        None => "<nil delegate>".to_string(),
+                    }
+                }
+                None => "<off main thread>".to_string(),
+            };
+            record_launch_note(&format!("live delegate class: {live_class}"));
+            let looked_up = AnyClass::get(c"AppDelegate");
+            record_launch_note(&format!(
+                "AnyClass::get(AppDelegate): {}",
+                if looked_up.is_some() { "found" } else { "not found" }
+            ));
+            let Some(class) = looked_up else {
+                fail_setup("the app delegate was not registered".into());
                 return;
             };
             let raw = (&*class) as *const AnyClass as *mut AnyClass;
@@ -235,6 +275,7 @@ mod ios {
                 // all — indistinguishable from a broken delegate. Requesting here rather than at
                 // an arbitrary delay ties the call to the state iOS actually requires.
                 extern "C-unwind" fn did_become_active(_this: &AnyObject, _cmd: Sel) {
+                    record_launch_note("applicationDidBecomeActive: ran");
                     if matches!(super::current(), Registration::Registered(_)) {
                         return;
                     }
@@ -275,15 +316,23 @@ mod ios {
                     >(did_fail),
                     VOID_OBJECT.as_ptr(),
                 );
+                record_launch_note(&format!(
+                    "class_addMethod didRegisterForRemoteNotificationsWithDeviceToken: {}",
+                    added_registered.as_bool()
+                ));
+                record_launch_note(&format!(
+                    "class_addMethod didFailToRegisterForRemoteNotificationsWithError: {}",
+                    added_failed.as_bool()
+                ));
                 if !added_registered.as_bool() || !added_failed.as_bool() {
-                    set_failed(
+                    fail_setup(
                         "another framework already handles the APNs delegate callbacks"
                             .to_string(),
                     );
                 }
                 // `applicationDidBecomeActive:` is a `v@:` method: it takes no argument.
                 let active_sel = Sel::register(c"applicationDidBecomeActive:");
-                let _ = objc2::ffi::class_addMethod(
+                let added_active = objc2::ffi::class_addMethod(
                     raw,
                     active_sel,
                     std::mem::transmute::<
@@ -292,6 +341,10 @@ mod ios {
                     >(did_become_active),
                     c"v@:".as_ptr(),
                 );
+                record_launch_note(&format!(
+                    "class_addMethod applicationDidBecomeActive: {}",
+                    added_active.as_bool()
+                ));
         });
     }
 
