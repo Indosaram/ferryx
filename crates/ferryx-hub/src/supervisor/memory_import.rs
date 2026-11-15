@@ -365,3 +365,29 @@ pub async fn import_totals(pool: &SqlitePool) -> Result<ImportTotals, Supervisor
         last_at,
     })
 }
+
+/// `hub_meta` key: version of the session reader the last completed seed ran with. A seed
+/// whose reader version differs from the caller's is run again, so a reader fix reaches
+/// sessions an earlier, broken reader imported as empty (their content hash changes).
+pub const READER_VERSION_KEY: &str = "supervisor_memory_import_reader";
+
+/// The reader version the last completed seed recorded, if any.
+pub async fn reader_version(pool: &SqlitePool) -> Result<Option<String>, SupervisorError> {
+    Ok(sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+        .bind(READER_VERSION_KEY)
+        .fetch_optional(pool)
+        .await?)
+}
+
+/// Records that a seed completed with reader `version`.
+pub async fn set_reader_version(pool: &SqlitePool, version: &str) -> Result<(), SupervisorError> {
+    sqlx::query(
+        "INSERT INTO hub_meta(key, value) VALUES(?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(READER_VERSION_KEY)
+    .bind(version)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

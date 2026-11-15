@@ -21,6 +21,17 @@ const MAX_MEMORY_FILE_BYTES: u64 = 64 * 1024;
 /// Page size of one history read (the history reader's maximum).
 const PAGE: usize = 100;
 
+/// Version of the session reading this seed does. Bump it when a reader fix changes which
+/// turns a session yields: a hub whose last seed ran with another version seeds again
+/// (version 2: Claude turns chained through attachment/system records are read).
+pub(crate) const READER_VERSION: &str = "2";
+
+/// Whether an import finished with the current READER_VERSION, so no seed is due.
+pub(crate) async fn seeded_with_current_reader(pool: &ferryx_hub::goals::SqlitePool) -> Result<bool, SupervisorError> {
+    Ok(memory_import::import_totals(pool).await?.last_at.is_some()
+        && memory_import::reader_version(pool).await?.as_deref() == Some(READER_VERSION))
+}
+
 /// Owner-authored global instruction files: (tool, path under home). Agent-written memory
 /// (for example ~/.omo/memory) is never read.
 fn memory_files(home: &Path) -> Vec<(&'static str, PathBuf)> {
@@ -214,6 +225,7 @@ pub(crate) async fn seed_with_roots(
     let (files, sessions) = read_join(joined)?;
     let from_files = memory_import::import_sessions(pool, memory.as_ref(), principal, files, file_bounds).await?;
     let from_sessions = memory_import::import_sessions(pool, memory.as_ref(), principal, sessions, bounds).await?;
+    memory_import::set_reader_version(pool, READER_VERSION).await?;
     let report = ImportReport {
         sessions: from_files.sessions + from_sessions.sessions,
         turns_ingested: from_files.turns_ingested + from_sessions.turns_ingested,
@@ -470,5 +482,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again.turns_ingested, 0);
+    }
+
+    /// Writes a Claude session shaped like real files: every message's parent is an attachment
+    /// or system record, the owner types in both content shapes and tool results come back as
+    /// user records. With `typed` false the session's only user records are tool results.
+    fn chained_claude_session(project: &Path, session: &str, cwd: &str, typed: bool) {
+        use serde_json::json;
+        let rec = |kind: &str, id: &str, parent: Option<&str>, body: Value| {
+            let mut value = json!({"type": kind, "uuid": id, "parentUuid": parent, "sessionId": session, "cwd": cwd});
+            value.as_object_mut().unwrap().extend(body.as_object().unwrap().clone());
+            format!("{value}\n")
+        };
+        let tool_result = json!({"message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}});
+        let first = if typed { json!({"message": {"role": "user", "content": "Prefer small focused commits."}}) } else { tool_result.clone() };
+        let last = if typed {
+            json!({"message": {"role": "user", "content": [{"type": "text", "text": "Answer in Korean when I write Korean."}]}})
+        } else {
+            tool_result.clone()
+        };
+        let text = [
+            rec("user", "u1", None, first),
+            rec("attachment", "a1", Some("u1"), json!({"attachment": {"type": "todo"}})),
+            rec("assistant", "m1", Some("a1"), json!({"message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}})),
+            rec("user", "u2", Some("m1"), tool_result),
+            rec("system", "s1", Some("u2"), json!({"subtype": "informational"})),
+            rec("user", "u3", Some("s1"), last),
+            rec("attachment", "a2", Some("u3"), json!({"attachment": {"type": "todo"}})),
+            rec("assistant", "m2", Some("a2"), json!({"message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}})),
+        ]
+        .concat();
+        std::fs::write(project.join(format!("{session}.jsonl")), text).unwrap();
+    }
+
+    /// The owner's typed turns of a Claude session chained through attachment and system
+    /// records are imported; a session whose user records are all tool results imports no turn
+    /// and is no error.
+    #[tokio::test]
+    async fn claude_turns_behind_attachment_records_are_imported() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().to_string_lossy().into_owned();
+        let claude_root = home.path().join("claude-projects");
+        let project = claude_root.join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let owner = "63ba88ec-b3cb-4a70-8a32-f5d1ad07e749";
+        let tools_only = "7d1e2f3a-4b5c-4d6e-8f70-819293a4b5c6";
+        chained_claude_session(&project, owner, &cwd, true);
+        chained_claude_session(&project, tools_only, &cwd, false);
+
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
+        let learner = Arc::new(Learner::default());
+        let report = seed_with_roots(
+            &pool,
+            learner.clone(),
+            "local:tester",
+            home.path().to_path_buf(),
+            vec![(CanonicalProvider::Claude, claude_root)],
+            Some(None),
+        )
+        .await
+        .unwrap();
+        assert_eq!((report.sessions, report.turns_ingested, report.failed), (2, 2, 0), "{report:?}");
+        let mut sources: Vec<_> = learner.texts.lock().unwrap().iter().map(|(source, _)| source.clone()).collect();
+        sources.sort();
+        assert_eq!(sources, vec![format!("import:claude:{owner}:0"), format!("import:claude:{owner}:5")]);
+        // Both sessions are recorded; the tool-result-only one with no turn.
+        let totals = memory_import::import_totals(&pool).await.unwrap();
+        assert_eq!((totals.sessions, totals.turns), (2, 2));
+    }
+
+    /// A seed that finished before the reader fix (no reader version, or an older one) is not
+    /// settled, so it runs again; a seed with the current reader is.
+    #[tokio::test]
+    async fn a_seed_from_an_older_reader_is_due_again() {
+        let home = tempfile::tempdir().unwrap();
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::supervisor::provision_identity(&pool, "local:tester").await.unwrap();
+        assert!(!seeded_with_current_reader(&pool).await.unwrap(), "never seeded");
+        memory_import::import_sessions(&pool, &Learner::default(), "local:tester", Vec::new(), ImportBounds::default())
+            .await
+            .unwrap();
+        assert!(!seeded_with_current_reader(&pool).await.unwrap(), "seeded before the reader version existed");
+        memory_import::set_reader_version(&pool, "1").await.unwrap();
+        assert!(!seeded_with_current_reader(&pool).await.unwrap(), "seeded with an older reader");
+        let memory: Arc<dyn OwnerMemory> = Arc::new(Learner::default());
+        seed_with_roots(&pool, memory, "local:tester", home.path().to_path_buf(), Vec::new(), Some(None))
+            .await
+            .unwrap();
+        assert!(seeded_with_current_reader(&pool).await.unwrap());
+        assert_eq!(memory_import::reader_version(&pool).await.unwrap().as_deref(), Some(READER_VERSION));
     }
 }
