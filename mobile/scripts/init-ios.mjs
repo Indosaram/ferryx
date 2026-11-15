@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { patchInfoPlist, patchLaunchScreen, patchProjectYml } from "./ios-patches.mjs";
+import { patchEntitlements, patchInfoPlist, patchLaunchScreen, patchProjectYml } from "./ios-patches.mjs";
 
 const mobile = fileURLToPath(new URL("..", import.meta.url));
 const cli = path.join(mobile, "../node_modules/@tauri-apps/cli/tauri.js");
@@ -23,12 +23,18 @@ const yml = readFileSync(path.join(apple, "project.yml"), "utf8");
 // Idempotent: re-running the script on an already patched project leaves it alone.
 if (!yml.includes("PrivacyInfo.xcprivacy")) patch("project.yml", s => patchProjectYml(s, team));
 patch("LaunchScreen.storyboard", patchLaunchScreen);
+// The entitlements file is part of the generated target, so push APNs capability must be
+// re-applied here or a regenerated project would ship without it.
+const entitlements = path.join(apple, "ferryx-mobile_iOS/ferryx-mobile_iOS.entitlements");
 copyFileSync(path.join(mobile, "ios-templates/PrivacyInfo.xcprivacy"), path.join(apple, "PrivacyInfo.xcprivacy"));
 // Committed, alpha-free AppIcon set from `bun scripts/icons.mjs`.
 cpSync(path.join(mobile, "src-tauri/icons/ios"), path.join(apple, "Assets.xcassets/AppIcon.appiconset"), { recursive: true });
 
 // Regenerate the .xcodeproj from the patched spec, then patch the emitted Info.plist.
 execFileSync("xcodegen", ["generate", "--spec", "project.yml"], { cwd: apple, stdio: "inherit" });
+// Entitlements are emitted BY xcodegen, so this must come after it: patching earlier is silently
+// undone, which shipped a project with no `aps-environment` and no compile error to show for it.
+if (existsSync(entitlements)) patch("ferryx-mobile_iOS/ferryx-mobile_iOS.entitlements", patchEntitlements);
 const plistDir = readdirSync(apple).find(n => n.endsWith("_iOS") && existsSync(path.join(apple, n, "Info.plist")));
 if (!plistDir) throw new Error("generated *_iOS/Info.plist not found");
 patch(path.join(plistDir, "Info.plist"), patchInfoPlist);
