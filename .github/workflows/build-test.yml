@@ -437,15 +437,21 @@ jobs:
               BIN="/tmp/sccache-v${V}-x86_64-unknown-linux-musl/sccache"
               ;;
             Windows)
-              curl -fsSL -o /tmp/sccache.zip "https://github.com/mozilla/sccache/releases/download/v${V}/sccache-v${V}-x86_64-pc-windows-msvc.zip"
-              unzip -q -o /tmp/sccache.zip -d /tmp
-              BIN=$(find /tmp -name sccache.exe -type f | head -1)
+              # Git Bash resolves a leading /tmp to <drive>:/tmp, which does not exist on the
+              # runner and made rustc fail with "The system cannot find the path specified".
+              # $RUNNER_TEMP is a real Windows path that both bash and rustc agree on.
+              curl -fsSL -o "$RUNNER_TEMP/sccache.zip" "https://github.com/mozilla/sccache/releases/download/v${V}/sccache-v${V}-x86_64-pc-windows-msvc.zip"
+              unzip -q -o "$RUNNER_TEMP/sccache.zip" -d "$RUNNER_TEMP"
+              BIN=$(find "$RUNNER_TEMP" -name sccache.exe -type f | head -1)
               ;;
             *)
               echo "sccache: not wired for ${{ runner.os }}"
               exit 0
               ;;
           esac
+          # RUSTC_WRAPPER must be a path rustc itself can execute. bash-style paths are not
+          # portable across Git Bash and rustc, so normalise through cygpath when available.
+          if command -v cygpath >/dev/null 2>&1; then BIN=$(cygpath -w "$BIN"); fi
           chmod +x "$BIN" 2>/dev/null || true
           [ -x "$BIN" ] || { echo "sccache: binary missing, skipping"; exit 0; }
           echo "RUSTC_WRAPPER=$BIN" >> "$GITHUB_ENV"
