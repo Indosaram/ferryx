@@ -22,6 +22,8 @@ export function patchProjectYml(source, team) {
     .replace(/^ *ITSAppUsesNonExemptEncryption: false\n/gm, "")
     .replace(/^ *NSMicrophoneUsageDescription: .*\n/gm, "");
   if (team) owned = owned.replace(/^ *DEVELOPMENT_TEAM: [A-Z0-9]+\n/gm, "");
+  // Re-running would otherwise append a second privacy-manifest source entry.
+  owned = owned.replace(/^ *- path: PrivacyInfo\.xcprivacy\n *buildPhase: resources\n/gm, "");
   let s = replaceRequired(
     owned,
     /(\n    settings:\n      base:\n)/,
