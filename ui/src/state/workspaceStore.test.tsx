@@ -113,6 +113,10 @@ function createServices({ autoConfirmExit = true }: { autoConfirmExit?: boolean 
     splitOperation: vi.fn(async (request) => {
       await Promise.resolve();
       if (request.action === "prepare") {
+        // The backend refuses a startup on the split path (ipc/terminal.rs, prepare stage).
+        if (request.request.startup) {
+          throw { code: "INVALID_ARGUMENT", message: "Prepare requires a local shell workspace and request identity" };
+        }
         return { action: "prepare", prepared: {
           identity: { requestId: request.requestId, originEpoch: "7", expiresAtUnixMs: Date.now() + 600_000 },
           workspaceId: request.request.workspaceId, worktree: request.request.worktree,
@@ -481,11 +485,8 @@ describe("useWorkspaceStore terminal ownership", () => {
       await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
     });
 
-    expect(services.splitCreate).toHaveBeenCalledTimes(1);
-    expect(services.splitCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ startup }),
-      expect.anything(),
-    );
+    expect(services.splitCreate).not.toHaveBeenCalled();
+    expect(services.spawnTerminal).toHaveBeenCalledWith(expect.objectContaining({ startup }));
     expect(services.closeTerminal).not.toHaveBeenCalledWith(sourceBefore.backendSessionId);
     expect(result.current.state.sessions[sourceId]).toEqual(sourceBefore);
     const updated = result.current.state.layout.layoutsByTabId[tabId];
@@ -505,9 +506,9 @@ describe("useWorkspaceStore terminal ownership", () => {
       await result.current.openTab(worktree);
     });
     let creates = 0;
-    (services.splitCreate as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+    (services.spawnTerminal as ReturnType<typeof vi.fn>).mockImplementation(async () => {
       creates += 1;
-      throw { code: "UNKNOWN", message: "outcome unknown" };
+      throw { code: "OPERATION_OUTCOME_UNKNOWN", message: "outcome unknown" };
     });
     const tabId = result.current.state.layout.activeTabId!;
     const sourceLeaf = result.current.state.layout.layoutsByTabId[tabId].activeLeafId!;
