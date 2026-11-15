@@ -1760,12 +1760,7 @@ impl Inner {
         let mut meter = Meter {
             call,
             collector: TurnCollector {
-                expected: self
-                    .profile
-                    .config
-                    .provider
-                    .clone()
-                    .zip(self.profile.config.model.clone()),
+                expected: spec.model.clone(),
                 ..TurnCollector::default()
             },
         };
