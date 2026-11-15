@@ -21,6 +21,12 @@ workflows:
     triggering:
       events: []
     scripts:
+      - name: Fetch git submodules
+        script: |
+          set -e
+          git submodule update --init --recursive --depth 1
+          git submodule status | head -5
+
       - name: Install toolchain
         script: |
           set -e
