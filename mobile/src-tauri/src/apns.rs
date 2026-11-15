@@ -189,7 +189,7 @@ mod ios {
                     >(did_fail),
                     VOID_OBJECT.as_ptr(),
                 );
-                if !added_registered || !added_failed {
+                if !added_registered.as_bool() || !added_failed.as_bool() {
                     set_failed(
                         "another framework already handles the APNs delegate callbacks"
                             .to_string(),
@@ -245,9 +245,21 @@ mod ios {
                     // `registerForRemoteNotifications` is main-thread only, and this callback is not.
                     let inner = sender.clone();
                     let _ = handle.run_on_main_thread(move || {
+                        use objc2::MainThreadMarker;
                         use objc2_ui_kit::UIApplication;
-                        unsafe {
-                            UIApplication::sharedApplication().registerForRemoteNotifications();
+                        // This closure runs on the main thread by construction, which is what
+                        // `MainThreadMarker` vouches for; APNs refuses registration off it.
+                        match MainThreadMarker::new() {
+                            Some(mtm) => {
+                                UIApplication::sharedApplication(mtm)
+                                    .registerForRemoteNotifications();
+                            }
+                            None => {
+                                let _ = inner.send(Err(
+                                    "APNs registration needs the main thread".to_string()
+                                ));
+                                return;
+                            }
                         }
                         let _ = inner.send(Ok(()));
                     });
