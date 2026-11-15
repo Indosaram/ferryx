@@ -1,0 +1,68 @@
+# Manual-trigger only: the free 500 macOS M2 minutes are shared with noveling, so no
+# push-triggered job. Releases stay local per docs/releases/LOCAL_RELEASE_RUNBOOK.md;
+# this workflow only gates, it never signs or publishes.
+workflows:
+  macos-gate:
+    name: macOS gate (clippy + test --lib)
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      vars:
+        CARGO_INCREMENTAL: "0"
+        CARGO_TERM_COLOR: always
+        # Pinned by src-tauri/build_ghostty.rs; any other version fails the gate.
+        ZIG_VERSION: "0.17.0"
+    # src-tauri/target is 4.7 GB, past Codemagic's 3 GB cache cap, so only the registry
+    # and bun caches are kept; a cold compile is the accepted cost of a manual gate.
+    cache:
+      cache_paths:
+        - $HOME/.cargo
+        - $HOME/.bun/install/cache
+    triggering:
+      events: []
+    scripts:
+      - name: Install toolchain
+        script: |
+          set -e
+          curl -fsSL https://bun.sh/install | bash
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun --version
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+            --profile minimal --default-toolchain stable \
+            --component clippy --component rustfmt
+          . "$HOME/.cargo/env"
+          cargo -V; cargo clippy -V
+          # ghostty is built from source by build_ghostty.rs; it hard-fails on a
+          # version mismatch, so install exactly the pinned zig.
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-aarch64-macos-${ZIG_VERSION}.tar.xz" \
+            | tar -xJ -C "$HOME"
+          ln -sf "$HOME/zig-aarch64-macos-${ZIG_VERSION}/zig" /usr/local/bin/zig 2>/dev/null \
+            || sudo ln -sf "$HOME/zig-aarch64-macos-${ZIG_VERSION}/zig" /usr/local/bin/zig
+          echo "PATH=$HOME/zig-aarch64-macos-${ZIG_VERSION}:$PATH" >> "$CM_ENV"
+          zig version
+
+      - name: Fetch FFmpeg SDK
+        script: |
+          set -e
+          . "$HOME/.cargo/env"
+          export PATH="$HOME/.bun/bin:$PATH"
+          bun scripts/fetch-ffmpeg.mjs
+
+      - name: Gate - clippy
+        script: |
+          set -e
+          . "$HOME/.cargo/env"
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5
+          cd src-tauri
+          cargo clippy --all-targets --all-features 2>&1 | tee "$CM_BUILD_DIR/clippy.log"
+
+      - name: Gate - test lib
+        script: |
+          set -e
+          . "$HOME/.cargo/env"
+          cd src-tauri
+          cargo test --lib 2>&1 | tee "$CM_BUILD_DIR/test_lib.log"
+
+    artifacts:
+      - clippy.log
+      - test_lib.log
