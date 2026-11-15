@@ -3757,6 +3757,7 @@ pub mod memory_import;
 pub mod project_memory;
 pub mod receipts;
 pub mod recovery;
+pub mod reference_docs;
 pub mod request;
 pub mod rules;
 pub mod session_control;

@@ -32,8 +32,8 @@ pub(crate) async fn seeded_with_current_reader(pool: &ferryx_hub::goals::SqliteP
         && memory_import::reader_version(pool).await?.as_deref() == Some(READER_VERSION))
 }
 
-/// Owner-authored global instruction files: (tool, path under home). Agent-written memory
-/// (for example ~/.omo/memory) is never read.
+/// Owner-authored global instruction files: (tool, path under home). The agent-written memory
+/// under ~/.omo/memory is read separately (`super::omo_memory::seed_omo_memory`).
 fn memory_files(home: &Path) -> Vec<(&'static str, PathBuf)> {
     vec![
         ("claude", home.join(".claude").join("CLAUDE.md")),
@@ -48,7 +48,7 @@ fn memory_files(home: &Path) -> Vec<(&'static str, PathBuf)> {
 /// so inserting, removing or moving one paragraph does not give every other paragraph a new
 /// id and make owner ingest learn the whole file again. A repeated paragraph keeps its first
 /// occurrence only, since both copies would share one id.
-fn paragraphs(text: &str, max: usize) -> Vec<ImportTurn> {
+pub(super) fn paragraphs(text: &str, max: usize) -> Vec<ImportTurn> {
     let normalized = text.replace("\r\n", "\n");
     let mut seen = std::collections::HashSet::new();
     normalized

@@ -87,8 +87,27 @@ import has finished yet. It reads two sources:
   paragraph per turn.
 
 Sessions the hub drove, tagged wrappers and anything that looks like a credential are skipped.
-A rerun ingests nothing new. Agent-written memory, such as `~/.omo/memory`, is never read.
-The log records counts only, never text.
+A rerun ingests nothing new. The log records counts only, never text.
+
+The owner's agent memory under `~/.omo/memory` is read too, never written. On every engine
+transition to Ready, and hourly while the engine stays Ready, the generation runs one pass
+when an owner exists and memory import is on. A pass reads only Markdown files under
+`agents/*/repo`, skipping `.git`, `transient-runs`, `runtime` and symlinks, up to 64 KiB each:
+
+- core memory (`system/**`, `people/**/card.md`, `people/**/observations.md`) goes to owner
+  ingest, one paragraph per turn, frontmatter and credential-shaped paragraphs dropped.
+  Identical files of several agents are sent once (import provider `omo-memory`, one import
+  session per distinct content). An unchanged file is not sent again; a changed file is. A pass
+  sends at most `FERRYX_HUB_OMO_MEMORY_INGEST_BUDGET` (default 200) new turns, so a large
+  backlog drains over several passes. The engine calls carry the cause `omo_memory_import`, and
+  each pass's counts and token sums are kept in `hub_meta` under
+  `supervisor_omo_memory_last_pass`.
+- notes and reference files (`notes/**`, `reference/**`) are never sent to the engine. They are
+  indexed in `supervisor_reference_docs` (frontmatter description plus keywords from the path,
+  the description and the first 2 KiB, credential-shaped lines dropped), refreshed when a
+  file's hash changes, and searched by keyword overlap.
+
+No other file under `~/.omo/memory` is read.
 
 When the engine is missing or not ready, nothing is cut over. `nextAction` names the unmet
 engine step, and `engineFault` carries the `MHC_*` code. The Preflight steps below fix it.

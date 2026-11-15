@@ -22,6 +22,7 @@ use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer,
 
 mod setup;
 mod seed;
+mod omo_memory;
 pub use setup::{
     agent_memory_block, supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
     SetupRunRequest, SLACK_TEAM_UNRESOLVED,
@@ -5106,6 +5107,16 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             Arc::clone(launch.server.remote_state()),
             home_dir(),
         )));
+        // The owner's agent memory (~/.omo/memory) is read on every Ready and hourly while
+        // Ready, as this generation's task.
+        let (engine, pool) = (runtime.clone(), launch.hub.pool.clone());
+        tasks.push(tokio::spawn(async move {
+            omo_memory::on_ready_and_hourly(engine.subscribe_health(), move || {
+                let (engine, pool) = (engine.clone(), pool.clone());
+                async move { omo_memory::pass_if_wanted(&engine, &pool, home_dir()).await }
+            })
+            .await;
+        }));
     }
     #[cfg(unix)]
     {
