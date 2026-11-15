@@ -519,11 +519,17 @@ describe("useWorkspaceStore terminal ownership", () => {
       providerSession: { key: "session_id" as const, id: "continue-unknown-local-1" },
     };
 
+    let thrown: unknown;
     await act(async () => {
-      await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
+      try {
+        await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
+      } catch (error) {
+        thrown = error;
+      }
       await result.current.splitPane(tabId, sourceLeaf, "horizontal", { startup });
     });
 
+    expect(thrown).toMatchObject({ code: "OPERATION_OUTCOME_UNKNOWN" });
     expect(creates).toBe(1);
   });
 
