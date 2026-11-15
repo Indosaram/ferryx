@@ -415,6 +415,44 @@ jobs:
           workspaces: './src-tauri -> target'
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # Shared sccache over the 6379 endpoint. The server enforces `requirepass`, so an
+      # open port alone cannot read or poison the cache. Fork PRs receive no secrets and
+      # simply compile without the shared cache: the step exits 0 without wiring the wrapper.
+      - name: Configure sccache
+        shell: bash
+        env:
+          SCCACHE_PASSWORD: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+          SCCACHE_HOST: ${{ vars.SCCACHE_REDIS_HOST || '1.231.34.236' }}
+        run: |
+          set -eu
+          if [ -z "${SCCACHE_PASSWORD:-}" ]; then
+            echo "sccache: no password secret available (fork PR); compiling without shared cache"
+            exit 0
+          fi
+          V=0.10.0
+          case "${{ runner.os }}" in
+            Linux)
+              curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${V}/sccache-v${V}-x86_64-unknown-linux-musl.tar.gz" | tar -xz -C /tmp
+              BIN="/tmp/sccache-v${V}-x86_64-unknown-linux-musl/sccache"
+              ;;
+            Windows)
+              curl -fsSL -o /tmp/sccache.zip "https://github.com/mozilla/sccache/releases/download/v${V}/sccache-v${V}-x86_64-pc-windows-msvc.zip"
+              unzip -q -o /tmp/sccache.zip -d /tmp
+              BIN=$(find /tmp -name sccache.exe -type f | head -1)
+              ;;
+            *)
+              echo "sccache: not wired for ${{ runner.os }}"
+              exit 0
+              ;;
+          esac
+          chmod +x "$BIN" 2>/dev/null || true
+          [ -x "$BIN" ] || { echo "sccache: binary missing, skipping"; exit 0; }
+          echo "RUSTC_WRAPPER=$BIN" >> "$GITHUB_ENV"
+          echo "SCCACHE_REDIS=redis://:${SCCACHE_PASSWORD}@${SCCACHE_HOST}:6379" >> "$GITHUB_ENV"
+          echo "SCCACHE_IDLE_TIMEOUT=0" >> "$GITHUB_ENV"
+          "$BIN" --version
+
+
       # Fixture suites commit through git. Hosted runners ship no global identity, so
       # `git commit` inside a fixture repository fails before the assertion under test runs.
       - name: Configure git identity for fixture repositories
