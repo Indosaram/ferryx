@@ -18,6 +18,7 @@ use ferryx_hub::supervisor::recovery::{
     CardError, Clock, LoopRetry, PauseGate, RecoveryDeps, RecoveryEscalations, RecoveryScheduler,
     RetryOutcome, SystemClock, CARD_PREFIX,
 };
+use ferryx_hub::supervisor::Admission;
 
 use super::HubLaunch;
 use crate::agent_control::AgentControlOp;
@@ -53,6 +54,124 @@ pub fn session_tools() -> Option<Arc<ferryx_hub::meta::mhc_supervisor::SessionTo
 /// The installed autonomy service, if the hub is open in this daemon.
 pub fn installed() -> Option<Arc<Autonomy>> {
     current().map(|installed| installed.autonomy)
+}
+
+/// The turn budget of a handed-over goal: the owner keeps paying for the pane, so the
+/// supervisor stops after the same small budget the app chat's handover gets.
+const HANDOVER_TURN_LIMIT: u32 = 5;
+
+/// Hands the pane `host_id`/`session_id` to the supervisor as one observed goal: the goal
+/// watches the pane the owner already runs and admission types nothing into it. `instruction`
+/// is the owner's own words for the work the goal continues. `None` when no hub is open in this
+/// daemon.
+pub async fn hand_to_supervisor(
+    host_id: &str,
+    session_id: &str,
+    instruction: &str,
+    is_shell: bool,
+    hub_dispatched: bool,
+) -> Option<
+    Result<Admission, ferryx_hub::supervisor::admission::AdmissionError>,
+> {
+    let installed = current()?;
+    Some(
+        hand_over(
+            &installed,
+            host_id,
+            session_id,
+            instruction,
+            is_shell,
+            hub_dispatched,
+        )
+        .await,
+    )
+}
+
+async fn hand_over(
+    installed: &Installed,
+    host_id: &str,
+    session_id: &str,
+    instruction: &str,
+    is_shell: bool,
+    hub_dispatched: bool,
+) -> Result<Admission, ferryx_hub::supervisor::admission::AdmissionError> {
+    use ferryx_hub::supervisor::admission::{installation_owner, AdmissionError, OperationClass};
+    use ferryx_hub::supervisor::{
+        app_work::resolve_project, handover, identity_of, AdmitRequest, BoundSession,
+        ChannelProvider, ExecutionKind, ExecutionTarget,
+    };
+
+    let pool = installed.autonomy.pool();
+    let owner = installation_owner(pool).await?;
+    let Some(identity) = identity_of(pool, &owner).await? else {
+        return Err(AdmissionError::Unauthorized(format!(
+            "no supervisor identity for {owner}"
+        )));
+    };
+    // The fleet names the pane's working directory; a pane it does not list can be neither
+    // located on a project nor given a cwd, so it is refused.
+    let session_ref = SessionRef::new(host_id, session_id);
+    let fleet = installed.session_tools.fleet().await.map_err(|error| {
+        AdmissionError::Refused {
+            code: "SUPERVISOR_FLEET_UNAVAILABLE",
+            message: format!("the fleet was not listed: {error}"),
+        }
+    })?;
+    let Some(session) = fleet.iter().find(|known| known.session_ref == session_ref) else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_SESSION_UNKNOWN",
+            message: format!("the fleet does not know session {session_ref}"),
+        });
+    };
+    let title = match session.title.trim() {
+        "" => "Handed-over session",
+        title => title,
+    };
+    let Some(resolved) = resolve_project(
+        pool,
+        &identity.supervisor_id,
+        instruction,
+        title,
+        std::slice::from_ref(&session_ref),
+        Some(installed.session_tools.as_ref()),
+        false,
+    )
+    .await?
+    else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_PROJECT_UNKNOWN",
+            message: format!(
+                "no project of this supervisor checks out the working directory of {session_ref}"
+            ),
+        });
+    };
+    let request = AdmitRequest {
+        supervisor_id: identity.supervisor_id,
+        owner_principal: owner,
+        source_adapter: ChannelProvider::Desktop,
+        source_message_id: handover::handover_source_id(host_id, session_id),
+        body: instruction.to_owned(),
+        project_id: resolved.project_id,
+        channel_binding_id: None,
+        target: ExecutionTarget {
+            kind: ExecutionKind::Pty,
+            host_id: host_id.to_owned(),
+        },
+        title: title.to_owned(),
+        cwd: session.cwd.clone(),
+        instruction: instruction.to_owned(),
+        requirements: Vec::new(),
+        mode: ferryx_hub::goals::types::GoalMode::Supervised,
+        turn_limit: HANDOVER_TURN_LIMIT,
+        operation_grant: OperationClass::BASELINE.to_vec(),
+    };
+    let bound = BoundSession {
+        host_id: host_id.to_owned(),
+        session_id: session_id.to_owned(),
+    };
+    handover::handover(pool, request, bound, is_shell, hub_dispatched)
+        .await
+        .map_err(AdmissionError::Store)
 }
 
 /// The autonomy service opened over `hub`, if that is the one installed.
