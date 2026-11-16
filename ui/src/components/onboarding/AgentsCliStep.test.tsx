@@ -147,7 +147,6 @@ describe("AgentsCliStep", () => {
         agents={[agent("claude", true), agent("codex", false)]}
         isMac
         onAddProject={vi.fn()}
-        onConnectMachine={vi.fn()}
         onStepCompleted={vi.fn()}
         onFinish={onFinish}
         onSkip={onSkip}

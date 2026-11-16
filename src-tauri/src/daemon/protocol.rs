@@ -1181,6 +1181,14 @@ pub enum DaemonRequest {
         request: crate::paired_host::service::RedeemGrantRequest,
     },
     PairedHostClientAttachKey,
+    PairedHostReconcile,
+    /// The desktop's account session, handed to the daemon so signing in *is* the connection.
+    /// `session_token: None` is sign-out: the credential is forgotten and nothing is paired.
+    #[serde(rename_all = "camelCase")]
+    PairedHostAdoptAccountSession {
+        account_origin: String,
+        session_token: Option<String>,
+    },
     #[serde(rename_all = "camelCase")]
     PairedHostForget {
         host_id: String,
@@ -1561,6 +1569,9 @@ pub enum DaemonResponse {
     },
     PairedHostReadOk {
         host: crate::paired_host::inventory::HostView,
+    },
+    PairedHostReconcileOk {
+        report: crate::paired_host::account_reconcile::ReconcileReport,
     },
     PairedHostMigrateLegacyOk {
         receipt: crate::paired_host::inventory::MigrationReceipt,

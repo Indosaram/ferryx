@@ -37,6 +37,9 @@ vi.mock("../../remote/accountAttach", async (importOriginal) => ({
   getOrCreateAttachKey: grantMocks.attachKey,
 }));
 
+const pairingMocks = vi.hoisted(() => ({ adopt: vi.fn(async () => {}) }));
+vi.mock("../../lib/accountPairing", () => ({ adoptAccountSession: pairingMocks.adopt }));
+
 vi.mock("../../remote/accountSession", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../remote/accountSession")>()),
   requestGrant: grantMocks.requestGrant,
@@ -496,7 +499,7 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.queryByRole("radio", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /Pair Machine/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /generate qr|regenerate/i })).toBeNull();
-    expect(screen.getByRole("radio", { name: "Enrollment code (manual)" })).toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: /Enrollment code/i })).toBeNull();
     expect(screen.getByRole("radio", { name: "Connect with SSH" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Import SSH Config" })).toBeInTheDocument();
   });
@@ -619,32 +622,25 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       );
 
       expect(await screen.findByText("Enrolled Box")).toBeInTheDocument();
-      // Mirror scope cannot open projects: the row's single primary is Connect, never Add Project.
-      expect(screen.queryByRole("button", { name: "Add Project on Enrolled Box" })).toBeNull();
-      expect(screen.getByRole("button", { name: "Connect Enrolled Box" })).toBeInTheDocument();
+      // Mirror scope cannot open projects, and there is no Connect action to fall back on: the
+      // pairing pass upgrades the credential on its own, so the row simply reports progress.
+      expect(screen.getByRole("button", { name: "Add Project on Enrolled Box" })).toBeDisabled();
+      expect(screen.queryByRole("button", { name: /^Connect / })).toBeNull();
+      const mirrorStatus = screen.getByText("Enrolled Box").closest("[data-machine-id]")!
+        .querySelector('[data-testid="machine-status"]');
+      expect(mirrorStatus).toHaveAttribute("data-code", "PAIRING_ACCOUNT");
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("issues an enrollment code from the account bar into the Add Machine wizard and displays the exact CLI command", async () => {
+  it("offers no enrollment-code affordance: a signed-in machine pairs itself", async () => {
     const { store, inventory } = createTestInventory([]);
     await inventory.refresh();
 
-    const fetchMock = vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (url.includes("/api/account/v1/machines")) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => [],
-        };
-      }
-      if (url.includes("/api/account/v1/enrollment-codes") && opts?.method === "POST") {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ code: "enr_code_xyz", expiresAt: Date.now() + 600000 }),
-        };
+        return { ok: true, status: 200, json: async () => [] };
       }
       return { ok: false, status: 404, json: async () => ({}) };
     });
@@ -660,24 +656,24 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
         />
       );
 
-      const issueBtn = await screen.findByRole("button", { name: /Issue Enrollment Code/i });
-      expect(issueBtn).toBeInTheDocument();
+      // The account bar shows the signed-in account and a way out, never a code to hand over.
+      expect(await screen.findByLabelText("Sign Out")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Issue Enrollment Code/i })).toBeNull();
+      expect(screen.queryByText(/ferryx-cli account enroll/)).toBeNull();
+      expect(screen.queryByTestId("issued-enrollment-card")).toBeNull();
 
+      // Opening Add Machine never lands on an enrollment step either.
       await act(async () => {
-        fireEvent.click(issueBtn);
+        fireEvent.click(screen.getByRole("button", { name: /Add Machine/i }));
       });
-
-      // The account bar opens the wizard directly on its enrollment-code step.
-      expect(screen.getByRole("dialog", { name: "Add Machine" })).toBeInTheDocument();
-      expect(await screen.findByText("enr_code_xyz")).toBeInTheDocument();
-      const expectedCommand = `ferryx-cli account enroll --code enr_code_xyz --origin ${DEFAULT_RELAY_ORIGIN}`;
-      expect(screen.getByText(expectedCommand)).toBeInTheDocument();
+      expect(screen.queryByRole("radio", { name: /Enrollment code/i })).toBeNull();
+      expect(screen.queryByTestId("enrollment-command")).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("displays empty state copy stating the other machine has to enroll first when signed in with no machines", async () => {
+  it("displays empty state copy saying a machine pairs itself when signed in with no machines", async () => {
     const { store, inventory } = createTestInventory([]);
     await inventory.refresh();
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -706,7 +702,9 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
         />
       );
 
-      expect(await screen.findByText(/The other machine has to enroll first/i)).toBeInTheDocument();
+      // Signing in is the whole pairing step: the empty state must not send the user to a code.
+      expect(await screen.findByText(/pairs itself as soon as it signs in/i)).toBeInTheDocument();
+      expect(screen.queryByText(/enroll first/i)).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -984,19 +982,12 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.getByRole("button", { name: "Add Project" })).toBeInTheDocument();
   });
 
-  it("passes supplied non-default account origin to listMachines and issueEnrollmentCode", async () => {
+  it("passes supplied non-default account origin to listMachines", async () => {
     const { store, inventory } = createTestInventory();
     await inventory.refresh();
     const customOrigin = "https://custom.relay.company.corp";
 
-    const fetchMock = vi.fn().mockImplementation(async (url: string, opts?: RequestInit) => {
-      if (url.includes("/api/account/v1/enrollment-codes") && opts?.method === "POST") {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ code: "ENROLL-123456", expiresAt: Date.now() + 600000 }),
-        };
-      }
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
       if (url.includes("/api/account/v1/machines")) {
         return {
           ok: true,
@@ -1028,25 +1019,10 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
           }),
         }),
       );
-
-      // Click "Issue Enrollment Code" button
-      const issueBtn = screen.getByRole("button", { name: "Issue Enrollment Code" });
-      await act(async () => {
-        fireEvent.click(issueBtn);
-      });
-
-      expect(fetchMock).toHaveBeenCalledWith(
-        `${customOrigin}/api/account/v1/enrollment-codes`,
-        expect.objectContaining({
-          method: "POST",
-          headers: expect.objectContaining({
-            Authorization: "Bearer test-session-token",
-          }),
-        }),
-      );
-      expect(await screen.findByTestId("issued-enrollment-card")).toBeInTheDocument();
-      expect(screen.getByTestId("enrollment-command")).toHaveTextContent(
-        `ferryx-cli account enroll --code ENROLL-123456 --origin ${customOrigin}`,
+      // No enrollment-code request is ever made from this surface.
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        expect.stringContaining("/enrollment-codes"),
+        expect.anything(),
       );
     } finally {
       vi.unstubAllGlobals();
@@ -1154,18 +1130,14 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       const absentRow = screen.getByText("Ungranted Account Box").closest("[data-machine-id]");
       expect(absentRow).toBeInTheDocument();
       const absentStatus = absentRow!.querySelector('[data-testid="machine-status"]');
-      expect(absentStatus).toHaveAttribute("data-code", "MACHINE_GRANT_REQUIRED");
-      expect(absentStatus).toHaveTextContent("Needs access");
+      // Signing in pairs every machine of the account, so an unredeemed grant is a transient
+      // state with no action attached: the row reports the pairing and the user waits.
+      expect(absentStatus).toHaveAttribute("data-code", "PAIRING_ACCOUNT");
+      expect(absentStatus).toHaveTextContent("Setting up");
 
-      // Projects cannot be added without the grant: the row offers Connect instead of Add Project.
-      expect(screen.queryByRole("button", { name: "Add Project on Ungranted Account Box" })).toBeNull();
-
-      // An enrolled machine whose grant was never redeemed on this desktop used to be a dead end:
-      // every action disabled, with no way to obtain the grant from here. Offer the way forward.
-      const connectBtn = screen.getByRole("button", { name: "Connect Ungranted Account Box" });
-      expect(connectBtn).not.toBeDisabled();
-      // The granted machine is already usable, so it must NOT show a redundant Connect action.
-      expect(screen.queryByRole("button", { name: "Connect Granted Account Box" })).toBeNull();
+      // No registration affordance exists anywhere in the UI.
+      expect(screen.queryByRole("button", { name: /^Connect / })).toBeNull();
+      expect(screen.getByRole("button", { name: "Add Project on Ungranted Account Box" })).toBeDisabled();
 
       // Verify machine-scoped machine
       expect(await screen.findByText("Granted Account Box")).toBeInTheDocument();
@@ -1223,14 +1195,15 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       .find((el) => el.getAttribute("data-code") === "REPAIR_REQUIRES_ENROLLMENT");
     expect(statusEl).toBeDefined();
     if (!statusEl) return;
-    expect(statusEl.textContent).toContain("enrollment code");
-    expect(statusEl.textContent).toContain("ferryx-cli account enroll");
+    // Re-pairing is signing in again; there is no code to read out or run by hand.
+    expect(statusEl.textContent).toContain("pairs itself again");
+    expect(statusEl.textContent).not.toContain("enrollment code");
+    expect(statusEl.textContent).not.toContain("ferryx-cli account enroll");
     expect(screen.queryByText(/machine-access PIN/)).toBeNull();
   });
 
-  it("re-pair on an enrolled account machine re-issues its machine grant", async () => {
-    grantMocks.attachKey.mockResolvedValue({ publicKey: "test-attach-public-key" });
-    grantMocks.requestGrant.mockRejectedValue(new Error("GRANT_STOP_FOR_TEST"));
+  it("re-pair on an enrolled account machine hands the account session to the daemon instead of asking for a grant", async () => {
+    pairingMocks.adopt.mockClear();
 
     const machineScopedMachine: AccountMachineView = {
       machineRecordId: "rec-machine",
@@ -1290,14 +1263,10 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
         fireEvent.click(repairButton);
       });
 
-      expect(grantMocks.requestGrant).toHaveBeenCalledTimes(1);
-      expect(grantMocks.requestGrant).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.anything(),
-        expect.anything(),
-        expect.anything(),
-        expect.objectContaining({ grantScope: "machine" }),
-      );
+      // Signing in already owns the pairing. Re-pair hands the same account session to the
+      // daemon again, which redeems a fresh machine grant with no per-machine UI step.
+      expect(pairingMocks.adopt).toHaveBeenCalledWith(DEFAULT_RELAY_ORIGIN, "test-token");
+      expect(grantMocks.requestGrant).not.toHaveBeenCalled();
       expect(screen.queryByRole("status", { name: /REPAIR_REQUIRES_ENROLLMENT/ })).toBeNull();
       const statusElements = screen.queryAllByRole("status");
       for (const el of statusElements) {

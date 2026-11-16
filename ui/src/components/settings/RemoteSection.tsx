@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavigation";
-import { DEFAULT_MACHINE_LABEL, nativePairedHostCommands, pairedHostInventory } from "../../lib/pairedHostInventory";
+import { DEFAULT_MACHINE_LABEL, pairedHostInventory } from "../../lib/pairedHostInventory";
 import type { PairedHostContext } from "../../lib/pairedDaemonProject";
 import { extractIpcErrorMessage, resetSshHostsCache, useSshHosts, type SshHost } from "../../lib/sshHosts";
 import { isTailscaleProvisioned, syncTailscaleMachines, useTailscaleDiscovery, useTailscaleTargetsByHost } from "../../lib/tailscaleDiscovery";
 import { remoteHostStore, type HostEndpoint, type RemoteHostStore } from "../../state/remoteHostStore";
 import {
   AccountSessionError,
-  allocateSession,
   clearStoredAccountSessionToken,
   getStoredAccountTokenOrigin,
   logoutAccountSession,
@@ -17,18 +16,14 @@ import {
   storeAccountOrigin,
   approveMachineRequest,
   denyMachineRequest,
-  issueEnrollmentCode,
   issueInstallKey,
   listMachines,
   listPendingMachineRequests,
   lookupMachineRequest,
-  openTunnel,
-  redeemInTunnel,
-  requestGrant,
   type AccountMachineView,
   type PendingMachineRequest,
 } from "../../remote/accountSession";
-import { getOrCreateAttachKey } from "../../remote/accountAttach";
+import { adoptAccountSession } from "../../lib/accountPairing";
 import { getAgentIntegration, toIpcError } from "../../lib/tauri";
 import { useRemoteDesktopSupported } from "../../lib/remoteDesktop";
 import { AccountSignIn } from "./AccountSignIn";
@@ -51,6 +46,9 @@ import {
   type MixedItem,
 } from "./remote/remoteModel";
 import { useSshActions } from "./remote/useSshActions";
+
+/** Stop-only setting: "off" disables automatic account pairing. Absent means on. */
+const AUTO_PAIR_KEY = "ferryx.remote.autoPairAccountMachines";
 
 /** Account polling cadence while the Add Machine wizard is open or a machine awaits approval. */
 export const ACCOUNT_ONBOARDING_POLL_MS = 5_000;
@@ -133,8 +131,7 @@ export function RemoteSection({
           err instanceof AccountSessionError &&
           err.code === "UNAUTHORIZED"
         ) {
-          clearStoredAccountSessionToken();
-          setAccountToken(null);
+          endAccountSession();
           return;
         }
         const message = accountErrorMessage(err);
@@ -168,18 +165,6 @@ export function RemoteSection({
     }
   };
 
-  // The Add Machine wizard owns the issued code, its command and the copy state; it shows the
-  // failure itself, so this only translates the error into a readable message.
-  const handleIssueEnrollmentCode = async (): Promise<string> => {
-    if (!accountToken) throw new Error("Sign in to issue an enrollment code");
-    try {
-      const res = await issueEnrollmentCode(accountOrigin, accountToken);
-      return res.code;
-    } catch (err: unknown) {
-      throw new Error(accountErrorMessage(err) ?? "Failed to issue enrollment code");
-    }
-  };
-
   // Pending approval requests addressed to this account (by email hint). An older account
   // server without the endpoint, or any transient failure, leaves the list as it was: the
   // cards are an addition to the machine list, never a reason to show an error.
@@ -203,16 +188,39 @@ export function RemoteSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountToken, accountOrigin]);
 
+  const forgetAccountSession = () => {
+    void adoptAccountSession(accountOrigin, null);
+  };
+  // Sign-out, an origin switch and a rejected token all end here, so the daemon is always told
+  // to stop using a session that is going away.
+  const endAccountSession = () => {
+    clearStoredAccountSessionToken();
+    setAccountToken(null);
+    setAccountMachines([]);
+    setPendingRequests([]);
+    forgetAccountSession();
+  };
   const handleSignOut = () => {
     if (accountToken) {
       const issuerOrigin = getStoredAccountTokenOrigin() || accountOrigin;
       void logoutAccountSession(issuerOrigin, accountToken);
     }
-    clearStoredAccountSessionToken();
-    setAccountToken(null);
-    setAccountMachines([]);
-    setPendingRequests([]);
+    endAccountSession();
   };
+  // Stop-only setting: absent means on, and only an explicit off stops pairing.
+  const autoPair = useSyncExternalStore(
+    (onChange) => {
+      const onStorage = (event: StorageEvent) => { if (event.key === AUTO_PAIR_KEY) onChange(); };
+      window.addEventListener("storage", onStorage);
+      return () => window.removeEventListener("storage", onStorage);
+    },
+    () => window.localStorage.getItem(AUTO_PAIR_KEY) !== "off",
+  );
+  useEffect(() => {
+    if (!accountToken || !autoPair) return;
+    void adoptAccountSession(accountOrigin, accountToken);
+  }, [accountToken, accountOrigin, autoPair]);
+
   const handleUseAccountOrigin = () => {
     let next: URL;
     try {
@@ -230,9 +238,7 @@ export function RemoteSection({
     setAccountOriginError(null);
     if (origin === accountOrigin) return;
     storeAccountOrigin(origin);
-    clearStoredAccountSessionToken();
-    setAccountToken(null);
-    setAccountMachines([]);
+    endAccountSession();
     setActionError(null);
     setConfiguredOrigin(origin);
   };
@@ -377,101 +383,6 @@ export function RemoteSection({
   };
 
 
-  // Paired actions
-  // Redeems an account-issued machine grant on THIS desktop. The web client has had this flow
-  // since account enrollment shipped; the desktop never did, so an enrolled machine sat at
-  // "Needs Grant" forever and its projects could not be added. Every piece already existed --
-  // the grant API, the encrypted tunnel, and `paired_host_migrate_legacy` which persists the
-  // redeemed device token -- so this wires them together rather than inventing a new path.
-  const handleConnectAccountMachine = async (host: HostEndpoint) => {
-    if (busy) return;
-    const machine = accountMachines.find((m) => m.machineId === host.machineId);
-    if (!machine || !accountToken) return;
-
-    setBusy(true);
-    setActionError(null);
-    try {
-      // A daemon that redeems grants itself keeps the device key in Rust and stores the host with
-      // its machine attach key, so its relay traffic is end-to-end encrypted from the start.
-      const capabilities = await nativePairedHostCommands.capabilities().catch(() => null);
-      if (
-        capabilities?.pairedHostE2EV1 === true
-        && nativePairedHostCommands.redeemGrant
-        && nativePairedHostCommands.clientAttachPublicKey
-      ) {
-        const clientPublicKey = await nativePairedHostCommands.clientAttachPublicKey();
-        const grant = await requestGrant(
-          accountOrigin,
-          accountToken,
-          machine,
-          clientPublicKey,
-          { grantScope: "machine" },
-        );
-        await nativePairedHostCommands.redeemGrant({
-          relayOrigin: grant.relayOrigin || accountOrigin,
-          machineId: machine.machineId,
-          displayLabel: machine.displayName,
-          pairingToken: grant.pairingToken,
-          machineAttachPublicKey: grant.machineAttachPublicKey,
-          enrollmentEpoch: String(machine.enrollmentEpoch),
-          accountSessionToken: accountToken,
-        });
-        await refreshAccountMachines(
-          accountToken,
-          accountOrigin,
-          (message) => `Connected, but the machine list could not be refreshed: ${message}`,
-        );
-        return;
-      }
-
-      const attachKey = await getOrCreateAttachKey();
-      if (!attachKey) throw new Error("ATTACH_KEY_UNSUPPORTED");
-
-      // A mirror grant connects but is refused by every route that lists or opens projects,
-      // which is exactly the state this button exists to leave.
-      const grant = await requestGrant(
-        accountOrigin,
-        accountToken,
-        machine,
-        attachKey.publicKey,
-        { grantScope: "machine" },
-      );
-      const session = await allocateSession(accountOrigin, accountToken, machine.machineId);
-      const tunnel = await openTunnel({
-        relayOrigin: grant.relayOrigin || accountOrigin,
-        machineId: machine.machineId,
-        enrollmentEpoch: machine.enrollmentEpoch,
-        machineAttachPublicKey: grant.machineAttachPublicKey,
-        localKeyPair: attachKey,
-        sessionId: session.sessionId,
-      });
-      try {
-        const pair = await redeemInTunnel(tunnel.transport, grant.pairingToken, machine.displayName);
-        // Persist through the daemon so the grant survives a restart and the local inventory
-        // reports `paired` with machine scope.
-        await nativePairedHostCommands.migrate({
-          relayOrigin: grant.relayOrigin || accountOrigin,
-          machineId: machine.machineId,
-          displayLabel: machine.displayName,
-          deviceToken: pair.token,
-        });
-      } finally {
-        tunnel.close();
-      }
-      // The grant itself succeeded; only the refresh failed, so say that rather than
-      // leaving a stale "Needs Grant" row with no explanation.
-      await refreshAccountMachines(
-        accountToken,
-        accountOrigin,
-        (message) => `Connected, but the machine list could not be refreshed: ${message}`,
-      );
-    } catch (failure) {
-      setActionError(failure instanceof Error ? failure.message : "ACCOUNT_GRANT_FAILED");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const handleCheckPaired = async (host: HostEndpoint) => {
     if (!host.generation || state.nativeStatus !== "ready" || busy) return;
     setBusy(true);
@@ -600,7 +511,7 @@ export function RemoteSection({
         // the same identity-checked path as Connect. Anything else enrolls first.
         if (enrolled && accountToken) {
           setRepairHostId(null);
-          void handleConnectAccountMachine(host);
+          if (accountToken) void adoptAccountSession(accountOrigin, accountToken);
           return;
         }
         setRepairHostId(host.hostId);
@@ -653,7 +564,6 @@ export function RemoteSection({
         <AccountBar
           accountOrigin={accountOrigin}
           showNoMachinesHint={accountMachines.length === 0 && !accountMachinesLoading}
-          onIssueCode={() => openAddMachine("enrollment")}
           onSignOut={handleSignOut}
         />
       )}
@@ -710,7 +620,6 @@ export function RemoteSection({
                 canOpenProject={Boolean(onOpenProject)}
                 signedIn={Boolean(accountToken)}
                 onAddProject={() => handleOpenProject({ kind: "pairedDaemon", hostId: host.hostId, generation: host.generation! })}
-                onConnect={() => void handleConnectAccountMachine(host)}
                 onCheck={() => void handleCheckPaired(host)}
                 onForget={() => { openDrawer(key, true); setConfirmForget({ hostId: host.hostId, generation: host.generation! }); }}
                 onOpenRemoteDesktop={remoteDesktopSupported && onOpenRemoteDesktop
@@ -769,14 +678,13 @@ export function RemoteSection({
         }}
       />
 
-      {/* ONE Add Machine opens the method-first wizard: enrollment code, SSH, or config import */}
+      {/* ONE Add Machine opens the method-first wizard: install command, approval, SSH, or config import */}
       <AddMachineModal
         isOpen={isAddModalOpen}
         onClose={() => setIsAddModalOpen(false)}
         inventory={inventory}
         initialMethod={addMachineMethod}
         accountOrigin={accountOrigin}
-        onIssueEnrollmentCode={accountToken ? handleIssueEnrollmentCode : undefined}
         onIssueInstallKey={accountToken ? handleIssueInstallKey : undefined}
         accountMachines={accountMachines}
         onLookupMachineRequest={accountToken ? handleLookupMachineRequest : undefined}

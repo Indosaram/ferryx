@@ -219,6 +219,31 @@ pub async fn paired_host_redeem_grant<R: tauri::Runtime>(
 }
 
 #[cfg(feature = "desktop")]
+/// Pairs every machine of the signed-in account. The desktop calls this once on sign-in and
+/// after a reconnect; there is no per-machine Connect action to call instead.
+#[tauri::command]
+pub async fn paired_host_reconcile(
+    daemon: State<'_, Arc<DaemonClient>>,
+) -> Result<crate::paired_host::account_reconcile::ReconcileReport> {
+    daemon.paired_host_reconcile().await
+}
+
+#[cfg(feature = "desktop")]
+/// The desktop's account session, handed to the daemon. Signing in pairs every machine of the
+/// account and opens agent control; there is no separate registration step in the UI.
+/// `session_token: None` is sign-out.
+#[tauri::command]
+pub async fn paired_host_adopt_account_session(
+    daemon: State<'_, Arc<DaemonClient>>,
+    account_origin: String,
+    session_token: Option<String>,
+) -> Result<crate::paired_host::account_reconcile::ReconcileReport> {
+    daemon
+        .paired_host_adopt_account_session(account_origin, session_token)
+        .await
+}
+
+#[cfg(feature = "desktop")]
 /// The public half of the key this client attaches with; the grant binds it. The private
 /// half never leaves the daemon.
 #[tauri::command]

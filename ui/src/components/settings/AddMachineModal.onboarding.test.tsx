@@ -72,7 +72,8 @@ describe("AddMachineModal - install command method", () => {
   it("defaults to Install command when signed in", () => {
     render(<AddMachineModal isOpen onClose={() => {}} onSuccess={() => {}} onIssueInstallKey={vi.fn()} />);
     expect(screen.getByRole("radio", { name: "Install command" })).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByRole("radio", { name: "Enrollment code (manual)" })).toHaveAttribute("aria-checked", "false");
+    // No manual enrollment method exists any more: a signed-in machine pairs itself.
+    expect(screen.queryByRole("radio", { name: /Enrollment code/i })).toBeNull();
   });
 
   it("issues one key on open and shows the sh and PowerShell commands with copy buttons and expiry", async () => {
@@ -96,6 +97,21 @@ describe("AddMachineModal - install command method", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy Linux and macOS" })); });
     expect(invokeMock).toHaveBeenCalledWith("cmd_clipboard_write_text", { text: issued.installCommand.sh });
     expect(screen.getByRole("button", { name: "Copy Linux and macOS" })).toHaveTextContent("Copied");
+  });
+
+  it("reports Copy failed, not Copied, when the clipboard write is rejected", async () => {
+    // The install command is the only way to boot the other machine, so a silent
+    // "Copied" on a refused write would send the user away with an empty clipboard.
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "cmd_clipboard_write_text") throw new Error("clipboard unavailable");
+      return undefined;
+    });
+    render(<AddMachineModal isOpen onClose={() => {}} onSuccess={() => {}} onIssueInstallKey={vi.fn().mockResolvedValue(issued)} initialMethod="install" />);
+    await screen.findByTestId("install-key-card");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy Linux and macOS" })); });
+    const button = screen.getByRole("button", { name: "Copy Linux and macOS" });
+    expect(button).toHaveTextContent("Copy failed");
+    expect(button).not.toHaveTextContent("Copied");
   });
 
   it("regenerates a key with New key", async () => {

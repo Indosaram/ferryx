@@ -102,9 +102,8 @@ function PairedDetails(props: PairedDetailsProps) {
       ) : null}
       {props.repairRequested ? (
         <p role="status" data-code="REPAIR_REQUIRES_ENROLLMENT" className="text-[12px] text-muted-foreground">
-          Re-pairing goes through your Ferryx account. Sign in above, issue an enrollment code, and run{" "}
-          <code className="font-mono">ferryx-cli account enroll --code &lt;code&gt;</code> on that machine. It then
-          appears in this list and can be connected. No credentials have been replaced.
+          Re-pairing goes through your Ferryx account: sign in above and this machine pairs itself again. No
+          credentials have been replaced.
         </p>
       ) : null}
       {props.confirmingForget ? (

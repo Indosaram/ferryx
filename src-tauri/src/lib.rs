@@ -1890,6 +1890,8 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         crate::ipc::paired_host::paired_host_pair,
         crate::ipc::paired_host::paired_host_migrate_legacy,
         crate::ipc::paired_host::paired_host_redeem_grant,
+        crate::ipc::paired_host::paired_host_reconcile,
+        crate::ipc::paired_host::paired_host_adopt_account_session,
         crate::ipc::paired_host::paired_host_client_attach_public_key,
         crate::ipc::paired_host::paired_host_forget,
         crate::ipc::paired_host::paired_host_attach_session,

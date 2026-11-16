@@ -152,33 +152,6 @@ describe("RemoteSection review fixes", () => {
     expect(screen.getAllByTestId("machine-status")[0]).toHaveAttribute("data-code", "OFFLINE");
   });
 
-  it("shows Copy failed (not Copied) when the clipboard write fails and labels the dismiss button", async () => {
-    const { store, inventory } = createInventory();
-    await inventory.refresh();
-    invokeMock.mockImplementation(async (command: string) => {
-      if (command === "cmd_ssh_list_hosts") return [];
-      if (command === "cmd_clipboard_write_text") throw new Error("clipboard unavailable");
-      return undefined;
-    });
-    vi.stubGlobal("fetch", vi.fn(async (url: string, opts?: RequestInit) =>
-      String(url).includes("enrollment-codes") && opts?.method === "POST"
-        ? jsonResponse({ code: "ENR-1", expiresAt: Date.now() + 600000 })
-        : jsonResponse([])));
-    Object.defineProperty(navigator, "clipboard", { value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) }, configurable: true });
-    Object.defineProperty(document, "execCommand", { value: vi.fn(() => false), configurable: true });
-
-    await act(async () => {
-      render(<RemoteSection store={store} inventory={inventory} accountOrigin={DEFAULT_RELAY_ORIGIN} accountSessionToken="tok" />);
-    });
-    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: /Issue Enrollment Code/i })); });
-    // The enrollment card now lives in the Add Machine wizard, which issues the code on open.
-    expect(await screen.findByRole("button", { name: "Dismiss enrollment code" })).toBeInTheDocument();
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Copy/ })); });
-
-    expect(screen.getByRole("button", { name: /Copy failed/ })).toBeInTheDocument();
-    expect(screen.queryByText("Copied")).toBeNull();
-  });
-
   it("requires confirmation before deleting an SSH machine", async () => {
     const { store, inventory } = createInventory();
     await inventory.refresh();

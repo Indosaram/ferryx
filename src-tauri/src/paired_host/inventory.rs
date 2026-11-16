@@ -469,6 +469,24 @@ impl Inventory {
             })
             .collect()
     }
+    /// Machine id to enrollment epoch for hosts paired end-to-end at machine scope.
+    ///
+    /// Internal only: the outward projection deliberately keeps its shape so a client built
+    /// before this accessor existed still decodes it.
+    pub fn paired_machine_epochs(&self) -> BTreeMap<String, String> {
+        self.disk
+            .hosts
+            .values()
+            .filter(|row| {
+                row.auth_status == AuthStatus::Paired && row.grant_scope == GrantScope::Machine
+            })
+            .filter_map(|row| {
+                row.attach
+                    .as_ref()
+                    .map(|attach| (row.machine_id.clone(), attach.enrollment_epoch.clone()))
+            })
+            .collect()
+    }
     /// Durable exact-generation verification before desktop removes its legacy copy.
     pub fn read_verified(&mut self, id: &str, generation: Epoch) -> Result<HostView> {
         self.validate_generation(id, generation)?;

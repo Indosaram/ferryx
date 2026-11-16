@@ -1,11 +1,10 @@
-import { ChevronRight, FolderPlus, Monitor } from "lucide-react";
+import { ChevronRight, FolderPlus } from "lucide-react";
 
 import { Button } from "../ui/button";
 
 export type GettingStartedChecklistProps = {
   permissionsSummary: { granted: number; total: number } | null;
   onAddProject: () => void;
-  onConnectMachine: () => void;
   onOpenWelcome: () => void;
 };
 
@@ -15,7 +14,6 @@ const CHOICE_CLASS =
 export function GettingStartedChecklist({
   permissionsSummary,
   onAddProject,
-  onConnectMachine,
   onOpenWelcome,
 }: GettingStartedChecklistProps): JSX.Element {
   const permissionsLine =
@@ -56,27 +54,6 @@ export function GettingStartedChecklist({
               <div className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
                 Pick a folder on this computer. Git repositories unlock
                 worktrees.
-              </div>
-            </div>
-            <ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" />
-          </button>
-
-          <button
-            type="button"
-            data-testid="checklist-connect-machine"
-            aria-label="Connect machine"
-            onClick={onConnectMachine}
-            className={CHOICE_CLASS}
-          >
-            <div className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/60">
-              <Monitor className="size-4 text-foreground" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-[13px] font-medium text-foreground">
-                Connect a machine
-              </div>
-              <div className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
-                Pair another computer through your Ferryx account.
               </div>
             </div>
             <ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground" />

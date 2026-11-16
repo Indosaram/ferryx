@@ -3,7 +3,6 @@ import {
   logoutAccountSession,
   requestGrant,
   allocateSession,
-  issueEnrollmentCode,
   AccountSessionError,
   storeAccountSessionToken,
   getStoredAccountSessionToken,
@@ -189,58 +188,6 @@ describe("Account Follow-ups: Sign-out, Auth Classification, and Last Target Per
       let err: AccountSessionError | null = null;
       try {
         await allocateSession(relayUrl, "tok", "mach-1");
-      } catch (e) {
-        if (e instanceof AccountSessionError) err = e;
-      }
-      expect(err?.status).toBe(401);
-      expect(err?.code).toBe("UNAUTHORIZED");
-    });
-
-    it("issueEnrollmentCode: HTML 403 and text 401 do NOT yield UNAUTHORIZED, keeping ENROLLMENT_CODE_FAILED", async () => {
-      globalThis.fetch = vi.fn().mockImplementation(async () =>
-        new Response("<html>Forbidden 403</html>", {
-          status: 403,
-          headers: { "Content-Type": "text/html" },
-        })
-      );
-
-      let err403: AccountSessionError | null = null;
-      try {
-        await issueEnrollmentCode(relayUrl, "tok");
-      } catch (err) {
-        if (err instanceof AccountSessionError) err403 = err;
-      }
-      expect(err403?.status).toBe(403);
-      expect(err403?.code).toBe("ENROLLMENT_CODE_FAILED");
-
-      globalThis.fetch = vi.fn().mockImplementation(async () =>
-        new Response("Unauthorized text 401", {
-          status: 401,
-          headers: { "Content-Type": "text/plain" },
-        })
-      );
-
-      let err401: AccountSessionError | null = null;
-      try {
-        await issueEnrollmentCode(relayUrl, "tok");
-      } catch (err) {
-        if (err instanceof AccountSessionError) err401 = err;
-      }
-      expect(err401?.status).toBe(401);
-      expect(err401?.code).toBe("ENROLLMENT_CODE_FAILED");
-    });
-
-    it("issueEnrollmentCode: structured 401 with code UNAUTHORIZED yields UNAUTHORIZED", async () => {
-      globalThis.fetch = vi.fn().mockImplementation(async () =>
-        new Response(JSON.stringify({ code: "UNAUTHORIZED", message: "Session expired" }), {
-          status: 401,
-          headers: { "Content-Type": "application/json" },
-        })
-      );
-
-      let err: AccountSessionError | null = null;
-      try {
-        await issueEnrollmentCode(relayUrl, "tok");
       } catch (e) {
         if (e instanceof AccountSessionError) err = e;
       }
