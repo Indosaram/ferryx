@@ -7,23 +7,27 @@
  *
  *   bun scripts/qa/mobile-chat-visual-qa.mjs --evidence-dir <dir> [--url <harness url>]
  *
- * The Vite dev server and the harness page (ui/mobile-chat-qa.html) must already be running.
+ * Appearance-only matrix (exactly 16 PNGs, no JSON report; use an empty directory):
+ *   bun scripts/qa/mobile-chat-visual-qa.mjs --appearance --evidence-dir <dir> [--url <appearance harness url>]
+ *
+ * The Vite dev server and the harness pages must already be running.
  */
 
 import { createRequire } from "node:module";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = join(fileURLToPath(import.meta.url), "..", "..", "..");
 
 function parseArgs(argv) {
-  const args = { evidenceDir: null, url: "http://127.0.0.1:5173/mobile-chat-qa.html" };
+  const args = { evidenceDir: null, url: null, appearance: false };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--evidence-dir") args.evidenceDir = argv[++i];
     else if (argv[i] === "--url") args.url = argv[++i];
+    else if (argv[i] === "--appearance") args.appearance = true;
     else if (argv[i] === "--help" || argv[i] === "-h") {
-      console.log("usage: bun scripts/qa/mobile-chat-visual-qa.mjs --evidence-dir <dir> [--url <harness url>]");
+      console.log("usage: bun scripts/qa/mobile-chat-visual-qa.mjs [--appearance] --evidence-dir <dir> [--url <harness url>]");
       process.exit(0);
     } else {
       console.error(`mobile-chat-visual-qa: unrecognized argument: ${argv[i]}`);
@@ -34,6 +38,7 @@ function parseArgs(argv) {
     console.error("mobile-chat-visual-qa: --evidence-dir is required");
     process.exit(2);
   }
+  args.url ??= `http://127.0.0.1:5173/${args.appearance ? "appearance-qa" : "mobile-chat-qa"}.html`;
   return args;
 }
 
@@ -344,6 +349,55 @@ const TOP_BAR_PROBE = (expectedWidth) => {
   };
 };
 
+async function captureAppearance(args, chromium) {
+  // Refuse reuse rather than deleting evidence or silently leaving more than 16 files.
+  if (readdirSync(args.evidenceDir).length !== 0) throw new Error("Appearance capture requires an empty evidence directory");
+  const states = ["appearance-preview", "theme-import-error", "custom-css-active", "remote-appearance-sheet"];
+  const shots = [];
+  const errors = [];
+  const browser = await chromium.launch({ channel: "chrome", headless: true });
+  try {
+    for (const viewport of [{ width: 390, height: 844 }, { width: 1440, height: 900 }]) {
+      for (const theme of ["light", "dark"]) {
+        const context = await browser.newContext({ viewport, deviceScaleFactor: 2,
+          hasTouch: viewport.width === 390, isMobile: viewport.width === 390, reducedMotion: "reduce" });
+        try {
+          const page = await context.newPage();
+          page.on("pageerror", (error) => errors.push(error.message));
+          for (const state of states) {
+            const url = new URL(args.url);
+            url.searchParams.set("state", state);
+            url.searchParams.set("theme", theme);
+            await page.goto(url.href, { waitUntil: "domcontentloaded" });
+            await page.waitForSelector(`[data-testid="qa-${state}"]`, { timeout: 15000 });
+            await waitForQaReady(page);
+            if (state === "appearance-preview" || state === "custom-css-active") {
+              await page.waitForSelector('[data-testid="appearance-chat-preview"] .katex', { timeout: 15000 });
+            }
+            if (state === "theme-import-error") await page.waitForSelector('[role="alert"]', { timeout: 15000 });
+            if (state === "remote-appearance-sheet") await page.waitForSelector('[data-testid="remote-appearance-sheet"]', { timeout: 15000 });
+            const applied = await page.evaluate(() => document.documentElement.dataset.theme);
+            if (applied !== theme) throw new Error(`${state}: expected ${theme}, received ${applied}`);
+            const name = `${state}-${theme}-${viewport.width}.png`;
+            await page.screenshot({ path: join(args.evidenceDir, name), fullPage: true });
+            shots.push(name);
+          }
+        } finally {
+          await context.close();
+        }
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+  if (errors.length) throw new Error(`Appearance page errors: ${errors.join("\n")}`);
+  const files = readdirSync(args.evidenceDir);
+  if (shots.length !== 16 || new Set(shots).size !== 16 || files.length !== 16 || files.some((file) => !shots.includes(file))) {
+    throw new Error("Appearance capture did not produce exactly 16 distinct qualified PNGs");
+  }
+  console.log(JSON.stringify({ gate: "PASS", shots }, null, 2));
+}
+
 async function run() {
   const PHONE_HOME_STATES = [
     "home-supervisor",
@@ -356,6 +410,7 @@ async function run() {
   const args = parseArgs(process.argv.slice(2));
   mkdirSync(args.evidenceDir, { recursive: true });
   const { chromium } = loadPlaywright();
+  if (args.appearance) return captureAppearance(args, chromium);
   const browser = await chromium.launch({ channel: "chrome", headless: true });
   const report = { url: args.url, probes: {}, shots: [], consoleErrors: [] };
 

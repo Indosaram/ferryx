@@ -3,6 +3,12 @@
 // the on-screen keyboard and the terminal key dock.
 import React from "react";
 
+import { AppearanceChatPreview } from "../components/settings/AppearanceChatPreview";
+import { AppearanceSection, ThemeLibrary } from "../components/settings/AppearanceSection";
+import { DEFAULT_APPEARANCE_SETTINGS, useAppearanceSettings } from "../lib/appearanceSettings";
+import { APPEARANCE_SETTINGS_STORAGE_KEY } from "../lib/storageKeys";
+import { RemoteAppearanceSheet } from "../remote/appearance/RemoteAppearanceSheet";
+
 import { userFacingError } from "../remote/userFacingError";
 import { ReferencePromptCard } from "../remote/chat/ReferencePromptCard";
 import type { HeldMessage } from "../remote/chat/referenceQueue";
@@ -19,7 +25,68 @@ export const CHAT_QA_STATES = [
   "offline",
   "keyboard-open",
   "terminal-dock",
+  "appearance-preview",
+  "theme-import-error",
+  "custom-css-active",
+  "remote-appearance-sheet",
 ] as const;
+
+export const APPEARANCE_QA_STATES = [
+  "appearance-preview",
+  "theme-import-error",
+  "custom-css-active",
+  "remote-appearance-sheet",
+] as const satisfies readonly ChatQaState[];
+
+export type AppearanceQaState = (typeof APPEARANCE_QA_STATES)[number];
+
+export function isAppearanceQaState(state: string): state is AppearanceQaState {
+  return (APPEARANCE_QA_STATES as readonly string[]).includes(state);
+}
+
+/** Seed only the canonical browser store; the production applier owns all CSS. */
+export function seedAppearanceQaState(state: string, theme: "light" | "dark") {
+  window.localStorage.setItem(APPEARANCE_SETTINGS_STORAGE_KEY, JSON.stringify({
+    ...DEFAULT_APPEARANCE_SETTINGS,
+    theme,
+    accentColor: "rose",
+    customThemes: state === "theme-import-error"
+      ? [{ version: 2, id: "qa-invalid", name: "Rejected import", base: theme, tokens: { "--radius-lg": "2px" } }]
+      : [{ version: 1, id: "qa-saved", name: "QA saved theme", base: theme, tokens: {} }],
+    customCss: state === "custom-css-active"
+      ? '[data-preview-row="user"] { border: 2px solid #be185d; border-radius: 16px; }'
+      : "",
+  }));
+}
+
+/** Real appearance surfaces, with fixed local data and no workspace/transport. */
+export function AppearanceQaFixture({ state }: { state: string }) {
+  const { settings, invalidThemes, updateSettings } = useAppearanceSettings();
+  const [sheetOpen, setSheetOpen] = React.useState(true);
+  if (!isAppearanceQaState(state)) {
+    return <p role="status" data-testid="appearance-qa-fallback">Unknown appearance QA state.</p>;
+  }
+  return <main data-testid={`qa-${state}`} className="min-h-screen bg-background p-4 text-foreground sm:p-6">
+    <div className="mx-auto max-w-4xl space-y-4">
+      {state === "appearance-preview" ? <AppearanceSection /> : null}
+      {state === "theme-import-error" ? <ThemeLibrary settings={settings} invalidThemes={invalidThemes}
+        updateSettings={updateSettings} resolvedTheme={settings.theme === "light" ? "light" : "dark"} /> : null}
+      {state === "custom-css-active" ? <>
+        <h1 className="text-lg font-semibold">Custom CSS active</h1>
+        <button type="button" className="min-h-11 rounded-md border border-border px-3"
+          onClick={() => updateSettings({ customCss: "" })}>Remove custom CSS</button>
+        <pre aria-label="Active custom CSS" className="whitespace-pre-wrap break-all text-sm">{settings.customCss}</pre>
+        <AppearanceChatPreview />
+      </> : null}
+      {state === "remote-appearance-sheet" ? <>
+        <h1 className="text-lg font-semibold">Remote appearance</h1>
+        <button type="button" className="min-h-11 rounded-md border border-border px-3"
+          onClick={() => setSheetOpen(true)}>Open appearance</button>
+        <RemoteAppearanceSheet open={sheetOpen} onOpenChange={setSheetOpen} />
+      </> : null}
+    </div>
+  </main>;
+}
 
 export type ChatQaState = (typeof CHAT_QA_STATES)[number];
 
@@ -162,6 +229,10 @@ export function chatQaComposerProps(state: string): ChatQaComposerProps {
     case "prompt-multi":
     case "prompt-custom":
     case "terminal-dock":
+    case "appearance-preview":
+    case "theme-import-error":
+    case "custom-css-active":
+    case "remote-appearance-sheet":
       return {};
   }
 }
