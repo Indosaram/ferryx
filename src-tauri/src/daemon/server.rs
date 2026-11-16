@@ -51,6 +51,42 @@ use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 
+/// Target-built tunnel support keeps the Windows oracle executable on Unix too.
+#[derive(Clone, Copy)]
+pub(crate) enum Target {
+    Unix,
+    Windows,
+}
+
+impl Target {
+    pub(crate) fn current() -> Self {
+        #[cfg(unix)]
+        { Self::Unix }
+        #[cfg(not(unix))]
+        { Self::Windows }
+    }
+}
+
+/// These base capabilities are shared by the handshake and capability query.
+/// Other capabilities retain their existing feature/target gates at their sites.
+pub(crate) fn capability_vector(is_local_transport: bool, target: Target) -> Vec<&'static str> {
+    let mut capabilities = vec!["machinePairingV1", "sshPasswordV1", "dagStreamingV1"];
+    if is_local_transport && matches!(target, Target::Unix) {
+        capabilities.push(super::protocol::SSH_TUNNEL_CAPABILITY);
+    }
+    capabilities
+}
+
+#[derive(Clone, Copy)]
+enum ConnectionTransport {
+    Local,
+    Paired,
+}
+
+fn is_local_transport(transport: ConnectionTransport) -> bool {
+    matches!(transport, ConnectionTransport::Local)
+}
+
 #[cfg(any(unix, test))]
 async fn rollback_transferred_readers<R, A, D>(
     relinquish: R,
@@ -4561,6 +4597,11 @@ impl DaemonServer {
         &self.remote_state
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_test_pairing_directory(&mut self, directory: PathBuf) {
+        self.paired_hosts = crate::paired_host::service::PairedHostService::open(directory);
+    }
+
     /// This daemon's paired-host inventory (a supervisor move reaches the holder through it).
     pub(crate) fn paired_hosts(&self) -> &crate::paired_host::service::PairedHostService {
         &self.paired_hosts
@@ -6946,6 +6987,19 @@ impl DaemonServer {
         .unwrap_or_else(|error| Some(format!("the peer check failed: {error}")))
     }
 
+    /// Raw daemon frames admitted over a paired/relay connection must never acquire
+    /// the owner socket's tunnel capability, even when the daemon also serves UDS.
+    pub async fn handle_paired_client<S>(self: Arc<Self>, stream: S)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        self.handle_client_on_transport(
+            stream,
+            super::supervisor_peer::PeerOrigin::Unknown,
+            ConnectionTransport::Paired,
+        ).await;
+    }
+
     pub async fn handle_client_with_origin<S>(
         self: &Arc<Self>,
         stream: S,
@@ -6953,6 +7007,18 @@ impl DaemonServer {
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        self.handle_client_on_transport(stream, origin, ConnectionTransport::Local).await;
+    }
+
+    async fn handle_client_on_transport<S>(
+        self: &Arc<Self>,
+        stream: S,
+        origin: super::supervisor_peer::PeerOrigin,
+        transport: ConnectionTransport,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let is_local = is_local_transport(transport);
         // QaFixtureKind::DaemonListenerStall (QA builds only): accepted, handshake not answered until released.
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         crate::ipc::qa_barrier::daemon_listener_stall_gate().await;
@@ -7144,10 +7210,14 @@ impl DaemonServer {
                             binary_path: self.binary_path.clone(),
                             binary_mtime_ms: self.binary_mtime_ms,
                             daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                            capabilities: vec![
-                                crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.to_string(),
-                                crate::daemon::control::CONTROL_CAPABILITY.to_string(),
-                            ],
+                            capabilities: capability_vector(is_local, Target::current())
+                                .into_iter()
+                                .chain([
+                                    crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY,
+                                    crate::daemon::control::CONTROL_CAPABILITY,
+                                ])
+                                .map(str::to_owned)
+                                .collect(),
                             admission_time_unix_ms: Some(
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -7201,9 +7271,15 @@ impl DaemonServer {
                     | DaemonRequest::SshTunnelSpecsSave { .. }
                     | DaemonRequest::SshTunnelSpecsReset
                     | DaemonRequest::SshTunnelForgetHost { .. }) => DaemonResponse::Error {
-                    message: "Tunnel dispatch is not yet available".into(),
-                    code: Some("UNSUPPORTED".into()),
-                    details: Some(serde_json::json!({ "reason": "tunnel_dispatch_pending" })),
+                    message: if is_local {
+                        "Tunnel dispatch is not yet available"
+                    } else {
+                        "Tunnels are available only over the local owner socket"
+                    }.into(),
+                    code: Some(crate::ipc::IpcErrorCode::Unsupported.to_string()),
+                    details: Some(serde_json::json!({
+                        "reason": if is_local { "tunnel_dispatch_pending" } else { "local_only" }
+                    })),
                 },
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
@@ -8474,7 +8550,8 @@ impl DaemonServer {
                     DaemonResponse::PairedHostForgetOk
                 }
                 Ok(DaemonRequest::GetCapabilities) => {
-                    let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into(), "dagStreamingV1".into()];
+                    let mut capabilities: Vec<String> = capability_vector(is_local, Target::current())
+                        .into_iter().map(str::to_owned).collect();
                     if self.paired_hosts.available().await {
                         capabilities.push("pairedHostInventoryV1".into());
                         capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY.into());

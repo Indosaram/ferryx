@@ -36,6 +36,13 @@ use tokio::net::UnixStream as DaemonStream;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
+use crate::daemon::protocol::{
+    TunnelForgetHostRequest, TunnelForgetHostResponse, TunnelInvalidateHostRequest,
+    TunnelInvalidateHostResponse, TunnelListResponse, TunnelSpecsResetResponse,
+    TunnelSpecsSaveRequest, TunnelSpecsSaveResponse, TunnelStartRequest, TunnelStartResponse,
+    TunnelStopRequest, TunnelStopResponse,
+};
+
 const DAEMON_READY_TOKEN: &str = "FERRYX_DAEMON_READY";
 
 #[cfg(all(test, unix))]
@@ -640,6 +647,22 @@ fn agent_prompt_failure(response: DaemonResponse) -> IpcError {
             "The running Ferryx daemon predates agent prompt answers; they work after the daemon restarts",
         ),
         _ => IpcError::internal("Unexpected daemon agent prompt response"),
+    }
+}
+
+fn tunnel_response_error(response: DaemonResponse) -> IpcError {
+    match response {
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = IpcError::new(
+                code.as_deref().map(IpcErrorCode::from_code_str)
+                    .unwrap_or(IpcErrorCode::InternalError),
+                message,
+            );
+            error.details = details;
+            error
+        }
+        DaemonResponse::WorktreeError { error } => error,
+        _ => IpcError::internal("Unexpected daemon tunnel response"),
     }
 }
 
@@ -3488,6 +3511,63 @@ impl DaemonClient {
         }
     }
 
+    /// Tunnel requests get a fresh connection and exactly one delivery attempt.
+    /// Reconnection/retry of a tunnel belongs to its daemon registry, not this client.
+    async fn tunnel_request(&self, request: DaemonRequest) -> Result<DaemonResponse, IpcError> {
+        let mut connection = self.connect_and_handshake().await?;
+        connection.request(&request).await
+            .map_err(|error| error.into_ipc_error(&request, true))
+    }
+
+    pub async fn tunnel_start(&self, request: TunnelStartRequest) -> Result<TunnelStartResponse, IpcError> {
+        match self.tunnel_request(DaemonRequest::SshTunnelStart { request }).await? {
+            DaemonResponse::SshTunnelStart { response } => Ok(response),
+            response => Err(tunnel_response_error(response)),
+        }
+    }
+
+    pub async fn tunnel_stop(&self, request: TunnelStopRequest) -> Result<TunnelStopResponse, IpcError> {
+        match self.tunnel_request(DaemonRequest::SshTunnelStop { request }).await? {
+            DaemonResponse::SshTunnelStop { response } => Ok(response),
+            response => Err(tunnel_response_error(response)),
+        }
+    }
+
+    pub async fn tunnel_list(&self) -> Result<TunnelListResponse, IpcError> {
+        match self.tunnel_request(DaemonRequest::SshTunnelList).await? {
+            DaemonResponse::SshTunnelList { response } => Ok(response),
+            response => Err(tunnel_response_error(response)),
+        }
+    }
+
+    pub async fn tunnel_invalidate_host(&self, request: TunnelInvalidateHostRequest) -> Result<TunnelInvalidateHostResponse, IpcError> {
+        match self.tunnel_request(DaemonRequest::SshTunnelInvalidateHost { request }).await? {
+            DaemonResponse::SshTunnelInvalidateHost { response } => Ok(response),
+            response => Err(tunnel_response_error(response)),
+        }
+    }
+
+    pub async fn tunnel_specs_save(&self, request: TunnelSpecsSaveRequest) -> Result<TunnelSpecsSaveResponse, IpcError> {
+        match self.tunnel_request(DaemonRequest::SshTunnelSpecsSave { request }).await? {
+            DaemonResponse::SshTunnelSpecsSave { response } => Ok(response),
+            response => Err(tunnel_response_error(response)),
+        }
+    }
+
+    pub async fn tunnel_specs_reset(&self) -> Result<TunnelSpecsResetResponse, IpcError> {
+        match self.tunnel_request(DaemonRequest::SshTunnelSpecsReset).await? {
+            DaemonResponse::SshTunnelSpecsReset { response } => Ok(response),
+            response => Err(tunnel_response_error(response)),
+        }
+    }
+
+    pub async fn tunnel_forget_host(&self, request: TunnelForgetHostRequest) -> Result<TunnelForgetHostResponse, IpcError> {
+        match self.tunnel_request(DaemonRequest::SshTunnelForgetHost { request }).await? {
+            DaemonResponse::SshTunnelForgetHost { response } => Ok(response),
+            response => Err(tunnel_response_error(response)),
+        }
+    }
+
     /// The owner speaks another data protocol (todo 9). Nothing is sent over the data protocol and
     /// nothing is shut down, terminated, retargeted or spawned. On Unix the GUI first asks for a
     /// session-preserving upgrade over the control channel (todo 8's RequestUpgrade); only when
@@ -4599,6 +4679,15 @@ impl DaemonClient {
                 "Unexpected daemon response",
             )),
         }
+    }
+
+    /// Queries afresh like the other capability helpers; tunnel support is never cached.
+    pub async fn supports_ssh_tunnel(&self) -> bool {
+        matches!(
+            self.send_request(DaemonRequest::GetCapabilities).await,
+            Ok(DaemonResponse::CapabilitiesOk { capabilities })
+                if capabilities.iter().any(|c| c == crate::daemon::protocol::SSH_TUNNEL_CAPABILITY)
+        )
     }
 
     /// Whether the daemon serves identified, cancellable pastes (`PasteWrite`/`CancelPaste`).
@@ -5908,12 +5997,146 @@ mod local_control_isolation_tests {
     }
 }
 
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn ssh_tunnel_capability_absent_on_windows() {
+        use crate::daemon::protocol::SSH_TUNNEL_CAPABILITY;
+        use crate::daemon::server::{capability_vector, Target};
+        for local in [true, false] {
+            assert!(!capability_vector(local, Target::current()).contains(&SSH_TUNNEL_CAPABILITY));
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::daemon::protocol::{
         DaemonRequest, DaemonResponse, DaemonStreamMessage, DAEMON_PROTOCOL_VERSION,
     };
+
+    async fn tunnel_capability_exchange(
+        server: Arc<DaemonServer>,
+        paired: bool,
+        requests: Vec<DaemonRequest>,
+    ) -> Vec<DaemonResponse> {
+        // A bound UDS and a real dispatch loop, not a fabricated handshake response.
+        let directory = tempdir().unwrap();
+        let socket = directory.path().join("tunnels.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let serving = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            if paired {
+                server.handle_paired_client(stream).await;
+            } else {
+                server.handle_unix_client(stream).await;
+            }
+        });
+        let exchange = async {
+            let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut responses = Vec::new();
+            for request in requests {
+                let mut bytes = serde_json::to_vec(&request).unwrap();
+                bytes.push(b'\n');
+                writer.write_all(&bytes).await.unwrap();
+                writer.flush().await.unwrap();
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                responses.push(serde_json::from_str(&line).unwrap());
+            }
+            drop(writer);
+            drop(reader);
+            serving.await.unwrap();
+            responses
+        };
+        tokio::time::timeout(Duration::from_secs(10), exchange).await.unwrap()
+    }
+
+    fn tunnel_handshake_requests() -> Vec<DaemonRequest> {
+        vec![
+            DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION, token: None },
+            DaemonRequest::GetCapabilities,
+        ]
+    }
+
+    fn assert_tunnel_capabilities(responses: &[DaemonResponse], expected: bool) {
+        assert_eq!(responses.len(), 2);
+        for response in responses {
+            let capabilities = match response {
+                DaemonResponse::HandshakeOk { capabilities, .. }
+                    | DaemonResponse::CapabilitiesOk { capabilities } => capabilities,
+                response => panic!("Unexpected capability reply: {response:?}"),
+            };
+            assert_eq!(capabilities.iter().any(|c| c == crate::daemon::protocol::SSH_TUNNEL_CAPABILITY), expected);
+            for prior in ["machinePairingV1", "sshPasswordV1", "dagStreamingV1"] {
+                assert!(capabilities.iter().any(|c| c == prior), "missing {prior}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_tunnel_capability_advertised_locally_only() {
+        use crate::daemon::server::{capability_vector, Target};
+        use crate::daemon::protocol::SSH_TUNNEL_CAPABILITY;
+        assert!(capability_vector(true, Target::Unix).contains(&SSH_TUNNEL_CAPABILITY));
+        assert!(!capability_vector(true, Target::Windows).contains(&SSH_TUNNEL_CAPABILITY));
+        assert!(!capability_vector(false, Target::Unix).contains(&SSH_TUNNEL_CAPABILITY));
+
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("config");
+        let mut server = DaemonServer::new_with_paths(
+            Some(config), Some(directory.path().join("auth")),
+        );
+        // Opening the inventory is deferred: replacing its directory with a file
+        // deterministically makes pairing unavailable, with no environment mutation.
+        let blocked = directory.path().join("blocked");
+        fs::write(&blocked, b"not a directory").unwrap();
+        server.set_test_pairing_directory(blocked);
+        let server = Arc::new(server);
+        assert!(!server.paired_hosts().available().await);
+        let local = tunnel_capability_exchange(Arc::clone(&server), false, tunnel_handshake_requests()).await;
+        assert_tunnel_capabilities(&local, true);
+        let paired = tunnel_capability_exchange(server, true, tunnel_handshake_requests()).await;
+        assert_tunnel_capabilities(&paired, false);
+    }
+
+    #[tokio::test]
+    async fn ssh_tunnel_capability_absent_from_paired_reply() {
+        let directory = tempdir().unwrap();
+        let server = Arc::new(DaemonServer::new_with_paths(
+            Some(directory.path().join("config")), Some(directory.path().join("auth")),
+        ));
+        assert!(server.paired_hosts().available().await);
+        let local = tunnel_capability_exchange(Arc::clone(&server), false, tunnel_handshake_requests()).await;
+        assert_tunnel_capabilities(&local, true);
+        let mut requests = tunnel_handshake_requests();
+        requests.extend([
+            DaemonRequest::SshTunnelStart { request: TunnelStartRequest {
+                host_id: "host".into(), spec: None, spec_id: Some("saved".into()), host_revision: Some(0),
+            } },
+            DaemonRequest::SshTunnelStop { request: TunnelStopRequest { runtime_id: "runtime".into() } },
+            DaemonRequest::SshTunnelList,
+            DaemonRequest::SshTunnelInvalidateHost { request: TunnelInvalidateHostRequest {
+                host_id: "host".into(), host_revision: 1, identity: None,
+            } },
+            DaemonRequest::SshTunnelSpecsSave { request: TunnelSpecsSaveRequest {
+                host_id: "host".into(), ..Default::default()
+            } },
+            DaemonRequest::SshTunnelSpecsReset,
+            DaemonRequest::SshTunnelForgetHost { request: TunnelForgetHostRequest { host_id: "host".into() } },
+        ]);
+        let responses = tunnel_capability_exchange(server, true, requests).await;
+        assert_tunnel_capabilities(&responses[..2], false);
+        assert_eq!(responses[2..].len(), 7);
+        for response in &responses[2..] {
+            let error = tunnel_response_error(response.clone());
+            assert_eq!(error.code, IpcErrorCode::Unsupported);
+            assert_eq!(error.details.as_ref().unwrap()["reason"], "local_only");
+        }
+    }
 
     #[test]
     fn outcome_acknowledgement_errors_keep_the_daemon_code() {
