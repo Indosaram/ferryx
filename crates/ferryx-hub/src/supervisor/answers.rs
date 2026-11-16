@@ -5,7 +5,8 @@
 //! current revision: an owner decision or one written into the current contract, naming the
 //! exact prompt id and the exact option label. Everything else goes to the owner:
 //! - a permission, approval or plan prompt: any permission expansion stays owner-required,
-//!   whatever a decision says ([`crate::security::auto_answer`] never answers either);
+//!   whatever a decision says ([`crate::security::auto_answer_decided`] never answers
+//!   either);
 //! - an unreadable screen: held, never guessed;
 //! - a decision of an older goal revision: an owner correction superseded it;
 //! - a decision for another prompt id, or a label that is not exactly one of the options;

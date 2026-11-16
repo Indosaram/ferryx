@@ -3755,6 +3755,7 @@ pub mod lessons;
 pub mod memory;
 pub mod memory_import;
 pub mod project_memory;
+pub mod prompt_judge;
 pub mod receipts;
 pub mod recovery;
 pub mod reference_docs;

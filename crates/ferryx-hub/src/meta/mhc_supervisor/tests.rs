@@ -2435,6 +2435,7 @@ fn fleet_session(id: &str, question: &str) -> FleetSession {
         agent: "claude".into(),
         state: "blocked".into(),
         state_source: "provider".into(),
+        screen_readable: true,
         state_since_ms: None,
         screen_changed_at_ms: None,
         pending_prompt: Some(PendingPrompt {

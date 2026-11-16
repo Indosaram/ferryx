@@ -309,6 +309,7 @@ mod prompt_changed_event_tests {
             agent: "claude".into(),
             state: "idle".into(),
             state_source: "telemetry".into(),
+            screen_readable: true,
             state_since_ms: None,
             screen_changed_at_ms: None,
             pending_prompt: None,

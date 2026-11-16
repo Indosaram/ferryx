@@ -289,6 +289,20 @@ async fn recorded_call_fault(pool: &SqlitePool) -> Result<Option<EngineFault>, S
     Ok(call_fault(&recorded_call_outcomes(pool).await?))
 }
 
+/// Todo 2's `supervisorHealthy` for a caller that only has the pool: false when this
+/// installation's newest recorded engine calls say the engine is failing. No recorded call is
+/// an unknown engine, not a broken one, and reads healthy.
+pub async fn supervisor_degraded(pool: &SqlitePool) -> bool {
+    match recorded_call_fault(pool).await {
+        Ok(fault) => fault.is_some(),
+        // An unreadable log is not proof the engine works; the supervisor escalates instead.
+        Err(error) => {
+            tracing::warn!(%error, "the recorded engine calls could not be read");
+            true
+        }
+    }
+}
+
 /// (state text, fault, missing capabilities, step) of the engine view.
 fn engine_reading(engine: &EngineView) -> (String, Option<EngineFault>, Vec<String>, EngineStep) {
     if !engine.installed {

@@ -212,6 +212,7 @@ fn session(host: &str, id: &str, agent: &str, state: &str, source: &str, changed
         agent: agent.to_owned(),
         state: state.to_owned(),
         state_source: source.to_owned(),
+        screen_readable: true,
         state_since_ms: Some(changed),
         screen_changed_at_ms: Some(changed),
         pending_prompt: None,

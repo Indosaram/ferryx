@@ -199,6 +199,9 @@ fn fleet_session(
         agent: text("agent").unwrap_or_default().to_owned(),
         state: state.to_owned(),
         state_source: text("stateSource").unwrap_or("none").to_owned(),
+        // The daemon's own reading of whether it could read this pane's screen. An older peer
+        // that omits it reads as unreadable here, and no prompt of it is answered.
+        screen_readable: value.get("screenReadable").and_then(Value::as_bool).unwrap_or(false),
         state_since_ms: millis("stateSince"),
         screen_changed_at_ms: millis("screenChangedAt"),
         pending_prompt: value

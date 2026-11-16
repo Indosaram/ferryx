@@ -341,7 +341,14 @@ pub(super) async fn install(launch: &HubLaunch) {
     let channel = OwnerChannel {
         sessions: Some(SessionRefresh { state: Arc::downgrade(&state), sources: Arc::new(panel_sources) }),
     };
-    let autonomy = match Autonomy::open(pool.clone(), session_control.clone(), Arc::new(channel)).await {
+    // The engine judges a prompt the rules, the contract and the owner's past answers could not
+    // settle (todo 7). Without an installed engine the gate escalates as before.
+    let judge: Option<Arc<dyn ferryx_hub::supervisor::prompt_judge::PromptJudge>> =
+        ferryx_hub::meta::mhc_supervisor::installed().map(|engine| {
+            Arc::new(ferryx_hub::supervisor::prompt_judge::EnginePromptJudge::new(engine))
+                as Arc<dyn ferryx_hub::supervisor::prompt_judge::PromptJudge>
+        });
+    let autonomy = match Autonomy::open_with(pool.clone(), session_control.clone(), Arc::new(channel), judge).await {
         Ok(autonomy) => autonomy,
         Err(error) => {
             tracing::warn!(%error, "supervisor autonomy was not opened; the panel stays empty");
@@ -538,6 +545,7 @@ pub(crate) mod tests {
             agent: "claude".into(),
             state: "blocked".into(),
             state_source: "screen".into(),
+            screen_readable: true,
             state_since_ms: None,
             screen_changed_at_ms: None,
             pending_prompt: Some(PendingPrompt {
@@ -927,6 +935,7 @@ pub(crate) mod tests {
             agent: "claude".into(),
             state: "working".into(),
             state_source: "screen".into(),
+            screen_readable: true,
             state_since_ms: Some(START_MS),
             screen_changed_at_ms: Some(START_MS),
             pending_prompt: None,
