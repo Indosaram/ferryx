@@ -459,6 +459,35 @@ pub fn owner_prompt_answer_of(
     Some(PendingOwnerAnswer { autonomy, answer: claimed, option_index })
 }
 
+/// The option a keystroke picks on a tracked prompt: one ASCII digit `1..=option_count`. Enter
+/// and CR are never an answer: a pending prompt has no highlighted option, so recording one
+/// would teach the wrong precedent.
+pub(crate) fn typed_option_index(bytes: &[u8], option_count: usize) -> Option<usize> {
+    let [digit] = bytes else { return None };
+    let index = usize::from(digit.checked_sub(b'1')?);
+    (index < option_count).then_some(index)
+}
+
+/// The owner answer behind bytes typed straight into a pane of `session_id` in this daemon (the
+/// desktop's terminal, the phone, the web): the option their digit picks on that session's
+/// tracked prompt. The caller records it once the write went through.
+pub fn typed_answer_of(session_id: &str, bytes: &[u8]) -> Option<PendingOwnerAnswer> {
+    typed_answer_with(&installed()?, session_id, bytes)
+}
+
+pub(crate) fn typed_answer_with(
+    autonomy: &Arc<Autonomy>,
+    session_id: &str,
+    bytes: &[u8],
+) -> Option<PendingOwnerAnswer> {
+    let (answer, option_index) = autonomy.peek_owner_answer_where(
+        |host| host_is(None, host),
+        session_id,
+        |prompt| typed_option_index(bytes, prompt.options.len()),
+    )?;
+    Some(PendingOwnerAnswer { autonomy: Arc::clone(autonomy), answer, option_index })
+}
+
 /// One daemon observation: a blocked or prompting pane is read and handed to autonomy; any
 /// other reading only clears the card of a prompt that is gone. The read runs in its own task
 /// so the observer loop never waits on it.
@@ -619,6 +648,103 @@ pub(crate) mod tests {
         assert!(owner_answer_with(&autonomy, Some("omarchy"), &owner).is_none(), "learned once");
         let supervisor = answer_op("p1", Some("sup-tool-abc"));
         assert!(owner_answer_with(&autonomy, Some("omarchy"), &supervisor).is_none());
+    }
+
+    /// A digit on a tracked prompt is the option it names, one-based; Enter, multi-byte input,
+    /// digits past the last option and a digit typed as part of a longer write are not answers.
+    #[test]
+    fn only_a_single_digit_names_an_option() {
+        assert_eq!(typed_option_index(b"1", 3), Some(0));
+        assert_eq!(typed_option_index(b"2", 3), Some(1));
+        assert_eq!(typed_option_index(b"3", 3), Some(2));
+        assert_eq!(typed_option_index(b"0", 3), None);
+        assert_eq!(typed_option_index(b"4", 3), None);
+        assert_eq!(typed_option_index(b"\r", 3), None);
+        assert_eq!(typed_option_index(b"\n", 3), None);
+        assert_eq!(typed_option_index(b"", 3), None);
+        assert_eq!(typed_option_index(b"12", 3), None);
+        assert_eq!(typed_option_index(b"2x", 3), None);
+        assert_eq!(typed_option_index(b"1", 0), None);
+        assert_eq!(typed_option_index("\u{662}".as_bytes(), 3), None);
+    }
+
+    /// A digit typed into a pane the supervisor tracks nothing for claims nothing: no prompt,
+    /// no record.
+    #[tokio::test]
+    async fn a_digit_with_no_tracked_prompt_records_nothing() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let autonomy = Autonomy::open(pool, Arc::new(NoControl), Arc::new(Silent)).await.unwrap();
+
+        assert!(typed_answer_with(&autonomy, "s1", b"1").is_none());
+        // A tracked prompt on another session is not this session's.
+        autonomy.observe(&blocked("p1")).await;
+        assert!(typed_answer_with(&autonomy, "s2", b"1").is_none());
+        // Nor is a keystroke that names no option.
+        assert!(typed_answer_with(&autonomy, "s1", b"\r").is_none());
+        assert!(typed_answer_with(&autonomy, "s1", b"9").is_none());
+        let labels = autonomy
+            .answer_history()
+            .recent_labels(&blocked("p1").pending_prompt.unwrap(), "/nonexistent/panel-autonomy-test", "claude")
+            .await
+            .unwrap();
+        assert!(labels.is_empty());
+    }
+
+    /// The owner types "2" into a pane blocked on a three-option prompt: through the same
+    /// accessor the daemon's Write handler calls, the answer joins the history once, the log
+    /// says what they chose, and the card resolves. The same digit again records nothing.
+    #[tokio::test]
+    async fn a_digit_typed_into_a_pane_is_learned_once() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let autonomy = Autonomy::open(pool.clone(), Arc::new(NoControl), Arc::new(Silent))
+            .await
+            .unwrap();
+        // The slot is per test thread, as in `take_recovery_card`.
+        super::super::slot_set(
+            &super::super::PANEL_AUTONOMY,
+            Some(Installed {
+                hub: ferryx_hub::Hub::with_policy(
+                    pool,
+                    Arc::new(ferryx_hub::agent_control::RecordingControl::default()),
+                    ferryx_hub::HubConfig::default(),
+                    ferryx_hub::sessions::watch::NotifyPolicy::default(),
+                ),
+                recovery: build_recovery(
+                    &autonomy,
+                    Arc::new(NoControl),
+                    Arc::new(FixedFleet { sessions: Vec::new() }),
+                    Arc::new(FakeClock::new(START_MS)),
+                ),
+                session_tools: Arc::new(ferryx_hub::meta::mhc_supervisor::SessionTools::new(
+                    Arc::new(NoControl),
+                    Arc::new(FixedFleet { sessions: Vec::new() }),
+                )),
+                autonomy: Arc::clone(&autonomy),
+                remote_fleet: None,
+            }),
+        );
+        let mut prompt = blocked("p1");
+        prompt.pending_prompt.as_mut().unwrap().options =
+            vec!["npm".into(), "pnpm".into(), "bun".into()];
+        autonomy.observe(&prompt).await;
+
+        let claimed = typed_answer_of("s1", b"2").expect("a tracked, unsettled prompt");
+        claimed.recorded().await;
+
+        let labels = autonomy
+            .answer_history()
+            .recent_labels(prompt.pending_prompt.as_ref().unwrap(), "/nonexistent/panel-autonomy-test", "claude")
+            .await
+            .unwrap();
+        assert_eq!(labels, vec!["pnpm".to_owned()]);
+        let log = autonomy.action_log().list_today(0).await.unwrap();
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert_eq!(log[0].summary, "You chose pnpm");
+        assert!(autonomy.escalation_source().pending().await.unwrap().is_empty());
+
+        assert!(typed_answer_of("s1", b"2").is_none(), "learned once");
+        assert_eq!(autonomy.action_log().list_today(0).await.unwrap().len(), 1);
+        super::super::slot_set(&super::super::PANEL_AUTONOMY, None);
     }
 
     /// The owner channel is process-wide, so the test that watches it is the only one that

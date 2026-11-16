@@ -388,6 +388,11 @@ impl Autonomy {
         self.escalations.clone()
     }
 
+    /// The persisted owner answers, to read back what the supervisor learned.
+    pub fn answer_history(&self) -> AnswerHistory {
+        self.history.clone()
+    }
+
     fn tracked(&self) -> std::sync::MutexGuard<'_, HashMap<SessionRef, Tracked>> {
         self.tracked.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -628,18 +633,42 @@ impl Autonomy {
         backend_session_id: &str,
         prompt_id: &str,
     ) -> Option<OwnerAnswer> {
-        let tracked = self.tracked();
-        let (session_ref, known) = tracked.iter().find(|(session_ref, known)| {
-            host_matches(session_ref.host_id())
-                && session_ref.backend_session_id() == backend_session_id
-                && known.prompt.prompt_id == prompt_id
+        let (claimed, ()) = self.peek_owner_answer_where(host_matches, backend_session_id, |prompt| {
+            (prompt.prompt_id == prompt_id).then_some(())
         })?;
-        (!known.settled).then(|| OwnerAnswer {
+        Some(claimed)
+    }
+
+    /// The owner's answer to the first prompt of `backend_session_id` on a host `host_matches`
+    /// accepts that `select` maps to a value: the answer with that value. Read under one lock
+    /// over the tracked prompts, so the prompt a caller decided on is the one it claimed; typed
+    /// input knows only its session, and `select` says what it picked on the prompt it found.
+    pub fn peek_owner_answer_where<T>(
+        &self,
+        host_matches: impl Fn(&str) -> bool,
+        backend_session_id: &str,
+        select: impl Fn(&PendingPrompt) -> Option<T>,
+    ) -> Option<(OwnerAnswer, T)> {
+        let tracked = self.tracked();
+        let (session_ref, known, selected) = tracked.iter().find_map(|(session_ref, known)| {
+            if !host_matches(session_ref.host_id())
+                || session_ref.backend_session_id() != backend_session_id
+            {
+                return None;
+            }
+            let selected = select(&known.prompt)?;
+            Some((session_ref, known, selected))
+        })?;
+        if known.settled {
+            return None;
+        }
+        let answer = OwnerAnswer {
             session_ref: session_ref.clone(),
             session: known.session.clone(),
             prompt: known.prompt.clone(),
             repo: known.repo.clone(),
-        })
+        };
+        Some((answer, selected))
     }
 
     /// Records a claimed owner answer: the choice joins the answer history (a duplicate or an
