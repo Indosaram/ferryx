@@ -688,6 +688,13 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
 fn request_type_name(req: &DaemonRequest) -> &'static str {
     match req {
         DaemonRequest::SshPassword { .. } => "sshPassword",
+        DaemonRequest::SshTunnelStart { .. } => "sshTunnelStart",
+        DaemonRequest::SshTunnelStop { .. } => "sshTunnelStop",
+        DaemonRequest::SshTunnelList => "sshTunnelList",
+        DaemonRequest::SshTunnelInvalidateHost { .. } => "sshTunnelInvalidateHost",
+        DaemonRequest::SshTunnelSpecsSave { .. } => "sshTunnelSpecsSave",
+        DaemonRequest::SshTunnelSpecsReset => "sshTunnelSpecsReset",
+        DaemonRequest::SshTunnelForgetHost { .. } => "sshTunnelForgetHost",
         DaemonRequest::Handshake { .. } => "handshake",
         DaemonRequest::Ping => "ping",
         DaemonRequest::MachineSessionDetail { .. } => "machineSessionDetail",

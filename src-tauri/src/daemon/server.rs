@@ -7190,6 +7190,21 @@ impl DaemonServer {
                 Ok(DaemonRequest::ReferenceChat { request }) => DaemonResponse::ReferenceChatOk {
                     reply: crate::remote::server::desktop_reference_chat(&self.remote_state, request).await,
                 },
+                // Todo 3 owns the wire/name map; Todo 4 adds client methods and Todo 7
+                // replaces this intermediate refusal with all seven real dispatch arms.
+                // Capability advertisement knowingly precedes dispatch between Todos 4
+                // and 7; no build in that window is installed or shipped. Todo 7 closes it.
+                Ok(DaemonRequest::SshTunnelStart { .. }
+                    | DaemonRequest::SshTunnelStop { .. }
+                    | DaemonRequest::SshTunnelList
+                    | DaemonRequest::SshTunnelInvalidateHost { .. }
+                    | DaemonRequest::SshTunnelSpecsSave { .. }
+                    | DaemonRequest::SshTunnelSpecsReset
+                    | DaemonRequest::SshTunnelForgetHost { .. }) => DaemonResponse::Error {
+                    message: "Tunnel dispatch is not yet available".into(),
+                    code: Some("UNSUPPORTED".into()),
+                    details: Some(serde_json::json!({ "reason": "tunnel_dispatch_pending" })),
+                },
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),
