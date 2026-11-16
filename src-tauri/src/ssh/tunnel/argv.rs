@@ -657,8 +657,12 @@ impl Live {
                 tokio::select! {
                     _ = &mut stop => break,
                     accepted = listener.accept() => {
-                        let (stream, _) = accepted.unwrap();
-                        let stream = stream.into_std().unwrap(); stream.set_nonblocking(false).unwrap();
+                        let (stream, _) = match accepted {
+                            Ok(accepted) => accepted,
+                            Err(error) => { eprintln!("sshd fixture accept error: {error}"); continue; }
+                        };
+                        let stream = stream.into_std().expect("convert accepted sshd fixture socket");
+                        stream.set_nonblocking(false).expect("set accepted sshd fixture socket blocking");
                         let text = std::fs::read_to_string(&config).unwrap();
                         let password_fixture = text.contains("PasswordAuthentication yes");
                         let mut command = if password_fixture && unsafe { libc::geteuid() } != 0 {
@@ -666,7 +670,7 @@ impl Live {
                             command.args(["-n", "/usr/sbin/sshd"]); command
                         } else { tokio::process::Command::new("/usr/sbin/sshd") };
                         let mut child = command.args(["-i", "-e", "-f"]).arg(&config)
-                            .stdin(Stdio::from(OwnedFd::from(stream.try_clone().unwrap())))
+                            .stdin(Stdio::from(OwnedFd::from(stream.try_clone().expect("clone accepted sshd fixture socket"))))
                             .stdout(Stdio::from(OwnedFd::from(stream)))
                             .stderr(std::fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
                             .kill_on_drop(true).spawn().expect("private loopback sshd prerequisite");
@@ -686,10 +690,20 @@ impl Live {
             loop {
                 tokio::select! {
                     accepted = sink.accept() => {
-                        let (mut stream, _) = accepted.unwrap();
+                        let (mut stream, _) = match accepted {
+                            Ok(accepted) => accepted,
+                            Err(error) => { eprintln!("echo fixture accept error: {error}"); continue; }
+                        };
                         clients.spawn(async move {
                             let mut byte = [0u8; 1];
-                            if stream.read_exact(&mut byte).await.is_ok() { stream.write_all(&byte).await.expect("echo payload"); }
+                            match tokio::time::timeout(Duration::from_secs(20), async {
+                                stream.read_exact(&mut byte).await?;
+                                stream.write_all(&byte).await
+                            }).await {
+                                Ok(Ok(())) => {},
+                                Ok(Err(error)) => eprintln!("echo client disconnected during probe: {error}"),
+                                Err(error) => eprintln!("echo client exchange deadline: {error}"),
+                            }
                         });
                     }
                     Some(result) = clients.join_next(), if !clients.is_empty() => { result.unwrap(); }
@@ -723,46 +737,77 @@ impl Live {
         tunnel_argv(&self.host, &spec, port, &self.fixture.empty, &ConfigSource::Fixture { user: text, system: "" }).unwrap()
     }
 }
-fn reserve() -> std::net::TcpListener { std::net::TcpListener::bind("127.0.0.1:0").unwrap() }
-async fn connect(port: u16) -> tokio::net::TcpStream {
-    // Connection completion itself is the observable readiness event. No fixed
-    // sleeps: each refused connect yields before subscribing to the next attempt.
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            match tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await {
-                Ok(stream) => break stream,
-                Err(_) => tokio::task::yield_now().await,
+fn reserve() -> std::net::TcpListener {
+    // Never reuse a probe port within this process, even after an earlier case
+    // releases it while its sshd is still shutting down. Concurrent cases also
+    // hold their reservations until immediately before spawning their own ssh.
+    static USED: std::sync::OnceLock<std::sync::Mutex<BTreeSet<u16>>> = std::sync::OnceLock::new();
+    let mut used = USED.get_or_init(Default::default).lock().expect("probe port ledger");
+    let mut rejected = Vec::new();
+    loop {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve ephemeral probe port");
+        let port = listener.local_addr().expect("reserved probe address").port();
+        if used.insert(port) { return listener; }
+        rejected.push(listener);
+    }
+}
+fn probe_diagnostic(live: &Live, args: &[String]) -> String {
+    let read = |name: &str| std::fs::read_to_string(live.fixture.dir.path().join(name))
+        .unwrap_or_else(|error| format!("<{name}: {error}>"));
+    format!("launcher={:?}; argv={args:?}\nssh stderr:\n{}\nsshd stderr:\n{}", live.launcher, read("client.log"), read("sshd.log"))
+}
+async fn probe(port: u16, exchange: bool, live: &Live, args: &[String]) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut last_error = String::from("no completed attempt");
+    loop {
+        let attempt = async {
+            let mut stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+            if exchange {
+                stream.write_all(b"x").await?;
+                let mut byte = [0];
+                stream.read_exact(&mut byte).await?;
+                assert_eq!(&byte, b"x", "wrong echoed byte; {}", probe_diagnostic(live, args));
             }
+            Ok::<(), std::io::Error>(())
+        };
+        match tokio::time::timeout_at(deadline, attempt).await {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => last_error = error.to_string(),
+            Err(_) => panic!("probe port {port} readiness deadline; last I/O error: {last_error}; {}", probe_diagnostic(live, args)),
         }
-    }).await.expect("bounded tunnel connectability")
+        if tokio::time::Instant::now() >= deadline {
+            panic!("probe port {port} readiness deadline; last I/O error: {last_error}; {}", probe_diagnostic(live, args));
+        }
+        // Retry the complete connect+exchange on reset/EOF/refusal. No sleeps:
+        // every attempt awaits socket completion under the SAME absolute bound.
+        tokio::task::yield_now().await;
+    }
 }
-async fn payload(port: u16) {
-    let mut stream = connect(port).await;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        stream.write_all(b"x").await.unwrap();
-        let mut byte = [0]; stream.read_exact(&mut byte).await.unwrap(); assert_eq!(&byte, b"x");
-    }).await.expect("payload echo on this connection");
-}
+async fn payload(port: u16, live: &Live, args: &[String]) { probe(port, true, live, args).await; }
 async fn contrast(isolated: bool) {
     let live = Live::new().await;
     let reservations: Vec<_> = (0..4).map(|_| reserve()).collect();
     let ports: Vec<_> = reservations.iter().map(|p| p.local_addr().unwrap().port()).collect();
     let text = format!("Host *\n LocalForward 127.0.0.1:{} 127.0.0.1:{}\n RemoteForward 127.0.0.1:{} 127.0.0.1:{}\n DynamicForward 127.0.0.1:{}\n", ports[1], live.sink, ports[2], live.sink, ports[3]);
     let mut args = live.argv(ports[0], &text);
-    let probe = live.fixture.dir.path().join("probe"); std::fs::write(&probe, &text).unwrap();
+    let probe_config = live.fixture.dir.path().join("probe"); std::fs::write(&probe_config, &text).unwrap();
     if !isolated {
         let index = args.iter().position(|s| s == "-F").unwrap();
-        args[index + 1] = probe.to_string_lossy().into_owned();
+        args[index + 1] = probe_config.to_string_lossy().into_owned();
     }
     drop(reservations);
     let _child = live.spawn(&args);
-    payload(ports[0]).await;
+    payload(ports[0], &live, &args).await;
     if isolated {
         for port in &ports[1..] {
-            assert!(tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, *port)).await.is_err(), "inherited listener {port}");
+            let result = tokio::time::timeout(Duration::from_secs(20),
+                tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, *port))).await;
+            assert!(matches!(result, Ok(Err(_))), "unexpected inherited listener or connect deadline on port {port}; {}", probe_diagnostic(&live, &args));
         }
     } else {
-        payload(ports[1]).await; payload(ports[2]).await; drop(connect(ports[3]).await);
+        payload(ports[1], &live, &args).await;
+        payload(ports[2], &live, &args).await;
+        probe(ports[3], false, &live, &args).await;
     }
     eprintln!("Arm {} allocated={} localforward={} remoteforward={} dynamicforward={} inherited_listeners={}", if isolated { "A" } else { "B" }, ports[0], ports[1], ports[2], ports[3], !isolated);
 }
@@ -835,10 +880,11 @@ async fn password_non_jump_tunnel_authenticates() {
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = Command::new(&live.launcher);
     command.args(&args[1..]).envs(environment).env("SSH_ASKPASS", helper).process_group(0)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+        .stdin(Stdio::null()).stdout(Stdio::null())
+        .stderr(std::fs::OpenOptions::new().create(true).append(true).open(live.fixture.dir.path().join("client.log")).expect("password ssh stderr log"));
     let child = command.spawn().unwrap(); eprintln!("password tunnel pid={}", child.id());
     let _child = ChildGuard(child);
-    payload(port).await;
+    payload(port, &live, &args).await;
     let log = std::fs::read_to_string(live.fixture.dir.path().join("sshd.log")).unwrap();
     let authenticated = log.contains(&format!("Accepted password for {}", host.username.as_deref().unwrap()));
     drop(_child);
@@ -871,7 +917,7 @@ async fn jump_alias_connects() {
     assert_eq!(args[args.len() - 2], live.host.target());
     assert_eq!(Path::new(&args[f + 3]), config);
     assert!(std::fs::read_to_string(&config).unwrap().contains("Host bastion\n HostName 127.0.0.1\n"));
-    { let _child = live.spawn(&args); payload(port).await; }
+    { let _child = live.spawn(&args); payload(port, &live, &args).await; }
     let log = std::fs::read_to_string(live.fixture.dir.path().join("sshd.log")).unwrap();
     assert!(log.contains(&format!("Accepted publickey for {user}")), "bastion auth log: {log}");
     // OpenSSH prepends `exec` to ProxyCommand. A bare `echo ...; nc ...`
@@ -887,7 +933,7 @@ async fn jump_alias_connects() {
     let second_port = second_reservation.local_addr().unwrap().port();
     *args.last_mut().unwrap() = format!("-L127.0.0.1:{second_port}:127.0.0.1:{}", live.sink);
     drop(second_reservation);
-    { let _child = live.spawn(&args); payload(second_port).await; }
+    { let _child = live.spawn(&args); payload(second_port, &live, &args).await; }
     assert_eq!(std::fs::read_to_string(marker).unwrap().trim(), "inherited");
     eprintln!("hop -F inheritance: authenticated user={user} port={ssh_port}; ProxyCommand marker=inherited");
 }
