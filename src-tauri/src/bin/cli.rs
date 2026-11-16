@@ -6,6 +6,8 @@ use ferryx_lib::cli::{
     run_direct_trust_cli, run_open_cli, run_pair_cli, run_remote_cli, AccountCliError, LaunchMode,
 };
 
+const USAGE: &str = "ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|file cp <src> <dst> [--json]|api <list|describe <command>>|--daemon>";
+
 fn main() {
     #[cfg(unix)]
     if let Some(code) = ferryx_lib::ssh::transport_unix::run_supervisor_mode() {
@@ -20,6 +22,15 @@ fn main() {
         .is_some_and(|arg| matches!(arg.as_str(), "--version" | "-V" | "version"))
     {
         println!("{}", ferryx_lib::cli::cli_version_line());
+        return;
+    }
+    // An explicit help request is a success, not a usage error: installers and wrappers probe
+    // `--help` to check that the binary runs at all.
+    if args
+        .get(1)
+        .is_some_and(|arg| matches!(arg.as_str(), "--help" | "-h" | "help"))
+    {
+        println!("{}\nUsage: {USAGE}", ferryx_lib::cli::cli_version_line());
         return;
     }
     // Only the groups named in CLI_GROUPS dispatch here; everything else falls through to
@@ -144,7 +155,7 @@ fn main() {
             }
         }
         LaunchMode::Gui => {
-            eprintln!("Ferryx CLI is running in headless mode.\nUsage: ferryx-cli <up [--key-stdin|--key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]|service <install|status|uninstall> [--json]|agents|supervisor goal <set|show|mode|approve|discard|accept-revision|reject-revision>|supervisor setup --owner <p> --project <name> --repo-identity <id> --host <id> --git-common-dir <dir>|mcp|hub migrate --from-omo <db>|account <enroll|login>|pair|remote|direct-trust|browser|file cp <src> <dst> [--json]|api <list|describe <command>>|--daemon>");
+            eprintln!("Ferryx CLI is running in headless mode.\nUsage: {USAGE}");
             std::process::exit(1);
         }
         LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),

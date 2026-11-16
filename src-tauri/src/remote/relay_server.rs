@@ -4841,19 +4841,28 @@ fn is_downloadable_artifact(artifact: &str) -> bool {
     )
 }
 
+/// Directories the relay may serve `ferryx-cli` artifacts from before redirecting to the
+/// latest GitHub release: only an operator-staged `FERRYX_DOWNLOADS_DIR`.
+///
+/// The relay used to also look in `~/.ferryx/downloads`, `~/bin` and `/usr/local/bin`. Those
+/// hold whatever CLI was once copied onto the relay host (often the host's own install), so the
+/// route kept serving a months-old `ferryx-cli` without `up` or `--version` long after newer
+/// releases shipped, and the installer's SHA256SUMS check rejected it anyway. The release is the
+/// source of truth; a local copy is opt-in.
+fn download_candidate_dirs(downloads_dir: Option<std::ffi::OsString>) -> Vec<std::path::PathBuf> {
+    downloads_dir
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .into_iter()
+        .collect()
+}
+
 async fn download_cli_artifact_handler(
     axum::extract::Path(artifact): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    let candidate_dirs = [
-        std::env::var("FERRYX_DOWNLOADS_DIR").ok().map(std::path::PathBuf::from),
-        std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join(".ferryx").join("downloads")),
-        std::env::var("HOME").ok().map(|h| std::path::PathBuf::from(h).join("bin")),
-        Some(std::path::PathBuf::from("/usr/local/bin")),
-    ];
-
     download_cli_artifact_from_candidate_dirs(
         &artifact,
-        candidate_dirs.into_iter().flatten(),
+        download_candidate_dirs(std::env::var_os("FERRYX_DOWNLOADS_DIR")),
     )
     .await
 }
@@ -11814,6 +11823,16 @@ mod tests {
         });
 
         (format!("http://{addr}"), handle)
+    }
+
+    #[test]
+    fn downloads_are_served_only_from_an_explicit_downloads_dir() {
+        assert!(super::download_candidate_dirs(None).is_empty());
+        assert!(super::download_candidate_dirs(Some("".into())).is_empty());
+        assert_eq!(
+            super::download_candidate_dirs(Some("/srv/ferryx/downloads".into())),
+            vec![std::path::PathBuf::from("/srv/ferryx/downloads")]
+        );
     }
 
     #[tokio::test]
