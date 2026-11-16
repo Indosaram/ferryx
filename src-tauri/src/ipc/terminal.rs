@@ -942,6 +942,19 @@ pub(crate) fn effective_paired_repo_root(
     }
 }
 
+/// The daemon epoch a paired spawn reports for the proxy session it just created.
+///
+/// It must be the paired machine's daemon epoch, never this machine's credential generation:
+/// the host validates a target epoch (`validate_machine_target_blocking` rejects a stale one),
+/// `proxy_backend_id` hashes it into the proxy's identity, `retry_owned` fences the recovery
+/// tuple with it, and the pane's paired recovery compares it against `target.daemonEpoch` in the
+/// remote status. Projecting `host.generation.0` here put a small credential counter (`4`) into a
+/// field every one of those consumers reads as a millisecond epoch, so no comparison could ever
+/// succeed and every paired pane died at the attach fence with `SESSION_NOT_FOUND`.
+pub(crate) fn paired_spawn_epoch(remote_session: &crate::remote::machine_protocol::Session) -> u64 {
+    remote_session.target.daemon_epoch.0
+}
+
 pub(crate) fn infer_worktree_slug(
     request_worktree: Option<&WorktreeIdentity>,
     target_cwd: Option<&std::path::Path>,
@@ -4870,6 +4883,19 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
         // owner's authoritative answer, so this spawn must project the proxy's own incarnation.
         // Leaving the field empty (the previous behaviour) made the binding unbuildable, so every
         // paired attach was rejected as unprovable before it could reach the fence's owner check.
+        //
+        // The epoch here is the paired machine's daemon epoch, which is the domain every consumer
+        // of this value speaks: the host validates it (`validate_machine_target_blocking` rejects a
+        // stale one), the proxy identity hashes it into `proxy_backend_id`, `retry_owned` fences the
+        // recovery tuple with it, and the pane's paired recovery compares it against
+        // `target.daemonEpoch` in the remote status. It is NOT the local daemon epoch that
+        // `AttachOk.epoch` reports, so the native attach fence re-derives the tuple epoch from the
+        // attachment it actually served instead of demanding these two domains be equal.
+        //
+        // Projecting `host.generation.0` put the paired-host credential generation (e.g. `4`) into
+        // a field that must hold a millisecond epoch, so no comparison could ever succeed: the pane
+        // failed the epoch fence on attach (`SESSION_NOT_FOUND`) and every recovery attempt reported
+        // `staleTuple`, which the UI surfaced as the generic "Native terminal identity conflict".
         let (incarnation, generation) = match daemon_client.describe_session(&proxy_session_id).await {
             Ok(details) => (details.incarnation, details.generation),
             Err(error) => {
@@ -4884,7 +4910,7 @@ pub async fn cmd_terminal_spawn<R: Runtime>(
 
         crate::daemon::client::DaemonSpawnResult {
             session_id: proxy_session_id.clone(),
-            epoch: host.generation.0,
+            epoch: paired_spawn_epoch(&remote_session),
             session: crate::daemon::protocol::DaemonSessionDetails {
                 session_id: proxy_session_id,
                 workspace_id: Some(request.workspace_id.clone()),
@@ -5195,9 +5221,20 @@ pub async fn cmd_terminal_attach<R: Runtime>(
         let attachment = daemon_client.attach_until(&session_id,
             after_sequence.as_deref().and_then(|value| value.parse().ok()), deadline).await?;
         let mut authoritative = binding;
-        authoritative.daemon_epoch = attachment.epoch.to_string();
+        // The served epoch is what this daemon's sequence space is keyed by, so it is what the
+        // response reports. A paired binding, however, carries its target's epoch: that is the
+        // value `retry_owned`, the remote status payload and the host's target validation all
+        // speak. Rewriting it to the local epoch is what left paired bindings unable to be proven
+        // and made every recovery report a stale tuple.
+        if !crate::terminal::paired_runtime::Runtime::owns(&session_id) {
+            authoritative.daemon_epoch = attachment.epoch.to_string();
+        }
+        // `daemon_epoch` reports the sequence space this attach was actually served from, so the
+        // pane's replay cursor is interpreted against the right counter. The binding may hold a
+        // different (paired) epoch, which travels in `attach_tuple` instead.
+        let served_epoch = attachment.epoch.to_string();
         let response = AttachTerminalResponse {
-            session_id: attachment.session_id.clone(), daemon_epoch: Some(authoritative.daemon_epoch.clone()),
+            session_id: attachment.session_id.clone(), daemon_epoch: Some(served_epoch),
             incarnation: description.incarnation, attach_tuple: Some(authoritative),
             history_start_sequence: attachment.start_sequence.map(|value| value.to_string()),
             history_end_sequence: attachment.end_sequence.map(|value| value.to_string()),
@@ -5327,7 +5364,11 @@ async fn terminal_attach<R: Runtime>(
         attachment.stream_task.abort();
         return Err(IpcError::spawn_request_conflict("Attach binding incarnation cannot be proven"));
     }
-    binding.daemon_epoch = attachment.epoch.to_string();
+    binding.daemon_epoch = if crate::terminal::paired_runtime::Runtime::owns(&target_session_id) {
+        binding.daemon_epoch
+    } else {
+        attachment.epoch.to_string()
+    };
     let resp = AttachTerminalResponse {
         session_id: attachment.session_id.clone(),
         incarnation: description.incarnation,
