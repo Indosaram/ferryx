@@ -357,11 +357,11 @@ describe("error mapping", () => {
   beforeEach(() => core.invoke.mockReset());
 
   it("keeps the IpcErrorCode and surfaces the tunnel code from details.failureCode", async () => {
-    core.invoke.mockRejectedValue({
+    core.invoke.mockImplementationOnce(() => Promise.reject({
       code: "INVALID_ARGUMENT",
       message: "local port 5432 is already forwarded",
       details: { failureCode: "port_in_use" },
-    });
+    }));
 
     const error = await startTunnel({ hostId: "host-1", specId: "saved-1", hostRevision: 7 }).catch(
       (thrown: unknown) => thrown,
@@ -376,11 +376,11 @@ describe("error mapping", () => {
   });
 
   it("keeps a structured details.reason without inventing a tunnel failure code", async () => {
-    core.invoke.mockRejectedValue({
+    core.invoke.mockImplementationOnce(() => Promise.reject({
       code: "REQUEST_CONFLICT",
       message: "host revision is stale",
       details: { reason: "host_revision_stale" },
-    });
+    }));
 
     const error = (await stopTunnel("runtime-1").catch((thrown: unknown) => thrown)) as SshTunnelBridgeError;
 
@@ -390,7 +390,7 @@ describe("error mapping", () => {
   });
 
   it("produces a typed error with a fallback code from a bare-string rejection", async () => {
-    core.invoke.mockRejectedValue("daemon socket closed");
+    core.invoke.mockImplementationOnce(() => Promise.reject("daemon socket closed"));
 
     const error = await resetHostTunnelStore().catch((thrown: unknown) => thrown);
 
