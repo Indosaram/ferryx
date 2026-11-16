@@ -108,7 +108,9 @@ describe("hasSshTunnelCapability", () => {
 });
 
 describe("listTunnels", () => {
-  beforeEach(() => core.invoke.mockReset());
+  beforeEach(() => {
+    core.invoke.mockReset();
+  });
 
   it("returns the list payload unchanged, camelCase keys and failurePiece included", async () => {
     // A raw wire literal, exactly as the backend emits it: camelCase keys, snake_case
@@ -161,7 +163,9 @@ describe("listTunnels", () => {
 });
 
 describe("startTunnel", () => {
-  beforeEach(() => core.invoke.mockReset());
+  beforeEach(() => {
+    core.invoke.mockReset();
+  });
 
   it("sends a saved spec id with the host revision it read", async () => {
     const list = listResponse();
@@ -240,7 +244,9 @@ describe("startTunnel", () => {
 });
 
 describe("stopTunnel", () => {
-  beforeEach(() => core.invoke.mockReset());
+  beforeEach(() => {
+    core.invoke.mockReset();
+  });
 
   it("sends the runtime id and returns the idempotent flag", async () => {
     core.invoke.mockResolvedValue({ stopped: false });
@@ -251,7 +257,9 @@ describe("stopTunnel", () => {
 });
 
 describe("saveHostTunnels", () => {
-  beforeEach(() => core.invoke.mockReset());
+  beforeEach(() => {
+    core.invoke.mockReset();
+  });
 
   it("forwards the expected revision and discardInvalid, and omits force unless it is true", async () => {
     core.invoke.mockResolvedValueOnce(listResponse());
@@ -285,7 +293,9 @@ describe("saveHostTunnels", () => {
 });
 
 describe("resetHostTunnelStore", () => {
-  beforeEach(() => core.invoke.mockReset());
+  beforeEach(() => {
+    core.invoke.mockReset();
+  });
 
   it("invokes the reset command and returns the quarantine path", async () => {
     core.invoke.mockResolvedValue({ quarantinedPath: "/data/ssh_tunnels.corrupt-9.json" });
@@ -298,7 +308,9 @@ describe("resetHostTunnelStore", () => {
 });
 
 describe("invalidateHost", () => {
-  beforeEach(() => core.invoke.mockReset());
+  beforeEach(() => {
+    core.invoke.mockReset();
+  });
 
   it("forwards the post-mutation identity tuple and returns the moved revision", async () => {
     core.invoke.mockResolvedValue({ revision: 8 });
@@ -331,7 +343,9 @@ describe("invalidateHost", () => {
 });
 
 describe("forgetHostTunnels", () => {
-  beforeEach(() => core.invoke.mockReset());
+  beforeEach(() => {
+    core.invoke.mockReset();
+  });
 
   it("invokes the forget command for a deleted host", async () => {
     core.invoke.mockResolvedValue({ removed: 2 });
@@ -354,7 +368,9 @@ describe("hostRevisionFromList", () => {
 });
 
 describe("error mapping", () => {
-  beforeEach(() => core.invoke.mockReset());
+  beforeEach(() => {
+    core.invoke.mockReset();
+  });
 
   it("keeps the IpcErrorCode and surfaces the tunnel code from details.failureCode", async () => {
     core.invoke.mockImplementationOnce(() => Promise.reject({
