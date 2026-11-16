@@ -486,6 +486,12 @@ export function secondaryWindowBootstrap(
   return { projects, activeProjectId };
 }
 
+/** A paired host key is `<relay origin>/host/<machineId>`; a descriptor's target names the bare machine id. */
+function pairedHostMachineId(hostId: string): string {
+  const marker = hostId.lastIndexOf("/host/");
+  return marker < 0 ? hostId : decodeURIComponent(hostId.slice(marker + "/host/".length));
+}
+
 export function App() {
   useApplyAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
@@ -2059,7 +2065,7 @@ function WorkspaceApp({
               !captured.daemonEpoch || !captured.incarnation ||
               pairedDescriptor.backendSessionId !== captured.backendSessionId ||
               pairedDescriptor.incarnation !== captured.incarnation || pairedDescriptor.daemonEpoch !== captured.daemonEpoch ||
-              pairedDescriptor.hostId !== expectedTarget.hostId || target.machineId !== expectedTarget.hostId ||
+              pairedDescriptor.hostId !== expectedTarget.hostId || target.machineId !== pairedHostMachineId(expectedTarget.hostId) ||
               target.daemonEpoch !== captured.daemonEpoch || target.sessionId !== captured.backendSessionId) return;
 
           if (status.state === "disconnected" && status.failure?.kind === "disconnected") {
@@ -2112,7 +2118,7 @@ function WorkspaceApp({
               pairedDescriptor.incarnation !== admissionIdentity.incarnation || pairedDescriptor.daemonEpoch !== admissionIdentity.daemonEpoch ||
               status.generation < (admissionIdentity.generation ?? 0) ||
               pairedDescriptor.hostId !== expectedTarget.hostId ||
-              target.machineId !== expectedTarget.hostId || target.daemonEpoch !== captured.daemonEpoch ||
+              target.machineId !== pairedHostMachineId(expectedTarget.hostId) || target.daemonEpoch !== captured.daemonEpoch ||
               target.sessionId !== pairedDescriptor.backendSessionId) return;
 
           const currentGeneration = status.generation;

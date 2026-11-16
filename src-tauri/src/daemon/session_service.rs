@@ -1117,7 +1117,10 @@ impl DaemonSessionService {
         let meta = metadata.get(&target.session_id).ok_or("SESSION_EXPIRED")?;
         let Some(session) = meta.machine_session.as_ref() else {
             drop(metadata);
-            if target.daemon_epoch.0 != self.epoch {
+            // A desktop-opened PTY keeps its session id across rolling handovers (ids are fresh
+            // UUIDs and a live id is never re-issued), so a target an earlier generation of this
+            // daemon issued still names this live process. Only a future epoch is stale.
+            if target.daemon_epoch.0 == 0 || target.daemon_epoch.0 > self.epoch {
                 return Err("STALE_EPOCH".into());
             }
             let catalog = self

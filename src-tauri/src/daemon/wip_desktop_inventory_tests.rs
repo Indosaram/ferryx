@@ -106,6 +106,20 @@ async fn desktop_gui_session_inventory_and_attach_validation() {
     let stale_err = service.validate_machine_target(&stale_target).await.unwrap_err();
     assert_eq!(stale_err, "STALE_EPOCH");
 
+    // 3b. A target issued by an earlier daemon generation (before a rolling handover) still
+    // names this live PTY: it validates and is echoed back under the epoch it was issued with,
+    // and the session detail answers under that epoch too.
+    let mut earlier_target = target.clone();
+    earlier_target.daemon_epoch = Epoch(epoch.0 - 1);
+    let earlier = service.validate_machine_target(&earlier_target).await.unwrap();
+    assert_eq!(earlier.target, earlier_target);
+    match service.machine_detail(&session_id, earlier_target.daemon_epoch).unwrap() {
+        crate::remote::machine_protocol::SessionDetail::Running { session } => {
+            assert_eq!(session.target, earlier_target);
+        }
+        other => panic!("earlier-epoch detail must describe the running session, got {other:?}"),
+    }
+
     // 4. Wrong machine_id is rejected with STALE_EPOCH
     eprintln!("[inventory_test] wrong_machine_id");
     let mut wrong_mach_target = target.clone();

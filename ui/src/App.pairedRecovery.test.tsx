@@ -234,11 +234,14 @@ import { clearWorkspaceSnapshot } from "./state/workspaceSnapshotCache";
 import { clearHmrWorkspaceState } from "./state/hmrWorkspaceState";
 import { setLocalRecoveryPersistence } from "./state/workspaceStore";
 
+// Real paired host keys are `<relay origin>/host/<machineId>`; descriptor targets carry the bare id.
+const PAIRED_HOST_ID = "https://relay.example.com/host/host-a";
+
 const pairedProject: RegisteredProject = {
   workspaceId: `daemon:${"a".repeat(64)}`,
   repoRoot: "/srv/repo",
   gitRoot: null,
-  target: { kind: "pairedDaemon", hostId: "host-a" },
+  target: { kind: "pairedDaemon", hostId: PAIRED_HOST_ID },
   remoteWorkspaceId: "remote-project",
 };
 
@@ -247,7 +250,7 @@ describe("App paired recovery boundary", () => {
     localStorage.clear();
     remoteHostStore.setState(() => ({
       hosts: {
-        "host-a": { hostId: "host-a", name: "Host A", address: "127.0.0.1", transport: "relay", authStatus: "paired", online: true, generation: "1", grantScope: "machine" },
+        "host-a": { hostId: PAIRED_HOST_ID, name: "Host A", address: "127.0.0.1", transport: "relay", authStatus: "paired", online: true, generation: "1", grantScope: "machine" },
       },
       activeHostId: null, discovering: false, nativeStatus: "ready", machineFeaturesEnabled: true,
     }));
@@ -271,7 +274,7 @@ describe("App paired recovery boundary", () => {
       workspaceId: pairedProject.workspaceId,
       repoRoot: pairedProject.repoRoot,
       gitRoot: "/srv/repo",
-      hostId: "host-a",
+      hostId: PAIRED_HOST_ID,
       hostLabel: "Host A",
     });
     native.listWorktrees.mockResolvedValue([{ path: "/local", branch: "main", head: "HEAD", bare: false, detached: false, locked: null, prunable: null }]);
@@ -410,7 +413,7 @@ describe("App paired recovery boundary", () => {
       native.terminalRemoteStatusHandler?.({
         sessionId: "paired-proxy-123",
         target: { machineId: "host-a", daemonEpoch: "epoch-paired", sessionId: "paired-proxy-123" },
-        descriptor: { backendSessionId: "paired-proxy-123", hostId: "host-a", target: { machineId: "host-a", daemonEpoch: "epoch-paired", sessionId: "paired-proxy-123" }, incarnation: "inc-paired", daemonEpoch: "epoch-paired" },
+        descriptor: { backendSessionId: "paired-proxy-123", hostId: PAIRED_HOST_ID, target: { machineId: "host-a", daemonEpoch: "epoch-paired", sessionId: "paired-proxy-123" }, incarnation: "inc-paired", daemonEpoch: "epoch-paired" },
         generation: 2, state: "connected", failure: null, replayGap: null,
       });
     });
@@ -426,7 +429,7 @@ describe("App paired recovery boundary", () => {
     native.terminalRemoteStatusHandler?.({
       sessionId: "paired-proxy-123",
       target: { machineId: "host-a", daemonEpoch: "epoch-paired", sessionId: "paired-proxy-123" },
-      descriptor: { backendSessionId: "paired-proxy-123", hostId: "host-a", target: { machineId: "host-a", daemonEpoch: "epoch-paired", sessionId: "paired-proxy-123" }, incarnation: "inc-wrong", daemonEpoch: "epoch-paired" },
+      descriptor: { backendSessionId: "paired-proxy-123", hostId: PAIRED_HOST_ID, target: { machineId: "host-a", daemonEpoch: "epoch-paired", sessionId: "paired-proxy-123" }, incarnation: "inc-wrong", daemonEpoch: "epoch-paired" },
       generation: 1, state: "connected", failure: null, replayGap: null,
     });
     expect(outcomes).toEqual([{ kind: "pending" }]);
@@ -490,7 +493,7 @@ describe("App paired recovery boundary", () => {
       };
       const descriptor = {
         backendSessionId: identityCase === "descriptor-session" ? "other-session" : actorIdentity.backendSessionId,
-        hostId: identityCase === "descriptor-host" ? "other-host" : "host-a",
+        hostId: identityCase === "descriptor-host" ? "other-host" : PAIRED_HOST_ID,
         daemonEpoch: identityCase === "descriptor-epoch" ? "other-epoch" : actorIdentity.daemonEpoch,
         incarnation: identityCase === "descriptor-incarnation" ? "other-incarnation" : actorIdentity.incarnation,
         target: {
@@ -545,7 +548,7 @@ describe("App paired recovery boundary", () => {
     const cancel = await requestPairedAdmission(result => outcomes.push(result));
     const emit = native.terminalRemoteStatusHandler;
     if (!emit) throw new Error("Retry started without a status subscription");
-    const descriptor = { backendSessionId: "paired-proxy-123", hostId: "host-a", daemonEpoch: "epoch-paired",
+    const descriptor = { backendSessionId: "paired-proxy-123", hostId: PAIRED_HOST_ID, daemonEpoch: "epoch-paired",
       incarnation: "inc-paired", target: { machineId: "host-a", daemonEpoch: "epoch-paired", sessionId: "paired-proxy-123" } };
     try {
       if (order === "after-response") await act(async () => { release(receipt); await response; });
@@ -592,7 +595,7 @@ describe("App paired recovery boundary", () => {
     const before = storeObservation.state?.sessions["paired-session"];
     const descriptor = {
       backendSessionId: eventCase === "descriptor-session" ? "foreign" : "paired-proxy-123",
-      hostId: eventCase === "descriptor-host" ? "foreign" : "host-a",
+      hostId: eventCase === "descriptor-host" ? "foreign" : PAIRED_HOST_ID,
       daemonEpoch: eventCase === "descriptor-epoch" ? "foreign" : "epoch-paired",
       incarnation: eventCase === "descriptor-incarnation" ? "foreign" : "inc-paired",
       target: { machineId: eventCase === "target-machine" ? "foreign" : "host-a",
@@ -698,8 +701,8 @@ describe("App paired recovery boundary", () => {
     await act(async () => {
       native.terminalRemoteStatusHandler?.({
         sessionId: "paired-proxy-123", daemonEpoch: "epoch-different", incarnation: "inc-different",
-        target: { hostId: "host-a", ownerId: pairedProject.workspaceId, epoch: "epoch-different", backendSessionId: "paired-proxy-123" },
-        descriptor: { backendSessionId: "paired-proxy-123", target: { hostId: "host-a", ownerId: pairedProject.workspaceId, epoch: "epoch-different", backendSessionId: "paired-proxy-123" }, config: {}, clientRequestId: "request-1", remoteCursor: "0", cols: 80, rows: 24 },
+        target: { hostId: PAIRED_HOST_ID, ownerId: pairedProject.workspaceId, epoch: "epoch-different", backendSessionId: "paired-proxy-123" },
+        descriptor: { backendSessionId: "paired-proxy-123", target: { hostId: PAIRED_HOST_ID, ownerId: pairedProject.workspaceId, epoch: "epoch-different", backendSessionId: "paired-proxy-123" }, config: {}, clientRequestId: "request-1", remoteCursor: "0", cols: 80, rows: 24 },
         generation: 1, state: "connected", failure: null, replayGap: null,
       });
     });
@@ -735,8 +738,8 @@ describe("App paired recovery boundary", () => {
     await act(async () => {
       native.terminalRemoteStatusHandler?.({
         sessionId: "paired-proxy-123", daemonEpoch: "epoch-paired", incarnation: "inc-paired",
-        target: { hostId: "host-a", ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" },
-        descriptor: { backendSessionId: "paired-proxy-123", target: { hostId: "host-a", ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" }, config: {}, clientRequestId: "request-1", remoteCursor: "0", cols: 80, rows: 24 },
+        target: { hostId: PAIRED_HOST_ID, ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" },
+        descriptor: { backendSessionId: "paired-proxy-123", target: { hostId: PAIRED_HOST_ID, ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" }, config: {}, clientRequestId: "request-1", remoteCursor: "0", cols: 80, rows: 24 },
         generation: 1, state: "disconnected", failure: null, replayGap: null,
       });
     });
@@ -744,8 +747,8 @@ describe("App paired recovery boundary", () => {
     await act(async () => {
       native.terminalRemoteStatusHandler?.({
         sessionId: "paired-proxy-123", daemonEpoch: "epoch-paired", incarnation: "inc-paired",
-        target: { hostId: "host-a", ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" },
-        descriptor: { backendSessionId: "paired-proxy-123", target: { hostId: "host-a", ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" }, config: {}, clientRequestId: "request-1", remoteCursor: "0", cols: 80, rows: 24 },
+        target: { hostId: PAIRED_HOST_ID, ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" },
+        descriptor: { backendSessionId: "paired-proxy-123", target: { hostId: PAIRED_HOST_ID, ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" }, config: {}, clientRequestId: "request-1", remoteCursor: "0", cols: 80, rows: 24 },
         generation: 1, state: "disconnected", failure: null, replayGap: null,
       });
     });
@@ -783,7 +786,7 @@ describe("App paired recovery boundary", () => {
       native.terminalRemoteStatusHandler?.({
         sessionId: "paired-proxy-123",
         target: { machineId: "host-a", daemonEpoch: "epoch-mismatch", sessionId: "paired-proxy-123" },
-        descriptor: { backendSessionId: "paired-proxy-123", hostId: "host-a", target: { machineId: "host-a", daemonEpoch: "epoch-mismatch", sessionId: "paired-proxy-123" }, incarnation: "inc-paired", daemonEpoch: "epoch-mismatch" },
+        descriptor: { backendSessionId: "paired-proxy-123", hostId: PAIRED_HOST_ID, target: { machineId: "host-a", daemonEpoch: "epoch-mismatch", sessionId: "paired-proxy-123" }, incarnation: "inc-paired", daemonEpoch: "epoch-mismatch" },
         generation: 2, state: "disconnected", failure: null, replayGap: null,
       });
     });
@@ -791,8 +794,8 @@ describe("App paired recovery boundary", () => {
     await act(async () => {
       native.terminalRemoteStatusHandler?.({
       sessionId: "paired-proxy-123",
-      target: { hostId: "host-a", ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" },
-      descriptor: { backendSessionId: "paired-proxy-123", hostId: "host-a", target: { machineId: "host-a", daemonEpoch: "epoch-paired", sessionId: "paired-proxy-123" }, incarnation: "inc-paired", daemonEpoch: "epoch-paired" },
+      target: { hostId: PAIRED_HOST_ID, ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" },
+      descriptor: { backendSessionId: "paired-proxy-123", hostId: PAIRED_HOST_ID, target: { machineId: "host-a", daemonEpoch: "epoch-paired", sessionId: "paired-proxy-123" }, incarnation: "inc-paired", daemonEpoch: "epoch-paired" },
         generation: 1, state: "disconnected", failure: null, replayGap: null,
       });
     });
@@ -827,8 +830,8 @@ describe("App paired recovery boundary", () => {
     await act(async () => {
       native.terminalRemoteStatusHandler?.({
         sessionId: "paired-proxy-123", daemonEpoch: "epoch-paired", incarnation: "inc-paired",
-        target: { hostId: "host-a", ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" },
-        descriptor: { backendSessionId: "paired-proxy-123", target: { hostId: "host-a", ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" }, config: {}, clientRequestId: "request-1", remoteCursor: "0", cols: 80, rows: 24 },
+        target: { hostId: PAIRED_HOST_ID, ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" },
+        descriptor: { backendSessionId: "paired-proxy-123", target: { hostId: PAIRED_HOST_ID, ownerId: pairedProject.workspaceId, epoch: "epoch-paired", backendSessionId: "paired-proxy-123" }, config: {}, clientRequestId: "request-1", remoteCursor: "0", cols: 80, rows: 24 },
         generation: 1, state: "disconnected", failure: null, replayGap: null,
       });
     });
@@ -1142,7 +1145,7 @@ describe("App paired recovery boundary", () => {
     await act(async () => {
       native.terminalRemoteStatusHandler?.({
         sessionId: "paired-proxy-123", daemonEpoch: "epoch-paired", incarnation: "inc-paired",
-        target: { kind: "pairedDaemon", hostId: "host-a" },
+        target: { kind: "pairedDaemon", hostId: PAIRED_HOST_ID },
         generation: 1, state: "disconnected", failure: null, replayGap: null,
       });
     });

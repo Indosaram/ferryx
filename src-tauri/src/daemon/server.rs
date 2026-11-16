@@ -8168,6 +8168,21 @@ impl DaemonServer {
                     Ok(()) => DaemonResponse::CloseOk,
                     Err(message) => daemon_error(message),
                 },
+                // A paired proxy retained on the predecessor after a handover is owned there, so its
+                // retry and recovery outcome must be answered by that daemon: answering locally
+                // reports `owner_unavailable` for every retained pane and they never recover. The
+                // successor still loads the stored descriptor, so ownership is the only test.
+                Ok(ref request @ (DaemonRequest::RetryPairedSession { ref backend_session_id, .. }
+                    | DaemonRequest::PairedRecoveryOutcome { ref backend_session_id }))
+                    if self.session_router.find_legacy_peer_for_session(backend_session_id).is_some() =>
+                {
+                    let peer = self.session_router.find_legacy_peer_for_session(backend_session_id)
+                        .expect("checked by the guard");
+                    match peer.send_request(request).await {
+                        Ok(response) => response,
+                        Err(message) => daemon_error(message),
+                    }
+                }
                 Ok(DaemonRequest::RetryPairedSession { backend_session_id, daemon_epoch, incarnation }) => {
                     match self.terminal_service.paired().retry_owned(&backend_session_id, &daemon_epoch, &incarnation).await {
                         Ok(result) => DaemonResponse::RetryPairedSessionResult {
@@ -15226,6 +15241,80 @@ mod instance_lock_deadline_tests {
         drop(reader);
         drop(write_half);
         let _ = server_task.await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn paired_retry_for_a_session_retained_on_the_predecessor_is_answered_by_it() {
+        let server = Arc::new(DaemonServer::new());
+        let session_id = "daemon-session:retained-paired".to_string();
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new().prefix("fx-legacy").tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("peer.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(stream);
+                    let mut lines = tokio::io::BufReader::new(reader).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let response = match serde_json::from_str::<DaemonRequest>(&line).unwrap() {
+                            DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                                version: DAEMON_PROTOCOL_VERSION, pid: 1, epoch: 1, binary_path: None,
+                                binary_mtime_ms: None, daemon_version: None, capabilities: Vec::new(),
+                                admission_time_unix_ms: None,
+                            },
+                            DaemonRequest::RetryPairedSession { daemon_epoch, incarnation, .. } => {
+                                assert_eq!((daemon_epoch.as_str(), incarnation.as_str()), ("7", "inc"));
+                                DaemonResponse::RetryPairedSessionResult {
+                                    admitted: true, owner_unavailable: false, stale_tuple: false,
+                                    blocked: false, affirmative_exit: false,
+                                }
+                            }
+                            other => panic!("unexpected request forwarded to the legacy peer: {other:?}"),
+                        };
+                        let mut json = serde_json::to_string(&response).unwrap();
+                        json.push('\n');
+                        writer.write_all(json.as_bytes()).await.unwrap();
+                        let _ = writer.flush().await;
+                    }
+                });
+            }
+        });
+        // The successor loads the stored descriptor at startup, exactly as on a real handover.
+        let store = dir.path().join("paired_descriptors.json");
+        std::fs::write(&store, serde_json::json!({ session_id.clone(): {
+            "hostId": "https://relay.example.com/host/host-a", "generation": "1",
+            "target": { "machineId": "host-a", "daemonEpoch": "7", "sessionId": "s" },
+            "afterSequence": "0",
+        }}).to_string()).unwrap();
+        server.terminal_service.paired().set_store_path(store);
+        assert!(server.terminal_service.paired().descriptor(&session_id).is_some());
+        server.session_router.add_legacy_peer(Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket, vec![session_id.clone()],
+        )));
+        let (mut client_tx, server_rx) = tokio::io::duplex(4096);
+        let s = server.clone();
+        let server_handler = tokio::spawn(async move { s.handle_client(server_rx).await });
+        let mut hs = serde_json::to_string(&DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION, token: None }).unwrap();
+        hs.push('\n');
+        client_tx.write_all(hs.as_bytes()).await.unwrap();
+        let (client_r, mut client_w) = tokio::io::split(client_tx);
+        let mut client_lines = tokio::io::BufReader::new(client_r).lines();
+        let _ = client_lines.next_line().await.unwrap();
+        let mut req = serde_json::to_string(&DaemonRequest::RetryPairedSession {
+            backend_session_id: session_id.clone(), daemon_epoch: "7".into(), incarnation: "inc".into(),
+        }).unwrap();
+        req.push('\n');
+        client_w.write_all(req.as_bytes()).await.unwrap();
+        let resp: DaemonResponse = serde_json::from_str(&client_lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(
+            matches!(resp, DaemonResponse::RetryPairedSessionResult { admitted: true, owner_unavailable: false, .. }),
+            "a retained paired pane must be retried by the daemon that still owns it, got {resp:?}"
+        );
+        server_handler.abort();
+        peer_task.abort();
     }
 
     #[cfg(unix)]
