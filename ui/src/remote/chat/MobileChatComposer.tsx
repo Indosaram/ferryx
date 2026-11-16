@@ -799,6 +799,7 @@ export const MobileChatComposer = React.forwardRef<
           ref={fileInputRef}
           type="file"
           multiple
+          aria-label="Attach files"
           className="hidden"
           onChange={handleFileChange}
           data-testid="file-upload-input"

@@ -1,5 +1,5 @@
 import { AppWindow, GitBranch, GitCompare, Palette, Search, TerminalSquare, X, type LucideIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { cycleAppearanceTheme, openAppearanceSurface } from "../lib/appearanceCommands";
 import type { useAppearanceSettings } from "../lib/appearanceSettings";
@@ -25,9 +25,19 @@ export type CommandPaletteProps = {
 
 type PaletteCommand = { id: string; title: string; run: () => void; icon: LucideIcon };
 
+const focusableSelector = 'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+
+/** Tab order inside the palette, skipping nodes that cannot take focus or are hidden from it. */
+function paletteFocusables(container: HTMLElement) {
+  return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector))
+    .filter((element) => element.tabIndex >= 0 && !element.closest('[hidden], [inert], [aria-hidden="true"]'));
+}
+
 export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onShowChanges, onNewWindow, appearance, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
   const isMac = isMacShortcutPlatform();
   const { overrides: shortcutOverrides } = useShortcutOverrides();
   const { preset: shortcutPreset } = useShortcutPreset(isMac);
@@ -59,12 +69,24 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
     [normalizedQuery, tabs],
   );
 
+  // Remember the control that opened the palette, move focus into the search field, and hand
+  // focus back on close or unmount so the opener is never left pointing at removed DOM.
+  useEffect(() => {
+    if (!open) return;
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    inputRef.current?.focus();
+    return () => {
+      const opener = openerRef.current;
+      openerRef.current = null;
+      if (opener?.isConnected) opener.focus();
+    };
+  }, [open]);
+
   useEffect(() => {
     if (!open) {
       setQuery("");
       return;
     }
-    inputRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -74,16 +96,37 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose, open]);
 
+  // aria-modal promises focus stays inside: wrap Tab / Shift+Tab at the palette edges.
+  const handleDialogKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusables = paletteFocusables(dialog);
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 px-4 pt-[12vh] backdrop-blur-sm" onMouseDown={onClose}>
       <div
+        ref={dialogRef}
         role="dialog"
         aria-label="Command palette"
         aria-modal="true"
         className="w-full max-w-2xl animate-enter overflow-hidden rounded-xl border border-border bg-popover shadow-2xl"
         onMouseDown={(event) => event.stopPropagation()}
+        onKeyDown={handleDialogKeyDown}
       >
         <div className="flex items-center gap-2 border-b border-border px-3">
           <Search className="size-4 shrink-0 text-muted-foreground" />
@@ -91,6 +134,7 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
             ref={inputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            aria-label="Search commands"
             placeholder="Search worktrees and terminal tabs"
             className="h-11 min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
           />
