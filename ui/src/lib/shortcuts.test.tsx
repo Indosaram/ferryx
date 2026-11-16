@@ -158,6 +158,8 @@ describe("shortcut registry", () => {
       "commandPalette.open",
       "window.new",
       "settings.toggle",
+      "appearance.cycleTheme",
+      "appearance.openSettings",
       "notifications.toggle",
       "zoom.in",
       "zoom.out",

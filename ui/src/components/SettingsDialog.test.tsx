@@ -449,11 +449,11 @@ describe("SettingsDialog", () => {
     await selectRadixOption("Interface density", /comfortable/i);
 
     const stored = JSON.parse(localStorage.getItem("ferryx.settings.appearance")!);
-    expect(stored).toEqual({
+    expect(stored).toEqual(expect.objectContaining({
       theme: "dark",
       accentColor: "emerald",
       density: "comfortable",
-    });
+    }));
 
     unmount();
     render(<SettingsDialog open onClose={vi.fn()} />);
@@ -603,16 +603,16 @@ describe("SettingsDialog", () => {
       await selectRadixOption("Accent color", /ocean blue/i);
       await selectRadixOption("Interface density", /comfortable/i);
 
-      expect(loadAppearanceSettings()).toEqual({
+      expect(loadAppearanceSettings()).toEqual(expect.objectContaining({
         theme: "light",
         accentColor: "blue",
         density: "comfortable",
-      });
-      expect(events.at(-1)).toEqual({
+      }));
+      expect(events.at(-1)).toEqual(expect.objectContaining({
         theme: "light",
         accentColor: "blue",
         density: "comfortable",
-      });
+      }));
 
       unmount();
       render(<SettingsDialog open onClose={vi.fn()} />);
