@@ -93,13 +93,20 @@ pub struct ProjectResolution {
     pub host_id: Option<String>,
 }
 
-/// Resolves the project of an app submit from the owner's own turn, before admission: (1) the
-/// project whose checkout contains the cwd of the first session the owner addressed with @;
-/// (2) else the single project whose name or repository identity basename the owner message and
-/// the proposal title name as a whole word, case-insensitively. Two matches are refused
-/// (`None`), never guessed. `host_id` is the project's host when it has exactly one.
+/// Resolves the project of an app submit from the owner's own turn, before admission:
 ///
-/// `None` leaves the project to admission, which then holds the goal for the owner.
+/// 1. the project whose checkout contains the cwd of the first session the owner addressed with
+///    `@`;
+/// 2. else, when the owner's previous app submit ended in a project `needs_choice`
+///    (`asked_for_project`), the single project the owner's message alone names: the answer to
+///    the supervisor's own question. The proposal title gets no say in it, so a title the model
+///    derived from an earlier turn cannot turn a one-name answer into a refusal;
+/// 3. else the single project whose name or repository identity basename the owner message and
+///    the proposal title name as a whole word, case-insensitively.
+///
+/// Several matches are refused (`None`), never guessed. `host_id` is the project's host when it
+/// has exactly one. `None` leaves the project to admission, which then asks the owner and lists
+/// the project names.
 pub async fn resolve_project(
     pool: &SqlitePool,
     supervisor_id: &str,
@@ -107,10 +114,18 @@ pub async fn resolve_project(
     title: &str,
     mentions: &[SessionRef],
     sessions: Option<&SessionTools>,
+    asked_for_project: bool,
 ) -> Result<Option<ProjectResolution>, AdmissionError> {
-    let project_id = match project_of_mentions(pool, supervisor_id, mentions, sessions).await {
-        Some(project_id) => project_id,
-        None => match project_of_names(pool, supervisor_id, owner_text, title).await? {
+    let answering = if asked_for_project {
+        project_of_names(pool, supervisor_id, owner_text, "").await?
+    } else {
+        None
+    };
+    let mentioned = project_of_mentions(pool, supervisor_id, mentions, sessions).await;
+    let project_id = match (mentioned, answering) {
+        (Some(project_id), _) => project_id,
+        (None, Some(project_id)) => project_id,
+        (None, None) => match project_of_names(pool, supervisor_id, owner_text, title).await? {
             Some(project_id) => project_id,
             None => return Ok(None),
         },
@@ -135,7 +150,11 @@ async fn project_of_mentions(
     let fleet = match sessions.fleet().await {
         Ok(fleet) => fleet,
         Err(error) => {
-            tracing::warn!(%error, session = %first, "the fleet was not listed; a mentioned session names no project");
+            tracing::warn!(
+                %error,
+                session = %first,
+                "the fleet was not listed; a mentioned session names no project"
+            );
             return None;
         }
     };
@@ -372,6 +391,58 @@ fn refused(error: &admission::AdmissionError) -> WorkToolRejection {
     WorkToolRejection::new(error.code(), &error.to_string())
 }
 
+/// The hub-meta key prefix of the marker that says the owner's last app submit ended in a project
+/// `needs_choice`: the state rule 3 reads so that one project name answers the supervisor's own
+/// question. The value is the admission source id of the turn that asked, so the answer stays
+/// traceable to the question.
+const PROJECT_CHOICE_PREFIX: &str = "supervisor_app_project_choice:";
+
+/// Records that the turn `request_id` ended in a project `needs_choice`, or (`None`) that it did
+/// not, which clears an earlier question. Every submit writes it, so the next submit of the
+/// conversation reads only its own predecessor's question. The key is per owner, so one owner's
+/// question never decides another's answer.
+async fn record_project_choice(
+    pool: &SqlitePool,
+    owner: &str,
+    request_id: Option<&str>,
+) -> Result<(), AdmissionError> {
+    let key = format!("{PROJECT_CHOICE_PREFIX}{owner}");
+    match request_id {
+        Some(request_id) => {
+            sqlx::query(
+                "INSERT INTO hub_meta(key, value) VALUES(?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(&key)
+            .bind(request_id)
+            .execute(pool)
+            .await?;
+        }
+        None => {
+            sqlx::query("DELETE FROM hub_meta WHERE key = ?")
+                .bind(&key)
+                .execute(pool)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether the owner's last app submit ended in a project `needs_choice`; the admission source id
+/// of that turn when it did. A missing row (no such submit, or one that named a project) answers
+/// `None`. The marker only lets rule 3 apply, which matches the owner's own message more strictly
+/// than rule 2, so it never widens a guess.
+async fn project_question(
+    pool: &SqlitePool,
+    owner: &str,
+) -> Result<Option<String>, AdmissionError> {
+    let asked: Option<String> = sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+        .bind(format!("{PROJECT_CHOICE_PREFIX}{owner}"))
+        .fetch_optional(pool)
+        .await?;
+    Ok(asked)
+}
+
 /// The submit with the project and host the owner's turn resolves to, unless the proposal or the
 /// owner's choices already named them. A turn whose owner has no supervisor identity resolves
 /// nothing and leaves the scope to admission.
@@ -410,6 +481,7 @@ async fn resolve_for_turn(
                     .map(|live| live.mentions.clone())
                     .unwrap_or_default(),
             };
+            let asked = project_question(pool, owner).await?.is_some();
             let Some(resolved) = resolve_project(
                 pool,
                 &identity.supervisor_id,
@@ -417,6 +489,7 @@ async fn resolve_for_turn(
                 &work.title,
                 &mentions,
                 sessions,
+                asked,
             )
             .await?
             else {
@@ -506,9 +579,24 @@ impl WorkToolHandler for AppWorkTools {
                     Ok(work) => work,
                     Err(error) => return Err(refused(&error)),
                 };
-                let outcome = admission::handle_message(&self.pool, &actor, Some(&work))
-                    .await
-                    .map_err(|error| refused(&error))?;
+                let outcome = admission::handle_message(&self.pool, &actor, Some(&work)).await;
+                // The question the next app turn answers. A refused submit is not a question, so
+                // it clears any earlier one instead. The outcome itself is already persisted, so
+                // a failure here is logged rather than turned into a failed submit.
+                let asked = match &outcome {
+                    Ok(SubmitOutcome::NeedsChoice { missing, .. }) if missing == "project" => {
+                        Some(actor.source_message_id.as_str())
+                    }
+                    _ => None,
+                };
+                if let Err(error) = record_project_choice(&self.pool, &owner, asked).await {
+                    tracing::warn!(
+                        %error,
+                        owner = %owner,
+                        "the project question was not recorded"
+                    );
+                }
+                let outcome = outcome.map_err(|error| refused(&error))?;
                 if let Some(generation) = turn {
                     if let Some(live) = registry().live.get_mut(&generation) {
                         live.outcomes.push(outcome.clone());
@@ -1176,6 +1264,148 @@ mod tests {
         assert_eq!(outcome["outcome"], "needs_choice");
         assert_eq!(outcome["missing"], "host");
         assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// Rule 4: a `needs_choice` for the project lists the project names, so the owner can answer
+    /// with one.
+    #[tokio::test]
+    async fn a_project_choice_lists_the_project_names() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-c1", "고쳐줘");
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+        let detail = outcome["detail"].as_str().unwrap();
+        for name in ["ferryx", "other", "pane"] {
+            assert!(detail.contains(name), "{detail} does not list {name}");
+        }
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// Rules 3 and 4 together, the plan's failure-then-success scenario: no name is asked for by
+    /// listing the names, and the next message naming exactly one project creates the goal.
+    #[tokio::test]
+    async fn the_project_named_in_answer_to_the_question_is_admitted() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+
+        let asked = AppTurnGuard::begin("req-c2", "고쳐줘");
+        let outcome = tools
+            .handle(app(Some(asked.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(outcome["missing"], "project");
+        assert_eq!(goals(&pool).await, 0);
+
+        let answer = AppTurnGuard::begin("req-c3", "ferryx");
+        let admitted = tools
+            .handle(app(Some(answer.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(admitted["outcome"], "admitted");
+
+        let (project_id, host_id) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "ferryx"));
+        assert_eq!(host_id, "host-a");
+        assert_eq!(goals(&pool).await, 1);
+    }
+
+    /// Rule 3 answers the supervisor's own question: the owner's message alone decides, so a
+    /// proposal title naming a second project cannot turn a one-name answer into a refusal.
+    #[tokio::test]
+    async fn an_answer_to_the_question_ignores_the_proposal_title() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+        let asked = AppTurnGuard::begin("req-c4", "고쳐줘");
+        tools
+            .handle(app(Some(asked.token()), submit()))
+            .await
+            .unwrap();
+
+        let answer = AppTurnGuard::begin("req-c5", "ferryx");
+        let titled = WorkToolCall::Submit {
+            title: "Fix the typo in pane's README".into(),
+            requirements: vec!["the typo is fixed".into()],
+            worker: WorkerPreference::Any,
+        };
+
+        tools.handle(app(Some(answer.token()), titled)).await.unwrap();
+
+        let (project_id, _) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "ferryx"));
+    }
+
+    /// Rule 3 is conditional: without the earlier question, the same message and title name two
+    /// projects and are refused, never guessed.
+    #[tokio::test]
+    async fn without_a_question_the_same_title_still_names_two_projects() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-c6", "ferryx");
+        let titled = WorkToolCall::Submit {
+            title: "Fix the typo in pane's README".into(),
+            requirements: vec!["the typo is fixed".into()],
+            worker: WorkerPreference::Any,
+        };
+
+        let outcome = tools.handle(app(Some(turn.token()), titled)).await.unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// The project question the owner currently owes, if any.
+    async fn asked_project(pool: &SqlitePool) -> Option<String> {
+        super::project_question(pool, OWNER).await.unwrap()
+    }
+
+    /// The question stands only while the owner owes a project: the next turn records its own
+    /// answer, so an admitted goal clears it, and a question about the host never sets it.
+    #[tokio::test]
+    async fn only_a_project_question_arms_the_next_answer() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let ferryx = project_id_of(&projects, "ferryx").to_owned();
+        let tools = AppWorkTools::new(pool.clone());
+        assert_eq!(asked_project(&pool).await, None);
+
+        // A host question is not a project question.
+        bind_project_host(&pool, &ferryx, "host-b", "/srv/ferryx/.git")
+            .await
+            .unwrap();
+        let host = AppTurnGuard::begin("req-c7", "fix the ferryx README");
+        let outcome = tools
+            .handle(app(Some(host.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(outcome["missing"], "host");
+        assert_eq!(asked_project(&pool).await, None);
+
+        // A project question is, and it names the turn that asked.
+        let asked = AppTurnGuard::begin("req-c8", "고쳐줘");
+        tools
+            .handle(app(Some(asked.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(asked_project(&pool).await.as_deref(), Some("app:req-c8"));
+
+        // The turn that answers it records its own outcome instead.
+        let answer = AppTurnGuard::begin("req-c9", "other");
+        let admitted = tools
+            .handle(app(Some(answer.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(admitted["outcome"], "admitted");
+        assert_eq!(asked_project(&pool).await, None);
     }
 
     #[derive(Default)]
