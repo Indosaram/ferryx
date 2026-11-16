@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
 import { SSH_CONFIG_PATH_STORAGE_KEY } from "./storageKeys";
+import type { TunnelSpec } from "./sshTunnels";
 
 export type SshHostSource = "config" | "manual" | "tailscale";
 export type SshAuthMethod = "agent" | "key" | "password";
@@ -24,6 +25,13 @@ export interface SshHost {
    * machine opens PowerShell. Presets match the local picker; any other value is a path.
    */
   shell?: string | null;
+  /**
+   * Saved tunnel definitions for this machine, joined client-side from the tunnel
+   * definitions response. Never persisted and never sent back in an update payload
+   * (`cleanHostForIpc` rebuilds the object field by field); absent when the background
+   * service does not advertise `sshTunnelV1`.
+   */
+  tunnels?: TunnelSpec[];
 }
 
 export interface SshRemoteEnvironment {
