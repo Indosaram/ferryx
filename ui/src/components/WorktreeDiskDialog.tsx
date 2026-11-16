@@ -467,7 +467,7 @@ export function WorktreeDiskDialog({
               <button
                 type="button"
                 onClick={() => void startScan(true)}
-                className="rounded-md bg-status-warning-container px-2.5 py-1 text-xs font-medium hover:bg-status-warning/30"
+                className="rounded-md border border-status-warning-border bg-status-warning/20 px-2.5 py-1 text-xs font-medium hover:bg-status-warning/30"
               >
                 Restart scan
               </button>

@@ -384,7 +384,8 @@ pub async fn injection_block_with_ids(
     Ok(Some((block.join("\n"), ids)))
 }
 
-/// Selects lessons for a corrective turn without advancing goal-level injection counts.
+/// Selects lessons for a corrective turn, advancing each chosen lesson's own usage counters
+/// so a lesson that only ever reaches correction does not look unused to the stale sweep.
 pub async fn injection_block_with_ids_for_turn(
     pool: &SqlitePool,
     domain: LessonDomain,
@@ -405,6 +406,23 @@ pub async fn injection_block_with_ids_for_turn(
     if chosen.is_empty() {
         return Ok(None);
     }
+    // A correction-selected lesson is used now, so its usage has to move with it: otherwise an
+    // actively useful corrective lesson looks untouched and `retire_stale` retires it.
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin_write().await?;
+    for lesson in &chosen {
+        sqlx::query(
+            "UPDATE supervisor_lessons
+             SET injected = injected + 1, last_injected_at = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(&lesson.id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     let mut block = vec![INJECTION_HEADER.to_owned(), FENCE_OPEN.to_owned()];
     block.extend(chosen.iter().map(|lesson| fenced_line(&lesson.rule)));
     block.push(FENCE_CLOSE.to_owned());
@@ -487,7 +505,12 @@ pub async fn settle(
     Ok(ids)
 }
 
-/// Settles each open turn injection once without changing goal-level counters.
+/// Settles each open turn injection once and credits it to the goal rollup.
+///
+/// A lesson can reach a turn without passing admission -- a correction selects it directly --
+/// so turn rows are the only place its outcome is visible. Crediting them keeps
+/// `helped`/`hurt` and promotion honest for those lessons; the goal rollup settles each
+/// `(goal, lesson)` pair once, so a lesson seen through both paths is not double-counted.
 pub async fn settle_turns(
     pool: &SqlitePool,
     turn_ref: &str,
@@ -506,6 +529,7 @@ pub async fn settle_turns(
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
+    observe(pool, &ids, outcome).await?;
     Ok(ids)
 }
 
@@ -968,12 +992,14 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
-        // Turn attribution does not promote lessons; the goal rollup observes once.
-        let before: i64 = sqlx::query_scalar("SELECT SUM(helped) FROM supervisor_lessons")
+        // A turn's outcome now credits the lessons it carried: a correction can reach a lesson
+        // admission never injected, so the turn row is that lesson's only outcome record.
+        let helped: i64 = sqlx::query_scalar("SELECT SUM(helped) FROM supervisor_lessons")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(before, 0);
+        assert_eq!(helped, 2);
+        // The goal rollup settles a lesson it already saw through a turn once, not twice.
         note_injected(&pool, "goal:turn-fixture", &expected)
             .await
             .unwrap();
@@ -988,7 +1014,64 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(helped, 2);
+        assert_eq!(helped, 4);
+    }
+
+    #[tokio::test]
+    async fn a_correction_selected_lesson_still_counts_as_used() {
+        let pool = pool().await;
+        let seeded = record(
+            &pool,
+            LessonDraft {
+                domain: LessonDomain::Goal,
+                project: PROJECT,
+                rule: "check the flaky probe first",
+                rationale: "a correction reached it without admission",
+                keywords: "tests",
+                evidence_ref: "goal:correction",
+            },
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .expect("the record helper stores a new lesson");
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("UPDATE supervisor_lessons SET last_injected_at = ?, created_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&now)
+            .bind(&seeded.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let block = injection_block_with_ids_for_turn(
+            &pool,
+            LessonDomain::Goal,
+            PROJECT,
+            &["the tests are flaky"],
+        )
+        .await
+        .unwrap()
+        .expect("the corrective turn should select the lesson");
+        let injected: i64 =
+            sqlx::query_scalar("SELECT injected FROM supervisor_lessons WHERE id = ?")
+                .bind(&seeded.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(injected, 1, "a correction-selected lesson was used");
+        note_turn_injected(&pool, "turn-correction", &block.1)
+            .await
+            .unwrap();
+        settle_turns(&pool, "turn-correction", Outcome::Helped)
+            .await
+            .unwrap();
+        let helped: i64 =
+            sqlx::query_scalar("SELECT helped FROM supervisor_lessons WHERE id = ?")
+                .bind(&seeded.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(helped, 1, "the correction outcome credited the lesson");
     }
 
     #[tokio::test]

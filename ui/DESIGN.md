@@ -591,5 +591,6 @@ Container-shaped status surfaces -- badges, banners, alert panels, notice rows -
 `bg-status-X-container` with `border-status-X-border` and `text-status-X-on`, never a
 translucent `bg-status-X/NN`. The alpha form survives only where the surface is a
 single-pixel marker or a line of text: the active search match in `FilePreviewText`, the
-`+`/`-` lines of a diff body, a hover ground under an existing container button, and a
-count pill nested inside one. Everything else has been migrated; add no new `bg-status-X/NN`.
+`+`/`-` lines of a diff body, a hover ground under an existing container button, a count
+pill nested inside one, and the voice orb's own tone (`VoiceCallSurface`). Everything else
+has been migrated; add no new `bg-status-X/NN`.

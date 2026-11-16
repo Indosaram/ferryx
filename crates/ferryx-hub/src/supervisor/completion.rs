@@ -600,13 +600,20 @@ impl CompletionDriver {
             instruction.trim(),
             grant_text(cwd.as_deref().unwrap_or(""), &binding_host, &grant)
         );
-        let turn_block = super::lessons::injection_block_with_ids_for_turn(
+        let turn_block = match super::lessons::injection_block_with_ids_for_turn(
             &self.pool,
             super::lessons::LessonDomain::Goal,
             &goal.project_id,
             &[&asked],
         )
-        .await?;
+        .await
+        {
+            Ok(block) => block,
+            Err(error) => {
+                tracing::warn!(%error, "turn lessons were not injected");
+                None
+            }
+        };
         let mut injected_lessons = Vec::new();
         if let Some((block, ids)) = turn_block {
             instruction.push_str("\n\n");
@@ -700,7 +707,11 @@ impl CompletionDriver {
                 )
                 .bind(&goal.goal_id)
                 .fetch_optional(&self.pool)
-                .await?;
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "the lesson turn reference was not found");
+                    None
+                });
                 self.lessons_hurt(&goal.goal_id, &summary, turn_ref.as_deref())
                     .await;
             }
