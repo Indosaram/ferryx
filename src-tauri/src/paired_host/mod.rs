@@ -12,6 +12,7 @@ pub mod file_read;
 pub mod file_write;
 pub mod file_tree;
 pub mod path_select;
+pub mod account_reconcile;
 pub mod inventory;
 pub mod projects;
 pub mod reachability;

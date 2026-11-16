@@ -78,7 +78,6 @@ describe("first-run wizard and macOS permissions", () => {
         agents={[]}
         isMac
         onAddProject={vi.fn()}
-        onConnectMachine={vi.fn()}
         onStepCompleted={vi.fn()}
         onFinish={onFinish}
         onSkip={vi.fn()}

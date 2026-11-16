@@ -81,7 +81,6 @@ function createDefaultProps(overrides?: Partial<WelcomeWizardProps>): WelcomeWiz
     agents: mockAgents,
     isMac: true,
     onAddProject: vi.fn(),
-    onConnectMachine: vi.fn(),
     onStepCompleted: vi.fn(),
     onFinish: vi.fn(),
     onSkip: vi.fn(),
@@ -211,27 +210,15 @@ describe("WelcomeWizard", () => {
     expect(callOrder).toEqual(["stepCompleted", "addProject"]);
   });
 
-  it('project step Connect a machine button calls onStepCompleted("project") then onConnectMachine', () => {
-    const onStepCompleted = vi.fn();
-    const onConnectMachine = vi.fn();
+  it("project step has no machine registration entry point", () => {
     const props = createDefaultProps({
       steps: ["intro", "project"],
       initialStepIndex: 1,
-      onStepCompleted,
-      onConnectMachine,
     });
     render(<WelcomeWizard {...props} />);
 
-    const callOrder: string[] = [];
-    onStepCompleted.mockImplementation(() => callOrder.push("stepCompleted"));
-    onConnectMachine.mockImplementation(() => callOrder.push("connectMachine"));
-
-    const connectMachineBtn = screen.getByTestId("onboarding-connect-machine");
-    fireEvent.click(connectMachineBtn);
-
-    expect(onStepCompleted).toHaveBeenCalledWith("project");
-    expect(onConnectMachine).toHaveBeenCalledTimes(1);
-    expect(callOrder).toEqual(["stepCompleted", "connectMachine"]);
+    expect(screen.getByTestId("onboarding-add-project")).toBeDefined();
+    expect(screen.queryByTestId("onboarding-connect-machine")).toBeNull();
   });
 
   it("initialStepIndex=1 starts on the second step", () => {

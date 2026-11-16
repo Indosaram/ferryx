@@ -1,10 +1,7 @@
-import { ChevronRight, FolderPlus, Monitor } from "lucide-react";
+import { ChevronRight, FolderPlus } from "lucide-react";
 
-export function FirstProjectStep(props: {
-  onAddProject: () => void;
-  onConnectMachine: () => void;
-}): JSX.Element {
-  const { onAddProject, onConnectMachine } = props;
+export function FirstProjectStep(props: { onAddProject: () => void }): JSX.Element {
+  const { onAddProject } = props;
 
   return (
     <div className="grid gap-2">
@@ -23,26 +20,6 @@ export function FirstProjectStep(props: {
           </div>
           <div className="mt-0.5 text-[12px] text-muted-foreground leading-relaxed">
             Pick a folder on this computer. Git repositories unlock worktrees.
-          </div>
-        </div>
-        <ChevronRight className="size-4 text-muted-foreground ml-auto shrink-0" />
-      </button>
-
-      <button
-        type="button"
-        data-testid="onboarding-connect-machine"
-        onClick={onConnectMachine}
-        className="group flex w-full items-center gap-3 rounded-md border border-border px-4 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-      >
-        <div className="size-8 rounded-md bg-accent/60 grid place-items-center shrink-0">
-          <Monitor className="size-4 text-foreground" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-medium text-foreground">
-            Connect a machine
-          </div>
-          <div className="mt-0.5 text-[12px] text-muted-foreground leading-relaxed">
-            Pair another computer through your Ferryx account.
           </div>
         </div>
         <ChevronRight className="size-4 text-muted-foreground ml-auto shrink-0" />

@@ -98,7 +98,7 @@ interface MachineRowProps {
   status: MachineStatus;
   statusTitle?: string;
   selected: boolean;
-  primary: { kind: "add" | "connect"; disabled: boolean; onClick: () => void };
+  primary: { disabled: boolean; onClick: () => void };
   disabledReason: string | null;
   note?: ReactNode;
   menuItems: MenuItemSpec[];
@@ -130,15 +130,9 @@ export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, stat
           <span className="shrink-0 rounded border border-border/70 bg-muted/40 px-1.5 text-[11px] text-muted-foreground">{pathChip}</span>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {primary.kind === "connect" ? (
-            <Button type="button" size="sm" aria-label={`Connect ${actionName}`} disabled={primary.disabled} aria-describedby={primary.disabled && disabledReason ? reasonId : undefined} onClick={primary.onClick}>
-              Connect
-            </Button>
-          ) : (
-            <Button type="button" size="sm" variant={primary.disabled ? "outline" : "default"} aria-label={`Add Project on ${actionName}`} disabled={primary.disabled} aria-describedby={primary.disabled && disabledReason ? reasonId : undefined} onClick={primary.onClick}>
-              Add Project
-            </Button>
-          )}
+          <Button type="button" size="sm" variant={primary.disabled ? "outline" : "default"} aria-label={`Add Project on ${actionName}`} disabled={primary.disabled} aria-describedby={primary.disabled && disabledReason ? reasonId : undefined} onClick={primary.onClick}>
+            Add Project
+          </Button>
           <Button type="button" variant="outline" size="sm" ref={detailsRef} aria-label={`Details for ${actionName}`} aria-haspopup="dialog" onClick={onDetails}>
             Details
           </Button>
@@ -173,9 +167,9 @@ export function MachineRow({ rowKey, name, actionName, kindLabel, pathChip, stat
 export interface PairedMachineRowProps extends PairedStatusInput {
   selected: boolean;
   busy: boolean;
-  signedIn: boolean;
+  /** Retained for callers; pairing no longer depends on the sign-in flag. */
+  signedIn?: boolean;
   onAddProject: () => void;
-  onConnect: () => void;
   onDetails: () => void;
   /** Details chosen from the "More actions" menu; defaults to onDetails. */
   onMenuDetails?: () => void;
@@ -189,13 +183,12 @@ export interface PairedMachineRowProps extends PairedStatusInput {
 }
 
 export function PairedMachineRow(props: PairedMachineRowProps) {
-  const { host, busy, signedIn, nativeReady, canOpenProject } = props;
+  const { host, busy, nativeReady, canOpenProject } = props;
   const status = usePairedRowStatus(props);
   const route = usePairedHostRoute(host.hostId);
   const name = pairedDisplayName(host);
-  const connect = status.primary === "connect";
-  const disabled = connect ? busy || !signedIn : busy || status.code !== "READY" || !canOpenProject;
-  const reason = busy ? "Another action is in progress." : connect && !signedIn ? "Sign in to your Ferryx account to connect." : status.reason ?? MACHINE_STATUS_EXPLANATIONS[status.code] ?? null;
+  const disabled = busy || status.code !== "READY" || !canOpenProject;
+  const reason = busy ? "Another action is in progress." : status.reason ?? MACHINE_STATUS_EXPLANATIONS[status.code] ?? null;
   return (
     <MachineRow
       rowKey={`paired:${host.hostId}`}
@@ -205,9 +198,7 @@ export function PairedMachineRow(props: PairedMachineRowProps) {
       pathChip={pairedPathLabel(host.transport, route)}
       status={status}
       selected={props.selected}
-      primary={connect
-        ? { kind: "connect", disabled, onClick: props.onConnect }
-        : { kind: "add", disabled, onClick: props.onAddProject }}
+      primary={{ disabled, onClick: props.onAddProject }}
       disabledReason={reason}
       menuItems={[
         { label: "Details", onSelect: props.onMenuDetails ?? props.onDetails },
@@ -272,7 +263,7 @@ export function SshMachineRow(props: SshMachineRowProps) {
       status={status}
       statusTitle={props.test?.error || target?.lastError || status.label}
       selected={props.selected}
-      primary={{ kind: "add", disabled, onClick: props.onAddProject }}
+      primary={{ disabled, onClick: props.onAddProject }}
       disabledReason={reason}
       note={target?.diagnostic ? (
         <p role="note" className="break-words text-[12px] text-muted-foreground">{target.diagnostic.details?.stage ?? target.diagnostic.code}: {target.diagnostic.message}</p>

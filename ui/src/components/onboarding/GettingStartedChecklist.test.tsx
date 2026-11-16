@@ -7,19 +7,17 @@ type PermissionsSummary = { granted: number; total: number };
 
 function renderChecklist(permissionsSummary: PermissionsSummary | null = null) {
   const onAddProject = vi.fn();
-  const onConnectMachine = vi.fn();
   const onOpenWelcome = vi.fn();
 
   render(
     <GettingStartedChecklist
       onAddProject={onAddProject}
-      onConnectMachine={onConnectMachine}
       onOpenWelcome={onOpenWelcome}
       permissionsSummary={permissionsSummary}
     />
   );
 
-  return { onAddProject, onConnectMachine, onOpenWelcome };
+  return { onAddProject, onOpenWelcome };
 }
 
 describe("GettingStartedChecklist", () => {
@@ -35,48 +33,35 @@ describe("GettingStartedChecklist", () => {
     expect(screen.getByText("Add a project to open a terminal workspace.")).toBeDefined();
   });
 
-  it("renders the three checklist rows", () => {
+  it("renders the project row and setup row without a machine registration entry", () => {
     renderChecklist();
 
     expect(screen.getByTestId("checklist-add-project")).toBe(
       screen.getByRole("button", { name: "Add Project" })
     );
-    expect(screen.getByTestId("checklist-connect-machine")).toBe(
-      screen.getByRole("button", { name: "Connect machine" })
-    );
+    expect(screen.queryByTestId("checklist-connect-machine")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Connect machine" })).toBeNull();
     expect(screen.getByTestId("checklist-review-setup").contains(
       screen.getByRole("button", { name: "Open Welcome Setup" })
     )).toBe(true);
   });
 
   it("calls onAddProject from the primary Add Project button", () => {
-    const { onAddProject, onConnectMachine, onOpenWelcome } = renderChecklist();
+    const { onAddProject, onOpenWelcome } = renderChecklist();
 
     fireEvent.click(screen.getByRole("button", { name: "Add Project" }));
 
     expect(onAddProject).toHaveBeenCalledTimes(1);
-    expect(onConnectMachine).not.toHaveBeenCalled();
-    expect(onOpenWelcome).not.toHaveBeenCalled();
-  });
-
-  it("calls onConnectMachine from the Connect machine button", () => {
-    const { onAddProject, onConnectMachine, onOpenWelcome } = renderChecklist();
-
-    fireEvent.click(screen.getByRole("button", { name: "Connect machine" }));
-
-    expect(onConnectMachine).toHaveBeenCalledTimes(1);
-    expect(onAddProject).not.toHaveBeenCalled();
     expect(onOpenWelcome).not.toHaveBeenCalled();
   });
 
   it("calls onOpenWelcome from the Open Welcome Setup button", () => {
-    const { onAddProject, onConnectMachine, onOpenWelcome } = renderChecklist();
+    const { onAddProject, onOpenWelcome } = renderChecklist();
 
     fireEvent.click(screen.getByRole("button", { name: "Open Welcome Setup" }));
 
     expect(onOpenWelcome).toHaveBeenCalledTimes(1);
     expect(onAddProject).not.toHaveBeenCalled();
-    expect(onConnectMachine).not.toHaveBeenCalled();
   });
 
   it("shows the permissions summary when one is provided", () => {

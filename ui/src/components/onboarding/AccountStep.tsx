@@ -1,32 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import {
-  enrollThisMachine,
-  getAccountEnrollmentStatus,
-  type AccountEnrollmentStatus,
-} from "../../lib/tauri";
-import {
-  AccountSessionError,
-  getConfiguredAccountOrigin,
-  getStoredAccountSessionToken,
-  issueEnrollmentCode,
-} from "../../remote/accountSession";
+import { adoptAccountSession } from "../../lib/accountPairing";
+import { getAccountEnrollmentStatus, type AccountEnrollmentStatus } from "../../lib/tauri";
+import { getConfiguredAccountOrigin, getStoredAccountSessionToken } from "../../remote/accountSession";
 import { AccountSignIn } from "../settings/AccountSignIn";
-import { Button } from "../ui/button";
 import { WizardRow, WizardRowList, WizardStatus } from "./WizardPrimitives";
 
+/**
+ * Signing in is the whole step. There is no enrollment code to read out and no second "link"
+ * action: the account session is handed to the daemon, which enrolls this computer when it has
+ * to and pairs it with the account.
+ */
 export type AccountStepDeps = {
   loadStatus: () => Promise<AccountEnrollmentStatus>;
-  issueCode: (origin: string, token: string) => Promise<{ code: string }>;
-  enroll: (origin: string, code: string, sessionToken?: string) => Promise<AccountEnrollmentStatus>;
   readToken: (origin: string) => string | null;
+  adopt: (origin: string, token: string | null) => Promise<void>;
 };
 
 const DEFAULT_DEPS: AccountStepDeps = {
   loadStatus: getAccountEnrollmentStatus,
-  issueCode: issueEnrollmentCode,
-  enroll: enrollThisMachine,
   readToken: getStoredAccountSessionToken,
+  adopt: adoptAccountSession,
 };
 
 export type AccountStepProps = {
@@ -35,30 +29,7 @@ export type AccountStepProps = {
   onLinked?: () => void;
 };
 
-type Phase =
-  | { kind: "loading" }
-  | { kind: "linked" }
-  | { kind: "signed-out" }
-  | { kind: "signed-in"; token: string }
-  | { kind: "linking" }
-  | { kind: "failed"; token: string; code: string; message: string };
-
-function describeError(error: unknown): { code: string; message: string } {
-  if (error instanceof AccountSessionError) {
-    return { code: error.code, message: error.message };
-  }
-  if (error && typeof error === "object" && "code" in error) {
-    const typed = error as { code: unknown; message?: unknown };
-    return {
-      code: String(typed.code),
-      message: typeof typed.message === "string" ? typed.message : String(typed.code),
-    };
-  }
-  return {
-    code: "ENROLL_FAILED",
-    message: error instanceof Error ? error.message : "Could not link this computer.",
-  };
-}
+type Phase = { kind: "loading" } | { kind: "linked" } | { kind: "signed-out" };
 
 export function AccountStep({ origin, deps, onLinked }: AccountStepProps): JSX.Element {
   const accountOrigin = origin ?? getConfiguredAccountOrigin();
@@ -68,31 +39,14 @@ export function AccountStep({ origin, deps, onLinked }: AccountStepProps): JSX.E
   const mountedRef = useRef(true);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
 
-  const link = useCallback(
-    async (token: string) => {
-      setPhase({ kind: "linking" });
-      try {
-        const { code } = await depsRef.current.issueCode(accountOrigin, token);
-        const status = await depsRef.current.enroll(accountOrigin, code, token);
-        if (!mountedRef.current) return;
-        if (!status.enrolled) {
-          setPhase({
-            kind: "failed",
-            token,
-            code: "ENROLL_FAILED",
-            message: "The account did not confirm this computer.",
-          });
-          return;
-        }
-        setPhase({ kind: "linked" });
-        onLinkedRef.current?.();
-      } catch (error) {
-        if (!mountedRef.current) return;
-        setPhase({ kind: "failed", token, ...describeError(error) });
-      }
-    },
-    [accountOrigin],
-  );
+  // There is nothing to await: the session the user just obtained is the pairing. The daemon
+  // enrolls and pairs from it, so the step completes the moment sign-in returns. Onboarding is
+  // its own surface and Settings may never mount, so the handoff happens here too.
+  const link = useCallback(() => {
+    void depsRef.current.adopt(accountOrigin, depsRef.current.readToken(accountOrigin));
+    setPhase({ kind: "linked" });
+    onLinkedRef.current?.();
+  }, [accountOrigin]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -107,7 +61,7 @@ export function AccountStep({ origin, deps, onLinked }: AccountStepProps): JSX.E
         }
         const token = depsRef.current.readToken(accountOrigin);
         if (token) {
-          void link(token);
+          link();
         } else {
           setPhase({ kind: "signed-out" });
         }
@@ -121,19 +75,14 @@ export function AccountStep({ origin, deps, onLinked }: AccountStepProps): JSX.E
     return (
       <AccountSignIn
         origin={accountOrigin}
-        onSignIn={(token) => void link(token)}
+        onSignIn={() => link()}
       />
     );
   }
 
-  const status =
-    phase.kind === "linked" ? (
-      <WizardStatus tone="success" label="Linked" />
-    ) : phase.kind === "failed" ? (
-      <WizardStatus tone="warning" label="Not linked" />
-    ) : (
-      <WizardStatus tone="neutral" label={phase.kind === "linking" ? "Linking…" : "Checking…"} />
-    );
+  const status = phase.kind === "linked"
+    ? <WizardStatus tone="success" label="Linked" />
+    : <WizardStatus tone="neutral" label="Checking…" />;
 
   return (
     <div data-testid="onboarding-account" data-phase={phase.kind}>
@@ -141,24 +90,8 @@ export function AccountStep({ origin, deps, onLinked }: AccountStepProps): JSX.E
         <WizardRow
           testId="onboarding-account-this-computer"
           title="This computer"
-          description={
-            phase.kind === "failed"
-              ? `${phase.code}: ${phase.message}`
-              : "Linked computers show up in the worktree picker on your phone."
-          }
+          description="Linked computers show up in the worktree picker on your phone."
           status={status}
-          action={
-            phase.kind === "failed" ? (
-              <Button
-                size="sm"
-                variant="outline"
-                data-testid="onboarding-account-retry"
-                onClick={() => void link(phase.token)}
-              >
-                Retry
-              </Button>
-            ) : null
-          }
         />
       </WizardRowList>
     </div>

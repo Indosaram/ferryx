@@ -26,7 +26,7 @@ const host: HostEndpoint = {
 function renderRow(over: Partial<HostEndpoint> = {}) {
   render(
     <PairedMachineRow host={{ ...host, ...over }} nativeReady accountEnrolled={false} canOpenProject selected={false} busy={false} signedIn
-      onAddProject={vi.fn()} onConnect={vi.fn()} onDetails={vi.fn()} onCheck={vi.fn()} onForget={vi.fn()}
+      onAddProject={vi.fn()} onDetails={vi.fn()} onCheck={vi.fn()} onForget={vi.fn()}
       rowRef={() => undefined} detailsRef={() => undefined} />,
   );
   const row = screen.getByRole("listitem");

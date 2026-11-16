@@ -1054,49 +1054,6 @@ export async function redeemInTunnel(
   return data as PairExchangeResponse;
 }
 
-export interface IssueEnrollmentCodeResponse {
-  code: string;
-  expiresAt: number;
-}
-
-export async function issueEnrollmentCode(
-  origin: string,
-  sessionToken: string,
-): Promise<IssueEnrollmentCodeResponse> {
-  const url = `${cleanOrigin(origin)}/api/account/v1/enrollment-codes`;
-  const res = await fetchWithTimeout(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${sessionToken}`,
-    },
-  });
-
-  if (!res.ok) {
-    let code = "ENROLLMENT_CODE_FAILED";
-    let message = `Failed to issue enrollment code (${res.status})`;
-    try {
-      const data = await res.json();
-      if (typeof data?.code === "string" && data.code.trim().length > 0) {
-        code = data.code.trim();
-      }
-      if (typeof data?.message === "string" && data.message.trim().length > 0) {
-        message = data.message.trim();
-      }
-    } catch {}
-    if (code === "UNAUTHORIZED" && res.status !== 401) {
-      code = "ENROLLMENT_CODE_FAILED";
-    }
-    if (res.status === 401 && code === "UNAUTHORIZED") {
-      message = "Account session expired or unauthorized.";
-    }
-    throw new AccountSessionError(code, message, res.status);
-  }
-
-  const data = await readJsonObject(res, "Enrollment code");
-  requireStrings(data, ["code"], "Enrollment code", res.status);
-  return data as unknown as IssueEnrollmentCodeResponse;
-}
-
 /**
  * Throws the structured account error carried by a non-2xx response. The server's
  * {code,message,details} wins; UNAUTHORIZED is honoured only with HTTP 401 so a gateway

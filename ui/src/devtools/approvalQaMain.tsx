@@ -126,7 +126,6 @@ function ApprovalQaApp() {
         initialMethod={viewParam === "approve" ? "approve" : "install"}
         accountOrigin={ORIGIN}
         accountMachines={machinesFixture}
-        onIssueEnrollmentCode={async () => "ABCD-1234"}
         onIssueInstallKey={async () => {
           logQa("issueInstallKey");
           return installKeyFixture;

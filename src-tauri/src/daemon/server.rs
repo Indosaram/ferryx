@@ -4569,6 +4569,38 @@ impl DaemonServer {
         &self.paired_hosts
     }
 
+    /// Pairs the signed-in account's machines, then opens agent control. Signing in is the whole
+    /// consent: an account whose machines are all paired should not also require a switch.
+    /// The owner's excluded list is preserved, so an explicit exclusion still holds.
+    async fn reconcile_and_open_account_machines<F>(
+        &self,
+        reconcile: F,
+    ) -> crate::paired_host::account_reconcile::ReconcileReport
+    where
+        F: std::future::Future<
+            Output = crate::paired_host::account_reconcile::ReconcileReport,
+        >,
+    {
+        let report = reconcile.await;
+        if report.paired.is_empty() && report.already_usable.is_empty() {
+            return report;
+        }
+        let state = std::sync::Arc::clone(self.remote_state());
+        let excluded = state.agent_control_policy.snapshot().excluded_device_ids;
+        let opened = crate::ipc::run_blocking(move || {
+            state.set_agent_control(true, excluded).map_err(|error| {
+                crate::ipc::error::IpcError::internal(format!(
+                    "agent control could not be opened: {error}"
+                ))
+            })
+        })
+        .await;
+        if let Err(error) = opened {
+            tracing::warn!(%error, "agent control could not be opened for the paired account");
+        }
+        report
+    }
+
     pub fn session_service(&self) -> &Arc<DaemonSessionService> {
         &self.session_service
     }
@@ -8364,6 +8396,21 @@ impl DaemonServer {
                     Ok(host) => DaemonResponse::PairedHostPairOk { host },
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
+                Ok(DaemonRequest::PairedHostReconcile) => {
+                    let report = self
+                        .reconcile_and_open_account_machines(self.paired_hosts.reconcile_account_machines())
+                        .await;
+                    DaemonResponse::PairedHostReconcileOk { report }
+                }
+                Ok(DaemonRequest::PairedHostAdoptAccountSession { account_origin, session_token }) => {
+                    let report = self
+                        .reconcile_and_open_account_machines(
+                            self.paired_hosts
+                                .adopt_account_session(account_origin, session_token),
+                        )
+                        .await;
+                    DaemonResponse::PairedHostReconcileOk { report }
+                }
                 Ok(DaemonRequest::PairedHostClientAttachKey) => match crate::ipc::run_blocking(|| {
                     Ok(crate::paired_host::secure_http::client_attach_public_key())
                 }).await {

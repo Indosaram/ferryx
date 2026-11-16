@@ -115,7 +115,6 @@ function QaApp() {
         isMac
         supervisorProjects={projects}
         onAddProject={() => undefined}
-        onConnectMachine={() => undefined}
         onStepCompleted={(step) => console.info(`[supervisor-setup-qa] completed ${step}`)}
         onFinish={() => undefined}
         onSkip={() => undefined}

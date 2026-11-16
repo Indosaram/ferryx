@@ -132,6 +132,25 @@ export interface PairedHostCommands {
   /** Present only on daemons reporting pairedHostE2EV1. */
   redeemGrant?(request: RedeemGrantRequest): Promise<HostView>;
   clientAttachPublicKey?(): Promise<string>;
+  /**
+   * Hand the account session to the daemon: signing in pairs every machine of the account.
+   * Pass `sessionToken: null` on sign-out. This is the only trigger the UI needs; there is no
+   * per-machine connect action.
+   */
+  adoptAccountSession?(request: AccountSessionHandoff): Promise<ReconcileReport>;
+}
+
+export interface AccountSessionHandoff {
+  accountOrigin: string;
+  sessionToken: string | null;
+}
+
+/** What one pairing pass did. Every field is a count or a sanitized code, never free text. */
+export interface ReconcileReport {
+  paired: string[];
+  alreadyUsable: string[];
+  skipped: { machineId: string; code: string }[];
+  blocked: string | null;
 }
 // No raw native exception crosses this boundary: it may contain request credentials.
 // Structured error fields {code, message, details, retryable} are sanitized and preserved.
@@ -157,6 +176,23 @@ export const nativePairedHostCommands: PairedHostCommands = {
   migrate: request => command("paired_host_migrate_legacy", request),
   read: request => command("paired_host_read", request),
   redeemGrant: request => command("paired_host_redeem_grant", request),
+  // Separate arguments, not a wrapped request object: the command takes accountOrigin and
+  // sessionToken directly, so this one bypasses the shared `command` shaper.
+  adoptAccountSession: async (request) => {
+    try {
+      return await invoke<ReconcileReport>("paired_host_adopt_account_session", {
+        accountOrigin: request.accountOrigin,
+        sessionToken: request.sessionToken,
+      });
+    } catch (err) {
+      const structured = extractPairedHostError(err);
+      const error = new Error(structured.message) as Error & PairedHostError;
+      error.code = structured.code;
+      error.details = structured.details;
+      error.retryable = structured.retryable;
+      throw error;
+    }
+  },
   clientAttachPublicKey: async () => {
     const answer = await command<string | { publicKey: string }>("paired_host_client_attach_public_key");
     return typeof answer === "string" ? answer : answer.publicKey;
@@ -288,7 +324,7 @@ function recordInventoryUnavailable(operation: "list" | "capabilities", err: unk
 }
 
 /** Best-effort diagnostic carrying only an allowlisted error code, never the raw error. */
-function recordInventoryDiagnostic(stage: string, details: Record<string, unknown>): void {
+export function recordInventoryDiagnostic(stage: string, details: Record<string, unknown>): void {
   try {
     void bootTrace(stage, details)
       ?.catch(() => {
