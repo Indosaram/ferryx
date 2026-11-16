@@ -60,6 +60,8 @@ export type ShortcutActionId =
   | "commandPalette.open"
   | "window.new"
   | "settings.toggle"
+  | "appearance.cycleTheme"
+  | "appearance.openSettings"
   | "notifications.toggle"
   | "zoom.in"
   | "zoom.out"
@@ -77,7 +79,7 @@ export type ShortcutBinding = {
 export type ShortcutDefinition = {
   id: ShortcutActionId;
   title: string;
-  group: "Tabs" | "Terminal Panes" | "Global" | "Workspaces" | "View";
+  group: "Tabs" | "Terminal Panes" | "Global" | "Workspaces" | "View" | "Appearance";
   binding: ShortcutBinding;
   aliases?: readonly ShortcutBinding[];
   source: "original" | "ferryx";
@@ -477,6 +479,20 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     group: "Global",
     binding: { key: ",", mod: true },
     source: "original",
+  },
+  {
+    id: "appearance.cycleTheme",
+    title: "Cycle theme",
+    group: "Appearance",
+    binding: { key: "a", mod: true, alt: true },
+    source: "ferryx",
+  },
+  {
+    id: "appearance.openSettings",
+    title: "Open appearance settings",
+    group: "Appearance",
+    binding: { key: "a", mod: true, alt: true, shift: true },
+    source: "ferryx",
   },
   {
     id: "notifications.toggle",
