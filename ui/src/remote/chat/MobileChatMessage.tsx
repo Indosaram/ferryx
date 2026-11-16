@@ -1,6 +1,4 @@
 import React, { useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { AlertCircle, Check, ChevronRight, Copy, Loader2 } from "lucide-react";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { formatWorkedDuration } from "../agentConversation";
@@ -13,8 +11,7 @@ import {
   AttachmentList,
   ChatAttachment,
   ChatWorkItem,
-  CHAT_MARKDOWN_COMPONENTS,
-  chatMarkdownUrlTransform,
+  ChatProseMarkdown,
   formatReferenceTimestamp,
   ReferenceAbandonedBranchDisclosure,
   ReferencePartList,
@@ -328,6 +325,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
           <ReferencePartList
             parts={visibleParts}
             hideWork={workFolded}
+            mathInProse={role === "assistant"}
             context={referenceContext}
             timestamp={timestamp}
           />
@@ -337,13 +335,7 @@ const MobileChatMessageImpl: React.FC<MobileChatMessageProps> = ({
           data-testid="assistant-message-body"
           className="w-full text-chat-foreground leading-relaxed text-base break-words select-text"
         >
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={CHAT_MARKDOWN_COMPONENTS}
-            urlTransform={chatMarkdownUrlTransform}
-          >
-            {content}
-          </ReactMarkdown>
+          <ChatProseMarkdown text={content} assistant={role === "assistant"} />
 
           {attachments.length > 0 && (
             <AttachmentList attachments={attachments} className="mt-2" />

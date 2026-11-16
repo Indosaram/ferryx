@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useAppearanceSettings } from "../../lib/appearanceSettings";
+import type * as ChatMathModule from "./chatMath";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -978,21 +980,53 @@ export const CHAT_MARKDOWN_COMPONENTS = {
   img: ChatMarkdownImage,
 };
 
+let chatMathModule: typeof ChatMathModule | undefined;
+let chatMathLoad: Promise<typeof ChatMathModule> | undefined;
+
+/** The existing markdown pipeline, with math loaded only for opted-in assistant prose. */
+export function ChatProseMarkdown({ text, assistant = false }: { text: string; assistant?: boolean }) {
+  const { settings } = useAppearanceSettings();
+  const enabled = assistant && settings.renderMath && /\$[^$]+\$/.test(text);
+  const [math, setMath] = useState<typeof ChatMathModule | undefined>(chatMathModule);
+  const [loadError, setLoadError] = useState(false);
+  useEffect(() => {
+    if (!enabled || math) return;
+    let active = true;
+    chatMathLoad ??= import("./chatMath");
+    void chatMathLoad.then((loaded) => {
+      chatMathModule = loaded;
+      if (active) setMath(loaded);
+    }, () => {
+      if (active) setLoadError(true);
+    });
+    return () => { active = false; };
+  }, [enabled, math]);
+  const components = React.useMemo(() => !enabled || !math ? CHAT_MARKDOWN_COMPONENTS : {
+    ...CHAT_MARKDOWN_COMPONENTS,
+    span: ({ node, children, ...props }: React.ComponentProps<"span"> & { node?: unknown; "data-chat-math"?: string; "data-math-source"?: string }) => {
+      const source = props["data-math-source"];
+      return source === undefined ? <span {...props}>{children}</span> : <math.ChatMath source={source} display={props["data-chat-math"] === "block"} />;
+    },
+  }, [enabled, math]);
+  // Disabled math stays literal, including backslashes markdown would otherwise consume.
+  if (assistant && !settings.renderMath && text.includes("$")) return <span className="whitespace-pre-wrap">{text}</span>;
+  return <>
+    {loadError && <span role="status">Math renderer unavailable; showing source.</span>}
+    <ReactMarkdown remarkPlugins={enabled && math ? [remarkGfm, math.remarkChatMath] : [remarkGfm]} components={components} urlTransform={chatMarkdownUrlTransform}>
+      {text}
+    </ReactMarkdown>
+  </>;
+}
+
 /** Markdown the page already carries, drawn the way the rest of the chat draws prose. */
-const ReferenceProse: React.FC<{ text: string; className?: string }> = ({ text, className }) => (
+const ReferenceProse: React.FC<{ text: string; className?: string; assistant?: boolean }> = ({ text, className, assistant }) => (
   <div
     className={cn(
       "text-sm leading-relaxed text-chat-foreground-secondary break-words select-text",
       className,
     )}
   >
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={CHAT_MARKDOWN_COMPONENTS}
-      urlTransform={chatMarkdownUrlTransform}
-    >
-      {text}
-    </ReactMarkdown>
+    <ChatProseMarkdown text={text} assistant={assistant} />
   </div>
 );
 
@@ -1467,7 +1501,8 @@ export const ReferencePartView: React.FC<{
   context?: ReferencePartRenderContext;
   timestamp?: string | number | null;
   className?: string;
-}> = ({ part, context, timestamp, className }) => {
+  mathInProse?: boolean;
+}> = ({ part, context, timestamp, className, mathInProse = false }) => {
   switch (part.kind) {
     case "text":
       // Turn body prose matches the user bubble and plain assistant body (16px, primary color);
@@ -1475,6 +1510,7 @@ export const ReferencePartView: React.FC<{
       return (
         <ReferenceProse
           text={part.text}
+          assistant={mathInProse}
           className={cn("text-base leading-relaxed text-chat-foreground", className)}
         />
       );
@@ -1561,7 +1597,8 @@ export const ReferencePartList: React.FC<{
   context?: ReferencePartRenderContext;
   timestamp?: string | number | null;
   className?: string;
-}> = ({ parts, hideWork = false, context, timestamp, className }) => {
+  mathInProse?: boolean;
+}> = ({ parts, hideWork = false, context, timestamp, className, mathInProse = false }) => {
   const nesting = planReferenceWorkNesting(parts);
   const segments = groupReferenceWorkParts(parts);
   const anyVisible = segments.some((segment) => {
@@ -1584,6 +1621,7 @@ export const ReferencePartList: React.FC<{
             <ReferencePartView
               key={referencePartKey(segment.part, segment.index)}
               part={segment.part}
+              mathInProse={mathInProse}
               context={context}
               timestamp={timestamp}
             />
