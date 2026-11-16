@@ -85,6 +85,152 @@ pub fn submit_from_call(
     }
 }
 
+/// The owner's own words that hand a session to the supervisor; matched case-insensitively.
+const HANDOVER_PHRASES: [&str; 2] = ["이 세션 맡아", "take this session"];
+
+/// The turn budget of a handed-over goal: the owner keeps paying for the pane, so the supervisor
+/// stops after the same small budget an app request gets.
+const HANDOVER_TURN_LIMIT: u32 = 5;
+
+/// Whether the owner's own words hand a session to the supervisor.
+fn asks_for_handover(owner_text: &str) -> bool {
+    let lowered = owner_text.to_lowercase();
+    HANDOVER_PHRASES
+        .iter()
+        .any(|phrase| lowered.contains(phrase))
+}
+
+/// Hand exactly the session the owner addressed to the supervisor: the goal observes the pane
+/// the owner already runs, and admission types nothing into it. Zero or several addressed
+/// sessions ask the owner which one instead of guessing.
+async fn handover_turn(
+    pool: &SqlitePool,
+    owner: &str,
+    actor: &ActorContext,
+    work: &SubmitWork,
+    turn: Option<u64>,
+    sessions: Option<&SessionTools>,
+) -> Result<SubmitOutcome, AdmissionError> {
+    let mentions: Vec<SessionRef> = match turn {
+        None => Vec::new(),
+        Some(generation) => registry()
+            .live
+            .get(&generation)
+            .map(|live| live.mentions.clone())
+            .unwrap_or_default(),
+    };
+    let session = match mentions.as_slice() {
+        [only] => only.clone(),
+        [] => {
+            return Ok(SubmitOutcome::NeedsChoice {
+                missing: "session".into(),
+                detail: "the request hands a session over but names none; address exactly one session with @".into(),
+            })
+        }
+        several => {
+            return Ok(SubmitOutcome::NeedsChoice {
+                missing: "session".into(),
+                detail: format!(
+                    "the request names {} sessions; hand over exactly one",
+                    several.len()
+                ),
+            })
+        }
+    };
+    let Some(sessions) = sessions else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_SESSIONS_UNAVAILABLE",
+            message: "the session tools are not installed".into(),
+        });
+    };
+    let fleet = sessions.fleet().await.map_err(|error| {
+        AdmissionError::Refused {
+            code: "SUPERVISOR_FLEET_UNAVAILABLE",
+            message: format!("the fleet was not listed: {error}"),
+        }
+    })?;
+    let Some(fleet_session) = fleet
+        .iter()
+        .find(|session_of_fleet| session_of_fleet.session_ref == session)
+    else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_SESSION_UNKNOWN",
+            message: format!("the fleet does not know session {session}"),
+        });
+    };
+    let Some(identity) = identity_of(pool, owner).await? else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_IDENTITY_MISSING",
+            message: "no supervisor identity for this owner".into(),
+        });
+    };
+    let Some(resolved) = resolve_project(
+        pool,
+        &identity.supervisor_id,
+        &actor.source_body,
+        &work.title,
+        &mentions,
+        Some(sessions),
+        false,
+    )
+    .await?
+    else {
+        return Ok(SubmitOutcome::NeedsChoice {
+            missing: "project".into(),
+            detail: format!(
+                "no project of this supervisor checks out the working directory of session {session}"
+            ),
+        });
+    };
+    let host_id = session.host_id().to_owned();
+    let session_id = session.backend_session_id().to_owned();
+    // A session the hub itself dispatched is already the supervisor's, and handover refuses it:
+    // the binding names the pane the hub launched.
+    let hub_dispatched: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM supervisor_execution_bindings
+                        WHERE host_id = ? AND provider_session_id = ?)",
+    )
+    .bind(&host_id)
+    .bind(&session_id)
+    .fetch_one(pool)
+    .await?;
+    let request = super::AdmitRequest {
+        supervisor_id: identity.supervisor_id,
+        owner_principal: owner.to_owned(),
+        source_adapter: actor.source_adapter.clone(),
+        source_message_id: super::handover::handover_source_id(&host_id, &session_id),
+        body: actor.source_body.clone(),
+        project_id: resolved.project_id,
+        channel_binding_id: actor.channel_binding_id.clone(),
+        target: super::ExecutionTarget {
+            kind: ExecutionKind::Pty,
+            host_id: host_id.clone(),
+        },
+        title: work.title.clone(),
+        cwd: fleet_session.cwd.clone(),
+        instruction: work.instruction.clone(),
+        requirements: work.requirements.clone(),
+        mode: crate::goals::types::GoalMode::Supervised,
+        turn_limit: work.turn_limit.unwrap_or(HANDOVER_TURN_LIMIT),
+        operation_grant: OperationClass::BASELINE.to_vec(),
+    };
+    let admission = super::handover::handover(
+        pool,
+        request,
+        super::BoundSession { host_id, session_id },
+        fleet_session.agent.trim().is_empty(),
+        hub_dispatched,
+    )
+    .await
+    .map_err(AdmissionError::Store)?;
+    Ok(SubmitOutcome::Conversational {
+        reason: format!(
+            "Session {session} is the supervisor's now: goal {}. It is observed as it runs; nothing was typed into it.",
+            admission.receipt.goal_id
+        ),
+    })
+}
+
 /// The project a chat-delegated goal belongs to, and the host it runs on when that project has
 /// exactly one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -566,6 +712,43 @@ impl WorkToolHandler for AppWorkTools {
                     })
                     .ok_or_else(no_turn)?;
                 let work = submit_from_call(&title, &requirements, worker, &actor.source_body);
+                // The owner hands an already running session over in its own words, for exactly
+                // one addressed session; admission observes it and types nothing into it.
+                if asks_for_handover(&actor.source_body) {
+                    let outcome = handover_turn(
+                        &self.pool,
+                        &owner,
+                        &actor,
+                        &work,
+                        turn,
+                        self.sessions.as_deref(),
+                    )
+                    .await
+                    .map_err(|error| refused(&error))?;
+                    // A handover that needs a project leaves the project question open for the
+                    // next submit; one that needs a session does not.
+                    let asked = match &outcome {
+                        SubmitOutcome::NeedsChoice { missing, .. } if missing == "project" => {
+                            Some(actor.source_message_id.as_str())
+                        }
+                        _ => None,
+                    };
+                    if let Err(error) = record_project_choice(&self.pool, &owner, asked).await {
+                        tracing::warn!(
+                            %error,
+                            owner = %owner,
+                            "the project question was not recorded"
+                        );
+                    }
+                    if let Some(generation) = turn {
+                        if let Some(live) = registry().live.get_mut(&generation) {
+                            live.outcomes.push(outcome.clone());
+                        }
+                    }
+                    return serde_json::to_value(&outcome).map_err(|error| {
+                        WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string())
+                    });
+                }
                 let work = match resolve_for_turn(
                     &self.pool,
                     &owner,
@@ -1046,6 +1229,64 @@ mod tests {
             refs
         );
         assert!(crate::supervisor::transcript::addressed_sessions("do it").is_empty());
+    }
+
+    fn handover_turn_seeded(owner_text: &str, mentions: Vec<SessionRef>) -> AppTurnGuard {
+        AppTurnGuard::begin_with_mentions("req-handover", owner_text, mentions)
+    }
+
+    #[tokio::test]
+    async fn one_addressed_session_is_handed_over_as_one_observed_goal() {
+        let pool = many_project_pool().await;
+        let mention = SessionRef::new("host-a", "pty-h1");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/pane/src/deep"),
+        );
+        let turn = handover_turn_seeded("이 세션 맡아", vec![mention.clone()]);
+        let value = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(goals(&pool).await, 1);
+        let (host_id, session_id, run_state, source): (String, String, String, String) = sqlx::query_as(
+            "SELECT b.host_id, b.provider_session_id, g.run_state, r.source_message_id
+               FROM supervisor_goals g
+               JOIN supervisor_execution_bindings b ON b.goal_id = g.goal_id
+               JOIN supervisor_requests r ON r.goal_id = g.goal_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(host_id, "host-a");
+        assert_eq!(session_id, "pty-h1");
+        assert_eq!(run_state, "running");
+        assert_eq!(
+            source,
+            crate::supervisor::handover::handover_source_id("host-a", "pty-h1")
+        );
+        // The reply names the goal it admitted.
+        let reply = value["reason"].as_str().unwrap();
+        let goal_id: String = sqlx::query_scalar("SELECT goal_id FROM supervisor_goals")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(reply.contains(&goal_id), "reply {reply:?} names no goal");
+    }
+
+    #[tokio::test]
+    async fn two_addressed_sessions_are_refused_and_admit_nothing() {
+        let pool = many_project_pool().await;
+        let first = SessionRef::new("host-a", "pty-h1");
+        let second = SessionRef::new("host-a", "pty-h2");
+        let mut fleet = fleet_with(first.clone(), "host-a", "/home/owner/code/pane");
+        fleet.extend(fleet_with(second.clone(), "host-a", "/home/owner/code/pane"));
+        let tools = tools_with_fleet(&pool, fleet);
+        let turn = handover_turn_seeded("take this session", vec![first, second]);
+        let value = tools.handle(app(Some(turn.token()), submit())).await.unwrap();
+        assert_eq!(value["outcome"], json!("needs_choice"));
+        assert_eq!(value["missing"], json!("session"));
+        assert_eq!(goals(&pool).await, 0);
     }
 
     #[test]
