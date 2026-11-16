@@ -1,4 +1,7 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import * as tauriCore from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const native = vi.hoisted(() => ({
@@ -38,6 +41,7 @@ import {
   installSettingsRuntimeBridge,
 } from "../../lib/settingsRuntimeBridge";
 import { AppearanceSection } from "./AppearanceSection";
+import { AppearanceChatPreview } from "./AppearanceChatPreview";
 import { APPEARANCE_SETTINGS_STORAGE_KEY } from "../../lib/storageKeys";
 import { parseThemeDocument, type ThemeDocumentV1 } from "../../lib/themeDocument";
 
@@ -148,6 +152,117 @@ describe("AppearanceSection system theme", () => {
     fireOsTheme("light");
     expect(document.documentElement.dataset.theme).toBe("charcoal");
     expect(native.setTerminalAppearance).not.toHaveBeenCalledWith("light");
+  });
+});
+
+// Use the shipped palette declarations, not a second set of preview colours.
+const previewRootCss = ["index.css", "settings-runtime.css"].map((file) =>
+  readFileSync(resolve(process.cwd(), "src", file), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .match(/:root(?:\[[^\]]+\])*\s*\{[^}]*\}/g)?.join("\n") ?? "",
+).join("\n");
+
+describe("AppearanceSection live chat preview", () => {
+  let stylesheet: HTMLStyleElement;
+
+  beforeEach(() => {
+    localStorage.clear();
+    stubColorScheme(false);
+    _resetNativeOsThemeForTest();
+    stylesheet = document.createElement("style");
+    stylesheet.textContent = previewRootCss;
+    document.head.append(stylesheet);
+  });
+
+  afterEach(() => {
+    cleanup();
+    applyAppearanceSettings(DEFAULT_APPEARANCE_SETTINGS);
+    stylesheet.remove();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders five named rows with real message, math, markdown, tool and composer samples", async () => {
+    await act(async () => {
+      render(<AppearanceSection />);
+      await import("../../remote/chat/chatMath");
+    });
+    const preview = screen.getByTestId("appearance-chat-preview");
+    expect([...preview.querySelectorAll("[data-preview-row]")].map((row) => row.getAttribute("aria-label"))).toEqual([
+      "User bubble", "Assistant prose with math", "Code block", "Inline code", "Tool and status",
+    ]);
+    expect(within(preview).getByTestId("user-message-bubble")).toBeInTheDocument();
+    expect(within(preview).getByLabelText("A = \\pi r^2")).toBeInTheDocument();
+    expect(preview.querySelector("pre code")).not.toBeNull();
+    expect(preview.querySelector('[data-preview-row="inline-code"] code')).not.toBeNull();
+    expect(within(preview).getByRole("button", { name: /Read appearance settings/ })).toHaveAttribute("aria-expanded", "false");
+    expect(within(preview).getByTestId("held-message-appearance-preview")).toBeInTheDocument();
+    expect(getComputedStyle(within(preview).getByTestId("chat-composer-held")).display).toBe("flex");
+    expect(within(preview).getByPlaceholderText("Ask the agent...")).toHaveValue("");
+    expect(within(preview).getByRole("group", { name: "Chat appearance sample" })).toHaveAttribute("inert");
+    expect(preview.querySelector('[data-testid="mobile-chat-workspace"]')).toBeNull();
+  });
+
+  it.each(["dark", "light"] as const)("switches the %s accent on the same preview node without IPC or sockets", async (theme) => {
+    saveAppearanceSettings({ theme });
+    const invoke = vi.spyOn(tauriCore, "invoke");
+    const fetch = vi.fn(() => { throw new Error("Daemon unreachable"); });
+    const socket = vi.fn(function () { throw new Error("Daemon unreachable"); });
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("WebSocket", socket);
+    render(<Harness />);
+    const preview = screen.getByTestId("appearance-chat-preview");
+    const initial = getComputedStyle(document.documentElement).getPropertyValue("--chat-primary").trim();
+    expect(initial).toBe(theme === "light" ? "#1d4ed8" : "#346bf1");
+    const trigger = screen.getByRole("combobox", { name: "Accent color" });
+    fireEvent.pointerDown(trigger, { pointerId: 1, button: 0 });
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("option", { name: "Rose" }));
+    expect(screen.getByTestId("appearance-chat-preview")).toBe(preview);
+    const selected = getComputedStyle(document.documentElement).getPropertyValue("--chat-primary").trim();
+    expect(selected).not.toBe(initial);
+    // jsdom does not inherit custom properties. Assert the preview's computed token
+    // when the DOM implementation supports inheritance; root cascade is asserted above.
+    const inherited = getComputedStyle(preview).getPropertyValue("--chat-primary").trim();
+    if (inherited) expect(inherited).toBe(selected);
+    expect(preview.style.getPropertyValue("--chat-primary")).toBe("");
+    expect(invoke).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(socket).not.toHaveBeenCalled();
+  });
+
+  it("uses production custom-theme scoping and standalone CSS precedence without touching recovery controls", () => {
+    const doc: ThemeDocumentV1 = { version: 1, id: "preview-theme", name: "Preview theme", base: "light",
+      tokens: { "--chat-primary": "#123456" }, css: '[data-preview-row="inline-code"] { color: #123456; }' };
+    saveAppearanceSettings({ customThemes: [doc], activeCustomThemeId: doc.id,
+      customCss: '[data-preview-row="inline-code"] { color: #abcdef; }' });
+    render(<Harness />);
+    const preview = screen.getByTestId("appearance-chat-preview");
+    const row = preview.querySelector('[data-preview-row="inline-code"]')!;
+    expect(preview).toHaveAttribute("data-chat-scope");
+    expect(document.documentElement.dataset.customTheme).toBe(doc.id);
+    expect(document.documentElement.style.getPropertyValue("--chat-primary")).toBe("#123456");
+    expect(getComputedStyle(row).color).toBe("rgb(171, 205, 239)");
+    expect(screen.getByRole("button", { name: "Remove custom CSS" }).closest("[data-chat-scope]")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Remove custom CSS" }));
+    expect(screen.getByTestId("appearance-chat-preview")).toBe(preview);
+    expect(getComputedStyle(row).color).toBe("rgb(18, 52, 86)");
+    fireEvent.click(screen.getByRole("button", { name: "Use charcoal" }));
+    expect(screen.getByTestId("appearance-chat-preview")).toBe(preview);
+    expect(document.documentElement.style.getPropertyValue("--chat-primary")).toBe("");
+    expect(getComputedStyle(row).color).not.toBe("rgb(18, 52, 86)");
+  });
+
+  it("disables animation and transitions, including under reduced motion", () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("prefers-reduced-motion"),
+      media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    render(<AppearanceChatPreview />);
+    const preview = screen.getByTestId("appearance-chat-preview");
+    for (const element of [preview, ...preview.querySelectorAll("svg, button, textarea")]) {
+      expect(getComputedStyle(element).animation).toBe("none");
+      expect(getComputedStyle(element).transition).toBe("none");
+    }
+    expect(preview.querySelector(".animate-spin, .work-shimmer-text")).toBeNull();
   });
 });
 

@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "../ui/select";
 import { SettingRow, SettingsGroup, SettingsHeading } from "./primitives";
+import { AppearanceChatPreview } from "./AppearanceChatPreview";
 
 export function AppearanceSection() {
   const { settings, invalidThemes, updateSettings, resetSettings } = useAppearanceSettings();
@@ -140,6 +141,7 @@ export function AppearanceSection() {
           </SettingRow>
         </div>
       </SettingsGroup>
+      <AppearanceChatPreview />
       <ThemeLibrary settings={settings} invalidThemes={invalidThemes} updateSettings={updateSettings} resolvedTheme={resolvedTheme} />
     </section>
   );
