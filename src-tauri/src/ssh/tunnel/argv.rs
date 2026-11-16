@@ -200,7 +200,7 @@ fn words(line: &str) -> Result<Vec<String>, IpcError> {
     let mut quote = None;
     let mut escaped = false;
     let mut separator = false;
-    for c in line.chars() {
+    for c in line.trim_start().chars() {
         if escaped { word.push(c); escaped = false; continue; }
         if c == '\\' { escaped = true; continue; }
         if let Some(q) = quote {
@@ -383,6 +383,7 @@ impl Config {
 fn parse_g(text: &str) -> Settings {
     let mut settings = Settings::new();
     for line in text.lines() {
+        let line = line.trim_start();
         if let Some(index) = line.find(char::is_whitespace) {
             let (key, rest) = line.split_at(index);
             settings.entry(key.to_ascii_lowercase()).or_default().push(rest.trim_start().to_string());
@@ -438,6 +439,10 @@ fn compare(left: &Settings, right: &Settings, host: &SshHost, hop: bool) -> Resu
     let forced = forced_values(host);
     for key in left.keys().chain(right.keys()).collect::<BTreeSet<_>>() {
         let k = key.as_str();
+        // `host` is -G's original command-line lookup name, not HostName.
+        // An alias on the left and its resolved address on the right necessarily
+        // differ here; `hostname` below still verifies the actual endpoint.
+        if k == "host" { continue; }
         let a = value(left, k); let b = value(right, k);
         let equal = if k == "identityfile" { identities(left)? == identities(right)? }
             else if k == "hostname" { a.map(str::to_ascii_lowercase) == b.map(str::to_ascii_lowercase) }
@@ -597,6 +602,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
     fn drop(&mut self) {
+        // Every fixture child leads its own group. Reap proxy ssh/nc children too,
+        // rather than leaving a hop alive after the destination ssh is killed.
+        let result = unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
+        if result != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+            eprintln!("kill fixture process group: {}", std::io::Error::last_os_error());
+        }
         if let Err(error) = self.0.kill() {
             if error.kind() != std::io::ErrorKind::InvalidInput { eprintln!("kill fixture child: {error}"); }
         }
@@ -645,8 +656,13 @@ impl Live {
                     accepted = listener.accept() => {
                         let (stream, _) = accepted.unwrap();
                         let stream = stream.into_std().unwrap(); stream.set_nonblocking(false).unwrap();
-                        let mut child = tokio::process::Command::new("/usr/sbin/sshd")
-                            .args(["-i", "-e", "-f"]).arg(&config)
+                        let text = std::fs::read_to_string(&config).unwrap();
+                        let password_fixture = text.contains("PasswordAuthentication yes");
+                        let mut command = if password_fixture && unsafe { libc::geteuid() } != 0 {
+                            let mut command = tokio::process::Command::new("sudo");
+                            command.args(["-n", "/usr/sbin/sshd"]); command
+                        } else { tokio::process::Command::new("/usr/sbin/sshd") };
+                        let mut child = command.args(["-i", "-e", "-f"]).arg(&config)
                             .stdin(Stdio::from(OwnedFd::from(stream.try_clone().unwrap())))
                             .stdout(Stdio::from(OwnedFd::from(stream)))
                             .stderr(std::fs::OpenOptions::new().create(true).append(true).open(&log).unwrap())
@@ -681,7 +697,8 @@ impl Live {
     }
     fn spawn(&self, args: &[String]) -> ChildGuard {
         let log = self.fixture.dir.path().join("client.log");
-        let child = Command::new(&self.launcher).args(&args[1..]).stdin(Stdio::null())
+        use std::os::unix::process::CommandExt;
+        let child = Command::new(&self.launcher).args(&args[1..]).process_group(0).stdin(Stdio::null())
             .stdout(Stdio::null()).stderr(std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap())
             .spawn().unwrap();
         eprintln!("live tunnel pid={}", child.id());
@@ -737,37 +754,76 @@ async fn contrast(isolated: bool) {
 }
 #[tokio::test]
 async fn password_non_jump_tunnel_authenticates() {
-    // A real password endpoint is provisioned by the serial remote supervisor.
-    // OpenSSH's unprivileged inetd fixture cannot create an OS password account.
-    // Missing prerequisites FAIL (never skip or claim key auth as password auth).
-    let fixture = Fixture::new();
-    let json = std::env::var("FERRYX_TUNNEL_PASSWORD_FIXTURE_HOST")
-        .expect("supervisor must supply a password-authenticated loopback SshHost JSON");
-    let mut host: SshHost = serde_json::from_str(&json).expect("password fixture host");
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    // Provision a disposable Linux account, never change the operator's password.
+    // Lack of account-management privileges is a prerequisite failure, not a pass.
+    // macOS's system account database is not modified by this Unix fixture.
+    #[derive(Debug)]
+    enum SkipReason { PasswordAccountProvisioningUnsupportedPlatform }
+    if !cfg!(target_os = "linux") {
+        eprintln!("EXPLICIT_TEST_SKIP {:?}", SkipReason::PasswordAccountProvisioningUnsupportedPlatform);
+        return;
+    }
+    fn account_command(program: &str) -> Command {
+        if unsafe { libc::geteuid() } == 0 { Command::new(program) }
+        else {
+            let mut command = Command::new("sudo"); command.args(["-n", program]); command
+        }
+    }
+    struct Account(String);
+    impl Drop for Account {
+        fn drop(&mut self) {
+            let output = account_command("userdel").arg(&self.0).output().expect("remove fixture account");
+            assert!(output.status.success(), "userdel: {}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+    let username = format!("fxt{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+    let output = account_command("useradd").args(["--no-create-home", "--shell", "/bin/sh", &username]).output().expect("useradd prerequisite");
+    assert!(output.status.success(), "password fixture needs root or sudo -n useradd: {}", String::from_utf8_lossy(&output.stderr));
+    let _account = Account(username.clone());
+    let password = uuid::Uuid::new_v4().to_string();
+    let mut chpasswd = account_command("chpasswd").stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("chpasswd prerequisite");
+    {
+        use std::io::Write;
+        chpasswd.stdin.take().unwrap().write_all(format!("{username}:{password}\n").as_bytes()).unwrap();
+    }
+    let output = chpasswd.wait_with_output().unwrap();
+    assert!(output.status.success(), "chpasswd: {}", String::from_utf8_lossy(&output.stderr));
+    let live = Live::new().await;
+    let config = live.fixture.dir.path().join("sshd_config");
+    let text = std::fs::read_to_string(&config).unwrap()
+        .replace("PasswordAuthentication no", "PasswordAuthentication yes")
+        .replace("UsePAM no", "UsePAM yes");
+    std::fs::write(&config, text).unwrap();
+    let mut host = live.host.clone();
+    host.username = Some(username);
+    host.identity_file = None;
     host.auth_method = SshAuthMethod::Password;
     assert!(host.jump_host.is_none());
-    assert_eq!(host.hostname, "127.0.0.1", "password fixture must be local");
-    let password = std::env::var("FERRYX_TUNNEL_PASSWORD_FIXTURE_SECRET").expect("password fixture secret");
     crate::ssh::password::set(&host, crate::ssh::password::Password::new(password)).unwrap();
     struct CredentialGuard(SshHost);
     impl Drop for CredentialGuard {
         fn drop(&mut self) { crate::ssh::password::clear(&self.0).expect("clear password fixture credential"); }
     }
     let _credential = CredentialGuard(host.clone());
-    let mut spec = spec();
-    spec.remote_port = std::env::var("FERRYX_TUNNEL_PASSWORD_FIXTURE_ECHO_PORT").expect("multi-accept echo port").parse().unwrap();
+    let mut spec = spec(); spec.remote_port = live.sink;
     let reservation = reserve(); let port = reservation.local_addr().unwrap().port(); drop(reservation);
-    let args = tunnel_argv(&host, &spec, port, &fixture.empty, &ConfigSource::Fixture { user: "", system: "" }).unwrap();
+    let args = tunnel_argv(&host, &spec, port, &live.fixture.empty, &ConfigSource::Fixture { user: "", system: "" }).unwrap();
     let environment = crate::ssh::password::environment(&args).unwrap();
-    // libtest is not the app's askpass entry point. The helper must be the built
-    // CLI whose startup dispatches password::run_askpass before normal startup.
-    let helper = std::env::var("FERRYX_TUNNEL_PASSWORD_FIXTURE_ASKPASS").expect("built askpass-capable CLI path");
-    let mut command = Command::new(&args[0]);
-    command.args(&args[1..]).envs(environment).env("SSH_ASKPASS", helper)
+    // The libtest executable does not dispatch run_askpass. This secret-free
+    // adapter exercises the real broker's capability protocol instead; only the
+    // random token and broker port are inherited, never the password.
+    let helper = live.fixture.dir.path().join("askpass");
+    std::fs::write(&helper, "#!/usr/bin/env python3\nimport os, socket, sys\nwith socket.create_connection(('127.0.0.1', int(os.environ['FERRYX_SSH_ASKPASS_PORT'])), timeout=5) as s:\n s.sendall(os.environ['FERRYX_SSH_ASKPASS_TOKEN'].encode())\n while True:\n  data = s.recv(4096)\n  if not data: break\n  sys.stdout.buffer.write(data)\n").unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = Command::new(&live.launcher);
+    command.args(&args[1..]).envs(environment).env("SSH_ASKPASS", helper).process_group(0)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     let child = command.spawn().unwrap(); eprintln!("password tunnel pid={}", child.id());
     let _child = ChildGuard(child);
     payload(port).await;
+    let log = std::fs::read_to_string(live.fixture.dir.path().join("sshd.log")).unwrap();
+    assert!(log.contains(&format!("Accepted password for {}", host.username.as_deref().unwrap())), "real password authentication required: {log}");
 }
 #[tokio::test]
 async fn arm_a_isolates_inherited_forwardings() { contrast(true).await; }
@@ -791,8 +847,18 @@ async fn jump_alias_connects() {
     { let _child = live.spawn(&args); payload(port).await; }
     let log = std::fs::read_to_string(live.fixture.dir.path().join("sshd.log")).unwrap();
     assert!(log.contains(&format!("Accepted publickey for {user}")), "bastion auth log: {log}");
-    std::fs::write(&config, format!("{base} ProxyCommand echo inherited > {}; /usr/bin/nc 127.0.0.1 {ssh_port}\n", marker.display())).unwrap();
-    { let _child = live.spawn(&args); payload(port).await; }
+    // OpenSSH prepends `exec` to ProxyCommand. A bare `echo ...; nc ...`
+    // therefore execs echo and never reaches nc. Make the whole probe one program.
+    use std::os::unix::fs::PermissionsExt;
+    let proxy = live.fixture.dir.path().join("probe-proxy");
+    std::fs::write(&proxy, format!("#!/bin/sh\nprintf 'inherited\\n' > {}\nexec /usr/bin/nc 127.0.0.1 {ssh_port}\n", crate::ssh::direct::quote_posix(marker.to_str().unwrap()))).unwrap();
+    std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(&config, format!("{base} ProxyCommand {}\n", proxy.display())).unwrap();
+    let second_reservation = reserve();
+    let second_port = second_reservation.local_addr().unwrap().port();
+    *args.last_mut().unwrap() = format!("-L127.0.0.1:{second_port}:127.0.0.1:{}", live.sink);
+    drop(second_reservation);
+    { let _child = live.spawn(&args); payload(second_port).await; }
     assert_eq!(std::fs::read_to_string(marker).unwrap().trim(), "inherited");
     eprintln!("hop -F inheritance: authenticated user={user} port={ssh_port}; ProxyCommand marker=inherited");
 }
@@ -851,6 +917,11 @@ fn destination_precedes_joined_forward() {
     let j = args.iter().position(|s| s == "-J").unwrap();
     assert_eq!(args[j + 1], "relay@127.0.0.1:2200");
     assert!(!args[j + 1].contains("bastion"));
+    let left = parse_g("host bastion\nhostname 127.0.0.1\nuser relay\nport 2200\n");
+    let right = parse_g("host 127.0.0.1\nhostname 127.0.0.1\nuser relay\nport 2200\n");
+    assert!(compare(&left, &right, &h, true).is_ok(), "lookup alias is not a connection setting");
+    let changed = parse_g("host 127.0.0.1\nhostname 127.0.0.1\nuser relay\nport 2200\nidentityagent /tmp/different-agent\n");
+    assert_eq!(piece(compare(&left, &changed, &h, true).unwrap_err()), "jump_identity");
 }
 #[test]
 fn empty_config_is_the_only_forwarding_isolation() {
@@ -1015,8 +1086,21 @@ fn per_setting_equivalence_refusals() {
     for name in ["GenericBox.local", "genericbox.local"] {
         assert!(f.argv(&mixed, &format!("Host *\n HostName {name}\n"), "").is_ok());
     }
-    let mut key = host(); key.identity_file = Some("~/.ssh/id_x".into());
-    assert!(f.argv(&key, "Host *\n IdentityFile ~/.ssh/id_x\n", "").is_ok());
+    // ssh ignores a nonexistent command-line -i before -G, whereas a config
+    // IdentityFile remains in its list. Supply a real file so this row measures
+    // tilde normalization and de-duplication, not missing-key CLI semantics.
+    let home = dirs::home_dir().unwrap();
+    let key_dir = tempfile::Builder::new().prefix("fx-argv-key-").tempdir_in(&home).unwrap();
+    std::fs::write(key_dir.path().join("id_x"), "fixture identity\n").unwrap();
+    let relative = key_dir.path().strip_prefix(&home).unwrap().join("id_x");
+    let tilde_key = format!("~/{}", relative.to_string_lossy());
+    let mut key = host(); key.identity_file = Some(tilde_key.clone());
+    for indentation in ["", " ", "\t"] {
+        assert_eq!(words(&format!("{indentation}IdentityFile {tilde_key}")).unwrap(), vec!["IdentityFile".to_string(), tilde_key.clone()]);
+        assert!(f.argv(&key, &format!("Host *\n{indentation}IdentityFile {tilde_key}\n"), "").is_ok());
+    }
+    let parsed = parse_g(&format!(" identityfile {tilde_key}\n\tidentityfile {tilde_key}\n"));
+    assert_eq!(identities(&parsed).unwrap(), vec![normalize_identity(&tilde_key).unwrap()]);
     let args = f.argv(&host(), "Host *\n IdentitiesOnly yes\n", "").unwrap();
     assert!(args.iter().any(|v| v.eq_ignore_ascii_case("IdentitiesOnly=yes")));
     let mut jump = host(); jump.jump_host = Some("bastion".into());
