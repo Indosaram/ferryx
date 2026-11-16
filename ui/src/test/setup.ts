@@ -235,6 +235,30 @@ const { clearHmrWorkspaceState } = await import("../state/hmrWorkspaceState");
 const { clearWorkspaceSnapshot } = await import("../state/workspaceSnapshotCache");
 const { setAdvancedFeaturesFallbackForTests } = await import("../lib/advancedFeatures");
 
+// jsdom can expose a `localStorage` accessor whose getter returns undefined (measured on the
+// Linux bun runtime, jsdom 26.1.0, url http://localhost:3000). Suites that persist settings then
+// die on `undefined.clear()`, so install an in-memory Storage whenever the platform one is absent.
+if (typeof window !== "undefined") {
+  let platformStorage: Storage | undefined;
+  try {
+    platformStorage = window.localStorage;
+  } catch {
+    platformStorage = undefined;
+  }
+  if (!platformStorage) {
+    const entries = new Map<string, string>();
+    const fallback: Storage = {
+      get length() { return entries.size; },
+      clear: () => { entries.clear(); },
+      getItem: (key: string) => entries.get(key) ?? null,
+      key: (index: number) => Array.from(entries.keys())[index] ?? null,
+      removeItem: (key: string) => { entries.delete(key); },
+      setItem: (key: string, value: string) => { entries.set(key, String(value)); },
+    };
+    Object.defineProperty(window, "localStorage", { configurable: true, writable: true, value: fallback });
+  }
+}
+
 setupBeforeEach(() => {
   // Suites that clear localStorage still render every surface; advancedFeatures tests opt out.
   setAdvancedFeaturesFallbackForTests(true);
