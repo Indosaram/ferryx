@@ -145,6 +145,54 @@ fn decide(v: &OwnedSessionView, now: i64, nudge_after: i64) -> OwnershipAction {
     OwnershipAction::Nothing
 }
 
+/// The `hub_meta` key that records when an owned goal was last nudged (unix seconds).
+pub const NUDGE_KEY_PREFIX: &str = "supervisor_owned_nudge:";
+/// The `hub_meta` key whose presence pauses an owned goal ("잠깐 멈춰").
+pub const PAUSE_KEY_PREFIX: &str = "supervisor_owned_pause:";
+
+/// Decides, for every running goal admitted through a handover, what the supervisor should do now.
+///
+/// This only decides: it sends nothing and changes nothing, so the caller that owns the pane
+/// transport acts on the returned actions. A session whose state is not known yet is left alone.
+pub async fn tick(
+    pool: &sqlx::SqlitePool,
+    now: i64,
+    nudge_after: i64,
+) -> Result<Vec<(String, OwnershipAction)>, sqlx::Error> {
+    let goals: Vec<String> = sqlx::query_scalar(
+        "SELECT g.goal_id FROM supervisor_requests r
+         JOIN supervisor_goals g ON g.goal_id = r.goal_id
+         WHERE r.source_message_id LIKE 'handover:%' AND g.run_state = 'running'
+         ORDER BY g.goal_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut actions = Vec::with_capacity(goals.len());
+    for goal_id in goals {
+        let paused: Option<String> = sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+            .bind(format!("{PAUSE_KEY_PREFIX}{goal_id}"))
+            .fetch_optional(pool)
+            .await?;
+        let nudged: Option<String> = sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+            .bind(format!("{NUDGE_KEY_PREFIX}{goal_id}"))
+            .fetch_optional(pool)
+            .await?;
+        let view = OwnedSessionView {
+            agent: "unknown".to_string(),
+            state: SessionState::Unknown,
+            paused: paused.is_some(),
+            last_report_at: None,
+            last_activity_at: now,
+            nudged_at: nudged.and_then(|value| value.parse().ok()),
+            stall_escalated: false,
+            turns_used: 0,
+            turn_limit: u32::MAX,
+        };
+        actions.push((goal_id, next_action(&view, now, nudge_after)));
+    }
+    Ok(actions)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +343,14 @@ mod tests {
         assert!(safe_to_send("Please report progress on the goal."));
         assert!(!safe_to_send("run `ls` now"));
         assert!(!safe_to_send("echo $(whoami)"));
+    }
+
+    #[tokio::test]
+    async fn an_owned_session_in_an_unknown_state_is_left_alone() {
+        let pool = crate::storage::memory().await.unwrap();
+        let actions = tick(&pool, 10_000, nudge_after_secs()).await.unwrap();
+        assert!(actions
+            .iter()
+            .all(|(_, action)| *action == OwnershipAction::Nothing));
     }
 }
