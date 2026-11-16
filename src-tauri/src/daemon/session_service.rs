@@ -1,4 +1,6 @@
 use super::workspace_service::DaemonWorkspaceService;
+#[path = "retained_recovery.rs"]
+mod retained_recovery;
 use crate::daemon::agent_state::AgentStateHub;
 use crate::daemon::protocol::{
     AgentProviderSessionKey, DaemonRemoteEvent, DaemonResponse, DaemonSessionDetails,
@@ -1941,6 +1943,7 @@ impl DaemonSessionService {
     }
 
     pub(super) async fn restore_remote_sessions_at(&self, path: PathBuf) -> Result<(), String> {
+        let _recovery = self.session_router.recovery_lock.lock().await;
         self.ensure_agent_sink();
         self.migrate_legacy_remote_persistence(&path).await?;
         let paired_path = path.with_file_name("paired_descriptors.json");
@@ -1955,6 +1958,9 @@ impl DaemonSessionService {
         .await
         .map_err(|e| e.to_string())?;
         for mut record in records {
+            if self.terminal_service.remote().contains(&record.descriptor.backend_session_id) {
+                continue;
+            }
             if record.terminal {
                 // The pane keeps this id after a daemon restart and asks about it before it can
                 // resume. Publish the retained exit evidence before the record is deleted, so the

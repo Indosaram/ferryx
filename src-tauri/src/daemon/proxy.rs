@@ -1,5 +1,7 @@
 #[path = "machine_peer.rs"]
 mod machine_peer;
+#[path = "legacy_peer_liveness.rs"]
+mod legacy_peer_liveness;
 use crate::daemon::agent_state::{AgentState, AgentStateHub, AgentStateSubscription};
 use crate::daemon::client::read_transport_token;
 use crate::daemon::manifest::{get_manifest_path, HandoverManifest};
@@ -217,7 +219,7 @@ impl LegacyPeer {
         }
     }
 
-    async fn persist_sessions(&self) -> Result<(), String> {
+    pub(crate) async fn persist_sessions(&self) -> Result<(), String> {
         let Some(path) = self.manifest_path.clone() else { return Ok(()); };
         let socket = self.socket_path.clone();
         let sessions = self.known_sessions.read().clone();
@@ -746,6 +748,7 @@ impl LegacyPeer {
 pub struct SessionRouter {
     terminal_service: Arc<TerminalService>,
     legacy_peers: Arc<RwLock<Vec<Arc<LegacyPeer>>>>,
+    pub(crate) recovery_lock: tokio::sync::Mutex<()>,
     workspace_ids: RwLock<std::collections::HashMap<String, (String, Option<PathBuf>)>>,
 }
 
@@ -754,6 +757,7 @@ impl SessionRouter {
         Self {
             terminal_service,
             legacy_peers: Arc::new(RwLock::new(Vec::new())),
+            recovery_lock: tokio::sync::Mutex::new(()),
             workspace_ids: RwLock::new(std::collections::HashMap::new()),
         }
     }

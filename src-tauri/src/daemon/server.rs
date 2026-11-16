@@ -7061,8 +7061,27 @@ impl DaemonServer {
                         None
                     };
 
+                    let recovery_id = match req.as_ref() {
+                        Ok(DaemonRequest::RetryRemoteSession { session_id }
+                            | DaemonRequest::RemoteSessionDetails { session_id }) => Some(session_id.as_str()),
+                        Ok(DaemonRequest::RetryPairedSession { backend_session_id, .. }
+                            | DaemonRequest::PairedRecoveryOutcome { backend_session_id }) => Some(backend_session_id.as_str()),
+                        Ok(DaemonRequest::Attach { session_id, .. }
+                            | DaemonRequest::DescribeSession { session_id }) => Some(session_id.as_str()),
+                        _ => None,
+                    };
+                    let recovery_refusal = if busy_refusal.is_none()
+                        && peer_refusal.is_none()
+                        && !recovery_id.is_some_and(|id| self.handover_manager.session_not_owned(id))
+                    {
+                        if let Some(id) = recovery_id {
+                            self.session_service.recover_retained_session(id, &self.paired_hosts)
+                                .await.err().map(daemon_error)
+                        } else { None }
+                    } else { None };
                     let resp = match req {
                 _ if busy_refusal.is_some() => busy_refusal.take().expect("checked above"),
+                _ if recovery_refusal.is_some() => recovery_refusal.expect("checked above"),
                 _ if peer_refusal.is_some() => peer_refusal.expect("checked above"),
                 // A committed predecessor never serves a local session it transferred: the
                 // successor is that session's only owner (todo 8).

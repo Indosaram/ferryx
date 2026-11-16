@@ -1,5 +1,7 @@
 use super::*;
 use std::sync::atomic::Ordering;
+#[path = "retained_recovery_tests.rs"]
+mod retained_recovery_tests;
 
 async fn settlement_stage(
     stages: &mut tokio::sync::mpsc::UnboundedReceiver<&'static str>,
