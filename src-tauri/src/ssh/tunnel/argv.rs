@@ -618,6 +618,7 @@ struct Live {
     fixture: Fixture,
     host: SshHost,
     server: tokio::task::JoinHandle<()>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     echo: tokio::task::JoinHandle<()>,
     sink: u16,
     launcher: PathBuf,
@@ -649,10 +650,12 @@ impl Live {
         std::fs::write(&launcher, format!("#!/bin/sh\nexec /usr/bin/ssh -o UserKnownHostsFile={} -o GlobalKnownHostsFile=/dev/null \"$@\"\n", crate::ssh::direct::quote_posix(known.to_str().unwrap()))).unwrap();
         std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
         let log = root.join("sshd.log");
+        let (shutdown, mut stop) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let mut children = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
+                    _ = &mut stop => break,
                     accepted = listener.accept() => {
                         let (stream, _) = accepted.unwrap();
                         let stream = stream.into_std().unwrap(); stream.set_nonblocking(false).unwrap();
@@ -672,6 +675,9 @@ impl Live {
                     Some(result) = children.join_next(), if !children.is_empty() => { result.unwrap(); }
                 }
             }
+            // Closing the client causes each inetd sshd to exit. Await every
+            // actual Child::wait task before the disposable account is removed.
+            while let Some(result) = children.join_next().await { result.expect("join sshd teardown"); }
         });
         let sink = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let sink_port = sink.local_addr().unwrap().port();
@@ -693,7 +699,15 @@ impl Live {
         let mut host = host(); host.hostname = "127.0.0.1".into(); host.port = Some(port);
         host.username = Some(std::env::var("USER").expect("fixture login user"));
         host.identity_file = Some(root.join("user_key").to_string_lossy().into_owned());
-        Self { fixture, host, server, echo, sink: sink_port, launcher }
+        Self { fixture, host, server, shutdown: Some(shutdown), echo, sink: sink_port, launcher }
+    }
+    async fn stop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            shutdown.send(()).expect("fixture accept loop alive");
+        }
+        tokio::time::timeout(Duration::from_secs(20), &mut self.server)
+            .await.expect("bounded sshd teardown").expect("sshd teardown task");
+        self.echo.abort();
     }
     fn spawn(&self, args: &[String]) -> ChildGuard {
         let log = self.fixture.dir.path().join("client.log");
@@ -773,8 +787,11 @@ async fn password_non_jump_tunnel_authenticates() {
     struct Account(String);
     impl Drop for Account {
         fn drop(&mut self) {
-            let output = account_command("userdel").arg(&self.0).output().expect("remove fixture account");
-            assert!(output.status.success(), "userdel: {}", String::from_utf8_lossy(&output.stderr));
+            match account_command("userdel").arg(&self.0).output() {
+                Ok(output) if output.status.success() => {},
+                Ok(output) => eprintln!("FIXTURE_CLEANUP_WARNING userdel {}: {}", self.0, String::from_utf8_lossy(&output.stderr)),
+                Err(error) => eprintln!("FIXTURE_CLEANUP_WARNING userdel {}: {error}", self.0),
+            }
         }
     }
     let username = format!("fxt{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
@@ -789,7 +806,7 @@ async fn password_non_jump_tunnel_authenticates() {
     }
     let output = chpasswd.wait_with_output().unwrap();
     assert!(output.status.success(), "chpasswd: {}", String::from_utf8_lossy(&output.stderr));
-    let live = Live::new().await;
+    let mut live = Live::new().await;
     let config = live.fixture.dir.path().join("sshd_config");
     let text = std::fs::read_to_string(&config).unwrap()
         .replace("PasswordAuthentication no", "PasswordAuthentication yes")
@@ -823,7 +840,10 @@ async fn password_non_jump_tunnel_authenticates() {
     let _child = ChildGuard(child);
     payload(port).await;
     let log = std::fs::read_to_string(live.fixture.dir.path().join("sshd.log")).unwrap();
-    assert!(log.contains(&format!("Accepted password for {}", host.username.as_deref().unwrap())), "real password authentication required: {log}");
+    let authenticated = log.contains(&format!("Accepted password for {}", host.username.as_deref().unwrap()));
+    drop(_child);
+    live.stop().await;
+    assert!(authenticated, "real password authentication required: {log}");
 }
 #[tokio::test]
 async fn arm_a_isolates_inherited_forwardings() { contrast(true).await; }
@@ -844,6 +864,13 @@ async fn jump_alias_connects() {
     let mut args = live.argv(port, "");
     let f = args.iter().position(|s| s == "-F").unwrap(); args[f + 1] = config.to_string_lossy().into_owned();
     args.splice(3..3, ["-J".into(), "bastion".into()]);
+    eprintln!("alias fixture argv={args:?}; config={base:?}");
+    let jump = args.iter().position(|arg| arg == "-J").unwrap();
+    assert_eq!(args[jump + 1], "bastion");
+    assert!(jump < args.len() - 2);
+    assert_eq!(args[args.len() - 2], live.host.target());
+    assert_eq!(Path::new(&args[f + 3]), config);
+    assert!(std::fs::read_to_string(&config).unwrap().contains("Host bastion\n HostName 127.0.0.1\n"));
     { let _child = live.spawn(&args); payload(port).await; }
     let log = std::fs::read_to_string(live.fixture.dir.path().join("sshd.log")).unwrap();
     assert!(log.contains(&format!("Accepted publickey for {user}")), "bastion auth log: {log}");
@@ -851,7 +878,9 @@ async fn jump_alias_connects() {
     // therefore execs echo and never reaches nc. Make the whole probe one program.
     use std::os::unix::fs::PermissionsExt;
     let proxy = live.fixture.dir.path().join("probe-proxy");
-    std::fs::write(&proxy, format!("#!/bin/sh\nprintf 'inherited\\n' > {}\nexec /usr/bin/nc 127.0.0.1 {ssh_port}\n", crate::ssh::direct::quote_posix(marker.to_str().unwrap()))).unwrap();
+    // Do not depend on nc's installation path or variant. Relay both directions
+    // until EOF; closing stdin must half-close TCP, not discard server output.
+    std::fs::write(&proxy, format!("#!/usr/bin/env python3\nimport os, selectors, socket\nwith open({:?}, 'w') as marker: marker.write('inherited\\n')\ns = socket.create_connection(('127.0.0.1', {ssh_port}), timeout=10)\ns.settimeout(None)\nsel = selectors.DefaultSelector()\nsel.register(0, selectors.EVENT_READ)\nsel.register(s, selectors.EVENT_READ)\nwhile True:\n for key, _ in sel.select():\n  if key.fileobj == 0:\n   data = os.read(0, 65536)\n   if data: s.sendall(data)\n   else:\n    sel.unregister(0)\n    s.shutdown(socket.SHUT_WR)\n  else:\n   data = s.recv(65536)\n   if not data: s.close(); raise SystemExit(0)\n   view = memoryview(data)\n   while view: view = view[os.write(1, view):]\n", marker.to_str().unwrap())).unwrap();
     std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(&config, format!("{base} ProxyCommand {}\n", proxy.display())).unwrap();
     let second_reservation = reserve();
