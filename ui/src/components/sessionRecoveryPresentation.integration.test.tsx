@@ -190,6 +190,9 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
           phase: "recovering",
           reason: "Transport link lost; automatic backoff scheduled",
         },
+        // The store marks a local pane reconnecting while its PTY is being re-resolved; that is the
+        // only recovering shape whose retained backend may still be replaced.
+        ...(transport === "local" ? { remoteConnectionState: "reconnecting" as const } : {}),
       });
 
       const activeTaskActivity: TerminalActivity = {
@@ -224,15 +227,15 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
       expect(screen.queryByRole("heading", { name: /Shell exited|Remote session exited/ })).toBeNull();
       expect(screen.getByTestId("terminal-pane-surface")).toBeInTheDocument();
 
-      // Verify appropriate buttons: Retry is always present. A non-SSH reconnecting overlay also
-      // offers the "Open new shell" escape (a session may never come back, e.g. after an OS reboot);
-      // SSH keeps its own reconnect overlay without it.
+      // Verify appropriate buttons: Retry is always present. Only a local pane marked reconnecting
+      // may also replace its retained PTY; SSH reattaches, and a paired pane still holding a live
+      // backend is reattach-only, so neither paints a button the guard would reject.
       const retryBtn = screen.getByRole("button", { name: "Retry session recovery" });
       expect(retryBtn).toBeInTheDocument();
-      if (transport === "ssh") {
-        expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
-      } else {
+      if (transport === "local") {
         expect(screen.getByRole("button", { name: "Open new shell" })).toBeInTheDocument();
+      } else {
+        expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
       }
 
       // Verify retry action preserves zero spawn (onOpenNewShell must not be invoked)
@@ -254,7 +257,7 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
       expect(disposeAdmission).toHaveBeenCalledTimes(2);
     });
 
-    it("renders blocked outcome with structured reason, explicit new shell escape, and zero automatic spawn on retry", async () => {
+    it("renders blocked outcome with structured reason, retry, and no dead new shell escape", async () => {
       const disposeAdmission = vi.fn();
       const onRefreshSessionIdentity = vi.fn().mockReturnValue(disposeAdmission);
       const onOpenNewShell = vi.fn();
@@ -279,11 +282,11 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
       expect(screen.getByRole("heading", { name: "Session recovery blocked" })).toBeInTheDocument();
       expect(screen.getByText(blockedSession.recoveryState!.reason!)).toBeInTheDocument();
 
-      // Verify appropriate buttons: both corrective Retry and explicit Open new shell escape
+      // Verify appropriate buttons: corrective Retry only. A blocked pane still owns its backend
+      // session id, so replacement would answer AGENT_RESUME_INVALID; the button must not be painted.
       const retryBtn = screen.getByRole("button", { name: "Retry session recovery" });
-      const newShellBtn = screen.getByRole("button", { name: "Open new shell" });
       expect(retryBtn).toBeInTheDocument();
-      expect(newShellBtn).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
 
       // Verify Retry invokes recovery admission and does not spawn new shell
       fireEvent.click(retryBtn);
@@ -292,10 +295,6 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
         expect.any(Function),
       );
       expect(onOpenNewShell).not.toHaveBeenCalled();
-
-      // Verify explicit new terminal escape invokes onOpenNewShell
-      fireEvent.click(newShellBtn);
-      expect(onOpenNewShell).toHaveBeenCalledWith(`${transport}-blocked`);
 
       // Unmounting cleans up active admission subscription
       unmount();
@@ -333,11 +332,18 @@ describe("Session recovery presentation cross-flow integration matrix", () => {
       // Verify no automatic retry button is rendered for confirmed exits
       expect(screen.queryByRole("button", { name: "Retry session recovery" })).toBeNull();
 
-      // Verify explicit new terminal escape button
-      const newShellBtn = screen.getByRole("button", { name: "Open new shell" });
-      expect(newShellBtn).toBeInTheDocument();
-      fireEvent.click(newShellBtn);
-      expect(onOpenNewShell).toHaveBeenCalledWith(`${transport}-exited`);
+      if (transport === "ssh") {
+        // An SSH pane is replaceable only once its backend is confirmed gone (a standby id), so a
+        // plain confirmed exit keeps its stored reattach-only session and shows no replacement.
+        expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
+        expect(onOpenNewShell).not.toHaveBeenCalled();
+      } else {
+        // Verify explicit new terminal escape button
+        const newShellBtn = screen.getByRole("button", { name: "Open new shell" });
+        expect(newShellBtn).toBeInTheDocument();
+        fireEvent.click(newShellBtn);
+        expect(onOpenNewShell).toHaveBeenCalledWith(`${transport}-exited`);
+      }
       expect(onRefreshSessionIdentity).not.toHaveBeenCalled();
     });
 

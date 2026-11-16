@@ -8,6 +8,7 @@ import { Button } from "./ui/button";
 import { cn } from "../lib/cn";
 import { localSplitIntent, retryLocalSplit, cancelLocalSplit } from "../lib/localSplitLifecycle";
 import { isPairedWorkspaceId, isRemoteWorkspaceId } from "../lib/remoteProject";
+import { canReplaceShellSession } from "../lib/shellReplacement";
 import {
   isSessionAutoResumeHeld,
   isSessionSleeping,
@@ -33,7 +34,6 @@ import { TerminalSearchOverlay } from "./TerminalSearchOverlay";
 import { DagPaneBadge } from "./dag/DagPaneBadge";
 import { useAdvancedFeatures } from "../lib/advancedFeatures";
 import { remoteHostStore } from "../state/remoteHostStore";
-import { groupOf } from "../lib/attentionGroup";
 
 type TerminalPaneProps = {
   session: TerminalSession;
@@ -449,7 +449,7 @@ export function TerminalPane({
           providerSessionId={session.providerSession?.id ?? null}
           sessions={sessions}
           agentPresent={activity?.isAgent === true}
-          agentWorking={activity?.isAgent === true && groupOf(activity) === "working"}
+          agentWorking={activity?.isAgent === true && activity.state === "working"}
         />
       ) : null}
       <div
@@ -665,7 +665,7 @@ export function TerminalPane({
                           <span>Retry</span>
                         </Button>
                       ) : null}
-                      {onOpenNewShell ? (
+                      {onOpenNewShell && canReplaceShellSession(session) ? (
                         <Button
                           type="button"
                           size="sm"
@@ -683,7 +683,7 @@ export function TerminalPane({
                 ) : isRecoveryExited ? (
                   <>
                     <p role="status" className="min-w-0 truncate text-[12px] text-muted-foreground">The remote owner confirmed this session exited.</p>
-                    {onOpenNewShell ? (
+                    {onOpenNewShell && canReplaceShellSession(session) ? (
                       <Button
                         type="button"
                         size="sm"
@@ -754,7 +754,7 @@ export function TerminalPane({
                           <span>Retry</span>
                         </Button>
                       ) : null}
-                      {onOpenNewShell ? (
+                      {onOpenNewShell && canReplaceShellSession(session) ? (
                         <Button
                           type="button"
                           size="sm"
@@ -776,7 +776,7 @@ export function TerminalPane({
                       <span>{recoveryState?.reason ?? "Reconnecting session..."}</span>
                     </div>
                     {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" className="h-7 shrink-0 text-[11px]" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
-                    {onOpenNewShell ? (
+                    {onOpenNewShell && canReplaceShellSession(session) ? (
                       <Button
                         type="button"
                         size="sm"
@@ -856,7 +856,7 @@ export function TerminalPane({
                     <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
                     <span>Reconnecting session...</span>
                   </Button>
-                ) : onOpenNewShell ? (
+                ) : onOpenNewShell && canReplaceShellSession(session) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -891,7 +891,7 @@ export function TerminalPane({
                           <span>Retry</span>
                         </Button>
                       ) : null}
-                      {onOpenNewShell ? (
+                      {onOpenNewShell && canReplaceShellSession(session) ? (
                         <Button
                           type="button"
                           size="sm"
@@ -913,7 +913,7 @@ export function TerminalPane({
                       <span>{recoveryState?.reason ?? "Reconnecting to session..."}</span>
                     </div>
                     {canRetryRecovery ? <Button type="button" size="sm" variant="secondary" className="h-7 shrink-0 text-[11px]" aria-label="Retry session recovery" onClick={handleReconnect}>Retry</Button> : null}
-                    {onOpenNewShell ? (
+                    {onOpenNewShell && canReplaceShellSession(session) ? (
                       <Button
                         type="button"
                         size="sm"
@@ -961,7 +961,7 @@ export function TerminalPane({
                       type="button"
                       size="sm"
                       variant={canReattach || canRetryRecovery ? "ghost" : "secondary"}
-                      disabled={isPending || !onOpenNewShell}
+                      disabled={isPending || !onOpenNewShell || !canReplaceShellSession(session)}
                       aria-label={isStandbyShell ? "Start shell" : "Open new shell"}
                       onClick={handleOpenNewShell}
                       className="h-7 shrink-0 text-[11px]"

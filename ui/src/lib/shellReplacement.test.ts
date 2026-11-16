@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  canReplaceShellSession,
   clearShellReplacementInflightForTests,
   reconnectLocalSession,
   replaceExitedShellSession,
@@ -331,6 +332,43 @@ describe("shell replacement", () => {
       expect(openNewShell).not.toHaveBeenCalled();
       expect(dispatch).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("canReplaceShellSession", () => {
+  const pane = (over: Partial<TerminalSession> = {}): TerminalSession => ({
+    id: "pane",
+    workspaceId: "local-ws",
+    cwd: "/repo",
+    worktree: null,
+    backendSessionId: "live-pty",
+    lifecycle: "working",
+    ...over,
+  });
+
+  it("hides the affordance for every shape the replacement guard would reject", () => {
+    // A live backend on a local pane: reattach-only, so no replacement may be offered.
+    expect(canReplaceShellSession(pane())).toBe(false);
+    // Paired panes keep their backend proxy id while recovering or blocked.
+    expect(canReplaceShellSession(pane({ workspaceId: "daemon:abc" }))).toBe(false);
+    // SSH is reattach-only unless its backend is confirmed gone.
+    expect(canReplaceShellSession(pane({ workspaceId: "ssh:host:project", lifecycle: "exited" }))).toBe(false);
+    expect(canReplaceShellSession(null)).toBe(false);
+    expect(canReplaceShellSession(undefined)).toBe(false);
+  });
+
+  it("offers the affordance for every shape the guard accepts", () => {
+    // Already settled: confirmed exit, failed start, or a standby placeholder.
+    expect(canReplaceShellSession(pane({ lifecycle: "exited" }))).toBe(true);
+    expect(canReplaceShellSession(pane({ lifecycle: "failed" }))).toBe(true);
+    expect(canReplaceShellSession(pane({ backendSessionId: null }))).toBe(true);
+    expect(canReplaceShellSession(pane({ backendSessionId: "standby:pane" }))).toBe(true);
+    // A local PTY stuck reconnecting is the escape the guard explicitly allows.
+    expect(canReplaceShellSession(pane({ remoteConnectionState: "reconnecting" }))).toBe(true);
+    // A confirmed-gone SSH backend may be respawned on its remote host.
+    expect(
+      canReplaceShellSession(pane({ workspaceId: "ssh:host:project", backendSessionId: "standby:pane" })),
+    ).toBe(true);
   });
 });
 
