@@ -128,6 +128,7 @@ describe("desktopChatLane staged file delivery", () => {
     });
     expect(result.current.draft).toContain("@notes.txt");
     expect(result.current.stagedFiles).toHaveLength(1);
+    if (!fileStaging) throw new Error("expected fileStaging");
     expect(fileStaging.transport.remove).not.toHaveBeenCalled();
     expect(fileStaging.transport.cancel).not.toHaveBeenCalled();
   });
