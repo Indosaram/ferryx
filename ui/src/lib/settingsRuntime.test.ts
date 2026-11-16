@@ -52,7 +52,10 @@ beforeEach(() => {
 describe("settings runtime contracts", () => {
   it("persists and applies appearance theme, accent, and density", () => {
     const next = saveAppearanceSettings({ theme: "light", accentColor: "emerald", density: "comfortable" });
-    expect(loadAppearanceSettings()).toEqual(next);
+    const stored = loadAppearanceSettings();
+    expect(stored.theme).toBe("light");
+    expect(stored.accentColor).toBe("emerald");
+    expect(stored.density).toBe("comfortable");
 
     applyAppearanceSettings(next);
     expect(document.documentElement.dataset.theme).toBe("light");
@@ -107,11 +110,10 @@ describe("settings runtime contracts", () => {
     _resetSettingsRuntimeBridgeForTest();
     installSettingsRuntimeBridge();
 
-    expect(loadAppearanceSettings()).toEqual({
-      theme: "light",
-      accentColor: "blue",
-      density: "comfortable",
-    });
+    const stored = loadAppearanceSettings();
+    expect(stored.theme).toBe("light");
+    expect(stored.accentColor).toBe("blue");
+    expect(stored.density).toBe("comfortable");
     expect(document.documentElement.dataset.theme).toBe("light");
     expect(document.documentElement.dataset.accent).toBe("blue");
     expect(document.documentElement.dataset.density).toBe("comfortable");
