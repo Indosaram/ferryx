@@ -1325,6 +1325,19 @@ async fn projector_desktop_gui_child_canonical_local_target() {
     assert_eq!((projected.cols, projected.rows), (100, 30));
     assert!(projected.running);
     assert!(projected.end_sequence.0 >= projected.start_sequence.0);
+    // The single-session detail a paired desktop reads before attaching describes the same
+    // GUI-opened session the inventory lists, instead of answering SESSION_NOT_FOUND.
+    match service.machine_detail(&id, epoch).unwrap() {
+        crate::remote::machine_protocol::SessionDetail::Running { session } => {
+            assert_eq!(session.target, projected.target);
+            assert_eq!(session.workspace_id, projected.workspace_id);
+        }
+        other => panic!("desktop GUI session detail was not running: {other:?}"),
+    }
+    assert_eq!(
+        service.machine_detail("no-such-session", epoch).unwrap_err(),
+        "SESSION_NOT_FOUND"
+    );
     assert!(uuid::Uuid::parse_str(&projected.target.machine_id).is_ok());
     assert_ne!(projected.target.machine_id, id);
     // The served identity is this machine's durable one, persisted inside the fixture, not
