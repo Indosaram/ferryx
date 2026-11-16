@@ -168,7 +168,7 @@ pub async fn report_settled(pool: &SqlitePool, goal_id: &str) -> Result<bool, Su
     };
     let provider = ChannelProvider::from_str(&provider_text)?;
     let session = session_of(provider, &channel_id, &thread_id, &goal.owner_principal);
-    let report = Report::new(
+    let mut report = Report::new(
         Uuid::new_v4().to_string(),
         "supervisor-goal",
         &key,
@@ -181,6 +181,10 @@ pub async fn report_settled(pool: &SqlitePool, goal_id: &str) -> Result<bool, Su
         goal.state_detail.as_deref().unwrap_or_default()
     ))
     .with_origin(&source_message_id);
+    // A settle answers the request the owner made, so the gate must read it as a reply to him and
+    // never as the hub's own unsolicited narration (which is withheld when it is not in the
+    // owner's language).
+    report.reply_to_owner = true;
     let mut tx = pool.begin_write().await?;
     let queued = crate::report_gate::queue_delivery_in(
         &mut tx,

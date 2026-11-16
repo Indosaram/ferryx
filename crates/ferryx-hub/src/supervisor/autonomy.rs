@@ -568,6 +568,11 @@ pub struct Autonomy {
 }
 
 impl Autonomy {
+    /// The hub database this service's stores live in.
+    pub fn pool(&self) -> &SqlitePool {
+        self.gate.pool()
+    }
+
     /// Opens the stores on the hub database (seeding the default rules once) and wires the
     /// publisher into every store mutation. The engine judge is wired by
     /// [`Self::open_with`]; this one judges nothing and trusts the engine's recorded calls.

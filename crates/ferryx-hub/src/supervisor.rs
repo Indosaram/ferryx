@@ -2237,6 +2237,14 @@ pub async fn admit_request_bound(
         .bind(&goal_id)
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "UPDATE supervisor_dispatches SET state = 'superseded', updated_at = ?
+             WHERE goal_id = ? AND state = 'ready'",
+        )
+        .bind(&now)
+        .bind(&goal_id)
+        .execute(&mut *tx)
+        .await?;
     }
     if terms.observed {
         // A handed-over session already runs: the goal is running and nothing is ever typed

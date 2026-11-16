@@ -905,6 +905,9 @@ async fn a_degraded_engine_escalates_every_prompt_including_learned_ones() {
     teach(&fixture, 1, 3).await;
     judge.set(FakeJudge::answers(1, 0.99, "pnpm"));
     health.set(false);
+    // Teaching ran while healthy, so the engine was asked then; only what it is asked from here
+    // on tells whether a degraded engine is consulted.
+    let asked_before = judge.asked().len();
 
     fixture
         .autonomy
@@ -912,7 +915,7 @@ async fn a_degraded_engine_escalates_every_prompt_including_learned_ones() {
         .await;
 
     assert!(fixture.control.calls().is_empty(), "nothing was typed");
-    assert!(judge.asked().is_empty(), "a degraded engine is not asked");
+    assert_eq!(judge.asked().len(), asked_before, "a degraded engine is not asked");
     let open = fixture.autonomy.escalation_source().pending().await.unwrap();
     assert_eq!(open.len(), 1);
     assert!(open[0].reason.starts_with("supervisor degraded:"), "{}", open[0].reason);
