@@ -1075,7 +1075,7 @@ async fn resolve_scope(
 }
 
 /// The checkout a git common dir belongs to: `/x/repo/.git` is `/x/repo`.
-fn checkout_root(git_common_dir: &str) -> String {
+pub(super) fn checkout_root(git_common_dir: &str) -> String {
     let trimmed = git_common_dir.trim_end_matches(['/', '\\']);
     for suffix in ["/.git", "\\.git"] {
         if let Some(root) = trimmed.strip_suffix(suffix) {
@@ -1087,7 +1087,7 @@ fn checkout_root(git_common_dir: &str) -> String {
     trimmed.to_owned()
 }
 
-fn within(root: &str, path: &str) -> bool {
+pub(super) fn within(root: &str, path: &str) -> bool {
     path == root
         || path
             .strip_prefix(root)

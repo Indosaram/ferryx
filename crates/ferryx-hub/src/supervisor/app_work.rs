@@ -27,9 +27,10 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 use super::admission::{
-    self, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
+    self, ActorContext, AdmissionError, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
 };
-use super::{goal_of, ChannelProvider, ExecutionKind};
+use super::panel_contract::SessionRef;
+use super::{goal_of, identity_of, ChannelProvider, ExecutionKind};
 use crate::goals::contract::RequirementSpec;
 use crate::meta::mhc_fault::SupervisorFault;
 use crate::meta::mhc_profile::ConversationScope;
@@ -84,10 +85,182 @@ pub fn submit_from_call(
     }
 }
 
-/// An app turn in flight: the owner's message and what its submits did.
+/// The project a chat-delegated goal belongs to, and the host it runs on when that project has
+/// exactly one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectResolution {
+    pub project_id: String,
+    pub host_id: Option<String>,
+}
+
+/// Resolves the project of an app submit from the owner's own turn, before admission: (1) the
+/// project whose checkout contains the cwd of the first session the owner addressed with @;
+/// (2) else the single project whose name or repository identity basename the owner message and
+/// the proposal title name as a whole word, case-insensitively. Two matches are refused
+/// (`None`), never guessed. `host_id` is the project's host when it has exactly one.
+///
+/// `None` leaves the project to admission, which then holds the goal for the owner.
+pub async fn resolve_project(
+    pool: &SqlitePool,
+    supervisor_id: &str,
+    owner_text: &str,
+    title: &str,
+    mentions: &[SessionRef],
+    sessions: Option<&SessionTools>,
+) -> Result<Option<ProjectResolution>, AdmissionError> {
+    let project_id = match project_of_mentions(pool, supervisor_id, mentions, sessions).await {
+        Some(project_id) => project_id,
+        None => match project_of_names(pool, supervisor_id, owner_text, title).await? {
+            Some(project_id) => project_id,
+            None => return Ok(None),
+        },
+    };
+    Ok(Some(ProjectResolution {
+        host_id: single_host(pool, &project_id).await?,
+        project_id,
+    }))
+}
+
+/// The project of the first session the owner addressed with @: the one whose checkout on that
+/// session's host contains the session's cwd. `None` when that session is unknown to the fleet,
+/// the fleet cannot be listed, or the cwd belongs to no project or to several.
+async fn project_of_mentions(
+    pool: &SqlitePool,
+    supervisor_id: &str,
+    mentions: &[SessionRef],
+    sessions: Option<&SessionTools>,
+) -> Option<String> {
+    let sessions = sessions?;
+    let first = mentions.first()?;
+    let fleet = match sessions.fleet().await {
+        Ok(fleet) => fleet,
+        Err(error) => {
+            tracing::warn!(%error, session = %first, "the fleet was not listed; a mentioned session names no project");
+            return None;
+        }
+    };
+    let session = fleet.iter().find(|session| session.session_ref == *first)?;
+    let hosts: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT h.project_id, h.host_id, h.git_common_dir
+           FROM supervisor_project_hosts h
+           JOIN supervisor_projects p ON p.project_id = h.project_id
+          WHERE p.supervisor_id = ?",
+    )
+    .bind(supervisor_id)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    let mut matched: Vec<String> = hosts
+        .into_iter()
+        .filter(|(_, host_id, git_common_dir)| {
+            host_id == &session.host_id
+                && admission::within(
+                    &admission::checkout_root(git_common_dir),
+                    session.cwd.trim_end_matches(['/', '\\']),
+                )
+        })
+        .map(|(project_id, _, _)| project_id)
+        .collect();
+    matched.sort();
+    matched.dedup();
+    match matched.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// The single project the owner's message and the proposal title name: its name or its
+/// repository identity basename, matched case-insensitively as a whole word. Several matches
+/// are refused.
+async fn project_of_names(
+    pool: &SqlitePool,
+    supervisor_id: &str,
+    owner_text: &str,
+    title: &str,
+) -> Result<Option<String>, AdmissionError> {
+    let projects: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT project_id, name, repo_identity FROM supervisor_projects
+          WHERE supervisor_id = ? ORDER BY project_id",
+    )
+    .bind(supervisor_id)
+    .fetch_all(pool)
+    .await?;
+    let named = format!("{owner_text}\n{title}");
+    let mut matched: Vec<String> = projects
+        .into_iter()
+        .filter(|(_, name, repo_identity)| {
+            names_word(name, &named) || names_word(repo_basename(repo_identity), &named)
+        })
+        .map(|(project_id, _, _)| project_id)
+        .collect();
+    matched.sort();
+    matched.dedup();
+    Ok(match matched.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    })
+}
+
+/// The host of a project when it has exactly one; `None` for none or several.
+async fn single_host(
+    pool: &SqlitePool,
+    project_id: &str,
+) -> Result<Option<String>, AdmissionError> {
+    let hosts: Vec<String> = sqlx::query_scalar(
+        "SELECT host_id FROM supervisor_project_hosts WHERE project_id = ? ORDER BY host_id LIMIT 2",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(match hosts.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    })
+}
+
+/// The last path segment of a repository identity, without a `.git` suffix:
+/// `github.com/example/ferryx` is `ferryx`.
+fn repo_basename(repo_identity: &str) -> &str {
+    let trimmed = repo_identity.trim_end_matches(['/', '\\']);
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+}
+
+/// A character of a name's own word: ASCII letters, digits and `_`. Anything else (a space, a
+/// Korean particle, a hyphen) ends a word, so `ferryx에서` names `ferryx`.
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Whether `needle` occurs in `haystack` as a whole word, case-insensitively.
+fn names_word(needle: &str, haystack: &str) -> bool {
+    let needle: Vec<char> = needle.to_lowercase().chars().collect();
+    if needle.is_empty() {
+        return false;
+    }
+    let haystack: Vec<char> = haystack.to_lowercase().chars().collect();
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    for start in 0..=haystack.len() - needle.len() {
+        if haystack[start..start + needle.len()] != needle[..] {
+            continue;
+        }
+        let before = start.checked_sub(1).map(|at| haystack[at]);
+        let after = haystack.get(start + needle.len()).copied();
+        if !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char) {
+            return true;
+        }
+    }
+    false
+}
+
+/// An app turn in flight: the owner's message, the sessions it addressed and what its submits
+/// did.
 struct AppTurn {
     request_id: String,
     text: String,
+    mentions: Vec<SessionRef>,
     outcomes: Vec<SubmitOutcome>,
 }
 
@@ -116,6 +289,15 @@ impl AppTurnGuard {
     /// `request_id` identifies the owner's message (it is the admission source id) and
     /// `owner_text` is what the owner wrote, verbatim.
     pub fn begin(request_id: &str, owner_text: &str) -> Self {
+        Self::begin_with_mentions(request_id, owner_text, Vec::new())
+    }
+
+    /// Like [`Self::begin`], with the sessions the owner addressed with @ in this message.
+    pub fn begin_with_mentions(
+        request_id: &str,
+        owner_text: &str,
+        mentions: Vec<SessionRef>,
+    ) -> Self {
         let mut registry = registry();
         registry.next += 1;
         let generation = registry.next;
@@ -124,6 +306,7 @@ impl AppTurnGuard {
             AppTurn {
                 request_id: request_id.to_owned(),
                 text: owner_text.to_owned(),
+                mentions,
                 outcomes: Vec::new(),
             },
         );
@@ -160,7 +343,11 @@ pub async fn converse(
     owner_text: &str,
     message: &str,
 ) -> Result<String, SupervisorFault> {
-    let turn = AppTurnGuard::begin(request_id, owner_text);
+    let turn = AppTurnGuard::begin_with_mentions(
+        request_id,
+        owner_text,
+        super::transcript::addressed_sessions(message),
+    );
     supervisor
         .converse_in_turn(&app_scope(), Some(turn.token()), message)
         .await
@@ -183,6 +370,66 @@ fn no_turn() -> WorkToolRejection {
 
 fn refused(error: &admission::AdmissionError) -> WorkToolRejection {
     WorkToolRejection::new(error.code(), &error.to_string())
+}
+
+/// The submit with the project and host the owner's turn resolves to, unless the proposal or the
+/// owner's choices already named them. A turn whose owner has no supervisor identity resolves
+/// nothing and leaves the scope to admission.
+async fn resolve_for_turn(
+    pool: &SqlitePool,
+    owner: &str,
+    actor: &ActorContext,
+    work: &SubmitWork,
+    turn: Option<u64>,
+    sessions: Option<&SessionTools>,
+) -> Result<SubmitWork, AdmissionError> {
+    let mut work = work.clone();
+    let chosen_project = work
+        .project_id
+        .clone()
+        .or_else(|| actor.choices.project_id.clone());
+    if work.host_id.is_some() && chosen_project.is_some() {
+        return Ok(work);
+    }
+    let Some(identity) = identity_of(pool, owner).await? else {
+        return Ok(work);
+    };
+    // A project the request or the owner already named keeps its own host: a name match could
+    // otherwise attribute it to a different project.
+    let resolved = match chosen_project {
+        Some(project_id) => ProjectResolution {
+            host_id: single_host(pool, &project_id).await?,
+            project_id,
+        },
+        None => {
+            let mentions: Vec<SessionRef> = match turn {
+                None => Vec::new(),
+                Some(generation) => registry()
+                    .live
+                    .get(&generation)
+                    .map(|live| live.mentions.clone())
+                    .unwrap_or_default(),
+            };
+            let Some(resolved) = resolve_project(
+                pool,
+                &identity.supervisor_id,
+                &actor.source_body,
+                &work.title,
+                &mentions,
+                sessions,
+            )
+            .await?
+            else {
+                return Ok(work);
+            };
+            resolved
+        }
+    };
+    work.project_id.get_or_insert(resolved.project_id);
+    if let Some(host_id) = resolved.host_id {
+        work.host_id.get_or_insert(host_id);
+    }
+    Ok(work)
 }
 
 /// The work tools of the app conversation, with an optional handler for every other scope.
@@ -246,6 +493,19 @@ impl WorkToolHandler for AppWorkTools {
                     })
                     .ok_or_else(no_turn)?;
                 let work = submit_from_call(&title, &requirements, worker, &actor.source_body);
+                let work = match resolve_for_turn(
+                    &self.pool,
+                    &owner,
+                    &actor,
+                    &work,
+                    turn,
+                    self.sessions.as_deref(),
+                )
+                .await
+                {
+                    Ok(work) => work,
+                    Err(error) => return Err(refused(&error)),
+                };
                 let outcome = admission::handle_message(&self.pool, &actor, Some(&work))
                     .await
                     .map_err(|error| refused(&error))?;
@@ -684,6 +944,238 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(refused.code, "SUPERVISOR_SESSIONS_UNAVAILABLE");
+    }
+
+    /// The owner text plus the trailer `converse` registers mentions from round-trips into the
+    /// addressed sessions; text without the trailer addresses none.
+    #[test]
+    fn addressed_sessions_read_back_the_trailer_turn_message_adds() {
+        let refs = vec![SessionRef::new("host-a", "pty-1")];
+        let message = crate::supervisor::transcript::turn_message("do it", &refs);
+        assert_eq!(
+            crate::supervisor::transcript::addressed_sessions(&message),
+            refs
+        );
+        assert!(crate::supervisor::transcript::addressed_sessions("do it").is_empty());
+    }
+
+    #[test]
+    fn a_name_matches_only_as_a_whole_word_and_a_repo_basename_drops_its_git_suffix() {
+        assert!(names_word("ferryx", "ferryx에서 README 오타 고쳐줘"));
+        assert!(names_word("ferryx", "FERRYX: fix the typo"));
+        assert!(names_word("ferryx", "fix ferryx, please"));
+        assert!(!names_word("ferryx", "fix ferryxhub"));
+        assert!(!names_word("app", "the happy path"));
+        assert!(!names_word("", "anything"));
+        assert_eq!(repo_basename("github.com/example/ferryx"), "ferryx");
+        assert_eq!(repo_basename("github.com/example/ferryx.git"), "ferryx");
+        assert_eq!(repo_basename("github.com/example/ferryx/"), "ferryx");
+        assert_eq!(repo_basename("ferryx"), "ferryx");
+    }
+
+    /// Three projects on two hosts, so a rule that guesses shows up as a wrong goal.
+    async fn many_project_pool() -> SqlitePool {
+        let pool = crate::storage::memory().await.unwrap();
+        let identity = ensure_identity(&pool, OWNER).await.unwrap();
+        for (name, repo) in [
+            ("ferryx", "github.com/example/ferryx"),
+            ("other", "github.com/example/other"),
+            ("pane", "github.com/example/pane"),
+        ] {
+            let project = create_project(&pool, &identity.supervisor_id, name, repo)
+                .await
+                .unwrap();
+            bind_project_host(
+                &pool,
+                &project.project_id,
+                "host-a",
+                &format!("/home/owner/code/{name}/.git"),
+            )
+            .await
+            .unwrap();
+        }
+        pool
+    }
+
+    fn project_id_of<'a>(projects: &'a [(String, String)], name: &str) -> &'a str {
+        &projects
+            .iter()
+            .find(|(_, project_name)| project_name == name)
+            .unwrap()
+            .0
+    }
+
+    async fn projects(pool: &SqlitePool) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT project_id, name FROM supervisor_projects ORDER BY name")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn goal_target(pool: &SqlitePool) -> (String, String) {
+        sqlx::query_as(
+            "SELECT g.project_id, b.host_id FROM supervisor_goals g
+               JOIN supervisor_execution_bindings b ON b.goal_id = g.goal_id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    fn fleet_with(session_ref: SessionRef, host_id: &str, cwd: &str) -> Vec<FleetSession> {
+        let mut session = fleet_session();
+        session.session_ref = session_ref;
+        session.host_id = host_id.to_owned();
+        session.cwd = cwd.to_owned();
+        vec![session]
+    }
+
+    fn tools_with_fleet(pool: &SqlitePool, fleet: Vec<FleetSession>) -> AppWorkTools {
+        let sessions =
+            SessionTools::new(Arc::new(FakeControl::default()), Arc::new(FakeFleet(fleet)));
+        AppWorkTools::new(pool.clone()).with_sessions(Arc::new(sessions))
+    }
+
+    /// Rule 1: the project of the first @mentioned session's cwd on that session's host, and its
+    /// single host — even when the owner's message names no project at all.
+    #[tokio::test]
+    async fn a_mentioned_sessions_cwd_names_the_project_and_its_host() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let mention = SessionRef::new("host-a", "pty-1");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/other/src/deep"),
+        );
+        let turn = AppTurnGuard::begin_with_mentions("req-m1", WORK, vec![mention]);
+
+        tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        let (project_id, host_id) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "other"));
+        assert_eq!(host_id, "host-a");
+    }
+
+    /// Rule 1 wins over rule 2: the mentioned session's cwd decides even when the owner's text
+    /// names another project.
+    #[tokio::test]
+    async fn a_mentioned_session_outranks_a_project_name_in_the_message() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let mention = SessionRef::new("host-a", "pty-1");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/pane"),
+        );
+        let turn = AppTurnGuard::begin_with_mentions("req-m2", WORK, vec![mention]);
+
+        tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        let (project_id, _) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "pane"));
+    }
+
+    /// Rule 2: a unique project name in the owner's message, whole-word and case-insensitive,
+    /// as in the plan's Korean example.
+    #[tokio::test]
+    async fn a_unique_project_name_in_the_owner_message_decides_the_project() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-n1", "FERRYX에서 README 오타 고쳐줘");
+
+        tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        let (project_id, host_id) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "ferryx"));
+        assert_eq!(host_id, "host-a");
+    }
+
+    /// The proposal title participates in the match, not only the owner's message.
+    #[tokio::test]
+    async fn the_proposal_title_also_names_the_project() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-n2", WORK);
+        let titled = WorkToolCall::Submit {
+            title: "Fix the typo in pane's README".into(),
+            requirements: vec!["the typo is fixed".into()],
+            worker: WorkerPreference::Any,
+        };
+
+        tools.handle(app(Some(turn.token()), titled)).await.unwrap();
+
+        let (project_id, _) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "pane"));
+    }
+
+    /// Two projects named in one message are refused, never guessed: nothing is persisted and
+    /// admission holds the goal for the owner to pick.
+    #[tokio::test]
+    async fn two_matching_projects_are_refused_and_the_owner_picks() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-n3", "fix ferryx and pane");
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// A project name that only occurs inside a longer word names nothing: with several
+    /// projects and no other hint, the owner still has to pick.
+    #[tokio::test]
+    async fn a_name_inside_another_word_names_no_project() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-n4", "fix the ferryxhub typo");
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// A project on two hosts has no single host, so the host stays unresolved and admission
+    /// asks the owner instead of picking one.
+    #[tokio::test]
+    async fn a_project_on_two_hosts_names_no_host() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let ferryx = project_id_of(&projects, "ferryx").to_owned();
+        bind_project_host(&pool, &ferryx, "host-b", "/srv/ferryx/.git")
+            .await
+            .unwrap();
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-h1", "fix the ferryx README");
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "host");
+        assert_eq!(goals(&pool).await, 0);
     }
 
     #[derive(Default)]
