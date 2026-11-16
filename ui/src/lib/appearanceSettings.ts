@@ -3,7 +3,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { isDesktopShell } from "./clientRuntime";
 import { APPEARANCE_SETTINGS_STORAGE_KEY } from "./storageKeys";
-import { parseThemeDocument, type ThemeDocumentV1, type ThemeValidationError } from "./themeDocument";
+import { parseThemeColor, parseThemeDocument, type ThemeDocumentV1, type ThemeValidationError } from "./themeDocument";
+import { scopeCustomCss, type CustomCssError } from "./customThemeCss";
 
 export type AppearanceTheme = "charcoal" | "dark" | "light" | "system";
 export type AppearanceAccent = "default" | "blue" | "emerald" | "purple" | "amber" | "rose";
@@ -231,17 +232,103 @@ export function resolveTerminalAppearance(theme: AppearanceTheme, prefersLight: 
   return "dark";
 }
 
+type AppliedCustomAppearance = {
+  originalProperties: Map<string, { value: string; priority: string }>;
+  styles: HTMLStyleElement[];
+  observer?: MutationObserver;
+  markedScopes: Set<HTMLElement>;
+};
+const appliedCustomAppearance = new WeakMap<HTMLElement, AppliedCustomAppearance>();
+
+function clearCustomAppearance(root: HTMLElement) {
+  const previous = appliedCustomAppearance.get(root);
+  if (!previous) return;
+  previous.observer?.disconnect();
+  for (const [token, original] of previous.originalProperties) {
+    if (original.value) root.style.setProperty(token, original.value, original.priority);
+    else root.style.removeProperty(token);
+  }
+  for (const style of previous.styles) style.remove();
+  for (const scope of previous.markedScopes) scope.removeAttribute("data-chat-scope");
+  delete root.dataset.customTheme;
+  appliedCustomAppearance.delete(root);
+}
+
+/** Stable opt-in hook for chat, including chat mounted after the appearance runtime starts.
+ * Only the real workspace is marked; settings/recovery controls remain outside this subtree.
+ * Preview owners can opt in directly with data-chat-scope.
+ */
+function markChatScopes(root: HTMLElement, applied: AppliedCustomAppearance) {
+  const mark = () => {
+    for (const node of root.querySelectorAll<HTMLElement>('[data-testid="mobile-chat-workspace"]')) {
+      if (!node.hasAttribute("data-chat-scope")) {
+        node.setAttribute("data-chat-scope", "");
+        applied.markedScopes.add(node);
+      }
+    }
+  };
+  mark();
+  const Observer = root.ownerDocument.defaultView?.MutationObserver;
+  if (Observer) {
+    applied.observer = new Observer(mark);
+    applied.observer.observe(root, { childList: true, subtree: true });
+  }
+}
+
 export function applyAppearanceSettings(
   settings: AppearanceSettingsState,
   root: HTMLElement | null = typeof document !== "undefined" ? document.documentElement : null,
 ) {
   if (!root) return;
-  const theme = resolvedTheme(settings.theme);
+  // Revalidate at the DOM boundary too: direct callers are not necessarily storage readers.
+  const candidate = settings.customThemes.find((doc) => doc.id === settings.activeCustomThemeId);
+  const parsed = candidate ? parseThemeDocument(candidate) : null;
+  let activeTheme = parsed?.ok ? parsed.doc : null;
+  const errors: CustomCssError[] = parsed && !parsed.ok ? parsed.errors : [];
+  const scopeId = activeTheme?.id ?? "custom-css";
+  const themeCss = scopeCustomCss(activeTheme?.css ?? "", scopeId);
+  if (!themeCss.ok) {
+    errors.push(...themeCss.errors.map((error) => ({ ...error, path: `theme.css.${error.path}` })));
+    activeTheme = null; // A rejected theme stylesheet refuses the whole theme, not selected rules.
+  }
+  const customCss = scopeCustomCss(settings.customCss, scopeId);
+  if (!customCss.ok) errors.push(...customCss.errors.map((error) => ({ ...error, path: `customCss.${error.path}` })));
+
+  clearCustomAppearance(root);
+  const theme = activeTheme?.base ?? resolvedTheme(settings.theme);
   root.dataset.theme = theme;
   root.dataset.themePreference = settings.theme;
   root.dataset.accent = settings.accentColor;
   root.dataset.density = settings.density;
   root.style.colorScheme = theme === "light" ? "light" : "dark";
+
+  const cssSources = [activeTheme && themeCss.ok ? themeCss.css : "", customCss.ok ? customCss.css : ""];
+  if (activeTheme || cssSources.some(Boolean)) {
+    const applied: AppliedCustomAppearance = { originalProperties: new Map(), styles: [], markedScopes: new Set() };
+    appliedCustomAppearance.set(root, applied);
+    root.dataset.customTheme = scopeId;
+    // Built-in palette/accent values stay in CSS; inline colour overrides are the sole token layer.
+    for (const [token, value] of Object.entries(activeTheme?.tokens ?? {})) {
+      const color = parseThemeColor(value)!; // parseThemeDocument validated every token atomically.
+      for (const [name, resolved] of [[token, value], [`${token}-rgb`, color.slice(0, 3).join(" ")]]) {
+        applied.originalProperties.set(name, { value: root.style.getPropertyValue(name), priority: root.style.getPropertyPriority(name) });
+        root.style.setProperty(name, resolved);
+      }
+    }
+    if (cssSources.some(Boolean)) {
+      markChatScopes(root, applied);
+      // The palette and tokens are already installed. Append sources in their cascade order.
+      for (const css of cssSources) {
+        if (!css) continue;
+        const style = root.ownerDocument.createElement("style");
+        style.dataset.customThemeCss = scopeId;
+        style.textContent = css;
+        (root.ownerDocument.head ?? root).appendChild(style);
+        applied.styles.push(style);
+      }
+    }
+  }
+  return { errors };
 }
 
 export function useAppearanceSettings() {
