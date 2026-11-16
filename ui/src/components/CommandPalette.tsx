@@ -1,6 +1,8 @@
-import { AppWindow, GitBranch, GitCompare, Search, TerminalSquare, X, type LucideIcon } from "lucide-react";
+import { AppWindow, GitBranch, GitCompare, Palette, Search, TerminalSquare, X, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { cycleAppearanceTheme, openAppearanceSurface } from "../lib/appearanceCommands";
+import type { useAppearanceSettings } from "../lib/appearanceSettings";
 import { isMacShortcutPlatform, resolvedShortcuts, shortcutLabel } from "../lib/shortcuts";
 import { useShortcutOverrides, useShortcutPreset } from "../lib/shortcutOverrides";
 import { staticTabLabel } from "../lib/tabTitle";
@@ -16,12 +18,14 @@ export type CommandPaletteProps = {
   onShowChanges?: () => void;
   /** Present only in the desktop shell, where a second window can be opened. */
   onNewWindow?: () => void;
+  /** Installed appearance store and the shell's appearance surface; absent on unsupported surfaces. */
+  appearance?: Pick<ReturnType<typeof useAppearanceSettings>, "settings" | "updateSettings"> & { onOpen: () => void };
   onClose: () => void;
 };
 
 type PaletteCommand = { id: string; title: string; run: () => void; icon: LucideIcon };
 
-export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onShowChanges, onNewWindow, onClose }: CommandPaletteProps) {
+export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onShowChanges, onNewWindow, appearance, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const isMac = isMacShortcutPlatform();
@@ -36,8 +40,20 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
     const commands: PaletteCommand[] = [];
     if (onShowChanges) commands.push({ id: "show-changes", title: "Show changes", run: onShowChanges, icon: GitCompare });
     if (onNewWindow) commands.push({ id: "window.new", title: "New Window", run: onNewWindow, icon: AppWindow });
+    if (appearance) {
+      commands.push(
+        { id: "appearance.cycleTheme", title: "Cycle theme", run: () => cycleAppearanceTheme(appearance.settings, appearance.updateSettings), icon: Palette },
+        { id: "appearance.openSettings", title: "Change appearance…", run: () => openAppearanceSurface(appearance.onOpen), icon: Palette },
+        ...appearance.settings.customThemes.map((theme) => ({
+          id: `appearance.theme.${theme.id}`,
+          title: `Theme: ${theme.name}`,
+          run: () => { appearance.updateSettings({ activeCustomThemeId: theme.id }); },
+          icon: Palette,
+        })),
+      );
+    }
     return commands.filter((command) => command.title.toLowerCase().includes(normalizedQuery));
-  }, [normalizedQuery, onNewWindow, onShowChanges]);
+  }, [appearance, normalizedQuery, onNewWindow, onShowChanges]);
   const filteredTabs = useMemo(
     () => tabs.filter((tab) => staticTabLabel(tab).toLowerCase().includes(normalizedQuery)),
     [normalizedQuery, tabs],
@@ -100,6 +116,11 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
                 >
                   <command.icon className="size-4 shrink-0 text-muted-foreground" />
                   <span className="min-w-0 flex-1 truncate">{command.title}</span>
+                  {command.id === "appearance.cycleTheme" || command.id === "appearance.openSettings" ? (
+                    <kbd className="rounded border border-border bg-muted px-1 py-px text-[10px] text-foreground">
+                      {shortcutLabel(command.id, isMac, shortcutOverrides, shortcutPreset)}
+                    </kbd>
+                  ) : null}
                 </button>
               ))}
             </section>
@@ -154,7 +175,9 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
         </div>
 
         <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
-          {resolvedShortcuts(shortcutOverrides, shortcutPreset, isMac).map((shortcut) => (
+          {resolvedShortcuts(shortcutOverrides, shortcutPreset, isMac)
+            .filter((shortcut) => appearance || !shortcut.id.startsWith("appearance."))
+            .map((shortcut) => (
             <span key={shortcut.id} className="inline-flex items-center gap-1">
               <span>{shortcut.title}</span>
               <kbd className="rounded border border-border bg-muted px-1 py-px text-foreground">{shortcutLabel(shortcut.id, isMac, shortcutOverrides, shortcutPreset)}</kbd>

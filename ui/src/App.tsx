@@ -32,7 +32,8 @@ import { TerminalFileLinkActions } from "./components/TerminalFileLinkActions";
 import { Toaster, toast } from "./components/ui/sonner";
 import { IconButton } from "./components/ui/IconButton";
 import { copyTextToClipboard } from "./lib/clipboard";
-import { useApplyAppearanceSettings } from "./lib/appearanceSettings";
+import { cycleAppearanceTheme, openAppearanceSurface } from "./lib/appearanceCommands";
+import { useAppearanceSettings, useApplyAppearanceSettings } from "./lib/appearanceSettings";
 import { workspaceName } from "./lib/branchFilter";
 import { collectDagWatchRoots, isLocalDagProject, remoteProjectsWatchKey } from "./lib/dagWatchRoots";
 import { loadBrowserSettings, newBrowserTabUrl } from "./lib/browserSettings";
@@ -488,6 +489,7 @@ export function secondaryWindowBootstrap(
 
 export function App() {
   useApplyAppearanceSettings();
+  const paletteAppearance = useAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
   const [bootstrap, setBootstrap] = useState<ProjectBootstrap | null>(() =>
     isNativeRuntime ? null : loadProjectBootstrap(),
@@ -4686,6 +4688,8 @@ function WorkspaceApp({
         "commandPalette.open": handleOpenCommandPalette,
         "window.new": isNativeRuntime ? handleNewWindow : undefined,
         "settings.toggle": handleToggleSettings,
+        "appearance.cycleTheme": () => cycleAppearanceTheme(paletteAppearance.settings, paletteAppearance.updateSettings),
+        "appearance.openSettings": () => openAppearanceSurface(() => handleOpenSettings("appearance")),
         "notifications.toggle": handleRevealSupervisor,
         "zoom.in": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "in") : handleZoomIn,
         "zoom.out": browserShortcutsActive && shortcutBrowserId ? () => void handleBrowserZoom(shortcutBrowserId, "out") : handleZoomOut,
@@ -4717,6 +4721,9 @@ function WorkspaceApp({
       handleSplitActive,
       handleRevealSupervisor,
       handleToggleSettings,
+      handleOpenSettings,
+      paletteAppearance.settings,
+      paletteAppearance.updateSettings,
       handleUnsplitActive,
       handleZoomIn,
       handleZoomOut,
@@ -4977,6 +4984,7 @@ function WorkspaceApp({
           onSelectTab={handleSelectTerminalTab}
           onShowChanges={activeWorktreeCanShowChanges ? handleShowActiveWorktreeChanges : undefined}
           onNewWindow={isNativeRuntime ? handleNewWindow : undefined}
+          appearance={{ ...paletteAppearance, onOpen: () => handleOpenSettings("appearance") }}
           onClose={handleCloseCommandPalette}
         />
       ) : null}
