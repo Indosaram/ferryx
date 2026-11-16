@@ -791,6 +791,8 @@ async fn admit_scoped(
         owner_hold: (!holds.is_empty()).then(|| holds.join("; ")),
         adopts_lane: adopts_lane.map(|(lane, _)| lane.to_owned()),
         legacy_goal_read: adopts_lane.map(|(_, read)| read),
+        // Only a handover admits an observed goal; a work admission dispatches.
+        observed: false,
     };
     let admission = admit_request_bound(pool, &request, &terms, session.as_ref()).await?;
     if admission.duplicate {

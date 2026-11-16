@@ -1197,6 +1197,7 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
         owner_hold: None,
         adopts_lane: Some("busy".into()),
         legacy_goal_read: goal_read(&pool, "busy").await,
+        ..AdmitTerms::default()
     };
     // The store itself refuses while the legacy worker is attached, under its write lock. The
     // other order, an adoption committing during a legacy launch, is refused by the legacy
@@ -1213,6 +1214,7 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
         owner_hold: None,
         adopts_lane: Some("ledger".into()),
         legacy_goal_read: Some(None),
+        ..AdmitTerms::default()
     };
     let error = admit_request_with(&pool, &request, &elsewhere).await.unwrap_err();
     assert_eq!(error.code(), "INVALID_REQUEST", "{error}");
@@ -1236,6 +1238,7 @@ async fn an_adoption_rechecks_its_legacy_lane_inside_the_admission_transaction()
         owner_hold: Some(detail.clone()),
         adopts_lane: Some("busy".into()),
         legacy_goal_read: goal_read(&pool, "busy").await,
+        ..AdmitTerms::default()
     };
     let admission = admit_request_with(&pool, &request, &held).await.unwrap();
     assert!(!admission.duplicate);
@@ -1288,6 +1291,7 @@ async fn two_adapters_adopting_one_lane_admit_one_goal() {
         owner_hold: None,
         adopts_lane: Some("nightly".into()),
         legacy_goal_read: goal_read(&pool, "nightly").await,
+        ..AdmitTerms::default()
     };
     // Both adoptions reach the store as first ones, as when Slack and the desktop both pass
     // adopt_work's lookup before either commits.
@@ -1323,6 +1327,7 @@ async fn an_adoption_that_finds_the_legacy_goal_turned_off_is_refused_at_commit(
         owner_hold: None,
         adopts_lane: Some("nightly".into()),
         legacy_goal_read: goal_read(&pool, "nightly").await,
+        ..AdmitTerms::default()
     };
     // The owner narrowed the legacy goal after adopt_work read it as full.
     set_mode(&pool, "nightly", GoalMode::Supervised).await.unwrap();
@@ -1344,6 +1349,7 @@ async fn an_adoption_that_finds_the_legacy_goal_turned_off_is_refused_at_commit(
         owner_hold: Some(format!("{OWNER_APPROVAL_REQUIRED}: the owner decides first")),
         adopts_lane: Some("nightly".into()),
         legacy_goal_read: goal_read(&pool, "nightly").await,
+        ..AdmitTerms::default()
     };
     assert!(!admit_request_with(&pool, &held, &terms).await.unwrap().duplicate);
 }
@@ -1557,6 +1563,7 @@ async fn an_adoption_that_finds_the_legacy_terms_changed_is_refused_at_commit() 
             owner_hold: None,
             adopts_lane: Some("nightly".into()),
             legacy_goal_read: goal_read(&pool, "nightly").await,
+            ..AdmitTerms::default()
         }
     };
 
