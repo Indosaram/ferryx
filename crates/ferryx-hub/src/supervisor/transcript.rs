@@ -16,6 +16,11 @@
 //! the reply carries the stored rule as evidence (`kind: "rule"`). Without a rule store the
 //! request fails; nothing is claimed that did not happen. Any other reply's `evidence` stays
 //! empty and the panel shows it as Unverified.
+//!
+//! A fresh owner turn also teaches owner memory: with a [`Converse::learning`] context the
+//! owner's own words are queued for owner ingest in the background, the same way an admitted
+//! request is (`memory::learn_in_background`). Learning never blocks the reply, and an
+//! @-addressed instruction, a rule change or a replayed request teaches nothing.
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
@@ -27,7 +32,7 @@ use sqlx::SqlitePool;
 use tokio::sync::watch;
 
 use super::panel_contract::{EvidenceRef, RuleKind, RuleScope, RuleStore, SessionRef, StandingRule};
-use super::request::RequestFailure;
+use super::request::{RequestContext, RequestFailure};
 use crate::meta::mhc_fault::SupervisorFault;
 use crate::meta::mhc_profile::ConversationScope;
 use crate::meta::mhc_supervisor::MhcSupervisor;
@@ -518,6 +523,9 @@ pub struct Converse<'a> {
     pub now: &'a (dyn Fn() -> i64 + Send + Sync),
     /// Called each time the transcript gained a row, so views can refetch while a turn runs.
     pub changed: &'a (dyn Fn() + Send + Sync),
+    /// The owner the app chat speaks as and the surface it came from, so a fresh owner turn
+    /// can teach owner memory. `None` leaves learning off.
+    pub learning: Option<&'a RequestContext>,
 }
 
 /// One owner message and the supervisor's reply to it.
@@ -576,6 +584,15 @@ async fn run(
     if fresh {
         (ctx.changed)();
     }
+    // Only a fresh owner turn teaches, and only what the owner wrote in their own words: an
+    // @-addressed instruction is an order to sessions and a rule change is a rule, not a
+    // preference. A replay learns nothing, so the same message never teaches twice.
+    let learning = match ctx.learning {
+        Some(context) if fresh && mentions.is_empty() && change.is_none() => Some(
+            super::memory::learn_in_background(pool, context, request_id, None, &owner.text),
+        ),
+        _ => None,
+    };
     let reply_id = reply_request_id(request_id);
     if !fresh {
         if let Some(reply) = by_request(pool, &reply_id).await? {
@@ -598,5 +615,9 @@ async fn run(
     let (reply, _) =
         append(pool, Role::Supervisor, &answer, &evidence, &reply_id, (ctx.now)()).await?;
     (ctx.changed)();
-    Ok(json!({"owner": owner, "reply": reply, "replayed": false}))
+    let mut done = json!({"owner": owner, "reply": reply, "replayed": false});
+    if let (Some(learning), Some(fields)) = (learning, done.as_object_mut()) {
+        fields.insert("learning".into(), learning);
+    }
+    Ok(done)
 }
