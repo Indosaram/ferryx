@@ -100,6 +100,100 @@ fn asks_for_handover(owner_text: &str) -> bool {
         .any(|phrase| lowered.contains(phrase))
 }
 
+/// The owner's own words that pause or resume a session the supervisor already owns; matched
+/// case-insensitively like [`HANDOVER_PHRASES`].
+const PAUSE_PHRASES: [&str; 2] = ["이 세션 멈춰", "pause this session"];
+const RESUME_PHRASES: [&str; 2] = ["이 세션 계속", "resume this session"];
+
+/// What the owner asked of an owned session's ownership loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnershipCommand {
+    Pause,
+    Resume,
+}
+
+impl OwnershipCommand {
+    /// The wired command, `None` when the owner's text asks for neither.
+    fn of(owner_text: &str) -> Option<Self> {
+        let lowered = owner_text.to_lowercase();
+        let said = |phrases: &[&str; 2]| phrases.iter().any(|phrase| lowered.contains(phrase));
+        if said(&PAUSE_PHRASES) {
+            Some(Self::Pause)
+        } else if said(&RESUME_PHRASES) {
+            Some(Self::Resume)
+        } else {
+            None
+        }
+    }
+}
+
+/// Pauses or resumes the ownership loop of exactly the session the owner addressed: the goal
+/// whose execution binding names that pane, a running one before one that merely still names it
+/// (a pane the owner kept after its goal ended is not owned again, as in admission). Zero or
+/// several addressed sessions ask the owner which one instead of guessing, and a session no
+/// live goal is bound to is refused, because only a session the supervisor already owns has a
+/// loop to pause.
+async fn ownership_turn(
+    pool: &SqlitePool,
+    owner: &str,
+    command: OwnershipCommand,
+    turn: Option<u64>,
+) -> Result<SubmitOutcome, AdmissionError> {
+    let mentions: Vec<SessionRef> = match turn {
+        None => Vec::new(),
+        Some(generation) => registry()
+            .live
+            .get(&generation)
+            .map(|live| live.mentions.clone())
+            .unwrap_or_default(),
+    };
+    let session = match mentions.as_slice() {
+        [only] => only.clone(),
+        [] => {
+            return Ok(SubmitOutcome::NeedsChoice {
+                missing: "session".into(),
+                detail: "the request pauses or resumes a session but names none; address exactly one session with @".into(),
+            })
+        }
+        several => {
+            return Ok(SubmitOutcome::NeedsChoice {
+                missing: "session".into(),
+                detail: format!(
+                    "the request names {} sessions; name exactly one",
+                    several.len()
+                ),
+            })
+        }
+    };
+    let bound: Option<String> = sqlx::query_scalar(
+        "SELECT b.goal_id FROM supervisor_execution_bindings b
+           JOIN supervisor_goals g ON g.goal_id = b.goal_id
+          WHERE b.kind = 'pty' AND b.host_id = ? AND b.provider_session_id = ?
+            AND g.owner_principal = ? AND g.run_state NOT IN ('completed','cancelled')
+          ORDER BY (g.run_state = 'running') DESC, b.goal_id LIMIT 1",
+    )
+    .bind(session.host_id())
+    .bind(session.backend_session_id())
+    .bind(owner)
+    .fetch_optional(pool)
+    .await?;
+    let Some(goal_id) = bound else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_SESSION_NOT_OWNED",
+            message: format!("session {session} is not a session the supervisor owns"),
+        });
+    };
+    let paused = command == OwnershipCommand::Pause;
+    super::ownership::set_paused(pool, &goal_id, paused).await?;
+    Ok(SubmitOutcome::Conversational {
+        reason: if paused {
+            format!("Goal {goal_id} is paused: session {session} is not nudged or continued until you resume it.")
+        } else {
+            format!("Goal {goal_id} is resumed: session {session} is owned again.")
+        },
+    })
+}
+
 /// Hand exactly the session the owner addressed to the supervisor: the goal observes the pane
 /// the owner already runs, and admission types nothing into it. Zero or several addressed
 /// sessions ask the owner which one instead of guessing.
@@ -712,6 +806,21 @@ impl WorkToolHandler for AppWorkTools {
                     })
                     .ok_or_else(no_turn)?;
                 let work = submit_from_call(&title, &requirements, worker, &actor.source_body);
+                // The owner's own words pause or resume the ownership loop of a session the
+                // supervisor already owns; nothing is admitted and no text reaches the pane.
+                if let Some(command) = OwnershipCommand::of(&actor.source_body) {
+                    let outcome = ownership_turn(&self.pool, &owner, command, turn)
+                        .await
+                        .map_err(|error| refused(&error))?;
+                    if let Some(generation) = turn {
+                        if let Some(live) = registry().live.get_mut(&generation) {
+                            live.outcomes.push(outcome.clone());
+                        }
+                    }
+                    return serde_json::to_value(&outcome).map_err(|error| {
+                        WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string())
+                    });
+                }
                 // The owner hands an already running session over in its own words, for exactly
                 // one addressed session; admission observes it and types nothing into it.
                 if asks_for_handover(&actor.source_body) {
@@ -1286,6 +1395,105 @@ mod tests {
         let value = tools.handle(app(Some(turn.token()), submit())).await.unwrap();
         assert_eq!(value["outcome"], json!("needs_choice"));
         assert_eq!(value["missing"], json!("session"));
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// The ownership loop's pause key of one goal, as the pass reads it.
+    async fn pause_key(pool: &SqlitePool, goal_id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+            .bind(format!(
+                "{}{goal_id}",
+                crate::supervisor::ownership::PAUSE_KEY_PREFIX
+            ))
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The owner's own words pause and resume the loop of the session they addressed, next to
+    /// the handover that made it the supervisor's: no second goal, nothing typed into a pane.
+    #[tokio::test]
+    async fn the_owner_pauses_and_resumes_an_owned_session_in_chat() {
+        let pool = many_project_pool().await;
+        let mention = SessionRef::new("host-a", "pty-h1");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/pane/src/deep"),
+        );
+        let handed = handover_turn_seeded("이 세션 맡아", vec![mention.clone()]);
+        tools
+            .handle(app(Some(handed.token()), submit()))
+            .await
+            .unwrap();
+        let goal_id: String = sqlx::query_scalar("SELECT goal_id FROM supervisor_goals")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(pause_key(&pool, &goal_id).await, None, "a fresh goal runs");
+
+        let paused = AppTurnGuard::begin_with_mentions(
+            "req-pause",
+            "이 세션 멈춰",
+            vec![mention.clone()],
+        );
+        let value = tools
+            .handle(app(Some(paused.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(pause_key(&pool, &goal_id).await.as_deref(), Some("1"));
+        let reply = value["reason"].as_str().unwrap();
+        assert!(reply.contains(&goal_id), "reply {reply:?} names no goal");
+
+        let resumed = AppTurnGuard::begin_with_mentions(
+            "req-resume",
+            "resume this session",
+            vec![mention],
+        );
+        tools
+            .handle(app(Some(resumed.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(pause_key(&pool, &goal_id).await, None);
+        assert_eq!(goals(&pool).await, 1, "pausing never admits a second goal");
+    }
+
+    /// A session no goal is bound to has no loop to pause: the request is refused, and so is one
+    /// that names no session or several.
+    #[tokio::test]
+    async fn pausing_an_unowned_session_is_refused() {
+        let pool = many_project_pool().await;
+        let mention = SessionRef::new("host-a", "pty-unowned");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/pane"),
+        );
+
+        let unowned = AppTurnGuard::begin_with_mentions(
+            "req-pause-unowned",
+            "pause this session",
+            vec![mention.clone()],
+        );
+        let refused = tools
+            .handle(app(Some(unowned.token()), submit()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, "SUPERVISOR_SESSION_NOT_OWNED");
+
+        for (text, mentions) in [
+            ("pause this session", Vec::new()),
+            (
+                "pause this session",
+                vec![mention.clone(), SessionRef::new("host-a", "pty-unowned-2")],
+            ),
+        ] {
+            let none = AppTurnGuard::begin_with_mentions("req-none", text, mentions);
+            let value = tools
+                .handle(app(Some(none.token()), submit()))
+                .await
+                .unwrap();
+            assert_eq!(value["outcome"], json!("needs_choice"));
+            assert_eq!(value["missing"], json!("session"));
+        }
         assert_eq!(goals(&pool).await, 0);
     }
 

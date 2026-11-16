@@ -160,7 +160,15 @@ pub const PAUSE_KEY_PREFIX: &str = "supervisor_owned_pause:";
 /// The `hub_meta` key recording that a stall was already escalated for an owned goal.
 pub const STALL_KEY_PREFIX: &str = "supervisor_owned_stall:";
 
-/// Decides, for every running goal admitted through a handover, what the supervisor should do now.
+/// Decides, for every running goal of the supervisor that is bound to an agent pane, what to do
+/// now.
+///
+/// The supervisor owns a session either because it launched it (the dispatcher records the pane
+/// on the binding's first start) or because the owner handed it over ([`super::handover`]); both
+/// carry a `provider_session_id` on a `pty` binding, so the binding is the whole set. A running
+/// goal with no bound pane has no session to read and is not in it, an `mhc` binding's session is
+/// the engine rather than a pane ([`read_views`] would never list it), and a session the hub
+/// dispatched is that same goal rather than a second one, so nothing is ever owned twice.
 ///
 /// This only decides: it sends nothing and changes nothing, so the caller that owns the pane
 /// transport acts on the returned actions. A session whose state is not known yet is left alone.
@@ -172,10 +180,11 @@ pub async fn tick(
     nudge_after: i64,
 ) -> Result<Vec<(String, OwnershipAction)>, sqlx::Error> {
     let goals: Vec<String> = sqlx::query_scalar(
-        "SELECT g.goal_id FROM supervisor_requests r
-         JOIN supervisor_goals g ON g.goal_id = r.goal_id
-         WHERE r.source_message_id LIKE 'handover:%' AND g.run_state = 'running'
-         ORDER BY g.goal_id",
+        "SELECT b.goal_id FROM supervisor_execution_bindings b
+           JOIN supervisor_goals g ON g.goal_id = b.goal_id
+          WHERE g.run_state = 'running' AND b.kind = 'pty'
+            AND b.provider_session_id IS NOT NULL
+          ORDER BY b.goal_id",
     )
     .fetch_all(pool)
     .await?;
@@ -241,7 +250,9 @@ fn pane_field<'a>(pane: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 /// Silence is measured from the daemon's `stateSince`, the moment the pane entered its current
 /// state, so a pane that has been idle since long before this pass is stale rather than fresh.
 /// A goal whose bound session the fleet does not list is left out of the map, which [`tick`]
-/// reads as an unknown session, and an unknown session is never nudged.
+/// reads as an unknown session, and an unknown session is never nudged. A pane with no agent is
+/// a plain shell, which the supervisor never owns ([`super::handover`] refuses one), so it is
+/// left out too rather than treated as an agent that has gone quiet.
 pub async fn read_views(
     pool: &sqlx::SqlitePool,
     control: &dyn AgentControl,
@@ -251,7 +262,8 @@ pub async fn read_views(
         "SELECT b.goal_id, b.host_id, b.provider_session_id
            FROM supervisor_execution_bindings b
            JOIN supervisor_goals g ON g.goal_id = b.goal_id
-          WHERE g.run_state = 'running' AND b.provider_session_id IS NOT NULL
+          WHERE g.run_state = 'running' AND b.kind = 'pty'
+            AND b.provider_session_id IS NOT NULL
           ORDER BY b.goal_id",
     )
     .fetch_all(pool)
@@ -275,6 +287,10 @@ pub async fn read_views(
                 })
             });
         let Some(pane) = pane else { continue };
+        let agent = pane_field(pane, "agent").unwrap_or("").trim();
+        if agent.is_empty() {
+            continue;
+        }
         let state = session_state(pane_field(pane, "state").unwrap_or("unknown"));
         let since = pane
             .get("stateSince")
@@ -283,7 +299,7 @@ pub async fn read_views(
         views.insert(
             goal_id,
             OwnedSessionView {
-                agent: pane_field(pane, "agent").unwrap_or("unknown").to_string(),
+                agent: agent.to_string(),
                 state,
                 paused: false,
                 // Entering the current state is the pane's last word to us; whether that counts
@@ -710,6 +726,123 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A running goal the supervisor launched itself, bound to the pane its dispatcher was
+    /// given: the binding names that pane exactly as a handover's binding does.
+    async fn launched(pool: &sqlx::SqlitePool, pane: &str) -> String {
+        use crate::goals::contract::RequirementSpec;
+        use crate::goals::types::GoalMode;
+        use crate::supervisor::admission::OperationClass;
+        use crate::supervisor::{
+            admit_request, attach_session, bind_project_host, claim_dispatch,
+            confirm_claim_before_transmit, create_project, ensure_identity, record_start,
+            AdmitRequest, ChannelProvider, ExecutionKind, ExecutionTarget,
+        };
+        const OWNER: &str = "slack:T1:U-owner";
+        const HOST: &str = "local";
+        let identity = ensure_identity(pool, OWNER).await.unwrap();
+        let project = create_project(
+            pool,
+            &identity.supervisor_id,
+            "ferryx",
+            "github.com/example/ferryx",
+        )
+        .await
+        .unwrap();
+        bind_project_host(pool, &project.project_id, HOST, "/repo/ferryx/.git")
+            .await
+            .unwrap();
+        let admitted = admit_request(
+            pool,
+            &AdmitRequest {
+                supervisor_id: identity.supervisor_id.clone(),
+                owner_principal: OWNER.into(),
+                source_adapter: ChannelProvider::Slack,
+                source_message_id: "launched-1".into(),
+                body: "Finish the fetch cache.".into(),
+                project_id: project.project_id.clone(),
+                channel_binding_id: None,
+                target: ExecutionTarget {
+                    kind: ExecutionKind::Pty,
+                    host_id: HOST.into(),
+                },
+                title: "Finish the fetch cache".into(),
+                cwd: "/repo/ferryx".into(),
+                instruction: "Finish the fetch cache.".into(),
+                requirements: vec![RequirementSpec {
+                    id: "r1".into(),
+                    text: "the fetch cache is wired".into(),
+                    verifier: "cargo test -p ferryx-hub passes".into(),
+                }],
+                mode: GoalMode::Full,
+                turn_limit: 5,
+                operation_grant: vec![OperationClass::Edit],
+            },
+        )
+        .await
+        .unwrap();
+        let goal_id = admitted.receipt.goal_id;
+        let request_id: String = sqlx::query_scalar(
+            "SELECT request_id FROM supervisor_dispatches WHERE goal_id = ? AND state = 'ready'",
+        )
+        .bind(&goal_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        attach_session(pool, &goal_id, 1, pane).await.unwrap();
+        claim_dispatch(pool, &request_id, 1, 1).await.unwrap();
+        confirm_claim_before_transmit(pool, &request_id)
+            .await
+            .unwrap();
+        record_start(pool, &request_id, 1, "run-1", pane).await.unwrap();
+        goal_id
+    }
+
+    fn silent() -> OwnedSessionView {
+        let mut view = idle();
+        view.last_activity_at = NOW - NUDGE;
+        view
+    }
+
+    /// The plan's "launched by the supervisor or handed over": a goal the supervisor launched
+    /// itself is owned as soon as its pane is bound, not only a handover.
+    #[tokio::test]
+    async fn a_goal_the_supervisor_launched_is_owned_like_a_handed_over_one() {
+        let pool = crate::storage::memory().await.unwrap();
+        let goal_id = launched(&pool, "pane-launched-1").await;
+        let views = HashMap::from([(goal_id.clone(), silent())]);
+
+        let actions = tick(&pool, &views, NOW, NUDGE).await.unwrap();
+
+        assert_eq!(
+            actions,
+            vec![(
+                goal_id,
+                OwnershipAction::Nudge("Please report progress on the goal.".to_string())
+            )],
+            "a launched goal is nudged like a handed-over one"
+        );
+    }
+
+    /// A running goal with no bound pane has no session to read, so the pass leaves it alone:
+    /// nothing is owned twice and nothing is nudged blind.
+    #[tokio::test]
+    async fn a_running_goal_with_no_bound_pane_is_not_owned() {
+        let pool = crate::storage::memory().await.unwrap();
+        let goal_id = launched(&pool, "pane-launched-2").await;
+        sqlx::query(
+            "UPDATE supervisor_execution_bindings SET provider_session_id = NULL WHERE goal_id = ?",
+        )
+        .bind(&goal_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let views = HashMap::from([(goal_id, silent())]);
+
+        let actions = tick(&pool, &views, NOW, NUDGE).await.unwrap();
+
+        assert!(actions.is_empty());
     }
 
     #[tokio::test]
