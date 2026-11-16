@@ -35,40 +35,21 @@ describe("FirstProjectStep", () => {
     cleanup();
   });
 
-  it("renders both project choices as buttons", () => {
-    render(
-      <FirstProjectStep onAddProject={vi.fn()} onConnectMachine={vi.fn()} />
-    );
+  it("renders the project row and no machine registration entry point", () => {
+    render(<FirstProjectStep onAddProject={vi.fn()} />);
 
     expect(screen.getByTestId("onboarding-add-project")).toBeDefined();
-    expect(screen.getByTestId("onboarding-connect-machine")).toBeDefined();
     expect(screen.getByRole("button", { name: /Add a local folder/ })).toBeDefined();
-    expect(screen.getByRole("button", { name: /Connect a machine/ })).toBeDefined();
+    expect(screen.queryByTestId("onboarding-connect-machine")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Connect a machine/ })).toBeNull();
   });
 
   it("calls onAddProject when Add a local folder is clicked", () => {
     const onAddProject = vi.fn();
-    const onConnectMachine = vi.fn();
-    render(
-      <FirstProjectStep onAddProject={onAddProject} onConnectMachine={onConnectMachine} />
-    );
+    render(<FirstProjectStep onAddProject={onAddProject} />);
 
     fireEvent.click(screen.getByTestId("onboarding-add-project"));
 
     expect(onAddProject).toHaveBeenCalledTimes(1);
-    expect(onConnectMachine).not.toHaveBeenCalled();
-  });
-
-  it("calls onConnectMachine when Connect a machine is clicked", () => {
-    const onAddProject = vi.fn();
-    const onConnectMachine = vi.fn();
-    render(
-      <FirstProjectStep onAddProject={onAddProject} onConnectMachine={onConnectMachine} />
-    );
-
-    fireEvent.click(screen.getByTestId("onboarding-connect-machine"));
-
-    expect(onConnectMachine).toHaveBeenCalledTimes(1);
-    expect(onAddProject).not.toHaveBeenCalled();
   });
 });

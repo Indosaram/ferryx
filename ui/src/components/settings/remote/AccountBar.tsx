@@ -1,22 +1,15 @@
-import { KeyRound, LogOut } from "lucide-react";
+import { LogOut } from "lucide-react";
 import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
 
 export interface AccountBarProps {
   accountOrigin: string;
   showNoMachinesHint: boolean;
-  /** Opens the Add Machine wizard on its enrollment-code step. */
-  onIssueCode: () => void;
   onSignOut: () => void;
 }
 
-/** Signed-in account strip. The issued code and its command live in the Add Machine wizard. */
-export function AccountBar({
-  accountOrigin,
-  showNoMachinesHint,
-  onIssueCode,
-  onSignOut,
-}: AccountBarProps) {
+/** Signed-in account strip. There is no code to issue: a signed-in machine pairs itself. */
+export function AccountBar({ accountOrigin, showNoMachinesHint, onSignOut }: AccountBarProps) {
   let host = accountOrigin;
   try {
     host = new URL(accountOrigin).host;
@@ -39,10 +32,6 @@ export function AccountBar({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={onIssueCode}>
-            <KeyRound className="mr-1 size-3.5" />
-            Issue Enrollment Code
-          </Button>
           <Button type="button" variant="ghost" size="sm" onClick={onSignOut} aria-label="Sign Out">
             <LogOut className="mr-1 size-3.5" />
             Sign Out
@@ -51,7 +40,7 @@ export function AccountBar({
       </div>
 
       {showNoMachinesHint ? (
-        <p className="text-[11px] text-muted-foreground">No account machines enrolled yet. The other machine has to enroll first.</p>
+        <p className="text-[11px] text-muted-foreground">No account machines yet. A machine on your account pairs itself once it signs in.</p>
       ) : null}
     </section>
   );

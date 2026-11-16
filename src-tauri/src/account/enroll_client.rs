@@ -82,6 +82,21 @@ pub fn save_account_session(account_origin: &str, session_token: &str) -> Result
     save_account_session_at(&path, account_origin, session_token)
 }
 
+pub fn clear_account_session_at(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("could not clear the account session: {error}")),
+    }
+}
+
+pub fn clear_account_session() -> Result<(), String> {
+    match account_session_path() {
+        Some(path) => clear_account_session_at(&path),
+        None => Ok(()),
+    }
+}
+
 pub fn load_account_session_at(path: &std::path::Path) -> Option<StoredAccountSession> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()

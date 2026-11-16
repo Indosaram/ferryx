@@ -39,10 +39,10 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
     expect(screen.getByRole("radiogroup", { name: "Connection methods" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Install command" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Approve a machine" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Enrollment code (manual)" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Connect with SSH" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Import SSH Config" })).toBeInTheDocument();
-    expect(screen.getAllByRole("radio")).toHaveLength(5);
+    expect(screen.getAllByRole("radio")).toHaveLength(4);
+    expect(screen.queryByRole("radio", { name: /Enrollment code/i })).toBeNull();
     expect(screen.queryByRole("radio", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByRole("tab", { name: /Pair with PIN/i })).toBeNull();
     expect(screen.queryByLabelText(/Machine PIN/i)).toBeNull();
@@ -51,8 +51,8 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
   });
 
   it("getModalErrorMessage maps each specific error code to actionable UX guidance", () => {
-    expect(getModalErrorMessage("PIN_EXPIRED")).toContain("Code expired. Sign in to your Ferryx account");
-    expect(getModalErrorMessage("EXPIRED_PIN")).toContain("Code expired. Sign in to your Ferryx account");
+    expect(getModalErrorMessage("PIN_EXPIRED")).toContain("Code expired");
+    expect(getModalErrorMessage("EXPIRED_PIN")).toContain("Code expired");
     expect(getModalErrorMessage("WRONG_RELAY")).toContain("Relay mismatch");
     expect(getModalErrorMessage("INVALID_RELAY_ORIGIN")).toContain("Relay mismatch");
     expect(getModalErrorMessage("DAEMON_UNAVAILABLE")).toContain("Remote daemon unavailable");
@@ -68,10 +68,11 @@ describe("AddMachineModal - P05 structured per-status error UX", () => {
     expect(getModalErrorMessage(customErr)).toBe("Custom detailed reason from daemon");
   });
 
-  it("maps PIN_EXPIRED to actionable guidance", () => {
+  it("maps PIN_EXPIRED to guidance that never sends the user to an enrollment code", () => {
     const msg = getModalErrorMessage("PIN_EXPIRED");
     expect(msg).toMatch(/expired/i);
-    expect(msg).toMatch(/sign in/i);
+    expect(msg).toMatch(/retry/i);
+    expect(msg).not.toMatch(/enrollment code/i);
   });
 
   it("maps WRONG_RELAY to relay mismatch advice", () => {
@@ -162,8 +163,10 @@ describe("AddMachineModal - SSH connection and import", () => {
         onSuccess={() => {}}
       />,
     );
-    // Signed out (no install-key issuer): the manual enrollment method stays the default.
-    expect(screen.getByRole("radio", { name: "Enrollment code (manual)" })).toHaveAttribute("aria-checked", "true");
+    // Signed out (no install-key issuer): SSH is the default, and there is no enrollment method
+    // to fall back on. A machine already running ferryx-cli pairs itself when it signs in.
+    expect(screen.getByRole("radio", { name: "Connect with SSH" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByRole("radio", { name: /Enrollment code/i })).toBeNull();
     chooseMethod("Connect with SSH");
     expect(screen.getByLabelText(/Label/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/Hostname/i)).toBeInTheDocument();
@@ -179,37 +182,36 @@ describe("AddMachineModal - SSH connection and import", () => {
   });
 });
 
-describe("AddMachineModal - enrollment code step", () => {
-  it("signed in: choosing Enrollment code renders the exact enroll command", async () => {
-    const origin = "https://relay.example";
-    const issue = vi.fn().mockResolvedValue("ABCD-1234");
+describe("AddMachineModal - the manual enrollment-code method is gone", () => {
+  it("offers no enrollment method, no enroll command and no issued card even when signed in", async () => {
     render(
       <AddMachineModal
         isOpen={true}
         onClose={() => {}}
         onSuccess={() => {}}
-        accountOrigin={origin}
-        onIssueEnrollmentCode={issue}
+        accountOrigin="https://relay.example"
       />,
     );
-    chooseMethod("Enrollment code (manual)");
 
-    expect(await screen.findByTestId("issued-enrollment-card")).toBeInTheDocument();
-    expect(screen.getByTestId("enrollment-command").textContent).toBe(
-      "ferryx-cli account enroll --code ABCD-1234 --origin https://relay.example",
-    );
-    expect(issue).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "Dismiss enrollment code" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Copy" })).toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: /Enrollment code/i })).toBeNull();
+    expect(screen.queryByText(/ferryx-cli account enroll/)).toBeNull();
+    expect(screen.queryByTestId("issued-enrollment-card")).toBeNull();
+    expect(screen.queryByTestId("enrollment-command")).toBeNull();
     expect(screen.queryByText(/Sign in to issue an enrollment code/i)).toBeNull();
   });
 
-  it("signed out: choosing Enrollment code shows the sign-in reason and issues nothing", () => {
-    render(<AddMachineModal isOpen={true} onClose={() => {}} onSuccess={() => {}} accountOrigin="https://relay.example" />);
-    chooseMethod("Enrollment code (manual)");
+  it("an initialMethod of enrollment falls back to the method chooser instead of a code step", () => {
+    render(
+      <AddMachineModal
+        isOpen={true}
+        onClose={() => {}}
+        onSuccess={() => {}}
+        initialMethod={"enrollment" as any}
+      />,
+    );
 
-    expect(screen.getByText(/Sign in to issue an enrollment code/i)).toBeInTheDocument();
-    expect(screen.queryByTestId("issued-enrollment-card")).toBeNull();
+    expect(screen.getByRole("radiogroup", { name: "Connection methods" })).toBeInTheDocument();
     expect(screen.queryByTestId("enrollment-command")).toBeNull();
+    expect(screen.queryByText(/ferryx-cli account enroll/)).toBeNull();
   });
 });

@@ -784,6 +784,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::PairedHostMigrateLegacy { .. } => "pairedHostMigrateLegacy",
         DaemonRequest::PairedHostRedeemGrant { .. } => "pairedHostRedeemGrant",
         DaemonRequest::PairedHostClientAttachKey => "pairedHostClientAttachKey",
+        DaemonRequest::PairedHostReconcile => "pairedHostReconcile",
+        DaemonRequest::PairedHostAdoptAccountSession { .. } => "pairedHostAdoptAccountSession",
         DaemonRequest::PairedHostForget { .. } => "pairedHostForget",
         DaemonRequest::PairedHostRevoke { .. } => "pairedHostRevoke",
         DaemonRequest::RemoteCreateMachinePairingCode => "remoteCreateMachinePairingCode",
@@ -2655,6 +2657,37 @@ impl DaemonClient {
             .await?
         {
             DaemonResponse::PairedHostForgetOk => Ok(()),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    pub async fn paired_host_reconcile(
+        &self,
+    ) -> crate::paired_host::service::Result<crate::paired_host::account_reconcile::ReconcileReport>
+    {
+        match self
+            .paired_host_request(DaemonRequest::PairedHostReconcile)
+            .await?
+        {
+            DaemonResponse::PairedHostReconcileOk { report } => Ok(report),
+            _ => Err(crate::paired_host::service::ServiceError::unavailable()),
+        }
+    }
+    /// Hands the account session to the daemon: signing in pairs every machine of the account.
+    /// `session_token: None` is sign-out.
+    pub async fn paired_host_adopt_account_session(
+        &self,
+        account_origin: String,
+        session_token: Option<String>,
+    ) -> crate::paired_host::service::Result<crate::paired_host::account_reconcile::ReconcileReport>
+    {
+        match self
+            .paired_host_request(DaemonRequest::PairedHostAdoptAccountSession {
+                account_origin,
+                session_token,
+            })
+            .await?
+        {
+            DaemonResponse::PairedHostReconcileOk { report } => Ok(report),
             _ => Err(crate::paired_host::service::ServiceError::unavailable()),
         }
     }

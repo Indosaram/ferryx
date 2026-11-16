@@ -26,7 +26,6 @@ export type WelcomeWizardProps = {
   agents: ReadonlyArray<ResolvedAgent>;
   isMac: boolean;
   onAddProject: () => void;
-  onConnectMachine: () => void;
   onStepCompleted: (step: OnboardingStepId) => void;
   onFinish: () => void;
   onSkip: () => void;
@@ -80,7 +79,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
     agents,
     isMac,
     onAddProject,
-    onConnectMachine,
     onStepCompleted,
     onFinish,
     onSkip,
@@ -241,10 +239,6 @@ export function WelcomeWizard(props: WelcomeWizardProps): JSX.Element | null {
             onAddProject={() => {
               onStepCompleted("project");
               onAddProject();
-            }}
-            onConnectMachine={() => {
-              onStepCompleted("project");
-              onConnectMachine();
             }}
           />
         );

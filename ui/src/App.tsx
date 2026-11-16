@@ -4876,7 +4876,6 @@ function WorkspaceApp({
         ) : projects.length === 0 ? (
           <GettingStartedChecklist
             onAddProject={handleOpenAddProject}
-            onConnectMachine={() => handleOpenSettings("remote")}
             onOpenWelcome={() => {
               window.dispatchEvent(new CustomEvent(OPEN_ONBOARDING_EVENT));
             }}
@@ -5032,10 +5031,6 @@ function WorkspaceApp({
               onboardingResumeRef.current = { steps: onboardingSteps };
               setOnboardingSteps(null);
               handleOpenAddProject();
-            }}
-            onConnectMachine={() => {
-              setOnboardingSteps(null);
-              handleOpenSettings("remote");
             }}
           />
         </Suspense>

@@ -8,7 +8,7 @@ export interface MachineListProps {
   shown: number;
   searchQuery: string;
   actionError: string | null;
-  /** Enrollment codes are issued from the account bar, which exists only while signed in. */
+  /** Whether an account session exists; only affects the copy, since pairing is automatic. */
   signedIn: boolean;
   onSearchChange: (value: string) => void;
   onAddMachine: () => void;
@@ -55,8 +55,8 @@ export function MachineList({ total, shown, searchQuery, actionError, signedIn, 
           <p className="mt-1 text-[12px] text-muted-foreground">
             {total === 0
               ? signedIn
-                ? "The other machine has to enroll first. Issue an enrollment code above to enroll a machine, or use Add Machine to connect via SSH."
-                : "The other machine has to enroll first. Sign in above to issue an enrollment code, or use Add Machine to connect via SSH."
+                ? "The other machine pairs itself as soon as it signs in to your account. You can also use Add Machine to connect one over SSH."
+                : "Sign in above to pair the machines on your account automatically, or use Add Machine to connect one over SSH."
               : "Try clearing your search query to see all machines."}
           </p>
         </div>

@@ -221,7 +221,6 @@ function OnboardingQaApp(): JSX.Element {
         <GettingStartedChecklist
           permissionsSummary={{ granted: 1, total: 3 }}
           onAddProject={() => logQa("onAddProject")}
-          onConnectMachine={() => logQa("onConnectMachine")}
           onOpenWelcome={() => logQa("onOpenWelcome")}
         />
       </div>
@@ -284,7 +283,6 @@ function OnboardingQaApp(): JSX.Element {
         doneSteps={doneParam}
         initialStepIndex={startIndex}
         onAddProject={() => logQa("onAddProject")}
-        onConnectMachine={() => logQa("onConnectMachine")}
         onStepCompleted={(step: OnboardingStepId) => logQa(`onStepCompleted:${step}`)}
         onFinish={() => logQa("onFinish")}
         onSkip={() => logQa("onSkip")}

@@ -12,7 +12,9 @@ import { useModalDialog } from "./useModalDialog";
 function unavailable(host: HostEndpoint | undefined, nativeReady: boolean): string | null {
   if (!nativeReady) return "Native machine access is unavailable. Upgrade the desktop and local daemon.";
   if (!host) return "Pair a daemon in Settings > Remote Access, then select a machine.";
-  if (host.authStatus !== "paired" || host.grantScope !== "machine") return "This machine needs machine access. Connect it from your Ferryx account in Settings > Remote Access.";
+  // Signing in pairs every machine of the account, so an unpaired row is mid-pairing, not a
+  // state the user has to register. Never point at a manual connect step that no longer exists.
+  if (host.authStatus !== "paired" || host.grantScope !== "machine") return "This machine is still pairing with your Ferryx account. It becomes available on its own.";
   if (!host.generation || !host.machineId) return "Upgrade the desktop and daemon, then pair this machine again.";
   if (!host.online) return "This machine is offline. Connect its daemon to the relay before adding a project.";
   return null;
