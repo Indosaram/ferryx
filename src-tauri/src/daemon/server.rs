@@ -309,6 +309,7 @@ mod prompt_changed_event_tests {
             agent: "claude".into(),
             state: "idle".into(),
             state_source: "telemetry".into(),
+            screen_readable: true,
             state_since_ms: None,
             screen_changed_at_ms: None,
             pending_prompt: None,
@@ -7693,10 +7694,14 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::Write { session_id, data }) if self.serves_paired_here(&session_id) => {
                     crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
+                    let typed = crate::hub_runtime::panel_autonomy::typed_answer_of(&session_id, &data);
                     match self.terminal_service.write_input_operation(&session_id, 0, data) {
                         Ok(pending) => match pending.await {
                             Ok(()) => {
                                 crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
+                                if let Some(answer) = typed {
+                                    tokio::spawn(answer.recorded());
+                                }
                                 DaemonResponse::WriteOk
                             }
                             Err(e) => daemon_error(e.to_string()),
@@ -7715,6 +7720,8 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
                     crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
+                    // The owner's digit on a tracked prompt is learned once it went through.
+                    let typed = crate::hub_runtime::panel_autonomy::typed_answer_of(&session_id, &data);
                     #[cfg(feature = "local-split-qa")]
                     let tok = super::qa_producers::record_daemon_mutation_ingress(&session_id, "write", &data);
                     if self.session_router.is_local_session(&session_id) {
@@ -7723,6 +7730,9 @@ impl DaemonServer {
                                 #[cfg(feature = "local-split-qa")]
                                 super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
                                 crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
+                                if let Some(answer) = typed {
+                                    tokio::spawn(answer.recorded());
+                                }
                                 DaemonResponse::WriteOk
                             }
                             Err(e) => DaemonResponse::Error {
@@ -7737,6 +7747,9 @@ impl DaemonServer {
                                 #[cfg(feature = "local-split-qa")]
                                 super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
                                 crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
+                                if let Some(answer) = typed {
+                                    tokio::spawn(answer.recorded());
+                                }
                                 DaemonResponse::WriteOk
                             }
                             Err(message) => daemon_error(message),

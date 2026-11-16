@@ -18,6 +18,7 @@ use ferryx_hub::supervisor::recovery::{
     CardError, Clock, LoopRetry, PauseGate, RecoveryDeps, RecoveryEscalations, RecoveryScheduler,
     RetryOutcome, SystemClock, CARD_PREFIX,
 };
+use ferryx_hub::supervisor::Admission;
 
 use super::HubLaunch;
 use crate::agent_control::AgentControlOp;
@@ -53,6 +54,124 @@ pub fn session_tools() -> Option<Arc<ferryx_hub::meta::mhc_supervisor::SessionTo
 /// The installed autonomy service, if the hub is open in this daemon.
 pub fn installed() -> Option<Arc<Autonomy>> {
     current().map(|installed| installed.autonomy)
+}
+
+/// The turn budget of a handed-over goal: the owner keeps paying for the pane, so the
+/// supervisor stops after the same small budget the app chat's handover gets.
+const HANDOVER_TURN_LIMIT: u32 = 5;
+
+/// Hands the pane `host_id`/`session_id` to the supervisor as one observed goal: the goal
+/// watches the pane the owner already runs and admission types nothing into it. `instruction`
+/// is the owner's own words for the work the goal continues. `None` when no hub is open in this
+/// daemon.
+pub async fn hand_to_supervisor(
+    host_id: &str,
+    session_id: &str,
+    instruction: &str,
+    is_shell: bool,
+    hub_dispatched: bool,
+) -> Option<
+    Result<Admission, ferryx_hub::supervisor::admission::AdmissionError>,
+> {
+    let installed = current()?;
+    Some(
+        hand_over(
+            &installed,
+            host_id,
+            session_id,
+            instruction,
+            is_shell,
+            hub_dispatched,
+        )
+        .await,
+    )
+}
+
+async fn hand_over(
+    installed: &Installed,
+    host_id: &str,
+    session_id: &str,
+    instruction: &str,
+    is_shell: bool,
+    hub_dispatched: bool,
+) -> Result<Admission, ferryx_hub::supervisor::admission::AdmissionError> {
+    use ferryx_hub::supervisor::admission::{installation_owner, AdmissionError, OperationClass};
+    use ferryx_hub::supervisor::{
+        app_work::resolve_project, handover, identity_of, AdmitRequest, BoundSession,
+        ChannelProvider, ExecutionKind, ExecutionTarget,
+    };
+
+    let pool = installed.autonomy.pool();
+    let owner = installation_owner(pool).await?;
+    let Some(identity) = identity_of(pool, &owner).await? else {
+        return Err(AdmissionError::Unauthorized(format!(
+            "no supervisor identity for {owner}"
+        )));
+    };
+    // The fleet names the pane's working directory; a pane it does not list can be neither
+    // located on a project nor given a cwd, so it is refused.
+    let session_ref = SessionRef::new(host_id, session_id);
+    let fleet = installed.session_tools.fleet().await.map_err(|error| {
+        AdmissionError::Refused {
+            code: "SUPERVISOR_FLEET_UNAVAILABLE",
+            message: format!("the fleet was not listed: {error}"),
+        }
+    })?;
+    let Some(session) = fleet.iter().find(|known| known.session_ref == session_ref) else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_SESSION_UNKNOWN",
+            message: format!("the fleet does not know session {session_ref}"),
+        });
+    };
+    let title = match session.title.trim() {
+        "" => "Handed-over session",
+        title => title,
+    };
+    let Some(resolved) = resolve_project(
+        pool,
+        &identity.supervisor_id,
+        instruction,
+        title,
+        std::slice::from_ref(&session_ref),
+        Some(installed.session_tools.as_ref()),
+        false,
+    )
+    .await?
+    else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_PROJECT_UNKNOWN",
+            message: format!(
+                "no project of this supervisor checks out the working directory of {session_ref}"
+            ),
+        });
+    };
+    let request = AdmitRequest {
+        supervisor_id: identity.supervisor_id,
+        owner_principal: owner,
+        source_adapter: ChannelProvider::Desktop,
+        source_message_id: handover::handover_source_id(host_id, session_id),
+        body: instruction.to_owned(),
+        project_id: resolved.project_id,
+        channel_binding_id: None,
+        target: ExecutionTarget {
+            kind: ExecutionKind::Pty,
+            host_id: host_id.to_owned(),
+        },
+        title: title.to_owned(),
+        cwd: session.cwd.clone(),
+        instruction: instruction.to_owned(),
+        requirements: Vec::new(),
+        mode: ferryx_hub::goals::types::GoalMode::Supervised,
+        turn_limit: HANDOVER_TURN_LIMIT,
+        operation_grant: OperationClass::BASELINE.to_vec(),
+    };
+    let bound = BoundSession {
+        host_id: host_id.to_owned(),
+        session_id: session_id.to_owned(),
+    };
+    handover::handover(pool, request, bound, is_shell, hub_dispatched)
+        .await
+        .map_err(AdmissionError::Store)
 }
 
 /// The autonomy service opened over `hub`, if that is the one installed.
@@ -341,7 +460,14 @@ pub(super) async fn install(launch: &HubLaunch) {
     let channel = OwnerChannel {
         sessions: Some(SessionRefresh { state: Arc::downgrade(&state), sources: Arc::new(panel_sources) }),
     };
-    let autonomy = match Autonomy::open(pool.clone(), session_control.clone(), Arc::new(channel)).await {
+    // The engine judges a prompt the rules, the contract and the owner's past answers could not
+    // settle (todo 7). Without an installed engine the gate escalates as before.
+    let judge: Option<Arc<dyn ferryx_hub::supervisor::prompt_judge::PromptJudge>> =
+        ferryx_hub::meta::mhc_supervisor::installed().map(|engine| {
+            Arc::new(ferryx_hub::supervisor::prompt_judge::EnginePromptJudge::new(engine))
+                as Arc<dyn ferryx_hub::supervisor::prompt_judge::PromptJudge>
+        });
+    let autonomy = match Autonomy::open_with(pool.clone(), session_control.clone(), Arc::new(channel), judge).await {
         Ok(autonomy) => autonomy,
         Err(error) => {
             tracing::warn!(%error, "supervisor autonomy was not opened; the panel stays empty");
@@ -459,6 +585,35 @@ pub fn owner_prompt_answer_of(
     Some(PendingOwnerAnswer { autonomy, answer: claimed, option_index })
 }
 
+/// The option a keystroke picks on a tracked prompt: one ASCII digit `1..=option_count`. Enter
+/// and CR are never an answer: a pending prompt has no highlighted option, so recording one
+/// would teach the wrong precedent.
+pub(crate) fn typed_option_index(bytes: &[u8], option_count: usize) -> Option<usize> {
+    let [digit] = bytes else { return None };
+    let index = usize::from(digit.checked_sub(b'1')?);
+    (index < option_count).then_some(index)
+}
+
+/// The owner answer behind bytes typed straight into a pane of `session_id` in this daemon (the
+/// desktop's terminal, the phone, the web): the option their digit picks on that session's
+/// tracked prompt. The caller records it once the write went through.
+pub fn typed_answer_of(session_id: &str, bytes: &[u8]) -> Option<PendingOwnerAnswer> {
+    typed_answer_with(&installed()?, session_id, bytes)
+}
+
+pub(crate) fn typed_answer_with(
+    autonomy: &Arc<Autonomy>,
+    session_id: &str,
+    bytes: &[u8],
+) -> Option<PendingOwnerAnswer> {
+    let (answer, option_index) = autonomy.peek_owner_answer_where(
+        |host| host_is(None, host),
+        session_id,
+        |prompt| typed_option_index(bytes, prompt.options.len()),
+    )?;
+    Some(PendingOwnerAnswer { autonomy: Arc::clone(autonomy), answer, option_index })
+}
+
 /// One daemon observation: a blocked or prompting pane is read and handed to autonomy; any
 /// other reading only clears the card of a prompt that is gone. The read runs in its own task
 /// so the observer loop never waits on it.
@@ -509,6 +664,7 @@ pub(crate) mod tests {
             agent: "claude".into(),
             state: "blocked".into(),
             state_source: "screen".into(),
+            screen_readable: true,
             state_since_ms: None,
             screen_changed_at_ms: None,
             pending_prompt: Some(PendingPrompt {
@@ -619,6 +775,103 @@ pub(crate) mod tests {
         assert!(owner_answer_with(&autonomy, Some("omarchy"), &owner).is_none(), "learned once");
         let supervisor = answer_op("p1", Some("sup-tool-abc"));
         assert!(owner_answer_with(&autonomy, Some("omarchy"), &supervisor).is_none());
+    }
+
+    /// A digit on a tracked prompt is the option it names, one-based; Enter, multi-byte input,
+    /// digits past the last option and a digit typed as part of a longer write are not answers.
+    #[test]
+    fn only_a_single_digit_names_an_option() {
+        assert_eq!(typed_option_index(b"1", 3), Some(0));
+        assert_eq!(typed_option_index(b"2", 3), Some(1));
+        assert_eq!(typed_option_index(b"3", 3), Some(2));
+        assert_eq!(typed_option_index(b"0", 3), None);
+        assert_eq!(typed_option_index(b"4", 3), None);
+        assert_eq!(typed_option_index(b"\r", 3), None);
+        assert_eq!(typed_option_index(b"\n", 3), None);
+        assert_eq!(typed_option_index(b"", 3), None);
+        assert_eq!(typed_option_index(b"12", 3), None);
+        assert_eq!(typed_option_index(b"2x", 3), None);
+        assert_eq!(typed_option_index(b"1", 0), None);
+        assert_eq!(typed_option_index("\u{662}".as_bytes(), 3), None);
+    }
+
+    /// A digit typed into a pane the supervisor tracks nothing for claims nothing: no prompt,
+    /// no record.
+    #[tokio::test]
+    async fn a_digit_with_no_tracked_prompt_records_nothing() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let autonomy = Autonomy::open(pool, Arc::new(NoControl), Arc::new(Silent)).await.unwrap();
+
+        assert!(typed_answer_with(&autonomy, "s1", b"1").is_none());
+        // A tracked prompt on another session is not this session's.
+        autonomy.observe(&blocked("p1")).await;
+        assert!(typed_answer_with(&autonomy, "s2", b"1").is_none());
+        // Nor is a keystroke that names no option.
+        assert!(typed_answer_with(&autonomy, "s1", b"\r").is_none());
+        assert!(typed_answer_with(&autonomy, "s1", b"9").is_none());
+        let labels = autonomy
+            .answer_history()
+            .recent_labels(&blocked("p1").pending_prompt.unwrap(), "/nonexistent/panel-autonomy-test", "claude")
+            .await
+            .unwrap();
+        assert!(labels.is_empty());
+    }
+
+    /// The owner types "2" into a pane blocked on a three-option prompt: through the same
+    /// accessor the daemon's Write handler calls, the answer joins the history once, the log
+    /// says what they chose, and the card resolves. The same digit again records nothing.
+    #[tokio::test]
+    async fn a_digit_typed_into_a_pane_is_learned_once() {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        let autonomy = Autonomy::open(pool.clone(), Arc::new(NoControl), Arc::new(Silent))
+            .await
+            .unwrap();
+        // The slot is per test thread, as in `take_recovery_card`.
+        super::super::slot_set(
+            &super::super::PANEL_AUTONOMY,
+            Some(Installed {
+                hub: ferryx_hub::Hub::with_policy(
+                    pool,
+                    Arc::new(ferryx_hub::agent_control::RecordingControl::default()),
+                    ferryx_hub::HubConfig::default(),
+                    ferryx_hub::sessions::watch::NotifyPolicy::default(),
+                ),
+                recovery: build_recovery(
+                    &autonomy,
+                    Arc::new(NoControl),
+                    Arc::new(FixedFleet { sessions: Vec::new() }),
+                    Arc::new(FakeClock::new(START_MS)),
+                ),
+                session_tools: Arc::new(ferryx_hub::meta::mhc_supervisor::SessionTools::new(
+                    Arc::new(NoControl),
+                    Arc::new(FixedFleet { sessions: Vec::new() }),
+                )),
+                autonomy: Arc::clone(&autonomy),
+                remote_fleet: None,
+            }),
+        );
+        let mut prompt = blocked("p1");
+        prompt.pending_prompt.as_mut().unwrap().options =
+            vec!["npm".into(), "pnpm".into(), "bun".into()];
+        autonomy.observe(&prompt).await;
+
+        let claimed = typed_answer_of("s1", b"2").expect("a tracked, unsettled prompt");
+        claimed.recorded().await;
+
+        let labels = autonomy
+            .answer_history()
+            .recent_labels(prompt.pending_prompt.as_ref().unwrap(), "/nonexistent/panel-autonomy-test", "claude")
+            .await
+            .unwrap();
+        assert_eq!(labels, vec!["pnpm".to_owned()]);
+        let log = autonomy.action_log().list_today(0).await.unwrap();
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert_eq!(log[0].summary, "You chose pnpm");
+        assert!(autonomy.escalation_source().pending().await.unwrap().is_empty());
+
+        assert!(typed_answer_of("s1", b"2").is_none(), "learned once");
+        assert_eq!(autonomy.action_log().list_today(0).await.unwrap().len(), 1);
+        super::super::slot_set(&super::super::PANEL_AUTONOMY, None);
     }
 
     /// The owner channel is process-wide, so the test that watches it is the only one that
@@ -801,6 +1054,7 @@ pub(crate) mod tests {
             agent: "claude".into(),
             state: "working".into(),
             state_source: "screen".into(),
+            screen_readable: true,
             state_since_ms: Some(START_MS),
             screen_changed_at_ms: Some(START_MS),
             pending_prompt: None,

@@ -380,13 +380,120 @@ mod status {
             [
                 "adoptable", "autoCutover", "engineEnabled", "engineFault", "engineInstalled",
                 "engineState", "intake", "memoryImport", "missingCapabilities", "nextAction",
-                "owner", "projects", "restartRequired",
+                "owner", "projects", "restartRequired", "supervisorHealthy",
             ]
         );
         assert_eq!(value["nextAction"], "enable_engine");
         assert_eq!(value["engineState"], "absent");
         assert!(value["owner"].is_null() && value["engineFault"].is_null());
+        assert_eq!(value["supervisorHealthy"], true);
         assert_eq!(value["intake"], serde_json::json!({"unifiedOpen": true, "legacy": "idle", "origin": "fresh", "legacyHistory": false}));
         assert_eq!(value["memoryImport"], serde_json::json!({"enabled": false, "sessions": 0, "turns": 0, "lastAt": null}));
+    }
+
+    /// One recorded engine turn of this installation, `minutes_ago` minutes old.
+    async fn record_call(pool: &SqlitePool, outcome: &str, minutes_ago: i64) {
+        let at = (chrono::Utc::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO supervisor_model_calls(cause, role, prompt_bytes, outcome, ms, created_at)
+             VALUES('qa','decision',12,?,1,?)",
+        )
+        .bind(outcome)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_ready_engine_that_keeps_failing_its_calls_is_degraded() {
+        let pool = crate::storage::memory().await.unwrap();
+        let before = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!((before.engine_state.as_str(), before.supervisor_healthy), ("ready", true));
+        assert!(before.engine_fault.is_none());
+
+        // Two of five failing is not more than half: the engine stays healthy.
+        for outcome in ["ok", "ok", "ok", "MHC_PROVIDER", "MHC_TIMEOUT"] {
+            record_call(&pool, outcome, 1).await;
+        }
+        let half = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!((half.engine_state.as_str(), half.supervisor_healthy), ("ready", true));
+
+        // Exactly half failing is still not more than half.
+        record_call(&pool, "MHC_PROVIDER", 0).await;
+        let half = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!((half.engine_state.as_str(), half.supervisor_healthy), ("ready", true));
+
+        // Past half, the newest calls make the engine degraded with the dominant code, and the
+        // setup order it had is untouched.
+        record_call(&pool, "MHC_PROVIDER", 0).await;
+        let degraded = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!(degraded.engine_state, "degraded");
+        assert!(!degraded.supervisor_healthy);
+        let fault = degraded.engine_fault.unwrap();
+        assert_eq!(fault.code, "MHC_PROVIDER");
+        assert!(fault.message.contains("4 of the last 7"), "{}", fault.message);
+        assert!(fault.message.contains("MHC_PROVIDER"), "{}", fault.message);
+        assert_eq!(degraded.next_action, before.next_action);
+
+        // A clean run ends the degradation.
+        for _ in 0..8 {
+            record_call(&pool, "ok", 0).await;
+        }
+        let recovered = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!((recovered.engine_state.as_str(), recovered.supervisor_healthy), ("ready", true));
+        assert!(recovered.engine_fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn only_the_last_thirty_minutes_and_twenty_calls_count() {
+        let pool = crate::storage::memory().await.unwrap();
+        // Failures older than the window say nothing about the engine now.
+        for _ in 0..5 {
+            record_call(&pool, "MHC_PROVIDER", 31).await;
+        }
+        let old = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!(old.engine_state, "ready");
+        assert!(old.supervisor_healthy);
+
+        // The window keeps the newest twenty: failures that fell out of it do not count.
+        for _ in 0..5 {
+            record_call(&pool, "MHC_PROVIDER", 10).await;
+        }
+        for _ in 0..20 {
+            record_call(&pool, "ok", 1).await;
+        }
+        let windowed = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!((windowed.engine_state.as_str(), windowed.supervisor_healthy), ("ready", true));
+        assert!(windowed.engine_fault.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_turns_are_not_engine_failures_but_three_exits_are() {
+        let pool = crate::storage::memory().await.unwrap();
+        for outcome in ["ok", "ok", "MHC_CANCELLED", "MHC_CANCELLED", "MHC_CANCELLED"] {
+            record_call(&pool, outcome, 1).await;
+        }
+        let cancelled = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!((cancelled.engine_state.as_str(), cancelled.supervisor_healthy), ("ready", true));
+
+        for _ in 0..3 {
+            record_call(&pool, "MHC_ENGINE_EXITED", 0).await;
+        }
+        let exited = setup_status(&pool, ready()).await.unwrap();
+        assert_eq!(exited.engine_state, "degraded");
+        assert!(!exited.supervisor_healthy);
+        assert_eq!(exited.engine_fault.unwrap().code, "MHC_ENGINE_EXITED");
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_is_not_installed_never_reads_degraded_from_call_rows() {
+        let pool = crate::storage::memory().await.unwrap();
+        for _ in 0..3 {
+            record_call(&pool, "MHC_ENGINE_EXITED", 0).await;
+        }
+        let value = setup_status(&pool, EngineView::default()).await.unwrap();
+        assert_eq!(value.engine_state, "absent");
+        assert!(value.supervisor_healthy);
     }
 }

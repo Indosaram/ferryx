@@ -7,6 +7,7 @@ use super::*;
 use crate::meta::mhc_supervisor::{
     parse_work_call, FleetSource, SessionTools, WorkToolCall,
 };
+use crate::supervisor::prompt_judge::{JudgeVerdict, PromptJudge};
 use serde_json::json;
 
 #[derive(Default)]
@@ -15,6 +16,8 @@ struct Control {
     fail: Mutex<bool>,
     /// Accepts answers without a delivery receipt, like a host that returns none.
     no_receipt: Mutex<bool>,
+    /// What a screen read returns; empty for a pane with nothing on it.
+    tail: Mutex<String>,
 }
 
 impl Control {
@@ -56,7 +59,7 @@ impl SessionControl for Control {
     }
 
     async fn read_tail(&self, _session: &SessionRef, _lines: usize) -> Result<String> {
-        Ok(String::new())
+        Ok(self.tail.lock().unwrap().clone())
     }
 }
 
@@ -97,6 +100,85 @@ struct Fixture {
     frames: Arc<Frames>,
 }
 
+/// A judge that answers with whatever it was told to, and records what it was asked.
+struct FakeJudge {
+    reply: Mutex<std::result::Result<JudgeVerdict, String>>,
+    asked: Mutex<Vec<String>>,
+}
+
+impl Default for FakeJudge {
+    fn default() -> Self {
+        Self {
+            reply: Mutex::new(std::result::Result::Err(String::new())),
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl FakeJudge {
+    fn answers(index: usize, confidence: f64, reason: &str) -> Arc<Self> {
+        Arc::new(Self::with(std::result::Result::Ok(JudgeVerdict {
+            option_index: index,
+            confidence,
+            reason: reason.to_owned(),
+        })))
+    }
+
+    fn fails(message: &str) -> Arc<Self> {
+        Arc::new(Self::with(std::result::Result::Err(message.to_owned())))
+    }
+
+    fn with(reply: std::result::Result<JudgeVerdict, String>) -> Self {
+        Self {
+            reply: Mutex::new(reply),
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    /// Changes what the engine answers from now on; what it was asked so far is kept.
+    fn set(&self, next: Arc<Self>) {
+        *self.reply.lock().unwrap() = next.reply.lock().unwrap().clone();
+    }
+}
+
+#[async_trait]
+impl PromptJudge for FakeJudge {
+    async fn judge(&self, prompt: &str) -> Result<JudgeVerdict> {
+        self.asked.lock().unwrap().push(prompt.to_owned());
+        match &*self.reply.lock().unwrap() {
+            Ok(verdict) => Ok(verdict.clone()),
+            Err(message) => Err(crate::error::HubError::message(message.clone())),
+        }
+    }
+}
+
+/// The health probe the test controls: healthy unless told otherwise.
+struct Health(std::sync::atomic::AtomicBool);
+
+impl Health {
+    fn healthy() -> Arc<Self> {
+        Arc::new(Self(std::sync::atomic::AtomicBool::new(true)))
+    }
+}
+
+#[async_trait]
+impl SupervisorHealth for Health {
+    async fn healthy(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Health {
+    /// Marks the engine degraded (or healthy again) for observations from now on.
+    fn set(&self, healthy: bool) {
+        self.0.store(healthy, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 async fn fixture() -> Fixture {
     let pool = crate::storage::memory().await.unwrap();
     let control = Arc::new(Control::default());
@@ -104,6 +186,28 @@ async fn fixture() -> Fixture {
     let autonomy = Autonomy::open(pool.clone(), control.clone(), frames.clone())
         .await
         .unwrap();
+    Fixture {
+        pool,
+        autonomy,
+        control,
+        frames,
+    }
+}
+
+/// A fixture whose gate has the fake engine behind it, at the health `health` says.
+async fn judged(judge: Arc<FakeJudge>, health: Arc<Health>) -> Fixture {
+    let pool = crate::storage::memory().await.unwrap();
+    let control = Arc::new(Control::default());
+    let frames = Arc::new(Frames::default());
+    let autonomy = Autonomy::open_with_health(
+        pool.clone(),
+        control.clone(),
+        frames.clone(),
+        Some(judge.clone() as Arc<dyn PromptJudge>),
+        health as Arc<dyn SupervisorHealth>,
+    )
+    .await
+    .unwrap();
     Fixture {
         pool,
         autonomy,
@@ -133,6 +237,7 @@ fn session(prompt: Option<PendingPrompt>) -> FleetSession {
         agent: "claude".to_owned(),
         state: "blocked".to_owned(),
         state_source: "provider".to_owned(),
+        screen_readable: true,
         state_since_ms: None,
         screen_changed_at_ms: None,
         pending_prompt: prompt,
@@ -564,4 +669,404 @@ async fn a_recovery_escalation_survives_clear_and_is_withdrawn_only_by_recovery(
     RecoveryEscalations::resolve(&*fixture.autonomy, &session_ref);
     assert!(fixture.autonomy.escalation_source().pending().await.unwrap().is_empty());
     assert_eq!(fixture.frames.count("decision mac:s1 resolved"), 1);
+}
+
+/// Owner memory the fake engine must see: one taught line.
+async fn taught(pool: &SqlitePool) {
+    sqlx::query(
+        "INSERT INTO supervisor_memory_sources(source_id, supervisor_id, owner_principal,
+            source_adapter, source_message_id, action, body, body_sha256, state,
+            created_at, updated_at)
+         SELECT 'src-1', supervisor_id, owner_principal, 'desktop', 'msg-1', 'teach',
+                'Bun only in this repo, never npm.', ?, 'ok', '2026-11-15', '2026-11-15'
+           FROM supervisor_identity LIMIT 1",
+    )
+    .bind(crate::usage::sha256_hex("Bun only in this repo, never npm."))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// An identity for the owner: memory rows and goal bindings need one.
+async fn owner(pool: &SqlitePool) {
+    crate::supervisor::provision_owner(pool, "qa-owner", "ferryx", "github.com/x/ferryx", "mac", "/work/ferryx/.git")
+        .await
+        .unwrap();
+}
+
+/// One admitted goal bound to the pane `s1` on host `mac`, at revision 1, with the owner
+/// request `body`, so the gate reads a real binding.
+async fn bound_goal(pool: &SqlitePool, body: &str) {
+    let identity: (String, String) =
+        sqlx::query_as("SELECT supervisor_id, owner_principal FROM supervisor_identity LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let project: String = sqlx::query_scalar("SELECT project_id FROM supervisor_projects LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let request = crate::supervisor::AdmitRequest {
+        supervisor_id: identity.0,
+        owner_principal: identity.1,
+        source_adapter: crate::supervisor::ChannelProvider::Desktop,
+        source_message_id: "msg-goal-1".into(),
+        body: body.into(),
+        project_id: project,
+        channel_binding_id: None,
+        target: crate::supervisor::ExecutionTarget {
+            kind: crate::supervisor::ExecutionKind::Pty,
+            host_id: "mac".into(),
+        },
+        title: "Wire the fetch cache".into(),
+        cwd: POOL_CWD.into(),
+        instruction: "Wire the fetch cache.".into(),
+        requirements: vec![crate::goals::contract::RequirementSpec {
+            id: "r1".into(),
+            text: "the fetch cache is wired".into(),
+            verifier: "cargo test -p ferryx-hub passes".into(),
+        }],
+        mode: crate::goals::types::GoalMode::Supervised,
+        turn_limit: 5,
+        operation_grant: vec![crate::supervisor::admission::OperationClass::Edit],
+    };
+    crate::supervisor::admit_request_bound(
+        pool,
+        &request,
+        &crate::supervisor::AdmitTerms::default(),
+        Some(&crate::supervisor::BoundSession {
+            host_id: "mac".into(),
+            session_id: "s1".into(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_confident_engine_verdict_answers_the_prompt_and_logs_the_basis() {
+    let judge = FakeJudge::answers(1, 0.9, "Bun only in this repo");
+    let fixture = judged(judge.clone(), Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    fixture
+        .autonomy
+        .observe(&session(Some(question("j1", "Which package manager should I use?", None))))
+        .await;
+
+    assert_eq!(fixture.control.calls(), vec!["answer mac:s1 j1 1".to_owned()]);
+    assert_eq!(fixture.autonomy.escalation_source().pending().await.unwrap().len(), 0);
+    let log = fixture.autonomy.action_log().list_today(0).await.unwrap();
+    let answered = log
+        .iter()
+        .find(|entry| entry.summary.starts_with("Answered"))
+        .expect("the judged answer is logged");
+    assert_eq!(answered.basis, "Judged from your memory: Bun only in this repo");
+    // The undo of an autonomous answer restores the card, exactly as a learned one does.
+    assert_eq!(answered.undo.as_ref().map(|undo| undo.kind.as_str()), Some(RESTORE_DECISION));
+}
+
+#[tokio::test]
+async fn a_low_confidence_verdict_escalates_with_the_engine_choice_as_recommendation() {
+    let judge = FakeJudge::answers(1, 0.79, "probably bun");
+    let fixture = judged(judge, Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    fixture
+        .autonomy
+        .observe(&session(Some(question("j2", "Which package manager should I use?", None))))
+        .await;
+
+    assert!(fixture.control.calls().is_empty(), "nothing is typed below the threshold");
+    let open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].recommended_index, 1);
+    assert!(open[0].reason.contains("probably bun"), "{}", open[0].reason);
+}
+
+#[tokio::test]
+async fn a_failed_engine_call_escalates_and_answers_nothing() {
+    let judge = FakeJudge::fails("the engine exited");
+    let fixture = judged(judge, Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    fixture
+        .autonomy
+        .observe(&session(Some(question("j3", "Which package manager should I use?", None))))
+        .await;
+
+    assert!(fixture.control.calls().is_empty());
+    let open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(fixture.frames.count("action Answered"), 0);
+}
+
+#[tokio::test]
+async fn an_irreversible_prompt_never_reaches_the_engine() {
+    let judge = FakeJudge::answers(0, 0.99, "yes, force push");
+    let fixture = judged(judge.clone(), Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    let prompt = question("j4", "Run it?", Some("git push --force origin main"));
+    fixture.autonomy.observe(&session(Some(prompt))).await;
+
+    assert!(judge.asked().is_empty(), "the engine was never asked");
+    assert!(fixture.control.calls().is_empty());
+    let open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert!(open[0].reason.contains("irreversible"), "{}", open[0].reason);
+}
+
+#[tokio::test]
+async fn a_screen_sourced_approval_never_reaches_the_engine_and_types_nothing() {
+    let judge = FakeJudge::answers(0, 0.99, "approve it");
+    let fixture = judged(judge.clone(), Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    let mut approval = question("j5", "Do you want to proceed?", Some("cargo test -p ferryx-hub"));
+    approval.kind = "approval".into();
+    let mut screen = session(Some(approval));
+    screen.state_source = "screen".into();
+    fixture.autonomy.observe(&screen).await;
+
+    assert!(judge.asked().is_empty(), "a screen-sourced approval is the owner's");
+    assert!(fixture.control.calls().is_empty(), "0 keystrokes");
+    let open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(open.len(), 1);
+}
+
+#[tokio::test]
+async fn an_unreadable_screen_is_held_and_types_nothing_even_with_a_confident_verdict() {
+    let judge = FakeJudge::answers(1, 0.99, "bun");
+    let fixture = judged(judge, Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    let mut blind = session(Some(question("j6", "Which package manager should I use?", None)));
+    blind.screen_readable = false;
+    fixture.autonomy.observe(&blind).await;
+
+    assert!(fixture.control.calls().is_empty());
+    let open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert!(open[0].reason.contains("could not read"), "{}", open[0].reason);
+}
+
+#[tokio::test]
+async fn a_provider_sourced_approval_that_names_its_command_may_be_answered() {
+    let judge = FakeJudge::answers(0, 0.9, "you always approve cargo test");
+    let fixture = judged(judge, Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    let mut approval = question("j7", "Do you want to proceed?", Some("cargo test -p ferryx-hub"));
+    approval.kind = "approval".into();
+    fixture.autonomy.observe(&session(Some(approval))).await;
+
+    assert_eq!(fixture.control.calls(), vec!["answer mac:s1 j7 0".to_owned()]);
+}
+
+#[tokio::test]
+async fn a_malformed_verdict_escalates_instead_of_answering() {
+    // The engine replied with prose: the strict parser refuses it, so the prompt escalates.
+    let judge = FakeJudge::fails("the judge's verdict is not strict JSON");
+    let fixture = judged(judge, Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    fixture
+        .autonomy
+        .observe(&session(Some(question("j8", "Which package manager should I use?", None))))
+        .await;
+
+    assert!(fixture.control.calls().is_empty());
+    assert_eq!(fixture.autonomy.escalation_source().pending().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_verdict_naming_an_option_that_does_not_exist_escalates() {
+    let judge = FakeJudge::answers(7, 0.99, "option seven");
+    let fixture = judged(judge, Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    fixture
+        .autonomy
+        .observe(&session(Some(question("j9", "Which package manager should I use?", None))))
+        .await;
+
+    assert!(fixture.control.calls().is_empty());
+    let open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    // No recommendation from an index that is not an option.
+    assert!(open[0].recommended_index < 2, "{}", open[0].recommended_index);
+}
+
+#[tokio::test]
+async fn a_degraded_engine_escalates_every_prompt_including_learned_ones() {
+    // While the owner teaches, the engine is unsure, so the three answers are the owner's.
+    let judge = FakeJudge::answers(1, 0.5, "not sure yet");
+    let health = Health::healthy();
+    let fixture = judged(judge.clone(), health.clone()).await;
+    owner(&fixture.pool).await;
+    teach(&fixture, 1, 3).await;
+    judge.set(FakeJudge::answers(1, 0.99, "pnpm"));
+    health.set(false);
+    // Teaching ran while healthy, so the engine was asked then; only what it is asked from here
+    // on tells whether a degraded engine is consulted.
+    let asked_before = judge.asked().len();
+
+    fixture
+        .autonomy
+        .observe(&session(Some(question("j10", "Which package manager should I use?", None))))
+        .await;
+
+    assert!(fixture.control.calls().is_empty(), "nothing was typed");
+    assert_eq!(judge.asked().len(), asked_before, "a degraded engine is not asked");
+    let open = fixture.autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(open.len(), 1);
+    assert!(open[0].reason.starts_with("supervisor degraded:"), "{}", open[0].reason);
+    // The learned recommendation still travels with the card.
+    assert_eq!(open[0].recommended_index, 1);
+}
+
+#[tokio::test]
+async fn the_prompt_shows_the_engine_the_owner_memory_the_goal_and_the_screen() {
+    let judge = FakeJudge::answers(1, 0.9, "bun");
+    let fixture = judged(judge.clone(), Health::healthy()).await;
+    owner(&fixture.pool).await;
+    taught(&fixture.pool).await;
+    bound_goal(&fixture.pool, "Add the fetch cache behind the flag").await;
+
+    *fixture.control.tail.lock().unwrap() =
+        "? Which package manager should I use?\n  1. npm\n  2. pnpm".to_owned();
+    fixture
+        .autonomy
+        .observe(&session(Some(question("j11", "Which package manager should I use?", None))))
+        .await;
+
+    let asked = judge.asked();
+    assert_eq!(asked.len(), 1);
+    let prompt = &asked[0];
+    for needle in [
+        "Bun only in this repo, never npm.",
+        "Add the fetch cache behind the flag",
+        "the fetch cache is wired",
+        "question: Which package manager should I use?",
+        "option 0: npm",
+        "option 1: pnpm",
+        "kind: question",
+        "## Screen around the prompt",
+        "  2. pnpm",
+    ] {
+        assert!(prompt.contains(needle), "missing {needle:?} in\n{prompt}");
+    }
+}
+
+#[tokio::test]
+async fn the_goal_contract_answers_before_the_engine_is_asked() {
+    let judge = FakeJudge::answers(0, 0.99, "npm");
+    let fixture = judged(judge.clone(), Health::healthy()).await;
+    owner(&fixture.pool).await;
+    bound_goal(&fixture.pool, "Use pnpm").await;
+    let goal_id: String = sqlx::query_scalar("SELECT goal_id FROM supervisor_execution_bindings WHERE provider_session_id = 's1'")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO supervisor_goal_decisions(goal_id, goal_revision, prompt_id, option_label, source, created_at)
+         VALUES(?, 1, 'd1', 'pnpm', 'owner', '2026-11-15')",
+    )
+    .bind(&goal_id)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    fixture
+        .autonomy
+        .observe(&session(Some(question("d1", "Which package manager should I use?", None))))
+        .await;
+
+    assert!(judge.asked().is_empty(), "the contract settled it; the engine was not asked");
+    assert_eq!(fixture.control.calls(), vec!["answer mac:s1 d1 1".to_owned()]);
+    let log = fixture.autonomy.action_log().list_today(0).await.unwrap();
+    let answered = log.iter().find(|entry| entry.summary.starts_with("Answered")).unwrap();
+    assert!(answered.basis.contains("goal contract"), "{}", answered.basis);
+}
+
+#[tokio::test]
+async fn a_decision_of_an_older_goal_revision_does_not_answer() {
+    let judge = FakeJudge::answers(1, 0.9, "pnpm");
+    let fixture = judged(judge.clone(), Health::healthy()).await;
+    owner(&fixture.pool).await;
+    bound_goal(&fixture.pool, "Use pnpm").await;
+    let goal_id: String = sqlx::query_scalar("SELECT goal_id FROM supervisor_execution_bindings WHERE provider_session_id = 's1'")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO supervisor_goal_decisions(goal_id, goal_revision, prompt_id, option_label, source, created_at)
+         VALUES(?, 2, 'd2', 'npm', 'owner', '2026-11-15')",
+    )
+    .bind(&goal_id)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    fixture
+        .autonomy
+        .observe(&session(Some(question("d2", "Which package manager should I use?", None))))
+        .await;
+
+    // The stale revision is ignored: the engine judged, and its answer stands.
+    assert_eq!(judge.asked().len(), 1);
+    assert_eq!(fixture.control.calls(), vec!["answer mac:s1 d2 1".to_owned()]);
+}
+
+#[tokio::test]
+async fn the_gate_never_asks_the_engine_for_a_supervisor_initiated_answer() {
+    let judge = FakeJudge::answers(1, 0.99, "pnpm");
+    let fixture = judged(judge.clone(), Health::healthy()).await;
+    owner(&fixture.pool).await;
+
+    let prompt = question("j12", "Which package manager should I use?", None);
+    let refused = fixture
+        .autonomy
+        .gate()
+        .allow(&session(Some(prompt.clone())), &prompt, 1)
+        .await
+        .unwrap_err();
+    assert!(!refused.is_empty());
+    assert!(judge.asked().is_empty(), "the gate stays rules, contract and history");
+}
+
+/// An engine that replies in prose, like a model that ignored the output contract.
+struct ProseJudge;
+
+#[async_trait]
+impl PromptJudge for ProseJudge {
+    async fn judge(&self, _prompt: &str) -> Result<JudgeVerdict> {
+        crate::supervisor::prompt_judge::parse_verdict("I would pick option 2, Bun.")
+    }
+}
+
+#[tokio::test]
+async fn the_engine_prose_instead_of_json_of_a_verdict_escalates() {
+    let fixture = judged(Arc::new(FakeJudge::with(Ok(JudgeVerdict {
+        option_index: 1,
+        confidence: 0.9,
+        reason: "unused".into(),
+    }))), Health::healthy()).await;
+    // The real parser, on a real model reply, is what refuses it.
+    let autonomy = Autonomy::open_with_health(
+        fixture.pool.clone(),
+        fixture.control.clone(),
+        fixture.frames.clone(),
+        Some(Arc::new(ProseJudge)),
+        Health::healthy(),
+    )
+    .await
+    .unwrap();
+    owner(&fixture.pool).await;
+
+    autonomy
+        .observe(&session(Some(question("j13", "Which package manager should I use?", None))))
+        .await;
+
+    assert!(fixture.control.calls().is_empty(), "nothing is typed");
+    let open = autonomy.escalation_source().pending().await.unwrap();
+    assert_eq!(open.len(), 1);
 }

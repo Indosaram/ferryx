@@ -22,6 +22,7 @@ use crate::remote::reference_chat::types::{ReferencePart, ReferencePromptAnswer,
 
 mod setup;
 mod seed;
+mod omo_memory;
 pub use setup::{
     agent_memory_block, supervisor_adopt_all, supervisor_setup, supervisor_setup_run, supervisor_setup_status, SetupError, SetupProject,
     SetupRunRequest, SLACK_TEAM_UNRESOLVED,
@@ -3749,15 +3750,15 @@ pub async fn supervisor_converse(
     caller: SupervisorCaller,
     input: ferryx_hub::supervisor::transcript::ConverseInput,
 ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
-    use ferryx_hub::supervisor::request::RequestFailure;
+    use ferryx_hub::supervisor::request::{RequestContext, RequestFailure};
     use ferryx_hub::supervisor::transcript;
     let (pool, owner, _) = supervisor_service(state).await?;
-    if owner.is_none() {
+    let Some(owner) = owner else {
         return Err(RequestFailure::new(
             "UNAUTHORIZED",
             "this installation has no single supervisor owner",
         ));
-    }
+    };
     let Some(engine) = app_conversation(state, &input) else {
         return Err(RequestFailure::new(
             "MHC_NOT_RUNNING",
@@ -3765,6 +3766,15 @@ pub async fn supervisor_converse(
         ));
     };
     let rules = rule_store(state);
+    // A fresh owner turn teaches the owner's memory through the engine, off the reply's path.
+    // The surface is the caller's: the desktop app for a local caller, the phone for a remote one.
+    let learning = RequestContext {
+        principal: owner,
+        adapter: caller.adapter(),
+        channel_binding_id: None,
+        control: None,
+        memory: ferryx_hub::meta::mhc_supervisor::installed_memory(),
+    };
     let announce = || {
         let mut payload = json!({ "supervisorConverse": input.request_id });
         if let SupervisorCaller::Remote { device_id } = &caller {
@@ -3781,6 +3791,7 @@ pub async fn supervisor_converse(
         flights: &state.supervisor_flights,
         now: &transcript::now_ms,
         changed: &announce,
+        learning: Some(&learning),
     };
     transcript::converse(&ctx, &input).await
 }
@@ -4889,6 +4900,16 @@ fn spawn_supervisor_recovery(launch: &HubLaunch) -> tokio::task::JoinHandle<()> 
     })
 }
 
+/// The supervisor's ownership loop: every running goal it owns (launched by it or handed over)
+/// is read from its bound pane, and a session silent past `FERRYX_HUB_NUDGE_AFTER_MIN` gets one
+/// progress request. A machine that is not the lease holder types nothing: its sends are refused
+/// by the daemon's fence before the first byte, the same guard every supervisor send passes.
+fn spawn_supervisor_ownership(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(ferryx_hub::supervisor::ownership::serve(
+        launch.hub.pool.clone(),
+    ))
+}
+
 /// Forwards the store's goal-change announcements ([`ferryx_hub::supervisor::changes`]) to the
 /// desktop and phone Supervisor views as `supervisor_changed {goalId}`, so a goal the
 /// dispatcher, a worker receipt or the wake scheduler moved is refetched without an owner
@@ -4991,6 +5012,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     tasks.push(spawn_supervisor_change_forwarder(launch));
     tasks.push(spawn_supervisor_wakes(launch));
     tasks.push(spawn_supervisor_recovery(launch));
+    tasks.push(spawn_supervisor_ownership(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {
@@ -5106,6 +5128,16 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             Arc::clone(launch.server.remote_state()),
             home_dir(),
         )));
+        // The owner's agent memory (~/.omo/memory) is read on every Ready and hourly while
+        // Ready, as this generation's task.
+        let (engine, pool) = (runtime.clone(), launch.hub.pool.clone());
+        tasks.push(tokio::spawn(async move {
+            omo_memory::on_ready_and_hourly(engine.subscribe_health(), move || {
+                let (engine, pool) = (engine.clone(), pool.clone());
+                async move { omo_memory::pass_if_wanted(&engine, &pool, home_dir()).await }
+            })
+            .await;
+        }));
     }
     #[cfg(unix)]
     {

@@ -27,9 +27,10 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 use super::admission::{
-    self, ActorContext, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
+    self, ActorContext, AdmissionError, OperationClass, OwnerChoices, SubmitOutcome, SubmitWork,
 };
-use super::{goal_of, ChannelProvider, ExecutionKind};
+use super::panel_contract::SessionRef;
+use super::{goal_of, identity_of, ChannelProvider, ExecutionKind};
 use crate::goals::contract::RequirementSpec;
 use crate::meta::mhc_fault::SupervisorFault;
 use crate::meta::mhc_profile::ConversationScope;
@@ -84,10 +85,441 @@ pub fn submit_from_call(
     }
 }
 
-/// An app turn in flight: the owner's message and what its submits did.
+/// The owner's own words that hand a session to the supervisor; matched case-insensitively.
+const HANDOVER_PHRASES: [&str; 2] = ["이 세션 맡아", "take this session"];
+
+/// The turn budget of a handed-over goal: the owner keeps paying for the pane, so the supervisor
+/// stops after the same small budget an app request gets.
+const HANDOVER_TURN_LIMIT: u32 = 5;
+
+/// Whether the owner's own words hand a session to the supervisor.
+fn asks_for_handover(owner_text: &str) -> bool {
+    let lowered = owner_text.to_lowercase();
+    HANDOVER_PHRASES
+        .iter()
+        .any(|phrase| lowered.contains(phrase))
+}
+
+/// The owner's own words that pause or resume a session the supervisor already owns; matched
+/// case-insensitively like [`HANDOVER_PHRASES`].
+const PAUSE_PHRASES: [&str; 2] = ["이 세션 멈춰", "pause this session"];
+const RESUME_PHRASES: [&str; 2] = ["이 세션 계속", "resume this session"];
+
+/// What the owner asked of an owned session's ownership loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnershipCommand {
+    Pause,
+    Resume,
+}
+
+impl OwnershipCommand {
+    /// The wired command, `None` when the owner's text asks for neither.
+    fn of(owner_text: &str) -> Option<Self> {
+        let lowered = owner_text.to_lowercase();
+        let said = |phrases: &[&str; 2]| phrases.iter().any(|phrase| lowered.contains(phrase));
+        if said(&PAUSE_PHRASES) {
+            Some(Self::Pause)
+        } else if said(&RESUME_PHRASES) {
+            Some(Self::Resume)
+        } else {
+            None
+        }
+    }
+}
+
+/// Pauses or resumes the ownership loop of exactly the session the owner addressed: the goal
+/// whose execution binding names that pane, a running one before one that merely still names it
+/// (a pane the owner kept after its goal ended is not owned again, as in admission). Zero or
+/// several addressed sessions ask the owner which one instead of guessing, and a session no
+/// live goal is bound to is refused, because only a session the supervisor already owns has a
+/// loop to pause.
+async fn ownership_turn(
+    pool: &SqlitePool,
+    owner: &str,
+    command: OwnershipCommand,
+    turn: Option<u64>,
+) -> Result<SubmitOutcome, AdmissionError> {
+    let mentions: Vec<SessionRef> = match turn {
+        None => Vec::new(),
+        Some(generation) => registry()
+            .live
+            .get(&generation)
+            .map(|live| live.mentions.clone())
+            .unwrap_or_default(),
+    };
+    let session = match mentions.as_slice() {
+        [only] => only.clone(),
+        [] => {
+            return Ok(SubmitOutcome::NeedsChoice {
+                missing: "session".into(),
+                detail: "the request pauses or resumes a session but names none; address exactly one session with @".into(),
+            })
+        }
+        several => {
+            return Ok(SubmitOutcome::NeedsChoice {
+                missing: "session".into(),
+                detail: format!(
+                    "the request names {} sessions; name exactly one",
+                    several.len()
+                ),
+            })
+        }
+    };
+    let bound: Option<String> = sqlx::query_scalar(
+        "SELECT b.goal_id FROM supervisor_execution_bindings b
+           JOIN supervisor_goals g ON g.goal_id = b.goal_id
+          WHERE b.kind = 'pty' AND b.host_id = ? AND b.provider_session_id = ?
+            AND g.owner_principal = ? AND g.run_state NOT IN ('completed','cancelled')
+          ORDER BY (g.run_state = 'running') DESC, b.goal_id LIMIT 1",
+    )
+    .bind(session.host_id())
+    .bind(session.backend_session_id())
+    .bind(owner)
+    .fetch_optional(pool)
+    .await?;
+    let Some(goal_id) = bound else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_SESSION_NOT_OWNED",
+            message: format!("session {session} is not a session the supervisor owns"),
+        });
+    };
+    let paused = command == OwnershipCommand::Pause;
+    super::ownership::set_paused(pool, &goal_id, paused).await?;
+    Ok(SubmitOutcome::Conversational {
+        reason: if paused {
+            format!("Goal {goal_id} is paused: session {session} is not nudged or continued until you resume it.")
+        } else {
+            format!("Goal {goal_id} is resumed: session {session} is owned again.")
+        },
+    })
+}
+
+/// Hand exactly the session the owner addressed to the supervisor: the goal observes the pane
+/// the owner already runs, and admission types nothing into it. Zero or several addressed
+/// sessions ask the owner which one instead of guessing.
+async fn handover_turn(
+    pool: &SqlitePool,
+    owner: &str,
+    actor: &ActorContext,
+    work: &SubmitWork,
+    turn: Option<u64>,
+    sessions: Option<&SessionTools>,
+) -> Result<SubmitOutcome, AdmissionError> {
+    let mentions: Vec<SessionRef> = match turn {
+        None => Vec::new(),
+        Some(generation) => registry()
+            .live
+            .get(&generation)
+            .map(|live| live.mentions.clone())
+            .unwrap_or_default(),
+    };
+    let session = match mentions.as_slice() {
+        [only] => only.clone(),
+        [] => {
+            return Ok(SubmitOutcome::NeedsChoice {
+                missing: "session".into(),
+                detail: "the request hands a session over but names none; address exactly one session with @".into(),
+            })
+        }
+        several => {
+            return Ok(SubmitOutcome::NeedsChoice {
+                missing: "session".into(),
+                detail: format!(
+                    "the request names {} sessions; hand over exactly one",
+                    several.len()
+                ),
+            })
+        }
+    };
+    let Some(sessions) = sessions else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_SESSIONS_UNAVAILABLE",
+            message: "the session tools are not installed".into(),
+        });
+    };
+    let fleet = sessions.fleet().await.map_err(|error| {
+        AdmissionError::Refused {
+            code: "SUPERVISOR_FLEET_UNAVAILABLE",
+            message: format!("the fleet was not listed: {error}"),
+        }
+    })?;
+    let Some(fleet_session) = fleet
+        .iter()
+        .find(|session_of_fleet| session_of_fleet.session_ref == session)
+    else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_SESSION_UNKNOWN",
+            message: format!("the fleet does not know session {session}"),
+        });
+    };
+    let Some(identity) = identity_of(pool, owner).await? else {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_IDENTITY_MISSING",
+            message: "no supervisor identity for this owner".into(),
+        });
+    };
+    let Some(resolved) = resolve_project(
+        pool,
+        &identity.supervisor_id,
+        &actor.source_body,
+        &work.title,
+        &mentions,
+        Some(sessions),
+        false,
+    )
+    .await?
+    else {
+        return Ok(SubmitOutcome::NeedsChoice {
+            missing: "project".into(),
+            detail: format!(
+                "no project of this supervisor checks out the working directory of session {session}"
+            ),
+        });
+    };
+    let host_id = session.host_id().to_owned();
+    let session_id = session.backend_session_id().to_owned();
+    // A session the hub itself dispatched is already the supervisor's, and handover refuses it:
+    // the binding names the pane the hub launched.
+    let hub_dispatched: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM supervisor_execution_bindings
+                        WHERE host_id = ? AND provider_session_id = ?)",
+    )
+    .bind(&host_id)
+    .bind(&session_id)
+    .fetch_one(pool)
+    .await?;
+    let request = super::AdmitRequest {
+        supervisor_id: identity.supervisor_id,
+        owner_principal: owner.to_owned(),
+        source_adapter: actor.source_adapter.clone(),
+        source_message_id: super::handover::handover_source_id(&host_id, &session_id),
+        body: actor.source_body.clone(),
+        project_id: resolved.project_id,
+        channel_binding_id: actor.channel_binding_id.clone(),
+        target: super::ExecutionTarget {
+            kind: ExecutionKind::Pty,
+            host_id: host_id.clone(),
+        },
+        title: work.title.clone(),
+        cwd: fleet_session.cwd.clone(),
+        instruction: work.instruction.clone(),
+        requirements: work.requirements.clone(),
+        mode: crate::goals::types::GoalMode::Supervised,
+        turn_limit: work.turn_limit.unwrap_or(HANDOVER_TURN_LIMIT),
+        operation_grant: OperationClass::BASELINE.to_vec(),
+    };
+    let admission = super::handover::handover(
+        pool,
+        request,
+        super::BoundSession { host_id, session_id },
+        fleet_session.agent.trim().is_empty(),
+        hub_dispatched,
+    )
+    .await
+    .map_err(AdmissionError::Store)?;
+    Ok(SubmitOutcome::Conversational {
+        reason: format!(
+            "Session {session} is the supervisor's now: goal {}. It is observed as it runs; nothing was typed into it.",
+            admission.receipt.goal_id
+        ),
+    })
+}
+
+/// The project a chat-delegated goal belongs to, and the host it runs on when that project has
+/// exactly one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectResolution {
+    pub project_id: String,
+    pub host_id: Option<String>,
+}
+
+/// Resolves the project of an app submit from the owner's own turn, before admission:
+///
+/// 1. the project whose checkout contains the cwd of the first session the owner addressed with
+///    `@`;
+/// 2. else, when the owner's previous app submit ended in a project `needs_choice`
+///    (`asked_for_project`), the single project the owner's message alone names: the answer to
+///    the supervisor's own question. The proposal title gets no say in it, so a title the model
+///    derived from an earlier turn cannot turn a one-name answer into a refusal;
+/// 3. else the single project whose name or repository identity basename the owner message and
+///    the proposal title name as a whole word, case-insensitively.
+///
+/// Several matches are refused (`None`), never guessed. `host_id` is the project's host when it
+/// has exactly one. `None` leaves the project to admission, which then asks the owner and lists
+/// the project names.
+pub async fn resolve_project(
+    pool: &SqlitePool,
+    supervisor_id: &str,
+    owner_text: &str,
+    title: &str,
+    mentions: &[SessionRef],
+    sessions: Option<&SessionTools>,
+    asked_for_project: bool,
+) -> Result<Option<ProjectResolution>, AdmissionError> {
+    let answering = if asked_for_project {
+        project_of_names(pool, supervisor_id, owner_text, "").await?
+    } else {
+        None
+    };
+    let mentioned = project_of_mentions(pool, supervisor_id, mentions, sessions).await;
+    let project_id = match (mentioned, answering) {
+        (Some(project_id), _) => project_id,
+        (None, Some(project_id)) => project_id,
+        (None, None) => match project_of_names(pool, supervisor_id, owner_text, title).await? {
+            Some(project_id) => project_id,
+            None => return Ok(None),
+        },
+    };
+    Ok(Some(ProjectResolution {
+        host_id: single_host(pool, &project_id).await?,
+        project_id,
+    }))
+}
+
+/// The project of the first session the owner addressed with @: the one whose checkout on that
+/// session's host contains the session's cwd. `None` when that session is unknown to the fleet,
+/// the fleet cannot be listed, or the cwd belongs to no project or to several.
+async fn project_of_mentions(
+    pool: &SqlitePool,
+    supervisor_id: &str,
+    mentions: &[SessionRef],
+    sessions: Option<&SessionTools>,
+) -> Option<String> {
+    let sessions = sessions?;
+    let first = mentions.first()?;
+    let fleet = match sessions.fleet().await {
+        Ok(fleet) => fleet,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                session = %first,
+                "the fleet was not listed; a mentioned session names no project"
+            );
+            return None;
+        }
+    };
+    let session = fleet.iter().find(|session| session.session_ref == *first)?;
+    let hosts: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT h.project_id, h.host_id, h.git_common_dir
+           FROM supervisor_project_hosts h
+           JOIN supervisor_projects p ON p.project_id = h.project_id
+          WHERE p.supervisor_id = ?",
+    )
+    .bind(supervisor_id)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    let mut matched: Vec<String> = hosts
+        .into_iter()
+        .filter(|(_, host_id, git_common_dir)| {
+            host_id == &session.host_id
+                && admission::within(
+                    &admission::checkout_root(git_common_dir),
+                    session.cwd.trim_end_matches(['/', '\\']),
+                )
+        })
+        .map(|(project_id, _, _)| project_id)
+        .collect();
+    matched.sort();
+    matched.dedup();
+    match matched.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// The single project the owner's message and the proposal title name: its name or its
+/// repository identity basename, matched case-insensitively as a whole word. Several matches
+/// are refused.
+async fn project_of_names(
+    pool: &SqlitePool,
+    supervisor_id: &str,
+    owner_text: &str,
+    title: &str,
+) -> Result<Option<String>, AdmissionError> {
+    let projects: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT project_id, name, repo_identity FROM supervisor_projects
+          WHERE supervisor_id = ? ORDER BY project_id",
+    )
+    .bind(supervisor_id)
+    .fetch_all(pool)
+    .await?;
+    let named = format!("{owner_text}\n{title}");
+    let mut matched: Vec<String> = projects
+        .into_iter()
+        .filter(|(_, name, repo_identity)| {
+            names_word(name, &named) || names_word(repo_basename(repo_identity), &named)
+        })
+        .map(|(project_id, _, _)| project_id)
+        .collect();
+    matched.sort();
+    matched.dedup();
+    Ok(match matched.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    })
+}
+
+/// The host of a project when it has exactly one; `None` for none or several.
+async fn single_host(
+    pool: &SqlitePool,
+    project_id: &str,
+) -> Result<Option<String>, AdmissionError> {
+    let hosts: Vec<String> = sqlx::query_scalar(
+        "SELECT host_id FROM supervisor_project_hosts WHERE project_id = ? ORDER BY host_id LIMIT 2",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(match hosts.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    })
+}
+
+/// The last path segment of a repository identity, without a `.git` suffix:
+/// `github.com/example/ferryx` is `ferryx`.
+fn repo_basename(repo_identity: &str) -> &str {
+    let trimmed = repo_identity.trim_end_matches(['/', '\\']);
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+}
+
+/// A character of a name's own word: ASCII letters, digits and `_`. Anything else (a space, a
+/// Korean particle, a hyphen) ends a word, so `ferryx에서` names `ferryx`.
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Whether `needle` occurs in `haystack` as a whole word, case-insensitively.
+fn names_word(needle: &str, haystack: &str) -> bool {
+    let needle: Vec<char> = needle.to_lowercase().chars().collect();
+    if needle.is_empty() {
+        return false;
+    }
+    let haystack: Vec<char> = haystack.to_lowercase().chars().collect();
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    for start in 0..=haystack.len() - needle.len() {
+        if haystack[start..start + needle.len()] != needle[..] {
+            continue;
+        }
+        let before = start.checked_sub(1).map(|at| haystack[at]);
+        let after = haystack.get(start + needle.len()).copied();
+        if !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char) {
+            return true;
+        }
+    }
+    false
+}
+
+/// An app turn in flight: the owner's message, the sessions it addressed and what its submits
+/// did.
 struct AppTurn {
     request_id: String,
     text: String,
+    mentions: Vec<SessionRef>,
     outcomes: Vec<SubmitOutcome>,
 }
 
@@ -116,6 +548,15 @@ impl AppTurnGuard {
     /// `request_id` identifies the owner's message (it is the admission source id) and
     /// `owner_text` is what the owner wrote, verbatim.
     pub fn begin(request_id: &str, owner_text: &str) -> Self {
+        Self::begin_with_mentions(request_id, owner_text, Vec::new())
+    }
+
+    /// Like [`Self::begin`], with the sessions the owner addressed with @ in this message.
+    pub fn begin_with_mentions(
+        request_id: &str,
+        owner_text: &str,
+        mentions: Vec<SessionRef>,
+    ) -> Self {
         let mut registry = registry();
         registry.next += 1;
         let generation = registry.next;
@@ -124,6 +565,7 @@ impl AppTurnGuard {
             AppTurn {
                 request_id: request_id.to_owned(),
                 text: owner_text.to_owned(),
+                mentions,
                 outcomes: Vec::new(),
             },
         );
@@ -160,7 +602,11 @@ pub async fn converse(
     owner_text: &str,
     message: &str,
 ) -> Result<String, SupervisorFault> {
-    let turn = AppTurnGuard::begin(request_id, owner_text);
+    let turn = AppTurnGuard::begin_with_mentions(
+        request_id,
+        owner_text,
+        super::transcript::addressed_sessions(message),
+    );
     supervisor
         .converse_in_turn(&app_scope(), Some(turn.token()), message)
         .await
@@ -183,6 +629,120 @@ fn no_turn() -> WorkToolRejection {
 
 fn refused(error: &admission::AdmissionError) -> WorkToolRejection {
     WorkToolRejection::new(error.code(), &error.to_string())
+}
+
+/// The hub-meta key prefix of the marker that says the owner's last app submit ended in a project
+/// `needs_choice`: the state rule 3 reads so that one project name answers the supervisor's own
+/// question. The value is the admission source id of the turn that asked, so the answer stays
+/// traceable to the question.
+const PROJECT_CHOICE_PREFIX: &str = "supervisor_app_project_choice:";
+
+/// Records that the turn `request_id` ended in a project `needs_choice`, or (`None`) that it did
+/// not, which clears an earlier question. Every submit writes it, so the next submit of the
+/// conversation reads only its own predecessor's question. The key is per owner, so one owner's
+/// question never decides another's answer.
+async fn record_project_choice(
+    pool: &SqlitePool,
+    owner: &str,
+    request_id: Option<&str>,
+) -> Result<(), AdmissionError> {
+    let key = format!("{PROJECT_CHOICE_PREFIX}{owner}");
+    match request_id {
+        Some(request_id) => {
+            sqlx::query(
+                "INSERT INTO hub_meta(key, value) VALUES(?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(&key)
+            .bind(request_id)
+            .execute(pool)
+            .await?;
+        }
+        None => {
+            sqlx::query("DELETE FROM hub_meta WHERE key = ?")
+                .bind(&key)
+                .execute(pool)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether the owner's last app submit ended in a project `needs_choice`; the admission source id
+/// of that turn when it did. A missing row (no such submit, or one that named a project) answers
+/// `None`. The marker only lets rule 3 apply, which matches the owner's own message more strictly
+/// than rule 2, so it never widens a guess.
+async fn project_question(
+    pool: &SqlitePool,
+    owner: &str,
+) -> Result<Option<String>, AdmissionError> {
+    let asked: Option<String> = sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+        .bind(format!("{PROJECT_CHOICE_PREFIX}{owner}"))
+        .fetch_optional(pool)
+        .await?;
+    Ok(asked)
+}
+
+/// The submit with the project and host the owner's turn resolves to, unless the proposal or the
+/// owner's choices already named them. A turn whose owner has no supervisor identity resolves
+/// nothing and leaves the scope to admission.
+async fn resolve_for_turn(
+    pool: &SqlitePool,
+    owner: &str,
+    actor: &ActorContext,
+    work: &SubmitWork,
+    turn: Option<u64>,
+    sessions: Option<&SessionTools>,
+) -> Result<SubmitWork, AdmissionError> {
+    let mut work = work.clone();
+    let chosen_project = work
+        .project_id
+        .clone()
+        .or_else(|| actor.choices.project_id.clone());
+    if work.host_id.is_some() && chosen_project.is_some() {
+        return Ok(work);
+    }
+    let Some(identity) = identity_of(pool, owner).await? else {
+        return Ok(work);
+    };
+    // A project the request or the owner already named keeps its own host: a name match could
+    // otherwise attribute it to a different project.
+    let resolved = match chosen_project {
+        Some(project_id) => ProjectResolution {
+            host_id: single_host(pool, &project_id).await?,
+            project_id,
+        },
+        None => {
+            let mentions: Vec<SessionRef> = match turn {
+                None => Vec::new(),
+                Some(generation) => registry()
+                    .live
+                    .get(&generation)
+                    .map(|live| live.mentions.clone())
+                    .unwrap_or_default(),
+            };
+            let asked = project_question(pool, owner).await?.is_some();
+            let Some(resolved) = resolve_project(
+                pool,
+                &identity.supervisor_id,
+                &actor.source_body,
+                &work.title,
+                &mentions,
+                sessions,
+                asked,
+            )
+            .await?
+            else {
+                return Ok(work);
+            };
+            resolved
+        }
+    };
+    work.project_id.get_or_insert(resolved.project_id);
+    if let Some(host_id) = resolved.host_id {
+        work.host_id.get_or_insert(host_id);
+    }
+    Ok(work)
 }
 
 /// The work tools of the app conversation, with an optional handler for every other scope.
@@ -246,9 +806,89 @@ impl WorkToolHandler for AppWorkTools {
                     })
                     .ok_or_else(no_turn)?;
                 let work = submit_from_call(&title, &requirements, worker, &actor.source_body);
-                let outcome = admission::handle_message(&self.pool, &actor, Some(&work))
+                // The owner's own words pause or resume the ownership loop of a session the
+                // supervisor already owns; nothing is admitted and no text reaches the pane.
+                if let Some(command) = OwnershipCommand::of(&actor.source_body) {
+                    let outcome = ownership_turn(&self.pool, &owner, command, turn)
+                        .await
+                        .map_err(|error| refused(&error))?;
+                    if let Some(generation) = turn {
+                        if let Some(live) = registry().live.get_mut(&generation) {
+                            live.outcomes.push(outcome.clone());
+                        }
+                    }
+                    return serde_json::to_value(&outcome).map_err(|error| {
+                        WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string())
+                    });
+                }
+                // The owner hands an already running session over in its own words, for exactly
+                // one addressed session; admission observes it and types nothing into it.
+                if asks_for_handover(&actor.source_body) {
+                    let outcome = handover_turn(
+                        &self.pool,
+                        &owner,
+                        &actor,
+                        &work,
+                        turn,
+                        self.sessions.as_deref(),
+                    )
                     .await
                     .map_err(|error| refused(&error))?;
+                    // A handover that needs a project leaves the project question open for the
+                    // next submit; one that needs a session does not.
+                    let asked = match &outcome {
+                        SubmitOutcome::NeedsChoice { missing, .. } if missing == "project" => {
+                            Some(actor.source_message_id.as_str())
+                        }
+                        _ => None,
+                    };
+                    if let Err(error) = record_project_choice(&self.pool, &owner, asked).await {
+                        tracing::warn!(
+                            %error,
+                            owner = %owner,
+                            "the project question was not recorded"
+                        );
+                    }
+                    if let Some(generation) = turn {
+                        if let Some(live) = registry().live.get_mut(&generation) {
+                            live.outcomes.push(outcome.clone());
+                        }
+                    }
+                    return serde_json::to_value(&outcome).map_err(|error| {
+                        WorkToolRejection::new("SUPERVISOR_WORK_INVALID", &error.to_string())
+                    });
+                }
+                let work = match resolve_for_turn(
+                    &self.pool,
+                    &owner,
+                    &actor,
+                    &work,
+                    turn,
+                    self.sessions.as_deref(),
+                )
+                .await
+                {
+                    Ok(work) => work,
+                    Err(error) => return Err(refused(&error)),
+                };
+                let outcome = admission::handle_message(&self.pool, &actor, Some(&work)).await;
+                // The question the next app turn answers. A refused submit is not a question, so
+                // it clears any earlier one instead. The outcome itself is already persisted, so
+                // a failure here is logged rather than turned into a failed submit.
+                let asked = match &outcome {
+                    Ok(SubmitOutcome::NeedsChoice { missing, .. }) if missing == "project" => {
+                        Some(actor.source_message_id.as_str())
+                    }
+                    _ => None,
+                };
+                if let Err(error) = record_project_choice(&self.pool, &owner, asked).await {
+                    tracing::warn!(
+                        %error,
+                        owner = %owner,
+                        "the project question was not recorded"
+                    );
+                }
+                let outcome = outcome.map_err(|error| refused(&error))?;
                 if let Some(generation) = turn {
                     if let Some(live) = registry().live.get_mut(&generation) {
                         live.outcomes.push(outcome.clone());
@@ -428,6 +1068,7 @@ mod tests {
             agent: "claude".into(),
             state: "blocked".into(),
             state_source: "provider".into(),
+            screen_readable: true,
             state_since_ms: None,
             screen_changed_at_ms: None,
             pending_prompt: Some(PendingPrompt {
@@ -684,6 +1325,537 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(refused.code, "SUPERVISOR_SESSIONS_UNAVAILABLE");
+    }
+
+    /// The owner text plus the trailer `converse` registers mentions from round-trips into the
+    /// addressed sessions; text without the trailer addresses none.
+    #[test]
+    fn addressed_sessions_read_back_the_trailer_turn_message_adds() {
+        let refs = vec![SessionRef::new("host-a", "pty-1")];
+        let message = crate::supervisor::transcript::turn_message("do it", &refs);
+        assert_eq!(
+            crate::supervisor::transcript::addressed_sessions(&message),
+            refs
+        );
+        assert!(crate::supervisor::transcript::addressed_sessions("do it").is_empty());
+    }
+
+    fn handover_turn_seeded(owner_text: &str, mentions: Vec<SessionRef>) -> AppTurnGuard {
+        AppTurnGuard::begin_with_mentions("req-handover", owner_text, mentions)
+    }
+
+    #[tokio::test]
+    async fn one_addressed_session_is_handed_over_as_one_observed_goal() {
+        let pool = many_project_pool().await;
+        let mention = SessionRef::new("host-a", "pty-h1");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/pane/src/deep"),
+        );
+        let turn = handover_turn_seeded("이 세션 맡아", vec![mention.clone()]);
+        let value = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(goals(&pool).await, 1);
+        let (host_id, session_id, run_state, source): (String, String, String, String) = sqlx::query_as(
+            "SELECT b.host_id, b.provider_session_id, g.run_state, r.source_message_id
+               FROM supervisor_goals g
+               JOIN supervisor_execution_bindings b ON b.goal_id = g.goal_id
+               JOIN supervisor_requests r ON r.goal_id = g.goal_id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(host_id, "host-a");
+        assert_eq!(session_id, "pty-h1");
+        assert_eq!(run_state, "running");
+        assert_eq!(
+            source,
+            crate::supervisor::handover::handover_source_id("host-a", "pty-h1")
+        );
+        // The reply names the goal it admitted.
+        let reply = value["reason"].as_str().unwrap();
+        let goal_id: String = sqlx::query_scalar("SELECT goal_id FROM supervisor_goals")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(reply.contains(&goal_id), "reply {reply:?} names no goal");
+    }
+
+    #[tokio::test]
+    async fn two_addressed_sessions_are_refused_and_admit_nothing() {
+        let pool = many_project_pool().await;
+        let first = SessionRef::new("host-a", "pty-h1");
+        let second = SessionRef::new("host-a", "pty-h2");
+        let mut fleet = fleet_with(first.clone(), "host-a", "/home/owner/code/pane");
+        fleet.extend(fleet_with(second.clone(), "host-a", "/home/owner/code/pane"));
+        let tools = tools_with_fleet(&pool, fleet);
+        let turn = handover_turn_seeded("take this session", vec![first, second]);
+        let value = tools.handle(app(Some(turn.token()), submit())).await.unwrap();
+        assert_eq!(value["outcome"], json!("needs_choice"));
+        assert_eq!(value["missing"], json!("session"));
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// The ownership loop's pause key of one goal, as the pass reads it.
+    async fn pause_key(pool: &SqlitePool, goal_id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT value FROM hub_meta WHERE key = ?")
+            .bind(format!(
+                "{}{goal_id}",
+                crate::supervisor::ownership::PAUSE_KEY_PREFIX
+            ))
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The owner's own words pause and resume the loop of the session they addressed, next to
+    /// the handover that made it the supervisor's: no second goal, nothing typed into a pane.
+    #[tokio::test]
+    async fn the_owner_pauses_and_resumes_an_owned_session_in_chat() {
+        let pool = many_project_pool().await;
+        let mention = SessionRef::new("host-a", "pty-h1");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/pane/src/deep"),
+        );
+        let handed = handover_turn_seeded("이 세션 맡아", vec![mention.clone()]);
+        tools
+            .handle(app(Some(handed.token()), submit()))
+            .await
+            .unwrap();
+        let goal_id: String = sqlx::query_scalar("SELECT goal_id FROM supervisor_goals")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(pause_key(&pool, &goal_id).await, None, "a fresh goal runs");
+
+        let paused = AppTurnGuard::begin_with_mentions(
+            "req-pause",
+            "이 세션 멈춰",
+            vec![mention.clone()],
+        );
+        let value = tools
+            .handle(app(Some(paused.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(pause_key(&pool, &goal_id).await.as_deref(), Some("1"));
+        let reply = value["reason"].as_str().unwrap();
+        assert!(reply.contains(&goal_id), "reply {reply:?} names no goal");
+
+        let resumed = AppTurnGuard::begin_with_mentions(
+            "req-resume",
+            "resume this session",
+            vec![mention],
+        );
+        tools
+            .handle(app(Some(resumed.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(pause_key(&pool, &goal_id).await, None);
+        assert_eq!(goals(&pool).await, 1, "pausing never admits a second goal");
+    }
+
+    /// A session no goal is bound to has no loop to pause: the request is refused, and so is one
+    /// that names no session or several.
+    #[tokio::test]
+    async fn pausing_an_unowned_session_is_refused() {
+        let pool = many_project_pool().await;
+        let mention = SessionRef::new("host-a", "pty-unowned");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/pane"),
+        );
+
+        let unowned = AppTurnGuard::begin_with_mentions(
+            "req-pause-unowned",
+            "pause this session",
+            vec![mention.clone()],
+        );
+        let refused = tools
+            .handle(app(Some(unowned.token()), submit()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, "SUPERVISOR_SESSION_NOT_OWNED");
+
+        for (text, mentions) in [
+            ("pause this session", Vec::new()),
+            (
+                "pause this session",
+                vec![mention.clone(), SessionRef::new("host-a", "pty-unowned-2")],
+            ),
+        ] {
+            let none = AppTurnGuard::begin_with_mentions("req-none", text, mentions);
+            let value = tools
+                .handle(app(Some(none.token()), submit()))
+                .await
+                .unwrap();
+            assert_eq!(value["outcome"], json!("needs_choice"));
+            assert_eq!(value["missing"], json!("session"));
+        }
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    #[test]
+    fn a_name_matches_only_as_a_whole_word_and_a_repo_basename_drops_its_git_suffix() {
+        assert!(names_word("ferryx", "ferryx에서 README 오타 고쳐줘"));
+        assert!(names_word("ferryx", "FERRYX: fix the typo"));
+        assert!(names_word("ferryx", "fix ferryx, please"));
+        assert!(!names_word("ferryx", "fix ferryxhub"));
+        assert!(!names_word("app", "the happy path"));
+        assert!(!names_word("", "anything"));
+        assert_eq!(repo_basename("github.com/example/ferryx"), "ferryx");
+        assert_eq!(repo_basename("github.com/example/ferryx.git"), "ferryx");
+        assert_eq!(repo_basename("github.com/example/ferryx/"), "ferryx");
+        assert_eq!(repo_basename("ferryx"), "ferryx");
+    }
+
+    /// Three projects on two hosts, so a rule that guesses shows up as a wrong goal.
+    async fn many_project_pool() -> SqlitePool {
+        let pool = crate::storage::memory().await.unwrap();
+        let identity = ensure_identity(&pool, OWNER).await.unwrap();
+        for (name, repo) in [
+            ("ferryx", "github.com/example/ferryx"),
+            ("other", "github.com/example/other"),
+            ("pane", "github.com/example/pane"),
+        ] {
+            let project = create_project(&pool, &identity.supervisor_id, name, repo)
+                .await
+                .unwrap();
+            bind_project_host(
+                &pool,
+                &project.project_id,
+                "host-a",
+                &format!("/home/owner/code/{name}/.git"),
+            )
+            .await
+            .unwrap();
+        }
+        pool
+    }
+
+    fn project_id_of<'a>(projects: &'a [(String, String)], name: &str) -> &'a str {
+        &projects
+            .iter()
+            .find(|(_, project_name)| project_name == name)
+            .unwrap()
+            .0
+    }
+
+    async fn projects(pool: &SqlitePool) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT project_id, name FROM supervisor_projects ORDER BY name")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn goal_target(pool: &SqlitePool) -> (String, String) {
+        sqlx::query_as(
+            "SELECT g.project_id, b.host_id FROM supervisor_goals g
+               JOIN supervisor_execution_bindings b ON b.goal_id = g.goal_id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    fn fleet_with(session_ref: SessionRef, host_id: &str, cwd: &str) -> Vec<FleetSession> {
+        let mut session = fleet_session();
+        session.session_ref = session_ref;
+        session.host_id = host_id.to_owned();
+        session.cwd = cwd.to_owned();
+        vec![session]
+    }
+
+    fn tools_with_fleet(pool: &SqlitePool, fleet: Vec<FleetSession>) -> AppWorkTools {
+        let sessions =
+            SessionTools::new(Arc::new(FakeControl::default()), Arc::new(FakeFleet(fleet)));
+        AppWorkTools::new(pool.clone()).with_sessions(Arc::new(sessions))
+    }
+
+    /// Rule 1: the project of the first @mentioned session's cwd on that session's host, and its
+    /// single host — even when the owner's message names no project at all.
+    #[tokio::test]
+    async fn a_mentioned_sessions_cwd_names_the_project_and_its_host() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let mention = SessionRef::new("host-a", "pty-1");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/other/src/deep"),
+        );
+        let turn = AppTurnGuard::begin_with_mentions("req-m1", WORK, vec![mention]);
+
+        tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        let (project_id, host_id) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "other"));
+        assert_eq!(host_id, "host-a");
+    }
+
+    /// Rule 1 wins over rule 2: the mentioned session's cwd decides even when the owner's text
+    /// names another project.
+    #[tokio::test]
+    async fn a_mentioned_session_outranks_a_project_name_in_the_message() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let mention = SessionRef::new("host-a", "pty-1");
+        let tools = tools_with_fleet(
+            &pool,
+            fleet_with(mention.clone(), "host-a", "/home/owner/code/pane"),
+        );
+        let turn = AppTurnGuard::begin_with_mentions("req-m2", WORK, vec![mention]);
+
+        tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        let (project_id, _) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "pane"));
+    }
+
+    /// Rule 2: a unique project name in the owner's message, whole-word and case-insensitive,
+    /// as in the plan's Korean example.
+    #[tokio::test]
+    async fn a_unique_project_name_in_the_owner_message_decides_the_project() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-n1", "FERRYX에서 README 오타 고쳐줘");
+
+        tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        let (project_id, host_id) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "ferryx"));
+        assert_eq!(host_id, "host-a");
+    }
+
+    /// The proposal title participates in the match, not only the owner's message.
+    #[tokio::test]
+    async fn the_proposal_title_also_names_the_project() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-n2", WORK);
+        let titled = WorkToolCall::Submit {
+            title: "Fix the typo in pane's README".into(),
+            requirements: vec!["the typo is fixed".into()],
+            worker: WorkerPreference::Any,
+        };
+
+        tools.handle(app(Some(turn.token()), titled)).await.unwrap();
+
+        let (project_id, _) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "pane"));
+    }
+
+    /// Two projects named in one message are refused, never guessed: nothing is persisted and
+    /// admission holds the goal for the owner to pick.
+    #[tokio::test]
+    async fn two_matching_projects_are_refused_and_the_owner_picks() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-n3", "fix ferryx and pane");
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// A project name that only occurs inside a longer word names nothing: with several
+    /// projects and no other hint, the owner still has to pick.
+    #[tokio::test]
+    async fn a_name_inside_another_word_names_no_project() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-n4", "fix the ferryxhub typo");
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// A project on two hosts has no single host, so the host stays unresolved and admission
+    /// asks the owner instead of picking one.
+    #[tokio::test]
+    async fn a_project_on_two_hosts_names_no_host() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let ferryx = project_id_of(&projects, "ferryx").to_owned();
+        bind_project_host(&pool, &ferryx, "host-b", "/srv/ferryx/.git")
+            .await
+            .unwrap();
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-h1", "fix the ferryx README");
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "host");
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// Rule 4: a `needs_choice` for the project lists the project names, so the owner can answer
+    /// with one.
+    #[tokio::test]
+    async fn a_project_choice_lists_the_project_names() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-c1", "고쳐줘");
+
+        let outcome = tools
+            .handle(app(Some(turn.token()), submit()))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+        let detail = outcome["detail"].as_str().unwrap();
+        for name in ["ferryx", "other", "pane"] {
+            assert!(detail.contains(name), "{detail} does not list {name}");
+        }
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// Rules 3 and 4 together, the plan's failure-then-success scenario: no name is asked for by
+    /// listing the names, and the next message naming exactly one project creates the goal.
+    #[tokio::test]
+    async fn the_project_named_in_answer_to_the_question_is_admitted() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+
+        let asked = AppTurnGuard::begin("req-c2", "고쳐줘");
+        let outcome = tools
+            .handle(app(Some(asked.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(outcome["missing"], "project");
+        assert_eq!(goals(&pool).await, 0);
+
+        let answer = AppTurnGuard::begin("req-c3", "ferryx");
+        let admitted = tools
+            .handle(app(Some(answer.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(admitted["outcome"], "admitted");
+
+        let (project_id, host_id) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "ferryx"));
+        assert_eq!(host_id, "host-a");
+        assert_eq!(goals(&pool).await, 1);
+    }
+
+    /// Rule 3 answers the supervisor's own question: the owner's message alone decides, so a
+    /// proposal title naming a second project cannot turn a one-name answer into a refusal.
+    #[tokio::test]
+    async fn an_answer_to_the_question_ignores_the_proposal_title() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let tools = AppWorkTools::new(pool.clone());
+        let asked = AppTurnGuard::begin("req-c4", "고쳐줘");
+        tools
+            .handle(app(Some(asked.token()), submit()))
+            .await
+            .unwrap();
+
+        let answer = AppTurnGuard::begin("req-c5", "ferryx");
+        let titled = WorkToolCall::Submit {
+            title: "Fix the typo in pane's README".into(),
+            requirements: vec!["the typo is fixed".into()],
+            worker: WorkerPreference::Any,
+        };
+
+        tools.handle(app(Some(answer.token()), titled)).await.unwrap();
+
+        let (project_id, _) = goal_target(&pool).await;
+        assert_eq!(project_id, project_id_of(&projects, "ferryx"));
+    }
+
+    /// Rule 3 is conditional: without the earlier question, the same message and title name two
+    /// projects and are refused, never guessed.
+    #[tokio::test]
+    async fn without_a_question_the_same_title_still_names_two_projects() {
+        let pool = many_project_pool().await;
+        let tools = AppWorkTools::new(pool.clone());
+        let turn = AppTurnGuard::begin("req-c6", "ferryx");
+        let titled = WorkToolCall::Submit {
+            title: "Fix the typo in pane's README".into(),
+            requirements: vec!["the typo is fixed".into()],
+            worker: WorkerPreference::Any,
+        };
+
+        let outcome = tools.handle(app(Some(turn.token()), titled)).await.unwrap();
+
+        assert_eq!(outcome["outcome"], "needs_choice");
+        assert_eq!(outcome["missing"], "project");
+        assert_eq!(goals(&pool).await, 0);
+    }
+
+    /// The project question the owner currently owes, if any.
+    async fn asked_project(pool: &SqlitePool) -> Option<String> {
+        super::project_question(pool, OWNER).await.unwrap()
+    }
+
+    /// The question stands only while the owner owes a project: the next turn records its own
+    /// answer, so an admitted goal clears it, and a question about the host never sets it.
+    #[tokio::test]
+    async fn only_a_project_question_arms_the_next_answer() {
+        let pool = many_project_pool().await;
+        let projects = projects(&pool).await;
+        let ferryx = project_id_of(&projects, "ferryx").to_owned();
+        let tools = AppWorkTools::new(pool.clone());
+        assert_eq!(asked_project(&pool).await, None);
+
+        // A host question is not a project question.
+        bind_project_host(&pool, &ferryx, "host-b", "/srv/ferryx/.git")
+            .await
+            .unwrap();
+        let host = AppTurnGuard::begin("req-c7", "fix the ferryx README");
+        let outcome = tools
+            .handle(app(Some(host.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(outcome["missing"], "host");
+        assert_eq!(asked_project(&pool).await, None);
+
+        // A project question is, and it names the turn that asked.
+        let asked = AppTurnGuard::begin("req-c8", "고쳐줘");
+        tools
+            .handle(app(Some(asked.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(asked_project(&pool).await.as_deref(), Some("app:req-c8"));
+
+        // The turn that answers it records its own outcome instead.
+        let answer = AppTurnGuard::begin("req-c9", "other");
+        let admitted = tools
+            .handle(app(Some(answer.token()), submit()))
+            .await
+            .unwrap();
+        assert_eq!(admitted["outcome"], "admitted");
+        assert_eq!(asked_project(&pool).await, None);
     }
 
     #[derive(Default)]

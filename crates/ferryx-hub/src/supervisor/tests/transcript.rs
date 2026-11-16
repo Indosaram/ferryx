@@ -4,7 +4,7 @@
 //! plain-language "retry every 5 min" rule change. The engine is a fake that counts its turns
 //! and, when gated, parks inside the turn until the test releases it; nothing waits on time.
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -14,12 +14,14 @@ use tokio::sync::Notify;
 use crate::error::Result as HubResult;
 use crate::meta::mhc_fault::SupervisorFault;
 use crate::meta::mhc_profile::ConversationScope;
+use crate::meta::mhc_supervisor::{IngestOutcome, MemoryRequestError, OwnerMemory};
 use crate::supervisor::panel_contract::{EvidenceRef, RuleKind, RuleScope, RuleStore, StandingRule};
-use crate::supervisor::request::RequestFailure;
+use crate::supervisor::request::{RequestContext, RequestFailure};
 use crate::supervisor::transcript::{
     append, app_scope, by_request, converse, page, store_report, AppConversation, Converse,
     ConverseInput, Flights, Role, REPORT_PREFIX,
 };
+use crate::supervisor::ChannelProvider;
 
 struct FakeEngine {
     reply: Result<String, SupervisorFault>,
@@ -123,6 +125,7 @@ async fn converse_at(
             flights: &flights,
             now: &now,
             changed: &changed,
+            learning: None,
         },
         input,
     )
@@ -145,6 +148,7 @@ fn ctx<'a>(
         flights,
         now: NOW,
         changed: NOTHING,
+        learning: None,
     }
 }
 
@@ -535,4 +539,169 @@ async fn text_that_is_not_a_rule_change_or_addresses_sessions_goes_to_the_engine
     assert_eq!(engine.turns().len(), 2);
     assert_eq!(done["reply"]["evidence"], serde_json::json!([]));
     assert!(rules.list().await.unwrap().is_empty());
+}
+
+/// Owner memory as the app chat reaches it: records every ingest and notifies once per one.
+#[derive(Default)]
+struct FakeOwnerMemory {
+    ingests: Mutex<Vec<(String, String)>>,
+    ingested: Notify,
+}
+
+impl FakeOwnerMemory {
+    fn ingests(&self) -> Vec<(String, String)> {
+        self.ingests.lock().unwrap().clone()
+    }
+
+    /// Waits until `count` ingests arrived, without waiting on time to pass.
+    async fn wait_for(&self, count: usize) -> Vec<(String, String)> {
+        loop {
+            let notified = self.ingested.notified();
+            if self.ingests().len() >= count {
+                return self.ingests();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(10), notified)
+                .await
+                .expect("the ingest never arrived");
+        }
+    }
+}
+
+#[async_trait]
+impl OwnerMemory for FakeOwnerMemory {
+    async fn memory_request(&self, name: &str, _data: Value) -> Result<Value, MemoryRequestError> {
+        Err(MemoryRequestError::Refused {
+            code: "unsupported".into(),
+            message: name.into(),
+        })
+    }
+
+    async fn ingest_owner_text(
+        &self,
+        source_message_id: &str,
+        text: &str,
+    ) -> Result<IngestOutcome, SupervisorFault> {
+        self.ingests
+            .lock()
+            .unwrap()
+            .push((source_message_id.to_owned(), text.to_owned()));
+        self.ingested.notify_one();
+        Ok(IngestOutcome::Learned {
+            reply: "noted".into(),
+        })
+    }
+}
+
+const OWNER: &str = "desktop:owner";
+
+/// A pool with this installation's owner provisioned, plus the memory the app chat teaches.
+async fn learn_fixture() -> (SqlitePool, Arc<FakeOwnerMemory>) {
+    let pool = crate::storage::memory().await.unwrap();
+    crate::supervisor::ensure_identity(&pool, OWNER).await.unwrap();
+    (pool, Arc::new(FakeOwnerMemory::default()))
+}
+
+/// The learning context of an app chat turn, as the daemon builds it for `caller`.
+fn learning_context(
+    owner: &str,
+    adapter: ChannelProvider,
+    memory: &Arc<FakeOwnerMemory>,
+) -> RequestContext {
+    RequestContext {
+        principal: owner.to_owned(),
+        adapter,
+        channel_binding_id: None,
+        control: None,
+        memory: Some(Arc::clone(memory) as Arc<dyn OwnerMemory>),
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_owner_app_turn_is_learned_once_and_a_replay_learns_nothing() {
+    let (pool, memory) = learn_fixture().await;
+    let engine = FakeEngine::replying("noted");
+    let flights = Flights::default();
+    let learning = learning_context(OWNER, ChannelProvider::Desktop, &memory);
+    let context = Converse {
+        learning: Some(&learning),
+        ..ctx(&pool, &engine, None, &flights)
+    };
+
+    let done = converse(&context, &input("앞으로 커밋 메시지는 영어로", "req-1")).await.unwrap();
+
+    let ingests = memory.wait_for(1).await;
+    assert_eq!(
+        ingests,
+        vec![(
+            "desktop:req-1".to_owned(),
+            "앞으로 커밋 메시지는 영어로".to_owned()
+        )]
+    );
+    assert_eq!(done["learning"]["state"], "queued");
+    assert_eq!(done["learning"]["sourceId"], "desktop:req-1");
+
+    // The same request id is the same source: nothing is learned twice.
+    let again = converse(&context, &input("앞으로 커밋 메시지는 영어로", "req-1")).await.unwrap();
+    assert_eq!(again["replayed"], true);
+    assert!(again.get("learning").is_none());
+    assert_eq!(memory.ingests().len(), 1);
+}
+
+#[tokio::test]
+async fn a_phone_app_turn_is_learned_as_the_phone_surface() {
+    let (pool, memory) = learn_fixture().await;
+    let engine = FakeEngine::replying("noted");
+    let flights = Flights::default();
+    let learning = learning_context(OWNER, ChannelProvider::Phone, &memory);
+    let context = Converse {
+        learning: Some(&learning),
+        ..ctx(&pool, &engine, None, &flights)
+    };
+
+    converse(&context, &input("prefers small commits", "req-1")).await.unwrap();
+
+    let ingests = memory.wait_for(1).await;
+    assert_eq!(ingests, vec![("phone:req-1".to_owned(), "prefers small commits".to_owned())]);
+}
+
+#[tokio::test]
+async fn mention_instruction_and_rule_change_turns_teach_nothing() {
+    let (pool, memory) = learn_fixture().await;
+    let engine = FakeEngine::replying("ok");
+    let rules = FakeRules::default();
+    let flights = Flights::default();
+    let learning = learning_context(OWNER, ChannelProvider::Desktop, &memory);
+    let context = Converse {
+        learning: Some(&learning),
+        ..ctx(&pool, &engine, Some(&rules), &flights)
+    };
+
+    let mut mentioned = input("stop the build", "req-mention");
+    mentioned.mentions = vec!["host-a:pty-1".into()];
+    let ordered = converse(&context, &mentioned).await.unwrap();
+    let ruled = converse(&context, &input("retry every 5 min", "req-rule")).await.unwrap();
+
+    // The answer carries `learning` only when this turn queued an ingest, so its absence is
+    // the proof: neither the @-instruction nor the rule change reached owner memory.
+    assert!(ordered.get("learning").is_none());
+    assert!(ruled.get("learning").is_none());
+
+    // A plain turn on the same context does, and it is the only thing learned.
+    converse(&context, &input("prefers squash merges", "req-plain")).await.unwrap();
+    let ingests = memory.wait_for(1).await;
+    assert_eq!(ingests, vec![("desktop:req-plain".to_owned(), "prefers squash merges".to_owned())]);
+}
+
+#[tokio::test]
+async fn without_a_learning_context_nothing_is_learned() {
+    let (pool, memory) = learn_fixture().await;
+    let engine = FakeEngine::replying("ok");
+    let flights = Flights::default();
+
+    let done = converse(&ctx(&pool, &engine, None, &flights), &input("hello", "req-1"))
+        .await
+        .unwrap();
+
+    assert!(done.get("learning").is_none());
+    assert!(memory.ingests().is_empty());
 }

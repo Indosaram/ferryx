@@ -14,6 +14,38 @@ fn claude_active_branch_excludes_abandoned_sibling() {
     let messages = h.read(&p.items[0].entry_key,None,100).unwrap().items;
     assert_eq!(messages.iter().map(|m|m.id.as_deref().unwrap()).collect::<Vec<_>>(),vec!["a","c"]);
 }
+/// Real Claude files chain messages through attachment and system records, so the active
+/// branch walk must follow every record's uuid. Typed turns in both content shapes are read;
+/// a tool_result-only user record and a meta (skill body) record are not turns.
+#[test]
+fn claude_turns_chained_through_attachment_and_system_records_are_read() {
+    let root = tempfile::tempdir().unwrap(); let cwd = root.path().to_string_lossy().into_owned();
+    let session = "63ba88ec-b3cb-4a70-8a32-f5d1ad07e749";
+    let rec = |kind: &str, id: &str, parent: Option<&str>, extra: serde_json::Value| {
+        let mut v = json!({"type":kind,"uuid":id,"parentUuid":parent,"sessionId":session,"cwd":cwd,"version":"2.1.251"});
+        v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        format!("{v}\n")
+    };
+    let text = [
+        format!("{}\n", json!({"type":"file-history-snapshot","messageId":"x"})),
+        rec("user","u1",None,json!({"message":{"role":"user","content":"typed-string-sentinel"}})),
+        rec("attachment","a1",Some("u1"),json!({"attachment":{"type":"todo"}})),
+        rec("assistant","m1",Some("a1"),json!({"message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]}})),
+        rec("system","s1",Some("m1"),json!({"subtype":"informational"})),
+        rec("user","u2",Some("s1"),json!({"isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill"}]}})),
+        rec("user","u3",Some("u2"),json!({"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"tool output"}]}})),
+        rec("user","u4",Some("u3"),json!({"message":{"role":"user","content":[{"type":"text","text":"typed-array-sentinel"}]}})),
+        rec("attachment","a2",Some("u4"),json!({"attachment":{"type":"todo"}})),
+        rec("assistant","m2",Some("a2"),json!({"message":{"role":"assistant","content":[{"type":"text","text":"last answer"}]}})),
+        format!("{}\n", json!({"type":"last-prompt","sessionId":session})),
+    ].concat();
+    fs::write(root.path().join("claude.jsonl"),text).unwrap();
+    let mut h = History::new(vec![(CanonicalProvider::Claude,root.path().into())]);
+    let p = h.search("claude",None,"typed-string-sentinel",None,100).unwrap(); assert_eq!(p.items.len(),1);
+    let messages = h.read(&p.items[0].entry_key,None,100).unwrap().items;
+    let read: Vec<_> = messages.iter().map(|m| (m.ordinal,m.role.as_str(),m.text.as_str())).collect();
+    assert_eq!(read, vec![(1,"user","typed-string-sentinel"),(3,"assistant","first answer"),(7,"user","typed-array-sentinel"),(9,"assistant","last answer")]);
+}
 fn fixture() -> (tempfile::TempDir,History) {
     let root = tempfile::tempdir().unwrap();
     let header = json!({"type":"session_meta","payload":{"id":"019ec598-c800-7000-8000-000000000001","cwd":root.path(),"cli_version":"0.153.2"}});

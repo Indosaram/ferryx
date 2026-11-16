@@ -276,19 +276,27 @@ fn parse(provider: CanonicalProvider, bytes: &[u8]) -> Result<(Entry,Vec<Message
             }
         }
         let message = match provider {CanonicalProvider::Codex if kind == "response_item" && v["payload"]["type"] == "message" => Some(&v["payload"]), CanonicalProvider::Claude if kind == "user" || kind == "assistant" => Some(&v["message"]), _ => None};
+        // Claude chains its messages through every record type: an attachment, system or
+        // progress record can sit between a message and its parent, so each uuid-bearing
+        // record is part of the ancestry, not only user and assistant messages.
+        if provider == CanonicalProvider::Claude {
+            let id = field(&v,"uuid").or_else(|| message.and_then(|m| field(m,"id")));
+            if message.is_some() || id.is_some() { claude_ancestry.push((ordinal, id, field(&v,"parentUuid"), message.is_some())); }
+        }
         if let Some(m) = message {
-            if provider == CanonicalProvider::Claude {
-                claude_ancestry.push((ordinal, field(&v,"uuid").or_else(||field(m,"id")), field(&v,"parentUuid")));
-            }
+            // A meta record (a skill body, a command expansion) is harness-written, not a turn.
+            let meta = provider == CanonicalProvider::Claude && v["isMeta"] == true;
             let text = content_text(&m["content"]);
-            if !text.is_empty() {messages.push(Message {ordinal, role: field(m,"role").unwrap_or_else(||kind.into()), text, id: field(&v,"uuid").or_else(||field(m,"id")), parent_id: field(&v,"parentUuid")});}
+            if !text.is_empty() && !meta {messages.push(Message {ordinal, role: field(m,"role").unwrap_or_else(||kind.into()), text, id: field(&v,"uuid").or_else(||field(m,"id")), parent_id: field(&v,"parentUuid")});}
         }
     }
     // The latest Claude message selects the active branch. Walk only earlier
     // records, including textless messages, without renumbering source ordinals.
-    if let Some((ordinal, _, mut parent)) = claude_ancestry.pop() {
+    if let Some(leaf) = claude_ancestry.iter().rposition(|record| record.3) {
+        let (ordinal, _, mut parent, _) = claude_ancestry[leaf].clone();
+        claude_ancestry.truncate(leaf);
         let mut active = std::collections::HashSet::from([ordinal]);
-        for (ordinal, id, ancestor) in claude_ancestry.into_iter().rev() {
+        for (ordinal, id, ancestor, _) in claude_ancestry.into_iter().rev() {
             if parent.is_none() { break; }
             if id == parent { active.insert(ordinal); parent = ancestor; }
         }

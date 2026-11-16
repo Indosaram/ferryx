@@ -431,8 +431,9 @@ async fn cut_over_on_ready<C, R, Fut>(
     }
 }
 
-/// Seeds owner memory when the owner opted in and no import finished yet. Returns whether
-/// seeding is settled: an import ran, or one had already finished.
+/// Seeds owner memory when the owner opted in and no import finished yet with the current
+/// session reader. Returns whether seeding is settled: an import ran, or one had already
+/// finished with that reader.
 async fn seed_if_wanted(
     engine: &ferryx_hub::meta::mhc_supervisor::MhcSupervisor,
     pool: &ferryx_hub::goals::SqlitePool,
@@ -446,8 +447,13 @@ async fn seed_if_wanted(
             return false;
         }
     };
-    if status.memory_import.last_at.is_some() {
-        return true;
+    match super::seed::seeded_with_current_reader(pool).await {
+        Ok(true) => return true,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(code = error.code(), "memory import state was not read for seeding");
+            return false;
+        }
     }
     let (Some(owner), true) = (status.owner, status.memory_import.enabled) else {
         return false;
@@ -727,6 +733,9 @@ fn print_human(value: &Value) {
     let text = |key: &str| value[key].as_str().unwrap_or("-").to_owned();
     println!("next action      {}", text("nextAction"));
     println!("engine           enabled={} installed={} state={}", value["engineEnabled"], value["engineInstalled"], text("engineState"));
+    if value["supervisorHealthy"] == false {
+        println!("engine calls     failing: the supervisor answers nothing until they recover");
+    }
     if let Some(fault) = value["engineFault"].as_object() {
         println!("engine fault     {} {}", fault["code"].as_str().unwrap_or(""), fault["message"].as_str().unwrap_or(""));
     }

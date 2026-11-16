@@ -559,6 +559,9 @@ pub async fn status_report_with(
         "running": live.running,
         "stopped_flag": stopped_flag,
         "healthy": problems.is_empty(),
+        // The supervisor engine's own health, apart from the hub process above: a degraded
+        // engine leaves `healthy` and `--check` alone and is named here.
+        "supervisorHealthy": setup.as_ref().is_none_or(|setup| setup.supervisor_healthy),
         "problems": problems,
         "warnings": warnings,
         "http": {"addr": live.http_addr, "bound": live.http_bound},
@@ -1071,8 +1074,69 @@ mod tests {
         crate::supervisor::cutover::cutover(&pool, ready.health.as_ref()).await.unwrap();
         let done = status_report_with(&pool, &live, &ready).await;
         assert_eq!(done["healthy"], true, "{done}");
+        assert_eq!(done["supervisorHealthy"], true, "{done}");
         assert_eq!(done["supervisor_setup"]["intake"], "unified");
         assert_eq!(done["supervisor_setup"]["engine_state"], "ready");
+    }
+
+    #[tokio::test]
+    async fn a_degraded_engine_is_named_beside_the_hub_health_not_inside_it() {
+        use crate::meta::mhc_supervisor::{HealthState, SupervisorHealth};
+        use crate::supervisor::setup::{EngineView, NextAction};
+        let pool = crate::storage::memory().await.unwrap();
+        clear_stopped(&pool).await.unwrap();
+        let live = LiveHub {
+            running: true,
+            http_addr: "127.0.0.1:9119".into(),
+            http_bound: true,
+            version: "test".into(),
+            ..LiveHub::default()
+        };
+        let ready = EngineView {
+            enabled: true,
+            installed: true,
+            health: Some(SupervisorHealth {
+                state: HealthState::Ready,
+                generation: 1,
+                pid: None,
+                capabilities: crate::meta::mhc_profile::REQUIRED_CAPABILITIES
+                    .iter()
+                    .map(|capability| (*capability).to_owned())
+                    .collect(),
+                server_version: None,
+                fault: None,
+                detail: None,
+                queued_decisions: 0,
+            }),
+        };
+        // Everything else about this hub is fine, so `healthy` and `--check` answer for it alone.
+        crate::supervisor::provision_identity(&pool, "local:owner").await.unwrap();
+        let healthy = status_report_with(&pool, &live, &ready).await;
+        assert_eq!(healthy["healthy"], true, "{healthy}");
+        assert_eq!(healthy["supervisorHealthy"], true, "{healthy}");
+
+        // The engine calls it records decide: three exits in a row are degraded, the hub
+        // process itself stays healthy and `--check` keeps passing.
+        for _ in 0..3 {
+            sqlx::query(
+                "INSERT INTO supervisor_model_calls(cause, role, prompt_bytes, outcome, ms, created_at)
+                 VALUES('qa','decision',12,'MHC_ENGINE_EXITED',1,?)",
+            )
+            .bind(crate::storage::now_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let degraded = status_report_with(&pool, &live, &ready).await;
+        assert_eq!(degraded["supervisorHealthy"], false, "{degraded}");
+        assert_eq!(degraded["healthy"], true, "{degraded}");
+        assert!(reply_healthy(&degraded.to_string()));
+        assert_eq!(degraded["supervisor_setup"]["engine_state"], "degraded");
+        assert_eq!(degraded["supervisor_setup"]["engine_fault"], "MHC_ENGINE_EXITED");
+        let setup = crate::supervisor::setup::setup_status(&pool, ready).await.unwrap();
+        assert!(!setup.supervisor_healthy);
+        // The step it was on is untouched: the failing calls only name the engine.
+        assert_eq!(setup.next_action, NextAction::MapProjects);
     }
 
     #[tokio::test]

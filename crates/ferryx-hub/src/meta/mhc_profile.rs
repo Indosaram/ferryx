@@ -121,10 +121,12 @@ pub const CONTEXT_MAX_TOTAL_BYTES: usize = 32 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MhcProfileConfig {
     pub binary: String,
-    /// Explicit provider/model policy. Both or neither are sent; the engine default applies
-    /// otherwise. Never changed at runtime.
-    pub provider: Option<String>,
-    pub model: Option<String>,
+    /// Provider/model of conversation sessions (the owner's own conversations). Never changed
+    /// at runtime; `None` leaves the engine default.
+    pub conversation_model: Option<(String, String)>,
+    /// Provider/model of every other role: owner ingest, decision and convergence. Never
+    /// changed at runtime; `None` leaves the engine default.
+    pub background_model: Option<(String, String)>,
     pub thinking_level: Option<String>,
     /// Tool names withheld from every supervisor session, [`DEFAULT_EFFECT_TOOLS`] included.
     pub effect_tools: Vec<String>,
@@ -159,8 +161,8 @@ impl Default for MhcProfileConfig {
     fn default() -> Self {
         Self {
             binary: DEFAULT_MHC_BIN.to_owned(),
-            provider: None,
-            model: None,
+            conversation_model: None,
+            background_model: None,
             thinking_level: None,
             effect_tools: DEFAULT_EFFECT_TOOLS
                 .iter()
@@ -178,6 +180,43 @@ fn env_text(key: &str, shared: &BTreeMap<String, String>) -> Option<String> {
         .or_else(|| shared.get(key).cloned())
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+/// `provider/model` split at the first `/`; `None` when either side is empty.
+fn split_model(value: &str) -> Option<(String, String)> {
+    let (provider, model) = value.trim().split_once('/')?;
+    let (provider, model) = (provider.trim(), model.trim());
+    (!provider.is_empty() && !model.is_empty()).then(|| (provider.to_owned(), model.to_owned()))
+}
+
+/// The explicit `provider_key` + `model_key` pair. Both or neither: a half-set pair is ignored
+/// with a warning.
+fn explicit_pair(
+    provider_key: &str,
+    model_key: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Option<(String, String)> {
+    match (lookup(provider_key), lookup(model_key)) {
+        (Some(provider), Some(model)) => Some((provider, model)),
+        (None, None) => None,
+        _ => {
+            tracing::warn!(
+                "{provider_key} and {model_key} must be set together; the pair was ignored"
+            );
+            None
+        }
+    }
+}
+
+/// `key` (`provider/model`) from `lookup`; a value without both parts is ignored with a
+/// warning.
+fn split_route(key: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Option<(String, String)> {
+    let value = lookup(key)?;
+    let route = split_model(&value);
+    if route.is_none() {
+        tracing::warn!(value = %value, "{key} is not provider/model; the supervisor engine ignored it");
+    }
+    route
 }
 
 /// 1/true/yes/on, any case, surrounding whitespace ignored.
@@ -225,9 +264,9 @@ impl MhcProfileConfig {
     /// disable (0/false/no/off) in this process's environment (`process`) wins over the file
     /// and keeps this process from launching the engine; the shared file still names mhc, so
     /// its judge holds as `MHC_NOT_RUNNING` instead of switching to another model. A process
-    /// value never turns the engine on. `FERRYX_HUB_MHC_BIN`,
-    /// `FERRYX_HUB_MHC_PROVIDER` + `FERRYX_HUB_MHC_MODEL`,
-    /// `FERRYX_HUB_MHC_THINKING` and `FERRYX_HUB_MHC_EFFECT_TOOLS` (extra comma-separated names)
+    /// value never turns the engine on. `FERRYX_HUB_MHC_BIN`, the per-role models of
+    /// [`Self::route_models`], `FERRYX_HUB_MHC_THINKING` and `FERRYX_HUB_MHC_EFFECT_TOOLS`
+    /// (extra comma-separated names)
     /// refine it for the owning daemon (this process's environment first, then `shared`).
     /// Without `FERRYX_HUB_MHC_BIN` the engine is the mhc bundled next to the running
     /// executable, else bare `mhc` on the hub child PATH
@@ -255,24 +294,31 @@ impl MhcProfileConfig {
             ),
             ..Self::default()
         };
-        match (
-            env_text("FERRYX_HUB_MHC_PROVIDER", shared),
-            env_text("FERRYX_HUB_MHC_MODEL", shared),
-        ) {
-            (Some(provider), Some(model)) => {
-                config.provider = Some(provider);
-                config.model = Some(model);
-            }
-            (None, None) => {}
-            _ => tracing::warn!(
-                "FERRYX_HUB_MHC_PROVIDER and FERRYX_HUB_MHC_MODEL must be set together; the engine default model applies"
-            ),
-        }
+        config.route_models(&|key: &str| env_text(key, shared));
         config.thinking_level = env_text("FERRYX_HUB_MHC_THINKING", shared);
         if let Some(extra) = env_text("FERRYX_HUB_MHC_EFFECT_TOOLS", shared) {
             config.add_effect_tools(&extra);
         }
         Some(config)
+    }
+
+    /// Resolves the model of each role from `lookup` (trimmed, non-empty values). Conversation:
+    /// `FERRYX_HUB_MHC_PROVIDER` + `FERRYX_HUB_MHC_MODEL`, else `OMON_DEFAULT_MODEL`. Owner
+    /// ingest, decision and convergence: `FERRYX_HUB_MHC_BACKGROUND_PROVIDER` +
+    /// `FERRYX_HUB_MHC_BACKGROUND_MODEL`, else `OMON_BACKGROUND_MODEL`
+    /// ([`crate::model_policy::background_model`]). Each explicit pair is both or neither: a
+    /// half-set pair is ignored with a warning and the `OMON_*` model applies. With neither,
+    /// the role runs on the engine default.
+    pub fn route_models(&mut self, lookup: &dyn Fn(&str) -> Option<String>) {
+        self.conversation_model =
+            explicit_pair("FERRYX_HUB_MHC_PROVIDER", "FERRYX_HUB_MHC_MODEL", lookup)
+                .or_else(|| split_route("OMON_DEFAULT_MODEL", lookup));
+        self.background_model = explicit_pair(
+            "FERRYX_HUB_MHC_BACKGROUND_PROVIDER",
+            "FERRYX_HUB_MHC_BACKGROUND_MODEL",
+            lookup,
+        )
+        .or_else(|| split_route("OMON_BACKGROUND_MODEL", lookup));
     }
 
     /// Adds valid comma-separated tool names; the defaults are never removed.
@@ -343,6 +389,9 @@ pub struct RoleSpec {
     pub durable: bool,
     /// Owner cancellation reaches it.
     pub cancellable: bool,
+    /// Provider/model the role's sessions open with and its answers must come from
+    /// ([`MhcProfile::model_for`]); `None` is the engine default.
+    pub model: Option<(String, String)>,
 }
 
 /// Paths and policy of the owned engine.
@@ -525,6 +574,17 @@ impl MhcProfile {
         }
     }
 
+    /// The provider/model a role runs on: conversations on the owner's conversation model,
+    /// every other role on the background model.
+    pub fn model_for(&self, role: &SessionRole) -> Option<(String, String)> {
+        match role {
+            SessionRole::Conversation(_) => self.config.conversation_model.clone(),
+            SessionRole::OwnerIngest | SessionRole::Decision(_) | SessionRole::Convergence => {
+                self.config.background_model.clone()
+            }
+        }
+    }
+
     fn effect_tools(&self) -> String {
         self.config.effect_tools.join(",")
     }
@@ -582,6 +642,7 @@ impl MhcProfile {
             context,
             durable,
             cancellable,
+            model: self.model_for(role),
         }
     }
 
@@ -604,7 +665,7 @@ impl MhcProfile {
         if let Some(path) = session_path {
             command["sessionPath"] = json!(path);
         }
-        if let (Some(provider), Some(model)) = (&self.config.provider, &self.config.model) {
+        if let Some((provider, model)) = &spec.model {
             command["provider"] = json!(provider);
             command["modelId"] = json!(model);
         }
@@ -799,5 +860,135 @@ impl SessionStore {
             return Err(error.into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn routed(entries: &[(&str, &str)]) -> MhcProfileConfig {
+        let env: BTreeMap<String, String> = entries
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let mut config = MhcProfileConfig::default();
+        config.route_models(&|key: &str| {
+            env.get(key)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        });
+        config
+    }
+
+    fn pair(provider: &str, model: &str) -> Option<(String, String)> {
+        Some((provider.to_owned(), model.to_owned()))
+    }
+
+    fn scope() -> SessionRole {
+        SessionRole::Conversation(ConversationScope {
+            project_id: None,
+            channel_key: "app:owner".to_owned(),
+        })
+    }
+
+    const BACKGROUND_ROLES: [SessionRole; 3] = [
+        SessionRole::OwnerIngest,
+        SessionRole::Decision(0),
+        SessionRole::Convergence,
+    ];
+
+    const OWNER_ENV: [(&str, &str); 2] = [
+        ("OMON_DEFAULT_MODEL", "mahoquot/claude-opus-5-5"),
+        ("OMON_BACKGROUND_MODEL", "mahoquot/gpt-6-luna"),
+    ];
+
+    fn profile(config: MhcProfileConfig) -> MhcProfile {
+        MhcProfile::resolve(Path::new("/data"), Path::new("/parent"), config)
+    }
+
+    #[test]
+    fn the_conversation_runs_on_the_owner_default_model_without_explicit_settings() {
+        let profile = profile(routed(&OWNER_ENV));
+        assert_eq!(
+            profile.model_for(&scope()),
+            pair("mahoquot", "claude-opus-5-5")
+        );
+        // Split at the first '/': the model id keeps any further slashes.
+        let nested = routed(&[("OMON_DEFAULT_MODEL", " router/vendor/model-x ")]);
+        assert_eq!(nested.conversation_model, pair("router", "vendor/model-x"));
+    }
+
+    #[test]
+    fn background_roles_run_on_the_background_model() {
+        let profile = profile(routed(&OWNER_ENV));
+        for role in &BACKGROUND_ROLES {
+            assert_eq!(
+                profile.model_for(role),
+                pair("mahoquot", "gpt-6-luna"),
+                "{role:?}"
+            );
+            let spec = profile.role_spec(role);
+            assert_eq!(spec.model, pair("mahoquot", "gpt-6-luna"), "{role:?}");
+            let command = profile.open_session_command(&spec, "id", None);
+            assert_eq!(command["provider"], json!("mahoquot"), "{role:?}");
+            assert_eq!(command["modelId"], json!("gpt-6-luna"), "{role:?}");
+        }
+        let command = profile.open_session_command(&profile.role_spec(&scope()), "id", None);
+        assert_eq!(command["provider"], json!("mahoquot"));
+        assert_eq!(command["modelId"], json!("claude-opus-5-5"));
+    }
+
+    #[test]
+    fn explicit_settings_override_the_owner_models_per_role() {
+        let mut env = OWNER_ENV.to_vec();
+        env.extend([
+            ("FERRYX_HUB_MHC_BACKGROUND_PROVIDER", "judge"),
+            ("FERRYX_HUB_MHC_BACKGROUND_MODEL", "small"),
+        ]);
+        let config = routed(&env);
+        assert_eq!(config.background_model, pair("judge", "small"));
+        assert_eq!(
+            config.conversation_model,
+            pair("mahoquot", "claude-opus-5-5")
+        );
+
+        env.extend([
+            ("FERRYX_HUB_MHC_PROVIDER", "owner"),
+            ("FERRYX_HUB_MHC_MODEL", "large"),
+        ]);
+        let config = routed(&env);
+        assert_eq!(config.conversation_model, pair("owner", "large"));
+        assert_eq!(config.background_model, pair("judge", "small"));
+    }
+
+    #[test]
+    fn a_half_set_pair_is_ignored_and_the_owner_model_applies() {
+        let mut env = OWNER_ENV.to_vec();
+        env.extend([
+            ("FERRYX_HUB_MHC_BACKGROUND_PROVIDER", "judge"),
+            ("FERRYX_HUB_MHC_MODEL", "large"),
+        ]);
+        let config = routed(&env);
+        assert_eq!(config.background_model, pair("mahoquot", "gpt-6-luna"));
+        assert_eq!(
+            config.conversation_model,
+            pair("mahoquot", "claude-opus-5-5")
+        );
+    }
+
+    #[test]
+    fn without_any_model_setting_every_role_uses_the_engine_default() {
+        let config = routed(&[
+            ("OMON_BACKGROUND_MODEL", "no-slash"),
+            ("OMON_DEFAULT_MODEL", " "),
+        ]);
+        assert_eq!(config.conversation_model, None);
+        assert_eq!(config.background_model, None);
+        let profile = profile(config);
+        for role in BACKGROUND_ROLES.iter().cloned().chain([scope()]) {
+            let command = profile.open_session_command(&profile.role_spec(&role), "id", None);
+            assert!(command.get("provider").is_none() && command.get("modelId").is_none());
+        }
     }
 }

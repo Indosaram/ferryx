@@ -239,6 +239,7 @@ mod tests {
             agent: "claude".into(),
             state: state.into(),
             state_source: source.into(),
+            screen_readable: true,
             state_since_ms: None,
             screen_changed_at_ms: screen_changed_ago_secs.map(|secs| NOW - secs * 1000),
             pending_prompt: None,

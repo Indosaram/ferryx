@@ -123,6 +123,11 @@ pub struct FleetSession {
     pub agent: String,
     pub state: String,
     pub state_source: String,
+    /// Whether the daemon could read this pane's screen. An unreadable screen is held, never
+    /// answered or guessed ([`crate::security::AutoDecision::Hold`]). Absent from older peers
+    /// and defaulted to false there: a reading that cannot be shown is never trusted.
+    #[serde(default)]
+    pub screen_readable: bool,
     pub state_since_ms: Option<i64>,
     pub screen_changed_at_ms: Option<i64>,
     pub pending_prompt: Option<PendingPrompt>,
@@ -507,6 +512,7 @@ mod tests {
             agent: "claude".into(),
             state: "blocked".into(),
             state_source: "provider".into(),
+            screen_readable: true,
             state_since_ms: Some(1_000),
             screen_changed_at_ms: None,
             pending_prompt: Some(PendingPrompt {
@@ -541,6 +547,7 @@ mod tests {
                 "agent": "claude",
                 "state": "blocked",
                 "stateSource": "provider",
+                "screenReadable": true,
                 "stateSinceMs": 1000,
                 "screenChangedAtMs": null,
                 "pendingPrompt": {

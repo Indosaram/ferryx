@@ -30,6 +30,7 @@ function fixtureStatus(next: SetupNextAction): SetupStatus {
     engineInstalled: true,
     engineState: next === "fix_engine" ? "degraded" : ready ? "ready" : next === "enable_engine" ? "absent" : "starting",
     engineFault: next === "fix_engine" ? { code: "MHC_CAPABILITY_MISSING", message: "The engine refused to start the supervisor profile." } : null,
+    supervisorHealthy: next !== "fix_engine",
     missingCapabilities: next === "fix_engine" ? ["memory_receipts", "memory_forget", "supervisor_work_tools", "effect_tools_deny"] : [],
     restartRequired: next === "restart_required",
     owner: ready ? { supervisorId: "sup-01", ownerPrincipal: "slack:T024BE7LD:U0G9QF9C6" } : null,
