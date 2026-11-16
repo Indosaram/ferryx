@@ -1,14 +1,19 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import * as tauriCore from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const native = vi.hoisted(() => ({
+  invoke: vi.fn(async () => undefined),
   setTerminalAppearance: vi.fn(),
   saveFile: vi.fn<(fileName: string, text: string) => Promise<string>>(),
   themeListeners: [] as Array<(event: { payload: string }) => void>,
 }));
+
+vi.mock("@tauri-apps/api/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tauri-apps/api/core")>();
+  return { ...actual, invoke: native.invoke };
+});
 
 vi.mock("../../lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/tauri")>();
@@ -166,6 +171,7 @@ describe("AppearanceSection live chat preview", () => {
   let stylesheet: HTMLStyleElement;
 
   beforeEach(() => {
+    native.invoke.mockClear();
     localStorage.clear();
     stubColorScheme(false);
     _resetNativeOsThemeForTest();
@@ -205,7 +211,6 @@ describe("AppearanceSection live chat preview", () => {
 
   it.each(["dark", "light"] as const)("switches the %s accent on the same preview node without IPC or sockets", async (theme) => {
     saveAppearanceSettings({ theme });
-    const invoke = vi.spyOn(tauriCore, "invoke");
     const fetch = vi.fn(() => { throw new Error("Daemon unreachable"); });
     const socket = vi.fn(function () { throw new Error("Daemon unreachable"); });
     vi.stubGlobal("fetch", fetch);
@@ -226,7 +231,7 @@ describe("AppearanceSection live chat preview", () => {
     const inherited = getComputedStyle(preview).getPropertyValue("--chat-primary").trim();
     if (inherited) expect(inherited).toBe(selected);
     expect(preview.style.getPropertyValue("--chat-primary")).toBe("");
-    expect(invoke).not.toHaveBeenCalled();
+    expect(native.invoke).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
     expect(socket).not.toHaveBeenCalled();
   });
