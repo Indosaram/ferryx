@@ -297,22 +297,27 @@ function luminance(value: string) {
 const accents: AppearanceAccent[] = ["default", "blue", "emerald", "purple", "amber", "rose"];
 const matrix = (["dark", "light"] as const).flatMap((theme) => accents.map((accentColor) => ({ theme, accentColor })));
 
+function injectPaletteStyles() {
+  // JSDOM cannot parse Tailwind directives. Retain actual top-level palette rules,
+  // selectors, declarations and cascade order; do not substitute fixture colours.
+  const palette = postcss.parse(source("./index.css"));
+  const rules: string[] = [];
+  palette.each((node) => {
+    if (node.type === "rule" && node.selector.startsWith(":root")) rules.push(node.toString());
+  });
+  return inject(rules.join("\n") + "\n" + source("./settings-runtime.css"));
+}
+
 describe("appearance AA contrast enforcement", () => {
   it.each(matrix)("measures semantic computed colour pairs for $theme / $accentColor", ({ theme, accentColor }) => {
-    // JSDOM cannot parse Tailwind directives. Retain actual top-level palette rules,
-    // selectors, declarations and cascade order; do not substitute fixture colours.
-    const palette = postcss.parse(source("./index.css"));
-    const rules: string[] = [];
-    palette.each((node) => {
-      if (node.type === "rule" && node.selector.startsWith(":root")) rules.push(node.toString());
-    });
-    const remove = inject(rules.join("\n") + "\n" + source("./settings-runtime.css"));
+    const remove = injectPaletteStyles();
     try {
       applyAppearanceSettings({ ...DEFAULT_APPEARANCE_SETTINGS, theme, accentColor });
       const computed = getComputedStyle(document.documentElement);
       for (const [foreground, background] of [
         ["--chat-primary-foreground", "--chat-primary"],
         ["--chat-foreground", "--chat-surface"],
+        ["--chat-foreground", "--chat-user-bubble"],
         // --chat-screen is the shipped canvas token (there is no --chat-background).
         ["--chat-foreground", "--chat-screen"],
       ]) {
@@ -325,6 +330,18 @@ describe("appearance AA contrast enforcement", () => {
         const ratio = (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
         expect(ratio, `${theme}/${accentColor}: ${foreground} (${fg}) on ${background} (${bg})`).toBeGreaterThanOrEqual(4.5);
       }
+    } finally { remove(); }
+  });
+
+  it.each(["dark", "light"] as const)("tints the user bubble per accent in %s", (theme) => {
+    const remove = injectPaletteStyles();
+    try {
+      const bubbles = accents.map((accentColor) => {
+        applyAppearanceSettings({ ...DEFAULT_APPEARANCE_SETTINGS, theme, accentColor });
+        return getComputedStyle(document.documentElement).getPropertyValue("--chat-user-bubble").trim();
+      });
+      expect(bubbles.every((value) => value !== "")).toBe(true);
+      expect(new Set(bubbles).size, `bubbles: ${bubbles.join(" ")}`).toBe(accents.length);
     } finally { remove(); }
   });
 

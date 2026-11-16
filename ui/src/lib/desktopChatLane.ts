@@ -364,7 +364,13 @@ export function useDesktopChat({
     const key = referenceTargetKey(t);
     if (attachingKeys.current.has(key)) return;
     const staging = fileStagingRef.current;
-    if (!staging?.capabilities.includes(DESKTOP_CHAT_FILE_CAPABILITY)) {
+    if (!staging) {
+      patch(key, (prev) => ({ ...prev, attachError: new ReferenceFileError(
+        "UNSUPPORTED", `Local chat has no file staging route yet; attach the file by path in the terminal instead.`,
+      ) }));
+      return;
+    }
+    if (!staging.capabilities.includes(DESKTOP_CHAT_FILE_CAPABILITY)) {
       patch(key, (prev) => ({ ...prev, attachError: new ReferenceFileError(
         "UNSUPPORTED", `This host does not advertise ${DESKTOP_CHAT_FILE_CAPABILITY}; files cannot be staged.`,
       ) }));

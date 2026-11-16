@@ -11,7 +11,7 @@ import type { ReferenceSubmitPayload } from "../remote/chat/referenceTypes";
 import type { TerminalSession } from "./types";
 
 let sequence = 0;
-function setup(capabilities: readonly string[] = [DESKTOP_CHAT_FILE_CAPABILITY]) {
+function setup(capabilities: readonly string[] | null = [DESKTOP_CHAT_FILE_CAPABILITY]) {
   sequence += 1;
   const session: TerminalSession = {
     id: `attachment-pane-${sequence}`, cwd: "/repo", workspaceId: "ws", worktree: null,
@@ -45,10 +45,12 @@ function setup(capabilities: readonly string[] = [DESKTOP_CHAT_FILE_CAPABILITY])
     displayName: payload.name,
     mentionText: "@notes.txt ",
   }));
-  const fileStaging: DesktopChatFileStaging = {
-    capabilities,
-    transport: { stage, cancel: vi.fn(async () => true), remove: vi.fn(async () => true) },
-  };
+  const fileStaging: DesktopChatFileStaging | undefined = capabilities === null
+    ? undefined
+    : {
+        capabilities,
+        transport: { stage, cancel: vi.fn(async () => true), remove: vi.fn(async () => true) },
+      };
   const hook = renderHook(() => useDesktopChat({
     session, identity: { hostId: "local" }, transport, visible: false, pollMs: 0, fileStaging,
   }));
@@ -83,6 +85,19 @@ describe("desktopChatLane staged file delivery", () => {
     expect(result.current.attachError).toBeInstanceOf(ReferenceFileError);
     expect(result.current.attachError?.code).toBe("UNSUPPORTED");
     expect(result.current.attachError?.message).toContain(DESKTOP_CHAT_FILE_CAPABILITY);
+    expect(result.current.draft).toBe("Read this");
+    expect(result.current.send(result.current.draft)).toBe(false);
+    expect(stage).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("refuses with an honest local-chat error when no file staging transport is supplied", async () => {
+    const { result, file, stage, submit } = setup(null);
+    act(() => result.current.setDraft("Read this"));
+    await act(async () => { await result.current.attachFiles([file], 9); });
+    expect(result.current.attachError).toBeInstanceOf(ReferenceFileError);
+    expect(result.current.attachError?.code).toBe("UNSUPPORTED");
+    expect(result.current.attachError?.message).toContain("no file staging route");
     expect(result.current.draft).toBe("Read this");
     expect(result.current.send(result.current.draft)).toBe(false);
     expect(stage).not.toHaveBeenCalled();

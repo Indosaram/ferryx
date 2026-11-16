@@ -405,3 +405,58 @@
 :root[data-density="comfortable"] {
   font-size: 17px;
 }
+
+/* The user bubble tints toward the active accent so chat follows the chrome, not only the
+   send control. "default" keeps the shipped neutral so the default palette stays
+   pixel-identical; each other value is that neutral mixed with the accent's primary, which
+   leaves --chat-foreground at 11.9:1 or better. */
+:root[data-accent="blue"] {
+  --chat-user-bubble: #1d293e;
+  --chat-user-bubble-rgb: 29 41 62;
+}
+
+:root[data-accent="emerald"] {
+  --chat-user-bubble: #153329;
+  --chat-user-bubble-rgb: 21 51 41;
+}
+
+:root[data-accent="purple"] {
+  --chat-user-bubble: #2b233e;
+  --chat-user-bubble-rgb: 43 35 62;
+}
+
+:root[data-accent="amber"] {
+  --chat-user-bubble: #3e2e14;
+  --chat-user-bubble-rgb: 62 46 20;
+}
+
+:root[data-accent="rose"] {
+  --chat-user-bubble: #3e1d23;
+  --chat-user-bubble-rgb: 62 29 35;
+}
+
+:root[data-theme="light"][data-accent="blue"] {
+  --chat-user-bubble: #c5cfe8;
+  --chat-user-bubble-rgb: 197 207 232;
+}
+
+:root[data-theme="light"][data-accent="emerald"] {
+  --chat-user-bubble: #c0d8d3;
+  --chat-user-bubble-rgb: 192 216 211;
+}
+
+:root[data-theme="light"][data-accent="purple"] {
+  --chat-user-bubble: #d3c9e8;
+  --chat-user-bubble-rgb: 211 201 232;
+}
+
+:root[data-theme="light"][data-accent="amber"] {
+  --chat-user-bubble: #dccdc3;
+  --chat-user-bubble-rgb: 220 205 195;
+}
+
+:root[data-theme="light"][data-accent="rose"] {
+  --chat-user-bubble: #dec2cc;
+  --chat-user-bubble-rgb: 222 194 204;
+}
+

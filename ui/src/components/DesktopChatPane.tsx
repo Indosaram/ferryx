@@ -63,8 +63,9 @@ export function DesktopChatPane({
       hidden={!visible}
       className={className ?? "flex h-full min-h-0 w-full flex-col"}
     >
+      {/* DesktopReferenceChatKind currently omits file staging; show attach only when a caller supplies fileStaging. */}
       <MobileChatWorkspace
-        showAttachments
+        showAttachments={fileStaging !== undefined}
         stagedFiles={lane.stagedFiles}
         onAttachFiles={(files, caret) => void lane.attachFiles(files, caret)}
         onRemoveStagedFile={(attachmentId) => void lane.removeStagedFile(attachmentId)}

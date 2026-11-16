@@ -8,6 +8,7 @@ import {
   type DesktopChatPromptRead,
   type DesktopChatResult,
 } from "../lib/desktopChat";
+import { DESKTOP_CHAT_FILE_CAPABILITY, type DesktopChatFileStaging } from "../lib/desktopChatLane";
 import type { ReferenceHistoryPage, ReferencePrompt } from "../remote/chat/referenceTypes";
 import type { TerminalSession } from "../lib/types";
 
@@ -201,5 +202,33 @@ describe("DesktopChatPane", () => {
     release(ok(page(["STALE_TURN"])));
     await waitFor(() => expect(screen.getByText("NEW_TARGET_TURN")).toBeInTheDocument());
     expect(screen.queryByText("STALE_TURN")).not.toBeInTheDocument();
+  });
+
+  it("omits the attachment control when no file staging transport is supplied, and renders it when supplied", async () => {
+    const h = handlers();
+    const transport = desktopChatTransportFrom(h);
+    const s = session();
+    const { rerender } = render(
+      <DesktopChatPane session={s} visible onViewTerminal={vi.fn()} transport={transport} identity={{ hostId: "local" }} pollMs={0} />,
+    );
+    await waitFor(() => expect(h.history).toHaveBeenCalled());
+    expect(screen.queryByTestId("attach-file-button")).not.toBeInTheDocument();
+
+    const fileStaging: DesktopChatFileStaging = {
+      capabilities: [DESKTOP_CHAT_FILE_CAPABILITY],
+      transport: {
+        stage: vi.fn(async () => ({
+          receipt: { hostId: "local", attachmentId: "att-1", sha256: "0".repeat(64), sizeBytes: 1, mediaType: "text/plain" },
+          displayName: "a.txt",
+          mentionText: "@a.txt ",
+        })),
+        cancel: vi.fn(async () => true),
+        remove: vi.fn(async () => true),
+      },
+    };
+    rerender(
+      <DesktopChatPane session={s} visible onViewTerminal={vi.fn()} transport={transport} identity={{ hostId: "local" }} pollMs={0} fileStaging={fileStaging} />,
+    );
+    expect(screen.getByTestId("attach-file-button")).toBeInTheDocument();
   });
 });
