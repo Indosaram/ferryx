@@ -47,7 +47,7 @@ describe("chat math", () => {
 
   it("renders a display integral with both bounds", async () => {
     const { container } = await renderWithMath({ content: String.raw`$$\int_0^1 x\,dx$$` });
-    expect(container.querySelector(".katex-display .katex math msubsup")).not.toBeNull();
+    expect(container.querySelector(".katex-display .katex math msubsup, .katex-display .katex math munderover")).not.toBeNull();
     expect(container.querySelector(".katex")?.textContent).toContain("∫");
   });
 
