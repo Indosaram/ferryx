@@ -46,6 +46,21 @@ import {
   type DesktopChatTransport,
 } from "./desktopChat";
 import type { TerminalSession } from "./types";
+import {
+  ReferenceFileError,
+  stageReferenceChatFile,
+  referenceMentionInsertion,
+  referenceMentionPathOf,
+  type ReferenceFileStagingTransport,
+} from "../remote/chat/referenceFiles";
+import type { ReferenceFileReceipt } from "../remote/chat/referenceTypes";
+
+/** Reuse the owning host's advertised upload capability and existing staging adapter. */
+export interface DesktopChatFileStaging {
+  readonly capabilities: readonly string[];
+  readonly transport: ReferenceFileStagingTransport;
+}
+export const DESKTOP_CHAT_FILE_CAPABILITY = "pairedPasteUploadV1";
 
 export const DESKTOP_CHAT_DEFAULT_POLL_MS = 2000;
 
@@ -57,9 +72,15 @@ export interface UseDesktopChatArgs {
   readonly visible: boolean;
   /** History/prompt poll while visible and not exited; 0 disables polling. */
   readonly pollMs?: number;
+  readonly fileStaging?: DesktopChatFileStaging;
 }
 
 export interface DesktopChatLane {
+  readonly stagedFiles: readonly ReferenceFileReceipt[];
+  readonly attaching: boolean;
+  readonly attachError: ReferenceFileError | null;
+  readonly attachFiles: (files: readonly File[], caret: number) => Promise<void>;
+  readonly removeStagedFile: (attachmentId: string) => Promise<void>;
   readonly target: ReferenceTargetRef | null;
   readonly exited: boolean;
   readonly messages: readonly MobileChatMessageProps[];
@@ -101,6 +122,9 @@ interface PendingEcho {
 
 interface LaneState {
   readonly key: string | null;
+  readonly stagedFiles: readonly ReferenceFileReceipt[];
+  readonly attaching: boolean;
+  readonly attachError: ReferenceFileError | null;
   readonly page: ReferenceHistoryPage | null;
   readonly older: readonly ReferenceTurn[];
   readonly olderCursor: ReferenceHistoryCursor | null;
@@ -119,6 +143,9 @@ interface LaneState {
 function emptyLane(key: string | null): LaneState {
   return {
     key,
+    stagedFiles: [],
+    attaching: false,
+    attachError: null,
     page: null,
     older: [],
     olderCursor: null,
@@ -156,6 +183,7 @@ export function useDesktopChat({
   transport,
   visible,
   pollMs = DESKTOP_CHAT_DEFAULT_POLL_MS,
+  fileStaging,
 }: UseDesktopChatArgs): DesktopChatLane {
   const exited = desktopChatSessionExited(session);
   const { hostId, ownerId, epoch } = identity;
@@ -173,6 +201,9 @@ export function useDesktopChat({
 
   const transportRef = useRef(transport);
   transportRef.current = transport;
+  const fileStagingRef = useRef(fileStaging);
+  fileStagingRef.current = fileStaging;
+  const attachingKeys = useRef(new Set<string>());
   const targetRef = useRef(target);
   const registryRef = useRef(registryId);
   registryRef.current = registryId;
@@ -327,6 +358,69 @@ export function useDesktopChat({
     }
   }, [patch]);
 
+  const attachFiles = useCallback(async (files: readonly File[], caret: number): Promise<void> => {
+    const t = targetRef.current;
+    if (t === null || exitedRef.current || files.length === 0) return;
+    const key = referenceTargetKey(t);
+    if (attachingKeys.current.has(key)) return;
+    const staging = fileStagingRef.current;
+    if (!staging?.capabilities.includes(DESKTOP_CHAT_FILE_CAPABILITY)) {
+      patch(key, (prev) => ({ ...prev, attachError: new ReferenceFileError(
+        "UNSUPPORTED", `This host does not advertise ${DESKTOP_CHAT_FILE_CAPABILITY}; files cannot be staged.`,
+      ) }));
+      return;
+    }
+    attachingKeys.current.add(key);
+    patch(key, (prev) => ({ ...prev, attaching: true, attachError: null }));
+    const signal = laneRef.current.controller.signal;
+    const staged = [...stateRef.current.stagedFiles];
+    let at = caret;
+    try {
+      for (const file of files) {
+        const receipt = await stageReferenceChatFile({ transport: staging.transport }, t, file, signal, {
+          fileCount: staged.length,
+          turnBytes: staged.reduce((sum, entry) => sum + entry.receipt.sizeBytes, 0),
+        });
+        if (signal.aborted || !isCurrent(key)) {
+          const cleaned = await staging.transport.cancel(t.target, receipt.receipt.attachmentId);
+          if (!cleaned) throw new ReferenceFileError("TIMEOUT", "The host did not confirm abandoned upload cleanup.");
+          return;
+        }
+        staged.push(receipt);
+        const path = referenceMentionPathOf(receipt.mentionText)!;
+        const inserted = referenceMentionInsertion(referenceDrafts.read(t).text, path, at);
+        at = inserted.caret;
+        referenceDrafts.set(t, inserted.text);
+        patch(key, (prev) => ({ ...prev, stagedFiles: [...prev.stagedFiles, receipt] }));
+      }
+    } catch (error) {
+      patch(key, (prev) => ({ ...prev, attachError: error instanceof ReferenceFileError
+        ? error : new ReferenceFileError("UNSUPPORTED", error instanceof Error ? error.message : "File staging failed.") }));
+    } finally {
+      attachingKeys.current.delete(key);
+      patch(key, (prev) => ({ ...prev, attaching: false }));
+    }
+  }, [isCurrent, patch]);
+
+  const removeStagedFile = useCallback(async (attachmentId: string): Promise<void> => {
+    const t = targetRef.current;
+    const staging = fileStagingRef.current;
+    if (t === null || staging === undefined) return;
+    const key = referenceTargetKey(t);
+    const receipt = stateRef.current.stagedFiles.find((entry) => entry.receipt.attachmentId === attachmentId);
+    if (!receipt || referenceDrafts.isUnknownHeld(t)) return;
+    try {
+      if (!await staging.transport.remove(t.target, attachmentId)) {
+        throw new ReferenceFileError("TIMEOUT", "The host did not confirm file removal.");
+      }
+      referenceDrafts.set(t, referenceDrafts.read(t).text.split(receipt.mentionText.trimEnd()).join(""));
+      patch(key, (prev) => ({ ...prev, stagedFiles: prev.stagedFiles.filter((entry) => entry !== receipt), attachError: null }));
+    } catch (error) {
+      patch(key, (prev) => ({ ...prev, attachError: error instanceof ReferenceFileError
+        ? error : new ReferenceFileError("UNSUPPORTED", error instanceof Error ? error.message : "File removal failed.") }));
+    }
+  }, [patch]);
+
   const submit = useCallback(async (t: ReferenceTargetRef, text: string): Promise<void> => {
     const key = referenceTargetKey(t);
     const requestId = newDesktopChatRequestId();
@@ -338,6 +432,8 @@ export function useDesktopChat({
       at: Date.now(),
     };
     patch(key, (prev) => ({ ...prev, pending: [...prev.pending, echo] }));
+    // Files already live on the owning host. Editable path mentions travel in text;
+    // attachmentIds is intentionally empty, never an unfinished upload-id lane.
     const outcome = await desktopChatMutate(() =>
       transportRef.current(
         { kind: "submit", requestId, target: t, registryId: registryRef.current, params: { text, attachmentIds: [], origin: "chat" } },
@@ -347,7 +443,10 @@ export function useDesktopChat({
     if (outcome.ok) {
       referenceDrafts.settle(t, text);
       referenceDrafts.end(t, text);
-      patch(key, (prev) => ({ ...prev, warnings: prev.warnings.filter((warning) => !SEND_WARNINGS.includes(warning)) }));
+      patch(key, (prev) => ({ ...prev,
+        stagedFiles: prev.stagedFiles.filter((entry) => !text.includes(entry.mentionText.trimEnd())),
+        warnings: prev.warnings.filter((warning) => !SEND_WARNINGS.includes(warning)),
+      }));
       if (isCurrent(key)) void read();
       return;
     }
@@ -411,8 +510,10 @@ export function useDesktopChat({
     };
     if (exitedRef.current) return warn(DESKTOP_CHAT_EXITED);
     if (t === null || key === null) return false;
+    if (attachingKeys.current.has(key) || stateRef.current.attachError !== null) return false;
     const { prompt, screenRevision } = stateRef.current;
     if (prompt !== null) {
+      if (stateRef.current.stagedFiles.length > 0) return warn(DESKTOP_CHAT_HELD);
       const typed = referenceAnswerFromText(prompt, text);
       if (typed === null) return warn(DESKTOP_CHAT_HELD);
       if (referencePromptNeedsConfirmation(prompt, typed)) {
@@ -505,6 +606,11 @@ export function useDesktopChat({
   const prompt = exited ? null : live.prompt;
 
   return {
+    stagedFiles: live.stagedFiles,
+    attaching: live.attaching,
+    attachError: live.attachError,
+    attachFiles,
+    removeStagedFile,
     target,
     exited,
     messages,

@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const accents = ["default", "blue", "emerald", "purple", "amber", "rose"] as const;
 const themes = ["dark", "light"] as const;
 const brandTokens = ["--chat-primary", "--chat-primary-foreground", "--chat-link", "--chat-code"] as const;
-const indexCss = readFileSync(new URL("../index.css", import.meta.url), "utf8");
-const runtimeCss = readFileSync(new URL("../settings-runtime.css", import.meta.url), "utf8");
+// Vitest runs with cwd = ui/, so resolve from there; import.meta.url is not a
+// file: URL under the jsdom transform and throws before any test runs.
+const indexCss = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+const runtimeCss = readFileSync(resolve(process.cwd(), "src/settings-runtime.css"), "utf8");
 
 // Mount the shipped root rules, not a parallel palette fixture. Exclude font/import
 // and Tailwind directives that need Vite processing, and component rules that do

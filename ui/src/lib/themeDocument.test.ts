@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_APPEARANCE_SETTINGS, loadAppearanceSettings, loadAppearanceSettingsState, saveAppearanceSettings } from "./appearanceSettings";
@@ -79,7 +80,7 @@ describe("themeDocument", () => {
   });
 
   it("set-equals the colour-valued declarations in the two CSS root blocks", () => {
-    const css = readFileSync(new URL("../index.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const css = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
     const tokens = new Set<string>();
     for (const block of css.matchAll(/:root(?:\[data-theme="light"\])?\s*\{([^}]+)\}/g)) {
       for (const match of block[1].matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {

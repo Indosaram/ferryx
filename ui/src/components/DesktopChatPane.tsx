@@ -3,7 +3,7 @@ import { MobileChatWorkspace } from "../remote/chat/MobileChatWorkspace";
 import type { MobileChatComposerHandle } from "../remote/chat/MobileChatComposer";
 import { ReferencePromptCard } from "../remote/chat/ReferencePromptCard";
 import type { DesktopChatIdentity, DesktopChatTransport } from "../lib/desktopChat";
-import { useDesktopChat } from "../lib/desktopChatLane";
+import { useDesktopChat, type DesktopChatFileStaging } from "../lib/desktopChatLane";
 import { desktopVoicePort } from "../lib/voiceCallPort";
 import { useVoiceConversation } from "../lib/useVoiceConversation";
 import type { TerminalSession } from "../lib/types";
@@ -17,6 +17,7 @@ export interface DesktopChatPaneProps {
   readonly title?: string;
   readonly pollMs?: number;
   readonly className?: string;
+  readonly fileStaging?: DesktopChatFileStaging;
 }
 
 export function DesktopChatPane({
@@ -28,8 +29,9 @@ export function DesktopChatPane({
   title,
   pollMs,
   className,
+  fileStaging,
 }: DesktopChatPaneProps) {
-  const lane = useDesktopChat({ session, identity, transport, visible, pollMs });
+  const lane = useDesktopChat({ session, identity, transport, visible, pollMs, fileStaging });
   const composerRef = useRef<MobileChatComposerHandle | null>(null);
   const [voicePort] = useState(() => desktopVoicePort());
   const voiceConversation = useVoiceConversation({ port: voicePort, send: lane.send, messages: lane.messages });
@@ -62,7 +64,12 @@ export function DesktopChatPane({
       className={className ?? "flex h-full min-h-0 w-full flex-col"}
     >
       <MobileChatWorkspace
-        showAttachments={false}
+        showAttachments
+        stagedFiles={lane.stagedFiles}
+        onAttachFiles={(files, caret) => void lane.attachFiles(files, caret)}
+        onRemoveStagedFile={(attachmentId) => void lane.removeStagedFile(attachmentId)}
+        attaching={lane.attaching}
+        attachError={lane.attachError?.message ?? null}
         headerTitle={title ?? "Chat"}
         headerSubtitle={session.cwd}
         worktreeLabel={worktreeLabel}
