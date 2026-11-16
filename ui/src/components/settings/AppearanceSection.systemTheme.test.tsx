@@ -173,6 +173,7 @@ describe("AppearanceSection live chat preview", () => {
   beforeEach(() => {
     native.invoke.mockClear();
     localStorage.clear();
+    saveAppearanceSettings({ renderMath: true });
     stubColorScheme(false);
     _resetNativeOsThemeForTest();
     stylesheet = document.createElement("style");
@@ -189,8 +190,11 @@ describe("AppearanceSection live chat preview", () => {
   });
 
   it("renders five named rows with real message, math, markdown, tool and composer samples", async () => {
+    // Commit first so ChatProseMarkdown's effect starts its lazy import before
+    // we await that same module. Rendering inside the async act deferred the
+    // effect until after the import await, leaving the first render as raw TeX.
+    render(<AppearanceSection />);
     await act(async () => {
-      render(<AppearanceSection />);
       await import("../../remote/chat/chatMath");
     });
     const preview = screen.getByTestId("appearance-chat-preview");
