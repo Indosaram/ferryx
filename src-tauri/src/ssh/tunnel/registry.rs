@@ -773,6 +773,12 @@ mod tests {
         assert!(is_self_connect(addr, addr)); assert!(!is_self_connect(addr, (Ipv4Addr::LOCALHOST, port.wrapping_add(1)).into()));
         let factory = ProbeSocketFactory::default(); *factory.availability_source_port_override.lock().unwrap() = Some(port);
         assert_eq!(probe_local_port_available(addr, &factory).await, PortAvailability::SelfConnected);
+        // Use a fresh OS-assigned port for the readiness source/target pair;
+        // the preceding self-connect must not leave socket state on this port.
+        let reservation = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        let addr: SocketAddr = (Ipv4Addr::LOCALHOST, port).into();
+        drop(reservation);
         let (fake, _) = Scripted::new(vec![Attempt::WaitForProbe]);
         let (mut registry, _dir) = make_registry(fake.clone());
         let factory = Arc::new(ProbeSocketFactory::default());
@@ -781,9 +787,16 @@ mod tests {
         Arc::get_mut(&mut registry.core).unwrap().probes = factory;
         assert_eq!(probe_local_port_available(addr, &registry.core.probes).await, PortAvailability::Available);
         let view = registry.start(&host(), spec(Some(port)), false).await.unwrap();
-        assert_eq!(view.state, TunnelState::Listening); assert_eq!(view.failure, None);
+        let id = view.runtime_id.as_ref().unwrap();
+        state(&registry, id, TunnelState::Listening).await;
+        let current = registry.list(&HashMap::new()).unwrap().remove(0);
+        assert_eq!(current.state, TunnelState::Listening); assert_eq!(current.failure, None);
         assert!(registry.core.probes.readiness_source_port_override.lock().unwrap().is_none());
+        let exited = registry.subscribe_exit(id).unwrap();
         registry.shutdown().await.unwrap();
+        assert!(exited.borrow().is_some());
+        exit(exited).await;
+        assert!(std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok());
 
         let (fake, _) = Scripted::new(vec![Attempt::ProbeFailure]); let (registry, _dir) = make_registry(fake.clone());
         let view = registry.start(&host(), spec(None), false).await.unwrap(); let id = view.runtime_id.unwrap();
