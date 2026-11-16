@@ -78,6 +78,13 @@ All of these skip the hub engine. Auth is the existing agent-control gate: machi
 
 Tauri: `cmd_session_stop`, `cmd_supervisor_answer`, `cmd_supervisor_pause`, `cmd_supervisor_action_undo`, `cmd_supervisor_settings`, `cmd_supervisor_dispatch` (explicit `projectId`; no guessing), `cmd_agent_control_enable_owner` (agent control on, only the owner's own paired machine Control devices admitted), `cmd_supervisor_start` (setup card, after `cmd_agent_control_enable_owner`: sends `start` on the local hub control socket like `ferryx hub start`, never restarting the daemon; returns `started`, false when the hub already ran; `UNSUPPORTED` where there is no unix control socket).
 
+Handing a pane over from the panel is `hand_to_supervisor` in
+`src-tauri/src/hub_runtime/panel_autonomy.rs`: it admits the pane the owner already runs as one
+observed goal (`supervisor/handover.rs`) with the owner's own words as the instruction, types
+nothing into the pane, and gives it the same turn budget of 5 as the app chat's handover. It
+refuses a shell and a pane the hub dispatched itself, and the same session handed over twice is
+the same goal, never a second one.
+
 Daemon wire (capability `supervisorControlV1`): `supervisorGlobalPause`, `supervisorSettings`, `supervisorActionUndo`, `agentControlEnableOwner`. Each that changes state is refused from a process inside a Ferryx pane.
 
 Supervisor settings live in hub_meta key `supervisor_settings`: `{enabled, removeAll, ownerHome}`. `enabled` is effective only while the daemon resolves the same owner home (`OMO_HOME`, else `<home>/.omo`) that turned it on. `removeAll` is off by default.

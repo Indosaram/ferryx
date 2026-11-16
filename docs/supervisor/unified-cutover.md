@@ -109,6 +109,59 @@ when an owner exists and memory import is on. A pass reads only Markdown files u
 
 No other file under `~/.omo/memory` is read.
 
+## Memory the supervisor reads
+
+The supervisor answers from three sources and never invents a fourth.
+
+- **What the owner taught it** (`supervisor_memory_sources`, rows written by teach, correct and
+  ingest). The prompt judge puts the newest rows in front of the engine
+  (`supervisor::prompt_judge::owner_memory`), labelled "What the owner taught you".
+- **The owner's agent memory under `~/.omo/memory`**, through the memory import pass described
+  above: core memory goes to owner ingest, notes and reference files are indexed instead of
+  sent. The supervisor reads these files and never writes them.
+- **Reference docs** (`crates/ferryx-hub/src/supervisor/reference_docs.rs`). One row per note or
+  reference file in `supervisor_reference_docs`, rewritten only when the body hash changes and
+  searched by keyword overlap with the prompt and the pane's working directory. A hit reaches
+  the engine as one line of path, agent and frontmatter description; the body is not sent.
+
+The decisions recorded for the repository a pane runs in are added on top of those, as the
+judge's "This project's decisions" block.
+
+## Per-role models and the nudge threshold
+
+The engine runs one model per role family. Each pair is read from the hub env file
+(`~/.ferryx/hub/env`) first, then from the owning process's environment:
+
+| Variable | Role | Fallback |
+| --- | --- | --- |
+| `FERRYX_HUB_MHC_PROVIDER` + `FERRYX_HUB_MHC_MODEL` | conversation: the owner's chat turns and the panel | `OMON_DEFAULT_MODEL` |
+| `FERRYX_HUB_MHC_BACKGROUND_PROVIDER` + `FERRYX_HUB_MHC_BACKGROUND_MODEL` | background: owner ingest, prompt decisions, convergence | `OMON_BACKGROUND_MODEL` |
+| `FERRYX_HUB_MHC_THINKING` | thinking level of every role | the engine default |
+| `FERRYX_HUB_MHC_EFFECT_TOOLS` | extra comma-separated effect tool names, added to the defaults | none |
+
+Each provider/model pair is both or neither: a half-set pair is ignored with a warning and the
+`OMON_*` model applies. With neither set, the role runs on the engine default.
+`FERRYX_HUB_MHC_BIN` names the engine binary, and `FERRYX_HUB_MHC_SUPERVISOR` turns the engine on
+from the shared env file only; a process value can switch it off but never on.
+
+`FERRYX_HUB_NUDGE_AFTER_MIN` (default 15) is the silence threshold of an owned session, in
+minutes (`supervisor::ownership`). A pane the supervisor owns that reports nothing for that long
+gets one nudge; a second full threshold without a report escalates the stall to the owner. The
+turn budget is separate: it comes from the goal, not from this variable.
+
+### `supervisorHealthy`
+
+`supervisorHealthy` is the engine's verdict on itself, not the hub's health. It is false when the
+engine's advertised health is failing or when the newest recorded engine calls say the engine is
+failing (`supervisor::setup::supervisor_degraded`). A hub that has recorded no engine call is an
+unknown engine, not a broken one, and reads healthy; an unreadable call log is treated as
+failing, because the supervisor then escalates instead of trusting answers.
+
+While it is false the supervisor still runs but judges nothing: every prompt it would have
+answered goes to the owner as an escalation (`SupervisorHealth` in `supervisor/autonomy.rs`). The
+hub's own `healthy` field is unaffected, and `ferryx hub status --check` prints ``engine calls
+failing: the supervisor answers nothing until they recover``.
+
 When the engine is missing or not ready, nothing is cut over. `nextAction` names the unmet
 engine step, and `engineFault` carries the `MHC_*` code. The Preflight steps below fix it.
 
@@ -125,6 +178,10 @@ The setup status is camelCase JSON:
 | `autoCutover`, `memoryImport` | the owner's choices; `memoryImport` is `{enabled, sessions, turns, lastAt}` |
 | `adoptable` | legacy lanes that can be adopted |
 | `nextAction` | the first unmet step: `enable_engine`, `restart_required`, `wait_engine`, `fix_engine`, `create_owner`, `map_projects`, `cutover`, `import_memory`, `adopt` or `none` |
+
+`supervisorHealthy` is the one field an operator should read first: every other step can be
+green while the engine's calls are failing, and in that state the supervisor answers and decides
+nothing. The full meaning is in "`supervisorHealthy`" above.
 
 The same status is in the Supervisor snapshot's `setup` field. It is also served by
 `GET /api/v1/supervisor/setup` (any machine device except a mirror) and by the daemon request
