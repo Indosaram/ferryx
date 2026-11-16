@@ -3750,15 +3750,15 @@ pub async fn supervisor_converse(
     caller: SupervisorCaller,
     input: ferryx_hub::supervisor::transcript::ConverseInput,
 ) -> Result<Value, ferryx_hub::supervisor::request::RequestFailure> {
-    use ferryx_hub::supervisor::request::RequestFailure;
+    use ferryx_hub::supervisor::request::{RequestContext, RequestFailure};
     use ferryx_hub::supervisor::transcript;
     let (pool, owner, _) = supervisor_service(state).await?;
-    if owner.is_none() {
+    let Some(owner) = owner else {
         return Err(RequestFailure::new(
             "UNAUTHORIZED",
             "this installation has no single supervisor owner",
         ));
-    }
+    };
     let Some(engine) = app_conversation(state, &input) else {
         return Err(RequestFailure::new(
             "MHC_NOT_RUNNING",
@@ -3766,6 +3766,15 @@ pub async fn supervisor_converse(
         ));
     };
     let rules = rule_store(state);
+    // A fresh owner turn teaches the owner's memory through the engine, off the reply's path.
+    // The surface is the caller's: the desktop app for a local caller, the phone for a remote one.
+    let learning = RequestContext {
+        principal: owner,
+        adapter: caller.adapter(),
+        channel_binding_id: None,
+        control: None,
+        memory: ferryx_hub::meta::mhc_supervisor::installed_memory(),
+    };
     let announce = || {
         let mut payload = json!({ "supervisorConverse": input.request_id });
         if let SupervisorCaller::Remote { device_id } = &caller {
@@ -3782,6 +3791,7 @@ pub async fn supervisor_converse(
         flights: &state.supervisor_flights,
         now: &transcript::now_ms,
         changed: &announce,
+        learning: Some(&learning),
     };
     transcript::converse(&ctx, &input).await
 }
