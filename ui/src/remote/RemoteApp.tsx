@@ -35,6 +35,8 @@ import { MobileSessionSwitcherSheet } from "./chat/MobileSessionSwitcherSheet";
 import { MobileOverflowSheet } from "./chat/MobileOverflowSheet";
 import { MobileSheet } from "./chat/MobileSheet";
 import { PhoneAlertsSettings } from "../components/settings/NotificationsSection";
+import { useApplyAppearanceSettings } from "../lib/appearanceSettings";
+import { RemoteAppearanceButton, RemoteAppearanceSheet } from "./appearance/RemoteAppearanceSheet";
 import { muteSessionPush, type PushRequest } from "../lib/pushSubscription";
 import type { SidebarViewId } from "../components/sidebar/SidebarViewTabs";
 import { DecisionFocusContext, useDecisionDeepLink, type DecisionFocus } from "./decisionDeepLink";
@@ -1479,6 +1481,8 @@ async function readChatHistory(args: {
 }
 
 export const RemoteApp: React.FC = () => {
+  // The shared shell-agnostic applier also follows storage and system-theme changes.
+  useApplyAppearanceSettings();
   const state = useSyncExternalStore(remoteHostStore.subscribe, remoteHostStore.getState);
   const [magicLinkOverridden, setMagicLinkOverridden] = useState(() => hasMagicLinkCode());
   // The mode the user asked for lives here, ABOVE the keyed connection below: the key is the
@@ -1657,6 +1661,7 @@ export const RemoteHostConnection: React.FC<{
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [phoneAlertsOpen, setPhoneAlertsOpen] = useState(false);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [creationError, setCreationError] = useState<string | null>(null);
   const [signedOutNotice, setSignedOutNotice] = useState<string | null>(null);
   /** When the shell's events socket last went down; null while it is up. */
@@ -6226,7 +6231,12 @@ export const RemoteHostConnection: React.FC<{
                 phonePanel.refresh(),
                 ...accountDiscovery.machines.map((machine) => accountDiscovery.retryMachine(machine.machineId)),
               ]),
-            headerAction: <AccountButton onOpen={() => setAccountSheetOpen(true)} />,
+            headerAction: (
+              <div className="flex items-center">
+                <RemoteAppearanceButton open={appearanceOpen} onOpen={() => setAppearanceOpen(true)} />
+                <AccountButton onOpen={() => setAccountSheetOpen(true)} />
+              </div>
+            ),
             resume: phoneResume,
             lease: panelLease,
             voice: phoneCall,
@@ -6242,7 +6252,8 @@ export const RemoteHostConnection: React.FC<{
       ) : (
       <div ref={sessionScreenRef} data-testid="phone-session-screen" className="flex min-h-0 min-w-0 flex-1 flex-col">
       {desktopSidebar ? (
-      <header className="flex h-7 [@media(pointer:coarse)]:h-14 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
+      <header className="flex h-7 min-h-11 [@media(pointer:coarse)]:h-14 shrink-0 items-center justify-between border-b border-chat-border bg-chat-surface px-2.5">
+        <RemoteAppearanceButton open={appearanceOpen} onOpen={() => setAppearanceOpen(true)} />
         <button
           type="button"
           aria-label="Change workspace context"
@@ -6350,6 +6361,8 @@ export const RemoteHostConnection: React.FC<{
         )}
       </header>
       ) : (
+        <div className="flex shrink-0 items-center bg-chat-header">
+          <div className="min-w-0 flex-1">
         <MobileTopBar
           title={mobileTitle}
           agentType={mobileAgentType}
@@ -6369,6 +6382,9 @@ export const RemoteHostConnection: React.FC<{
           hideControls={accountPreselection}
           onBack={phoneHome ? phoneNav.back : undefined}
         />
+          </div>
+          <RemoteAppearanceButton open={appearanceOpen} onOpen={() => setAppearanceOpen(true)} />
+        </div>
       )}
       {phoneHome && sessionSupervision && activeMachineId ? (
         <SupervisorSessionStrip
@@ -6774,6 +6790,8 @@ export const RemoteHostConnection: React.FC<{
         buildStamp={BUILD_STAMP}
         disabled={pending !== null || !model.context.workspaceId}
       />
+
+      <RemoteAppearanceSheet open={appearanceOpen} onOpenChange={setAppearanceOpen} />
 
       {token ? (
         <MobileSheet
