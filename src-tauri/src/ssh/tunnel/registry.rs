@@ -75,6 +75,8 @@ pub struct ProbeSocketFactory {
     pub readiness_source_port_override: Mutex<Option<u16>>,
     #[cfg(test)]
     pub readiness_override_consumed: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub readiness_override_consumptions: AtomicUsize,
 }
 impl ProbeSocketFactory {
     async fn connect(&self, addr: SocketAddr, readiness: bool) -> io::Result<(TcpStream, bool)> {
@@ -87,6 +89,10 @@ impl ProbeSocketFactory {
             if let Some(port) = source.lock().unwrap().take() {
                 socket.bind((Ipv4Addr::LOCALHOST, port).into()).expect("probe source override must bind");
                 overridden = true;
+                if readiness {
+                    self.readiness_override_consumptions.fetch_add(1, Ordering::SeqCst);
+                    self.readiness_override_consumed.notify_one();
+                }
             }
         }
         #[cfg(not(test))]
@@ -459,19 +465,19 @@ fn register_child(core: &Arc<Core>, id: &TunnelRuntimeId, args: &[String], gener
     entry.child.current = Some(g.clone()); entry.view.attempt = entry.view.attempt.saturating_add(1);
     Ok(Some((g, rx)))
 }
-async fn readiness(port: u16, factory: Arc<ProbeSocketFactory>) -> bool {
+async fn readiness(port: u16, factory: Arc<ProbeSocketFactory>) -> Result<(), usize> {
     let addr = (Ipv4Addr::LOCALHOST, port).into();
+    let deadline = Instant::now() + START_DEADLINE;
+    let mut attempts = 0;
     loop {
-        match timeout(PROBE_DEADLINE, factory.connect(addr, true)).await {
-            Ok(Ok((mut socket, overridden))) => {
+        if Instant::now() >= deadline { return Err(attempts); }
+        attempts += 1;
+        match tokio::time::timeout_at(deadline.min(Instant::now() + PROBE_DEADLINE), factory.connect(addr, true)).await {
+            Ok(Ok((mut socket, _overridden))) => {
                 if self_connected(&socket).unwrap_or(true) {
                     // Simultaneous open owns P itself: close IMMEDIATELY, never
                     // hold this socket through the 2s channel-attribution window.
                     drop(socket);
-                    #[cfg(test)]
-                    if overridden { factory.readiness_override_consumed.notify_one(); }
-                    #[cfg(not(test))]
-                    let _ = overridden;
                     tokio::task::yield_now().await;
                     continue;
                 }
@@ -479,8 +485,8 @@ async fn readiness(port: u16, factory: Arc<ProbeSocketFactory>) -> bool {
                 // listening. Filtered destinations can report late (accepted
                 // residual); EOF/deadline can lose one diagnostic. An operator
                 // connecting during this <=2s window shares its attribution.
-                let mut byte = [0]; let _ = timeout(CHANNEL_DEADLINE, socket.read(&mut byte)).await;
-                drop(socket); return true;
+                let mut byte = [0]; let _ = tokio::time::timeout_at(deadline.min(Instant::now() + CHANNEL_DEADLINE), socket.read(&mut byte)).await;
+                drop(socket); return Ok(());
             }
             _ => tokio::time::sleep(Duration::from_millis(10)).await,
         }
@@ -549,7 +555,21 @@ async fn run_entry(weak: Weak<Core>, id: TunnelRuntimeId, host: SshHost, mut can
                         None => stderr_open = false,
                     }
                 }
-                _ = &mut ready, if !established => {
+                result = &mut ready, if !established => {
+                    if let Err(attempts) = result {
+                        // Keep the bounded diagnostic in this attempt only: no
+                        // raw stderr is copied into a view, ring, or disk log.
+                        let failure = format!("Readiness deadline for 127.0.0.1:{port} after {attempts} attempts; captured stderr: {diagnostic}");
+                        #[cfg(test)]
+                        eprintln!("{failure}");
+                        tracing::warn!(port, attempts, stderr_code = ?classify_ssh_stderr(&diagnostic, false), "Tunnel readiness deadline expired");
+                        drop(failure);
+                        child.request_kill();
+                        if let Some(core) = weak.upgrade() { core.state.lock().unwrap().draining.push(child.clone()); }
+                        update(&weak, &id, TunnelState::Reconnecting, Some(TunnelFailureCode::HostUnreachable), None);
+                        tokio::select! { _ = cancel.changed() => return, result = timeout(SHUTDOWN_DEADLINE, child.wait()) => { if !matches!(result, Ok(Ok(()))) { return; } } }
+                        break;
+                    }
                     // Check the post-wait watch before publishing. Readiness is
                     // not a latch: a stolen-port bind exit retracts listening.
                     if child.exit.borrow().is_none() {
@@ -674,7 +694,6 @@ mod tests {
                     Attempt::Fail(text) => { write.write_all(text.as_bytes()).await.unwrap(); drop(write); done.send_replace(Some(255 << 8)); }
                     Attempt::Hang => { killed.changed().await.unwrap(); drop(write); done.send_replace(Some(15)); }
                     Attempt::Listen | Attempt::WaitForProbe | Attempt::ProbeFailure => {
-                        if matches!(action, Attempt::WaitForProbe) { factory.unwrap().readiness_override_consumed.notified().await; }
                         // Real socket contention is independent of paused Tokio
                         // time. Bound retries by wall time and yield between
                         // attempts rather than relying on a fixed sleep.
@@ -697,6 +716,13 @@ mod tests {
                                 }
                             }
                         };
+                        if matches!(action, Attempt::WaitForProbe) {
+                            let factory = factory.unwrap();
+                            tokio::select! {
+                                _ = factory.readiness_override_consumed.notified() => {},
+                                _ = killed.changed() => { drop(listener); drop(write); done.send_replace(Some(15)); return; }
+                            }
+                        }
                         loop {
                             tokio::select! {
                                 _ = killed.changed() => break,
@@ -810,7 +836,9 @@ mod tests {
         let (fake, _) = Scripted::new(vec![Attempt::WaitForProbe]);
         let (mut registry, _dir) = make_registry(fake.clone());
         let factory = Arc::new(ProbeSocketFactory::default());
-        *factory.readiness_source_port_override.lock().unwrap() = Some(port);
+        // Distinct endpoints: exercise one-shot source override consumption,
+        // not simultaneous open on the listener's own address.
+        *factory.readiness_source_port_override.lock().unwrap() = Some(allocate_port().unwrap());
         *fake.probe_factory.lock().unwrap() = Some(factory.clone());
         Arc::get_mut(&mut registry.core).unwrap().probes = factory;
         assert_eq!(probe_local_port_available(addr, &registry.core.probes).await, PortAvailability::Available);
@@ -820,6 +848,7 @@ mod tests {
         let current = registry.list(&HashMap::new()).unwrap().remove(0);
         assert_eq!(current.state, TunnelState::Listening); assert_eq!(current.failure, None);
         assert!(registry.core.probes.readiness_source_port_override.lock().unwrap().is_none());
+        assert_eq!(registry.core.probes.readiness_override_consumptions.load(Ordering::SeqCst), 1);
         let exited = registry.subscribe_exit(id).unwrap();
         registry.shutdown().await.unwrap();
         assert!(exited.borrow().is_some());
