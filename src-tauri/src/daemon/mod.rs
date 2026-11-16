@@ -38,6 +38,8 @@ pub mod server;
 pub mod session_lifecycle;
 pub mod session_service;
 pub mod sidebar_snapshot;
+// Todo 7: daemon ownership of tunnel definitions, runtimes and the host observer.
+pub mod tunnel_dispatch;
 pub mod split_journal;
 // Portable facade over the OS service manager that owns the daemon's lifetime (macOS: `launchd`).
 pub mod supervisor;

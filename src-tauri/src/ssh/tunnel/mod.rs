@@ -1,6 +1,11 @@
 //! Wire types and validation shared by tunnel storage, protocol and runtime ownership.
 pub mod argv;
 pub mod registry;
+// The sidecar lock, process groups and start-time reads are unix-only; Windows
+// refuses every tunnel command before reaching them, so this half is compiled out
+// rather than stubbed.
+#[cfg(unix)]
+pub mod runtime_records;
 use crate::ipc::{IpcError, IpcErrorCode};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, net::Ipv6Addr};

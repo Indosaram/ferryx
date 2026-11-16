@@ -6,7 +6,9 @@
 //! Draining is a property of a generation, including generations of retained failed
 //! entries. It reserves its port until wait has completed, regardless of caller.
 use super::{argv::{self, ConfigSource}, *};
+use super::runtime_records::{RuntimeRecords, SweptRecord};
 use crate::ssh::{password, SshHost};
+use crate::ssh::tunnel_store::{Clock, SystemClock};
 use serde::Serialize;
 use std::{collections::{HashMap, VecDeque}, future::Future, io, net::{Ipv4Addr, SocketAddr}, path::{Path, PathBuf}, pin::Pin, process::{ExitStatus, Stdio}, sync::{Arc, Mutex, Weak, atomic::{AtomicUsize, Ordering}}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tokio::{io::{AsyncRead, AsyncReadExt}, net::{TcpSocket, TcpStream}, sync::{mpsc, watch}, time::{Instant, timeout}};
@@ -164,10 +166,10 @@ fn ensure_empty_config(dir: &Path) -> Result<PathBuf, IpcError> {
 #[serde(rename_all = "camelCase")]
 pub struct TunnelTransition { pub at: u64, pub from: TunnelState, pub to: TunnelState, pub code: Option<TunnelFailureCode> }
 /// Counted-entry shape only: no master IDLE_GRACE or delayed release.
-pub struct TunnelLease { active: Arc<AtomicUsize>, held: bool }
+pub struct TunnelLease { active: Arc<AtomicUsize>, live: watch::Sender<usize>, held: bool }
 impl TunnelLease {
-    fn new(active: Arc<AtomicUsize>) -> Self { active.fetch_add(1, Ordering::SeqCst); Self { active, held: true } }
-    fn release(&mut self) { if self.held { self.held = false; self.active.fetch_sub(1, Ordering::SeqCst); } }
+    fn new(active: Arc<AtomicUsize>, live: watch::Sender<usize>) -> Self { let count = active.fetch_add(1, Ordering::SeqCst) + 1; live.send_replace(count); Self { active, live, held: true } }
+    fn release(&mut self) { if self.held { self.held = false; let count = self.active.fetch_sub(1, Ordering::SeqCst) - 1; self.live.send_replace(count); } }
 }
 impl Drop for TunnelLease { fn drop(&mut self) { self.release(); } }
 #[derive(Clone)]
@@ -206,12 +208,12 @@ pub struct TunnelEntry {
     spec: TunnelSpec,
 }
 impl TunnelEntry {
-    fn transition(&mut self, to: TunnelState, code: Option<TunnelFailureCode>, piece: Option<String>) {
+    fn transition(&mut self, to: TunnelState, code: Option<TunnelFailureCode>, piece: Option<String>, now: u64) {
         let from = self.view.state;
-        self.view.state = to; self.view.since = Some(now());
+        self.view.state = to; self.view.since = Some(now);
         self.view.failure = code; self.view.failure_piece = piece;
         if self.log.len() == 100 { self.log.pop_front(); }
-        self.log.push_back(TunnelTransition { at: now(), from, to, code });
+        self.log.push_back(TunnelTransition { at: now, from, to, code });
         self.state.send_replace(to);
         if to == TunnelState::Failed { self.lease.release(); }
     }
@@ -233,17 +235,48 @@ struct Core {
     config: OwnedConfig,
     probes: Arc<ProbeSocketFactory>,
     active: Arc<AtomicUsize>,
+    /// Live-runtime count, so the host observer can be cancelled on idle and
+    /// re-armed by the first runtime that becomes live after that.
+    live: watch::Sender<usize>,
+    clock: Arc<dyn Clock>,
+    records: Option<Arc<RuntimeRecords>>,
     generation: AtomicUsize,
     runtime_dir: PathBuf,
 }
 pub struct TunnelRegistry { core: Arc<Core> }
 impl TunnelRegistry {
-    pub fn new(spawner: Arc<dyn TunnelSpawner>, config_source: ConfigSource<'_>, probe_factory: Arc<ProbeSocketFactory>) -> Self {
+    /// The clock seam is injected here so every timing decision in the daemon
+    /// (identity grace, transition stamps) is driven by one fake in tests.
+    pub fn new(spawner: Arc<dyn TunnelSpawner>, config_source: ConfigSource<'_>, probe_factory: Arc<ProbeSocketFactory>, clock: Arc<dyn Clock>) -> Self {
         Self { core: Arc::new(Core {
             state: Mutex::new(RegistryState { entries: HashMap::new(), draining: Vec::new(), closed: false }),
             spawner, config: match config_source { ConfigSource::Real => OwnedConfig::Real, ConfigSource::Fixture { user, system } => OwnedConfig::Fixture { user: user.into(), system: system.into() } },
-            probes: probe_factory, active: Arc::new(AtomicUsize::new(0)), generation: AtomicUsize::new(0), runtime_dir: crate::daemon::server::get_runtime_dir(),
+            probes: probe_factory, active: Arc::new(AtomicUsize::new(0)), live: watch::channel(0).0, clock,
+            records: None, generation: AtomicUsize::new(0), runtime_dir: crate::daemon::server::get_runtime_dir(),
         }) }
+    }
+    /// Attach the crash-visible runtimes sidecar. Called once at startup, before
+    /// the registry is shared; without it a start leaves no reclaimable record.
+    pub fn with_records(mut self, records: Arc<RuntimeRecords>) -> Self {
+        Arc::get_mut(&mut self.core).expect("records are attached before the registry is shared").records = Some(records);
+        self
+    }
+    pub fn clock(&self) -> u64 { self.core.clock.now_unix_ms() }
+    pub fn records(&self) -> Option<&Arc<RuntimeRecords>> { self.core.records.as_ref() }
+    /// The sweep lives with the child owner because only the registry holds the
+    /// spawner that can kill a process group.
+    pub fn sweep_records(&self, records: &RuntimeRecords) -> Vec<SweptRecord> {
+        records.sweep(&*self.core.spawner)
+    }
+    /// Resolves once any runtime is live. The observer cancels on idle and calls
+    /// this again, which is what re-arms it for the next live runtime.
+    pub async fn wait_until_live(&self) {
+        let mut rx = self.core.live.subscribe();
+        while *rx.borrow() == 0 { if rx.changed().await.is_err() { return; } }
+    }
+    pub async fn wait_until_idle(&self) {
+        let mut rx = self.core.live.subscribe();
+        while *rx.borrow() != 0 { if rx.changed().await.is_err() { return; } }
     }
     /// Saved starts are idempotent by host+spec id. Ad-hoc ids are minted BEFORE
     /// validation and never persisted, regardless of a client-supplied id.
@@ -278,9 +311,9 @@ impl TunnelRegistry {
                     let (tx, rx) = watch::channel(TunnelState::Reconnecting); state_rx = rx;
                     let mut entry = TunnelEntry {
                         view: TunnelView { spec_id: spec.id.clone(), runtime_id: Some(id.clone()), label: spec.label.clone(), host_id: host.id.clone(), local_port: port, remote_host: spec.remote_host.clone(), remote_port: spec.remote_port, state: TunnelState::Reconnecting, since: Some(now()), attempt: 0, failure: None, failure_piece: None },
-                        child: ChildGuard { cancel, current: None }, lease: TunnelLease::new(self.core.active.clone()), log: VecDeque::new(), state: tx, spec: spec.clone(),
+                        child: ChildGuard { cancel, current: None }, lease: TunnelLease::new(self.core.active.clone(), self.core.live.clone()), log: VecDeque::new(), state: tx, spec: spec.clone(),
                     };
-                    if occupied { entry.transition(TunnelState::Failed, Some(TunnelFailureCode::PortInUse), None); }
+                    if occupied { entry.transition(TunnelState::Failed, Some(TunnelFailureCode::PortInUse), None, self.core.clock.now_unix_ms()); }
                     let view = entry.view.clone();
                     state.entries.insert(id.clone(), entry);
                     if occupied { return Ok(view); }
@@ -311,7 +344,7 @@ impl TunnelRegistry {
             Err(_) => {
                 let mut state = self.core.state.lock().unwrap();
                 let entry = state.entries.get_mut(&id).ok_or_else(|| IpcError::internal("Tunnel start was cancelled"))?;
-                entry.transition(TunnelState::Reconnecting, Some(TunnelFailureCode::HostUnreachable), None);
+                entry.transition(TunnelState::Reconnecting, Some(TunnelFailureCode::HostUnreachable), None, self.core.clock.now_unix_ms());
                 Ok(entry.view.clone())
             }
         }
@@ -343,7 +376,7 @@ impl TunnelRegistry {
         for entry in state.entries.values_mut().filter(|e| e.view.host_id == host_id) {
             entry.child.cancel.send_replace(true);
             if let Some(g) = &entry.child.current { if g.exit.borrow().is_none() { g.request_kill(); generations.push(g.clone()); } }
-            entry.transition(TunnelState::Failed, Some(TunnelFailureCode::HostChanged), None);
+            entry.transition(TunnelState::Failed, Some(TunnelFailureCode::HostChanged), None, self.core.clock.now_unix_ms());
         }
         state.draining.extend(generations.clone()); generations
     }
@@ -407,9 +440,10 @@ fn failure_piece(text: &str) -> String {
 }
 fn update(core: &Weak<Core>, id: &TunnelRuntimeId, state: TunnelState, code: Option<TunnelFailureCode>, piece: Option<String>) {
     if let Some(core) = core.upgrade() {
+        let now = core.clock.now_unix_ms();
         let mut registry = core.state.lock().unwrap();
         if let Some(entry) = registry.entries.get_mut(id) {
-            if !*entry.child.cancel.borrow() { entry.transition(state, code, piece); }
+            if !*entry.child.cancel.borrow() { entry.transition(state, code, piece, now); }
         }
     }
 }
@@ -420,13 +454,41 @@ fn register_child(core: &Arc<Core>, id: &TunnelRuntimeId, args: &[String], gener
     if state.closed { return Ok(None); }
     let Some(entry) = state.entries.get_mut(id) else { return Ok(None); };
     if *entry.child.cancel.borrow() { return Ok(None); }
+    let local_port = entry.view.local_port;
+    // An intent record exists BEFORE spawn, so a crash in this window still names
+    // the port to reclaim. It carries no pid: the sweep releases the claim and
+    // never kills whoever holds the port.
+    if let Some(records) = &core.records {
+        if let Err(error) = records.record_intent(id, generation, local_port) {
+            tracing::warn!("Cannot record tunnel spawn intent: {error}");
+        }
+    }
     let handle = tokio::runtime::Handle::try_current().map_err(|_| IpcError::internal("Tunnel reaper requires a runtime"))?;
-    let SpawnedTunnel { mut child, mut stderr } = core.spawner.spawn(args).map_err(|_| io_error("tunnel_spawn_failed"))?;
+    let SpawnedTunnel { mut child, mut stderr } = match core.spawner.spawn(args) {
+        Ok(spawned) => spawned,
+        Err(_) => {
+            // No child exists, so the intent record has nothing to reclaim.
+            if let Some(records) = &core.records {
+                let _ = records.remove(id, generation);
+            }
+            return Err(io_error("tunnel_spawn_failed"));
+        }
+    };
     let pid = child.id();
+    // The pid record lands before the reaper is created: the reaper is what makes
+    // the entry live, so a crash before it leaves a killable record rather than
+    // an orphan only the port reveals.
+    if let Some(records) = &core.records {
+        if let Err(error) = records.record_pid(id, generation, local_port, pid, pid as i32) {
+            tracing::warn!("Cannot record tunnel child pid: {error}");
+        }
+    }
     let (kill, mut kill_rx) = mpsc::unbounded_channel();
     let (exit_tx, exit) = watch::channel(None);
     let (diagnostics, rx) = mpsc::unbounded_channel();
     let spawner = core.spawner.clone();
+    let records = core.records.clone();
+    let reaped_id = id.clone();
     // Reaper is the ONLY owner of Child and the ONLY issuer of group kills.
     // Dropping all senders (recv=None) is intentionally a kill request too.
     handle.spawn(async move {
@@ -441,7 +503,20 @@ fn register_child(core: &Arc<Core>, id: &TunnelRuntimeId, args: &[String], gener
                 }
             }
         };
-        match result { Ok(status) => { exit_tx.send_replace(Some(status)); }, Err(e) => { tracing::error!("Tunnel child wait failed: {e}"); } }
+        match result {
+            Ok(status) => {
+                exit_tx.send_replace(Some(status));
+                // Removal happens ONLY after this reaper published its post-wait
+                // status, and ONLY for the generation it owned: an old
+                // generation's late removal must never delete a newer live record.
+                if let Some(records) = records {
+                    if let Err(error) = records.remove(&reaped_id, generation) {
+                        tracing::warn!("Cannot retire a tunnel runtime record: {error}");
+                    }
+                }
+            }
+            Err(e) => { tracing::error!("Tunnel child wait failed: {e}"); }
+        }
     });
     // Drain continuously, bounded per line even without a newline. No raw
     // diagnostics survive this task/attempt, and the pipe cannot fill and stall.
@@ -623,7 +698,7 @@ mod tests {
     }
     fn make_registry(spawner: Arc<dyn TunnelSpawner>) -> (TunnelRegistry, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let mut registry = TunnelRegistry::new(spawner, ConfigSource::Fixture { user: "", system: "" }, Arc::new(ProbeSocketFactory::default()));
+        let mut registry = TunnelRegistry::new(spawner, ConfigSource::Fixture { user: "", system: "" }, Arc::new(ProbeSocketFactory::default()), Arc::new(SystemClock));
         Arc::get_mut(&mut registry.core).unwrap().runtime_dir = dir.path().to_path_buf();
         (registry, dir)
     }
@@ -964,7 +1039,7 @@ mod tests {
         let mut expected = VecDeque::new();
         {
             let mut state = registry.core.state.lock().unwrap(); let entry = state.entries.get_mut(&id).unwrap(); entry.log.clear();
-            for n in 0..101 { let to = if n % 2 == 0 { TunnelState::Reconnecting } else { TunnelState::Listening }; entry.transition(to, None, None); expected.push_back(to); }
+            for n in 0..101 { let to = if n % 2 == 0 { TunnelState::Reconnecting } else { TunnelState::Listening }; entry.transition(to, None, None, registry.core.clock.now_unix_ms()); expected.push_back(to); }
         }
         expected.pop_front(); let log = registry.transitions(&id);
         assert_eq!(log.len(), 100); assert_eq!(log.iter().map(|t| t.to).collect::<Vec<_>>(), expected.into_iter().collect::<Vec<_>>());
