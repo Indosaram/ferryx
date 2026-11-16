@@ -27,12 +27,6 @@ type PaletteCommand = { id: string; title: string; run: () => void; icon: Lucide
 
 const focusableSelector = 'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
 
-/** Tab order inside the palette, skipping nodes that cannot take focus or are hidden from it. */
-function paletteFocusables(container: HTMLElement) {
-  return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector))
-    .filter((element) => element.tabIndex >= 0 && !element.closest('[hidden], [inert], [aria-hidden="true"]'));
-}
-
 export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSelectTab, onShowChanges, onNewWindow, appearance, onClose }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -101,12 +95,12 @@ export function CommandPalette({ open, worktrees, tabs, onSelectWorktree, onSele
     if (event.key !== "Tab") return;
     const dialog = dialogRef.current;
     if (!dialog) return;
-    const focusables = paletteFocusables(dialog);
+    const focusables = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector));
     if (focusables.length === 0) return;
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
     const active = document.activeElement;
-    if (event.shiftKey && (active === first || !dialog.contains(active))) {
+    if (event.shiftKey && active === first) {
       event.preventDefault();
       last.focus();
     } else if (!event.shiftKey && active === last) {
