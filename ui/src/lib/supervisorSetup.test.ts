@@ -62,6 +62,7 @@ describe("normalizeSetupStatus", () => {
       engineInstalled: true,
       engineState: "ready",
       engineFault: null,
+      supervisorHealthy: true,
       missingCapabilities: [],
       restartRequired: false,
       owner: { supervisorId: "sup-1", ownerPrincipal: "local:me" },
@@ -98,6 +99,9 @@ describe("normalizeSetupStatus", () => {
     })!;
     expect(parsed.engineState).toBe("absent");
     expect(parsed.engineFault).toEqual({ code: "", message: "" });
+    // An older daemon that does not report it reads as healthy: unknown never nags.
+    expect(parsed.supervisorHealthy).toBe(true);
+    expect(normalizeSetupStatus({ ...wireStatus("none"), supervisorHealthy: false })!.supervisorHealthy).toBe(false);
     expect(parsed.missingCapabilities).toEqual(["memory_receipts"]);
     expect(parsed.owner).toBeNull();
     expect(parsed.projects).toBe(0);
@@ -186,6 +190,33 @@ describe("readiness and actionFor", () => {
 
   it("falls back to the engine state when a fault carries nothing", () => {
     expect(actionFor(status("fix_engine", { engineState: "stopped" })).description).toContain('"stopped"');
+  });
+
+  // The engine's own calls decide this, not its self-report: a ready-looking engine whose turns
+  // keep failing is blocked and every step waits on it.
+  it.each<SetupNextAction>(["none", "adopt", "cutover", "fix_engine"])(
+    "blocks nextAction %s while the engine's recorded calls are failing",
+    (kind) => {
+      const current = status(kind, {
+        supervisorHealthy: false,
+        engineState: "degraded",
+        engineFault: { code: "MHC_PROVIDER", message: "4 of the last 6 supervisor engine calls failed (MHC_PROVIDER)" },
+      });
+      expect(readiness(current)).toBe("blocked");
+      expect(setupNeedsAttention(current)).toBe(true);
+      expect(setupFinished(current)).toBe(false);
+      const action = actionFor(current);
+      expect(action.label).toBe("The supervisor engine is failing");
+      expect(action.description).toContain("MHC_PROVIDER");
+      expect(action.primary).toBeNull();
+      expect(row(current, "engine_ready")).toMatchObject({ state: "blocked", detail: "MHC_PROVIDER" });
+    },
+  );
+
+  it("leaves a healthy engine's setup order alone", () => {
+    expect(readiness(status("adopt", { supervisorHealthy: true }))).toBe("needs_setup");
+    expect(actionFor(status("adopt", { supervisorHealthy: true })).kind).toBe("adopt");
+    expect(row(status("adopt", { supervisorHealthy: true }), "engine_ready")).toMatchObject({ state: "done", detail: "Ready" });
   });
 });
 

@@ -118,6 +118,7 @@ The setup status is camelCase JSON:
 | --- | --- |
 | `engineEnabled`, `engineInstalled`, `engineState` | the env flag, an engine in the running generation, and its state |
 | `engineFault`, `missingCapabilities` | `{code, message}` or null, and required capabilities the engine lacks |
+| `supervisorHealthy` | false when the engine's own health or its recorded calls say it is failing; the hub's `healthy` is unaffected |
 | `restartRequired` | the flag is on but the running generation has no engine |
 | `owner`, `projects` | `{supervisorId, ownerPrincipal}` or null, and the owner's mapped project count |
 | `intake` | `{unifiedOpen, legacy, origin, legacyHistory}` |

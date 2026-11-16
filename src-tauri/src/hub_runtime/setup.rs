@@ -733,6 +733,9 @@ fn print_human(value: &Value) {
     let text = |key: &str| value[key].as_str().unwrap_or("-").to_owned();
     println!("next action      {}", text("nextAction"));
     println!("engine           enabled={} installed={} state={}", value["engineEnabled"], value["engineInstalled"], text("engineState"));
+    if value["supervisorHealthy"] == false {
+        println!("engine calls     failing: the supervisor answers nothing until they recover");
+    }
     if let Some(fault) = value["engineFault"].as_object() {
         println!("engine fault     {} {}", fault["code"].as_str().unwrap_or(""), fault["message"].as_str().unwrap_or(""));
     }

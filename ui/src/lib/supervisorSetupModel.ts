@@ -25,6 +25,8 @@ export type SetupStatus = {
   /** "absent" | "starting" | "ready" | "waiting" | "degraded" | "stopped", or a newer state. */
   engineState: string;
   engineFault: { code: string; message: string } | null;
+  /** False when the engine's recorded calls are failing, whatever its own health says. */
+  supervisorHealthy: boolean;
   missingCapabilities: string[];
   restartRequired: boolean;
   owner: { supervisorId: string; ownerPrincipal: string } | null;
@@ -106,6 +108,8 @@ export function normalizeSetupStatus(raw: unknown): SetupStatus | null {
     engineInstalled: bool(value.engineInstalled),
     engineState: text(value.engineState, "absent") || "absent",
     engineFault: fault ? { code: text(fault.code), message: text(fault.message) } : null,
+    // An older daemon does not report it: unknown reads as healthy, so it never nags.
+    supervisorHealthy: value.supervisorHealthy !== false,
     missingCapabilities: Array.isArray(value.missingCapabilities)
       ? value.missingCapabilities.filter((item): item is string => typeof item === "string" && item.length > 0)
       : [],
@@ -178,6 +182,9 @@ function isRolledBack(status: SetupStatus): boolean {
 /** What the setup state means for the person. Unknown (null) never asks for anything. */
 export function readiness(status: SetupStatus | null): SetupReadiness {
   if (!status) return "unknown";
+  // An engine that is on but failing its own calls is blocked, whatever step would come next:
+  // nothing is decided through it until it works again.
+  if (!status.supervisorHealthy) return "blocked";
   switch (status.nextAction) {
     case "none":
       return "ready";
@@ -203,7 +210,8 @@ export function readiness(status: SetupStatus | null): SetupReadiness {
  * (the banner still offers them).
  */
 export function setupFinished(status: SetupStatus | null): boolean {
-  return status !== null && (status.nextAction === "none" || status.nextAction === "adopt" || isRolledBack(status));
+  if (status === null || !status.supervisorHealthy) return false;
+  return status.nextAction === "none" || status.nextAction === "adopt" || isRolledBack(status);
 }
 
 /** True when a setup banner should ask: needs setup or blocked, never unknown, ready or working. */
@@ -244,6 +252,7 @@ function engineOnRow(status: SetupStatus): SetupChecklistRow {
 
 function engineReadyRow(status: SetupStatus): SetupChecklistRow {
   const base = { id: "engine_ready" as const, label: "Engine ready" };
+  if (!status.supervisorHealthy) return { ...base, state: "blocked", detail: status.engineFault?.code || "degraded" };
   if (status.engineState === "ready" && !status.engineFault) return { ...base, state: "done", detail: "Ready" };
   if (status.engineFault) return { ...base, state: "blocked", detail: status.engineFault.code || status.engineState };
   if (status.nextAction === "fix_engine") return { ...base, state: "blocked", detail: status.engineState };
@@ -310,6 +319,9 @@ function faultDescription(status: SetupStatus): string {
 /** The one thing to tell (and offer) the person for this setup state. */
 export function actionFor(status: SetupStatus): SetupAction {
   const kind = status.nextAction;
+  if (!status.supervisorHealthy) {
+    return { kind, label: "The supervisor engine is failing", description: faultDescription(status), primary: null };
+  }
   if (isRolledBack(status)) {
     return {
       kind,

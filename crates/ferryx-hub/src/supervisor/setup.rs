@@ -5,6 +5,11 @@
 //! the daemon, the phone and the CLI. Its `nextAction` is the first unmet step: turn the
 //! engine on, restart the hub generation so it is installed, wait for it, fix it, create the
 //! owner, map a project, cut over, seed owner memory (when opted in), adopt old lanes.
+//!
+//! The engine state also reads the calls the engine actually made
+//! ([`recorded_call_fault`]): an engine that reports itself ready while its turns keep failing
+//! is `degraded`, and `supervisorHealthy` says so.
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
@@ -18,6 +23,21 @@ pub const MEMORY_IMPORT_KEY: &str = "supervisor_memory_import";
 
 /// Longest owner principal ([`super::provision_identity`] refuses longer ones).
 const MAX_PRINCIPAL_CHARS: usize = 256;
+
+/// How far back the recorded engine calls are read, and how many of the newest count.
+const CALL_WINDOW_MINUTES: i64 = 30;
+const CALL_WINDOW_CALLS: i64 = 20;
+/// This many newest calls ending in [`EXITED`] make the engine degraded on their own.
+const EXITED_STREAK: usize = 3;
+
+/// `supervisor_model_calls.outcome` of a turn the engine answered.
+const CALL_OK: &str = "ok";
+/// The owner cancelled the turn (or its caller went away): not an engine failure.
+const CALL_CANCELLED: &str = "MHC_CANCELLED";
+const EXITED: &str = "MHC_ENGINE_EXITED";
+
+/// The `engineState` of an engine whose recorded calls are failing.
+const DEGRADED: &str = "degraded";
 
 /// What the caller knows about the engine of this process.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -148,6 +168,9 @@ pub struct SetupStatus {
     /// `absent`, `starting`, `ready`, `waiting`, `degraded`, `stopped` or `exited`.
     pub engine_state: String,
     pub engine_fault: Option<EngineFault>,
+    /// False when the engine's own health, or its recorded calls, say it is failing. Unknown
+    /// call history never makes it false.
+    pub supervisor_healthy: bool,
     pub missing_capabilities: Vec<String>,
     pub restart_required: bool,
     pub owner: Option<SetupOwner>,
@@ -182,6 +205,88 @@ enum EngineStep {
     Wait,
     Fix,
     Ready,
+}
+
+/// The newest recorded engine calls inside the window, newest first. Outcomes are `ok` or the
+/// typed fault code the turn ended in ([`CALL_CANCELLED`] among them).
+async fn recorded_call_outcomes(pool: &SqlitePool) -> Result<Vec<String>, SupervisorError> {
+    let since = (Utc::now() - Duration::minutes(CALL_WINDOW_MINUTES)).to_rfc3339();
+    let outcomes: Vec<String> = sqlx::query_scalar(
+        "SELECT outcome FROM supervisor_model_calls
+          WHERE julianday(created_at) >= julianday(?)
+          ORDER BY id DESC LIMIT ?",
+    )
+    .bind(since)
+    .bind(CALL_WINDOW_CALLS)
+    .fetch_all(pool)
+    .await?;
+    Ok(outcomes)
+}
+
+/// Whether a recorded outcome is an engine failure: a refusal, a crash, a timeout. A turn the
+/// owner cancelled is not.
+fn call_failed(outcome: &str) -> bool {
+    outcome != CALL_OK && outcome != CALL_CANCELLED
+}
+
+/// The most frequent failure code, the most recent one on a tie (`failures` is newest first).
+fn dominant_code<'a>(failures: &[&'a str]) -> Option<&'a str> {
+    let mut counts: Vec<(&'a str, usize)> = Vec::new();
+    for failure in failures.iter().copied() {
+        match counts.iter_mut().find(|(code, _)| *code == failure) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((failure, 1)),
+        }
+    }
+    let mut best: Option<(&'a str, usize)> = None;
+    for (code, count) in counts {
+        if best.is_none_or(|(_, best_count)| count > best_count) {
+            best = Some((code, count));
+        }
+    }
+    best.map(|(code, _)| code)
+}
+
+/// The fault the recorded calls imply, `None` while they do not say the engine is failing.
+///
+/// No call in the window is an unknown engine, not a broken one: it stays as its own health
+/// reports it. More than half the newest calls failing makes the engine degraded, as does a
+/// newest run of [`EXITED_STREAK`] exits.
+fn call_fault(outcomes: &[String]) -> Option<EngineFault> {
+    let failures: Vec<&str> = outcomes
+        .iter()
+        .map(String::as_str)
+        .filter(|outcome| call_failed(outcome))
+        .collect();
+    let exited_run = outcomes.len() >= EXITED_STREAK
+        && outcomes[..EXITED_STREAK].iter().all(|outcome| outcome.as_str() == EXITED);
+    let mostly_failing = failures.len() * 2 > outcomes.len();
+    if !exited_run && !mostly_failing {
+        return None;
+    }
+    let code = if exited_run {
+        EXITED
+    } else {
+        dominant_code(&failures).unwrap_or(EXITED)
+    };
+    let message = if exited_run {
+        format!("the supervisor engine exited on the last {EXITED_STREAK} calls")
+    } else {
+        format!(
+            "{} of the last {} supervisor engine calls failed",
+            failures.len(),
+            outcomes.len()
+        )
+    };
+    Some(EngineFault {
+        code: code.to_owned(),
+        message: format!("{message} ({code})"),
+    })
+}
+
+/// [`call_fault`] over what this installation recorded.
+async fn recorded_call_fault(pool: &SqlitePool) -> Result<Option<EngineFault>, SupervisorError> {
+    Ok(call_fault(&recorded_call_outcomes(pool).await?))
 }
 
 /// (state text, fault, missing capabilities, step) of the engine view.
@@ -277,7 +382,16 @@ pub async fn setup_status(
     pool: &SqlitePool,
     engine: EngineView,
 ) -> Result<SetupStatus, SupervisorError> {
-    let (engine_state, engine_fault, missing_capabilities, step) = engine_reading(&engine);
+    let (mut engine_state, mut engine_fault, missing_capabilities, step) = engine_reading(&engine);
+    // An installed engine that keeps failing its turns is degraded whatever it says about
+    // itself. Its own fault, when it named one, stays the more specific diagnosis.
+    if engine.installed {
+        if let Some(fault) = recorded_call_fault(pool).await? {
+            engine_state = DEGRADED.to_owned();
+            engine_fault.get_or_insert(fault);
+        }
+    }
+    let supervisor_healthy = engine_state != DEGRADED;
     let restart_required = engine.enabled && !engine.installed;
     let owner = identities(pool).await?.into_iter().next().map(|identity| SetupOwner {
         supervisor_id: identity.supervisor_id,
@@ -326,6 +440,7 @@ pub async fn setup_status(
         engine_installed: engine.installed,
         engine_state,
         engine_fault,
+        supervisor_healthy,
         missing_capabilities,
         restart_required,
         owner,
