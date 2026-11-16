@@ -500,17 +500,36 @@ async fn apply_rule_change(
     ))
 }
 
+/// What [`turn_message`] appends to a message whose owner addressed sessions with @.
+const ADDRESSED_OPEN: &str = "\n\n[The owner addressed these sessions with @: ";
+const ADDRESSED_CLOSE: &str = "]";
+
 /// The message the supervisor receives: the owner's text, plus the sessions it names so the
 /// supervisor never has to guess a write target.
-fn turn_message(text: &str, mentions: &[SessionRef]) -> String {
+pub(crate) fn turn_message(text: &str, mentions: &[SessionRef]) -> String {
     if mentions.is_empty() {
         return text.to_owned();
     }
     let refs: Vec<&str> = mentions.iter().map(SessionRef::as_str).collect();
     format!(
-        "{text}\n\n[The owner addressed these sessions with @: {}]",
+        "{text}{ADDRESSED_OPEN}{}{ADDRESSED_CLOSE}",
         refs.join(", ")
     )
+}
+
+/// The sessions a message from [`turn_message`] says the owner addressed: the exact inverse of
+/// the trailer it adds, so the work tools read the mentions the transcript recorded instead of
+/// parsing the owner's prose.
+pub fn addressed_sessions(message: &str) -> Vec<SessionRef> {
+    let Some(at) = message.rfind(ADDRESSED_OPEN) else {
+        return Vec::new();
+    };
+    let Some(list) = message[at + ADDRESSED_OPEN.len()..].strip_suffix(ADDRESSED_CLOSE) else {
+        return Vec::new();
+    };
+    list.split(", ")
+        .filter_map(|raw| SessionRef::parse(raw).ok())
+        .collect()
 }
 
 /// What one converse request runs against.

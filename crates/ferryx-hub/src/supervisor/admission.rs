@@ -189,8 +189,12 @@ pub struct AdoptSession {
 
 /// Most recent messages of an adopted session the worker may read as context.
 pub const ADOPTED_HISTORY_MESSAGES: i64 = 20;
+
 /// Longest adopted-history context, in characters.
 pub const ADOPTED_HISTORY_MAX_CHARS: usize = 8_000;
+
+/// How many project names a `needs_choice` detail lists, so the owner can answer with one.
+const LISTED_PROJECT_NAMES: i64 = 20;
 
 /// A persisted goal as admission reports it, read back after commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -957,7 +961,10 @@ async fn resolve_scope(
                 _ => {
                     return needs_choice(
                         "project",
-                        "several projects could be meant; pick one".into(),
+                        format!(
+                            "several projects could be meant; pick one: {}",
+                            project_names(pool, &identity.supervisor_id).await?
+                        ),
                     )
                 }
             }
@@ -1074,8 +1081,30 @@ async fn resolve_scope(
     }))
 }
 
+/// Every project name of this supervisor, oldest first, so a `needs_choice` detail can be
+/// answered by naming one. At most [`LISTED_PROJECT_NAMES`] names are listed; a longer list ends
+/// in `and more` rather than in a truncated name the owner could not reply with.
+async fn project_names(pool: &SqlitePool, supervisor_id: &str) -> Result<String, AdmissionError> {
+    let mut names: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM supervisor_projects WHERE supervisor_id = ?
+         ORDER BY created_at, name LIMIT ?",
+    )
+    .bind(supervisor_id)
+    .bind(LISTED_PROJECT_NAMES + 1)
+    .fetch_all(pool)
+    .await?;
+    let more = names.len() as i64 > LISTED_PROJECT_NAMES;
+    names.truncate(LISTED_PROJECT_NAMES as usize);
+    let joined = names.join(", ");
+    Ok(if more {
+        format!("{joined}, and more")
+    } else {
+        joined
+    })
+}
+
 /// The checkout a git common dir belongs to: `/x/repo/.git` is `/x/repo`.
-fn checkout_root(git_common_dir: &str) -> String {
+pub(super) fn checkout_root(git_common_dir: &str) -> String {
     let trimmed = git_common_dir.trim_end_matches(['/', '\\']);
     for suffix in ["/.git", "\\.git"] {
         if let Some(root) = trimmed.strip_suffix(suffix) {
@@ -1087,7 +1116,7 @@ fn checkout_root(git_common_dir: &str) -> String {
     trimmed.to_owned()
 }
 
-fn within(root: &str, path: &str) -> bool {
+pub(super) fn within(root: &str, path: &str) -> bool {
     path == root
         || path
             .strip_prefix(root)
