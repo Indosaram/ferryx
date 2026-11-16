@@ -26,6 +26,7 @@ import {
   resetAppearanceSettings,
   saveAppearanceSettings,
   useApplyAppearanceSettings,
+  type AppearanceSettingsState,
 } from "./appearanceSettings";
 import {
   loadBrowserSettings,
@@ -232,9 +233,8 @@ describe("settings runtime contracts", () => {
 
         expect(document.documentElement.dataset.theme).toBe("light");
         expect(terminalIpc.setTerminalAppearance).toHaveBeenLastCalledWith("light");
-        await vi.waitFor(() => {
-          expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#fafafa");
-        });
+        await terminalIpc.setTerminalAppearance.mock.results.at(-1)!.value;
+        expect(document.documentElement.style.getPropertyValue("--terminal")).toBe("#fafafa");
         expect(localStorage.getItem(TERMINAL_BACKGROUND_STORAGE_KEY)).toBe("#fafafa");
       });
 
@@ -262,20 +262,91 @@ describe("settings runtime contracts", () => {
         expect(terminalIpc.setTerminalAppearance).toHaveBeenLastCalledWith("dark");
       });
 
+      it("pushes each effective custom base once and returns to charcoal as dark", () => {
+        stubColorScheme(false);
+        installSettingsRuntimeBridge();
+        const customThemes = [
+          { version: 1 as const, id: "custom-light", name: "Light", base: "light" as const, tokens: {} },
+          { version: 1 as const, id: "custom-dark", name: "Dark", base: "dark" as const, tokens: {} },
+        ];
+        function AppearanceWatcher() {
+          useApplyAppearanceSettings();
+          return null;
+        }
+        const watcher = render(createElement(AppearanceWatcher));
+        act(() => {
+          saveAppearanceSettings({ customThemes, activeCustomThemeId: "custom-light" });
+        });
+        expect(document.documentElement.dataset.theme).toBe("light");
+        expect(terminalIpc.setTerminalAppearance.mock.calls).toEqual([["dark"], ["light"]]);
+
+        watcher.rerender(createElement(AppearanceWatcher));
+        act(() => {
+          saveAppearanceSettings({ accentColor: "rose", density: "comfortable", renderMath: false });
+          saveAppearanceSettings({ customCss: "p { color: red }" });
+          saveBrowserSettings({ defaultZoom: 125 });
+        });
+        expect(terminalIpc.setTerminalAppearance.mock.calls).toEqual([["dark"], ["light"]]);
+
+        act(() => { saveAppearanceSettings({ activeCustomThemeId: "custom-dark" }); });
+        expect(terminalIpc.setTerminalAppearance.mock.calls).toEqual([["dark"], ["light"], ["dark"]]);
+        act(() => { saveAppearanceSettings({ activeCustomThemeId: "custom-light" }); });
+        act(() => { saveAppearanceSettings({ activeCustomThemeId: null, theme: "charcoal" }); });
+        expect(terminalIpc.setTerminalAppearance.mock.calls).toEqual([
+          ["dark"], ["light"], ["dark"], ["light"], ["dark"],
+        ]);
+        watcher.unmount();
+      });
+
+      it("uses the default dark base when a direct appearance event has a theme missing its base", () => {
+        stubColorScheme(false);
+        saveAppearanceSettings({ theme: "light" });
+        installSettingsRuntimeBridge();
+        const settings = {
+          ...loadAppearanceSettings(),
+          theme: "charcoal",
+          activeCustomThemeId: "missing-base",
+          customThemes: [{ version: 1, id: "missing-base", name: "Missing base", tokens: {} }],
+        } as unknown as AppearanceSettingsState;
+        window.dispatchEvent(new CustomEvent(APPEARANCE_SETTINGS_EVENT, { detail: settings }));
+        expect(document.documentElement.dataset.theme).toBe("charcoal");
+        expect(terminalIpc.setTerminalAppearance.mock.calls).toEqual([["light"], ["dark"]]);
+        window.dispatchEvent(new CustomEvent(APPEARANCE_SETTINGS_EVENT, { detail: settings }));
+        expect(terminalIpc.setTerminalAppearance.mock.calls).toEqual([["light"], ["dark"]]);
+      });
+
+      it("keeps a custom base when the built-in system preference follows an OS flip", () => {
+        const media = stubColorScheme(false);
+        saveAppearanceSettings({
+          theme: "system",
+          customThemes: [{ version: 1, id: "custom-light", name: "Light", base: "light", tokens: {} }],
+          activeCustomThemeId: "custom-light",
+        });
+        installSettingsRuntimeBridge();
+        media.matches = true;
+        media.fire();
+        media.matches = false;
+        media.fire();
+        expect(document.documentElement.dataset.theme).toBe("light");
+        expect(terminalIpc.setTerminalAppearance.mock.calls).toEqual([["light"]]);
+      });
+
       it("keeps the UI working when the terminal appearance push rejects", async () => {
         const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
         terminalIpc.setTerminalAppearance.mockRejectedValue(new Error("daemon unavailable"));
         saveAppearanceSettings({ theme: "system" });
         const media = stubColorScheme(false);
         installSettingsRuntimeBridge();
-        await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+        await terminalIpc.setTerminalAppearance.mock.results.at(-1)!.value.catch(() => undefined);
+        expect(warn).toHaveBeenCalledTimes(1);
 
         media.matches = true;
         media.fire();
 
         expect(document.documentElement.dataset.theme).toBe("light");
         expect(terminalIpc.setTerminalAppearance).toHaveBeenLastCalledWith("light");
-        await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
+        await terminalIpc.setTerminalAppearance.mock.results.at(-1)!.value.catch(() => undefined);
+        expect(warn).toHaveBeenCalledTimes(2);
         warn.mockRestore();
       });
 

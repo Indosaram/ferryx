@@ -7,6 +7,7 @@ import {
   resolveTerminalAppearance,
   subscribeSystemColorScheme,
   type AppearanceSettingsState,
+  type AppearanceTheme,
 } from "./appearanceSettings";
 import { setTerminalAppearance } from "./tauri";
 import { syncTerminalBackground } from "./terminalSettings";
@@ -29,9 +30,11 @@ function isDesktopShell() {
 }
 
 /** Desktop-only: tells the native terminal which side of the app appearance to follow. */
-function pushTerminalAppearance(settings: AppearanceSettingsState) {
+function pushTerminalAppearance() {
   if (!isDesktopShell()) return;
-  const appearance = resolveTerminalAppearance(settings.theme, prefersLightColorScheme());
+  // The applier has already validated custom themes (including CSS) and resolved their base.
+  const theme = document.documentElement.dataset.theme as Exclude<AppearanceTheme, "system">;
+  const appearance = resolveTerminalAppearance(theme, prefersLightColorScheme());
   if (appearance === lastPushedAppearance) return;
   lastPushedAppearance = appearance;
   const request = ++pushRequest;
@@ -54,19 +57,20 @@ export function installSettingsRuntimeBridge() {
 
   const initial = loadAppearanceSettings();
   applyAppearanceSettings(initial);
-  pushTerminalAppearance(initial);
+  pushTerminalAppearance();
 
   const handleSystemThemeChange = () => {
     const settings = loadAppearanceSettings();
     if (settings.theme !== "system") return;
     applyAppearanceSettings(settings);
-    pushTerminalAppearance(settings);
+    pushTerminalAppearance();
   };
   const unsubscribeSystemTheme = subscribeSystemColorScheme(handleSystemThemeChange);
 
   const handleAppearanceSettingChange = (event: Event) => {
     const detail = (event as CustomEvent<AppearanceSettingsState>).detail;
-    pushTerminalAppearance(detail ?? loadAppearanceSettings());
+    applyAppearanceSettings(detail ?? loadAppearanceSettings());
+    pushTerminalAppearance();
   };
   window.addEventListener(APPEARANCE_SETTINGS_EVENT, handleAppearanceSettingChange);
   uninstallListeners = () => {
