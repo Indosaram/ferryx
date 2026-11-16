@@ -11,6 +11,7 @@
 
 use crate::ipc::IpcError;
 use crate::ssh::tunnel::argv::{self, ConfigSource};
+use crate::ssh::tunnel_store::SystemClock;
 use crate::ssh::tunnel::registry::{
     classify_ssh_stderr, ProcessSpawner, ProbeSocketFactory, Signal, SpawnedTunnel, TunnelChild,
     TunnelRegistry, TunnelSpawner, TunnelTransition,
@@ -441,7 +442,6 @@ struct Fixture {
 
 impl Fixture {
     async fn start() -> Self {
-        use crate::ssh::tunnel_store::SystemClock;
         use std::os::fd::OwnedFd;
         use std::os::unix::fs::PermissionsExt;
 
