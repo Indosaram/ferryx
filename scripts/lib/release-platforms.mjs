@@ -685,6 +685,15 @@ ${tauriBuild}
 cargo build --manifest-path "$source_dir/src-tauri/Cargo.toml" --release --no-default-features --bin ferryx-cli
 cp "$CARGO_TARGET_DIR/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64" || cp "$source_dir/src-tauri/target/release/ferryx-cli" "$out_dir/ferryx-cli-linux-amd64"
 test -s "$out_dir/ferryx-cli-linux-amd64"
+# ferryx-cli-linux-amd64 is what install.sh puts on headless servers. A copy that links the
+# desktop stack (PipeWire, FFmpeg, GTK) dies with exit 127 there, which is how release
+# v2026.1107.2 shipped, so refuse any dynamic dependency beyond the C runtime.
+cli_needed="$(objdump -p "$out_dir/ferryx-cli-linux-amd64" | awk '$1 == "NEEDED" { print $2 }')"
+cli_extra_needed="$(printf '%s\\n' "$cli_needed" | grep -Ev '^(libc|libm|libgcc_s|libpthread|libdl|librt|libutil|ld-linux-x86-64)\\.so(\\.[0-9]+)*$' || true)"
+if [ -n "$cli_extra_needed" ]; then
+  echo "ferryx-cli-linux-amd64 must link only the C runtime; it also needs: $cli_extra_needed" >&2
+  exit 1
+fi
 # The remote-desktop client is a separate headless binary (crates/ferryx-rd/ferryx-rd-app,
 # required-features "cli"). Without it every remote host answered "no RD client on PATH" and the
 # daemon-lifetime Q00/Q11 lanes could not drive the GUI at all, so ship it next to ferryx-cli.

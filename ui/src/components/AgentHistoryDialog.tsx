@@ -347,14 +347,14 @@ export function AgentHistoryDialog({
             ) : null}
 
             {entriesPartial ? (
-              <div className="mb-3 flex items-center gap-1.5 rounded-md border border-status-warning/30 bg-status-warning/10 px-2.5 py-1.5 text-[11px] text-status-warning">
+              <div className="mb-3 flex items-center gap-1.5 rounded-md border border-status-warning-border bg-status-warning-container px-2.5 py-1.5 text-[11px] text-status-warning-on">
                 <AlertTriangle className="size-3.5 shrink-0" />
                 <span>Partial results returned</span>
               </div>
             ) : null}
 
             {entriesWarnings.length > 0 ? (
-              <div className="mb-3 space-y-1 rounded-md border border-status-warning/30 bg-status-warning/10 p-2.5 text-[11px] text-status-warning">
+              <div className="mb-3 space-y-1 rounded-md border border-status-warning-border bg-status-warning-container p-2.5 text-[11px] text-status-warning-on">
                 {entriesWarnings.map((warn, i) => (
                   <div key={i} className="flex items-center gap-1.5">
                     <AlertTriangle className="size-3.5 shrink-0" />

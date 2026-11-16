@@ -46,6 +46,14 @@ fn goal_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
     }
 }
 
+fn hand_over_goal_from(response: DaemonResponse) -> Result<String, IpcError> {
+    match response {
+        DaemonResponse::SupervisorHandOverOk { goal_id } => Ok(goal_id),
+        DaemonResponse::Error { message, code, .. } => Err(failure(message, code)),
+        _ => Err(IpcError::internal("Unexpected daemon supervisor hand-over response")),
+    }
+}
+
 #[tauri::command]
 pub async fn cmd_supervisor_snapshot(
     daemon_client: tauri::State<'_, Arc<DaemonClient>>,
@@ -62,6 +70,25 @@ pub async fn cmd_supervisor_set_paused(
     paused_from(
         daemon_client
             .send_request(DaemonRequest::SupervisorSetPaused { lane_key, paused })
+            .await?,
+    )
+}
+
+/// Hand a running pane to the supervisor as one observed goal; answers the goal's id.
+#[tauri::command]
+pub async fn cmd_supervisor_hand_over(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    host_id: String,
+    session_id: String,
+    instruction: String,
+) -> Result<String, IpcError> {
+    hand_over_goal_from(
+        daemon_client
+            .send_request(DaemonRequest::SupervisorHandOver {
+                host_id,
+                session_id,
+                instruction,
+            })
             .await?,
     )
 }

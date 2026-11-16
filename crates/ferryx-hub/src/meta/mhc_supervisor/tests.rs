@@ -2244,8 +2244,7 @@ async fn every_engine_turn_is_metered_with_its_cause_and_unknown_usage_stays_unk
 async fn an_answer_from_another_model_than_the_configured_one_is_discarded() {
     let harness = Harness::new("routing", all_capabilities());
     let mut configured = config();
-    configured.provider = Some("anthropic".into());
-    configured.model = Some("claude-test".into());
+    configured.background_model = Some(("anthropic".into(), "claude-test".into()));
     let supervisor = MhcSupervisor::new(harness.profile("/parent", configured), harness.launcher.clone());
     assert_eq!(supervisor.decide("USAGE").await.unwrap(), "metered");
     let routed = supervisor.decide("USAGE_ROUTED").await.unwrap_err();
@@ -2256,6 +2255,90 @@ async fn an_answer_from_another_model_than_the_configured_one_is_discarded() {
     let calls = supervisor.unrecorded_calls();
     assert_eq!(calls[1].outcome, routed.code());
     assert_eq!(calls[1].model.as_deref(), Some("other-model"));
+}
+
+/// Background roles run on the background model and conversations on the conversation model:
+/// each session opens on its role's model, an answer from the other role's model is refused,
+/// and the model each call actually used is recorded.
+#[tokio::test]
+async fn each_role_opens_on_its_own_model_and_refuses_the_other_roles_model() {
+    let harness = Harness::new("role-routing", all_capabilities());
+    // The harness engine answers USAGE as anthropic/claude-test and USAGE_ROUTED as
+    // other/other-model.
+    let mut configured = config();
+    configured.background_model = Some(("anthropic".into(), "claude-test".into()));
+    configured.conversation_model = Some(("other".into(), "other-model".into()));
+    let supervisor = MhcSupervisor::new(
+        harness.profile("/parent", configured),
+        harness.launcher.clone(),
+    );
+    let scope = ConversationScope {
+        project_id: None,
+        channel_key: "slack:T1:B1:D1:routing".to_owned(),
+    };
+    let refused_code = SupervisorFault::provider("").code();
+
+    // A decision answered by the background model is accepted; by the conversation model,
+    // refused.
+    assert_eq!(supervisor.decide("USAGE").await.unwrap(), "metered");
+    let refused = supervisor.decide("USAGE_ROUTED").await.unwrap_err();
+    assert!(
+        matches!(refused, SupervisorFault::Provider { ref detail } if detail.contains("not the configured anthropic/claude-test")),
+        "{refused:?}"
+    );
+    // Convergence is a background role too.
+    assert_eq!(supervisor.converge("USAGE").await.unwrap(), "metered");
+    // A conversation answered by the conversation model is accepted; by the background model,
+    // refused.
+    assert_eq!(
+        supervisor.converse(&scope, "USAGE_ROUTED").await.unwrap(),
+        "routed"
+    );
+    let refused = supervisor.converse(&scope, "USAGE").await.unwrap_err();
+    assert!(
+        matches!(refused, SupervisorFault::Provider { ref detail } if detail.contains("not the configured other/other-model")),
+        "{refused:?}"
+    );
+
+    let opens = harness.peer.of_type("open_session");
+    assert!(!opens.is_empty());
+    for open in opens {
+        let role = open["context"]["ferryx_role"].as_str().unwrap().to_owned();
+        let (provider, model) = if role == "conversation" {
+            ("other", "other-model")
+        } else {
+            ("anthropic", "claude-test")
+        };
+        assert_eq!(open["provider"], json!(provider), "{role}");
+        assert_eq!(open["modelId"], json!(model), "{role}");
+    }
+    let calls = supervisor.unrecorded_calls();
+    let used: Vec<_> = calls
+        .iter()
+        .map(|call| {
+            (
+                call.role.as_str(),
+                call.provider.as_deref(),
+                call.model.as_deref(),
+                call.outcome.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        used,
+        [
+            ("decision", Some("anthropic"), Some("claude-test"), "ok"),
+            ("decision", Some("other"), Some("other-model"), refused_code),
+            ("convergence", Some("anthropic"), Some("claude-test"), "ok"),
+            ("conversation", Some("other"), Some("other-model"), "ok"),
+            (
+                "conversation",
+                Some("anthropic"),
+                Some("claude-test"),
+                refused_code
+            ),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -2352,6 +2435,7 @@ fn fleet_session(id: &str, question: &str) -> FleetSession {
         agent: "claude".into(),
         state: "blocked".into(),
         state_source: "provider".into(),
+        screen_readable: true,
         state_since_ms: None,
         screen_changed_at_ms: None,
         pending_prompt: Some(PendingPrompt {

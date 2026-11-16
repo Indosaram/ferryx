@@ -1,7 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AccountSessionError } from "../../remote/accountSession";
 import { AccountStep, type AccountStepDeps } from "./AccountStep";
 
 const ORIGIN = "https://relay.example.test";
@@ -11,9 +10,8 @@ const ENROLLED = { enrolled: true, accountOrigin: ORIGIN, enrolledAt: 1 };
 function deps(overrides: Partial<AccountStepDeps>): Partial<AccountStepDeps> {
   return {
     loadStatus: vi.fn().mockResolvedValue(NOT_ENROLLED),
-    issueCode: vi.fn().mockResolvedValue({ code: "ENR-1" }),
-    enroll: vi.fn().mockResolvedValue(ENROLLED),
     readToken: vi.fn().mockReturnValue(null),
+    adopt: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -26,38 +24,35 @@ describe("AccountStep", () => {
     expect(await screen.findByTestId("account-sign-in")).toBeTruthy();
   });
 
-  it("reports an already enrolled computer as linked without enrolling again", async () => {
-    const d = deps({ loadStatus: vi.fn().mockResolvedValue(ENROLLED) });
-    render(<AccountStep origin={ORIGIN} deps={d} />);
+  it("reports an already enrolled computer as linked", async () => {
+    render(<AccountStep origin={ORIGIN} deps={deps({ loadStatus: vi.fn().mockResolvedValue(ENROLLED) })} />);
     await waitFor(() =>
       expect(screen.getByTestId("onboarding-account").dataset.phase).toBe("linked"),
     );
-    expect(d.enroll).not.toHaveBeenCalled();
   });
 
-  it("links this computer with a freshly issued code when a session token exists", async () => {
+  it("treats an existing session token as linked with no code entry", async () => {
     const onLinked = vi.fn();
-    const d = deps({ readToken: vi.fn().mockReturnValue("tok") });
-    render(<AccountStep origin={ORIGIN} deps={d} onLinked={onLinked} />);
+    const adopt = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AccountStep
+        origin={ORIGIN}
+        deps={deps({ readToken: vi.fn().mockReturnValue("tok"), adopt })}
+        onLinked={onLinked}
+      />,
+    );
     await waitFor(() => expect(onLinked).toHaveBeenCalledTimes(1));
-    expect(d.issueCode).toHaveBeenCalledWith(ORIGIN, "tok");
-    expect(d.enroll).toHaveBeenCalledWith(ORIGIN, "ENR-1", "tok");
     expect(screen.getByTestId("onboarding-account").dataset.phase).toBe("linked");
+    expect(screen.queryByText(/code/i)).toBeNull();
+    // Onboarding may be the only surface the user ever sees, so the session reaches the
+    // daemon here rather than waiting for Settings to mount.
+    expect(adopt).toHaveBeenCalledWith(ORIGIN, "tok");
   });
 
-  it("surfaces the structured error code and retries on demand", async () => {
-    const issueCode = vi
-      .fn()
-      .mockRejectedValueOnce(new AccountSessionError("UNAUTHORIZED", "Session expired", 401))
-      .mockResolvedValueOnce({ code: "ENR-2" });
-    const d = deps({ readToken: vi.fn().mockReturnValue("tok"), issueCode });
-    render(<AccountStep origin={ORIGIN} deps={d} />);
-    expect(await screen.findByText("UNAUTHORIZED: Session expired")).toBeTruthy();
-
-    fireEvent.click(screen.getByTestId("onboarding-account-retry"));
-    await waitFor(() =>
-      expect(screen.getByTestId("onboarding-account").dataset.phase).toBe("linked"),
-    );
-    expect(d.enroll).toHaveBeenCalledWith(ORIGIN, "ENR-2", "tok");
+  it("never offers a retry or a manual link action", async () => {
+    render(<AccountStep origin={ORIGIN} deps={deps({})} />);
+    await screen.findByTestId("account-sign-in");
+    expect(screen.queryByTestId("onboarding-account-retry")).toBeNull();
+    expect(screen.queryByText("Retry")).toBeNull();
   });
 });

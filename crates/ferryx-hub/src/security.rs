@@ -40,19 +40,6 @@ pub fn classifier_allows(text: &str) -> bool {
     !DENY.iter().any(|pattern| lower.contains(pattern))
 }
 
-/// What the hub does with a prompt it sees in a pane.
-///
-/// The hub has no answer of its own: `suggested` is only the prompt's question text, and the
-/// pane-side answer path types an option index, so answering here would pick option 1 for the
-/// owner. Every readable prompt goes to the owner; an unreadable screen is held. `Answer` stays
-/// for a caller that has a real answer source (a judge verdict), which none has today.
-pub fn auto_answer(reading: &Reading, _suggested: &str) -> AutoDecision {
-    if !reading.screen_readable {
-        return AutoDecision::Hold;
-    }
-    AutoDecision::EscalateOwner
-}
-
 /// Turns the supervisor's answer decision ([`crate::supervisor::answer_history::decide`]) into
 /// what the hub does with the prompt. An irreversible or external step (plan D1a) and an
 /// unreadable screen are never answered, whatever `decision` says. A permission or approval
@@ -100,41 +87,6 @@ mod tests {
             kind: kind.map(str::to_owned),
             screen_readable: readable,
         }
-    }
-
-    #[test]
-    fn auto_answer_never_answers_d1a_items_for_the_owner() {
-        assert_eq!(
-            auto_answer(&reading("provider", Some("approval"), true), "yes"),
-            AutoDecision::EscalateOwner
-        );
-        assert_eq!(
-            auto_answer(
-                &reading("screen", Some("question"), true),
-                "the first option"
-            ),
-            AutoDecision::EscalateOwner
-        );
-        assert_eq!(
-            auto_answer(&reading("provider", Some("question"), true), "Which plan?"),
-            AutoDecision::EscalateOwner
-        );
-        assert_eq!(
-            auto_answer(&reading("screen", Some("approval"), true), "yes"),
-            AutoDecision::EscalateOwner
-        );
-        assert_eq!(
-            auto_answer(&reading("provider", Some("question"), false), "yes"),
-            AutoDecision::Hold
-        );
-        assert_eq!(
-            auto_answer(&reading("provider", Some("question"), true), "rm -rf /"),
-            AutoDecision::EscalateOwner
-        );
-        assert_eq!(
-            auto_answer(&reading("screen", Some("plan"), true), "ok"),
-            AutoDecision::EscalateOwner
-        );
     }
 
     #[test]

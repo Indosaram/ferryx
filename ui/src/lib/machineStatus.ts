@@ -4,7 +4,7 @@ import type { HostEndpoint } from "../state/remoteHostStore";
 import type { SshHostSource, SshTargetSummary } from "./sshHosts";
 
 export type MachineState = "connected" | "offline" | "checking" | "needsAccess" | "settingUp" | "error" | "disabled";
-export type PrimaryAction = "openProject" | "connect" | "setUp" | "retry" | "signIn" | "none";
+export type PrimaryAction = "openProject" | "setUp" | "retry" | "signIn" | "none";
 
 export interface MachineStatus {
   state: MachineState;
@@ -29,8 +29,9 @@ export const MACHINE_STATE_LABELS: Record<MachineState, string> = {
 /** Same texts as RemoteSection's `explanations`, so tooltips keep their meaning. */
 export const MACHINE_STATUS_EXPLANATIONS: Record<string, string> = {
   NATIVE_CONTEXT_REQUIRED: "Native host inventory is unavailable. Use the desktop app with a compatible local daemon; browser mirror access cannot manage machines.",
-  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, issue a fresh enrollment code from a signed-in desktop, and retry.",
+  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, then retry. A signed-in machine pairs itself, so no code is needed.",
   MACHINE_GRANT_REQUIRED: "Needs machine access. This credential carries no machine grant. Pair again from a signed-in account; revoked credentials cannot reconnect.",
+  PAIRING_ACCOUNT: "Signed in to your account; this machine is paired automatically.",
   UNSUPPORTED_CAPABILITY: "This relay, remote daemon, or local daemon does not advertise the required machine capabilities. Upgrade compatible components.",
   STALE_HOST_GENERATION: "Credentials changed during this request. Refresh the inventory and check capabilities again.",
   PAIRED_HOST_UNAVAILABLE: "The native host operation failed. Check the relay and daemon versions, connectivity and machine grant, then retry. Saved projects have not been removed.",
@@ -40,7 +41,7 @@ export const MACHINE_STATUS_EXPLANATIONS: Record<string, string> = {
   READY: "Machine project capabilities verified.",
 };
 
-const REPAIR_REASON = "Re-pair with an enrollment code";
+const REPAIR_REASON = "Re-pair by signing in to your Ferryx account";
 const NO_OPEN_REASON = "Opening projects is not available here";
 
 function status(state: MachineState, code: string, primary: PrimaryAction, primaryEnabled: boolean, reason: string | null, label = MACHINE_STATE_LABELS[state]): MachineStatus {
@@ -60,6 +61,13 @@ export interface PairedMachineStatusInput {
   canOpenProject?: boolean;
 }
 
+/**
+ * A machine the signed-in account has not paired yet is transient, not a task for the user:
+ * signing in pairs every machine of the account, so the row resolves itself. There is no
+ * connect action anywhere in the UI.
+ */
+const PAIRING_ACCOUNT_REASON = "Signed in to your account; this machine is paired automatically.";
+
 export function pairedMachineStatus(input: PairedMachineStatusInput): MachineStatus {
   const { host, nativeReady, accountEnrolled, reachability, check } = input;
   if (!nativeReady && !accountEnrolled) {
@@ -67,12 +75,14 @@ export function pairedMachineStatus(input: PairedMachineStatusInput): MachineSta
   }
   if (host.authStatus === "revoked") {
     return accountEnrolled
-      ? status("needsAccess", "MACHINE_GRANT_REQUIRED", "connect", true, "Access to this machine was revoked")
+      ? status("settingUp", "PAIRING_ACCOUNT", "openProject", false, "Access was revoked; pairing again happens automatically.")
       : status("needsAccess", "MACHINE_GRANT_REQUIRED", "none", false, `Access to this machine was revoked. ${REPAIR_REASON}`);
   }
   if (host.authStatus !== "paired" || host.grantScope !== "machine") {
+    // Signed in means paired: the daemon redeems this machine's grant on its own, so the row is
+    // waiting on a pairing pass that is already scheduled, not on anything the user must do.
     return accountEnrolled
-      ? status("needsAccess", "MACHINE_GRANT_REQUIRED", "connect", true, MACHINE_STATUS_EXPLANATIONS.MACHINE_GRANT_REQUIRED)
+      ? status("settingUp", "PAIRING_ACCOUNT", "openProject", false, PAIRING_ACCOUNT_REASON)
       : status("needsAccess", "MACHINE_GRANT_REQUIRED", "none", false, REPAIR_REASON);
   }
   if (reachability.supported) {
@@ -95,7 +105,7 @@ export function pairedMachineStatus(input: PairedMachineStatusInput): MachineSta
     if (check.code === "OFFLINE") return status("offline", "OFFLINE", "openProject", false, MACHINE_STATUS_EXPLANATIONS.OFFLINE);
     if (check.code === "MACHINE_GRANT_REQUIRED") {
       return accountEnrolled
-        ? status("needsAccess", "MACHINE_GRANT_REQUIRED", "connect", true, MACHINE_STATUS_EXPLANATIONS.MACHINE_GRANT_REQUIRED)
+        ? status("settingUp", "PAIRING_ACCOUNT", "openProject", false, PAIRING_ACCOUNT_REASON)
         : status("needsAccess", "MACHINE_GRANT_REQUIRED", "none", false, REPAIR_REASON);
     }
     const reason = MACHINE_STATUS_EXPLANATIONS[check.code] ?? MACHINE_STATUS_EXPLANATIONS.PAIRED_HOST_UNAVAILABLE;

@@ -316,10 +316,10 @@ export function NotificationsSection() {
   };
 
   let permissionBadgeClass =
-    "border-status-warning/20 bg-status-warning/10 text-status-warning";
+    "border-status-warning-border bg-status-warning-container text-status-warning-on";
   if (isAuthorized) {
     permissionBadgeClass =
-      "border-status-success/20 bg-status-success/10 text-status-success";
+      "border-status-success-border bg-status-success-container text-status-success-on";
   } else if (isDenied) {
     permissionBadgeClass =
       "border-destructive/20 bg-destructive/10 text-destructive";
@@ -388,8 +388,8 @@ export function NotificationsSection() {
               variant="outline"
               className={`px-2 py-0.5 text-[11px] font-medium ${
                 permissionStatus.badgesEnabled
-                  ? "border-status-success/20 bg-status-success/10 text-status-success"
-                  : "border-status-warning/20 bg-status-warning/10 text-status-warning"
+                  ? "border-status-success-border bg-status-success-container text-status-success-on"
+                  : "border-status-warning-border bg-status-warning-container text-status-warning-on"
               }`}
             >
               Dock badge: {permissionStatus.badgesEnabled ? "On" : "Off"}

@@ -1117,7 +1117,10 @@ impl DaemonSessionService {
         let meta = metadata.get(&target.session_id).ok_or("SESSION_EXPIRED")?;
         let Some(session) = meta.machine_session.as_ref() else {
             drop(metadata);
-            if target.daemon_epoch.0 != self.epoch {
+            // A desktop-opened PTY keeps its session id across rolling handovers (ids are fresh
+            // UUIDs and a live id is never re-issued), so a target an earlier generation of this
+            // daemon issued still names this live process. Only a future epoch is stale.
+            if target.daemon_epoch.0 == 0 || target.daemon_epoch.0 > self.epoch {
                 return Err("STALE_EPOCH".into());
             }
             let catalog = self
@@ -1371,6 +1374,29 @@ impl DaemonSessionService {
         })
     }
 
+    /// A session the desktop GUI opened has no machine-journal record, yet the inventory lists it
+    /// and the terminal socket admits it (`validate_machine_target`). Describe it the same way, so
+    /// a paired desktop can attach to the sessions this host's inventory advertises.
+    fn desktop_gui_detail(
+        &self,
+        id: &str,
+        epoch: crate::scoped_contracts::Epoch,
+    ) -> Result<crate::remote::machine_protocol::SessionDetail, String> {
+        use crate::remote::machine_protocol::SessionDetail;
+        let catalog = self
+            .workspace_service
+            .catalog()
+            .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
+        match self.project_desktop_gui_session(id, epoch, &catalog) {
+            Ok(session) if session.running => Ok(SessionDetail::Running { session }),
+            Ok(session) => Ok(SessionDetail::Expired {
+                target: session.target,
+            }),
+            Err(code) if code == "MACHINE_SERVICE_UNAVAILABLE" => Err(code),
+            Err(_) => Err("SESSION_NOT_FOUND".into()),
+        }
+    }
+
     pub(crate) fn machine_only(&self, id: &str) -> bool {
         self.workspace_service.journal.owns_session(id)
     }
@@ -1534,11 +1560,9 @@ impl DaemonSessionService {
         epoch: crate::scoped_contracts::Epoch,
     ) -> Result<crate::remote::machine_protocol::SessionDetail, String> {
         use crate::remote::machine_protocol::SessionDetail;
-        let mut record = self
-            .workspace_service
-            .journal
-            .session(id)?
-            .ok_or("SESSION_NOT_FOUND")?;
+        let Some(mut record) = self.workspace_service.journal.session(id)? else {
+            return self.desktop_gui_detail(id, epoch);
+        };
         if let Some(exit) = record.exit {
             record.session.running = false;
             return Ok(SessionDetail::Exited {

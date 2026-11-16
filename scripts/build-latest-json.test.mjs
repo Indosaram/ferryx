@@ -99,7 +99,7 @@ function createSyntheticReleaseFixture({
   mkdirSync(receiptsDir, { recursive: true });
   mkdirSync(artifactsDir, { recursive: true });
 
-  const requiredTargets = ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"];
+  const requiredTargets = ["darwin-aarch64", "linux-x86_64"];
   if (nsisMigration) {
     requiredTargets.push("windows-x86_64");
   }
@@ -166,7 +166,7 @@ function createSyntheticReleaseFixture({
         bytes: macUpdaterBuf.length,
         sha256: sha256(macUpdaterBuf),
         signatureRelPath: "darwin/Ferryx.app.tar.gz.sig",
-        targets: ["darwin-aarch64", "darwin-x86_64"],
+        targets: ["darwin-aarch64"],
       },
       {
         kind: "cli-darwin-universal",
@@ -365,7 +365,6 @@ test("assembleRelease creates complete release inventory, latest.json first, sta
     assert.equal(manifest.pub_date, new Date(1788868800 * 1000).toISOString());
     assert.deepEqual(Object.keys(manifest.platforms).sort(), [
       "darwin-aarch64",
-      "darwin-x86_64",
       "linux-x86_64",
     ]);
 
@@ -416,7 +415,6 @@ test("assembleRelease supports NSIS migration channel with windows updater targe
     const manifest = JSON.parse(readFileSync(join(outDir, "latest.json"), "utf8"));
     assert.deepEqual(Object.keys(manifest.platforms).sort(), [
       "darwin-aarch64",
-      "darwin-x86_64",
       "linux-x86_64",
       "windows-x86_64",
     ]);

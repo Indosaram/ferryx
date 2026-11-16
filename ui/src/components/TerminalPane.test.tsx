@@ -662,7 +662,7 @@ describe("TerminalPane native routing contract", () => {
     expect(onOpenNewShell).not.toHaveBeenCalled();
   });
 
-  it("renders blocked recovery with explicit new terminal escape and no automatic resume", () => {
+  it("renders blocked recovery with retry only when the backend is still held", () => {
     const onOpenNewShell = vi.fn();
     render(
       <TerminalPane
@@ -677,7 +677,10 @@ describe("TerminalPane native routing contract", () => {
 
     expect(screen.getByText("Session recovery blocked")).toBeInTheDocument();
     expect(screen.getByText("Authentication required")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open new shell" })).toBeInTheDocument();
+    // The pane still holds a live backend id, so a replacement shell would be refused with
+    // AGENT_RESUME_INVALID; the retry affordance stays and no dead new-shell button is painted.
+    expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
+    expect(onOpenNewShell).not.toHaveBeenCalled();
   });
 
   it("keeps SSH recovery outcomes ahead of stale remote transport state", () => {
@@ -843,7 +846,7 @@ describe("TerminalPane native routing contract", () => {
     ["ssh", "ssh:host-a"],
     ["paired", "daemon:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"],
   ] as const)("parameterized %s recovery presentation under equivalent outcomes", (transport, workspaceId) => {
-    it("renders blocked reason, corrective retry, and explicit new terminal escape", () => {
+    it("renders blocked reason, corrective retry, and no dead new terminal escape", () => {
       const dispose = vi.fn();
       const onRefreshSessionIdentity = vi.fn().mockReturnValue(dispose);
       const onOpenNewShell = vi.fn();
@@ -867,9 +870,10 @@ describe("TerminalPane native routing contract", () => {
       expect(screen.getByText("Session recovery blocked")).toBeInTheDocument();
       expect(screen.getByRole("status")).toHaveTextContent("Identity conflict detected");
       const retryBtn = screen.getByRole("button", { name: "Retry session recovery" });
-      const newShellBtn = screen.getByRole("button", { name: "Open new shell" });
       expect(retryBtn).toBeInTheDocument();
-      expect(newShellBtn).toBeInTheDocument();
+      // A blocked pane keeps its real backend session id, so replacement is never admissible:
+      // painting the button would only produce AGENT_RESUME_INVALID.
+      expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
 
       fireEvent.click(retryBtn);
       expect(onRefreshSessionIdentity).toHaveBeenCalledWith(`${transport}-blocked`, expect.any(Function));
@@ -880,16 +884,13 @@ describe("TerminalPane native routing contract", () => {
       fireEvent.click(retryBtn);
       expect(dispose).toHaveBeenCalledTimes(1);
 
-      fireEvent.click(newShellBtn);
-      expect(onOpenNewShell).toHaveBeenCalledWith(`${transport}-blocked`);
-
       // Unmounting cleans up active admission subscription
       unmount();
       expect(dispose).toHaveBeenCalledTimes(2);
     });
   });
 
-  it("renders blocked agent session with explicit new terminal escape without invoking resume", () => {
+  it("renders blocked agent session without a dead new terminal escape or resume call", () => {
     const onRefreshSessionIdentity = vi.fn();
     const onOpenNewShell = vi.fn();
     const blockedAgent: TerminalSession = {
@@ -911,8 +912,9 @@ describe("TerminalPane native routing contract", () => {
 
     expect(screen.getByText("Session recovery blocked")).toBeInTheDocument();
     expect(screen.getByText("Agent authority revoked")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open new shell" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open new shell" })).toBeNull();
     expect(screen.getByRole("button", { name: "Retry session recovery" })).toBeInTheDocument();
+    expect(onOpenNewShell).not.toHaveBeenCalled();
   });
 
   it("does not auto spawn or reconnect when sleeping session recoveryState is exited", () => {

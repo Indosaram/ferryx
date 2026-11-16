@@ -78,7 +78,6 @@ function RowWithDrawer() {
         busy={false}
         signedIn
         onAddProject={vi.fn()}
-        onConnect={vi.fn()}
         onDetails={() => setOpen(true)}
         onCheck={vi.fn()}
         onForget={vi.fn()}
@@ -111,15 +110,16 @@ describe("remote settings follow-ups", () => {
     expect(screen.getByRole("region", { name: "Remote Access" })).toHaveAttribute("aria-label", "Access to This Machine");
   });
 
-  it("signed-out empty list does not point at the signed-in enrollment control", () => {
+  it("signed-out empty list points at sign-in, never at an enrollment control", () => {
     renderList(false);
     expect(screen.queryByText(/Issue an enrollment code above/)).toBeNull();
-    expect(screen.getByText(/Sign in above to issue an enrollment code/)).toBeInTheDocument();
+    expect(screen.getByText(/Sign in above to pair the machines/)).toBeInTheDocument();
   });
 
-  it("signed-in empty list points at the enrollment control", () => {
+  it("signed-in empty list says machines pair themselves, with no code to issue", () => {
     renderList(true);
-    expect(screen.getByText(/Issue an enrollment code above/)).toBeInTheDocument();
+    expect(screen.queryByText(/Issue an enrollment code above/)).toBeNull();
+    expect(screen.getByText(/pairs itself as soon as it signs in/)).toBeInTheDocument();
   });
 
   it("disables Re-pair with a visible reason while signed out", () => {

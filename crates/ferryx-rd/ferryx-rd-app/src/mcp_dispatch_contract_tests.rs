@@ -57,9 +57,8 @@ fn successful_down_then_failed_up_is_followed_by_reset() {
     assert!(down < reset);
 }
 
-#[test]
-fn every_advertised_tool_has_a_successful_dispatch_contract() {
-    for (name, arguments, expected) in [
+fn dispatch_contract_cases() -> [(&'static str, Value, Option<InputEventType>); 11] {
+    [
         (
             "remote_mouse_click",
             json!({"x":1,"y":2}),
@@ -98,7 +97,33 @@ fn every_advertised_tool_has_a_successful_dispatch_contract() {
         ("remote_release_all", json!({}), Some(InputEventType::Reset)),
         ("remote_get_screen_info", json!({}), None),
         ("remote_take_screenshot", json!({"format":"png"}), None),
-    ] {
+        (
+            "remote_wait_for_screen_change",
+            json!({"last_frame_id":6,"timeout_ms":0}),
+            None,
+        ),
+    ]
+}
+
+#[test]
+fn dispatch_contract_names_equal_advertised_tool_names() {
+    let cases = dispatch_contract_cases();
+    let contract_names: std::collections::BTreeSet<_> =
+        cases.iter().map(|(name, _, _)| *name).collect();
+    let tools = list_mcp_tools();
+    let tools = tools.as_array().unwrap();
+    let advertised_names: std::collections::BTreeSet<_> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(contract_names.len(), cases.len());
+    assert_eq!(advertised_names.len(), tools.len());
+    assert_eq!(contract_names, advertised_names);
+}
+
+#[test]
+fn every_advertised_tool_has_a_successful_dispatch_contract() {
+    for (name, arguments, expected) in dispatch_contract_cases() {
         let backend = Arc::new(RecordedBackend {
             accepted: Mutex::new(Vec::new()),
             fail_on: None,

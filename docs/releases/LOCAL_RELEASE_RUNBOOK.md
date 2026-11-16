@@ -520,10 +520,31 @@ Install safety rules enforced by the script:
   (Gatekeeper validation) - the readiness budget widening on main covers this.
 
 For a fully signed, notarized, stapled local build without a release run, use
-`node scripts/build-notarized-local.mjs <detached-worktree>` (builds from the
+`bun scripts/build-notarized-local.mjs <detached-worktree>` (builds from the
 worktree at merged main HEAD with `APPLE_SIGNING_IDENTITY`, assembles the daemon
 helper bundle, re-signs inside-out, submits to notarytool, staples, and refuses
-to finish without `spctl` reporting `Notarized Developer ID`).
+to finish without `spctl` reporting `Notarized Developer ID`). `--check` runs
+only its preflight.
+
+When the compile was already done on the build host, skip it here:
+
+```bash
+scp -r "$HOST:<clone>/src-tauri/target/release/bundle/macos/Ferryx.app" /tmp/Ferryx.app
+rsync -r "$HOST:<clone>/src-tauri/resources/ffmpeg/payload/aarch64-apple-darwin/" /tmp/ffmpeg-payload/
+bun scripts/build-notarized-local.mjs --finalize-only /tmp/Ferryx.app --ffmpeg-payload /tmp/ffmpeg-payload
+```
+
+`--finalize-only` compiles nothing and runs no preflight: it never spawns
+`bun install`, a fetch script, or `cargo tauri build`. It runs only the
+packaging steps on the copied bundle (the daemon helper, the FFmpeg runtime into
+`Contents/Frameworks`, the dylib signing, then the re-sign/notarize/staple
+pass), so the bundle it finalizes is byte-for-byte the one the build host
+compiled. It still needs the `FerryxNotary` keychain profile and the signing
+identity on this Mac, and it refuses a bundle or payload directory that is
+missing. The payload directory is the host's
+`src-tauri/resources/ffmpeg/payload/aarch64-apple-darwin` (`runtime/`, `legal/`,
+`stage.json`); the dylibs it contains are re-signed here, so a host-signed copy
+is fine.
 
 ## Daemon runtime layout (independent daemon lifetime)
 

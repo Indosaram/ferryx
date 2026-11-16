@@ -1620,6 +1620,10 @@ impl RemoteGatewayState {
 
     /// Sends the decision push for `session_refs` to every subscription that wants it, each
     /// seeing only the sessions its device may see. Returns how many sends were made.
+    /// Sends one decision card to every device that may see it, over both transports, and returns
+    /// how many device sends were attempted. A device reachable over Web Push and APNs counts
+    /// once per transport, so this is a send count, not a distinct-notification count; tests that
+    /// assert it are asserting fan-out width.
     pub(crate) async fn dispatch_decision_push(&self, session_refs: &[String]) -> usize {
         use ferryx_hub::supervisor::panel_contract::SessionRef;
         let visible: Vec<(&String, bool)> = session_refs
@@ -1648,10 +1652,31 @@ impl RemoteGatewayState {
                 targets.push((sub, refs));
             }
         }
-        if targets.is_empty() {
+        // iOS installs have no PushManager, so they register an APNs token instead of a web
+        // push subscription. They get the same decision alerts through the same visibility rule.
+        let apns_targets: Vec<(crate::remote::apns::ApnsSubscription, Vec<String>)> = self
+            .push
+            .store
+            .list_apns()
+            .into_iter()
+            .filter(|sub| sub.needs_input)
+            .filter_map(|sub| {
+                let device = self.auth_manager.live_device(&sub.device_id)?;
+                let refs: Vec<String> = visible
+                    .iter()
+                    .filter(|(_, machine_owned)| device_sees_session(&device, *machine_owned))
+                    .map(|(session_ref, _)| (*session_ref).clone())
+                    .collect();
+                (!refs.is_empty()).then_some((sub, refs))
+            })
+            .collect();
+        let apns = self.push.apns();
+        if targets.is_empty() && (apns_targets.is_empty() || apns.is_none()) {
             return 0;
         }
-        let mut sends = Vec::new();
+        // The two senders return different futures, so the fan-out joins them as one boxed type.
+        let mut sends: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = crate::remote::push::SendOutcome> + Send>>> =
+            Vec::new();
         for (sub, refs) in &targets {
             let (agent, worktree) = match refs.as_slice() {
                 [only] => {
@@ -1664,7 +1689,25 @@ impl RemoteGatewayState {
             };
             let notification =
                 crate::remote::push::decision_notification(refs, &agent, worktree.as_deref());
-            sends.push(async move { self.push.send(sub, &notification).await });
+            sends.push(Box::pin(async move { self.push.send(sub, &notification).await }));
+        }
+        if let Some(sender) = &apns {
+            for (sub, refs) in &apns_targets {
+                let (agent, worktree) = match refs.as_slice() {
+                    [only] => {
+                        let backend = SessionRef::parse(only)
+                            .map(|parsed| parsed.backend_session_id().to_string())
+                            .unwrap_or_else(|_| only.clone());
+                        self.push_labels(&backend).await
+                    }
+                    _ => (String::new(), None),
+                };
+                let notification =
+                    crate::remote::push::decision_notification(refs, &agent, worktree.as_deref());
+                sends.push(Box::pin(async move {
+                    self.push.send_apns(sender, sub, &notification).await
+                }));
+            }
         }
         let outcomes = futures_util::future::join_all(sends).await;
         for outcome in &outcomes {

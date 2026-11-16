@@ -87,6 +87,16 @@ pub struct PushSubscribeRequest {
     pub phone_finished_mode: FinishedMode,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PushApnsSubscribeRequest {
+    pub token: String,
+    #[serde(default = "default_true")]
+    pub phone_needs_input: bool,
+    #[serde(default)]
+    pub sandbox: bool,
+}
+
 /// Body of `POST /api/push/preferences`. Absent fields keep their stored value.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +121,9 @@ pub struct StoredSubscription {
 struct PersistedPushStore {
     #[serde(default)]
     subscriptions: Vec<StoredSubscription>,
+    /// iOS devices registered through APNs, keyed by device token.
+    #[serde(default)]
+    apns: Vec<crate::remote::apns::ApnsSubscription>,
     /// Session refs the owner muted: they stay in the panel and never push.
     #[serde(default)]
     muted_sessions: BTreeSet<String>,
@@ -130,6 +143,8 @@ pub enum PushStoreError {
 #[derive(Debug, Default)]
 pub struct PushStore {
     subscriptions: Mutex<HashMap<String, StoredSubscription>>,
+    /// iOS tokens, keyed by the token itself so one device cannot register twice.
+    apns: Mutex<HashMap<String, crate::remote::apns::ApnsSubscription>>,
     /// Locked only while `subscriptions` is held or alone, never the other way round.
     muted: Mutex<BTreeSet<String>>,
     path: Option<PathBuf>,
@@ -153,12 +168,14 @@ impl PushStore {
                 None
             }
         });
-        let (stored, muted) = persisted
-            .map(|store| (store.subscriptions, store.muted_sessions))
+        let (stored, apns, muted) = persisted
+            .map(|store| (store.subscriptions, store.apns, store.muted_sessions))
             .unwrap_or_default();
         let subscriptions = stored.into_iter().map(|sub| (sub.endpoint.clone(), sub)).collect();
+        let apns = apns.into_iter().map(|sub| (sub.token.clone(), sub)).collect();
         Self {
             subscriptions: Mutex::new(subscriptions),
+            apns: Mutex::new(apns),
             muted: Mutex::new(muted),
             path,
             allow_loopback: std::sync::atomic::AtomicBool::new(loopback_endpoints_allowed()),
@@ -175,6 +192,7 @@ impl PushStore {
     fn persist(
         &self,
         subs: &HashMap<String, StoredSubscription>,
+        apns: &HashMap<String, crate::remote::apns::ApnsSubscription>,
         muted: &BTreeSet<String>,
     ) -> std::io::Result<()> {
         let Some(path) = self.path.as_deref() else {
@@ -182,9 +200,11 @@ impl PushStore {
         };
         let mut subscriptions: Vec<_> = subs.values().cloned().collect();
         subscriptions.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+        let mut apns: Vec<_> = apns.values().cloned().collect();
+        apns.sort_by(|a, b| a.token.cmp(&b.token));
         crate::remote::auth::write_private_json(
             path,
-            &PersistedPushStore { subscriptions, muted_sessions: muted.clone() },
+            &PersistedPushStore { subscriptions, apns, muted_sessions: muted.clone() },
         )
     }
 
@@ -197,7 +217,7 @@ impl PushStore {
         let before = subs.clone();
         let result = change(&mut subs)?;
         if *subs != before {
-            if let Err(error) = self.persist(&subs, &self.muted.lock()) {
+            if let Err(error) = self.persist(&subs, &self.apns.lock(), &self.muted.lock()) {
                 *subs = before;
                 return Err(error.into());
             }
@@ -212,7 +232,7 @@ impl PushStore {
         let mut set = self.muted.lock();
         let changed = if muted { set.insert(session_ref.to_string()) } else { set.remove(session_ref) };
         if changed {
-            if let Err(error) = self.persist(&subs, &set) {
+            if let Err(error) = self.persist(&subs, &self.apns.lock(), &set) {
                 if muted {
                     set.remove(session_ref);
                 } else {
@@ -315,6 +335,89 @@ impl PushStore {
             .into_iter()
             .filter(|stored| stored.device_id == device_id)
             .collect()
+    }
+
+    /// Registers an APNs token for `device_id`. Re-registering the same token refreshes it
+    /// instead of duplicating, and a token owned by another device is refused: a phone must not
+    /// be able to steal another phone's alerts.
+    /// Mutates the APNs map under the same lock order as [`Self::mutate`]: `subscriptions` first,
+    /// then `apns`, then `muted`. Taking `apns` first here would invert that order and deadlock
+    /// against a concurrent web-push registration.
+    fn mutate_apns<T>(
+        &self,
+        change: impl FnOnce(&mut HashMap<String, crate::remote::apns::ApnsSubscription>) -> Result<T, PushStoreError>,
+    ) -> Result<T, PushStoreError> {
+        let subs = self.subscriptions.lock();
+        let mut apns = self.apns.lock();
+        let before = apns.clone();
+        let result = change(&mut apns)?;
+        if *apns != before {
+            if let Err(error) = self.persist(&subs, &apns, &self.muted.lock()) {
+                *apns = before;
+                return Err(error.into());
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn subscribe_apns(
+        &self,
+        device_id: &str,
+        token: &str,
+        environment: crate::remote::apns::ApnsEnvironment,
+        needs_input: bool,
+    ) -> Result<(), PushStoreError> {
+        if !crate::remote::apns::ApnsSubscription::valid_token(token) {
+            return Err(PushStoreError::InvalidEndpoint);
+        }
+        self.mutate_apns(|apns| {
+            if apns.get(token).is_some_and(|stored| stored.device_id != device_id) {
+                return Err(PushStoreError::ForeignEndpoint);
+            }
+            apns.insert(
+                token.to_string(),
+                crate::remote::apns::ApnsSubscription {
+                    device_id: device_id.to_string(),
+                    token: token.to_string(),
+                    environment,
+                    needs_input,
+                },
+            );
+            Ok(())
+        })
+    }
+
+    /// Drops an APNs token. Only its owner may remove it.
+    pub fn unsubscribe_apns(&self, device_id: &str, token: &str) -> Result<(), PushStoreError> {
+        self.mutate_apns(|apns| {
+            if apns.get(token).is_some_and(|stored| stored.device_id != device_id) {
+                return Err(PushStoreError::ForeignEndpoint);
+            }
+            apns.remove(token);
+            Ok(())
+        })
+    }
+
+    pub fn list_apns(&self) -> Vec<crate::remote::apns::ApnsSubscription> {
+        let mut subs: Vec<_> = self.apns.lock().values().cloned().collect();
+        subs.sort_by(|a, b| a.token.cmp(&b.token));
+        subs
+    }
+
+    /// Drops a token APNs reported as unregistered.
+    pub fn remove_gone_apns(&self, token: &str) -> Result<(), PushStoreError> {
+        self.mutate_apns(|apns| {
+            apns.remove(token);
+            Ok(())
+        })
+    }
+
+    /// Drops every APNs token whose device `is_live` rejects.
+    pub fn retain_apns_devices(&self, is_live: impl Fn(&str) -> bool) -> Result<(), PushStoreError> {
+        self.mutate_apns(|apns| {
+            apns.retain(|_, stored| is_live(&stored.device_id));
+            Ok(())
+        })
     }
 }
 
@@ -419,6 +522,8 @@ pub struct PushService {
     pub store: PushStore,
     vapid_path: Option<PathBuf>,
     vapid: OnceLock<VapidKeys>,
+    /// `None` means APNs is unconfigured; the flag stops a repeated env probe.
+    apns: OnceLock<Option<crate::remote::apns::SharedApns>>,
     client: reqwest::Client,
 }
 
@@ -440,7 +545,7 @@ impl PushService {
                 tracing::warn!("push client builder failed, using defaults: {error}");
                 reqwest::Client::new()
             });
-        Self { store, vapid_path, vapid: OnceLock::new(), client }
+        Self { store, vapid_path, vapid: OnceLock::new(), apns: OnceLock::new(), client }
     }
 
     /// The key pair, created on first use. Call from a blocking worker: it may touch disk.
@@ -490,6 +595,55 @@ impl PushService {
             }
         }
         outcome
+    }
+
+    /// The APNs sender for `FERRYX_APNS_*`, probed once. `None` leaves web push as the only
+    /// route, which is what every build without an Apple key does.
+    pub fn apns(self: &Arc<Self>) -> Option<crate::remote::apns::SharedApns> {
+        self.apns
+            .get_or_init(|| {
+                match crate::remote::apns::ApnsSender::from_env(self.client.clone()) {
+                    Ok(sender) => sender.map(Arc::new),
+                    Err(error) => {
+                        tracing::warn!("APNs stays disabled: {error}");
+                        None
+                    }
+                }
+            })
+            .clone()
+    }
+
+    /// Posts one APNs alert, dropping the token when Apple says it is dead.
+    pub async fn send_apns(
+        self: &Arc<Self>,
+        sender: &crate::remote::apns::SharedApns,
+        sub: &crate::remote::apns::ApnsSubscription,
+        notif: &AgentStateNotification,
+    ) -> SendOutcome {
+        let payload = crate::remote::apns::ApnsPayload::decision(
+            &notif.title,
+            &notif.body,
+            notif.url.clone(),
+            Some(notif.agent_id.clone()).filter(|id| !id.is_empty()),
+        );
+        let outcome = sender.send(sub, &payload).await;
+        if outcome == crate::remote::apns::ApnsOutcome::Gone {
+            let service = Arc::clone(self);
+            let token = sub.token.clone();
+            let removed = crate::ipc::run_blocking(move || {
+                service.store.remove_gone_apns(&token).map_err(crate::ipc::IpcError::internal)
+            })
+            .await;
+            if let Err(error) = removed {
+                tracing::warn!("dropping a dead APNs token failed: {}", error.message);
+            }
+            return SendOutcome::Gone;
+        }
+        match outcome {
+            crate::remote::apns::ApnsOutcome::Delivered => SendOutcome::Delivered,
+            crate::remote::apns::ApnsOutcome::Gone => SendOutcome::Gone,
+            crate::remote::apns::ApnsOutcome::Failed(error) => SendOutcome::Failed(error),
+        }
     }
 
     async fn post(&self, request: EncryptedRequest) -> SendOutcome {

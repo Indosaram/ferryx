@@ -11,7 +11,6 @@ import {
   Copy,
   Download,
   FileCode,
-  KeyRound,
   LoaderCircle,
   ShieldCheck,
   Terminal,
@@ -57,7 +56,6 @@ import { Card } from "../ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import { EnrollmentStep } from "./remote/EnrollmentStep";
 import { applySshTarget, hostnamePasteHandler, SshCommandField } from "./remote/SshCommandField";
 import { parseSshTarget, type ParsedSshTarget } from "../../lib/sshTarget";
 import { MachineApprovalCard, machineApprovalErrorMessage } from "./remote/MachineApprovalCard";
@@ -87,7 +85,7 @@ export const DEFAULT_SSH_FORM: HostFormData = {
 
 const explanations: Record<string, string> = {
   NATIVE_CONTEXT_REQUIRED: "Native host inventory is unavailable. Use the desktop app with a compatible local daemon; browser mirror access cannot manage machines.",
-  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, issue a fresh enrollment code from a signed-in desktop, and retry.",
+  PAIR_FAILED: "Could not pair. Check connectivity and daemon compatibility, then retry. A signed-in machine pairs itself, so no code is needed.",
   MACHINE_GRANT_REQUIRED: "Needs machine access. This credential carries no machine grant. Pair again from a signed-in account; revoked credentials cannot reconnect.",
   UNSUPPORTED_CAPABILITY: "This relay, remote daemon, or local daemon does not advertise the required machine capabilities. Upgrade compatible components.",
   STALE_HOST_GENERATION: "Credentials changed during this request. Refresh the inventory and check capabilities again.",
@@ -102,9 +100,9 @@ export function getModalErrorMessage(error: PairedHostError | string): string {
   switch (code) {
     case "PIN_EXPIRED":
     case "EXPIRED_PIN":
-      return "Code expired. Sign in to your Ferryx account, issue a fresh enrollment code, and retry.";
+      return "Code expired. Retry from the machine that showed the code; a signed-in machine pairs itself.";
     case "INVALID_PIN":
-      return "Invalid code. Check the code entered and issue a fresh enrollment code if needed.";
+      return "Invalid code. Check the code shown on the machine and retry.";
     case "WRONG_RELAY":
     case "INVALID_RELAY_ORIGIN":
       return `Relay mismatch. Verify both machines use the same relay origin (default: ${DEFAULT_RELAY_ORIGIN}).`;
@@ -126,7 +124,7 @@ export function getModalErrorMessage(error: PairedHostError | string): string {
       if (typeof error === "object" && error.message && error.message !== code && error.message !== "PAIRED_HOST_UNAVAILABLE") {
         return error.message;
       }
-      return explanations[code] ?? "Could not pair. Check connectivity and daemon compatibility, issue a fresh enrollment code from a signed-in desktop, and retry.";
+      return explanations[code] ?? "Could not pair. Check connectivity and daemon compatibility, then retry.";
   }
 }
 
@@ -144,7 +142,7 @@ export type VerifiedMachineResult =
       summary: { reachable: boolean; environment?: SshRemoteEnvironment | null };
     };
 
-export type AddMachineMethod = "install" | "approve" | "enrollment" | "ssh" | "import";
+export type AddMachineMethod = "install" | "approve" | "ssh" | "import";
 
 const METHODS: ReadonlyArray<{ value: AddMachineMethod; title: string; description: string; Icon: LucideIcon }> = [
   {
@@ -171,24 +169,17 @@ const METHODS: ReadonlyArray<{ value: AddMachineMethod; title: string; descripti
     description: "Pick hosts from ~/.ssh/config or paste a config block.",
     Icon: FileCode,
   },
-  {
-    value: "enrollment",
-    title: "Enrollment code (manual)",
-    description: "For a machine that already has ferryx-cli. Works through the relay, no open ports.",
-    Icon: KeyRound,
-  },
 ];
 
 const METHOD_STEP_DESCRIPTION: Record<AddMachineMethod, string> = {
   install: "Run this command on the machine you want to add.",
   approve: "Enter the code shown on the machine you want to add.",
-  enrollment: "Run the command on the machine you want to add.",
   ssh: "Enter the connection details for the machine.",
   import: "Import hosts from an SSH configuration.",
 };
 
 function isAddMachineMethod(value: unknown): value is AddMachineMethod {
-  return value === "install" || value === "approve" || value === "enrollment" || value === "ssh" || value === "import";
+  return value === "install" || value === "approve" || value === "ssh" || value === "import";
 }
 
 /** Account refusals of install-key issuing, mapped by structured code. */
@@ -226,10 +217,8 @@ export interface AddMachineModalProps {
   onImportDone?: (selectedHostId: string) => void;
   /** Opens directly on step 2 of this method; otherwise the wizard starts at "Choose a method". */
   initialMethod?: AddMachineMethod;
-  /** Account server origin the enrollment command points at. */
+  /** Account server origin the machine-request approval talks to. */
   accountOrigin?: string;
-  /** Issues an enrollment code for the signed-in account; absent while signed out. */
-  onIssueEnrollmentCode?: () => Promise<string>;
   /** Issues a single-use install key for the signed-in account; absent while signed out. */
   onIssueInstallKey?: () => Promise<IssueInstallKeyResponse>;
   /** Latest account machine list (kept fresh by the caller while the wizard is open). */
@@ -337,7 +326,6 @@ function AddMachineWizard({
   onImportDone,
   initialMethod,
   accountOrigin = DEFAULT_RELAY_ORIGIN,
-  onIssueEnrollmentCode,
   onIssueInstallKey,
   accountMachines,
   onLookupMachineRequest,
@@ -351,7 +339,7 @@ function AddMachineWizard({
   const [step, setStep] = useState<"choose" | "details">(isAddMachineMethod(initialMethod) ? "details" : "choose");
   const [method, setMethod] = useState<AddMachineMethod>(() => {
     if (isAddMachineMethod(initialMethod)) return initialMethod;
-    return onIssueInstallKey ? "install" : "enrollment";
+    return onIssueInstallKey ? "install" : "ssh";
   });
 
   const [sshForm, setSshForm] = useState<HostFormData>(DEFAULT_SSH_FORM);
@@ -637,7 +625,7 @@ function AddMachineWizard({
               <span className="break-words">{error}</span>
               {structuredError?.code === "PIN_EXPIRED" || structuredError?.code === "EXPIRED_PIN" ? (
                 <span className="text-[11px] font-medium text-destructive/90">
-                  Action: Issue a fresh enrollment code from a signed-in desktop and enter it above.
+                  Action: Retry from the machine that showed the code; a signed-in machine pairs itself.
                 </span>
               ) : structuredError?.code === "WRONG_RELAY" || structuredError?.code === "INVALID_RELAY_ORIGIN" ? (
                 <span className="text-[11px] font-medium text-destructive/90">
@@ -792,15 +780,6 @@ function AddMachineWizard({
               </Button>
             </div>
           </>
-        ) : null}
-
-        {!showingResult && step === "details" && method === "enrollment" ? (
-          <EnrollmentStep
-            accountOrigin={accountOrigin}
-            onIssueEnrollmentCode={onIssueEnrollmentCode}
-            onBack={goBack}
-            onDone={onClose}
-          />
         ) : null}
 
         {!showingResult && step === "details" && method === "install" ? (

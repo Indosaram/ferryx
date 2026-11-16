@@ -576,6 +576,199 @@ async fn a_failing_ferryx_check_never_completes_even_when_cited() {
 }
 
 #[tokio::test]
+async fn admission_and_correction_record_distinct_turns_without_recounting_lessons() {
+    use crate::supervisor::lessons::{record, LessonDomain, LessonDraft};
+
+    let pool = owner_pool().await;
+    let project: String = sqlx::query_scalar("SELECT project_id FROM supervisor_projects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for rule in [
+        "Run the verifier before reporting success",
+        "Check the result file",
+    ] {
+        let lesson = record(
+            &pool,
+            LessonDraft {
+                domain: LessonDomain::Goal,
+                project: &project,
+                rule,
+                rationale: "completion fixture",
+                keywords: "verify",
+                evidence_ref: "goal:fixture",
+            },
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        ids.push(lesson.id);
+    }
+    let (goal, lane) = admit(&pool, "m-turn-lessons", Some(1)).await;
+    let first: String =
+        sqlx::query_scalar("SELECT request_id FROM supervisor_dispatches WHERE goal_id = ?")
+            .bind(&goal)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let injected: Vec<String> = sqlx::query_scalar(
+        "SELECT lesson_id FROM lesson_turn_injections WHERE turn_ref = ? ORDER BY lesson_id",
+    )
+    .bind(&first)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    ids.sort();
+    assert_eq!(injected, ids);
+
+    let control = idle_control();
+    let dispatch = dispatcher(&pool, control.clone(), PANE);
+    dispatch.drain().await;
+    let _repo = use_clean_repo(&pool, &lane, "NOT READY").await;
+    let scheduler = completion_scheduler(
+        &pool,
+        ScriptedModel::new(&[ASSESS_CONTINUE]),
+        control.clone(),
+    );
+    settle(&pool, PANE, 1_000).await;
+    timeout(DEADLINE, scheduler.tick(epoch()))
+        .await
+        .unwrap()
+        .unwrap();
+    let correction = ready_dispatches(&pool, 10).await.unwrap();
+    assert_eq!(correction.len(), 1);
+    assert_ne!(correction[0].request_id, first);
+    let second: Vec<String> = sqlx::query_scalar(
+        "SELECT lesson_id FROM lesson_turn_injections WHERE turn_ref = ? ORDER BY lesson_id",
+    )
+    .bind(&correction[0].request_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(second, ids);
+    let counts: Vec<i64> = sqlx::query_scalar("SELECT injected FROM supervisor_lessons")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(counts, vec![1, 1]);
+    dispatch.drain().await;
+    let text = sends_text(&control).pop().unwrap();
+    for rule in [
+        "Run the verifier before reporting success",
+        "Check the result file",
+    ] {
+        assert!(text.contains(rule), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn a_correction_ranks_lessons_by_its_instruction_before_newer_unrelated_lessons() {
+    use crate::supervisor::lessons::{record, LessonDomain, LessonDraft};
+
+    let pool = owner_pool().await;
+    let (goal, lane) = admit(&pool, "m-correction-situation", Some(1)).await;
+    let project = goal_of(&pool, &goal).await.unwrap().unwrap().project_id;
+    let control = idle_control();
+    let dispatch = dispatcher(&pool, control.clone(), PANE);
+    dispatch.drain().await;
+    let _repo = use_clean_repo(&pool, &lane, "NOT READY").await;
+    // Add lessons after admission so only the correction can select them. Fixed timestamps
+    // make recency order deterministic; only the correction instruction mentions verify.sh.
+    let fixtures = [
+        (
+            "Run the failed verifier after correcting its input",
+            "verify.sh",
+            "2026-11-07T00:00:00Z",
+        ),
+        (
+            "Check unrelated documentation before reporting",
+            "documentation",
+            "2026-11-07T01:00:00Z",
+        ),
+        (
+            "Review unrelated styles before reporting",
+            "styles",
+            "2026-11-07T02:00:00Z",
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (rule, keywords, created_at) in fixtures {
+        let lesson = record(
+            &pool,
+            LessonDraft {
+                domain: LessonDomain::Goal,
+                project: &project,
+                rule,
+                rationale: "correction situation fixture",
+                keywords,
+                evidence_ref: &format!("goal:{goal}"),
+            },
+            |_| true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        sqlx::query(
+            "UPDATE supervisor_lessons SET created_at = ?, last_injected_at = ? WHERE id = ?",
+        )
+        .bind(created_at)
+        .bind(Utc::now().to_rfc3339())
+        .bind(&lesson.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(lesson.id);
+    }
+
+    settle(&pool, PANE, 1_000).await;
+    let scheduler = completion_scheduler(
+        &pool,
+        ScriptedModel::new(&[ASSESS_CONTINUE]),
+        control.clone(),
+    );
+    timeout(DEADLINE, scheduler.tick(epoch()))
+        .await
+        .unwrap()
+        .unwrap();
+    let correction = ready_dispatches(&pool, 10).await.unwrap();
+    assert_eq!(correction.len(), 1);
+    let selected: Vec<&str> = correction[0]
+        .instruction
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .collect();
+    assert_eq!(
+        selected,
+        vec![
+            format!("- {}", fixtures[0].0),
+            format!("- {}", fixtures[2].0)
+        ],
+        "the matching lesson must beat both newer unrelated candidates"
+    );
+    let mut expected = vec![ids[0].clone(), ids[2].clone()];
+    expected.sort();
+    let injected: Vec<String> = sqlx::query_scalar(
+        "SELECT lesson_id FROM lesson_turn_injections WHERE turn_ref = ? ORDER BY lesson_id",
+    )
+    .bind(&correction[0].request_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(injected, expected);
+
+    let results = dispatch.drain().await;
+    assert!(
+        matches!(results.as_slice(), [DispatchResult::Transmitted { .. }]),
+        "{results:?}"
+    );
+    let text = sends_text(&control).pop().unwrap();
+    let sent: Vec<&str> = text.lines().filter(|line| line.starts_with("- ")).collect();
+    assert_eq!(sent, selected);
+}
+
+#[tokio::test]
 async fn a_verifier_failure_runs_a_correction_without_the_owner_and_stops_at_the_budget() {
     let pool = owner_pool().await;
     let (goal, lane) = admit(&pool, "m-1", Some(1)).await;
@@ -1618,4 +1811,130 @@ fn a_permission_prompt_always_goes_to_the_owner() {
             "{kind:?}"
         );
     }
+}
+
+async fn assert_settling_turn_outcome(completed: bool) {
+    use crate::supervisor::lessons::{record, LessonDomain, LessonDraft};
+
+    let pool = owner_pool().await;
+    let project: String = sqlx::query_scalar("SELECT project_id FROM supervisor_projects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let lesson = record(
+        &pool,
+        LessonDraft {
+            domain: LessonDomain::Goal,
+            project: &project,
+            rule: "Run the verifier before reporting success",
+            rationale: "settlement fixture",
+            keywords: "verify",
+            evidence_ref: "goal:fixture",
+        },
+        |_| true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (goal, lane) = admit(&pool, "m-settlement", Some(1)).await;
+    let (other, _) = admit(&pool, "m-other", None).await;
+    let control = idle_control();
+    let dispatch = dispatcher(&pool, control.clone(), PANE);
+    // An unrelated held goal's turn must remain open.
+    transition_goal(
+        &pool,
+        &other,
+        1,
+        RunState::Ready,
+        RunState::Paused,
+        Some("owner hold"),
+    )
+    .await
+    .unwrap();
+    dispatch.drain().await;
+    let repo = use_clean_repo(&pool, &lane, "NOT READY").await;
+    let answers = if completed {
+        vec![ASSESS_CONTINUE, ASSESS_COMPLETE, CONVERGED]
+    } else {
+        vec![ASSESS_CONTINUE, ASSESS_CONTINUE, "{}"]
+    };
+    let scheduler = completion_scheduler(&pool, ScriptedModel::new(&answers), control);
+    settle(&pool, PANE, 1_000).await;
+    scheduler.tick(epoch()).await.unwrap();
+    dispatch.drain().await;
+    if completed {
+        std::fs::write(repo.0.join("result.txt"), "READY").unwrap();
+    }
+    settle(&pool, PANE, 2_000).await;
+    scheduler
+        .tick(epoch() + chrono::Duration::seconds(1))
+        .await
+        .unwrap();
+    let expected = if completed { "helped" } else { "hurt" };
+    assert_eq!(
+        goal_state(&pool, &goal).await.0,
+        if completed {
+            RunState::Completed
+        } else {
+            RunState::AwaitingOwner
+        }
+    );
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT i.outcome FROM lesson_turn_injections i
+         JOIN supervisor_dispatches d ON d.request_id = i.turn_ref
+         WHERE d.goal_id = ? ORDER BY d.id",
+    )
+    .bind(&goal)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![("neutral".into(),), (expected.into(),)]);
+    let other_settled: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM lesson_turn_injections i
+         JOIN supervisor_dispatches d ON d.request_id = i.turn_ref
+         WHERE d.goal_id = ? AND i.settled_at IS NOT NULL",
+    )
+    .bind(&other)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(other_settled, 0);
+    let rollup: (String, i64) = sqlx::query_as(
+        "SELECT outcome, COUNT(*) FROM lesson_injections
+         WHERE subject_ref = ? AND settled_at IS NOT NULL",
+    )
+    .bind(format!("goal:{goal}"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rollup, (expected.into(), 1));
+    let counts: (i64, i64) =
+        sqlx::query_as("SELECT helped, hurt FROM supervisor_lessons WHERE id = ?")
+            .bind(&lesson.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(counts, if completed { (1, 0) } else { (0, 1) });
+    // A later scheduler pass cannot count the same rollup again.
+    scheduler
+        .tick(epoch() + chrono::Duration::seconds(2))
+        .await
+        .unwrap();
+    let after: (i64, i64) =
+        sqlx::query_as("SELECT helped, hurt FROM supervisor_lessons WHERE id = ?")
+            .bind(&lesson.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, counts);
+}
+
+#[tokio::test]
+async fn completed_goal_credits_last_turn_and_closes_earlier_turn_neutral() {
+    assert_settling_turn_outcome(true).await;
+}
+
+#[tokio::test]
+async fn turn_limit_hurts_latest_settled_turn_without_double_counting_rollup() {
+    assert_settling_turn_outcome(false).await;
 }

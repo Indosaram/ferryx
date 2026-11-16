@@ -677,6 +677,9 @@ pub struct AdmitTerms {
     /// refused with `LEGACY_TERMS_CHANGED` under the write lock, so the adopted terms are
     /// never stale.
     pub legacy_goal_read: Option<LegacyGoalRead>,
+    /// Handover of an existing agent session: commit the goal as `running`, bound to that pane,
+    /// with NO dispatch intent; the dispatcher never transmits for it.
+    pub observed: bool,
 }
 
 /// `(revision, turns_used)` of a legacy lane's `lane_goal`, or `None` when it has none: what
@@ -2008,6 +2011,11 @@ pub async fn admit_request_bound(
     if let Some(detail) = &terms.owner_hold {
         require_text("owner hold detail", detail, MAX_BODY_CHARS)?;
     }
+    if terms.observed && session.is_none() {
+        return Err(SupervisorError::Invalid(
+            "a handed-over goal needs the session it observes".into(),
+        ));
+    }
     let body_sha256 = sha256_hex(&request.body);
     let operation_grant = serde_json::to_string(&request.operation_grant)
         .map_err(|error| SupervisorError::Invalid(format!("operation grant: {error}")))?;
@@ -2238,6 +2246,27 @@ pub async fn admit_request_bound(
         .execute(&mut *tx)
         .await?;
     }
+    if terms.observed {
+        // A handed-over session already runs: the goal is running and nothing is ever typed
+        // into its pane.
+        sqlx::query(
+            "UPDATE supervisor_goals SET run_state = ?, revision = 2, updated_at = ?
+             WHERE goal_id = ?",
+        )
+        .bind(RunState::Running.as_str())
+        .bind(&now)
+        .bind(&goal_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE supervisor_dispatches SET state = 'superseded', updated_at = ?
+             WHERE goal_id = ? AND state = 'ready'",
+        )
+        .bind(&now)
+        .bind(&goal_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     changes::announce(&goal_id);
     Ok(Admission {
@@ -2357,6 +2386,11 @@ pub async fn transition_goal(
     tx.commit().await?;
     changes::announce(goal_id);
     wakes::poke();
+    if goal_report::is_settled(to) {
+        if let Err(error) = goal_report::report_settled(pool, goal_id).await {
+            tracing::warn!(goal_id, %error, "could not report the settled goal to its origin");
+        }
+    }
     Ok(goal)
 }
 
@@ -3750,13 +3784,18 @@ pub mod cutover;
 pub mod delivery;
 pub mod dispatcher;
 pub mod fence_gate;
+pub mod handover;
+pub mod ownership;
+pub mod goal_report;
 pub mod health;
 pub mod lessons;
 pub mod memory;
 pub mod memory_import;
 pub mod project_memory;
+pub mod prompt_judge;
 pub mod receipts;
 pub mod recovery;
+pub mod reference_docs;
 pub mod request;
 pub mod rules;
 pub mod session_control;

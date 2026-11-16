@@ -33,7 +33,10 @@ export function LeaseNotices({ hub, here, touch }: { hub: SupervisorHubState; he
           data-testid="supervisor-lease-notice"
           data-kind={notice.kind}
           role="status"
-          className={cn('rounded-md bg-status-warning/15 px-2 py-1.5 leading-snug text-foreground', touch ? 'text-sm' : 'text-xs')}
+          className={cn(
+            'rounded-md border border-status-warning-border bg-status-warning-container px-2 py-1.5 leading-snug text-status-warning-on',
+            touch ? 'text-sm' : 'text-xs',
+          )}
         >
           {notice.text}
         </p>
@@ -118,7 +121,11 @@ export function StandbyCard({ hub, here, fallbackHolder, moveHere, adoptArchived
         </button>
       ) : null}
       {forceWarning !== null ? (
-        <div data-testid="supervisor-move-force" role="alert" className="flex flex-col gap-2 rounded-md bg-status-warning/15 p-2 text-foreground">
+        <div
+          data-testid="supervisor-move-force"
+          role="alert"
+          className="flex flex-col gap-2 rounded-md border border-status-warning-border bg-status-warning-container p-2 text-status-warning-on"
+        >
           <span data-testid="supervisor-move-force-warning">{forceWarning}</span>
           <div className="flex gap-2">
             <button type="button" data-testid="supervisor-move-force-confirm" disabled={moving} onClick={() => void move(true)} className={button}>

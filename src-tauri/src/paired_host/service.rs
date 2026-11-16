@@ -336,11 +336,12 @@ type VerificationGate = Arc<Mutex<Option<(tokio::sync::oneshot::Sender<()>, toki
 #[derive(Clone)]
 pub struct PairedHostService {
     inventory: Arc<Mutex<Owner>>,
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
     pub(crate) event_sink: Option<InventoryEventSink>,
     pub(crate) reachability: Arc<Mutex<ReachabilityBook>>,
     pub(crate) reachability_sink: Option<ReachabilitySink>,
     authority_changes: tokio::sync::watch::Sender<(u64, String)>,
+    pub(crate) reconcile_state: super::account_reconcile::ReconcileState,
     #[cfg(test)]
     verification_gate: VerificationGate,
     #[cfg(test)]
@@ -368,6 +369,7 @@ impl PairedHostService {
             reachability: Arc::new(Mutex::new(ReachabilityBook::default())),
             reachability_sink: None,
             authority_changes: tokio::sync::watch::channel((0, String::new())).0,
+            reconcile_state: super::account_reconcile::ReconcileState::default(),
             #[cfg(test)]
             verification_gate: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -581,6 +583,9 @@ impl PairedHostService {
     }
     pub async fn list(&self) -> Result<Vec<HostView>> {
         self.run(|store| Ok(store.list())).await
+    }
+    pub(crate) async fn paired_machine_epochs(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        self.run(|store| Ok(store.paired_machine_epochs())).await
     }
     /// Records the origins `host_id` reported for itself, under the generation that observed them.
     ///

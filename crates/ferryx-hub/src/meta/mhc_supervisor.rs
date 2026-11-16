@@ -591,6 +591,11 @@ impl SessionTools {
         self
     }
 
+    /// Every session of the fleet, as the list tool reports it.
+    pub async fn fleet(&self) -> Result<Vec<FleetSession>, HubError> {
+        self.fleet.list().await
+    }
+
     /// Runs one session call; any other call is rejected as not a session tool.
     pub async fn execute(&self, call: WorkToolCall) -> Result<Value, WorkToolRejection> {
         let failed = |error: HubError| {
@@ -598,7 +603,7 @@ impl SessionTools {
         };
         match call {
             WorkToolCall::ListSessions => {
-                let sessions = self.fleet.list().await.map_err(failed)?;
+                let sessions = self.fleet().await.map_err(failed)?;
                 Ok(json!({ "sessions": sessions }))
             }
             WorkToolCall::ReadSession { session_ref, lines } => {
@@ -1760,12 +1765,7 @@ impl Inner {
         let mut meter = Meter {
             call,
             collector: TurnCollector {
-                expected: self
-                    .profile
-                    .config
-                    .provider
-                    .clone()
-                    .zip(self.profile.config.model.clone()),
+                expected: spec.model.clone(),
                 ..TurnCollector::default()
             },
         };

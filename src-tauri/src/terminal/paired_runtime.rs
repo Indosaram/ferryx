@@ -220,8 +220,34 @@ impl Drop for ActorPersistGuard {
         }
         let descriptors = self.descriptors.clone();
         let store_path = self.store_path.clone();
-        tokio::task::spawn_blocking(move || persist_snapshot(&descriptors, &store_path));
+        schedule_persist(descriptors, store_path);
     }
+}
+
+/// Stores that already have a persist queued on the blocking pool, keyed by the store's `Arc`.
+/// Every proxy actor marks its descriptor dirty on each output batch; without coalescing, dozens
+/// of live proxies queue hundreds of full-file fsync writes a second behind `PERSIST_MUTEX` and
+/// starve the blocking pool, which wedges the daemon (its handshake stops answering).
+static PERSIST_QUEUED: parking_lot::Mutex<Vec<usize>> = parking_lot::Mutex::new(Vec::new());
+
+/// Queues one snapshot write for this store unless one is already queued. The flag is cleared
+/// before the snapshot is taken, so a change made after that point queues another write.
+fn schedule_persist(
+    descriptors: Arc<Mutex<HashMap<String, super::paired_daemon::Descriptor>>>,
+    store_path: Arc<Mutex<Option<PathBuf>>>,
+) {
+    let key = Arc::as_ptr(&store_path) as usize;
+    {
+        let mut queued = PERSIST_QUEUED.lock();
+        if queued.contains(&key) {
+            return;
+        }
+        queued.push(key);
+    }
+    tokio::task::spawn_blocking(move || {
+        PERSIST_QUEUED.lock().retain(|queued| *queued != key);
+        persist_snapshot(&descriptors, &store_path);
+    });
 }
 
 fn persist_snapshot(
@@ -648,7 +674,7 @@ impl Runtime {
         self.descriptors.lock().remove(id);
         let descriptors = self.descriptors.clone();
         let path = self.store_path.clone();
-        tokio::task::spawn_blocking(move || persist_snapshot(&descriptors, &path));
+        schedule_persist(descriptors, path);
     }
     async fn flush_descriptors(&self) -> Result<(), String> {
         let descriptors = self.descriptors.clone();
@@ -675,7 +701,7 @@ impl Runtime {
         self.descriptors.lock().insert(id.clone(), descriptor);
         let persist_descriptors = self.descriptors.clone();
         let persist_path = self.store_path.clone();
-        tokio::task::spawn_blocking(move || persist_snapshot(&persist_descriptors, &persist_path));
+        schedule_persist(persist_descriptors, persist_path);
 
         let (sender, receiver) = mpsc::channel(32);
         let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
@@ -918,7 +944,7 @@ impl Runtime {
                     _ = tokio::time::sleep_until(last_persisted + PERSIST_MIN_INTERVAL), if dirty.load(Ordering::Acquire) => {
                         let descs = descriptors.clone();
                         let path = store_path.clone();
-                        tokio::task::spawn_blocking(move || persist_snapshot(&descs, &path));
+                        schedule_persist(descs, path);
                         last_persisted = tokio::time::Instant::now();
                         dirty.store(false, Ordering::Release);
                     }

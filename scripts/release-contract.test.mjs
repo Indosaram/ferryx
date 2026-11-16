@@ -47,7 +47,7 @@ function makeValidReceipt(host = "macbook", plan = makeValidPlan(), overrides = 
         bytes: 28491024,
         sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         signatureRelPath: "darwin/Ferryx.app.tar.gz.sig",
-        targets: ["darwin-aarch64", "darwin-x86_64"],
+        targets: ["darwin-aarch64"],
       },
       {
         kind: "dmg",
@@ -212,7 +212,7 @@ test("parsePlan rejects target/channel inconsistency", () => {
       parsePlan(
         makeValidPlan({
           channels: { store: true, nsisMigration: true },
-          requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+          requiredTargets: ["darwin-aarch64", "linux-x86_64"],
         }),
       ),
     /channels\.nsisMigration requires 'windows-x86_64' in requiredTargets/i,
@@ -543,7 +543,7 @@ test("parseReceipt rejects unsafe relative paths and path traversal", () => {
         bytes: 1234,
         sha256: "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         signatureRelPath: "darwin/Ferryx.app.tar.gz.sig",
-        targets: ["darwin-aarch64", "darwin-x86_64"],
+        targets: ["darwin-aarch64"],
       },
     ],
   });
@@ -559,7 +559,7 @@ test("parseReceipt rejects unsafe relative paths and path traversal", () => {
         bytes: 1234,
         sha256: "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         signatureRelPath: "darwin/Ferryx.app.tar.gz.sig",
-        targets: ["darwin-aarch64", "darwin-x86_64"],
+        targets: ["darwin-aarch64"],
       },
     ],
   });
@@ -579,7 +579,7 @@ test("parseReceipt requires signatureRelPath for updater kinds and permits null 
         bytes: 1234,
         sha256: "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         signatureRelPath: null,
-        targets: ["darwin-aarch64", "darwin-x86_64"],
+        targets: ["darwin-aarch64"],
       },
     ],
   });
@@ -597,7 +597,7 @@ test("parseReceipt rejects duplicate artifact kinds within a receipt", () => {
         bytes: 1234,
         sha256: "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         signatureRelPath: "darwin/Ferryx.app.tar.gz.sig",
-        targets: ["darwin-aarch64", "darwin-x86_64"],
+        targets: ["darwin-aarch64"],
       },
       {
         kind: "macos-updater",
@@ -606,7 +606,7 @@ test("parseReceipt rejects duplicate artifact kinds within a receipt", () => {
         bytes: 1234,
         sha256: "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         signatureRelPath: "darwin/Ferryx2.app.tar.gz.sig",
-        targets: ["darwin-aarch64", "darwin-x86_64"],
+        targets: ["darwin-aarch64"],
       },
     ],
   });

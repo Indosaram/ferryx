@@ -234,9 +234,6 @@ if (mode === "account") {
     if (url.origin !== FIXTURE_ACCOUNT_ORIGIN) return realFetch(input, init);
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     if (method === "GET" && url.pathname === "/api/account/v1/machines") return json(accountMachines);
-    if (method === "POST" && url.pathname === "/api/account/v1/enrollment-codes") {
-      return json({ code: "FIXTURE-ENROLL-CODE", expiresAt: FIXTURE_NOW_MS + 10 * 60_000 });
-    }
     if (method === "POST" && url.pathname === "/api/account/v1/logout") return new Response(null, { status: 204 });
     return json({ code: "FIXTURE_UNSUPPORTED", message: "This account route is not part of the QA fixture." }, 404);
   };

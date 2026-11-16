@@ -67,6 +67,18 @@ function hasConfirmedGoneBackend(session: TerminalSession): boolean {
   return isStandbyBackendSessionId(session.backendSessionId);
 }
 
+/**
+ * Whether a pane may offer "Open new shell" right now. Mirrors the backend-state half of the
+ * {@link replaceExitedShellSession} guard, so a pane that still owns a live backend never paints a
+ * button whose only outcome is `AGENT_RESUME_INVALID`. Such a pane keeps its recovery actions
+ * (Retry) and the pane restart affordance instead.
+ */
+export function canReplaceShellSession(session: TerminalSession | null | undefined): boolean {
+  if (!session || !hasReplaceableBackend(session)) return false;
+  if (isRemoteWorkspaceId(session.workspaceId) && !hasConfirmedGoneBackend(session)) return false;
+  return true;
+}
+
 export function replaceExitedShellSession(
   localSessionId: string,
   dependencies: ShellReplacementDependencies,

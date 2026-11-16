@@ -34,7 +34,7 @@ export const KIND_DEFINITIONS = Object.freeze({
   "macos-updater": {
     permittedHost: "macbook",
     isUpdater: true,
-    expectedTargets: ["darwin-aarch64", "darwin-x86_64"],
+    expectedTargets: ["darwin-aarch64"],
     stableAlias: "Ferryx_universal.app.tar.gz",
     allowedExtensions: [".app.tar.gz"],
   },
@@ -326,7 +326,7 @@ export function parsePlan(value) {
     );
   }
 
-  const baseTargets = ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"];
+  const baseTargets = ["darwin-aarch64", "linux-x86_64"];
   for (const bt of baseTargets) {
     if (!targetSet.has(bt)) {
       throw new Error(`requiredTargets must include '${bt}'`);

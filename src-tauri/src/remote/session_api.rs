@@ -396,20 +396,33 @@ pub(super) async fn list(
     let scope: Scope = axum::extract::Query::try_from_uri(&uri)
         .map(|axum::extract::Query(scope)| scope)
         .map_err(|_| failure("INVALID_REQUEST", &uuid::Uuid::new_v4().to_string()))?;
-    read(state, headers, None, scope.workspace_id).await
+    read(state, headers, None, scope.workspace_id, None).await
 }
 pub(super) async fn detail(
     State(state): State<Arc<RemoteGatewayState>>,
     path: Result<Path<String>, axum::extract::rejection::PathRejection>,
     headers: HeaderMap,
+    uri: axum::http::Uri,
 ) -> Result<Response, Refusal> {
-    read(state, headers, Some(path.map(|p| p.0)), None).await
+    // The epoch the caller's target was issued under. A session that survived a rolling
+    // handover is described under that epoch, so the caller's target still matches.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Scope {
+        daemon_epoch: Option<String>,
+    }
+    let requested = axum::extract::Query::<Scope>::try_from_uri(&uri)
+        .ok()
+        .and_then(|axum::extract::Query(scope)| scope.daemon_epoch)
+        .and_then(|epoch| epoch.parse::<u64>().ok());
+    read(state, headers, Some(path.map(|p| p.0)), None, requested).await
 }
 async fn read(
     state: Arc<RemoteGatewayState>,
     headers: HeaderMap,
     path: Option<Result<String, axum::extract::rejection::PathRejection>>,
     workspace: Option<String>,
+    requested_epoch: Option<u64>,
 ) -> Result<Response, Refusal> {
     let id = uuid::Uuid::new_v4().to_string();
     let token = super::server::extract_token(&headers);
@@ -443,7 +456,13 @@ async fn read(
         };
         check()?;
         let response = match path {
-            Some(path) => json(200, sessions.machine_detail_routed(&path, epoch).await?),
+            Some(path) => {
+                let detail_epoch = requested_epoch
+                    .filter(|requested| *requested != 0 && *requested <= epoch.0)
+                    .map(crate::scoped_contracts::Epoch)
+                    .unwrap_or(epoch);
+                json(200, sessions.machine_detail_routed(&path, detail_epoch).await?)
+            }
             None => {
                 let mut rows = sessions.machine_sessions_routed(epoch).await?;
                 if let Some(token) = &token {

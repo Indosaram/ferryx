@@ -26,12 +26,14 @@ use super::panel_contract::{
     ActionEntry, ActionKind, ActionLog, AnswerDecision, Escalation, EvidenceRef, FleetSession,
     PendingPrompt, RuleStore, SessionControl, SessionRef, StandingRule, UndoHandle,
 };
+use super::prompt_judge::{judge_prompt, BoundGoal, PromptJudge, MIN_CONFIDENCE};
 use super::recovery::RecoveryEscalations;
 use super::rules::SqliteRuleStore;
 use super::undo::{ActionUndo, UndoError};
 use crate::error::Result;
 use crate::fleet::EscalationSource;
 use crate::meta::mhc_supervisor::AnswerGate;
+use crate::security::{auto_answer_decided, AutoDecision, Reading};
 
 /// Wall clock in epoch milliseconds.
 fn now_ms() -> i64 {
@@ -224,20 +226,87 @@ pub struct DecisionGate {
     history: AnswerHistory,
     rules: Arc<dyn RuleStore>,
     repos: Arc<RepoResolver>,
+    /// The engine's judgment, when one is installed. Only [`Self::decide`] asks it: the gate
+    /// every supervisor-initiated answer passes ([`Self::allow`]) stays rules, contract and
+    /// history, so an answer the engine proposed never costs a second model call.
+    judge: Option<Arc<dyn PromptJudge>>,
 }
 
 impl DecisionGate {
-    pub fn new(pool: SqlitePool, rules: Arc<dyn RuleStore>, repos: Arc<RepoResolver>) -> Self {
+    pub fn new(
+        pool: SqlitePool,
+        rules: Arc<dyn RuleStore>,
+        repos: Arc<RepoResolver>,
+        judge: Option<Arc<dyn PromptJudge>>,
+    ) -> Self {
         Self {
             history: AnswerHistory::new(pool.clone()),
             pool,
             rules,
             repos,
+            judge,
         }
     }
 
-    /// The decision for `prompt` of `session`, from rules, then history.
+    /// The decision for `prompt` of `session`, from rules and the goal contract, then history,
+    /// then the engine's judgment. No screen: only [`Self::decide_on_screen`] gives the engine
+    /// the lines around the prompt.
     pub async fn decide(
+        &self,
+        session: &FleetSession,
+        prompt: &PendingPrompt,
+    ) -> Result<AnswerDecision> {
+        self.decide_on_screen(session, prompt, "").await
+    }
+
+    /// [`Self::decide`] with the pane's screen, whose last lines the engine sees.
+    pub async fn decide_on_screen(
+        &self,
+        session: &FleetSession,
+        prompt: &PendingPrompt,
+        screen: &str,
+    ) -> Result<AnswerDecision> {
+        let learned = self.decide_learned(session, prompt).await?;
+        let AnswerDecision::Escalate {
+            recommended_index,
+            reason,
+        } = learned
+        else {
+            return Ok(learned);
+        };
+        // An irreversible or external step never reaches the engine: the owner decides it,
+        // whatever a model would say. Told apart by the classifier itself, never by the reason
+        // text.
+        let worktree = (!session.cwd.is_empty()).then_some(session.cwd.as_str());
+        if irreversible_or_external(prompt, worktree).is_some() {
+            return Ok(AnswerDecision::Escalate {
+                recommended_index,
+                reason,
+            });
+        }
+        // Neither does an approval read off the screen: the reading may have the command
+        // wrong, so the screen tier is always the owner's. Asking the engine for an answer
+        // that can never be typed only spends a model call.
+        if session.state_source == "screen"
+            && matches!(prompt.kind.as_str(), "permission" | "approval")
+        {
+            return Ok(AnswerDecision::Escalate {
+                recommended_index,
+                reason,
+            });
+        }
+        Ok(self
+            .judged(session, prompt, screen, recommended_index, &reason)
+            .await
+            .unwrap_or(AnswerDecision::Escalate {
+                recommended_index,
+                reason,
+            }))
+    }
+
+    /// Rules, the bound goal's contract, and the owner's past answers: no engine call. This is
+    /// what [`AnswerGate::allow`] checks a supervisor-initiated answer against.
+    async fn decide_learned(
         &self,
         session: &FleetSession,
         prompt: &PendingPrompt,
@@ -252,12 +321,143 @@ impl DecisionGate {
             host_id: &session.host_id,
             worktree,
         };
-        self.history.decide(&context, &rules, None).await
+        let decisions = self.contract_decisions(session).await;
+        self.history
+            .decide(&context, &rules, decisions.as_ref().map(|(revision, decisions)| {
+                super::answer_history::ContractDecisions {
+                    goal_revision: *revision,
+                    decisions,
+                }
+            }))
+            .await
+    }
+
+    /// The goal contract's decisions for the goal `session` is bound to, with the goal revision
+    /// they were decided at; `None` for a session no goal is bound to.
+    async fn contract_decisions(
+        &self,
+        session: &FleetSession,
+    ) -> Option<(i64, Vec<super::answers::PromptDecision>)> {
+        let goal = self.bound_goal(session).await?;
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT prompt_id, option_label, source FROM supervisor_goal_decisions
+              WHERE goal_id = ? AND goal_revision = ? ORDER BY id",
+        )
+        .bind(&goal.goal_id)
+        .bind(goal.revision)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        let decisions: Vec<super::answers::PromptDecision> = rows
+            .into_iter()
+            .filter_map(|(prompt_id, option_label, source)| {
+                let source = match source.as_str() {
+                    "owner" => super::answers::DecisionSource::Owner,
+                    "contract" => super::answers::DecisionSource::Contract,
+                    _ => return None,
+                };
+                Some(super::answers::PromptDecision {
+                    goal_revision: goal.revision,
+                    prompt_id,
+                    option_label,
+                    source,
+                })
+            })
+            .collect();
+        (!decisions.is_empty()).then_some((goal.revision, decisions))
+    }
+
+    /// The goal `session` is bound to through its execution binding: its revision, the owner's
+    /// admitted request and the contract's requirements.
+    pub async fn bound_goal(&self, session: &FleetSession) -> Option<BoundGoal> {
+        let backend_session_id = session.session_ref.backend_session_id();
+        if backend_session_id.is_empty() {
+            return None;
+        }
+        let row: (String, i64, String, Option<String>) = sqlx::query_as::<
+            _,
+            (String, i64, String, Option<String>),
+        >(
+            "SELECT g.goal_id, g.revision, g.lane_key, r.body
+               FROM supervisor_execution_bindings b
+               JOIN supervisor_goals g ON g.goal_id = b.goal_id
+               LEFT JOIN supervisor_requests r ON r.goal_id = g.goal_id
+              WHERE b.provider_session_id = ?
+              ORDER BY r.id LIMIT 1",
+        )
+        .bind(backend_session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()?;
+        let (goal_id, revision, lane_key, title) = row;
+        let requirements: Vec<String> = sqlx::query_scalar(
+            "SELECT text FROM lane_goal_requirements WHERE lane_key = ? ORDER BY rowid",
+        )
+        .bind(&lane_key)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        Some(BoundGoal {
+            goal_id,
+            revision,
+            title: title.unwrap_or_default(),
+            requirements,
+        })
+    }
+
+    /// Asks the engine what the owner would pick, from the owner's memory, the project's memory,
+    /// the reference hits for the prompt, the bound goal and the screen. `None` when no engine
+    /// is installed, the call fails, or the verdict cannot be used: the caller then keeps the
+    /// escalation it already had. A confident valid verdict becomes an answer; anything else an
+    /// escalation that recommends the engine's option and carries its reason.
+    async fn judged(
+        &self,
+        session: &FleetSession,
+        prompt: &PendingPrompt,
+        screen: &str,
+        recommended_index: usize,
+        reason: &str,
+    ) -> Option<AnswerDecision> {
+        let judge = self.judge.as_ref()?;
+        let goal = self.bound_goal(session).await;
+        let repo = self.repos.key(&session.cwd).await;
+        let asked = judge_prompt(&self.pool, session, prompt, goal.as_ref(), &repo).await;
+        let asked = super::prompt_judge::with_screen(asked, screen);
+        let verdict = match judge.judge(&asked).await {
+            Ok(verdict) => verdict,
+            Err(error) => {
+                tracing::warn!(%error, "the prompt judge failed; the owner decides");
+                return None;
+            }
+        };
+        let index = verdict.option_index;
+        if index < prompt.options.len() && verdict.confidence >= MIN_CONFIDENCE {
+            return Some(AnswerDecision::Answer {
+                option_index: index,
+                basis: format!("Judged from your memory: {}", verdict.reason),
+            });
+        }
+        // An index that is not an option is no recommendation at all; the learned one stands.
+        let recommended_index = if index < prompt.options.len() { index } else { recommended_index };
+        Some(AnswerDecision::Escalate {
+            recommended_index,
+            reason: if verdict.reason.is_empty() {
+                reason.to_owned()
+            } else {
+                format!("Judged, but not certainly enough: {}", verdict.reason)
+            },
+        })
     }
 
     /// Whether the owner paused the supervisor. A pause flag that cannot be read counts as set.
     pub async fn paused(&self) -> bool {
         crate::control::is_paused(&self.pool).await.unwrap_or(true)
+    }
+
+    /// The hub database the goal decisions and answer history live in.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 }
 
@@ -278,8 +478,9 @@ impl AnswerGate for DecisionGate {
                 "this is an irreversible or external step ({category}); the owner decides"
             ));
         }
+        // Rules, contract and history only: an answer the engine proposed is not re-judged.
         match self
-            .decide(session, prompt)
+            .decide_learned(session, prompt)
             .await
             .map_err(|error| error.to_string())?
         {
@@ -324,6 +525,33 @@ struct AutonomousAnswer {
     basis: String,
 }
 
+/// Whether the supervisor may judge at all (todo 2's `supervisorHealthy`). While it is not,
+/// [`Autonomy::observe`] escalates every prompt, including the ones a rule or the owner's own
+/// past answers would settle: a failing engine judged whose answers cannot be trusted.
+#[async_trait]
+pub trait SupervisorHealth: Send + Sync {
+    async fn healthy(&self) -> bool;
+}
+
+/// The engine's recorded calls as its health: a hub that never recorded one is unknown, not
+/// failing, and stays healthy.
+pub struct RecordedEngineHealth {
+    pool: SqlitePool,
+}
+
+impl RecordedEngineHealth {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl SupervisorHealth for RecordedEngineHealth {
+    async fn healthy(&self) -> bool {
+        !super::setup::supervisor_degraded(&self.pool).await
+    }
+}
+
 /// The production autonomy service. Build it with [`Autonomy::open`].
 pub struct Autonomy {
     history: AnswerHistory,
@@ -334,17 +562,34 @@ pub struct Autonomy {
     control: Arc<dyn SessionControl>,
     publisher: Arc<dyn PanelPublisher>,
     repos: Arc<RepoResolver>,
+    health: Arc<dyn SupervisorHealth>,
     tracked: Mutex<HashMap<SessionRef, Tracked>>,
     answered: Mutex<HashMap<SessionRef, AutonomousAnswer>>,
 }
 
 impl Autonomy {
+    /// The hub database this service's stores live in.
+    pub fn pool(&self) -> &SqlitePool {
+        self.gate.pool()
+    }
+
     /// Opens the stores on the hub database (seeding the default rules once) and wires the
-    /// publisher into every store mutation.
+    /// publisher into every store mutation. The engine judge is wired by
+    /// [`Self::open_with`]; this one judges nothing and trusts the engine's recorded calls.
     pub async fn open(
         pool: SqlitePool,
         control: Arc<dyn SessionControl>,
         publisher: Arc<dyn PanelPublisher>,
+    ) -> Result<Arc<Self>> {
+        Self::open_with(pool, control, publisher, None).await
+    }
+
+    /// [`Self::open`] with the engine's judge (and its recorded-call health).
+    pub async fn open_with(
+        pool: SqlitePool,
+        control: Arc<dyn SessionControl>,
+        publisher: Arc<dyn PanelPublisher>,
+        judge: Option<Arc<dyn PromptJudge>>,
     ) -> Result<Arc<Self>> {
         let rules: Arc<dyn RuleStore> = Arc::new(PublishingRuleStore::new(
             Arc::new(SqliteRuleStore::open(pool.clone(), now_ms()).await?),
@@ -355,15 +600,52 @@ impl Autonomy {
             publisher.clone(),
         ));
         let repos = Arc::new(RepoResolver::default());
+        let health: Arc<dyn SupervisorHealth> = Arc::new(RecordedEngineHealth::new(pool.clone()));
+        Self::build(pool, control, publisher, rules, log, repos, judge, health).await
+    }
+
+    /// [`Self::open_with`] with the health probe replaced: a test (or a caller that knows
+    /// better than the recorded calls) decides whether the supervisor is degraded.
+    pub async fn open_with_health(
+        pool: SqlitePool,
+        control: Arc<dyn SessionControl>,
+        publisher: Arc<dyn PanelPublisher>,
+        judge: Option<Arc<dyn PromptJudge>>,
+        health: Arc<dyn SupervisorHealth>,
+    ) -> Result<Arc<Self>> {
+        let rules: Arc<dyn RuleStore> = Arc::new(PublishingRuleStore::new(
+            Arc::new(SqliteRuleStore::open(pool.clone(), now_ms()).await?),
+            publisher.clone(),
+        ));
+        let log: Arc<dyn ActionLog> = Arc::new(PublishingActionLog::new(
+            Arc::new(SqliteActionLog::new(pool.clone())),
+            publisher.clone(),
+        ));
+        let repos = Arc::new(RepoResolver::default());
+        Self::build(pool, control, publisher, rules, log, repos, judge, health).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn build(
+        pool: SqlitePool,
+        control: Arc<dyn SessionControl>,
+        publisher: Arc<dyn PanelPublisher>,
+        rules: Arc<dyn RuleStore>,
+        log: Arc<dyn ActionLog>,
+        repos: Arc<RepoResolver>,
+        judge: Option<Arc<dyn PromptJudge>>,
+        health: Arc<dyn SupervisorHealth>,
+    ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             history: AnswerHistory::new(pool.clone()),
-            gate: Arc::new(DecisionGate::new(pool, rules.clone(), repos.clone())),
+            gate: Arc::new(DecisionGate::new(pool, rules.clone(), repos.clone(), judge)),
             rules,
             log,
             escalations: Arc::new(EscalationRegistry::default()),
             control,
             publisher,
             repos,
+            health,
             tracked: Mutex::new(HashMap::new()),
             answered: Mutex::new(HashMap::new()),
         }))
@@ -386,6 +668,11 @@ impl Autonomy {
     /// The open decisions the panel shows.
     pub fn escalation_source(&self) -> Arc<dyn EscalationSource> {
         self.escalations.clone()
+    }
+
+    /// The persisted owner answers, to read back what the supervisor learned.
+    pub fn answer_history(&self) -> AnswerHistory {
+        self.history.clone()
     }
 
     fn tracked(&self) -> std::sync::MutexGuard<'_, HashMap<SessionRef, Tracked>> {
@@ -446,17 +733,67 @@ impl Autonomy {
             self.publisher.decision(&session.session_ref, None);
         }
         let paused = self.gate.paused().await;
-        match self.gate.decide(session, &prompt).await {
-            Ok(AnswerDecision::Answer { option_index, basis }) if !paused => {
-                self.answer(session, &prompt, option_index, &basis).await;
-            }
+        // While the supervisor is degraded, or the owner has paused it, every prompt goes to the
+        // owner, including the ones a rule or the owner's own past answers would settle: no
+        // engine call is spent and nothing is typed.
+        let healthy = self.health.healthy().await;
+        if paused || !healthy {
+            let (recommended_index, basis) = match self.gate.decide_learned(session, &prompt).await {
+                Ok(AnswerDecision::Answer { option_index, basis }) => (option_index, basis),
+                Ok(AnswerDecision::Escalate {
+                    recommended_index,
+                    reason,
+                }) => (recommended_index, reason),
+                Err(error) => (0, format!("Your earlier answers could not be read ({error}).")),
+            };
+            let why = if healthy {
+                format!("The supervisor is paused. {basis}")
+            } else {
+                format!("supervisor degraded: {basis}")
+            };
+            self.escalate(session, &prompt, recommended_index, why);
+            return;
+        }
+        // The last lines of the pane are what the engine judges around: read once, and an
+        // unreadable screen is not a reason to answer without them.
+        let screen = self
+            .control
+            .read_tail(&session.session_ref, super::prompt_judge::SCREEN_LINES)
+            .await
+            .unwrap_or_default();
+        let decision = self.gate.decide_on_screen(session, &prompt, &screen).await;
+        // The same reading the screen policy sees: who reported the state, what kind of prompt
+        // it is, and whether the daemon could read the screen at all.
+        let reading = Reading {
+            state_source: session.state_source.clone(),
+            kind: Some(prompt.kind.clone()),
+            screen_readable: session.screen_readable,
+        };
+        let worktree = (!session.cwd.is_empty()).then_some(session.cwd.as_str());
+        match decision {
             Ok(AnswerDecision::Answer { option_index, basis }) => {
-                self.escalate(
-                    session,
-                    &prompt,
+                let decided = AnswerDecision::Answer {
                     option_index,
-                    format!("The supervisor is paused. {basis}"),
-                );
+                    basis: basis.clone(),
+                };
+                match auto_answer_decided(&reading, &prompt, worktree, &decided) {
+                    AutoDecision::Answer { .. } => {
+                        self.answer(session, &prompt, option_index, &basis).await;
+                    }
+                    // A held or owner-only prompt stays with the owner: nothing is typed.
+                    AutoDecision::EscalateOwner => self.escalate(
+                        session,
+                        &prompt,
+                        option_index,
+                        format!("This one is yours to decide. Basis: {basis}"),
+                    ),
+                    AutoDecision::Hold => self.escalate(
+                        session,
+                        &prompt,
+                        option_index,
+                        format!("I could not read this pane's screen. Basis: {basis}"),
+                    ),
+                }
             }
             Ok(AnswerDecision::Escalate {
                 recommended_index,
@@ -628,18 +965,42 @@ impl Autonomy {
         backend_session_id: &str,
         prompt_id: &str,
     ) -> Option<OwnerAnswer> {
-        let tracked = self.tracked();
-        let (session_ref, known) = tracked.iter().find(|(session_ref, known)| {
-            host_matches(session_ref.host_id())
-                && session_ref.backend_session_id() == backend_session_id
-                && known.prompt.prompt_id == prompt_id
+        let (claimed, ()) = self.peek_owner_answer_where(host_matches, backend_session_id, |prompt| {
+            (prompt.prompt_id == prompt_id).then_some(())
         })?;
-        (!known.settled).then(|| OwnerAnswer {
+        Some(claimed)
+    }
+
+    /// The owner's answer to the first prompt of `backend_session_id` on a host `host_matches`
+    /// accepts that `select` maps to a value: the answer with that value. Read under one lock
+    /// over the tracked prompts, so the prompt a caller decided on is the one it claimed; typed
+    /// input knows only its session, and `select` says what it picked on the prompt it found.
+    pub fn peek_owner_answer_where<T>(
+        &self,
+        host_matches: impl Fn(&str) -> bool,
+        backend_session_id: &str,
+        select: impl Fn(&PendingPrompt) -> Option<T>,
+    ) -> Option<(OwnerAnswer, T)> {
+        let tracked = self.tracked();
+        let (session_ref, known, selected) = tracked.iter().find_map(|(session_ref, known)| {
+            if !host_matches(session_ref.host_id())
+                || session_ref.backend_session_id() != backend_session_id
+            {
+                return None;
+            }
+            let selected = select(&known.prompt)?;
+            Some((session_ref, known, selected))
+        })?;
+        if known.settled {
+            return None;
+        }
+        let answer = OwnerAnswer {
             session_ref: session_ref.clone(),
             session: known.session.clone(),
             prompt: known.prompt.clone(),
             repo: known.repo.clone(),
-        })
+        };
+        Some((answer, selected))
     }
 
     /// Records a claimed owner answer: the choice joins the answer history (a duplicate or an
@@ -670,6 +1031,10 @@ impl Autonomy {
                     false
                 }
             };
+            // A prompt of a bound goal is also decided for that goal and revision, so the next
+            // pane of the same goal asking the same prompt is answered from the goal's own
+            // terms even before any history exists.
+            self.decide_for_goal(&session, &prompt, label).await;
             let basis = if learned {
                 "Your answer, remembered for next time"
             } else {
@@ -690,6 +1055,36 @@ impl Autonomy {
         }
         if self.escalations.remove(&session_ref).is_some() {
             self.publisher.decision(&session_ref, None);
+        }
+    }
+
+    /// Records the owner's own answer to a prompt of a goal `session` is bound to, against the
+    /// goal's current revision. A session no goal is bound to writes nothing; a prompt that was
+    /// already decided for that revision keeps its first label (a later answer to the same
+    /// prompt is the same decision seen twice).
+    async fn decide_for_goal(&self, session: &FleetSession, prompt: &PendingPrompt, label: &str) {
+        let Some(goal) = self.gate.bound_goal(session).await else {
+            return;
+        };
+        let written = sqlx::query(
+            "INSERT INTO supervisor_goal_decisions(goal_id, goal_revision, prompt_id, option_label,
+                source, created_at)
+             SELECT ?, ?, ?, ?, 'owner', ?
+              WHERE NOT EXISTS(SELECT 1 FROM supervisor_goal_decisions
+                                WHERE goal_id = ? AND goal_revision = ? AND prompt_id = ?)",
+        )
+        .bind(&goal.goal_id)
+        .bind(goal.revision)
+        .bind(&prompt.prompt_id)
+        .bind(label)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&goal.goal_id)
+        .bind(goal.revision)
+        .bind(&prompt.prompt_id)
+        .execute(self.gate.pool())
+        .await;
+        if let Err(error) = written {
+            tracing::warn!(%error, "an owner answer was not recorded for its goal");
         }
     }
 
@@ -787,3 +1182,4 @@ impl ActionUndo for Autonomy {
 
 #[cfg(test)]
 mod tests;
+

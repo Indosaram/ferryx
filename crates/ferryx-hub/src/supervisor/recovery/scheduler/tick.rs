@@ -412,6 +412,8 @@ impl RecoveryScheduler {
 
     /// An unknown agent is refused with one typed, owner-visible row and card; nothing is sent.
     /// Row and card are cleared when the session recovers, ends, or the owner answers (L1).
+    /// Both wait a confirmation window: a refusal whose session moved on or ended inside it
+    /// opens no card and writes no row, so the log keeps only incidents the owner saw.
     async fn refusals(
         &self,
         st: &mut State,
@@ -437,36 +439,85 @@ impl RecoveryScheduler {
             let Some(mut inc) = st.refused.remove(&r) else {
                 continue;
             };
-            let summary = format!("{} no longer needs recovery", inc.title);
+            // Never shown, or shown for less than a window and never logged: the card is
+            // withdrawn and nothing was written.
+            if inc.last_row.is_empty() {
+                self.finish(&mut inc);
+                st.bump(&inc);
+                continue;
+            }
+            let summary =
+                format!("{} moved on after the owner was asked; nothing was sent", inc.title);
             self.row(&mut inc, ActionKind::Finished, summary, false, now).await;
             self.finish(&mut inc);
             st.bump(&inc);
         }
-        let mut refs: Vec<&SessionRef> = obs.keys().collect();
-        refs.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        for r in refs {
-            let o = &obs[r];
-            let Err(refusal) = resume_for(&o.session.agent) else {
+        // Still refused after the confirmation window: the owner is asked, once. The card's
+        // open time is kept in `next_at_ms` (a refusal never schedules a retry).
+        let mut waiting: Vec<SessionRef> = st
+            .refused
+            .iter()
+            .filter(|(r, inc)| {
+                inc.escalated.is_none() && now - inc.started_ms >= grace && obs.contains_key(*r)
+            })
+            .map(|(r, _)| r.clone())
+            .collect();
+        waiting.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        for r in waiting {
+            let Some(inc) = st.refused.get_mut(&r) else {
                 continue;
             };
-            if !faulted(&o.kind) || st.refused.contains_key(r) || st.dismissed.contains(r) {
-                continue;
-            }
-            let reason = refusal.to_string();
-            let scope = format!("refused:{r}");
-            let generation = st.gens.get(&scope).copied().unwrap_or(0);
-            let key = format!("{CARD_PREFIX}{scope}:g{generation}");
-            let mut inc = new_incident(key, scope, Fault::Stall, o, now, now);
+            let agent = obs[&r].session.agent.clone();
+            let reason = Refusal::UnknownAgent { agent }.to_string();
+            let title = inc.title.clone();
             self.escalate(
-                &mut inc,
-                format!("{} needs recovery but cannot be resumed automatically.", o.session.title),
+                inc,
+                format!("{title} needs recovery but cannot be resumed automatically."),
                 ["Open the session", "Leave it"],
                 [Choice::Leave, Choice::Leave],
                 format!("{reason}; nothing was sent"),
                 now,
             );
-            let summary = format!("Left {} alone: {reason}", o.session.title);
+            inc.next_at_ms = now;
+        }
+        // The Escalated row follows once the card has been visible for a whole window.
+        let mut shown: Vec<SessionRef> = st
+            .refused
+            .iter()
+            .filter(|(r, inc)| {
+                inc.escalated.is_some()
+                    && inc.last_row.is_empty()
+                    && now - inc.next_at_ms >= grace
+                    && obs.contains_key(*r)
+            })
+            .map(|(r, _)| r.clone())
+            .collect();
+        shown.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        for r in shown {
+            let Some(mut inc) = st.refused.remove(&r) else {
+                continue;
+            };
+            let agent = obs[&r].session.agent.clone();
+            let reason = Refusal::UnknownAgent { agent }.to_string();
+            let summary = format!("Left {} alone: {reason}", inc.title);
             self.row(&mut inc, ActionKind::Escalated, summary, true, now).await;
+            st.refused.insert(r, inc);
+        }
+        let mut refs: Vec<&SessionRef> = obs.keys().collect();
+        refs.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        for r in refs {
+            let o = &obs[r];
+            if resume_for(&o.session.agent).is_ok() {
+                continue;
+            }
+            if !faulted(&o.kind) || st.refused.contains_key(r) || st.dismissed.contains(r) {
+                continue;
+            }
+            // Tracked without card or row until it outlasts the confirmation window.
+            let scope = format!("refused:{r}");
+            let generation = st.gens.get(&scope).copied().unwrap_or(0);
+            let key = format!("{CARD_PREFIX}{scope}:g{generation}");
+            let inc = new_incident(key, scope, Fault::Stall, o, now, now);
             st.base.insert(r.clone(), o.tail.clone());
             st.refused.insert(r.clone(), inc);
         }

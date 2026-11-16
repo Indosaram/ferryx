@@ -373,8 +373,8 @@ export function prepareRelease({
   };
 
   const requiredTargets = Boolean(nsisMigration)
-    ? ["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"]
-    : ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"];
+    ? ["darwin-aarch64", "linux-x86_64", "windows-x86_64"]
+    : ["darwin-aarch64", "linux-x86_64"];
 
   const plan = {
     schemaVersion: 1,

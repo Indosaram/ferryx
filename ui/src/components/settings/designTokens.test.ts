@@ -20,7 +20,6 @@ const SECTION_FILES = [
   "remote/AccountBar.tsx",
   "remote/AdvancedSection.tsx",
   "remote/DiscoveredList.tsx",
-  "remote/EnrollmentStep.tsx",
   "remote/MachineDrawer.tsx",
   "remote/MachineList.tsx",
   "remote/MachineRow.tsx",

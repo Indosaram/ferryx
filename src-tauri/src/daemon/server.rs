@@ -309,6 +309,7 @@ mod prompt_changed_event_tests {
             agent: "claude".into(),
             state: "idle".into(),
             state_source: "telemetry".into(),
+            screen_readable: true,
             state_since_ms: None,
             screen_changed_at_ms: None,
             pending_prompt: None,
@@ -2095,10 +2096,10 @@ enum Correction {
 /// What a wire report resolves to once this daemon's own process walk is applied.
 pub(crate) struct EffectiveReport {
     pub agent: String,
+    /// For `omo` and `maho`, `launcher = Mhc` here is this daemon's own finding rather than a
+    /// witness carried in from elsewhere: it is set only when a process walk proved `mhc` owns the
+    /// pane, and cleared when it could not. No other agent's provider is touched.
     pub provider: Option<AgentProviderSession>,
-    /// This daemon proved an `mhc` owner for this pane, so `launcher = Mhc` is its own finding
-    /// rather than a witness carried in from elsewhere.
-    pub launcher_proven: bool,
 }
 
 /// Resolve a report's agent against the owner this daemon proved for the pane.
@@ -2120,22 +2121,18 @@ pub(crate) fn effective_report(
         "omo" if owns => EffectiveReport {
             agent: "maho".into(),
             provider: provider.map(with_mhc_launcher),
-            launcher_proven: true,
         },
         "maho" if owns => EffectiveReport {
             agent,
             provider: provider.map(with_mhc_launcher),
-            launcher_proven: true,
         },
         "maho" => EffectiveReport {
             agent,
             provider: provider.map(without_launcher),
-            launcher_proven: false,
         },
         _ => EffectiveReport {
             agent,
             provider,
-            launcher_proven: false,
         },
     }
 }
@@ -4569,6 +4566,38 @@ impl DaemonServer {
         &self.paired_hosts
     }
 
+    /// Pairs the signed-in account's machines, then opens agent control. Signing in is the whole
+    /// consent: an account whose machines are all paired should not also require a switch.
+    /// The owner's excluded list is preserved, so an explicit exclusion still holds.
+    async fn reconcile_and_open_account_machines<F>(
+        &self,
+        reconcile: F,
+    ) -> crate::paired_host::account_reconcile::ReconcileReport
+    where
+        F: std::future::Future<
+            Output = crate::paired_host::account_reconcile::ReconcileReport,
+        >,
+    {
+        let report = reconcile.await;
+        if report.paired.is_empty() && report.already_usable.is_empty() {
+            return report;
+        }
+        let state = std::sync::Arc::clone(self.remote_state());
+        let excluded = state.agent_control_policy.snapshot().excluded_device_ids;
+        let opened = crate::ipc::run_blocking(move || {
+            state.set_agent_control(true, excluded).map_err(|error| {
+                crate::ipc::error::IpcError::internal(format!(
+                    "agent control could not be opened: {error}"
+                ))
+            })
+        })
+        .await;
+        if let Err(error) = opened {
+            tracing::warn!(%error, "agent control could not be opened for the paired account");
+        }
+        report
+    }
+
     pub fn session_service(&self) -> &Arc<DaemonSessionService> {
         &self.session_service
     }
@@ -4763,12 +4792,12 @@ impl DaemonServer {
     /// Is `claimed` the record `provider_id` has in the stores `agent` may be read from?
     ///
     /// Both sides are canonicalized and the claim must be a regular file, so a symlink or a
-    /// directory cannot pass by spelling alone. The roots come from `registry::readable_store_markers`
-    /// - the same table `resolve_agent_resume_cwd` searches - so ingress and resume can never
-    /// disagree about where a session may live. Only the per-agent session directories count: the
-    /// legacy flat `~/.omo/sessions` root is a search root the builder knows, but no
-    /// `transcript_path_for_session` layout produces a path under it, so a claim there stays
-    /// refused exactly as the pre-split daemon refused it.
+    /// directory cannot pass by spelling alone. The roots come from the same table
+    /// `resolve_agent_resume_cwd` searches (`registry::readable_store_markers`), so ingress and
+    /// resume can never disagree about where a session may live. Only the per-agent session
+    /// directories count: the legacy flat `~/.omo/sessions` root is a search root the builder
+    /// knows, but no `transcript_path_for_session` layout produces a path under it, so a claim
+    /// there stays refused exactly as the pre-split daemon refused it.
     fn ingress_path_is_own_store(provider_id: &str, claimed: &str, agent: &str) -> bool {
         let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
             return false;
@@ -7693,10 +7722,14 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::Write { session_id, data }) if self.serves_paired_here(&session_id) => {
                     crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
+                    let typed = crate::hub_runtime::panel_autonomy::typed_answer_of(&session_id, &data);
                     match self.terminal_service.write_input_operation(&session_id, 0, data) {
                         Ok(pending) => match pending.await {
                             Ok(()) => {
                                 crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
+                                if let Some(answer) = typed {
+                                    tokio::spawn(answer.recorded());
+                                }
                                 DaemonResponse::WriteOk
                             }
                             Err(e) => daemon_error(e.to_string()),
@@ -7715,6 +7748,8 @@ impl DaemonServer {
                 }
                 Ok(DaemonRequest::Write { session_id, data }) => {
                     crate::remote::server::agent_control_service::note_raw_write(&self.remote_state.agent_events, &session_id);
+                    // The owner's digit on a tracked prompt is learned once it went through.
+                    let typed = crate::hub_runtime::panel_autonomy::typed_answer_of(&session_id, &data);
                     #[cfg(feature = "local-split-qa")]
                     let tok = super::qa_producers::record_daemon_mutation_ingress(&session_id, "write", &data);
                     if self.session_router.is_local_session(&session_id) {
@@ -7723,6 +7758,9 @@ impl DaemonServer {
                                 #[cfg(feature = "local-split-qa")]
                                 super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
                                 crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
+                                if let Some(answer) = typed {
+                                    tokio::spawn(answer.recorded());
+                                }
                                 DaemonResponse::WriteOk
                             }
                             Err(e) => DaemonResponse::Error {
@@ -7737,6 +7775,9 @@ impl DaemonServer {
                                 #[cfg(feature = "local-split-qa")]
                                 super::qa_producers::record_daemon_mutation_delivery(&session_id, "write", &tok);
                                 crate::remote::server::agent_control_service::note_human_keystrokes(&session_id);
+                                if let Some(answer) = typed {
+                                    tokio::spawn(answer.recorded());
+                                }
                                 DaemonResponse::WriteOk
                             }
                             Err(message) => daemon_error(message),
@@ -8127,6 +8168,21 @@ impl DaemonServer {
                     Ok(()) => DaemonResponse::CloseOk,
                     Err(message) => daemon_error(message),
                 },
+                // A paired proxy retained on the predecessor after a handover is owned there, so its
+                // retry and recovery outcome must be answered by that daemon: answering locally
+                // reports `owner_unavailable` for every retained pane and they never recover. The
+                // successor still loads the stored descriptor, so ownership is the only test.
+                Ok(ref request @ (DaemonRequest::RetryPairedSession { ref backend_session_id, .. }
+                    | DaemonRequest::PairedRecoveryOutcome { ref backend_session_id }))
+                    if self.session_router.find_legacy_peer_for_session(backend_session_id).is_some() =>
+                {
+                    let peer = self.session_router.find_legacy_peer_for_session(backend_session_id)
+                        .expect("checked by the guard");
+                    match peer.send_request(request).await {
+                        Ok(response) => response,
+                        Err(message) => daemon_error(message),
+                    }
+                }
                 Ok(DaemonRequest::RetryPairedSession { backend_session_id, daemon_epoch, incarnation }) => {
                     match self.terminal_service.paired().retry_owned(&backend_session_id, &daemon_epoch, &incarnation).await {
                         Ok(result) => DaemonResponse::RetryPairedSessionResult {
@@ -8364,6 +8420,21 @@ impl DaemonServer {
                     Ok(host) => DaemonResponse::PairedHostPairOk { host },
                     Err(error) => DaemonResponse::PairedHostError { error },
                 },
+                Ok(DaemonRequest::PairedHostReconcile) => {
+                    let report = self
+                        .reconcile_and_open_account_machines(self.paired_hosts.reconcile_account_machines())
+                        .await;
+                    DaemonResponse::PairedHostReconcileOk { report }
+                }
+                Ok(DaemonRequest::PairedHostAdoptAccountSession { account_origin, session_token }) => {
+                    let report = self
+                        .reconcile_and_open_account_machines(
+                            self.paired_hosts
+                                .adopt_account_session(account_origin, session_token),
+                        )
+                        .await;
+                    DaemonResponse::PairedHostReconcileOk { report }
+                }
                 Ok(DaemonRequest::PairedHostClientAttachKey) => match crate::ipc::run_blocking(|| {
                     Ok(crate::paired_host::secure_http::client_attach_public_key())
                 }).await {
@@ -8548,6 +8619,23 @@ impl DaemonServer {
                         Err(error) => DaemonResponse::Error {
                             message: error.to_string(),
                             code: Some("SUPERVISOR_UNAVAILABLE".into()),
+                            details: None,
+                        },
+                    }
+                }
+                Ok(DaemonRequest::SupervisorHandOver { host_id, session_id, instruction }) => {
+                    match crate::hub_runtime::panel_autonomy::hand_to_supervisor(&host_id, &session_id, &instruction).await {
+                        Some(Ok(admission)) => DaemonResponse::SupervisorHandOverOk { goal_id: admission.receipt.goal_id },
+                        // No hub is open in this daemon: the answer an absent supervisor service gives,
+                        // so the app's off/upgrade copy is the same as every other supervisor request.
+                        None => DaemonResponse::Error {
+                            message: "the supervisor hub is not open in this daemon".into(),
+                            code: Some("SUPERVISOR_UNAVAILABLE".into()),
+                            details: None,
+                        },
+                        Some(Err(error)) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
                             details: None,
                         },
                     }
@@ -8966,7 +9054,7 @@ impl DaemonServer {
                         match self.prepare_handover_shared().await {
                             Ok((legacy_path, active_sessions, listener)) => {
                                 let legacy_path_str = legacy_path.to_string_lossy().into_owned();
-                                Arc::clone(&self).spawn_legacy_listener(listener);
+                                Arc::clone(self).spawn_legacy_listener(listener);
                                 DaemonResponse::PrepareHandoverOk {
                                     legacy_socket_path: legacy_path_str,
                                     active_sessions,
@@ -15157,6 +15245,80 @@ mod instance_lock_deadline_tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn paired_retry_for_a_session_retained_on_the_predecessor_is_answered_by_it() {
+        let server = Arc::new(DaemonServer::new());
+        let session_id = "daemon-session:retained-paired".to_string();
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new().prefix("fx-legacy").tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.path().join("peer.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(stream);
+                    let mut lines = tokio::io::BufReader::new(reader).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let response = match serde_json::from_str::<DaemonRequest>(&line).unwrap() {
+                            DaemonRequest::Handshake { .. } => DaemonResponse::HandshakeOk {
+                                version: DAEMON_PROTOCOL_VERSION, pid: 1, epoch: 1, binary_path: None,
+                                binary_mtime_ms: None, daemon_version: None, capabilities: Vec::new(),
+                                admission_time_unix_ms: None,
+                            },
+                            DaemonRequest::RetryPairedSession { daemon_epoch, incarnation, .. } => {
+                                assert_eq!((daemon_epoch.as_str(), incarnation.as_str()), ("7", "inc"));
+                                DaemonResponse::RetryPairedSessionResult {
+                                    admitted: true, owner_unavailable: false, stale_tuple: false,
+                                    blocked: false, affirmative_exit: false,
+                                }
+                            }
+                            other => panic!("unexpected request forwarded to the legacy peer: {other:?}"),
+                        };
+                        let mut json = serde_json::to_string(&response).unwrap();
+                        json.push('\n');
+                        writer.write_all(json.as_bytes()).await.unwrap();
+                        let _ = writer.flush().await;
+                    }
+                });
+            }
+        });
+        // The successor loads the stored descriptor at startup, exactly as on a real handover.
+        let store = dir.path().join("paired_descriptors.json");
+        std::fs::write(&store, serde_json::json!({ session_id.clone(): {
+            "hostId": "https://relay.example.com/host/host-a", "generation": "1",
+            "target": { "machineId": "host-a", "daemonEpoch": "7", "sessionId": "s" },
+            "afterSequence": "0",
+        }}).to_string()).unwrap();
+        server.terminal_service.paired().set_store_path(store);
+        assert!(server.terminal_service.paired().descriptor(&session_id).is_some());
+        server.session_router.add_legacy_peer(Arc::new(crate::daemon::proxy::LegacyPeer::new(
+            socket, vec![session_id.clone()],
+        )));
+        let (mut client_tx, server_rx) = tokio::io::duplex(4096);
+        let s = server.clone();
+        let server_handler = tokio::spawn(async move { s.handle_client(server_rx).await });
+        let mut hs = serde_json::to_string(&DaemonRequest::Handshake { version: DAEMON_PROTOCOL_VERSION, token: None }).unwrap();
+        hs.push('\n');
+        client_tx.write_all(hs.as_bytes()).await.unwrap();
+        let (client_r, mut client_w) = tokio::io::split(client_tx);
+        let mut client_lines = tokio::io::BufReader::new(client_r).lines();
+        let _ = client_lines.next_line().await.unwrap();
+        let mut req = serde_json::to_string(&DaemonRequest::RetryPairedSession {
+            backend_session_id: session_id.clone(), daemon_epoch: "7".into(), incarnation: "inc".into(),
+        }).unwrap();
+        req.push('\n');
+        client_w.write_all(req.as_bytes()).await.unwrap();
+        let resp: DaemonResponse = serde_json::from_str(&client_lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(
+            matches!(resp, DaemonResponse::RetryPairedSessionResult { admitted: true, owner_unavailable: false, .. }),
+            "a retained paired pane must be retried by the daemon that still owns it, got {resp:?}"
+        );
+        server_handler.abort();
+        peer_task.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn regression_daemon_remote_spawn_2_remote_write_resize_forward_to_legacy_peer() {
         let server = Arc::new(DaemonServer::new());
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -15495,7 +15657,6 @@ mod identity_admission_tests {
         // The bug: a reloaded pane's stored report still says `omo`, and `mhc` is what owns it.
         let resolved = effective_report("omo", Some(report_provider(None)), OwnerProof::Mhc);
         assert_eq!(resolved.agent, "maho");
-        assert!(resolved.launcher_proven);
         let provider = resolved.provider.expect("the provider is preserved");
         assert_eq!(provider.launcher, Some(AgentLauncher::Mhc));
         // Only the identity moves: the conversation it names is untouched.
@@ -15514,7 +15675,6 @@ mod identity_admission_tests {
         for owner in [OwnerProof::Other("zsh"), OwnerProof::None] {
             let resolved = effective_report("omo", Some(report_provider(None)), owner);
             assert_eq!(resolved.agent, "omo");
-            assert!(!resolved.launcher_proven);
             assert_eq!(resolved.provider.unwrap().launcher, None);
         }
     }
@@ -15528,7 +15688,6 @@ mod identity_admission_tests {
             OwnerProof::Mhc,
         );
         assert_eq!(proven.agent, "maho");
-        assert!(proven.launcher_proven);
         assert_eq!(proven.provider.unwrap().launcher, Some(AgentLauncher::Mhc));
         // Unproven: the field alone may not claim omo's store semantics. Still admitted.
         let unproven = effective_report(
@@ -15537,7 +15696,6 @@ mod identity_admission_tests {
             OwnerProof::Other("claude"),
         );
         assert_eq!(unproven.agent, "maho");
-        assert!(!unproven.launcher_proven);
         assert_eq!(unproven.provider.unwrap().launcher, None);
     }
 
@@ -15548,7 +15706,6 @@ mod identity_admission_tests {
             let reported = report_provider(None);
             let resolved = effective_report(agent, Some(reported.clone()), OwnerProof::Mhc);
             assert_eq!(resolved.agent, agent);
-            assert!(!resolved.launcher_proven);
             assert_eq!(resolved.provider, Some(reported));
         }
         // And a pane with no provider at all still resolves, without inventing one.
