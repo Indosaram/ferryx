@@ -340,9 +340,15 @@ impl ApnsSender {
                     })
                 }
             }
-            Err(error) => ApnsOutcome::Failed(format!("APNs request failed: {error}")),
+            Err(error) => ApnsOutcome::Failed(send_error_message(error)),
         }
     }
+}
+
+/// The log line for a failed send. `reqwest::Error`'s `Display` appends `for url (...)`, and this
+/// request's url ends in the device token, so the url is stripped before the error is formatted.
+fn send_error_message(error: reqwest::Error) -> String {
+    format!("APNs request failed: {}", error.without_url())
 }
 
 #[derive(Debug, Deserialize)]
@@ -472,6 +478,27 @@ mod tests {
         // A value too short to redact by halves is masked whole rather than printed.
         assert_eq!(redact_token("abcd1234"), "********");
         assert_eq!(redact_token(""), "");
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_message_does_not_carry_the_device_token() {
+        let token = "ab".repeat(32);
+        // A scheme reqwest refuses fails inside the client, before any connection is attempted, so
+        // this test does no I/O and does not depend on timing or on a port being closed.
+        let url = format!("ftp://127.0.0.1/3/device/{token}");
+        let client = reqwest::Client::new();
+        let error = client
+            .post(&url)
+            .send()
+            .await
+            .expect_err("reqwest only speaks http and https");
+
+        // The premise: formatting the error as-is does leak the token. If a reqwest upgrade ever
+        // stops naming the url this assert fails, so the guard below cannot silently go vacuous.
+        let raw = format!("APNs request failed: {error}");
+        let message = send_error_message(error);
+        assert!(raw.contains(&token), "reqwest names the request url: {raw}");
+        assert!(!message.contains(&token), "a send error must not name the token: {message}");
     }
 
     #[test]
