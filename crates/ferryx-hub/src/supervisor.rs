@@ -2378,6 +2378,11 @@ pub async fn transition_goal(
     tx.commit().await?;
     changes::announce(goal_id);
     wakes::poke();
+    if goal_report::is_settled(to) {
+        if let Err(error) = goal_report::report_settled(pool, goal_id).await {
+            tracing::warn!(goal_id, %error, "could not report the settled goal to its origin");
+        }
+    }
     Ok(goal)
 }
 
@@ -3773,6 +3778,7 @@ pub mod dispatcher;
 pub mod fence_gate;
 pub mod handover;
 pub mod ownership;
+pub mod goal_report;
 pub mod health;
 pub mod lessons;
 pub mod memory;
