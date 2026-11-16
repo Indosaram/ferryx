@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useAppearanceSettings } from "../../lib/appearanceSettings";
 import type * as ChatMathModule from "./chatMath";
+import { rehypeKatexNonThrowing, remarkMath } from "./chatMath";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -1001,18 +1002,12 @@ export function ChatProseMarkdown({ text, assistant = false }: { text: string; a
     });
     return () => { active = false; };
   }, [enabled, math]);
-  const components = React.useMemo(() => !enabled || !math ? CHAT_MARKDOWN_COMPONENTS : {
-    ...CHAT_MARKDOWN_COMPONENTS,
-    span: ({ node, children, ...props }: React.ComponentProps<"span"> & { node?: unknown; "data-chat-math"?: string; "data-math-source"?: string }) => {
-      const source = props["data-math-source"];
-      return source === undefined ? <span {...props}>{children}</span> : <math.ChatMath source={source} display={props["data-chat-math"] === "block"} />;
-    },
-  }, [enabled, math]);
+  const components = CHAT_MARKDOWN_COMPONENTS;
   // Disabled math stays literal, including backslashes markdown would otherwise consume.
   if (assistant && !settings.renderMath && text.includes("$")) return <span className="whitespace-pre-wrap">{text}</span>;
   return <>
     {loadError && <span role="status">Math renderer unavailable; showing source.</span>}
-    <ReactMarkdown remarkPlugins={enabled && math ? [remarkGfm, math.remarkChatMath] : [remarkGfm]} components={components} urlTransform={chatMarkdownUrlTransform}>
+    <ReactMarkdown remarkPlugins={enabled && math ? [remarkGfm, remarkMath] : [remarkGfm]} rehypePlugins={enabled && math ? rehypeKatexNonThrowing : []} components={components} urlTransform={chatMarkdownUrlTransform}>
       {text}
     </ReactMarkdown>
   </>;
