@@ -301,7 +301,7 @@ impl WakeHandler for Recorder {
         }
         if self
             .busy_left
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                 left.checked_sub(1)
             })
             .is_ok()

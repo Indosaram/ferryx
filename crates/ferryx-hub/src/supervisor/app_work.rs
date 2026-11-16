@@ -291,7 +291,7 @@ async fn handover_turn(
     let request = super::AdmitRequest {
         supervisor_id: identity.supervisor_id,
         owner_principal: owner.to_owned(),
-        source_adapter: actor.source_adapter.clone(),
+        source_adapter: actor.source_adapter,
         source_message_id: super::handover::handover_source_id(&host_id, &session_id),
         body: actor.source_body.clone(),
         project_id: resolved.project_id,
