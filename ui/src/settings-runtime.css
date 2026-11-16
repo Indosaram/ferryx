@@ -160,7 +160,27 @@
   --status-idle-on-container-rgb: 87 96 109;
 }
 
+/* Keep the default chat palette pixel-identical; other accents recolour only brand tokens. */
+:root[data-accent="default"] {
+  --chat-primary: #346bf1;
+  --chat-primary-rgb: 52 107 241;
+  --chat-primary-foreground: #ffffff;
+  --chat-primary-foreground-rgb: 255 255 255;
+  --chat-link: #4a7cf5;
+  --chat-link-rgb: 74 124 245;
+  --chat-code: #4bb8f0;
+  --chat-code-rgb: 75 184 240;
+}
+
 :root[data-accent="blue"] {
+  --chat-primary: #3b82f6;
+  --chat-primary-rgb: 59 130 246;
+  --chat-primary-foreground: #0a0a0a;
+  --chat-primary-foreground-rgb: 10 10 10;
+  --chat-link: #60a5fa;
+  --chat-link-rgb: 96 165 250;
+  --chat-code: #60a5fa;
+  --chat-code-rgb: 96 165 250;
   --primary: #3b82f6;
   --primary-rgb: 59 130 246;
   --ring: #60a5fa;
@@ -174,6 +194,14 @@
 }
 
 :root[data-accent="emerald"] {
+  --chat-primary: #10b981;
+  --chat-primary-rgb: 16 185 129;
+  --chat-primary-foreground: #0a0a0a;
+  --chat-primary-foreground-rgb: 10 10 10;
+  --chat-link: #34d399;
+  --chat-link-rgb: 52 211 153;
+  --chat-code: #34d399;
+  --chat-code-rgb: 52 211 153;
   --primary: #10b981;
   --primary-rgb: 16 185 129;
   --ring: #34d399;
@@ -187,6 +215,14 @@
 }
 
 :root[data-accent="purple"] {
+  --chat-primary: #8b5cf6;
+  --chat-primary-rgb: 139 92 246;
+  --chat-primary-foreground: #0a0a0a;
+  --chat-primary-foreground-rgb: 10 10 10;
+  --chat-link: #a78bfa;
+  --chat-link-rgb: 167 139 250;
+  --chat-code: #a78bfa;
+  --chat-code-rgb: 167 139 250;
   --primary: #8b5cf6;
   --primary-rgb: 139 92 246;
   --ring: #a78bfa;
@@ -200,6 +236,14 @@
 }
 
 :root[data-accent="amber"] {
+  --chat-primary: #f59e0b;
+  --chat-primary-rgb: 245 158 11;
+  --chat-primary-foreground: #0a0a0a;
+  --chat-primary-foreground-rgb: 10 10 10;
+  --chat-link: #fbbf24;
+  --chat-link-rgb: 251 191 36;
+  --chat-code: #fbbf24;
+  --chat-code-rgb: 251 191 36;
   --primary: #f59e0b;
   --primary-rgb: 245 158 11;
   --ring: #fbbf24;
@@ -213,6 +257,14 @@
 }
 
 :root[data-accent="rose"] {
+  --chat-primary: #f43f5e;
+  --chat-primary-rgb: 244 63 94;
+  --chat-primary-foreground: #0a0a0a;
+  --chat-primary-foreground-rgb: 10 10 10;
+  --chat-link: #fb7185;
+  --chat-link-rgb: 251 113 133;
+  --chat-code: #fb7185;
+  --chat-code-rgb: 251 113 133;
   --primary: #f43f5e;
   --primary-rgb: 244 63 94;
   --ring: #fb7185;
@@ -230,7 +282,26 @@
    the dark accents would win in light mode too. Each ring is a darker shade of its own primary:
    a ring identical to the fill is invisible on a focused primary button (button.tsx draws
    focus-visible:ring-1 with no offset), and every ring here clears 3:1 on #ffffff and #f6f7f9. */
+:root[data-theme="light"][data-accent="default"] {
+  --chat-primary: #1d4ed8;
+  --chat-primary-rgb: 29 78 216;
+  --chat-primary-foreground: #ffffff;
+  --chat-primary-foreground-rgb: 255 255 255;
+  --chat-link: #1d4ed8;
+  --chat-link-rgb: 29 78 216;
+  --chat-code: #0369a1;
+  --chat-code-rgb: 3 105 161;
+}
+
 :root[data-theme="light"][data-accent="blue"] {
+  --chat-primary: #2563eb;
+  --chat-primary-rgb: 37 99 235;
+  --chat-primary-foreground: #fafafa;
+  --chat-primary-foreground-rgb: 250 250 250;
+  --chat-link: #2563eb;
+  --chat-link-rgb: 37 99 235;
+  --chat-code: #2563eb;
+  --chat-code-rgb: 37 99 235;
   --primary: #2563eb;
   --primary-rgb: 37 99 235;
   --ring: #1d4ed8;
@@ -244,6 +315,14 @@
 }
 
 :root[data-theme="light"][data-accent="emerald"] {
+  --chat-primary: #059669;
+  --chat-primary-rgb: 5 150 105;
+  --chat-primary-foreground: #0a0a0a;
+  --chat-primary-foreground-rgb: 10 10 10;
+  --chat-link: #047857;
+  --chat-link-rgb: 4 120 87;
+  --chat-code: #047857;
+  --chat-code-rgb: 4 120 87;
   --primary: #059669;
   --primary-rgb: 5 150 105;
   --ring: #047857;
@@ -257,6 +336,14 @@
 }
 
 :root[data-theme="light"][data-accent="purple"] {
+  --chat-primary: #7c3aed;
+  --chat-primary-rgb: 124 58 237;
+  --chat-primary-foreground: #fafafa;
+  --chat-primary-foreground-rgb: 250 250 250;
+  --chat-link: #7c3aed;
+  --chat-link-rgb: 124 58 237;
+  --chat-code: #7c3aed;
+  --chat-code-rgb: 124 58 237;
   --primary: #7c3aed;
   --primary-rgb: 124 58 237;
   --ring: #6d28d9;
@@ -270,6 +357,14 @@
 }
 
 :root[data-theme="light"][data-accent="amber"] {
+  --chat-primary: #b45309;
+  --chat-primary-rgb: 180 83 9;
+  --chat-primary-foreground: #fafafa;
+  --chat-primary-foreground-rgb: 250 250 250;
+  --chat-link: #b45309;
+  --chat-link-rgb: 180 83 9;
+  --chat-code: #b45309;
+  --chat-code-rgb: 180 83 9;
   --primary: #b45309;
   --primary-rgb: 180 83 9;
   --ring: #92400e;
@@ -283,6 +378,14 @@
 }
 
 :root[data-theme="light"][data-accent="rose"] {
+  --chat-primary: #be123c;
+  --chat-primary-rgb: 190 18 60;
+  --chat-primary-foreground: #fafafa;
+  --chat-primary-foreground-rgb: 250 250 250;
+  --chat-link: #be123c;
+  --chat-link-rgb: 190 18 60;
+  --chat-code: #be123c;
+  --chat-code-rgb: 190 18 60;
   --primary: #be123c;
   --primary-rgb: 190 18 60;
   --ring: #9f1239;

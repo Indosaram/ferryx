@@ -190,6 +190,7 @@
   --chat-foreground-tertiary-rgb: 133 133 133;
   --chat-border: #363636;
   --chat-border-rgb: 54 54 54;
+  /* Default brand fallback; settings-runtime.css derives brand tokens for each active accent. */
   --chat-primary: #346bf1;
   --chat-primary-rgb: 52 107 241;
   --chat-primary-foreground: #ffffff;
