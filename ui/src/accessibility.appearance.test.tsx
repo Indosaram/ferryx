@@ -3,7 +3,6 @@ import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { computeAccessibleName } from "dom-accessibility-api";
 import postcss from "postcss";
-import tailwindcss from "tailwindcss";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CommandPalette } from "./components/CommandPalette";
@@ -194,23 +193,39 @@ describe("appearance accessibility audit", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
-  it("keeps remote sheet hit areas at least 44px, including the math label target", async () => {
-    // Compile the actual utility classes with Tailwind, not a test-only 44px override.
-    const raw = source("./remote/appearance/RemoteAppearanceSheet.tsx") + source("./remote/chat/MobileSheet.tsx");
-    const css = await postcss([tailwindcss({ content: [{ raw, extension: "tsx" }], corePlugins: { preflight: false } })])
-      .process("@tailwind utilities;", { from: undefined });
-    const remove = inject(css.css);
-    try {
-      render(<RemoteHarness />);
-      fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
-      const dialog = screen.getByRole("dialog", { name: "Appearance" });
-      for (const control of tabStops(dialog)) {
-        const target = control.matches('input[type="checkbox"]') ? control.closest("label")! : control;
-        const style = getComputedStyle(target);
-        const pixels = (value: string) => value.endsWith("rem") ? parseFloat(value) * 16 : parseFloat(value) || 0;
-        expect(Math.max(pixels(style.height), pixels(style.minHeight)), target.outerHTML).toBeGreaterThanOrEqual(44);
+  it("keeps remote sheet hit areas at least 44px, including the math label target", () => {
+    // Tailwind v3 spacing: numeric n = n * 0.25rem, at a 16px root; `px` = 1px.
+    const spacing = (value: string) => value === "px" ? 1
+      : /^\d+(?:\.\d+)?$/.test(value) ? Number(value) * 4
+      : /^\[\d+(?:\.\d+)?(?:px|rem)\]$/.test(value)
+        ? parseFloat(value.slice(1)) * (value.endsWith("rem]") ? 16 : 1) : 0;
+    const lineHeights: Record<string, number> = { xs: 16, sm: 20, base: 24, lg: 28, xl: 28, "2xl": 32 };
+    const verticalArea = (element: HTMLElement) => {
+      let minimum = 0;
+      let height: number | undefined;
+      let padding = 0;
+      let lineHeight = 0;
+      for (const token of element.className.split(/\s+/)) {
+        if (token.startsWith("min-h-")) minimum = Math.max(minimum, spacing(token.slice(6)));
+        else if (token.startsWith("h-")) height = spacing(token.slice(2));
+        else if (token.startsWith("size-")) height = spacing(token.slice(5));
+        else if (token.startsWith("py-")) padding = spacing(token.slice(3)) * 2;
+        else if (token.startsWith("text-")) lineHeight = lineHeights[token.slice(5)] ?? lineHeight;
+        // px-* is horizontal padding, so never increases the vertical hit area.
       }
-    } finally { remove(); }
+      // Tailwind uses border-box: padding adds to content only without an explicit height.
+      return Math.max(minimum, height ?? lineHeight + padding);
+    };
+
+    render(<RemoteHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+    const dialog = screen.getByRole("dialog", { name: "Appearance" });
+    for (const control of tabStops(dialog)) {
+      const label = control.matches('input[type="checkbox"]') ? control.closest("label") : null;
+      const area = Math.max(verticalArea(control), label ? verticalArea(label) : 0);
+      expect(area, control.outerHTML).toBeGreaterThanOrEqual(44);
+      if (label) expect(verticalArea(label), label.outerHTML).toBeGreaterThanOrEqual(44);
+    }
   });
 
   it("names palette search, close and all appearance command rows in DOM focus order", () => {
