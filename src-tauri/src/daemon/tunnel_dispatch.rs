@@ -241,7 +241,7 @@ pub struct TunnelDispatch {
 #[cfg(unix)]
 struct Runtime {
     registry: Arc<crate::ssh::tunnel::registry::TunnelRegistry>,
-    records: Arc<super::tunnel::runtime_records::RuntimeRecords>,
+    records: Arc<crate::ssh::tunnel::runtime_records::RuntimeRecords>,
 }
 
 #[cfg(unix)]
@@ -367,7 +367,7 @@ impl TunnelDispatch {
     }
 
     #[cfg(unix)]
-    pub fn records(&self) -> Result<Arc<super::tunnel::runtime_records::RuntimeRecords>, IpcError> {
+    pub fn records(&self) -> Result<Arc<crate::ssh::tunnel::runtime_records::RuntimeRecords>, IpcError> {
         Ok(Arc::clone(&self.runtime()?.records))
     }
 
