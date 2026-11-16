@@ -65,7 +65,7 @@ function plan() {
     appVersion: "2026.908.1",
     msixVersion: "2026.908.1.0",
     channels: { store: true, nsisMigration: false },
-    requiredTargets: ["darwin-aarch64", "darwin-x86_64", "linux-x86_64"],
+    requiredTargets: ["darwin-aarch64", "linux-x86_64"],
     toolchains: { node: ">=22.0.0", bun: ">=1.4.0", zig: "0.17.0" },
     sourceDateEpoch: 1788868800,
     createdAt: "2026-09-08T12:00:00.000Z",
@@ -318,7 +318,7 @@ function writeRun(tmp, key) {
   });
   const write = (host, list) => writeFileSync(join(receipts, `build-receipt-${host}.json`), JSON.stringify(receipt(host, list)));
   write("macbook", [
-    art("macos-updater", "darwin/Ferryx.app.tar.gz", true, ["darwin-aarch64", "darwin-x86_64"]),
+    art("macos-updater", "darwin/Ferryx.app.tar.gz", true, ["darwin-aarch64"]),
     art("dmg", "darwin/Ferryx_2026.908.1_universal.dmg", false),
     art("cli-darwin-universal", "darwin/ferryx-cli-darwin-universal", false),
   ]);
