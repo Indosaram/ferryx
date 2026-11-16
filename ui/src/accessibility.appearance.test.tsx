@@ -20,6 +20,24 @@ const savedTheme: ThemeDocumentV1 = { version: 1, id: "audit-theme", name: "Audi
 const interactive = 'button, input:not([type="hidden"]), select, textarea, a[href], summary, [role="button"], [role="combobox"], [contenteditable="true"], [tabindex]';
 const injectedSheets = new Set<HTMLStyleElement>();
 let originalRootAttributes: Array<[string, string]>;
+let originalLocalStorageDescriptor: PropertyDescriptor | undefined;
+let store: Storage;
+
+/** jsdom on the Linux bun runtime exposes a `localStorage` descriptor whose getter
+ * returns undefined. Install a deterministic in-memory Storage so both the product's
+ * browserStorage() and this suite's own reset touch one real store per test.
+ */
+function createMemoryStorage(): Storage {
+  const entries = new Map<string, string>();
+  return {
+    get length() { return entries.size; },
+    clear: () => { entries.clear(); },
+    getItem: (key: string) => entries.get(key) ?? null,
+    key: (index: number) => Array.from(entries.keys())[index] ?? null,
+    removeItem: (key: string) => { entries.delete(key); },
+    setItem: (key: string, value: string) => { entries.set(key, String(value)); },
+  };
+}
 
 function inject(css: string) {
   const sheet = document.createElement("style");
@@ -115,7 +133,10 @@ function PaletteHarness() {
 
 beforeEach(() => {
   originalRootAttributes = Array.from(document.documentElement.attributes, ({ name, value }) => [name, value]);
-  localStorage.clear();
+  originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(window, "localStorage");
+  store = createMemoryStorage();
+  Object.defineProperty(window, "localStorage", { value: store, configurable: true, writable: true });
+  store.clear();
   saveAppearanceSettings({ ...DEFAULT_APPEARANCE_SETTINGS, customThemes: [savedTheme], activeCustomThemeId: savedTheme.id });
 });
 
@@ -126,7 +147,9 @@ afterEach(() => {
   injectedSheets.clear();
   for (const attribute of Array.from(document.documentElement.attributes)) document.documentElement.removeAttribute(attribute.name);
   for (const [name, value] of originalRootAttributes) document.documentElement.setAttribute(name, value);
-  localStorage.clear();
+  store.clear();
+  if (originalLocalStorageDescriptor) Object.defineProperty(window, "localStorage", originalLocalStorageDescriptor);
+  else Reflect.deleteProperty(window, "localStorage");
 });
 
 describe("appearance accessibility audit", () => {
