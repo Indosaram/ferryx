@@ -19,6 +19,13 @@ set -eu
 #   FERRYX_ORIGIN      : custom relay/download origin (default: https://relay.ferryx.dev, must be https or http on loopback)
 #   FERRYX_VERSION     : specific tag version or 'latest' (default: latest, must match ^[A-Za-z0-9._-]+$)
 #   FERRYX_INSTALL_KEY : install key (same as --key)
+#
+# Every downloaded binary is checked against the SHA256SUMS of the same GitHub release
+# (FERRYX_VERSION, or the latest release); a source whose bytes do not match is skipped, and
+# the install fails when no source matches.
+#
+# Exit codes: 0 installed, 1 install failure, 2 usage error or unsupported platform
+# (Linux arm64 has no prebuilt ferryx-cli), otherwise the exit code of "ferryx-cli up".
 
 FERRYX_INSTALL_KEY="${FERRYX_INSTALL_KEY:-}"
 INSTALL_EMAIL=""
@@ -142,27 +149,28 @@ case "$OS" in
 esac
 
 # 2. Detect Architecture
+BUILD_FROM_SOURCE_URL="https://github.com/Indosaram/ferryx/blob/main/CONTRIBUTING.md#build-prerequisites"
 ARCH="$(uname -m)"
 case "$ARCH" in
   x86_64|amd64)
     PLATFORM_ARCH="amd64"
     ;;
   aarch64|arm64)
+    if [ "$PLATFORM_OS" = "linux" ]; then
+      echo "Error: Linux arm64 has no prebuilt ferryx-cli yet; build from source: ${BUILD_FROM_SOURCE_URL}" >&2
+      exit 2
+    fi
     PLATFORM_ARCH="arm64"
     ;;
   *)
-    echo "Error: Unsupported CPU architecture '$ARCH'." >&2
-    exit 1
+    echo "Error: ${OS} ${ARCH} has no prebuilt ferryx-cli; build from source: ${BUILD_FROM_SOURCE_URL}" >&2
+    exit 2
     ;;
 esac
 
-# 3. Determine download artifact name
+# 3. Determine download artifact name (Linux is amd64 only; macOS ships one universal binary)
 if [ "$PLATFORM_OS" = "linux" ]; then
-  if [ "$PLATFORM_ARCH" = "amd64" ]; then
-    ARTIFACT_NAME="ferryx-cli-linux-amd64"
-  else
-    ARTIFACT_NAME="ferryx-cli-linux-arm64"
-  fi
+  ARTIFACT_NAME="ferryx-cli-linux-amd64"
 elif [ "$PLATFORM_OS" = "darwin" ]; then
   ARTIFACT_NAME="ferryx-cli-darwin-universal"
 fi
@@ -171,14 +179,16 @@ fi
 PRIMARY_URL="${FERRYX_ORIGIN}/download/${ARTIFACT_NAME}"
 SECONDARY_URL="${FERRYX_ORIGIN}/download/ferryx-cli"
 if [ "$FERRYX_VERSION" = "latest" ]; then
-  GITHUB_URL="https://github.com/Indosaram/ferryx/releases/latest/download/${ARTIFACT_NAME}"
+  RELEASE_BASE_URL="https://github.com/Indosaram/ferryx/releases/latest/download"
 else
-  GITHUB_URL="https://github.com/Indosaram/ferryx/releases/download/${FERRYX_VERSION}/${ARTIFACT_NAME}"
+  RELEASE_BASE_URL="https://github.com/Indosaram/ferryx/releases/download/${FERRYX_VERSION}"
 fi
+GITHUB_URL="${RELEASE_BASE_URL}/${ARTIFACT_NAME}"
 
 # 5. Temporary download location
 TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'ferryx-install')"
 TMP_BIN="${TMP_DIR}/ferryx-cli"
+TMP_SUMS="${TMP_DIR}/SHA256SUMS"
 cleanup() {
   rm -rf "$TMP_DIR"
 }
@@ -225,7 +235,6 @@ artifact_matches_platform() {
       esac
       case "$PLATFORM_ARCH:$(field 37 40)" in
         amd64:3e00) ;;
-        arm64:b700) ;;
         *) return 1 ;;
       esac
       ;;
@@ -259,20 +268,69 @@ artifact_matches_platform() {
   esac
 }
 
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d ' ' -f 1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+  else
+    return 1
+  fi
+}
+
+# 6a. Fetch the release checksums. Releases publish SHA256SUMS; older ones SHA256SUMS.txt.
+echo "--> Downloading SHA256SUMS from ${RELEASE_BASE_URL} ..."
+SUMS_FOUND=0
+for sums_name in SHA256SUMS SHA256SUMS.txt; do
+  if download "${RELEASE_BASE_URL}/${sums_name}" "$TMP_SUMS" 2>/dev/null && [ -s "$TMP_SUMS" ]; then
+    SUMS_FOUND=1
+    break
+  fi
+done
+if [ "$SUMS_FOUND" -ne 1 ]; then
+  echo "Error: could not download SHA256SUMS from ${RELEASE_BASE_URL}; refusing to install an unverified binary." >&2
+  exit 1
+fi
+EXPECTED_SHA256="$(awk -v name="$ARTIFACT_NAME" '$2 == name || $2 == "*" name { print tolower($1); exit }' "$TMP_SUMS")"
+case "$EXPECTED_SHA256" in
+  ????????????????????????????????????????????????????????????????) ;;
+  *)
+    echo "Error: SHA256SUMS from ${RELEASE_BASE_URL} has no valid entry for ${ARTIFACT_NAME}." >&2
+    exit 1
+    ;;
+esac
+if ! sha256_of "$TMP_SUMS" >/dev/null; then
+  echo "Error: neither sha256sum nor shasum was found; cannot verify the download." >&2
+  exit 1
+fi
+
 echo "--> Downloading ferryx-cli for ${PLATFORM_OS}/${PLATFORM_ARCH}..."
 DOWNLOAD_SUCCESS=0
+CHECKSUM_MISMATCH=0
 for url in "$PRIMARY_URL" "$SECONDARY_URL" "$GITHUB_URL"; do
   echo "    Trying $url ..."
   if download "$url" "$TMP_BIN" 2>/dev/null && [ -s "$TMP_BIN" ]; then
-    if artifact_matches_platform "$TMP_BIN"; then
-      DOWNLOAD_SUCCESS=1
-      break
+    if ! artifact_matches_platform "$TMP_BIN"; then
+      echo "    Skipping: artifact is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
+      continue
     fi
-    echo "    Skipping: artifact is not a ${PLATFORM_OS}/${PLATFORM_ARCH} executable"
+    actual_sha256="$(sha256_of "$TMP_BIN" | tr 'A-F' 'a-f')"
+    if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
+      echo "    Skipping: SHA256 mismatch (expected ${EXPECTED_SHA256}, got ${actual_sha256})"
+      CHECKSUM_MISMATCH=1
+      continue
+    fi
+    echo "    SHA256 verified: ${actual_sha256}"
+    DOWNLOAD_SUCCESS=1
+    break
   fi
 done
 
 if [ "$DOWNLOAD_SUCCESS" -ne 1 ]; then
+  if [ "$CHECKSUM_MISMATCH" -eq 1 ]; then
+    echo "Error: no downloaded ferryx-cli matched the SHA256SUMS of the release (${ARTIFACT_NAME})." >&2
+    exit 1
+  fi
   echo "Error: Failed to download ferryx-cli from available endpoints." >&2
   exit 1
 fi

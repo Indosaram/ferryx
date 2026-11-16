@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, chmodSync, readdirSync, statSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 
 import {
@@ -742,6 +742,40 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
   }
 });
 
+test("createLinuxBuildScript: refuses a ferryx-cli-linux-amd64 that links desktop libraries", () => {
+  const linux = createLinuxBuildScript({
+    workspaceDir: "/tmp/release",
+    plan: { commitSha: "5d5499806a1b207849778f488b4e3e7b821a751b", tag: "v2026.09.08.1", sourceDateEpoch: 1 },
+    hostConfig: {},
+  });
+  const start = linux.indexOf('cli_needed="$(objdump -p');
+  const end = linux.indexOf("fi\n", start) + 3;
+  assert.ok(start > 0 && end > start, "the linux build script must check the CLI's NEEDED entries");
+  const guard = linux.slice(start, end);
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-test-cli-needed-"));
+  try {
+    const runGuard = (libs) => {
+      writeFileSync(
+        join(tmp, "objdump"),
+        `#!/usr/bin/env bash\nprintf '  NEEDED               %s\\n' ${libs.join(" ")}\n`,
+      );
+      chmodSync(join(tmp, "objdump"), 0o755);
+      return spawnSync("bash", ["-c", `set -euo pipefail\nout_dir=${tmp}\n${guard}`], {
+        env: { ...process.env, PATH: `${tmp}:${process.env.PATH}` },
+        encoding: "utf8",
+      });
+    };
+    const headless = runGuard(["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"]);
+    assert.equal(headless.status, 0, headless.stderr);
+    const desktop = runGuard(["libpipewire-0.3.so.0", "libavcodec.so.63", "libc.so.6"]);
+    assert.equal(desktop.status, 1);
+    assert.match(desktop.stderr, /libpipewire-0\.3\.so\.0/);
+    assert.match(desktop.stderr, /libavcodec\.so\.63/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("createLinuxBuildScript: executes end-to-end against isolated git bundles and produces raw AppImage", () => {
   const tmp = mkdtempSync(join(tmpdir(), "ferryx-test-linux-script-"));
   try {
@@ -831,6 +865,13 @@ fi
       "#!/usr/bin/env bash\nprintf '%s\\n' './usr/lib/Ferryx/ffmpeg/libavcodec.so.63' './usr/lib/Ferryx/ffmpeg-legal/build-receipt.txt'\n",
     );
     chmodSync(join(binDir, "dpkg-deb"), 0o755);
+
+    // Mock objdump: the mock CLI links only the C runtime, like a real headless build.
+    writeFileSync(
+      join(binDir, "objdump"),
+      "#!/usr/bin/env bash\nprintf '  NEEDED               %s\\n' libgcc_s.so.1 libm.so.6 libc.so.6 ld-linux-x86-64.so.2\n",
+    );
+    chmodSync(join(binDir, "objdump"), 0o755);
 
     // Mock cargo
     const cargoScript = `#!/usr/bin/env bash
