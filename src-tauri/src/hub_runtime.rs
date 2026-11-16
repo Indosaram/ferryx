@@ -4900,6 +4900,16 @@ fn spawn_supervisor_recovery(launch: &HubLaunch) -> tokio::task::JoinHandle<()> 
     })
 }
 
+/// The supervisor's ownership loop: every running goal it owns (launched by it or handed over)
+/// is read from its bound pane, and a session silent past `FERRYX_HUB_NUDGE_AFTER_MIN` gets one
+/// progress request. A machine that is not the lease holder types nothing: its sends are refused
+/// by the daemon's fence before the first byte, the same guard every supervisor send passes.
+fn spawn_supervisor_ownership(launch: &HubLaunch) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(ferryx_hub::supervisor::ownership::serve(
+        launch.hub.pool.clone(),
+    ))
+}
+
 /// Forwards the store's goal-change announcements ([`ferryx_hub::supervisor::changes`]) to the
 /// desktop and phone Supervisor views as `supervisor_changed {goalId}`, so a goal the
 /// dispatcher, a worker receipt or the wake scheduler moved is refetched without an owner
@@ -5002,6 +5012,7 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
     tasks.push(spawn_supervisor_change_forwarder(launch));
     tasks.push(spawn_supervisor_wakes(launch));
     tasks.push(spawn_supervisor_recovery(launch));
+    tasks.push(spawn_supervisor_ownership(launch));
     let addr = launch.config.tracker_addr.clone().unwrap_or_else(|| "127.0.0.1:9119".into());
     let router = ferryx_hub::http::router(launch.hub.pool.clone(), ferryx_hub::http::web_root());
     tasks.push(tokio::spawn(async move {
