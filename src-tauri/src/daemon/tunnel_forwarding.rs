@@ -441,6 +441,7 @@ struct Fixture {
 
 impl Fixture {
     async fn start() -> Self {
+        use crate::ssh::tunnel_store::SystemClock;
         use std::os::fd::OwnedFd;
         use std::os::unix::fs::PermissionsExt;
 
@@ -601,6 +602,7 @@ impl Fixture {
                 system: "",
             },
             Arc::new(ProbeSocketFactory::default()),
+            Arc::new(SystemClock),
         )
         .with_runtime_dir(self.dir.path())
     }
@@ -690,6 +692,7 @@ impl Daemon {
                     system: "",
                 },
                 Arc::new(ProbeSocketFactory::default()),
+                Arc::new(SystemClock),
             )
             .with_runtime_dir(&runtime_dir);
             while let Some(command) = rx.recv().await {
