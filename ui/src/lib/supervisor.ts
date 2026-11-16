@@ -80,6 +80,22 @@ export async function setSupervisorLanePaused(laneKey: string, paused: boolean):
   await refreshSupervisor();
 }
 
+/**
+ * Hand a running pane to the supervisor as one observed goal: the supervisor watches the pane the
+ * owner already runs and types nothing into it. `instruction` is the owner's own words for the work
+ * the goal continues; the daemon refuses a shell and a pane the hub dispatched itself. Answers the
+ * id of the goal the pane became, and refetches so the panel shows it.
+ */
+export async function handToSupervisor(
+  hostId: string,
+  sessionId: string,
+  instruction: string,
+): Promise<string> {
+  const goalId = await invoke<string>("cmd_supervisor_hand_over", { hostId, sessionId, instruction });
+  await refreshSupervisor();
+  return goalId;
+}
+
 export type SupervisorGoalRequest =
   | { action: "set"; laneKey: string; requirements: unknown[]; mode?: SupervisorGoalMode; turnLimit?: number }
   | { action: "mode"; laneKey: string; mode: SupervisorGoalMode }

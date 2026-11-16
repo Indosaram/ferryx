@@ -68,23 +68,11 @@ pub async fn hand_to_supervisor(
     host_id: &str,
     session_id: &str,
     instruction: &str,
-    is_shell: bool,
-    hub_dispatched: bool,
 ) -> Option<
     Result<Admission, ferryx_hub::supervisor::admission::AdmissionError>,
 > {
     let installed = current()?;
-    Some(
-        hand_over(
-            &installed,
-            host_id,
-            session_id,
-            instruction,
-            is_shell,
-            hub_dispatched,
-        )
-        .await,
-    )
+    Some(hand_over(&installed, host_id, session_id, instruction).await)
 }
 
 async fn hand_over(
@@ -92,8 +80,6 @@ async fn hand_over(
     host_id: &str,
     session_id: &str,
     instruction: &str,
-    is_shell: bool,
-    hub_dispatched: bool,
 ) -> Result<Admission, ferryx_hub::supervisor::admission::AdmissionError> {
     use ferryx_hub::supervisor::admission::{installation_owner, AdmissionError, OperationClass};
     use ferryx_hub::supervisor::{
@@ -127,6 +113,13 @@ async fn hand_over(
         "" => "Handed-over session",
         title => title,
     };
+    // Both refusals are read from the hub here rather than taken from the caller: a pane running a
+    // bare shell is not an agent session, and a pane the hub itself dispatched already belongs to a
+    // goal, so neither may be admitted as a handover.
+    let is_shell = session.agent.trim().is_empty();
+    let hub_dispatched =
+        ferryx_hub::supervisor::handover::session_is_hub_dispatched(pool, host_id, session_id)
+            .await?;
     let Some(resolved) = resolve_project(
         pool,
         &identity.supervisor_id,

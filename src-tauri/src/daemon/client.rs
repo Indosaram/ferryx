@@ -819,6 +819,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorDispatch { .. } => "supervisorDispatch",
         DaemonRequest::SupervisorSnapshot => "supervisorSnapshot",
         DaemonRequest::SupervisorSetPaused { .. } => "supervisorSetPaused",
+        DaemonRequest::SupervisorHandOver { .. } => "supervisorHandOver",
         DaemonRequest::SupervisorGoal { .. } => "supervisorGoal",
         DaemonRequest::SupervisorEngine { .. } => "supervisorEngine",
         DaemonRequest::SupervisorMoveHere { .. } => "supervisorMoveHere",

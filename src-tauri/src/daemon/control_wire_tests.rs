@@ -902,6 +902,69 @@ fn pause_request() -> DaemonRequest {
     }
 }
 
+/// The panel's hand-over, as the app sends it: one pane named by host and session, the owner's
+/// words as the instruction. With no hub open here it answers SUPERVISOR_UNAVAILABLE (503), never
+/// FORBIDDEN from outside the panes, and from a pane it is refused like every owner decision.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hand_over_reaches_the_service_and_names_its_goal_over_the_wire() {
+    let server = Arc::new(DaemonServer::new());
+    let request = DaemonRequest::SupervisorHandOver {
+        host_id: "local".into(),
+        session_id: "pane-1".into(),
+        instruction: "carry on with the cache".into(),
+    };
+    // Outside the panes the request is admitted to the hub layer, which is not open here.
+    match unix_exchange(&server, request.clone()).await {
+        DaemonResponse::Error { code, details, .. } => {
+            assert_eq!(code.as_deref(), Some("SUPERVISOR_UNAVAILABLE"));
+            assert_eq!(details, None, "the same answer the pause arm gives with no hub");
+        }
+        other => panic!("a hand-over with no hub answered {other:?}"),
+    }
+    // Inside a Ferryx pane it is an owner decision, refused before the hub is consulted.
+    let parent = crate::daemon::supervisor_peer::proc_info(std::process::id())
+        .expect("own process")
+        .ppid;
+    server.test_pane_pids.lock().insert(parent);
+    match unix_exchange(&server, request).await {
+        DaemonResponse::Error { code, message, .. } => {
+            assert_eq!(code.as_deref(), Some("FORBIDDEN"));
+            assert!(message.contains("Ferryx pane"), "{message}");
+        }
+        other => panic!("a hand-over from a pane answered {other:?}"),
+    }
+}
+
+/// The wire name the daemon logs and the app invokes: `supervisorHandOver`, next to the pause it
+/// mirrors, and the camelCase fields of the request and its answer.
+#[test]
+fn the_hand_over_request_and_answer_name_their_fields_on_the_wire() {
+    let request = DaemonRequest::SupervisorHandOver {
+        host_id: "local".into(),
+        session_id: "pane-1".into(),
+        instruction: "carry on".into(),
+    };
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"type": "supervisorHandOver", "hostId": "local",
+            "sessionId": "pane-1", "instruction": "carry on"})
+    );
+    assert!(request.is_owner_supervisor_control(), "a hand-over is the owner's decision");
+    match serde_json::from_value::<DaemonRequest>(wire).unwrap() {
+        DaemonRequest::SupervisorHandOver { host_id, session_id, instruction } => {
+            assert_eq!((host_id.as_str(), session_id.as_str(), instruction.as_str()),
+                ("local", "pane-1", "carry on"));
+        }
+        other => panic!("decoded as {other:?}"),
+    }
+    assert_eq!(
+        serde_json::to_value(DaemonResponse::SupervisorHandOverOk { goal_id: "goal-7".into() }).unwrap(),
+        serde_json::json!({"type": "supervisorHandOverOk", "goalId": "goal-7"})
+    );
+}
+
 /// A `supervisor.request` submit as `ferryx-cli mcp` forwards it (`DaemonOwnerRoute`).
 fn mcp_submit() -> DaemonRequest {
     serde_json::from_value(serde_json::json!({"type": "supervisorRequestV1", "cli": true, "mcp": true,

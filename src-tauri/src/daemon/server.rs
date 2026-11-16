@@ -8561,6 +8561,23 @@ impl DaemonServer {
                         },
                     }
                 }
+                Ok(DaemonRequest::SupervisorHandOver { host_id, session_id, instruction }) => {
+                    match crate::hub_runtime::panel_autonomy::hand_to_supervisor(&host_id, &session_id, &instruction).await {
+                        Some(Ok(admission)) => DaemonResponse::SupervisorHandOverOk { goal_id: admission.receipt.goal_id },
+                        // No hub is open in this daemon: the answer an absent supervisor service gives,
+                        // so the app's off/upgrade copy is the same as every other supervisor request.
+                        None => DaemonResponse::Error {
+                            message: "the supervisor hub is not open in this daemon".into(),
+                            code: Some("SUPERVISOR_UNAVAILABLE".into()),
+                            details: None,
+                        },
+                        Some(Err(error)) => DaemonResponse::Error {
+                            message: error.to_string(),
+                            code: Some(error.code().into()),
+                            details: None,
+                        },
+                    }
+                }
                 Ok(DaemonRequest::SupervisorGoal { request }) => {
                     match crate::hub_runtime::supervisor_goal(self.remote_state(), request).await {
                         Ok(snapshot) => DaemonResponse::SupervisorGoalOk { snapshot },

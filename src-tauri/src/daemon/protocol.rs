@@ -995,6 +995,15 @@ pub enum DaemonRequest {
         lane_key: String,
         paused: bool,
     },
+    /// Hand a running pane to the supervisor as one observed goal: the goal watches the pane the
+    /// owner already runs and nothing is typed into it. `instruction` is the owner's own words for
+    /// the work the goal continues; a shell and a pane the hub dispatched itself are refused.
+    #[serde(rename_all = "camelCase")]
+    SupervisorHandOver {
+        host_id: String,
+        session_id: String,
+        instruction: String,
+    },
     /// Show or steer one lane's goal contract. Gated by `supervisorGoalV1`.
     SupervisorGoal {
         request: SupervisorGoalAction,
@@ -1504,7 +1513,8 @@ impl DaemonRequest {
             Self::SupervisorGlobalPause { .. }
             | Self::SupervisorActionUndo { .. }
             | Self::SupervisorHubStart
-            | Self::AgentControlEnableOwner => true,
+            | Self::AgentControlEnableOwner
+            | Self::SupervisorHandOver { .. } => true,
             Self::SupervisorSettings { enabled } => enabled.is_some(),
             _ => false,
         }
@@ -1807,6 +1817,11 @@ pub enum DaemonResponse {
     #[serde(rename_all = "camelCase")]
     SupervisorSetPausedOk {
         paused: bool,
+    },
+    /// The goal the handed-over pane became.
+    #[serde(rename_all = "camelCase")]
+    SupervisorHandOverOk {
+        goal_id: String,
     },
     /// The supervisor snapshot after a `SupervisorGoal` action.
     #[serde(rename_all = "camelCase")]

@@ -24,6 +24,25 @@ pub fn handover_source_id(host_id: &str, backend_session_id: &str) -> String {
     format!("{HANDOVER_PREFIX}{host_id}:{backend_session_id}")
 }
 
+/// True when a goal of this hub already dispatched the pane: its execution binding names the
+/// session, so the supervisor owns it and a handover of it must be refused rather than admitted
+/// a second time.
+pub async fn session_is_hub_dispatched(
+    pool: &SqlitePool,
+    host_id: &str,
+    backend_session_id: &str,
+) -> Result<bool, SupervisorError> {
+    let dispatched: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM supervisor_execution_bindings
+                        WHERE host_id = ? AND provider_session_id = ?)",
+    )
+    .bind(host_id)
+    .bind(backend_session_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(dispatched)
+}
+
 /// Admit `request` as the goal observing the already-running `session`.
 ///
 /// A shell is not an agent session and a session the hub dispatched is already the
