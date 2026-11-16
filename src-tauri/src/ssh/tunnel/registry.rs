@@ -592,10 +592,10 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
 
     fn host() -> SshHost {
-        SshHost { id: uuid::Uuid::new_v4().to_string(), label: "fixture".into(), hostname: "127.0.0.1".into(), username: None, port: Some(22), identity_file: None, jump_host: None, source: SshHostSource::Manual, auth_method: SshAuthMethod::Key, disabled: None, shell: None }
+        SshHost { id: uuid::Uuid::new_v4().to_string(), label: "fixture".into(), hostname: "127.0.0.1".into(), username: None, port: Some(allocate_port().unwrap()), identity_file: None, jump_host: None, source: SshHostSource::Manual, auth_method: SshAuthMethod::Key, disabled: None, shell: None }
     }
     fn spec(port: Option<u16>) -> TunnelSpec {
-        TunnelSpec { id: TunnelSpecId("saved".into()), label: "database".into(), local_port: port, remote_host: "127.0.0.1".into(), remote_port: 5432, enabled: true }
+        TunnelSpec { id: TunnelSpecId("saved".into()), label: "database".into(), local_port: port, remote_host: "127.0.0.1".into(), remote_port: allocate_port().unwrap(), enabled: true }
     }
     fn make_registry(spawner: Arc<dyn TunnelSpawner>) -> (TunnelRegistry, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -768,15 +768,16 @@ mod tests {
         let (stop, shutdown) = tokio::join!(registry.stop(&id), registry.shutdown());
         stop.unwrap(); shutdown.unwrap(); assert!(exited.borrow().is_some(), "shutdown awaits draining generation");
 
+        // Reserve the next fixture's tunnel port BEFORE the self-connect case,
+        // so the allocator cannot recycle that case's socket/TIME_WAIT port.
+        let reservation = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let readiness_port = reservation.local_addr().unwrap().port();
         let port = allocate_port().unwrap();
         let addr: SocketAddr = (Ipv4Addr::LOCALHOST, port).into();
-        assert!(is_self_connect(addr, addr)); assert!(!is_self_connect(addr, (Ipv4Addr::LOCALHOST, port.wrapping_add(1)).into()));
+        assert!(is_self_connect(addr, addr)); assert!(!is_self_connect(addr, (Ipv4Addr::LOCALHOST, readiness_port).into()));
         let factory = ProbeSocketFactory::default(); *factory.availability_source_port_override.lock().unwrap() = Some(port);
         assert_eq!(probe_local_port_available(addr, &factory).await, PortAvailability::SelfConnected);
-        // Use a fresh OS-assigned port for the readiness source/target pair;
-        // the preceding self-connect must not leave socket state on this port.
-        let reservation = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = reservation.local_addr().unwrap().port();
+        let port = readiness_port;
         let addr: SocketAddr = (Ipv4Addr::LOCALHOST, port).into();
         drop(reservation);
         let (fake, _) = Scripted::new(vec![Attempt::WaitForProbe]);
@@ -823,6 +824,7 @@ mod tests {
         assert_eq!(process.calls.load(Ordering::SeqCst), 1); registry.shutdown().await.unwrap();
 
         let process = CountingProcess::new(true, false); let (registry, _dir) = make_registry(process.clone());
+        let port = allocate_port().unwrap();
         let host = host(); let first = registry.start(&host, spec(Some(port)), false).await.unwrap();
         let exited = registry.subscribe_exit(first.runtime_id.as_ref().unwrap()).unwrap();
         let pending = registry.invalidate_host(&host.id);
@@ -837,7 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn saved_definition_without_runtime_lists_as_stopped() {
-        let (registry, _dir) = make_registry(Arc::new(ProcessSpawner)); let definition = spec(Some(5432));
+        let (registry, _dir) = make_registry(Arc::new(ProcessSpawner)); let definition = spec(Some(allocate_port().unwrap()));
         let views = registry.list(&HashMap::from([("host".into(), vec![definition])])).unwrap();
         assert_eq!(views.len(), 1); assert_eq!(views[0].state, TunnelState::Stopped); assert_eq!(views[0].runtime_id, None); assert_eq!(views[0].since, None);
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
