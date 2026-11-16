@@ -441,6 +441,13 @@ fn attach_candidates(
     candidates
 }
 
+/// What a fresh opaque session is opened with: the machine's attach keys, and the lifetime class
+/// the relay applies to the session.
+struct StreamTarget<'a> {
+    attach: &'a HostAttach,
+    kind: SessionKind,
+}
+
 /// Allocates an opaque session with `allocation_bearer` (device token, or an account
 /// session while redeeming a grant) and completes the attach handshake.
 async fn establish_stream(
@@ -449,10 +456,10 @@ async fn establish_stream(
     relay_origin: &str,
     allocation_bearer: &str,
     machine_id: &str,
-    attach: &HostAttach,
-    kind: SessionKind,
+    target: StreamTarget<'_>,
     published_origins: &[PublishedOrigin],
 ) -> Result<RelayAttachedStream, ClientError> {
+    let StreamTarget { attach, kind } = target;
     let relay_origin = crate::remote::relay_client::live_relay_url(relay_origin).into_owned();
     let dir = client_attach_dir()?;
     tokio::time::timeout(ESTABLISH_TIMEOUT, async {
@@ -518,8 +525,7 @@ impl SecureHttpSession {
             relay_origin,
             allocation_bearer,
             machine_id,
-            attach,
-            SessionKind::Http,
+            StreamTarget { attach, kind: SessionKind::Http },
             published_origins,
         )
         .await
@@ -669,8 +675,7 @@ pub async fn open_secure_websocket(
         target.relay_origin,
         target.bearer,
         target.machine_id,
-        target.attach,
-        target.session_kind,
+        StreamTarget { attach: target.attach, kind: target.session_kind },
         target.published_origins,
     )
     .await?;

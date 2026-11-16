@@ -2096,10 +2096,10 @@ enum Correction {
 /// What a wire report resolves to once this daemon's own process walk is applied.
 pub(crate) struct EffectiveReport {
     pub agent: String,
+    /// For `omo` and `maho`, `launcher = Mhc` here is this daemon's own finding rather than a
+    /// witness carried in from elsewhere: it is set only when a process walk proved `mhc` owns the
+    /// pane, and cleared when it could not. No other agent's provider is touched.
     pub provider: Option<AgentProviderSession>,
-    /// This daemon proved an `mhc` owner for this pane, so `launcher = Mhc` is its own finding
-    /// rather than a witness carried in from elsewhere.
-    pub launcher_proven: bool,
 }
 
 /// Resolve a report's agent against the owner this daemon proved for the pane.
@@ -2121,22 +2121,18 @@ pub(crate) fn effective_report(
         "omo" if owns => EffectiveReport {
             agent: "maho".into(),
             provider: provider.map(with_mhc_launcher),
-            launcher_proven: true,
         },
         "maho" if owns => EffectiveReport {
             agent,
             provider: provider.map(with_mhc_launcher),
-            launcher_proven: true,
         },
         "maho" => EffectiveReport {
             agent,
             provider: provider.map(without_launcher),
-            launcher_proven: false,
         },
         _ => EffectiveReport {
             agent,
             provider,
-            launcher_proven: false,
         },
     }
 }
@@ -4764,12 +4760,12 @@ impl DaemonServer {
     /// Is `claimed` the record `provider_id` has in the stores `agent` may be read from?
     ///
     /// Both sides are canonicalized and the claim must be a regular file, so a symlink or a
-    /// directory cannot pass by spelling alone. The roots come from `registry::readable_store_markers`
-    /// - the same table `resolve_agent_resume_cwd` searches - so ingress and resume can never
-    /// disagree about where a session may live. Only the per-agent session directories count: the
-    /// legacy flat `~/.omo/sessions` root is a search root the builder knows, but no
-    /// `transcript_path_for_session` layout produces a path under it, so a claim there stays
-    /// refused exactly as the pre-split daemon refused it.
+    /// directory cannot pass by spelling alone. The roots come from the same table
+    /// `resolve_agent_resume_cwd` searches (`registry::readable_store_markers`), so ingress and
+    /// resume can never disagree about where a session may live. Only the per-agent session
+    /// directories count: the legacy flat `~/.omo/sessions` root is a search root the builder
+    /// knows, but no `transcript_path_for_session` layout produces a path under it, so a claim
+    /// there stays refused exactly as the pre-split daemon refused it.
     fn ingress_path_is_own_store(provider_id: &str, claimed: &str, agent: &str) -> bool {
         let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
             return false;
@@ -8979,7 +8975,7 @@ impl DaemonServer {
                         match self.prepare_handover_shared().await {
                             Ok((legacy_path, active_sessions, listener)) => {
                                 let legacy_path_str = legacy_path.to_string_lossy().into_owned();
-                                Arc::clone(&self).spawn_legacy_listener(listener);
+                                Arc::clone(self).spawn_legacy_listener(listener);
                                 DaemonResponse::PrepareHandoverOk {
                                     legacy_socket_path: legacy_path_str,
                                     active_sessions,
@@ -15508,7 +15504,6 @@ mod identity_admission_tests {
         // The bug: a reloaded pane's stored report still says `omo`, and `mhc` is what owns it.
         let resolved = effective_report("omo", Some(report_provider(None)), OwnerProof::Mhc);
         assert_eq!(resolved.agent, "maho");
-        assert!(resolved.launcher_proven);
         let provider = resolved.provider.expect("the provider is preserved");
         assert_eq!(provider.launcher, Some(AgentLauncher::Mhc));
         // Only the identity moves: the conversation it names is untouched.
@@ -15527,7 +15522,6 @@ mod identity_admission_tests {
         for owner in [OwnerProof::Other("zsh"), OwnerProof::None] {
             let resolved = effective_report("omo", Some(report_provider(None)), owner);
             assert_eq!(resolved.agent, "omo");
-            assert!(!resolved.launcher_proven);
             assert_eq!(resolved.provider.unwrap().launcher, None);
         }
     }
@@ -15541,7 +15535,6 @@ mod identity_admission_tests {
             OwnerProof::Mhc,
         );
         assert_eq!(proven.agent, "maho");
-        assert!(proven.launcher_proven);
         assert_eq!(proven.provider.unwrap().launcher, Some(AgentLauncher::Mhc));
         // Unproven: the field alone may not claim omo's store semantics. Still admitted.
         let unproven = effective_report(
@@ -15550,7 +15543,6 @@ mod identity_admission_tests {
             OwnerProof::Other("claude"),
         );
         assert_eq!(unproven.agent, "maho");
-        assert!(!unproven.launcher_proven);
         assert_eq!(unproven.provider.unwrap().launcher, None);
     }
 
@@ -15561,7 +15553,6 @@ mod identity_admission_tests {
             let reported = report_provider(None);
             let resolved = effective_report(agent, Some(reported.clone()), OwnerProof::Mhc);
             assert_eq!(resolved.agent, agent);
-            assert!(!resolved.launcher_proven);
             assert_eq!(resolved.provider, Some(reported));
         }
         // And a pane with no provider at all still resolves, without inventing one.

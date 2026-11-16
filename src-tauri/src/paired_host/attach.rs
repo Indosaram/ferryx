@@ -121,9 +121,12 @@ pub(super) fn candidate_names_expected_machine_for_test(
 /// The candidates that may still be dialled for `machine_id`.
 ///
 /// A candidate that names a *different* machine is dropped rather than dialled: a stale paired
-/// record must never attach this client to another host. Filtering here - rather than only inside
-/// the race - is what makes the identity gate hold on the degraded path too; without it the
-/// fallback would dial `candidates.first()` and quietly re-admit a candidate the gate just refused.
+/// record must never attach this client to another host. Production enforces that rule twice over:
+/// inside each raced attempt below, so a rejected candidate is torn down while the relay is still
+/// live, and in `resolve_attach_base_origin`, which filters the degraded path so it can never pick
+/// a refused candidate. Nothing in the attach path therefore calls this helper; it is the
+/// test-visible statement of that one rule, used by the tests here and in `path_select`.
+#[cfg(test)]
 pub(crate) fn eligible_candidates(candidates: &[CandidatePath], machine_id: &str) -> Vec<CandidatePath> {
     candidates
         .iter()

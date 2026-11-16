@@ -122,11 +122,7 @@ fn classify_name(name: &str) -> Option<Classified> {
         return None;
     }
     for spec in registry::AGENTS {
-        if spec
-            .command_names
-            .iter()
-            .any(|candidate| *candidate == name)
-        {
+        if spec.command_names.contains(&name) {
             return Some(Classified::Primary(spec.id));
         }
     }
