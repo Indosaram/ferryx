@@ -57,6 +57,9 @@ pub mod supervisor_lease_client;
 // control channel is used, and the owner is never ended without the user's exact-count consent.
 pub mod update_pending;
 pub mod workspace_service;
+// Todo 9: the end-to-end forwarding proof runs a real loopback sshd, so it is Unix-only.
+#[cfg(all(test, unix))]
+pub mod tunnel_forwarding;
 // Todo 13: refuse supervisor mutations from processes inside worker panes.
 #[cfg(test)]
 pub mod recovery_consistency_tests;

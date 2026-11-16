@@ -278,6 +278,13 @@ impl TunnelRegistry {
         let mut rx = self.core.live.subscribe();
         while *rx.borrow() != 0 { if rx.changed().await.is_err() { return; } }
     }
+    /// Daemon-path tests place the empty config inside their own fixture directory
+    /// instead of the operator's runtime directory. Behavior is otherwise identical.
+    #[cfg(all(test, unix))]
+    pub fn with_runtime_dir(mut self, dir: &Path) -> Self {
+        Arc::get_mut(&mut self.core).expect("registry must be unshared").runtime_dir = dir.to_path_buf();
+        self
+    }
     /// Saved starts are idempotent by host+spec id. Ad-hoc ids are minted BEFORE
     /// validation and never persisted, regardless of a client-supplied id.
     pub async fn start(&self, host: &SshHost, mut spec: TunnelSpec, saved: bool) -> Result<TunnelView, IpcError> {
