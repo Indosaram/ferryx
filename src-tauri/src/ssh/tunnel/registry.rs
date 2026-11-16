@@ -591,6 +591,10 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::os::unix::process::ExitStatusExt;
 
+    // Allocation hints are not reservations. Keep every port-using case in
+    // this module isolated for its full lifetime, including shutdown/reaping.
+    static PORT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn host() -> SshHost {
         SshHost { id: uuid::Uuid::new_v4().to_string(), label: "fixture".into(), hostname: "127.0.0.1".into(), username: None, port: Some(allocate_port().unwrap()), identity_file: None, jump_host: None, source: SshHostSource::Manual, auth_method: SshAuthMethod::Key, disabled: None, shell: None }
     }
@@ -671,7 +675,28 @@ mod tests {
                     Attempt::Hang => { killed.changed().await.unwrap(); drop(write); done.send_replace(Some(15)); }
                     Attempt::Listen | Attempt::WaitForProbe | Attempt::ProbeFailure => {
                         if matches!(action, Attempt::WaitForProbe) { factory.unwrap().readiness_override_consumed.notified().await; }
-                        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await.unwrap();
+                        // Real socket contention is independent of paused Tokio
+                        // time. Bound retries by wall time and yield between
+                        // attempts rather than relying on a fixed sleep.
+                        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                        let listener = loop {
+                            match tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
+                                Ok(listener) => break listener,
+                                Err(error) => {
+                                    if *killed.borrow() != None {
+                                        drop(write); done.send_replace(Some(15)); return;
+                                    }
+                                    if error.kind() != io::ErrorKind::AddrInUse || std::time::Instant::now() >= deadline {
+                                        let diagnostic = format!("bind [127.0.0.1]:{port}: {error}\nScripted tunnel listener could not bind within 5 seconds; cannot listen to port: {port}\n");
+                                        if let Err(error) = write.write_all(diagnostic.as_bytes()).await {
+                                            eprintln!("Scripted tunnel bind diagnostic write failed: {error}; {diagnostic}");
+                                        }
+                                        drop(write); done.send_replace(Some(255 << 8)); return;
+                                    }
+                                    tokio::task::yield_now().await;
+                                }
+                            }
+                        };
                         loop {
                             tokio::select! {
                                 _ = killed.changed() => break,
@@ -726,6 +751,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_stop_releases_listener() {
+        let _port_guard = PORT_TEST_LOCK.lock().await;
         let spawner = CountingProcess::new(false, false);
         let (registry, _dir) = make_registry(spawner.clone()); let host = host();
         let port = allocate_port().unwrap(); let definition = spec(Some(port));
@@ -746,6 +772,7 @@ mod tests {
 
     #[tokio::test]
     async fn drop_reaps_child() {
+        let _port_guard = PORT_TEST_LOCK.lock().await;
         for ignore in [false, true] {
             let spawner = CountingProcess::new(ignore, false);
             let (registry, _dir) = make_registry(spawner.clone());
@@ -813,6 +840,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_start_same_port_is_arbitrated() {
+        let _port_guard = PORT_TEST_LOCK.lock().await;
         let process = CountingProcess::new(false, false); let (registry, _dir) = make_registry(process.clone()); let registry = Arc::new(registry);
         let port = allocate_port().unwrap(); let barrier = Arc::new(tokio::sync::Barrier::new(3));
         let mut tasks = Vec::new();
@@ -839,6 +867,7 @@ mod tests {
 
     #[tokio::test]
     async fn saved_definition_without_runtime_lists_as_stopped() {
+        let _port_guard = PORT_TEST_LOCK.lock().await;
         let (registry, _dir) = make_registry(Arc::new(ProcessSpawner)); let definition = spec(Some(allocate_port().unwrap()));
         let views = registry.list(&HashMap::from([("host".into(), vec![definition])])).unwrap();
         assert_eq!(views.len(), 1); assert_eq!(views[0].state, TunnelState::Stopped); assert_eq!(views[0].runtime_id, None); assert_eq!(views[0].since, None);
@@ -851,6 +880,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn reconnect_is_time_bounded() {
+        let _port_guard = PORT_TEST_LOCK.lock().await;
         let (fake, mut attempts) = Scripted::new((0..17).map(|_| Attempt::Fail("Connection refused")).chain([Attempt::Listen]).collect());
         let (registry, _dir) = make_registry(fake.clone());
         let initial = registry.start(&host(), spec(None), false).await.unwrap();
@@ -898,6 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn transition_ring_keeps_newest_100_and_no_secret() {
+        let _port_guard = PORT_TEST_LOCK.lock().await;
         let (fake, _) = Scripted::new(vec![Attempt::Fail("s3cr3t\nSTDERR_SENTINEL\nPermission denied (publickey)")]);
         let (registry, _dir) = make_registry(fake); let view = registry.start(&host(), spec(None), false).await.unwrap(); let id = view.runtime_id.unwrap();
         assert_eq!(view.failure, Some(TunnelFailureCode::AuthFailed));
@@ -913,6 +944,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_config_reuse_and_stderr_drain() {
+        let _port_guard = PORT_TEST_LOCK.lock().await;
         use std::os::unix::fs::MetadataExt;
         let process = CountingProcess::new(false, true); let (registry, dir) = make_registry(process);
         let a = registry.start(&host(), spec(None), false).await.unwrap(); assert_eq!(a.state, TunnelState::Listening);
