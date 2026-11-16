@@ -1,4 +1,5 @@
 //! Wire types and validation shared by tunnel storage, protocol and runtime ownership.
+pub mod argv;
 use crate::ipc::{IpcError, IpcErrorCode};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, net::Ipv6Addr};
