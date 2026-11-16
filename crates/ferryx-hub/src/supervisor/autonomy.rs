@@ -374,7 +374,10 @@ impl DecisionGate {
         if backend_session_id.is_empty() {
             return None;
         }
-        let row: Option<(String, i64, String, Option<String>)> = sqlx::query_as(
+        let row: (String, i64, String, Option<String>) = sqlx::query_as::<
+            _,
+            (String, i64, String, Option<String>),
+        >(
             "SELECT g.goal_id, g.revision, g.lane_key, r.body
                FROM supervisor_execution_bindings b
                JOIN supervisor_goals g ON g.goal_id = b.goal_id

@@ -101,10 +101,18 @@ struct Fixture {
 }
 
 /// A judge that answers with whatever it was told to, and records what it was asked.
-#[derive(Default)]
 struct FakeJudge {
     reply: Mutex<std::result::Result<JudgeVerdict, String>>,
     asked: Mutex<Vec<String>>,
+}
+
+impl Default for FakeJudge {
+    fn default() -> Self {
+        Self {
+            reply: Mutex::new(std::result::Result::Err(String::new())),
+            asked: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl FakeJudge {
@@ -195,7 +203,7 @@ async fn judged(judge: Arc<FakeJudge>, health: Arc<Health>) -> Fixture {
         pool.clone(),
         control.clone(),
         frames.clone(),
-        judge.clone() as Arc<dyn PromptJudge>,
+        Some(judge.clone() as Arc<dyn PromptJudge>),
         health as Arc<dyn SupervisorHealth>,
     )
     .await
