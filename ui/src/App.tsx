@@ -489,7 +489,6 @@ export function secondaryWindowBootstrap(
 
 export function App() {
   useApplyAppearanceSettings();
-  const paletteAppearance = useAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
   const [bootstrap, setBootstrap] = useState<ProjectBootstrap | null>(() =>
     isNativeRuntime ? null : loadProjectBootstrap(),
@@ -862,6 +861,7 @@ function WorkspaceApp({
   initialProjects: RegisteredProject[];
   initialActiveProjectId: string;
 }) {
+  const paletteAppearance = useAppearanceSettings();
   const [isNativeRuntime] = useState(() => isTauriRuntime());
   const [isPrimary] = useState(() => isPrimaryWindow());
   // Bumps when another Ferryx window's focus or badge contribution changes (multi-window).

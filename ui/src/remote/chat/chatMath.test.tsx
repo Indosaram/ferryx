@@ -1,15 +1,13 @@
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { resetAppearanceSettings, saveAppearanceSettings } from "../../lib/appearanceSettings";
 import { MobileChatMessage } from "./MobileChatMessage";
 import { ChatMath } from "./chatMath";
 
-const appearance = vi.hoisted(() => ({ settings: { renderMath: true } }));
-vi.mock("../../lib/appearanceSettings", () => ({ useAppearanceSettings: () => appearance }));
-
 afterEach(() => {
   cleanup();
-  appearance.settings.renderMath = true;
+  resetAppearanceSettings();
 });
 
 // Subscribe before rendering, rather than polling or assuming import timing.
@@ -69,9 +67,10 @@ describe("chat math", () => {
 
   it("shows the exact raw source when disabled, and responds to a setting change", async () => {
     const content = String.raw`**Result:** $x^2$ and $$\int_0^1 x\,dx$$`;
-    const { container, rerender } = await renderWithMath({ content });
-    appearance.settings.renderMath = false;
-    rerender(<MobileChatMessage id="math-test" role="assistant" content={content} />);
+    const { container } = await renderWithMath({ content });
+    // A store update notifies the subscribed prose even when the message's props
+    // stay identical and React.memo skips rerendering the parent message.
+    act(() => { saveAppearanceSettings({ renderMath: false }); });
     expect(container.querySelector("math, .katex, .katex-display")).toBeNull();
     expect(screen.getByTestId("assistant-message-body").textContent).toBe(content);
   });
