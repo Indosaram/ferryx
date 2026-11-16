@@ -177,7 +177,8 @@ describe("appearance accessibility audit", () => {
     const preview = screen.getByTestId("appearance-chat-preview");
     expect(preview.querySelector('[role="group"][inert]')).not.toBeNull();
     expect(tabStops(preview)).toHaveLength(0);
-    for (const element of [preview, ...preview.querySelectorAll<HTMLElement>("*")]) {
+    // JSDOM MathML nodes lack .style (CSSStyleDeclaration); check every HTML element, which covers .katex and .katex-html.
+    for (const element of [preview, ...preview.querySelectorAll("*")].filter((node): node is HTMLElement => node instanceof HTMLElement)) {
       expect(getComputedStyle(element).animation).toMatch(/^none\b/);
       expect(getComputedStyle(element).transition).toMatch(/^none\b/);
     }

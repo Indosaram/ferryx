@@ -202,11 +202,10 @@ describe("AppearanceSection live chat preview", () => {
       "User bubble", "Assistant prose with math", "Code block", "Inline code", "Tool and status",
     ]);
     expect(within(preview).getByTestId("user-message-bubble")).toBeInTheDocument();
-    // jsdom exposes MathML <math> as a plain Element, not an HTMLElement, so the
-    // jest-dom matcher rejects it; assert the element and its accessible name.
-    const formula = within(preview).getByLabelText("A = \\pi r^2");
-    expect(formula.tagName.toLowerCase()).toBe("math");
-    expect(formula.getAttribute("aria-label")).toBe("A = \\pi r^2");
+    const katex = preview.querySelector('[data-preview-row="assistant"] .katex');
+    expect(katex).not.toBeNull();
+    expect(katex!.querySelector('math annotation[encoding="application/x-tex"]')?.textContent).toBe("A = \\pi r^2");
+    expect(katex!.querySelector(".katex-html .msupsub")).not.toBeNull();
     expect(preview.querySelector("pre code")).not.toBeNull();
     expect(preview.querySelector('[data-preview-row="inline-code"] code')).not.toBeNull();
     expect(within(preview).getByRole("button", { name: /Read appearance settings/ })).toHaveAttribute("aria-expanded", "false");

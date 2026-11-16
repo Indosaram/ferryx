@@ -80,8 +80,9 @@ will change.
 The selected accent remains active with a user theme, supplying tokens the
 document does not override. Default chat primary values are `#346bf1` with
 `52 107 241` in dark/charcoal and `#1d4ed8` with `29 78 216` in light; both use
-`#ffffff` as primary foreground. Accent rules change chat brand tokens (primary,
-primary foreground, link and code), not the neutral chat surfaces.
+`#ffffff` as primary foreground. Accent rules change chat brand and user-bubble
+tokens (primary, primary foreground, link, code and user bubble), not the
+remaining neutral chat surfaces.
 
 ## Theme documents and colour validation
 

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 const accents = ["default", "blue", "emerald", "purple", "amber", "rose"] as const;
 const themes = ["dark", "light"] as const;
 const brandTokens = ["--chat-primary", "--chat-primary-foreground", "--chat-link", "--chat-code"] as const;
+const accentChatTokens = [...brandTokens, "--chat-user-bubble"] as const;
 // Vitest runs with cwd = ui/, so resolve from there; import.meta.url is not a
 // file: URL under the jsdom transform and throws before any test runs.
 const indexCss = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
@@ -73,20 +74,20 @@ describe("chat accent root cascade", () => {
       expect(new Set(fills).size).toBe(accents.length);
     });
 
-    it("preserves every default brand token from the shipped base palette", () => {
+    it("preserves every default brand and bubble token from the shipped base palette", () => {
       document.documentElement.dataset.theme = theme;
       delete document.documentElement.dataset.accent;
       const base = getComputedStyle(document.documentElement);
-      const defaults = brandTokens.map((token) => [value(base, token), value(base, `${token}-rgb`)]);
+      const defaults = accentChatTokens.map((token) => [value(base, token), value(base, `${token}-rgb`)]);
       const selected = probe(theme, "default");
       expect(value(selected, "--chat-primary")).toBe(theme === "light" ? "#1d4ed8" : "#346bf1");
-      expect(brandTokens.map((token) => [value(selected, token), value(selected, `${token}-rgb`)])).toEqual(defaults);
+      expect(accentChatTokens.map((token) => [value(selected, token), value(selected, `${token}-rgb`)])).toEqual(defaults);
     });
 
     it.each(accents)("keeps %s foreground readable and every brand RGB companion in sync", (accent) => {
       const style = probe(theme, accent);
       expect(contrast(value(style, "--chat-primary-foreground"), value(style, "--chat-primary"))).toBeGreaterThanOrEqual(4.5);
-      for (const token of brandTokens) {
+      for (const token of accentChatTokens) {
         expect(value(style, `${token}-rgb`).split(/\s+/).map(Number)).toEqual(channels(value(style, token)));
       }
     });
@@ -103,7 +104,7 @@ describe("chat accent root cascade", () => {
     it("leaves all non-brand chat tokens unchanged when switching accents", () => {
       const chatTokens = [...indexCss.matchAll(/(--chat-[\w-]+)\s*:/g)].map((match) => match[1]);
       const neutralTokens = [...new Set(chatTokens)].filter((token) =>
-        !brandTokens.some((brand) => token === brand || token === `${brand}-rgb`),
+        !accentChatTokens.some((brand) => token === brand || token === `${brand}-rgb`),
       );
       const base = probe(theme, "default");
       const defaults = neutralTokens.map((token) => value(base, token));
