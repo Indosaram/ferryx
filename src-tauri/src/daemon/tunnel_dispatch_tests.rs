@@ -322,27 +322,30 @@ async fn all_seven_requests_round_trip_over_in_process_pair() {
     // reuses the retained entry instead of minting a second runtime id.
     let port = free_port();
     let failing = Fixture::default_host();
+    let restore_spec = TunnelSpec {
+        id: TunnelSpecId("restore".into()),
+        label: "restore".into(),
+        local_port: Some(port),
+        remote_host: "10.255.255.1".into(),
+        remote_port: 5432,
+        enabled: true,
+    };
+    // Reuse is a saved-start contract only: `registry::start` re-identifies an
+    // ad-hoc spec on every call, so the retained entry is unreachable from this
+    // request shape. Both legs therefore resolve the same definition by id.
+    failing.write_definitions(json!({
+        "version": 1,
+        "definitions_revision": 0,
+        "host_revisions": { HOST: 0 },
+        "hosts": { HOST: [restore_spec] }
+    }));
     let failing_spawner = RealChildSpawner::new();
     failing_spawner.fail_first.store(true, Ordering::SeqCst);
     let dispatch_failing =
         failing.dispatch_with(Arc::new(TestClock::new(2_000)), failing_spawner);
     let first = start_view(
         dispatch_failing
-            .start(
-                start_request(
-                    Some(TunnelSpec {
-                        id: TunnelSpecId("restore".into()),
-                        label: "restore".into(),
-                        local_port: Some(port),
-                        remote_host: "10.255.255.1".into(),
-                        remote_port: 5432,
-                        enabled: true,
-                    }),
-                    None,
-                    Some(0),
-                ),
-                true,
-            )
+            .start(start_request(None, Some("restore"), Some(0)), true)
             .await,
     )
     .view;
@@ -352,10 +355,7 @@ async fn all_seven_requests_round_trip_over_in_process_pair() {
     assert_eq!(first.failure, Some(TunnelFailureCode::HostUnreachable));
     let restored = start_view(
         dispatch_failing
-            .start(
-                start_request(Some(TunnelSpec { id: TunnelSpecId("restore".into()), ..failing.spec(port) }), None, Some(0)),
-                true,
-            )
+            .start(start_request(None, Some("restore"), Some(0)), true)
             .await,
     )
     .view;
