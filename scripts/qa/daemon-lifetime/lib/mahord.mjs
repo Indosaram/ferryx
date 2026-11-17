@@ -174,8 +174,12 @@ async function openMahord(gui, { binary, log }) {
 export function createMacLocalInput({ exec }) {
   const osa = async (script) => exec('/usr/bin/osascript', ['-e', script]);
   const escapeAs = (text) => String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  // System Events only accepts the AppleScript modifier names; the chord vocabulary the scenarios
+  // use is the cross-platform one (Meta/Control/Alt/Shift). Passing "meta down" straight through is
+  // rejected by osascript, so Q10 never opened Settings on macOS (run 20261117t142623z).
+  const MOD_NAMES = { meta: 'command', cmd: 'command', command: 'command', control: 'control', ctrl: 'control', alt: 'option', option: 'option', shift: 'shift' };
   const sendKey = async (k, mods = []) => {
-    const using = mods.length ? ` using {${mods.map((m) => `${m.toLowerCase()} down`).join(', ')}}` : '';
+    const using = mods.length ? ` using {${mods.map((m) => `${MOD_NAMES[String(m).toLowerCase()] ?? String(m).toLowerCase()} down`).join(', ')}}` : '';
     if (k === 'Escape') return osa('tell application "System Events" to key code 53');
     if (k === 'Enter' || k === 'Return') return osa('tell application "System Events" to key code 36');
     if (k === 'Backspace') return osa('tell application "System Events" to key code 51');

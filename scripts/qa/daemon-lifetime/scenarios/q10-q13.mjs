@@ -72,7 +72,9 @@ export async function openSettings(ctx, logFile) {
   const count = async () => (((await ctx.agent.call('readFile', { file: logFile })) ?? '').split(SETTINGS_OPENED_RECEIPT).length - 1);
   for (let i = 0; i < SETTINGS_OPEN_ATTEMPTS; i += 1) {
     const before = await count();
-    await ctx.mahord.hotkey(['Control', ',']);
+    // The product binds settings.toggle to the platform modifier (ui/src/lib/shortcuts.ts: metaKey on
+    // macOS, Ctrl elsewhere); pressing Control+, on a Mac produced no receipt in run 20261117t142623z.
+    await ctx.mahord.hotkey(ctx.platform === 'mac' ? ['Meta', ','] : ['Control', ',']);
     const seen = await ctx.agent.call('waitLog', { file: logFile, pattern: nthReceiptPattern(SETTINGS_OPENED_RECEIPT, before + 1), deadlineMs: SETTINGS_OPEN_DEADLINE_MS });
     attempts.push({ before, opened: Boolean(seen.matched) });
     if (seen.matched) return { opened: true, attempts };
@@ -618,7 +620,13 @@ export async function Q12(ctx, result) {
   if (ctx.sshd && !ctx.sshd.unavailable) {
     const ssh = await conn.call(D.spawnSsh({ clientRequestId: `qa-q12s-${nonce('R')}`, workspaceId: ctx.sshd.workspaceId, hostStorePath: ctx.sshd.hostStorePath }), 60_000);
     if (ssh.type === 'spawnOk') {
-      await ctx.agent.call('kill', { pid: ctx.sshd.pid, signal: 'SIGTERM' });
+      // The recorded sshd pid can be stale after an owner swap (run 20261117t142623z: "KILL_REFUSED:
+      // pid 20945 no longer runs its recorded executable"). The kill is cleanup, not the assertion:
+      // a listener that is already gone, replaced or reused has stopped serving this fixture just as
+      // well, and letting the agent's refusal reject would abort the whole scenario.
+      const stopped = await ctx.agent.call('kill', { pid: ctx.sshd.pid, signal: 'SIGTERM' })
+        .then((resp) => ({ resp }), (err) => ({ refused: String(err?.message ?? err) }));
+      result.identities = { ...(result.identities ?? {}), sshdStop: { pid: ctx.sshd.pid, ...(stopped.refused ? { refused: stopped.refused } : { resp: stopped.resp }) } };
       const rows = (await conn.describe()).sessions;
       const s = rows.find((x) => x.backendId === ssh.sessionId);
       await evidence(ctx, result, 'disconnected.json', s ?? null);
