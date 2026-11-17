@@ -519,8 +519,20 @@ export async function Q11(ctx, result) {
   } catch (error) {
     typed = { error: error.detail ?? String(error?.message ?? error) };
   }
-  const echoed = render(String(await conn.outputOf(sid) ?? '').slice(since));
-  if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !typed.error && echoed === marker, { typed, echoed })) return;
+  const rawAfter = String(await conn.outputOf(sid) ?? '').slice(since);
+  const echoed = render(rawAfter);
+  if (!assertion(result, 'the marker typed through the GUI reached the SSH session', !typed.error && echoed === marker, { typed, echoed })) {
+    const shot = await ctx.mahord.screenshot().catch(() => null);
+    if (shot) await evidence(ctx, result, 'type-failed.png.b64', shot.toString('base64'));
+    const swDbg = (await ctx.agent.call('readFile', { file: hjoin(guiTempDir(ctx.layout), 'ferryx-switch-debug.jsonl') }).catch(() => null)) ?? '';
+    const guiLogText = (await ctx.agent.call('readFile', { file: hjoin(ctx.layout.logs, `gui-${ctx.state.gui.tag}.log`) }).catch(() => null)) ?? '';
+    await evidence(ctx, result, 'type-diag.json', {
+      typed, echoed, rawAfter: rawAfter.slice(-2000),
+      switchDebugTail: swDbg.split(/\r?\n/).filter(Boolean).slice(-60),
+      guiLogTail: guiLogText.split(/\r?\n/).filter(Boolean).slice(-60),
+    });
+    return;
+  }
   // Arm the hold only now: the GUI input queue is serialized, so a held keystroke would block the
   // rest of the marker. Enter is the uncertain write that commits the marker line to cat.
   const receipts = hjoin(ctx.layout.barriers, 'write-ack-hold.receipt.jsonl');

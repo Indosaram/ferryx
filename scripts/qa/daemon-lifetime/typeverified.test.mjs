@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { typeVerified, pressChar, renderEcho } from './lib/typeverified.mjs';
+import { typeVerified, pressChar, renderEcho, renderConptyInput } from './lib/typeverified.mjs';
 import { createOutputRoute } from './lib/agent.mjs';
 
 /**
@@ -105,3 +105,26 @@ test('an output waiter with since ignores output that was already there (the typ
   assert.deepEqual(hits, ['Us']);
 });
 
+
+
+test('ignores ANSI-only ConPTY repaint bytes that do not change the rendered line', async () => {
+  let raw = 'Q11APPENDREADY\r\n';
+  let step = 0;
+  const sends = [];
+  const mahord = {
+    key: async (k) => { sends.push(k); },
+    hotkey: async () => {},
+  };
+  const echo = async () => raw;
+  const waitMore = async (length) => {
+    step += 1;
+    if (step === 1) { raw += '\x1b[?25l\x1b[?25h'; return { timedOut: false }; }
+    const ch = sends[sends.length - 1];
+    raw += ch;
+    return { timedOut: false };
+  };
+  const r = await typeVerified({ mahord, echo, waitMore, text: 'ab', render: (s) => renderConptyInput(s, 'Q11APPENDREADY'), perKeyMs: 500 });
+  assert.equal(r.line, 'ab');
+  assert.equal(r.resent, 0);
+  assert.deepEqual(sends, ['a', 'b']);
+});

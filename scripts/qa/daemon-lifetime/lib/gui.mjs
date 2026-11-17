@@ -573,7 +573,7 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
       const taskOut = layout.logs + "\\launch-task-" + tag + ".out";
       // cmd /c strips the first and last quote of a line that holds more than two, so the whole
       // command is wrapped in one more pair (bare form stored by Node spawn ran with result 0x1).
-      const madeLaunch = await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', launchTask, '/SC', 'ONLOGON', '/RL', 'LIMITED', '/TR', 'cmd.exe /c ""' + f.launchCmd + '" > "' + taskOut + '" 2>&1"', '/F'] });
+      const madeLaunch = await agent.call('exec', { command: 'schtasks', args: ['/Create', '/TN', launchTask, '/SC', 'ONLOGON', '/RL', 'LIMITED', '/TR', 'conhost.exe --headless cmd.exe /c ""' + f.launchCmd + '" > "' + taskOut + '" 2>&1"', '/F'] });
       if (madeLaunch.status !== 0) await fail('launch-task-not-created', 'schtasks /Create ' + launchTask + ' exited ' + madeLaunch.status + ': ' + (madeLaunch.stderr || madeLaunch.stdout));
       const run = await agent.call('exec', { command: 'schtasks', args: ['/Run', '/TN', launchTask] });
       if (run.status !== 0) await fail('launch-task-not-run', 'schtasks /Run ' + launchTask + ' exited ' + run.status + ': ' + (run.stderr || run.stdout));

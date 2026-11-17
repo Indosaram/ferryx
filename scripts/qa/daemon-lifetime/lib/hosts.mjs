@@ -22,7 +22,7 @@ export const HOSTS = Object.freeze({
     evidenceRoot: '/Users/i552267/code/ferryx-wt/.evidence/daemon-independent-lifetime-20261017',
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
     node: '/opt/homebrew/bin/node',
-    buildEnv: { ZIG: '/Users/i552267/tools/zig-aarch64-macos-0.17.0/zig' },
+    buildEnv: { ZIG: '/Users/i552267/tools/zig-aarch64-macos-0.17.0/zig', CARGO_BUILD_JOBS: '1', CARGO_INCREMENTAL: '0' },
     v1BuildEnv: { ZIG: '/opt/homebrew/Cellar/zig/0.16.0_1/bin/zig' },
     gui: { kind: 'mac-local' },
     exeSuffix: '',

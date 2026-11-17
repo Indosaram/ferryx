@@ -33,6 +33,19 @@ public static class QaJob {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  public static void Raise(IntPtr h) {
+    if (h == IntPtr.Zero) return;
+    if (IsIconic(h)) ShowWindow(h, 9);
+    SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+    SetWindowPos(h, new IntPtr(-2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+    BringWindowToTop(h);
+    SetForegroundWindow(h);
+  }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   // JOBOBJECT_EXTENDED_LIMIT_INFORMATION (class 9) is 144 bytes on x64; LimitFlags is the u32 at
   // byte 16. KILL_ON_JOB_CLOSE (0x2000) alone sets neither BREAKAWAY_OK nor SILENT_BREAKAWAY_OK.
@@ -105,6 +118,7 @@ while (-not $proc.HasExited) {
       $rectSeq = $seq
       $proc.Refresh()
       $h = $proc.MainWindowHandle
+      [QaJob]::Raise($h)
       $r = New-Object QaJob+RECT
       $ok = [QaJob]::GetWindowRect($h, [ref]$r)
       [ordered]@{ seq = $seq; ok = $ok; hwnd = [int64]$h; foreground = [int64][QaJob]::GetForegroundWindow(); left = $r.Left; top = $r.Top; right = $r.Right; bottom = $r.Bottom } | ConvertTo-Json -Compress | Set-Content -Path (Join-Path $RunDir "gui-$Tag.rect.json.tmp")

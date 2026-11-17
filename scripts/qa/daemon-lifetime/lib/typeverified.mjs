@@ -137,9 +137,19 @@ export async function typeVerified({ mahord, echo, waitMore, text, render = rend
       for (let k = 0; k < good; k += 1) sends[k] = sends[k] ?? 1;
       await pressChar(mahord, text[good]);
     }
-    // Wait for the echo of what was just sent; a timed-out wait is followed by a fresh read above,
-    // so an echo that lands late is seen before anything is resent.
-    await waitMore(raw.length, perKeyMs);
+    // Wait for a visible change (not just ConPTY cursor/repaint escape bytes) up to perKeyMs,
+    // so slow roundtrips do not trigger premature resends and duplicate characters.
+    const deadline = Date.now() + perKeyMs;
+    let seenLen = raw.length;
+    for (;;) {
+      const rem = deadline - Date.now();
+      if (rem <= 0) break;
+      const w = await waitMore(seenLen, rem);
+      const nextRaw = await echo();
+      if (render(nextRaw) !== line) break;
+      if (w?.timedOut || nextRaw.length <= seenLen) break;
+      seenLen = nextRaw.length;
+    }
   }
 }
 
