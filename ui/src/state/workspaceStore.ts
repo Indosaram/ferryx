@@ -2379,8 +2379,8 @@ export function useWorkspaceStore({
         });
         return;
       }
-      const validWorktreePaths = new Set(worktrees.map((worktree) => worktree.path));
-      const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreePaths.has(sessionWorktreePath(session)));
+      const validWorktreePaths = new Set(worktrees.map((worktree) => canonicalWorktreeKey(worktree.path)));
+      const staleSessions = Object.values(snapshot.sessions).filter((session) => !validWorktreePaths.has(canonicalWorktreeKey(sessionWorktreePath(session))));
       dispatch({ type: "SET_WORKTREES", worktrees });
       // Removing a worktree drops its parked layout, file tabs included.
       releaseOrphanPreviews(stateRef.current);
@@ -3524,9 +3524,9 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         activityBySessionId: action.state.activityBySessionId ?? {},
       };
     case "SET_WORKTREES": {
-      const validWorktreePaths = new Set(action.worktrees.map((worktree) => worktree.path));
+      const validWorktreePaths = new Set(action.worktrees.map((worktree) => canonicalWorktreeKey(worktree.path)));
       const sessions = Object.fromEntries(
-        Object.entries(state.sessions).filter(([, session]) => validWorktreePaths.has(sessionWorktreePath(session))),
+        Object.entries(state.sessions).filter(([, session]) => validWorktreePaths.has(canonicalWorktreeKey(sessionWorktreePath(session)))),
       );
       const activityBySessionId = Object.fromEntries(
         Object.entries(state.activityBySessionId ?? {}).filter(([sessionId]) => Boolean(sessions[sessionId])),
@@ -5225,6 +5225,15 @@ export function getCloseBatchTabIds(state: WorkspaceState, tabId: string, mode: 
   if (index < 0) return [];
   const slice = mode === "right" ? tabs.slice(index + 1) : tabs.slice(0, index);
   return slice.filter((tab) => !tab.pinned).map((tab) => tab.id);
+}
+
+export function canonicalWorktreeKey(path: string): string {
+  if (!path) return "";
+  if (/^\\\\\?\\/.test(path) || /^[a-zA-Z]:[\\/]/.test(path)) {
+    const stripped = path.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
+    return stripped.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  }
+  return path.replace(/\/+$/, "");
 }
 
 function sessionWorktreePath(session: TerminalSession | undefined): string {

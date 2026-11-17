@@ -538,6 +538,69 @@ export async function installV1QaEnv(ctx) {
   return out;
 }
 
+
+/**
+ * macOS Q08b: 24cbfd25d launchd.rs renders generation plists without EnvironmentVariables.
+ * Pre-staging Ferryx Daemon.app and bootstrapping an idle plist (RunAtLoad=false, KeepAlive=false)
+ * carrying ctx.isolationEnv makes 24cbfd25d see RegisteredIdle, skip overwriting the plist, and
+ * kickstart the v1bump daemon isolated inside this run.
+ */
+export async function installMacV1QaJob(ctx) {
+  const info = await ctx.agent.call('exec', {
+    command: 'plutil',
+    args: ['-extract', 'CFBundleShortVersionString', 'raw', hjoin(ctx.artifacts.v1bump.appPath, 'Contents', 'Info.plist')],
+  });
+  const version = String(info.stdout ?? '').trim();
+  if (!version) throw new Error('could not read v1bump CFBundleShortVersionString');
+  const v1Key = `${version}-${ctx.artifacts.v1bump.sha256.slice(0, 8)}`;
+  const genDir = hjoin(ctx.stagedRoot, v1Key);
+  const srcHelper = hjoin(ctx.artifacts.v1bump.appPath, 'Contents', 'Helpers', 'Ferryx Daemon.app');
+  const dstHelper = hjoin(genDir, 'Ferryx Daemon.app');
+  await ctx.agent.call('mkdir', { dir: genDir });
+  await ctx.agent.call('exec', { command: 'ditto', args: [srcHelper, dstHelper] });
+  const exe = hjoin(dstHelper, 'Contents', 'MacOS', 'ferryx');
+  const logDir = hjoin(ctx.layout.home, 'Library', 'Logs', 'Ferryx');
+  await ctx.agent.call('mkdir', { dir: logDir });
+  const label = ctx.jobs.label(v1Key);
+  const plist = hjoin(ctx.layout.launchAgents, `${label}.plist`);
+  const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const envXml = Object.entries(ctx.isolationEnv).map(([k, v]) => `        <key>${esc(k)}</key>\n        <string>${esc(v)}</string>`).join('\n');
+  const content = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${esc(label)}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${esc(exe)}</string>
+        <string>--daemon</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+${envXml}
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardOutPath</key>
+    <string>${esc(hjoin(logDir, 'daemon.stdout.log'))}</string>
+    <key>StandardErrorPath</key>
+    <string>${esc(hjoin(logDir, 'daemon.stderr.log'))}</string>
+</dict>
+</plist>
+`;
+  await ctx.agent.call('writeFile', { file: plist, content });
+  const boot = await ctx.agent.call('exec', { command: 'launchctl', args: ['bootstrap', `gui/${ctx.uid}`, plist] });
+  if (boot.status !== 0) throw new Error(`mac v1 plist bootstrap failed: ${boot.stderr || boot.stdout}`);
+  return { v1Key, label, plist, exe };
+}
+
 export async function Q08b(ctx, result) {
   if (!requireOwner(ctx, result)) return;
   if (!ctx.artifacts.v1bump) return block(result, 'ARTIFACT_MISSING', 'handover_v1_rev build (tag daemon-lifetime-handover-v1) not available');
@@ -549,12 +612,13 @@ export async function Q08b(ctx, result) {
   // v1bump (24cbfd25) only reads a version-1 workspace catalog; the HEAD owners wrote version 2.
   await evidence(ctx, result, 'catalog-set-aside.json', await setAsideHeadCatalog(ctx, 'Q08b'));
   if (ctx.platform === 'linux') await evidence(ctx, result, 'qa-env-dropins.json', await installV1QaEnv(ctx));
-  const old = await freshOwner(ctx, ctx.artifacts.v1bump, { tag: 'Q08B', dataVersion: 6 });
+  if (ctx.platform === 'mac') await evidence(ctx, result, 'qa-env-mac-v1.json', await installMacV1QaJob(ctx));
+  const old = await freshOwner(ctx, ctx.artifacts.v1bump, { tag: 'Q08B', dataVersion: 5 });
   await evidence(ctx, result, 'old-owner.json', { old, sameRevision: ctx.revisions.handoverV1Rev === ctx.revisions.head });
-  assertion(result, 'old owner speaks protocol 6', old.hello?.protocol_version === 6, old.hello);
+  assertion(result, 'old owner speaks protocol 5 (different from HEAD protocol 6)', old.hello?.protocol_version === 5, old.hello);
   // Probe and seed the old owner BEFORE any HEAD GUI exists: on Unix the HEAD GUI upgrades it on
   // its own (rerun2c: the probes ran after the upgrade and met the HEAD owner).
-  const mismatch = await ctx.agent.call('dataOpen', { runtimeDir: ctx.layout.runtime, version: 5, allowMismatch: true });
+  const mismatch = await ctx.agent.call('dataOpen', { runtimeDir: ctx.layout.runtime, version: 6, allowMismatch: true });
   assertion(result, 'HEAD data handshake is refused with a protocol mismatch', mismatch.handshake?.type !== 'handshakeOk', mismatch.handshake);
   await ctx.agent.call('close', { handle: mismatch.handle });
   const ctl = await controlConn(ctx);
@@ -571,6 +635,8 @@ export async function Q08b(ctx, result) {
     const pending = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${gui.tag}.log`), pattern: 'DAEMON_UPDATE_PENDING|DaemonUpdatePending', deadlineMs: DAEMON_READY_TIMEOUT_MS });
     assertion(result, 'Windows enters the pending state', Boolean(pending.matched), pending);
     assertion(result, 'old owner untouched', (await ctx.agent.call('probe', { pid: old.pid })) !== null, old.pid);
+    await retireOwner(ctx);
+    await freshOwner(ctx, ctx.artifacts.A, { expectKey: ctx.keys.A });
   } else {
     // Local session only: the handover_v1_rev build predates FERRYX_QA_SSH_KNOWN_HOSTS (ssh/direct.rs
     // in 24cbfd25 has no QA known_hosts pin), so under StrictHostKeyChecking=yes it can never reach
@@ -595,7 +661,7 @@ export async function Q09(ctx, result) {
   void shotDir;
   // Part 1: A (bumped protocol, control on) with live sessions meets B (HEAD).
   await retireOwner(ctx);
-  const a = await freshOwner(ctx, ctx.artifacts.bump, { tag: 'Q09A', dataVersion: 6 });
+  const a = await freshOwner(ctx, ctx.artifacts.bump, { tag: 'Q09A', dataVersion: 7 });
   const extra = await ctx.state.conn.call(D.spawnLocal({ clientRequestId: `qa-q09-${nonce('R')}`, workspaceId: ctx.workspaceId, cwd: ctx.repoDir }));
   const ctlA = await controlConn(ctx);
   const n = inventoryTotal(await ctlA.inventory());
@@ -634,7 +700,7 @@ export async function Q09(ctx, result) {
     { seen: changed.seen, newKey: newHello?.generation_key });
   // Part 2: confirm with the exact count ends A and starts the newest generation.
   await retireOwner(ctx);
-  const a2 = await freshOwner(ctx, ctx.artifacts.bump, { tag: 'Q09C', dataVersion: 6 });
+  const a2 = await freshOwner(ctx, ctx.artifacts.bump, { tag: 'Q09C', dataVersion: 7 });
   await ctx.gui.quit(ctx.state.gui);
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A);
   const ctl2 = await controlConn(ctx);
@@ -651,7 +717,7 @@ export async function Q09(ctx, result) {
   // its old arguments and a bound control endpoint (only3). Re-registered, it forwards the switch.
   const bumpTask = ctx.jobs.jobName(ctx.keys.bump);
   if (ctx.platform === 'windows') await ctx.jobs.remove(bumpTask);
-  const a3 = await freshOwner(ctx, ctx.artifacts.bump, { tag: 'Q09D', env: { FERRYX_QA_DISABLE_CONTROL: '1' }, dataVersion: 6 });
+  const a3 = await freshOwner(ctx, ctx.artifacts.bump, { tag: 'Q09D', env: { FERRYX_QA_DISABLE_CONTROL: '1' }, dataVersion: 7 });
   assertion(result, 'A started without a control endpoint', (await controlConn(ctx)) === null, null);
   await ctx.gui.quit(ctx.state.gui);
   const g3 = await ctx.gui.launch(ctx.artifacts.A);

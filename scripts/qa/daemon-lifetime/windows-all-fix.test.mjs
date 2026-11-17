@@ -75,7 +75,7 @@ test('Q09 retire: an idle owner that exits before its RetireWhenIdle reply is re
 
 test('Q10 retire: an owner already retiring without a control endpoint is retired once it exits (only3 owner 23480)', async () => {
   // Without control there is no Hello, so the drain speaks protocol 5 (only3: HEAD owner 23480).
-  const exiting = retireWorld({ protocol: 5 });
+  const exiting = retireWorld({ protocol: 6 });
   // Retiring already: its endpoint is gone and it exits once its last session closes.
   exiting.ctx.agent.call = ((call) => async (m, p) => {
     if (m === 'controlOpen') return { handle: null };
@@ -87,7 +87,7 @@ test('Q10 retire: an owner already retiring without a control endpoint is retire
   assert.equal(r.retired, true);
   assert.equal(r.reason, 'no control endpoint');
   // An owner without control that keeps running (Q09 part 3) is not retired.
-  const kept = retireWorld({ protocol: 5 });
+  const kept = retireWorld({ protocol: 6 });
   kept.ctx.agent.call = ((call) => async (m, p) => (m === 'controlOpen' ? { handle: null } : call(m, p)))(kept.ctx.agent.call);
   assert.equal((await retireOwner(kept.ctx)).retired, false);
 });

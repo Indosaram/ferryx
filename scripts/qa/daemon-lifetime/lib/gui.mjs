@@ -676,6 +676,13 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
    * and the query repeated. Other platforms need no focus step.
    */
   async function focus(gui) {
+    if (platform === 'mac' && gui?.pid) {
+      await agent.call('exec', {
+        command: '/usr/bin/osascript',
+        args: ['-e', `tell application "System Events" to set frontmost of (first process whose unix id is ${Number(gui.pid)}) to true`],
+      });
+      return { focused: true, pid: gui.pid };
+    }
     if (platform === 'linux') return focusLinux(gui);
     if (platform !== 'windows') return { skipped: platform };
     if (!mahord) throw new Error('Windows GUI focus needs MahoRD');

@@ -33,7 +33,7 @@ import { createJobs } from './lib/jobs.mjs';
 import { createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
 import { assembleDaemonHelper } from '../../macos-daemon-helper.mjs';
 import { finalizeMacosBundle } from '../../lib/release-platforms.mjs';
-import { connectMahord } from './lib/mahord.mjs';
+import { connectMahord, createMacLocalInput } from './lib/mahord.mjs';
 import { createAppReplacer } from './lib/replace.mjs';
 import { sshHostId } from './lib/sshd.mjs';
 import { run } from './lib/proc.mjs';
@@ -678,12 +678,15 @@ async function main() {
       // Host paths are parsed with the host's path flavour: posix basename/dirname do not split C:\ paths.
       const hostPath = host.platform === 'windows' ? path.win32 : path.posix;
       const src = fresh.appPath ?? hostPath.dirname(fresh.guiExecutable);
-      if (host.platform === 'mac') await agent.call('exec', { command: 'ditto', args: [src, joinFor(host.platform, destRoot, path.basename(src))] });
+      if (host.platform === 'mac') {
+        await agent.call('exec', { command: 'ditto', args: [src, joinFor(host.platform, destRoot, path.basename(src))] });
+        await agent.call('exec', { command: 'cp', args: [fresh.cliExecutable, destRoot] });
+      }
       else await agent.call('exec', host.platform === 'windows'
         ? windowsArtifactCopyCommand(fresh.guiExecutable, fresh.cliExecutable, destRoot)
         : { command: 'cp', args: [fresh.guiExecutable, fresh.cliExecutable, destRoot] });
       const art = host.platform === 'mac'
-        ? { name, appPath: joinFor(host.platform, destRoot, path.basename(src)), guiExecutable: macGuiExecutable(joinFor(host.platform, destRoot, path.basename(src))), cliExecutable: fresh.cliExecutable }
+        ? { name, appPath: joinFor(host.platform, destRoot, path.basename(src)), guiExecutable: macGuiExecutable(joinFor(host.platform, destRoot, path.basename(src))), cliExecutable: joinFor(host.platform, destRoot, path.basename(fresh.cliExecutable)) }
         : { name, appPath: null, guiExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.guiExecutable)), cliExecutable: joinFor(host.platform, destRoot, hostPath.basename(fresh.cliExecutable)) };
       if (host.platform === 'mac') {
         // todo 13: each QA artifact carries its own signed helper and a re-sealed outer signature.
@@ -711,7 +714,9 @@ async function main() {
     for (const art of Object.values(artifacts)) {
       for (const exe of [art.guiExecutable, art.daemonExecutable].filter(Boolean)) assertQaExecutable(exe, { allowedRoots, forbidden, platform: host.platform });
     }
-    const mahord = live.mahord = host.gui.kind === 'mahord' ? await connectMahord(host.gui, { log }) : null;
+    const mahord = live.mahord = host.gui.kind === 'mahord'
+      ? await connectMahord(host.gui, { log })
+      : (host.gui.kind === 'mac-local' ? createMacLocalInput({ exec: run }) : null);
     const gui = createGuiDriver({ host, agent, runId, layout, allowedRoots, forbidden, mahord, guiEnv: { ...(host.guiEnv ?? {}), ...env } });
     if (host.platform === 'windows') {
       const launcher = await import('node:fs').then((fs) => fs.readFileSync(path.join(HERE, 'fixtures', 'windows-gui-launcher.ps1'), 'utf8'));

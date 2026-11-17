@@ -255,7 +255,7 @@ export function createAgent({ platform, runId, runDir, allowRoots = [], home = o
     sha256: async ({ file }) => createHash('sha256').update(readFileSync(file)).digest('hex'),
     stat: async ({ file }) => { const s = statSync(file); return { size: s.size, mtimeMs: s.mtimeMs }; },
     // ---- daemon clients; each connection is a handle ----
-    dataOpen: async ({ runtimeDir, version = 5, allowMismatch = false, socketPath = null }) => {
+    dataOpen: async ({ runtimeDir, version = 6, allowMismatch = false, socketPath = null }) => {
       if (socketPath) inRun(socketPath);
       const { conn, handshake } = await connectData(runtimeDir, platform, { version, allowMismatch, socketPath });
       const handle = nextHandle++;

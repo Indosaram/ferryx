@@ -169,3 +169,29 @@ async function openMahord(gui, { binary, log }) {
     close: async () => { child.stdin.end(); await exited; },
   };
 }
+
+/** Local macOS System Events input adapter for Q11 when gui.kind === 'mac-local'. */
+export function createMacLocalInput({ exec }) {
+  const osa = async (script) => exec('/usr/bin/osascript', ['-e', script]);
+  const escapeAs = (text) => String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const sendKey = async (k, mods = []) => {
+    const using = mods.length ? ` using {${mods.map((m) => `${m.toLowerCase()} down`).join(', ')}}` : '';
+    if (k === 'Escape') return osa('tell application "System Events" to key code 53');
+    if (k === 'Enter' || k === 'Return') return osa('tell application "System Events" to key code 36');
+    if (k === 'Backspace') return osa('tell application "System Events" to key code 51');
+    return osa(`tell application "System Events" to keystroke "${escapeAs(k)}"${using}`);
+  };
+  return {
+    click: async () => ({ ok: true }),
+    type: async (text) => osa(`tell application "System Events" to keystroke "${escapeAs(text)}"`),
+    key: async (k) => sendKey(k),
+    hotkey: async (keys) => {
+      const mods = keys.slice(0, -1);
+      const ch = keys.at(-1);
+      return sendKey(ch, mods);
+    },
+    screenshot: async () => null,
+    reconnect: async () => 0,
+    close: async () => {},
+  };
+}

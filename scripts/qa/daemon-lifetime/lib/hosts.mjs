@@ -23,6 +23,7 @@ export const HOSTS = Object.freeze({
     runRoot: '/tmp/ferryx-qa-daemon-lifetime',
     node: '/opt/homebrew/bin/node',
     buildEnv: { ZIG: '/Users/i552267/tools/zig-aarch64-macos-0.17.0/zig' },
+    v1BuildEnv: { ZIG: '/opt/homebrew/Cellar/zig/0.16.0_1/bin/zig' },
     gui: { kind: 'mac-local' },
     exeSuffix: '',
   }),
@@ -93,6 +94,7 @@ export const HOSTS = Object.freeze({
       ZIG: 'C:\\Users\\sook\\ferryx-wt\\.zig-0.17.0\\zig.exe',
       CARGO_INCREMENTAL: '0',
       CARGO_BUILD_JOBS: '1',
+      COMSPEC: 'C:\\Windows\\System32\\cmd.exe',
     },
     evidenceRoot: 'C:\\Users\\sook\\ferryx-wt\\.evidence\\daemon-independent-lifetime-20261017',
     // The handover_v1 tree predates the ghostty Zig upgrade and pins Zig 0.16.0, while master
@@ -150,7 +152,7 @@ export function buildPlan({ host, runDir, worktree, v1Worktree, baselineWorktree
     B: tauri('local-split-qa', 'B', worktree),
     C: tauri('local-split-qa', 'C', worktree),
     bump: tauri('local-split-qa,qa-protocol-bump', 'BUMP', worktree),
-    v1bump: v1Worktree ? tauri('local-split-qa,qa-protocol-bump', 'V1', v1Worktree, host.v1BuildEnv) : null,
+    v1bump: v1Worktree ? tauri('local-split-qa', 'V1', v1Worktree, host.v1BuildEnv) : null,
     // The pre-plan baseline is the same revision generation as v1bump, so it pins the older
     // toolchain too: without host.v1BuildEnv the ghostty build script rejects the current Zig
     // ('Incompatible Zig version 0.17.0: libghostty-vt requires Zig 0.16.0', run 175303z).

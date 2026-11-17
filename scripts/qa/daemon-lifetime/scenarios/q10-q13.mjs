@@ -310,13 +310,35 @@ export function guiTempDir(layout) {
 export function wizardOpenPattern(pane) {
   return `"terminal\\.surface\\.skipped"[^\\n]*"localSessionId":"${pane}"[^\\n]*which=dialog:Welcome to Ferryx`;
 }
+export function wizardVisibleWithoutDialogPattern(pane) {
+  return `"terminal\\.surface\\.input\\.gate\\.state"[^\\n]*"paneIdentity":"${pane}"[^\\n]*"visible":true`;
+}
 export function wizardClosedPattern(pane) {
   return `which=dialog:Welcome to Ferryx[\\s\\S]*"terminal\\.surface\\.input\\.gate\\.state"[^\\n]*"paneIdentity":"${pane}"[^\\n]*"visible":true`;
 }
 export async function dismissSetupWizard(ctx, gui, pane) {
   if (!expectsSetupWizard(ctx.platform)) return { expected: false };
   const file = hjoin(guiTempDir(ctx.layout), 'ferryx-switch-debug.jsonl');
-  const opened = await ctx.agent.call('waitLog', { file, pattern: wizardOpenPattern(pane), deadlineMs: WIZARD_OPEN_MS });
+  const openRe = new RegExp(wizardOpenPattern(pane));
+  const visibleRe = new RegExp(wizardVisibleWithoutDialogPattern(pane));
+  const initialMs = Math.min(15_000, WIZARD_OPEN_MS);
+  const first = await ctx.agent.call('waitLog', {
+    file,
+    pattern: `(?:${wizardOpenPattern(pane)}|${wizardVisibleWithoutDialogPattern(pane)})`,
+    deadlineMs: initialMs,
+  });
+  let opened = openRe.test(first.matched ?? '') ? first : { matched: null };
+  if (!opened.matched && visibleRe.test(first.matched ?? '')) {
+    // onboarding.ts no longer auto-opens when projectCount > 0 and an agent CLI is available,
+    // so once the pane's gate reports visible=true we wait past the 1.2s auto-open timer and
+    // proceed without failing if no Welcome dialog suppressed it.
+    opened = await ctx.agent.call('waitLog', { file, pattern: wizardOpenPattern(pane), deadlineMs: 3_000 });
+    if (!opened.matched) {
+      return { expected: false, opened: false, closed: false, escapes: 0, wizardNotTriggered: true };
+    }
+  } else if (!opened.matched) {
+    opened = await ctx.agent.call('waitLog', { file, pattern: wizardOpenPattern(pane), deadlineMs: WIZARD_OPEN_MS - initialMs });
+  }
   if (!opened.matched) return { expected: true, opened: false, closed: false, escapes: 0 };
   let closed = { matched: null };
   let escapes = 0;
@@ -366,7 +388,10 @@ export const APPENDER_READY = 'Q11APPENDREADY';
 export const APPENDER_READY_MS = 30_000;
 export function appenderCommand(platform, file) {
   if (platform !== 'windows') return `cat >> ${file}\n`;
-  return `powershell -NoProfile -Command "Write-Output ('Q11APPEND' + 'READY'); while ($true) { $l = [Console]::ReadLine(); if ($null -eq $l) { break }; Add-Content -LiteralPath '${file}' -Value $l }"${enterKey(platform)}`;
+  const escaped = String(file).replace(/'/g, "''");
+  const script = `Write-Output ('Q11APPEND' + 'READY'); while ($true) { $l = [Console]::ReadLine(); if ($null -eq $l) { break }; Add-Content -LiteralPath '${escaped}' -Value $l }`;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return `powershell -NoProfile -EncodedCommand ${encoded}${enterKey(platform)}`;
 }
 
 /**
@@ -442,6 +467,7 @@ export async function Q11(ctx, result) {
     await ctx.agent.call('mkdir', { dir: guiTempDir(ctx.layout) });
     guiEnv.TMP = guiTempDir(ctx.layout);
     guiEnv.TEMP = guiTempDir(ctx.layout);
+    await ctx.agent.call('remove', { target: hjoin(ctx.layout.root, 'webview') });
   }
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A, { env: guiEnv });
   const wizard = await dismissSetupWizard(ctx, ctx.state.gui, pane);
