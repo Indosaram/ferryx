@@ -177,6 +177,25 @@ fn login_user() -> String {
         })
 }
 
+/// The real `ssh` the fixture launcher execs. It must be an absolute path: the launcher
+/// itself is named `ssh`, so a bare program name would resolve back through the daemon's
+/// `PATH` and re-enter the launcher forever.
+fn ssh_program() -> PathBuf {
+    let system = PathBuf::from("/usr/bin/ssh");
+    if system.is_file() {
+        return system;
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("ssh");
+            if candidate.is_absolute() && candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    system
+}
+
 fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
@@ -184,13 +203,15 @@ fn set_mode(path: &Path, mode: u32) {
 }
 
 /// A private OpenSSH server on loopback, its key material, and an echo destination the
-/// forward can reach. Host-key trust is written into the DAEMON's home by [`Fixture::trust`],
-/// because `ssh` looks in the `HOME` the daemon was spawned with, not the fixture's.
+/// forward can reach. Host-key trust is delivered by [`Fixture::trust`] through the program
+/// the daemon's tunnel child resolves from its `PATH`, never through `HOME`: OpenSSH expands
+/// its default `UserKnownHostsFile` (`~/.ssh/known_hosts`) from the passwd-entry home, so a
+/// private `HOME` cannot move which file the child consults.
 struct Fixture {
     host: SshHost,
     destination_port: u16,
-    /// The `known_hosts` row for this fixture's `sshd`, pinned to its ephemeral port.
-    known_hosts_line: String,
+    /// This fixture's `known_hosts`, pinning its `sshd` key to its ephemeral port.
+    known_hosts: PathBuf,
     sshd_pids: Arc<Mutex<Vec<u32>>>,
     server: tokio::task::JoinHandle<()>,
     destination: tokio::task::JoinHandle<()>,
@@ -235,11 +256,15 @@ impl Fixture {
             .expect("bind the loopback sshd fixture");
         let sshd_port = listener.local_addr().expect("fixture sshd address").port();
 
-        // The daemon's `ssh` child inherits the daemon's HOME, so the pin is written there
-        // by `trust` once the isolation directories exist.
+        // The pin lives in the fixture directory and reaches `ssh` only through the launcher
+        // `trust` installs, because the default `UserKnownHostsFile` is expanded from the
+        // passwd-entry home and ignores the daemon's private `HOME`.
         let host_key = std::fs::read_to_string(directory.path().join("host_key.pub"))
             .expect("read the fixture host key");
-        let known_hosts_line = format!("[127.0.0.1]:{sshd_port} {host_key}");
+        let known_hosts = directory.path().join("known_hosts");
+        std::fs::write(&known_hosts, format!("[127.0.0.1]:{sshd_port} {host_key}"))
+            .expect("write the fixture known_hosts");
+        set_mode(&known_hosts, 0o600);
 
         let sshd_pids: Arc<Mutex<Vec<u32>>> = Arc::default();
         let accept_pids = Arc::clone(&sshd_pids);
@@ -328,7 +353,7 @@ impl Fixture {
         Self {
             host,
             destination_port,
-            known_hosts_line,
+            known_hosts,
             sshd_pids,
             server,
             destination,
@@ -340,17 +365,29 @@ impl Fixture {
         &self.host
     }
 
-    /// Pin this fixture's host key in `home`'s `.ssh/known_hosts`, where the daemon's `ssh`
-    /// child will look. `StrictHostKeyChecking=yes` is forced on the tunnel argv, so this is
-    /// the only thing that lets the child get past host-key verification.
-    fn trust(&self, home: &Path) -> io::Result<()> {
-        let ssh_dir = home.join(".ssh");
-        std::fs::create_dir_all(&ssh_dir)?;
-        set_mode(home, 0o700);
-        set_mode(&ssh_dir, 0o700);
-        let known_hosts = ssh_dir.join("known_hosts");
-        std::fs::write(&known_hosts, &self.known_hosts_line)?;
-        set_mode(&known_hosts, 0o600);
+    /// Install the fixture's `ssh` launcher in `bin` and make this fixture's host key the only
+    /// trust the daemon's tunnel child consults.
+    ///
+    /// `StrictHostKeyChecking=yes` is forced on the tunnel argv
+    /// (`ssh::tunnel::argv`'s `FORCED_OPTIONS`) and the builder adds no `UserKnownHostsFile`,
+    /// so the pin has to be injected by the program the child resolves. The launcher prepends
+    /// those two options and nothing else: the builder's `-F`, `-L` and every forced option
+    /// reach real `ssh` unchanged, and host-key checking stays strict.
+    fn trust(&self, bin: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(bin)?;
+        set_mode(bin, 0o700);
+        let launcher = bin.join("ssh");
+        std::fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nexec {} -o UserKnownHostsFile={} -o GlobalKnownHostsFile=/dev/null \"$@\"\n",
+                ssh_program().display(),
+                ferryx_lib::ssh::direct::quote_posix(
+                    self.known_hosts.to_str().expect("UTF-8 known_hosts path")
+                ),
+            ),
+        )?;
+        set_mode(&launcher, 0o700);
         Ok(())
     }
 
@@ -470,6 +507,10 @@ struct Isolation {
     runtime: PathBuf,
     data: PathBuf,
     home: PathBuf,
+    /// The one directory of the daemon's `PATH` this harness owns: [`Fixture::trust`]
+    /// installs the pinned `ssh` launcher here, so the child resolves a program that pins
+    /// this run's `sshd` key instead of whatever the host happens to have in `~/.ssh`.
+    bin: PathBuf,
 }
 
 impl Isolation {
@@ -478,16 +519,19 @@ impl Isolation {
         let runtime = root.join("run");
         let data = root.join("data");
         let home = root.join("home");
-        for path in [&runtime, &data, &home, &root.join("sessions"), &root.join("tmp")] {
+        let bin = root.join("bin");
+        for path in [&runtime, &data, &home, &bin, &root.join("sessions"), &root.join("tmp")] {
             std::fs::create_dir_all(path).expect("create an isolated daemon directory");
         }
         set_mode(&runtime, 0o700);
         set_mode(&home, 0o700);
+        set_mode(&bin, 0o700);
         Self {
             root,
             runtime,
             data,
             home,
+            bin,
         }
     }
 }
@@ -563,11 +607,20 @@ impl Daemon {
     /// Spawn `ferryx --daemon` in the foreground and wait for its readiness line.
     async fn spawn(isolation: &Isolation) -> TestResult<Self> {
         let root = isolation.root.clone();
+        // The tunnel child resolves `ssh` from the daemon's `PATH` (the argv builder's program
+        // is the bare name on Unix), so the fixture's pinned launcher is prepended here. The
+        // builder's `ssh -G` oracle runs in this same process and resolves the same program,
+        // so the equivalence check and the live child see one trust file.
+        let path = std::env::join_paths(
+            std::iter::once(isolation.bin.clone())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())),
+        )
+        .map_err(|error| format!("build the daemon PATH: {error}"))?;
         let mut child = Command::new(env!("CARGO_BIN_EXE_ferryx"))
             .arg("--daemon")
             // Never inherit a real daemon's endpoints, remote configuration, or the user's HOME.
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", path)
             .env("FERRYX_RUNTIME_DIR", &isolation.runtime)
             .env("FERRYX_DATA_DIR", &isolation.data)
             .env("FERRYX_SESSION_DIR", root.join("sessions"))
@@ -808,7 +861,7 @@ fn assert_startable(view: &TunnelView, what: &str) -> TestResult<()> {
 async fn sigkill_daemon_reaps_orphan_child_and_releases_port() -> TestResult<()> {
     let fixture = Fixture::start().await;
     let isolation = Isolation::create(tempfile::tempdir()?);
-    fixture.trust(&isolation.home)?;
+    fixture.trust(&isolation.bin)?;
     fixture.write_host_record(&isolation.data, fixture.host())?;
     let host_id = fixture.host().id.clone();
     let local_port = free_port();
@@ -914,7 +967,7 @@ async fn sigkill_daemon_reaps_orphan_child_and_releases_port() -> TestResult<()>
 async fn host_record_change_tears_down_live_tunnel() -> TestResult<()> {
     let fixture = Fixture::start().await;
     let isolation = Isolation::create(tempfile::tempdir()?);
-    fixture.trust(&isolation.home)?;
+    fixture.trust(&isolation.bin)?;
     fixture.write_host_record(&isolation.data, fixture.host())?;
     let host_id = fixture.host().id.clone();
 
