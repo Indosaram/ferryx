@@ -35,6 +35,7 @@ import { MachineDrawer, RemoveSshIntegrationDialog, type MachineDrawerContent } 
 import { MachineList } from "./remote/MachineList";
 import { MachineApprovalCard } from "./remote/MachineApprovalCard";
 import { PairedMachineRow, pairedDisplayName, SshMachineRow, sshRowStatus } from "./remote/MachineRow";
+import { SshTunnelsPanel } from "./remote/SshTunnelsPanel";
 import { ThisMachineSection } from "./remote/ThisMachineSection";
 import {
   accountErrorMessage,
@@ -670,6 +671,9 @@ export function RemoteSection({
         onDetails={(hostId) => openDrawer(`ssh:${hostId}`)}
         detailsRef={(hostId) => bindDetails(`ssh:${hostId}`)}
       />
+
+      {/* Every tunnel the daemon reports, saved and ad-hoc, in one list. */}
+      <SshTunnelsPanel hosts={sshHosts} enabled={isTauri()} />
 
       <ThisMachineSection />
 
