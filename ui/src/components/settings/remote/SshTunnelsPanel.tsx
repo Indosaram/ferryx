@@ -283,7 +283,7 @@ export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, sn
             value={form.hostId}
             onValueChange={(value: string) => setForm((prev) => ({ ...prev, hostId: value }))}
           >
-            <SelectTrigger id="adhoc-tunnel-host" className="h-7 text-[12px]" aria-label="Machine for the forwarded port">
+            <SelectTrigger id="adhoc-tunnel-host" className="h-7 text-[12px]">
               <SelectValue placeholder="Select a machine" />
             </SelectTrigger>
             <SelectContent>
