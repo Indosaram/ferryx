@@ -492,7 +492,21 @@ export async function Q11(ctx, result) {
   const render = conpty ? (raw) => renderConptyInput(raw, APPENDER_READY) : renderEcho;
   // Keys go to the foreground window: make it the GUI that attached (Windows: gui.focus).
   const focused = await ctx.gui.focus(ctx.state.gui);
-  await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused });
+  let terminalClick = null;
+  if (ctx.platform === 'windows' && typeof ctx.mahord?.click === 'function') {
+    const rect = focused?.after ?? focused?.before;
+    if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top) && Number.isFinite(rect.right) && Number.isFinite(rect.bottom)) {
+      const w = rect.right - rect.left;
+      const h = rect.bottom - rect.top;
+      if (w > 300 && h > 200) {
+        const cx = Math.round(rect.left + w * 0.65);
+        const cy = Math.round(rect.top + h * 0.55);
+        await ctx.mahord.click(cx, cy);
+        terminalClick = { x: cx, y: cy };
+      }
+    }
+  }
+  await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused, terminalClick });
   let typed;
   try {
     typed = await typeVerified({

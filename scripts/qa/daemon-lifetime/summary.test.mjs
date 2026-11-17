@@ -1138,6 +1138,23 @@ test('Q11 on Windows closes the setup wizard that opens after the tab attached b
   assert.ok(wizard.detail.focus.length === 1, 'the GUI is focused before its Escape');
 });
 
+test('Q11 on Windows clicks the terminal surface center when gui.focus returns window bounds', async () => {
+  const { w, ctx, clicks, result, failed } = await (async () => {
+    const world = q11World({ platform: 'windows', gateVisibleWithoutWizard: true });
+    const clicks = [];
+    world.ctx.gui.focus = async () => ({ focused: true, before: { left: 100, top: 50, right: 1100, bottom: 850 } });
+    world.ctx.mahord.click = async (x, y) => { clicks.push([x, y]); world.w.focused = true; };
+    const r = { id: 'Q11', assertions: [], evidence: [] };
+    await Q11(world.ctx, r);
+    return { ...world, clicks, result: r, failed: r.assertions.filter((a) => !a.ok).map((a) => a.name) };
+  })();
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  // left + 0.65 * 1000 = 750, top + 0.55 * 800 = 490
+  assert.deepEqual(clicks, [[750, 490]]);
+  assert.equal(w.escapes, 0);
+  assert.match(w.log, /^uncertain[0-9a-f]{12}\n$/);
+});
+
 test('Q11 on Windows proceeds without Escape when pane gate is visible and no wizard opens', async () => {
   const { w, result, failed } = await runQ11({ platform: 'windows', gateVisibleWithoutWizard: true });
   assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
