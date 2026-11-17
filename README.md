@@ -107,6 +107,8 @@ machine enrollment, and the separate desktop account and gateway settings.
 - Outbound encrypted relay tunnel: no inbound SSH, open ports, or public IP needed
 - Native terminal split-panes and remote Git worktrees run directly on the machine
 
+Local-port forwards for a saved SSH machine are documented in [docs/SSH_TUNNELS.md](docs/SSH_TUNNELS.md).
+
 ```bash
 # 1. One-line install on the remote machine (Linux x64, macOS). After installing ferryx-cli it
 #    runs `ferryx-cli up`, which prints an approval link for your account and installs a
