@@ -25,7 +25,9 @@ use crate::ipc::{IpcError, IpcErrorCode};
 const ESTABLISH_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ConnectionKey {
+// `pub(crate)` for the argv pin in `ssh::tunnel::refusals`, which builds the real
+// master argv instead of copying its option list.
+pub(crate) struct ConnectionKey {
     target: String,
     port: Option<u16>,
     identity_file: Option<String>,
@@ -33,7 +35,7 @@ struct ConnectionKey {
 }
 
 impl ConnectionKey {
-    fn of(host: &SshHost) -> Self {
+    pub(crate) fn of(host: &SshHost) -> Self {
         Self {
             target: host.target(),
             port: host.port,
@@ -90,7 +92,7 @@ fn ensure_socket_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn master_args(key: &ConnectionKey, socket: &Path) -> Vec<String> {
+pub(crate) fn master_args(key: &ConnectionKey, socket: &Path) -> Vec<String> {
     let program = super::exec::resolve_ssh_program().unwrap_or_else(|_| "ssh".to_string());
     let mut args = vec![program, "-M".to_string(), "-N".to_string(), "-T".to_string()];
     for option in [

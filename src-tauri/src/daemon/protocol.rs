@@ -3,6 +3,7 @@ use crate::remote::auth::{DeviceInfo, DevicePermission};
 use crate::remote::protocol::RemoteActiveDesktopSelection;
 use crate::remote::state::{RemoteGatewayConfig, RemoteNetworkMode};
 use crate::session::PersistedWorkspaceSession;
+use crate::ssh::tunnel::{TunnelHostIdentity, TunnelSpec, TunnelView};
 use crate::terminal::output_hub::ReplayGap;
 use crate::terminal::TerminalSignal;
 use crate::worktree::WorktreeIdentity;
@@ -16,6 +17,8 @@ pub const DAEMON_PROTOCOL_VERSION: u32 = 6;
 /// QA build only (feature qa-protocol-bump): a future protocol, to test the mismatch path.
 #[cfg(feature = "qa-protocol-bump")]
 pub const DAEMON_PROTOCOL_VERSION: u32 = 7;
+/// Advertised only by local transports with SSH tunnel support.
+pub const SSH_TUNNEL_CAPABILITY: &str = "sshTunnelV1";
 pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `PasteWrite`/`CancelPaste`.
 pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
@@ -732,9 +735,481 @@ pub enum SupervisorReadAction {
     Role,
 }
 
+#[cfg(test)]
+mod tunnel_wire_tests {
+    use super::*;
+    use crate::ssh::tunnel::{TunnelFailureCode, TunnelState};
+    use serde::de::DeserializeOwned;
+    use serde_json::{json, Value};
+
+    fn spec() -> Value {
+        json!({
+            "id": "saved-1", "label": "Database", "localPort": 5432,
+            "remoteHost": "db.internal", "remotePort": 5432, "enabled": true
+        })
+    }
+
+    fn identity() -> Value {
+        json!({
+            "hostname": "bastion.example", "username": "alice", "port": 22,
+            "identityFile": "/keys/id_ed25519", "jumpHost": "jump.example", "disabled": false
+        })
+    }
+
+    fn view() -> Value {
+        json!({
+            "specId": "saved-1", "runtimeId": "runtime-1", "label": "Database",
+            "hostId": "host-1", "localPort": 5432, "remoteHost": "db.internal",
+            "remotePort": 5432, "state": "failed", "since": 1234, "attempt": 1,
+            "failure": "unsupported_config", "failurePiece": "config_alias"
+        })
+    }
+
+    fn list() -> Value {
+        let mut stopped = view();
+        stopped["specId"] = json!("saved-2");
+        stopped["runtimeId"] = Value::Null;
+        stopped["state"] = json!("stopped");
+        stopped["since"] = Value::Null;
+        stopped["attempt"] = json!(0);
+        stopped["failure"] = Value::Null;
+        stopped["failurePiece"] = Value::Null;
+        let mut stopped_spec = spec();
+        stopped_spec["id"] = json!("saved-2");
+        json!({
+            "views": [view(), stopped],
+            "definitions": [{"hostId": "host-1", "specs": [spec(), stopped_spec]}],
+            "hostRevisions": [{"hostId": "host-1", "revision": 2}],
+            "definitionsRevision": 3,
+            "storeStatus": {
+                "kind": "partial", "path": "/data/ssh_tunnels.json",
+                "invalidHosts": ["broken-host"], "quarantinedPath": null
+            }
+        })
+    }
+
+    // Production one-shot requests/responses are newline-delimited JSON. Decode
+    // the entire enum, not just an isolated payload struct, to exercise framing.
+    fn round_trip<T: Serialize + DeserializeOwned>(expected: Value) -> Value {
+        let decoded: T = serde_json::from_value(expected.clone()).unwrap();
+        let mut frame = serde_json::to_string(&decoded).unwrap();
+        frame.push('\n');
+        assert_eq!(frame.lines().count(), 1);
+        let received: T = serde_json::from_str(frame.strip_suffix('\n').unwrap()).unwrap();
+        let actual = serde_json::to_value(received).unwrap();
+        assert_eq!(actual, expected);
+        actual
+    }
+
+    fn requests() -> Vec<Value> {
+        vec![
+            json!({"type": "sshTunnelStart", "hostId": "host-1", "spec": spec(), "hostRevision": 2}),
+            json!({"type": "sshTunnelStop", "runtimeId": "runtime-1"}),
+            json!({"type": "sshTunnelList"}),
+            json!({"type": "sshTunnelInvalidateHost", "hostId": "host-1", "hostRevision": 3, "identity": identity()}),
+            json!({"type": "sshTunnelSpecsSave", "hostId": "host-1", "specs": [spec()], "expectedRevision": 3, "force": true, "discardInvalid": true}),
+            json!({"type": "sshTunnelSpecsReset"}),
+            json!({"type": "sshTunnelForgetHost", "hostId": "host-1"}),
+        ]
+    }
+
+    #[test]
+    fn seven_request_variants_round_trip() {
+        for request in requests() {
+            round_trip::<DaemonRequest>(request);
+        }
+        round_trip::<DaemonRequest>(json!({
+            "type": "sshTunnelStart", "hostId": "host-1", "specId": "saved-1", "hostRevision": 2
+        }));
+        // Ad-hoc clients need not invent an id before the daemon mints one.
+        let mut ad_hoc = requests().remove(0);
+        ad_hoc["spec"].as_object_mut().unwrap().remove("id");
+        let decoded: DaemonRequest = serde_json::from_value(ad_hoc).unwrap();
+        match decoded {
+            DaemonRequest::SshTunnelStart { request } => {
+                assert_eq!(request.spec.as_ref().unwrap().id.0, "");
+                let encoded = serde_json::to_value(DaemonRequest::SshTunnelStart { request }).unwrap();
+                assert_eq!(encoded["spec"]["id"], "");
+                round_trip::<DaemonRequest>(encoded);
+            }
+            other => panic!("expected tunnel start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seven_response_variants_round_trip() {
+        let mut list_response = list();
+        list_response["type"] = json!("sshTunnelList");
+        for response in [
+            json!({"type": "sshTunnelStart", "view": view(), "acceptedRevision": 2}),
+            json!({"type": "sshTunnelStop", "stopped": false}),
+            list_response,
+            json!({"type": "sshTunnelInvalidateHost", "revision": 3}),
+            json!({"type": "sshTunnelSpecsSave", "definitionsRevision": 4}),
+            json!({"type": "sshTunnelSpecsReset", "quarantinedPath": "/data/ssh_tunnels.corrupt.json"}),
+            json!({"type": "sshTunnelForgetHost", "removed": 1}),
+        ] {
+            round_trip::<DaemonResponse>(response);
+        }
+        // Error.details is the existing refusal carrier; client write_response
+        // rebuilds IpcError with these details rather than dropping the payload.
+        let details = json!({"reason": "host_revision_stale", "failureCode": "host_changed"});
+        let error = round_trip::<DaemonResponse>(json!({
+            "type": "error", "message": "Host changed", "code": "INVALID_ARGUMENT", "details": details
+        }));
+        assert_eq!(serde_json::to_vec(&error["details"]).unwrap(), serde_json::to_vec(&details).unwrap());
+    }
+
+    #[test]
+    fn struct_field_names_are_camel_case() {
+        let start = round_trip::<DaemonRequest>(requests().remove(0));
+        assert_eq!(start["hostId"], "host-1");
+        assert_eq!(start["hostRevision"], 2);
+        assert_eq!(start["spec"]["localPort"], 5432);
+        assert_eq!(start["spec"]["remoteHost"], "db.internal");
+        assert_eq!(start["spec"]["remotePort"], 5432);
+        let invalidate = round_trip::<DaemonRequest>(requests().remove(3));
+        assert_eq!(invalidate["identity"], identity());
+        let keys: Vec<_> = invalidate["identity"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys.len(), 6);
+        for key in ["hostname", "username", "port", "identityFile", "jumpHost", "disabled"] {
+            assert!(invalidate["identity"].get(key).is_some(), "missing {key}");
+        }
+        let save = round_trip::<DaemonRequest>(requests().remove(4));
+        assert_eq!(save["expectedRevision"], 3);
+        assert_eq!(save["force"], true);
+        assert_eq!(save["discardInvalid"], true);
+        let list: TunnelListResponse = serde_json::from_value(list()).unwrap();
+        let encoded = serde_json::to_value(list).unwrap();
+        assert_eq!(encoded["hostRevisions"][0]["hostId"], "host-1");
+        assert_eq!(encoded["definitionsRevision"], 3);
+        for forbidden in ["host_id", "host_revision", "expected_revision", "discard_invalid"] {
+            assert!(save.get(forbidden).is_none());
+        }
+    }
+
+    #[test]
+    fn failure_code_values_are_snake_case() {
+        use TunnelFailureCode::*;
+        for (code, expected) in [
+            (PortInUse, "port_in_use"), (HostUnreachable, "host_unreachable"),
+            (AuthFailed, "auth_failed"), (HostKeyRejected, "host_key_rejected"),
+            (ChannelFailed, "channel_failed"), (UnsupportedPlatform, "unsupported_platform"),
+            (UnsupportedConfig, "unsupported_config"), (DaemonUnavailable, "daemon_unavailable"),
+            (CredentialUnavailable, "credential_unavailable"), (HostChanged, "host_changed"),
+        ] {
+            assert_eq!(serde_json::to_value(code).unwrap(), json!(expected));
+            assert_eq!(serde_json::from_value::<TunnelFailureCode>(json!(expected)).unwrap(), code);
+        }
+        for (state, expected) in [
+            (TunnelState::Stopped, "stopped"), (TunnelState::Listening, "listening"),
+            (TunnelState::Reconnecting, "reconnecting"), (TunnelState::Failed, "failed"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), json!(expected));
+        }
+    }
+
+    #[test]
+    fn capability_constant_and_protocol_version_pinned() {
+        assert_eq!(SSH_TUNNEL_CAPABILITY, "sshTunnelV1");
+        // This base already advanced to v6 (QA v7); tunnels must NOT bump it.
+        #[cfg(not(feature = "qa-protocol-bump"))]
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
+        #[cfg(feature = "qa-protocol-bump")]
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 7);
+    }
+
+    #[test]
+    fn request_without_spec_or_spec_id_is_rejected() {
+        for payload in [
+            json!({"hostId": "host-1", "hostRevision": 2}),
+            json!({"hostId": "host-1", "hostRevision": 2, "spec": spec(), "specId": "saved-1"}),
+        ] {
+            let error = serde_json::from_value::<TunnelStartRequest>(payload.clone()).unwrap_err();
+            assert!(error.is_data());
+            let mut request = payload;
+            request["type"] = json!("sshTunnelStart");
+            assert!(serde_json::from_value::<DaemonRequest>(request).unwrap_err().is_data());
+        }
+        // Revision absence is decoded for compatibility, then refused by dispatch.
+        let request: TunnelStartRequest = serde_json::from_value(json!({
+            "hostId": "host-1", "specId": "saved-1"
+        })).unwrap();
+        assert_eq!(request.host_revision, None);
+    }
+
+    #[test]
+    fn specs_save_optional_revision_is_omitted_not_null() {
+        let request: DaemonRequest = serde_json::from_value(json!({
+            "type": "sshTunnelSpecsSave", "hostId": "host-1", "specs": []
+        })).unwrap();
+        match &request {
+            DaemonRequest::SshTunnelSpecsSave { request } => {
+                assert_eq!(request.expected_revision, None);
+                assert!(!request.force);
+                assert!(!request.discard_invalid);
+            }
+            other => panic!("expected specs save, got {other:?}"),
+        }
+        let encoded = serde_json::to_value(request).unwrap();
+        assert!(encoded.get("expectedRevision").is_none());
+        assert_eq!(encoded["force"], false);
+        assert_eq!(encoded["discardInvalid"], false);
+        let defaults = TunnelSpecsSaveRequest::default();
+        assert!(!defaults.force);
+        assert!(!defaults.discard_invalid);
+        let invalidate: DaemonRequest = serde_json::from_value(json!({
+            "type": "sshTunnelInvalidateHost", "hostId": "host-1", "hostRevision": 3
+        })).unwrap();
+        match &invalidate {
+            DaemonRequest::SshTunnelInvalidateHost { request } => assert_eq!(request.identity, None),
+            other => panic!("expected invalidate host, got {other:?}"),
+        }
+        assert!(serde_json::to_value(invalidate).unwrap().get("identity").is_none());
+    }
+
+    #[test]
+    fn store_status_keys_serialise_as_camel_case() {
+        for (kind, expected) in [
+            (StoreStatusKind::Ok, "ok"), (StoreStatusKind::Corrupt, "corrupt"),
+            (StoreStatusKind::Partial, "partial"), (StoreStatusKind::UnsupportedVersion, "unsupported_version"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), json!(expected));
+            assert_eq!(serde_json::from_value::<StoreStatusKind>(json!(expected)).unwrap(), kind);
+        }
+        let response: TunnelListResponse = serde_json::from_value(list()).unwrap();
+        let encoded = serde_json::to_value(response).unwrap();
+        assert_eq!(encoded["storeStatus"]["invalidHosts"], json!(["broken-host"]));
+        assert_eq!(encoded["storeStatus"]["quarantinedPath"], Value::Null);
+        assert!(encoded.get("store_status").is_none());
+        assert!(encoded["storeStatus"].get("invalid_hosts").is_none());
+        assert!(encoded["storeStatus"].get("quarantined_path").is_none());
+        assert_eq!(encoded["views"][0]["failurePiece"], "config_alias");
+        assert!(encoded["views"][0].get("failure_piece").is_none());
+    }
+}
+
+/// Wire ids are bare strings; convert to registry newtypes at the daemon boundary.
+/// Exactly one of `spec` and `spec_id` must be present. A missing host revision is
+/// wire-compatible with older callers but MUST be refused as `host_revision_stale`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", try_from = "TunnelStartRequestWire")]
+pub struct TunnelStartRequest {
+    pub host_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<TunnelSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TunnelStartRequestWire {
+    host_id: String,
+    spec: Option<TunnelSpec>,
+    spec_id: Option<String>,
+    host_revision: Option<u64>,
+}
+
+impl TryFrom<TunnelStartRequestWire> for TunnelStartRequest {
+    type Error = &'static str;
+
+    fn try_from(wire: TunnelStartRequestWire) -> Result<Self, Self::Error> {
+        if wire.spec.is_some() == wire.spec_id.is_some() {
+            return Err("exactly one of spec or specId is required");
+        }
+        Ok(Self {
+            host_id: wire.host_id,
+            spec: wire.spec,
+            spec_id: wire.spec_id,
+            host_revision: wire.host_revision,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelStopRequest {
+    pub runtime_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelListRequest {}
+
+/// Missing identity records no tuple for the bumped revision. A subsequent start
+/// accepts and records its host tuple, as for a pre-feature host record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelInvalidateHostRequest {
+    pub host_id: String,
+    pub host_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<TunnelHostIdentity>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelSpecsSaveRequest {
+    pub host_id: String,
+    pub specs: Vec<TunnelSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<u64>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub discard_invalid: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelSpecsResetRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelForgetHostRequest {
+    pub host_id: String,
+}
+
+/// Accepted starts return Ok even on first-attempt terminal runtime failures
+/// (port_in_use, credential_unavailable, unsupported_config, auth_failed,
+/// host_key_rejected): the view is Failed with its failure code. unsupported_config
+/// carries its qualifier only in view.failurePiece, never in an Err's details.
+/// Quick transient failure or the 10-second first-attempt deadline returns Ok with
+/// Reconnecting + host_unreachable, also recorded in the registry until listening.
+/// Refusals mean no tunnel was considered: host_revision_stale, host_disabled,
+/// host_not_found (NotFound + details.reason, after revision/store-health checks
+/// and a clean host-store read missing the id, with zero spawns),
+/// tunnel_spec_not_found, unsupported_platform,
+/// corrupt_store, unsupported_version, local_only, daemon_shutting_down,
+/// store_lock_unavailable (Unsupported), or empty_config_unwritable. GUI refusals
+/// UnsupportedCapability and remote_gateway_route remain Errs too.
+/// An unchanged listening start is idempotent. Saved spec ids identify entries;
+/// ad-hoc identity is (host_id, remote_host, remote_port), plus a supplied port
+/// compared to the current reported port, excluding id/label/enabled. Failed entries
+/// are retained and replaced in place (same runtime id, re-armed generation, cleared
+/// failure). Failed entries hold no live child or port after exit; a draining
+/// generation keeps its port reservation until the post-wait watch observes exit.
+/// Restore preserves an originally allocated port's allocation origin so
+/// port_in_use can reallocate once, even when Restore supplies the reported port.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelStartResponse {
+    pub view: TunnelView,
+    pub accepted_revision: u64,
+}
+
+/// Idempotent: an unknown or already removed runtime returns Ok with stopped=false.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelStopResponse {
+    pub stopped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelInvalidateHostResponse {
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostTunnelDefinitions {
+    pub host_id: String,
+    pub specs: Vec<TunnelSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostRevision {
+    pub host_id: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreStatusKind {
+    Ok,
+    Corrupt,
+    Partial,
+    UnsupportedVersion,
+}
+
+/// Partial exactly when invalid_hosts is nonempty. UnsupportedVersion denotes a
+/// valid newer file and must not offer reset/discard recovery controls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreStatus {
+    pub kind: StoreStatusKind,
+    pub path: String,
+    pub invalid_hosts: Vec<String>,
+    pub quarantined_path: Option<String>,
+}
+
+/// Every list re-reads store health and includes saved-but-stopped definitions with
+/// their host ownership. Clients read revisions here, never invent them for start/save.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelListResponse {
+    pub views: Vec<TunnelView>,
+    pub definitions: Vec<HostTunnelDefinitions>,
+    pub host_revisions: Vec<HostRevision>,
+    pub definitions_revision: u64,
+    pub store_status: StoreStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelSpecsSaveResponse {
+    pub definitions_revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelSpecsResetResponse {
+    pub quarantined_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelForgetHostResponse {
+    pub removed: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonRequest {
+    // Todo 3 owns variants and wire names; Todo 4 adds client methods, Todo 7 dispatch.
+    #[serde(rename_all = "camelCase")]
+    SshTunnelStart {
+        #[serde(flatten)]
+        request: TunnelStartRequest,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelStop {
+        #[serde(flatten)]
+        request: TunnelStopRequest,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelInvalidateHost {
+        #[serde(flatten)]
+        request: TunnelInvalidateHostRequest,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelSpecsSave {
+        #[serde(flatten)]
+        request: TunnelSpecsSaveRequest,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelForgetHost {
+        #[serde(flatten)]
+        request: TunnelForgetHostRequest,
+    },
+    SshTunnelList,
+    SshTunnelSpecsReset,
+
     #[serde(rename_all = "camelCase")]
     SshPassword {
         host: crate::ssh::SshHost,
@@ -1532,6 +2007,42 @@ impl DaemonRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DaemonResponse {
+    #[serde(rename_all = "camelCase")]
+    SshTunnelStart {
+        #[serde(flatten)]
+        response: TunnelStartResponse,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelStop {
+        #[serde(flatten)]
+        response: TunnelStopResponse,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelList {
+        #[serde(flatten)]
+        response: TunnelListResponse,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelInvalidateHost {
+        #[serde(flatten)]
+        response: TunnelInvalidateHostResponse,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelSpecsSave {
+        #[serde(flatten)]
+        response: TunnelSpecsSaveResponse,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelSpecsReset {
+        #[serde(flatten)]
+        response: TunnelSpecsResetResponse,
+    },
+    #[serde(rename_all = "camelCase")]
+    SshTunnelForgetHost {
+        #[serde(flatten)]
+        response: TunnelForgetHostResponse,
+    },
+
     PairedTerminalReattachOk {
         session_id: String,
         generation: crate::scoped_contracts::Epoch,

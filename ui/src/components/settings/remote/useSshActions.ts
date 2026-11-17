@@ -12,13 +12,27 @@ import {
 import type { HostFormData } from "../AddMachineModal";
 import type { SshTestState } from "./MachineDrawer";
 import { sameConnection } from "./remoteModel";
+import { useHostTunnels, type HostTunnelsSource } from "./useHostTunnels";
 
 /** SSH machine state and actions of the Remote section, moved out of RemoteSection unchanged. */
-export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
+export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabilities, tunnelSectionOpen, tunnelSource }: {
   sshHosts: SshHost[];
   busy: boolean;
   setBusy: (busy: boolean) => void;
   setActionError: (error: string | null) => void;
+  /**
+   * The capabilities the connected daemon advertises. `undefined` means "not known yet" and
+   * is treated exactly like an absent `sshTunnelV1`: the tunnel section explains itself and
+   * sends no request, which is the safe reading for an older background service.
+   */
+  capabilities?: readonly string[] | null;
+  /** Whether an SSH drawer is open, i.e. whether the tunnel section can be read at all. */
+  tunnelSectionOpen: boolean;
+  /**
+   * The snapshot the section already reads. Passing it makes the editor render that response
+   * instead of fetching its own copy, so one drawer costs one `cmd_ssh_tunnel_list`.
+   */
+  tunnelSource?: HostTunnelsSource;
 }) {
   const hostsRef = useRef(sshHosts);
   // SSH host states
@@ -31,6 +45,11 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
   const [showAdvancedEditSsh, setShowAdvancedEditSsh] = useState(false);
 
   const [confirmDeleteSshId, setConfirmDeleteSshId] = useState<string | null>(null);
+
+  // Saved tunnel definitions: the editor is the only reader, and it sends nothing while the
+  // capability is absent (MH-10). The hook owns its own snapshot, never a host-store copy —
+  // unless the section already read one, in which case this renders that one.
+  const { editor: tunnels } = useHostTunnels({ capabilities, active: tunnelSectionOpen, source: tunnelSource });
 
   // A connection change invalidates any in-flight test or prepare result for that host.
   useEffect(() => {
@@ -217,6 +236,6 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
     editingSshHost, setEditingSshHost, editFormData, setEditFormData, editPassword, setEditPassword,
     showAdvancedEditSsh, setShowAdvancedEditSsh, confirmDeleteSshId, setConfirmDeleteSshId,
     handleTestSsh, handlePrepareSsh, handleRemoveSshIntegration, handleToggleDisableSsh, handleDeleteSsh,
-    handleStartEditSsh, handleSaveEditSsh,
+    handleStartEditSsh, handleSaveEditSsh, tunnels,
   };
 }

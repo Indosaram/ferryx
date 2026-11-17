@@ -20,6 +20,8 @@ pub mod state_bridge;
 pub mod transport_unix;
 #[cfg(windows)]
 pub mod transport_windows;
+pub mod tunnel;
+pub mod tunnel_store;
 pub mod worktree;
 
 use serde::{Deserialize, Serialize};

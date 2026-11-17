@@ -38,6 +38,10 @@ pub mod server;
 pub mod session_lifecycle;
 pub mod session_service;
 pub mod sidebar_snapshot;
+// Todo 7: daemon ownership of tunnel definitions, runtimes and the host observer.
+pub mod tunnel_dispatch;
+#[cfg(all(test, unix))]
+mod tunnel_dispatch_tests;
 pub mod split_journal;
 // Portable facade over the OS service manager that owns the daemon's lifetime (macOS: `launchd`).
 pub mod supervisor;
@@ -55,6 +59,9 @@ pub mod supervisor_lease_client;
 // control channel is used, and the owner is never ended without the user's exact-count consent.
 pub mod update_pending;
 pub mod workspace_service;
+// Todo 9: the end-to-end forwarding proof runs a real loopback sshd, so it is Unix-only.
+#[cfg(all(test, unix))]
+pub mod tunnel_forwarding;
 // Todo 13: refuse supervisor mutations from processes inside worker panes.
 #[cfg(test)]
 pub mod recovery_consistency_tests;

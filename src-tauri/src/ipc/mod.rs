@@ -82,6 +82,7 @@ pub mod remote_desktop;
 #[cfg(feature = "desktop")]
 pub mod session;
 pub mod ssh;
+pub mod ssh_tunnel;
 #[cfg(feature = "desktop")]
 pub mod supervisor;
 #[cfg(feature = "desktop")]

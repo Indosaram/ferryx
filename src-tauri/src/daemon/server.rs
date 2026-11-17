@@ -51,6 +51,44 @@ use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 
+/// Target-built tunnel support keeps the Windows oracle executable on Unix too.
+#[derive(Clone, Copy)]
+pub(crate) enum Target {
+    Unix,
+    Windows,
+}
+
+impl Target {
+    pub(crate) fn current() -> Self {
+        #[cfg(unix)]
+        { Self::Unix }
+        #[cfg(not(unix))]
+        { Self::Windows }
+    }
+}
+
+/// These base capabilities are shared by the handshake and capability query.
+/// Other capabilities retain their existing feature/target gates at their sites.
+pub(crate) fn capability_vector(is_local_transport: bool, target: Target) -> Vec<&'static str> {
+    let mut capabilities = vec!["machinePairingV1", "sshPasswordV1", "dagStreamingV1"];
+    if is_local_transport && matches!(target, Target::Unix) {
+        capabilities.push(super::protocol::SSH_TUNNEL_CAPABILITY);
+    }
+    capabilities
+}
+
+#[derive(Clone, Copy)]
+// `pub(crate)` so the refusal pin in `ssh::tunnel::refusals` can pass a real peer
+// into the daemon's own local-transport predicate instead of copying its rule.
+pub(crate) enum ConnectionTransport {
+    Local,
+    Paired,
+}
+
+pub(crate) fn is_local_transport(transport: ConnectionTransport) -> bool {
+    matches!(transport, ConnectionTransport::Local)
+}
+
 #[cfg(any(unix, test))]
 async fn rollback_transferred_readers<R, A, D>(
     relinquish: R,
@@ -2473,6 +2511,78 @@ fn daemon_ssh_store_path() -> PathBuf {
     }
 }
 
+/// Tunnels are defined in their own file. `daemon_ssh_store_path` is the host
+/// store, which the daemon never writes and must never carry tunnel rows.
+fn daemon_ssh_tunnels_store_path() -> PathBuf {
+    if let Some(dir) = std::env::var_os("FERRYX_DATA_DIR") {
+        return PathBuf::from(dir).join("ssh_tunnels.json");
+    }
+    let base = dirs_next()
+        .unwrap_or_else(get_runtime_dir)
+        .join("com.ferryx.app");
+    if is_dev_runtime() {
+        base.join("dev/ssh_tunnels.json")
+    } else {
+        base.join("ssh_tunnels.json")
+    }
+}
+
+/// How much of the authoritative host file this read could decode. The tunnel
+/// prune and the identity gate are gated on this rather than on a permissive
+/// decode: `deserialize_resilient_hosts` is a GUI-side tolerance and must never
+/// decide that a missing or truncated file means "this host has no definitions".
+pub enum StrictHosts {
+    /// No host file at all. Never an authoritative empty list.
+    Absent,
+    /// The file parsed, some rows did not. Usable, not authoritative.
+    Degraded(Vec<crate::ssh::SshHost>),
+    /// The whole file is unreadable as a host store.
+    WholeFileInvalid,
+    Ok(Vec<crate::ssh::SshHost>),
+}
+
+/// Strict twin of the host-store reader: reports what it could not read instead
+/// of silently dropping it, so the tunnel side can refuse to act authoritatively.
+pub fn load_hosts_strict(path: &Path) -> StrictHosts {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return StrictHosts::Absent,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), "Cannot read the SSH host store: {error}");
+            return StrictHosts::WholeFileInvalid;
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), "The SSH host store is not JSON: {error}");
+            return StrictHosts::WholeFileInvalid;
+        }
+    };
+    let Some(root) = value.as_object() else {
+        return StrictHosts::WholeFileInvalid;
+    };
+    let rows = match root.get("hosts") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(rows)) => rows.clone(),
+        Some(_) => return StrictHosts::WholeFileInvalid,
+    };
+    let mut hosts = Vec::with_capacity(rows.len());
+    let mut invalid = 0usize;
+    for row in rows {
+        match serde_json::from_value::<crate::ssh::SshHost>(row) {
+            Ok(host) => hosts.push(host),
+            Err(_) => invalid += 1,
+        }
+    }
+    if invalid > 0 {
+        tracing::warn!(invalid, path = %path.display(), "Some SSH host rows are unreadable");
+        StrictHosts::Degraded(hosts)
+    } else {
+        StrictHosts::Ok(hosts)
+    }
+}
+
 pub struct DaemonServer {
     paired_hosts: crate::paired_host::service::PairedHostService,
     pub session_router: Arc<crate::daemon::proxy::SessionRouter>,
@@ -2487,6 +2597,10 @@ pub struct DaemonServer {
     binary_path: Option<String>,
     binary_mtime_ms: Option<u64>,
     pub(crate) session_service: Arc<DaemonSessionService>,
+    /// Daemon-owned tunnel runtime, definitions writer and host observer. On
+    /// Windows every dispatch arm refuses before touching it, so its runtime
+    /// half is compiled out rather than stubbed.
+    pub(crate) tunnel_dispatch: Arc<crate::daemon::tunnel_dispatch::TunnelDispatch>,
     /// Loopback TCP endpoint (`port`, bearer `token`) of the agent-state ingress, recorded once
     /// that ingress published its rendezvous record. `None` on unix, whose ingress is the socket
     /// path [`agent_state_socket_path`] returns, and `None` on every platform until then: every
@@ -4265,6 +4379,23 @@ impl DaemonServer {
             #[cfg(test)]
             test_shell_command: parking_lot::Mutex::new(None),
         });
+        // Tunnel state belongs to the daemon: definitions in their own file beside
+        // the host store, runtimes reclaimed by this module on the next boot.
+        let tunnel_dispatch = Arc::new(crate::daemon::tunnel_dispatch::TunnelDispatch::new(
+            crate::daemon::tunnel_dispatch::TunnelPaths::new(
+                isolated_dir
+                    .clone()
+                    .map(|p| p.join("ssh_tunnels.json"))
+                    .unwrap_or_else(daemon_ssh_tunnels_store_path),
+                isolated_dir
+                    .clone()
+                    .map(|p| p.join("ssh_hosts.json"))
+                    .unwrap_or_else(daemon_ssh_store_path),
+            ),
+        ));
+        // The boot sweep and the host observer are armed once, here, so a
+        // successor reclaims its predecessor's orphans before it serves a request.
+        tunnel_dispatch.start_background_tasks();
         // OSC 7501 summaries from every mirror this daemon answers for become Protocol states.
         let protocol_reporters =
             Arc::new(crate::terminal::foreground::ProtocolReporters::default());
@@ -4485,6 +4616,7 @@ impl DaemonServer {
             binary_path,
             binary_mtime_ms,
             session_service,
+            tunnel_dispatch,
             agent_state_endpoint: Mutex::new(None),
             agent_state_ingress_unavailable: std::sync::atomic::AtomicBool::new(false),
             agent_integration,
@@ -4559,6 +4691,11 @@ impl DaemonServer {
 
     pub fn remote_state(&self) -> &Arc<RemoteGatewayState> {
         &self.remote_state
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_pairing_directory(&mut self, directory: PathBuf) {
+        self.paired_hosts = crate::paired_host::service::PairedHostService::open(directory);
     }
 
     /// This daemon's paired-host inventory (a supervisor move reaches the holder through it).
@@ -5827,6 +5964,12 @@ impl DaemonServer {
         {
             tracing::error!(%message, "Failed to persist remote sessions while shutting down");
         }
+        // Orderly exit reaps every tunnel child before the process is gone. This is
+        // the only shutdown hook that runs; a SIGKILL leaves the runtimes sidecar
+        // for the next daemon's sweep.
+        if let Err(error) = self.tunnel_dispatch.shutdown().await {
+            tracing::error!(?error, "Failed to reap tunnel children while shutting down");
+        }
         // A clean exit takes its public endpoint with it, so the next launcher sees Missing.
         // Only an owner (it still holds the daemon locks) published the files on disk; a
         // draining predecessor handed its locks and listeners to the successor and leaves them.
@@ -6946,6 +7089,19 @@ impl DaemonServer {
         .unwrap_or_else(|error| Some(format!("the peer check failed: {error}")))
     }
 
+    /// Raw daemon frames admitted over a paired/relay connection must never acquire
+    /// the owner socket's tunnel capability, even when the daemon also serves UDS.
+    pub async fn handle_paired_client<S>(self: Arc<Self>, stream: S)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        self.handle_client_on_transport(
+            stream,
+            super::supervisor_peer::PeerOrigin::Unknown,
+            ConnectionTransport::Paired,
+        ).await;
+    }
+
     pub async fn handle_client_with_origin<S>(
         self: &Arc<Self>,
         stream: S,
@@ -6953,6 +7109,18 @@ impl DaemonServer {
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        self.handle_client_on_transport(stream, origin, ConnectionTransport::Local).await;
+    }
+
+    async fn handle_client_on_transport<S>(
+        self: &Arc<Self>,
+        stream: S,
+        origin: super::supervisor_peer::PeerOrigin,
+        transport: ConnectionTransport,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let is_local = is_local_transport(transport);
         // QaFixtureKind::DaemonListenerStall (QA builds only): accepted, handshake not answered until released.
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         crate::ipc::qa_barrier::daemon_listener_stall_gate().await;
@@ -7144,10 +7312,14 @@ impl DaemonServer {
                             binary_path: self.binary_path.clone(),
                             binary_mtime_ms: self.binary_mtime_ms,
                             daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                            capabilities: vec![
-                                crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY.to_string(),
-                                crate::daemon::control::CONTROL_CAPABILITY.to_string(),
-                            ],
+                            capabilities: capability_vector(is_local, Target::current())
+                                .into_iter()
+                                .chain([
+                                    crate::daemon::protocol::LOCAL_SPLIT_LIFECYCLE_CAPABILITY,
+                                    crate::daemon::control::CONTROL_CAPABILITY,
+                                ])
+                                .map(str::to_owned)
+                                .collect(),
                             admission_time_unix_ms: Some(
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -7190,6 +7362,31 @@ impl DaemonServer {
                 Ok(DaemonRequest::ReferenceChat { request }) => DaemonResponse::ReferenceChatOk {
                     reply: crate::remote::server::desktop_reference_chat(&self.remote_state, request).await,
                 },
+                // Todo 7: the seven tunnel arms answer from the daemon-owned registry.
+                // The local-owner boundary is checked per variant by the dispatch fn, and
+                // the platform refusal is a `#[cfg(windows)]` alternative body, never a
+                // return ahead of code that names the unix-only registry.
+                Ok(DaemonRequest::SshTunnelStart { request }) => {
+                    self.tunnel_dispatch.start(request, is_local).await
+                }
+                Ok(DaemonRequest::SshTunnelStop { request }) => {
+                    self.tunnel_dispatch.stop(request, is_local).await
+                }
+                Ok(DaemonRequest::SshTunnelList) => {
+                    self.tunnel_dispatch.list(is_local).await
+                }
+                Ok(DaemonRequest::SshTunnelInvalidateHost { request }) => {
+                    self.tunnel_dispatch.invalidate_host(request, is_local).await
+                }
+                Ok(DaemonRequest::SshTunnelSpecsSave { request }) => {
+                    self.tunnel_dispatch.specs_save(request, is_local).await
+                }
+                Ok(DaemonRequest::SshTunnelSpecsReset) => {
+                    self.tunnel_dispatch.specs_reset(is_local).await
+                }
+                Ok(DaemonRequest::SshTunnelForgetHost { request }) => {
+                    self.tunnel_dispatch.forget_host(request, is_local).await
+                }
                 Ok(DaemonRequest::SshPassword { host, password }) => {
                     let result = crate::ipc::run_blocking(move || match password {
                         Some(password) => crate::ssh::password::set(&host, password),
@@ -8459,7 +8656,8 @@ impl DaemonServer {
                     DaemonResponse::PairedHostForgetOk
                 }
                 Ok(DaemonRequest::GetCapabilities) => {
-                    let mut capabilities = vec!["machinePairingV1".into(), "sshPasswordV1".into(), "dagStreamingV1".into()];
+                    let mut capabilities: Vec<String> = capability_vector(is_local, Target::current())
+                        .into_iter().map(str::to_owned).collect();
                     if self.paired_hosts.available().await {
                         capabilities.push("pairedHostInventoryV1".into());
                         capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY.into());

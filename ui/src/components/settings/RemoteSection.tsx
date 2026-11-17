@@ -4,6 +4,7 @@ import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavig
 import { DEFAULT_MACHINE_LABEL, pairedHostInventory } from "../../lib/pairedHostInventory";
 import type { PairedHostContext } from "../../lib/pairedDaemonProject";
 import { extractIpcErrorMessage, resetSshHostsCache, useSshHosts, type SshHost } from "../../lib/sshHosts";
+import { hasSshTunnelCapability } from "../../lib/sshTunnels";
 import { isTailscaleProvisioned, syncTailscaleMachines, useTailscaleDiscovery, useTailscaleTargetsByHost } from "../../lib/tailscaleDiscovery";
 import { remoteHostStore, type HostEndpoint, type RemoteHostStore } from "../../state/remoteHostStore";
 import {
@@ -35,6 +36,7 @@ import { MachineDrawer, RemoveSshIntegrationDialog, type MachineDrawerContent } 
 import { MachineList } from "./remote/MachineList";
 import { MachineApprovalCard } from "./remote/MachineApprovalCard";
 import { PairedMachineRow, pairedDisplayName, SshMachineRow, sshRowStatus } from "./remote/MachineRow";
+import { SshTunnelsPanel } from "./remote/SshTunnelsPanel";
 import { ThisMachineSection } from "./remote/ThisMachineSection";
 import {
   accountErrorMessage,
@@ -46,6 +48,7 @@ import {
   type MixedItem,
 } from "./remote/remoteModel";
 import { useSshActions } from "./remote/useSshActions";
+import { useSshTunnels } from "./remote/useSshTunnels";
 
 /** Stop-only setting: "off" disables automatic account pairing. Absent means on. */
 const AUTO_PAIR_KEY = "ferryx.remote.autoPairAccountMachines";
@@ -67,6 +70,12 @@ export interface RemoteSectionProps {
   accountOrigin?: string;
   accountOriginResolver?: () => string;
   onAccountSessionChange?: (token: string | null, origin: string) => void;
+  /**
+   * The capabilities the connected background service advertises. Absent/empty means the
+   * tunnel section explains itself and sends nothing; it is a caller input, never discovered
+   * by a failed invoke (MH-10).
+   */
+  daemonCapabilities?: readonly string[] | null;
 }
 
 export function RemoteSection({
@@ -82,6 +91,7 @@ export function RemoteSection({
   accountOrigin: accountOriginProp,
   accountOriginResolver = getConfiguredAccountOrigin,
   onAccountSessionChange,
+  daemonCapabilities,
 }: RemoteSectionProps) {
   const [configuredOrigin, setConfiguredOrigin] = useState(() => accountOriginResolver());
   const accountOrigin = accountOriginProp ?? configuredOrigin;
@@ -319,17 +329,36 @@ export function RemoteSection({
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Details drawer: the open row key, and the control that receives focus back on close: the row's
+  // Details button, or its "More actions" trigger when the drawer was opened from that menu.
+  const [drawerKey, setDrawerKey] = useState<string | null>(null);
+
+  // One tunnel read for the whole section. The panel renders this snapshot and the drawer
+  // editor saves into it, so opening a drawer costs no second `cmd_ssh_tunnel_list`.
+  // A known-absent capability leaves the hook disabled, so an older daemon sees no tunnel
+  // command at all; an unknown one reads once, which is what the panel always did on mount.
+  const tunnelSource = useSshTunnels({
+    enabled: isTauri() && (daemonCapabilities == null || hasSshTunnelCapability(daemonCapabilities)),
+  });
+
   const {
     sshTestResults, setSshTestResults, sshPreparedHosts, sshRemovalResults,
     editingSshHost, setEditingSshHost, editFormData, setEditFormData, editPassword, setEditPassword,
     showAdvancedEditSsh, setShowAdvancedEditSsh, confirmDeleteSshId, setConfirmDeleteSshId,
     handleTestSsh, handlePrepareSsh, handleRemoveSshIntegration, handleToggleDisableSsh, handleDeleteSsh,
-    handleStartEditSsh, handleSaveEditSsh,
-  } = useSshActions({ sshHosts, busy, setBusy, setActionError });
+    handleStartEditSsh, handleSaveEditSsh, tunnels,
+  } = useSshActions({
+    sshHosts,
+    busy,
+    setBusy,
+    setActionError,
+    capabilities: daemonCapabilities,
+    // The tunnel capability probe waits for a drawer: with no SSH drawer open nothing reads the
+    // section, and a settings surface must not ask the daemon anything it does not render.
+    tunnelSectionOpen: drawerKey !== null,
+    tunnelSource,
+  });
 
-  // Details drawer: the open row key, and the control that receives focus back on close: the row's
-  // Details button, or its "More actions" trigger when the drawer was opened from that menu.
-  const [drawerKey, setDrawerKey] = useState<string | null>(null);
   const lastDrawerKeyRef = useRef<string | null>(null);
   const drawerOpenedFromMenuRef = useRef(false);
   const detailsRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -525,6 +554,7 @@ export function RemoteSection({
     drawerContent = {
       kind: "ssh", ...sshStatusInput(host), test: sshTestResults[host.id], busy, agentIntegrationEnabled,
       removalResult: sshRemovalResults[host.id],
+      tunnels,
       confirmingDelete: confirmDeleteSshId === host.id,
       edit: editingSshHost?.id === host.id && editFormData
         ? {
@@ -651,6 +681,15 @@ export function RemoteSection({
         onRetryDiscovery={retryTailscale}
         onDetails={(hostId) => openDrawer(`ssh:${hostId}`)}
         detailsRef={(hostId) => bindDetails(`ssh:${hostId}`)}
+      />
+
+      {/* Every tunnel the daemon reports, saved and ad-hoc, in one list. The capability is the
+          section's own input, so an absent one renders nothing and asks the daemon nothing. */}
+      <SshTunnelsPanel
+        hosts={sshHosts}
+        capabilities={daemonCapabilities}
+        enabled={isTauri()}
+        snapshot={tunnelSource}
       />
 
       <ThisMachineSection />
