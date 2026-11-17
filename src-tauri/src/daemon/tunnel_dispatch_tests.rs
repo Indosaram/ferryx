@@ -321,7 +321,10 @@ async fn all_seven_requests_round_trip_over_in_process_pair() {
     // reported port, keeps the runtime id and clears the failure.
     let port = free_port();
     let failing = Fixture::default_host();
-    let dispatch_failing = failing.dispatch(Arc::new(TestClock::new(2_000)));
+    let failing_spawner = RealChildSpawner::new();
+    failing_spawner.fail_first.store(true, Ordering::SeqCst);
+    let dispatch_failing =
+        failing.dispatch_with(Arc::new(TestClock::new(2_000)), failing_spawner);
     let first = start_view(
         dispatch_failing
             .start(
