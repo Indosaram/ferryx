@@ -24,7 +24,7 @@ import {
   tunnelBadge,
   type TunnelRow,
 } from "./tunnelPresentation";
-import { useSshTunnels } from "./useSshTunnels";
+import { useSshTunnels, type UseSshTunnelsResult } from "./useSshTunnels";
 
 export interface SshTunnelsPanelProps {
   /** The SSH inventory: row labels, and the machine an ad-hoc forward targets. */
@@ -35,6 +35,12 @@ export interface SshTunnelsPanelProps {
   capabilities?: readonly string[] | null;
   /** Mount gate: an embedded panel that is not showing must not poll. */
   enabled?: boolean;
+  /**
+   * A snapshot the owner already reads. The settings section fetches the list once and hands
+   * the result down, so the panel and the drawer editor render the same response instead of
+   * each spending a `cmd_ssh_tunnel_list`; the owner owns the polling with it.
+   */
+  snapshot?: UseSshTunnelsResult;
 }
 
 const PORT_MIN = 1;
@@ -130,10 +136,21 @@ function TunnelRowView({ row, hostLabel, stale, busy, onRestore, onStop }: {
   );
 }
 
-export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true }: SshTunnelsPanelProps) {
+export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, snapshot }: SshTunnelsPanelProps) {
   // The capability is decided from inputs the caller already has, never from a failed invoke.
-  const gated = enabled && (capabilities == null || hasSshTunnelCapability(capabilities));
-  const tunnels = useSshTunnels({ clock, enabled: gated });
+  // A caller that knows the vector decides; one that only has a snapshot reads its verdict,
+  // so a daemon that refused the read hides the panel instead of showing an error about a
+  // feature it does not have. Without either, the v1 default stands for a plain embedder.
+  const capable = capabilities != null
+    ? hasSshTunnelCapability(capabilities)
+    : snapshot
+      ? snapshot.capability !== "absent"
+      : true;
+  const gated = enabled && capable;
+  // An injected snapshot is the single reader: the panel's own hook stays inert, so the
+  // section never asks the daemon for the same list twice.
+  const own = useSshTunnels({ clock, enabled: gated && snapshot === undefined });
+  const tunnels = snapshot ?? own;
   const now = clock ?? Date.now;
   const [form, setForm] = useState({ hostId: "", label: "", localPort: "", remoteHost: "", remotePort: "" });
   const [formError, setFormError] = useState<string | null>(null);

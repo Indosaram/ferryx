@@ -66,6 +66,12 @@ export interface SshTunnelsEditorHandlers {
   resetPath: string | null;
   conflict: TunnelSaveConflict | null;
   onRefresh: () => void;
+  /**
+   * Whether the section may read the list itself when it opens with no snapshot yet. A caller
+   * that hands over a snapshot the section already fetches sets this to `false`: the owner is
+   * mid-read, and a second request for the same drawer is exactly what must not happen.
+   */
+  autoReadOnMount?: boolean;
   onSave: (
     hostId: string,
     specs: readonly TunnelSpec[],
@@ -226,10 +232,11 @@ function SshTunnelsBody(props: SshTunnelsEditorProps) {
   const refreshRef = useRef(props.onRefresh);
   refreshRef.current = props.onRefresh;
   // Reading the snapshot once per open drawer is the section's only automatic request; a probe
-  // that already answered with a snapshot must not cause a second one.
+  // that already answered with a snapshot must not cause a second one, and neither must a
+  // snapshot the caller is still fetching.
   const initialListRef = useRef(list);
   useEffect(() => {
-    if (initialListRef.current === null) refreshRef.current();
+    if (initialListRef.current === null && props.autoReadOnMount !== false) refreshRef.current();
   }, []);
 
   const revision = list?.definitionsRevision ?? null;

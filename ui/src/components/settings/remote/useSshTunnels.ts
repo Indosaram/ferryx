@@ -20,6 +20,12 @@ import {
 } from "../../../lib/sshTunnels";
 import { TUNNEL_REFRESH_MS, viewKey, type TunnelRow } from "./tunnelPresentation";
 
+/**
+ * What a tunnel read proved about the daemon. `unknown` before any read, `present` once the
+ * daemon answered, `absent` when it refused the command it never advertised.
+ */
+export type TunnelCapability = "present" | "absent" | "unknown";
+
 export interface UseSshTunnelsOptions {
   /** Injected clock: the refresh schedule and the stale threshold both read it. */
   clock?: () => number;
@@ -37,6 +43,13 @@ export interface TunnelSnapshot {
   receivedAt: number | null;
   error: string | null;
   refreshing: boolean;
+  /**
+   * What the read proved about `sshTunnelV1`: `present` once a response landed, `absent` when
+   * the daemon refused the command because it never advertised it, `unknown` before any read.
+   * A caller that hands this snapshot to the drawer editor answers its gate from here instead
+   * of spending a probe of its own.
+   */
+  capability: TunnelCapability;
 }
 
 export interface UseSshTunnelsResult extends TunnelSnapshot {
@@ -48,7 +61,14 @@ export interface UseSshTunnelsResult extends TunnelSnapshot {
   stop: (row: TunnelRow) => Promise<void>;
 }
 
-const EMPTY: TunnelSnapshot = { list: null, retired: [], receivedAt: null, error: null, refreshing: false };
+const EMPTY: TunnelSnapshot = {
+  list: null,
+  retired: [],
+  receivedAt: null,
+  error: null,
+  refreshing: false,
+  capability: "unknown",
+};
 
 export function useSshTunnels(options: UseSshTunnelsOptions = {}): UseSshTunnelsResult {
   const { enabled = true, refreshMs = TUNNEL_REFRESH_MS } = options;
@@ -74,11 +94,25 @@ export function useSshTunnels(options: UseSshTunnelsOptions = {}): UseSshTunnels
       const list = normalizeList(await listTunnels());
       if (!mountedRef.current) return;
       const retired = retireMissingViews(list, snapshotRef.current);
-      setSnapshot({ list, retired, receivedAt: now(clockRef.current), error: null, refreshing: false });
+      setSnapshot({
+        list,
+        retired,
+        receivedAt: now(clockRef.current),
+        error: null,
+        refreshing: false,
+        capability: "present",
+      });
     } catch (error) {
       if (!mountedRef.current) return;
       // The last good snapshot stays; `receivedAt` is untouched so the stale marker appears.
-      setSnapshot((prev) => ({ ...prev, refreshing: false, error: errorMessage(error) }));
+      // A refusal because the daemon never advertised the command is not a transient failure:
+      // it settles the capability, so the editor explains itself instead of showing an error.
+      setSnapshot((prev) => ({
+        ...prev,
+        refreshing: false,
+        error: errorMessage(error),
+        capability: isUnsupported(error) ? "absent" : prev.capability,
+      }));
     } finally {
       inFlightRef.current = false;
     }
@@ -197,4 +231,14 @@ function errorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim() !== "") return error;
   const message = (error as { message?: unknown } | null)?.message;
   return typeof message === "string" && message.trim() !== "" ? message : "Could not read SSH tunnels.";
+}
+
+/**
+ * Whether the read was refused because the daemon never advertised `cmd_ssh_tunnel_list`.
+ * `toSshTunnelBridgeError` carries the `IpcErrorCode`, so an older daemon's refusal is
+ * distinguishable from a transient failure of a capable one.
+ */
+function isUnsupported(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "UNSUPPORTED_CAPABILITY";
 }

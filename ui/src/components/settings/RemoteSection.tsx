@@ -4,6 +4,7 @@ import type { MachineProjectTarget, RemoteContext } from "../../lib/machineNavig
 import { DEFAULT_MACHINE_LABEL, pairedHostInventory } from "../../lib/pairedHostInventory";
 import type { PairedHostContext } from "../../lib/pairedDaemonProject";
 import { extractIpcErrorMessage, resetSshHostsCache, useSshHosts, type SshHost } from "../../lib/sshHosts";
+import { hasSshTunnelCapability } from "../../lib/sshTunnels";
 import { isTailscaleProvisioned, syncTailscaleMachines, useTailscaleDiscovery, useTailscaleTargetsByHost } from "../../lib/tailscaleDiscovery";
 import { remoteHostStore, type HostEndpoint, type RemoteHostStore } from "../../state/remoteHostStore";
 import {
@@ -47,6 +48,7 @@ import {
   type MixedItem,
 } from "./remote/remoteModel";
 import { useSshActions } from "./remote/useSshActions";
+import { useSshTunnels } from "./remote/useSshTunnels";
 
 /** Stop-only setting: "off" disables automatic account pairing. Absent means on. */
 const AUTO_PAIR_KEY = "ferryx.remote.autoPairAccountMachines";
@@ -331,6 +333,14 @@ export function RemoteSection({
   // Details button, or its "More actions" trigger when the drawer was opened from that menu.
   const [drawerKey, setDrawerKey] = useState<string | null>(null);
 
+  // One tunnel read for the whole section. The panel renders this snapshot and the drawer
+  // editor saves into it, so opening a drawer costs no second `cmd_ssh_tunnel_list`.
+  // A known-absent capability leaves the hook disabled, so an older daemon sees no tunnel
+  // command at all; an unknown one reads once, which is what the panel always did on mount.
+  const tunnelSource = useSshTunnels({
+    enabled: isTauri() && (daemonCapabilities == null || hasSshTunnelCapability(daemonCapabilities)),
+  });
+
   const {
     sshTestResults, setSshTestResults, sshPreparedHosts, sshRemovalResults,
     editingSshHost, setEditingSshHost, editFormData, setEditFormData, editPassword, setEditPassword,
@@ -346,6 +356,7 @@ export function RemoteSection({
     // The tunnel capability probe waits for a drawer: with no SSH drawer open nothing reads the
     // section, and a settings surface must not ask the daemon anything it does not render.
     tunnelSectionOpen: drawerKey !== null,
+    tunnelSource,
   });
 
   const lastDrawerKeyRef = useRef<string | null>(null);
@@ -672,8 +683,14 @@ export function RemoteSection({
         detailsRef={(hostId) => bindDetails(`ssh:${hostId}`)}
       />
 
-      {/* Every tunnel the daemon reports, saved and ad-hoc, in one list. */}
-      <SshTunnelsPanel hosts={sshHosts} enabled={isTauri()} />
+      {/* Every tunnel the daemon reports, saved and ad-hoc, in one list. The capability is the
+          section's own input, so an absent one renders nothing and asks the daemon nothing. */}
+      <SshTunnelsPanel
+        hosts={sshHosts}
+        capabilities={daemonCapabilities}
+        enabled={isTauri()}
+        snapshot={tunnelSource}
+      />
 
       <ThisMachineSection />
 

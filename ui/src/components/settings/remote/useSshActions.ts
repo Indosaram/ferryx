@@ -12,10 +12,10 @@ import {
 import type { HostFormData } from "../AddMachineModal";
 import type { SshTestState } from "./MachineDrawer";
 import { sameConnection } from "./remoteModel";
-import { useHostTunnels } from "./useHostTunnels";
+import { useHostTunnels, type HostTunnelsSource } from "./useHostTunnels";
 
 /** SSH machine state and actions of the Remote section, moved out of RemoteSection unchanged. */
-export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabilities, tunnelSectionOpen }: {
+export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabilities, tunnelSectionOpen, tunnelSource }: {
   sshHosts: SshHost[];
   busy: boolean;
   setBusy: (busy: boolean) => void;
@@ -28,6 +28,11 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabil
   capabilities?: readonly string[] | null;
   /** Whether an SSH drawer is open, i.e. whether the tunnel section can be read at all. */
   tunnelSectionOpen: boolean;
+  /**
+   * The snapshot the section already reads. Passing it makes the editor render that response
+   * instead of fetching its own copy, so one drawer costs one `cmd_ssh_tunnel_list`.
+   */
+  tunnelSource?: HostTunnelsSource;
 }) {
   const hostsRef = useRef(sshHosts);
   // SSH host states
@@ -42,8 +47,9 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabil
   const [confirmDeleteSshId, setConfirmDeleteSshId] = useState<string | null>(null);
 
   // Saved tunnel definitions: the editor is the only reader, and it sends nothing while the
-  // capability is absent (MH-10). The hook owns its own snapshot, never a host-store copy.
-  const { editor: tunnels } = useHostTunnels({ capabilities, active: tunnelSectionOpen });
+  // capability is absent (MH-10). The hook owns its own snapshot, never a host-store copy —
+  // unless the section already read one, in which case this renders that one.
+  const { editor: tunnels } = useHostTunnels({ capabilities, active: tunnelSectionOpen, source: tunnelSource });
 
   // A connection change invalidates any in-flight test or prepare result for that host.
   useEffect(() => {
