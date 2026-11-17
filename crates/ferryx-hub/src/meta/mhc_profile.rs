@@ -814,6 +814,16 @@ impl SessionStore {
         self.save()
     }
 
+    /// Drops a role binding and persists the drop, so the role's next open starts a fresh
+    /// durable identity with no session file to resume.
+    pub fn remove(&mut self, key: &str) -> Result<bool> {
+        if self.file.sessions.remove(key).is_none() {
+            return Ok(false);
+        }
+        self.save()?;
+        Ok(true)
+    }
+
     pub fn was_ingested(&self, source_id: &str) -> bool {
         self.file.ingested.iter().any(|id| id == source_id)
     }
