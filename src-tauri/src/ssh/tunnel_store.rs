@@ -143,6 +143,14 @@ impl TunnelStore {
             if replace { self.host_identities.insert(host.clone(), incoming.clone()); }
         }
     }
+    /// Drop the definition rows an operator's host list no longer names, along
+    /// with their unreadable leftovers. The malformed-value column is private to
+    /// this module, so the column is pruned here rather than at the caller.
+    pub fn prune_to_hosts(&mut self, present: &std::collections::HashSet<&str>) {
+        self.hosts.retain(|host, _| present.contains(host.as_str()));
+        self.invalid_rows.retain(|host, _| present.contains(host.as_str()));
+        self.invalid_host_values.retain(|host, _| present.contains(host.as_str()));
+    }
 }
 
 fn argument(field: &str) -> IpcError {
@@ -327,14 +335,6 @@ impl StoreLock {
     pub fn persist_authority_with_fault(&self, memory: &TunnelStore, now_ms: u64, fault: Option<&WriteFault>) -> Result<TunnelStore, IpcError> {
         let mut store = self.load(now_ms)?; store.writable(true)?; store.merge_authority(memory); self.write(&store, fault)?; Ok(store)
     }
-    /// Drop the definition rows an operator's host list no longer names, along
-    /// with their unreadable leftovers. The malformed-value column is private to
-    /// this module, so the column has to be pruned here rather than at the caller.
-    pub fn prune_to_hosts(&mut self, present: &std::collections::HashSet<&str>) {
-        self.hosts.retain(|host, _| present.contains(host.as_str()));
-        self.invalid_rows.retain(|host, _| present.contains(host.as_str()));
-        self.invalid_host_values.retain(|host, _| present.contains(host.as_str()));
-    }
     /// Persist a definitions prune. Authority is merged from both sides and never
     /// lowered; only the definition rows an operator's host list no longer names
     /// go. The prune is applied AFTER the merge, so authority fields can never be
@@ -343,7 +343,8 @@ impl StoreLock {
         let mut store = self.load(now_ms)?;
         store.writable(true)?;
         store.merge_authority(memory);
-        store.definitions_revision = store.definitions_revision.max(pruned.definitions_revision);
+        // Adopt the caller's already-pruned definition rows wholesale: authority
+        // was merged first, so only the definition columns can move here.
         store.hosts = pruned.hosts.clone();
         store.invalid_rows = pruned.invalid_rows.clone();
         store.invalid_host_values = pruned.invalid_host_values.clone();
