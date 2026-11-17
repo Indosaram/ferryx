@@ -381,10 +381,13 @@ async fn all_seven_requests_round_trip_over_in_process_pair() {
         DaemonResponse::SshTunnelForgetHost { response } => assert_eq!(response.removed, 1),
         other => panic!("forget failed: {other:?}"),
     }
-    match dispatch.specs_reset(true).await {
-        DaemonResponse::SshTunnelSpecsReset { response } => assert_eq!(response.quarantined_path, None),
-        other => panic!("reset of a valid store must not quarantine: {other:?}"),
-    }
+    // A parseable store is never quarantined: reset refuses with the pinned
+    // InvalidArgument + store_not_corrupt pair instead of destroying good data.
+    // The corrupt half (rename, fresh store, seeded revisions) is covered by
+    // `reset_quarantines_corrupt_and_refuses_valid_store`.
+    let (code, details) = error_of(dispatch.specs_reset(true).await);
+    assert_eq!(code, "INVALID_ARGUMENT");
+    assert_eq!(details["reason"], "store_not_corrupt");
     dispatch.shutdown().await.unwrap();
 }
 
