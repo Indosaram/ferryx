@@ -10,7 +10,7 @@ use crate::daemon::protocol::*;
 use crate::ssh::tunnel::registry::{
     ProcessSpawner, Signal, SpawnedTunnel, TunnelChild, TunnelSpawner,
 };
-use crate::ssh::tunnel::runtime_records::{RecordIntent, RuntimeRecord, RuntimeRecords};
+use crate::ssh::tunnel::runtime_records::{OwnerIdentity, RecordIntent, RuntimeRecord, RuntimeRecords};
 use crate::ssh::tunnel_store::Clock;
 use crate::ssh::tunnel::{TunnelFailureCode, TunnelRuntimeId, TunnelSpec, TunnelSpecId, TunnelState};
 
@@ -82,8 +82,8 @@ impl Fixture {
     fn seed_revision(&self, revision: u64) {
         self.write_definitions(json!({
             "version": 1,
-            "definitionsRevision": 0,
-            "hostRevisions": { HOST: revision },
+            "definitions_revision": 0,
+            "host_revisions": { HOST: revision },
             "hosts": {}
         }));
     }
@@ -345,7 +345,10 @@ async fn all_seven_requests_round_trip_over_in_process_pair() {
             .await,
     )
     .view;
-    assert_eq!(first.state, TunnelState::Failed);
+    // MH-6: an initial host_unreachable is NOT terminal and starts on the same
+    // backoff, so a first start reports reconnecting, never failed.
+    assert_eq!(first.state, TunnelState::Reconnecting, "MH-6: a first host_unreachable is not terminal");
+    assert_eq!(first.failure, Some(TunnelFailureCode::HostUnreachable));
     let restored = start_view(
         dispatch_failing
             .start(
@@ -356,7 +359,11 @@ async fn all_seven_requests_round_trip_over_in_process_pair() {
     )
     .view;
     assert_eq!(restored.runtime_id, first.runtime_id, "Restore reuses the retained entry");
-    assert_eq!(restored.failure, None);
+    // MH-6 again on the restore leg: the retained entry is still recovering, so
+    // it is never reported terminal. Whether it currently shows reconnecting or
+    // has already reached listening depends on the retry clock, so only the
+    // non-terminal invariant is asserted here.
+    assert_ne!(restored.state, TunnelState::Failed, "a restored entry never reports terminal for host_unreachable");
 
     // InvalidateHost, ForgetHost and SpecsReset each answer their own body.
     match dispatch
@@ -455,7 +462,7 @@ async fn unknown_spec_id_is_typed_not_found() {
     let spawner = NullSpawner::new();
     let dispatch = fixture.dispatch_with(Arc::new(TestClock::new(200)), spawner.clone());
     fixture.write_definitions(json!({
-        "version": 1, "definitionsRevision": 0, "hostRevisions": { HOST: 4 }, "hosts": {}
+        "version": 1, "definitions_revision": 0, "host_revisions": { HOST: 4 }, "hosts": {}
     }));
     let (code, details) = error_of(
         dispatch.start(start_request(Some(fixture.spec(free_port())), None, Some(0)), true).await,
@@ -469,7 +476,7 @@ async fn unknown_spec_id_is_typed_not_found() {
     let fixture = Fixture::default_host();
     let dispatch = fixture.dispatch(Arc::new(TestClock::new(300)));
     fixture.write_definitions(json!({
-        "version": 1, "definitionsRevision": 0, "hostRevisions": { HOST: 1 }, "hosts": {}
+        "version": 1, "definitions_revision": 0, "host_revisions": { HOST: 1 }, "hosts": {}
     }));
     let accepted = start_view(
         dispatch.start(start_request(Some(fixture.spec(free_port())), None, Some(1)), true).await,
@@ -621,7 +628,20 @@ async fn boot_sweep_skips_records_of_live_lock_holder() {
     // kills NOTHING: it has no identity, and the repo forbids killing whoever
     // holds the port.
     {
-        let dead = RuntimeRecords::open(data.clone(), Arc::new(PsProcessIdentity)).unwrap();
+        // A plain open always records THIS process (same pid, same boot,
+        // matching start time), so it is a LIVE owner and its claim must stand.
+        // A predecessor from a previous boot is what actually tests the release.
+        let dead = RuntimeRecords::open_as_owner(
+            data.clone(),
+            Arc::new(PsProcessIdentity),
+            OwnerIdentity {
+                owner_instance_id: uuid::Uuid::new_v4().to_string(),
+                owner_pid: std::process::id(),
+                owner_start_time: String::new(),
+                owner_boot_id: "a-previous-boot".into(),
+            },
+        )
+        .unwrap();
         let intent_id = TunnelRuntimeId("intent-runtime".into());
         dead.record_intent(&intent_id, 2, free_port()).unwrap();
         // Its instance lock is released when `dead` drops.
@@ -805,8 +825,8 @@ async fn list_prunes_absent_host_definitions() {
     let fixture = Fixture::new(vec![host_json(HOST, "10.0.0.1", "key", None)]);
     fixture.write_definitions(json!({
         "version": 1,
-        "definitionsRevision": 3,
-        "hostRevisions": { HOST: 2, "gone-host": 1 },
+        "definitions_revision": 3,
+        "host_revisions": { HOST: 2, "gone-host": 1 },
         "hosts": { HOST: fixture.specs(5432), "gone-host": fixture.specs(5433) }
     }));
     let dispatch = fixture.dispatch(Arc::new(TestClock::new(90)));
@@ -820,7 +840,7 @@ async fn list_prunes_absent_host_definitions() {
     assert!(written["hosts"].get("gone-host").is_none(), "the hosts row is gone: {written}");
     assert!(written["invalidRows"].get("gone-host").is_none() || written.get("invalidRows").is_none());
     assert_eq!(
-        written["hostRevisions"]["gone-host"], 1,
+        written["host_revisions"]["gone-host"], 1,
         "the revision row deliberately stays, so a re-created host cannot accept a stale start"
     );
 
@@ -921,7 +941,7 @@ async fn list_prunes_absent_host_definitions() {
 async fn reset_quarantines_corrupt_and_refuses_valid_store() {
     let fixture = Fixture::default_host();
     fixture.write_definitions(json!({
-        "version": 1, "definitionsRevision": 1, "hostRevisions": { HOST: 7 }, "hosts": {}
+        "version": 1, "definitions_revision": 1, "host_revisions": { HOST: 7 }, "hosts": {}
     }));
     let valid_bytes = std::fs::read(&fixture.definitions).unwrap();
     let dispatch = fixture.dispatch(Arc::new(TestClock::new(1_700_000)));

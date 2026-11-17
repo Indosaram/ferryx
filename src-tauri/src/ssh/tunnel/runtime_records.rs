@@ -187,7 +187,6 @@ pub struct RuntimeRecords {
 
 impl RuntimeRecords {
     pub fn open(dir: PathBuf, source: Arc<dyn ProcessIdentity>) -> io::Result<Self> {
-        fs::create_dir_all(&dir)?;
         let pid = std::process::id();
         let owner = OwnerIdentity {
             owner_instance_id: uuid::Uuid::new_v4().to_string(),
@@ -195,6 +194,24 @@ impl RuntimeRecords {
             owner_start_time: source.start_time(pid).unwrap_or_default(),
             owner_boot_id: source.boot_id(),
         };
+        Self::open_with_owner(dir, source, owner)
+    }
+
+    /// Test seam: whether an owner is reachable is decided by comparing its
+    /// recorded identity against the live source, and open always records THIS
+    /// process, so a case that needs a genuinely dead owner must pin the
+    /// identity. Nothing here is reachable from the daemon's own paths.
+    #[cfg(all(test, unix))]
+    pub fn open_as_owner(
+        dir: PathBuf,
+        source: Arc<dyn ProcessIdentity>,
+        owner: OwnerIdentity,
+    ) -> io::Result<Self> {
+        Self::open_with_owner(dir, source, owner)
+    }
+
+    fn open_with_owner(dir: PathBuf, source: Arc<dyn ProcessIdentity>, owner: OwnerIdentity) -> io::Result<Self> {
+        fs::create_dir_all(&dir)?;
         let instance = instance_lock_path(&dir, &owner.owner_instance_id);
         let file = fs::OpenOptions::new()
             .read(true)

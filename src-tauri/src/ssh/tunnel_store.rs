@@ -327,6 +327,29 @@ impl StoreLock {
     pub fn persist_authority_with_fault(&self, memory: &TunnelStore, now_ms: u64, fault: Option<&WriteFault>) -> Result<TunnelStore, IpcError> {
         let mut store = self.load(now_ms)?; store.writable(true)?; store.merge_authority(memory); self.write(&store, fault)?; Ok(store)
     }
+    /// Drop the definition rows an operator's host list no longer names, along
+    /// with their unreadable leftovers. The malformed-value column is private to
+    /// this module, so the column has to be pruned here rather than at the caller.
+    pub fn prune_to_hosts(&mut self, present: &std::collections::HashSet<&str>) {
+        self.hosts.retain(|host, _| present.contains(host.as_str()));
+        self.invalid_rows.retain(|host, _| present.contains(host.as_str()));
+        self.invalid_host_values.retain(|host, _| present.contains(host.as_str()));
+    }
+    /// Persist a definitions prune. Authority is merged from both sides and never
+    /// lowered; only the definition rows an operator's host list no longer names
+    /// go. The prune is applied AFTER the merge, so authority fields can never be
+    /// dropped by the assignment.
+    pub fn persist_prune(&self, pruned: &TunnelStore, memory: &TunnelStore, now_ms: u64) -> Result<TunnelStore, IpcError> {
+        let mut store = self.load(now_ms)?;
+        store.writable(true)?;
+        store.merge_authority(memory);
+        store.definitions_revision = store.definitions_revision.max(pruned.definitions_revision);
+        store.hosts = pruned.hosts.clone();
+        store.invalid_rows = pruned.invalid_rows.clone();
+        store.invalid_host_values = pruned.invalid_host_values.clone();
+        self.write(&store, None)?;
+        Ok(store)
+    }
     /// Stamp disk only if this exact revision still owns both the identity and
     /// max(file,memory) authority. Always stamp memory, including on corruption.
     pub fn stamp_identity(&self, memory: &mut TunnelStore, host_id: &str, rev: u64, now_ms: u64) -> Result<(), IpcError> {

@@ -973,20 +973,23 @@ impl TunnelDispatch {
                     let present: HashSet<&str> =
                         loaded.iter().map(|host| host.id.as_str()).collect();
                     let mut pruned = fresh.clone();
-                    pruned.hosts.retain(|host, _| present.contains(host.as_str()));
-                    pruned
-                        .invalid_rows
-                        .retain(|host, _| present.contains(host.as_str()));
+                    pruned.prune_to_hosts(&present);
                     if pruned.hosts.len() != fresh.hosts.len()
                         || pruned.invalid_rows.len() != fresh.invalid_rows.len()
                     {
-                        if let Err(error) = lock.persist_authority(&pruned, now) {
+                        // persist_authority keeps only the revision/identity
+                        // columns, so it would drop this prune on the floor; the
+                        // definition rows need their own write.
+                        if let Err(error) = lock.persist_prune(&pruned, &memory.store, now) {
                             tracing::warn!(?error, "Cannot persist the tunnel definitions prune");
                         }
                     }
                     memory.definitions = pruned.hosts.clone();
                     memory.store.hosts = pruned.hosts;
                     memory.store.invalid_rows = pruned.invalid_rows;
+                    // The malformed-value column is module-private; prune memory
+                    // through the same seam so RAM and disk agree.
+                    memory.store.prune_to_hosts(&present);
                 }
                 _ => {
                     memory.definitions = fresh.hosts.clone();
