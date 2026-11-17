@@ -10,12 +10,17 @@ use crate::daemon::protocol::*;
 use crate::ssh::tunnel::registry::{
     ProcessSpawner, Signal, SpawnedTunnel, TunnelChild, TunnelSpawner,
 };
-use crate::ssh::tunnel::runtime_records::{RecordIntent, RuntimeRecord};
-use crate::ssh::tunnel::{TunnelFailureCode, TunnelSpecId, TunnelState};
+use crate::ssh::tunnel::runtime_records::{RecordIntent, RuntimeRecord, RuntimeRecords};
+use crate::ssh::tunnel_store::Clock;
+use crate::ssh::tunnel::{TunnelFailureCode, TunnelRuntimeId, TunnelSpec, TunnelSpecId, TunnelState};
+
+use super::tunnel_dispatch::{TunnelDispatch, TunnelPaths};
 use crate::ssh::tunnel_store::TestClock;
 use serde_json::json;
 use std::{
+    collections::HashMap,
     net::{Ipv4Addr, TcpListener},
+    path::PathBuf,
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
