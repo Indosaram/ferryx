@@ -480,6 +480,15 @@ impl TunnelDispatch {
     /// Returns true when it bumped the revision.
     #[cfg(unix)]
     async fn adopt_if_changed(&self, host: &crate::ssh::SshHost, record_missing: bool) -> bool {
+        self.adopt_if_changed_locked(host, record_missing, None).await
+    }
+
+    async fn adopt_if_changed_locked(
+        &self,
+        host: &crate::ssh::SshHost,
+        record_missing: bool,
+        held: Option<&tunnel_store::StoreLock>,
+    ) -> bool {
         let disk = tuple(host);
         let now = self.clock.now_unix_ms();
         let recorded = {
@@ -502,10 +511,19 @@ impl TunnelDispatch {
                         pending_since_disk: now,
                     },
                 );
-                let definitions = self.paths.definitions.clone();
-                if let Ok(lock) = tunnel_store::lock_store(&definitions) {
-                    if let Err(error) = lock.persist_authority(&memory.store, now) {
-                        tracing::warn!(host = %host.id, ?error, "Cannot persist a recorded host tuple");
+                match held {
+                    Some(lock) => {
+                        if let Err(error) = lock.persist_authority(&memory.store, now) {
+                            tracing::warn!(host = %host.id, ?error, "Cannot persist a recorded host tuple");
+                        }
+                    }
+                    None => {
+                        let definitions = self.paths.definitions.clone();
+                        if let Ok(lock) = tunnel_store::lock_store(&definitions) {
+                            if let Err(error) = lock.persist_authority(&memory.store, now) {
+                                tracing::warn!(host = %host.id, ?error, "Cannot persist a recorded host tuple");
+                            }
+                        }
                     }
                 }
             }
@@ -781,7 +799,7 @@ impl TunnelDispatch {
             // Inline adoption is unconditional under its per-host guards, never
             // conditioned on "no live runtime daemon-wide": host A holding a
             // live tunnel keeps the observer armed while host B stays silent.
-            if self.adopt_if_changed(&host, true).await {
+            if self.adopt_if_changed_locked(&host, true, Some(&lock)).await {
                 return Err(stale());
             }
             let recorded = {
