@@ -12,13 +12,22 @@ import {
 import type { HostFormData } from "../AddMachineModal";
 import type { SshTestState } from "./MachineDrawer";
 import { sameConnection } from "./remoteModel";
+import { useHostTunnels } from "./useHostTunnels";
 
 /** SSH machine state and actions of the Remote section, moved out of RemoteSection unchanged. */
-export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
+export function useSshActions({ sshHosts, busy, setBusy, setActionError, capabilities, tunnelSectionOpen }: {
   sshHosts: SshHost[];
   busy: boolean;
   setBusy: (busy: boolean) => void;
   setActionError: (error: string | null) => void;
+  /**
+   * The capabilities the connected daemon advertises. `undefined` means "not known yet" and
+   * is treated exactly like an absent `sshTunnelV1`: the tunnel section explains itself and
+   * sends no request, which is the safe reading for an older background service.
+   */
+  capabilities?: readonly string[] | null;
+  /** Whether an SSH drawer is open, i.e. whether the tunnel section can be read at all. */
+  tunnelSectionOpen: boolean;
 }) {
   const hostsRef = useRef(sshHosts);
   // SSH host states
@@ -31,6 +40,10 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
   const [showAdvancedEditSsh, setShowAdvancedEditSsh] = useState(false);
 
   const [confirmDeleteSshId, setConfirmDeleteSshId] = useState<string | null>(null);
+
+  // Saved tunnel definitions: the editor is the only reader, and it sends nothing while the
+  // capability is absent (MH-10). The hook owns its own snapshot, never a host-store copy.
+  const { editor: tunnels } = useHostTunnels({ capabilities, active: tunnelSectionOpen });
 
   // A connection change invalidates any in-flight test or prepare result for that host.
   useEffect(() => {
@@ -217,6 +230,6 @@ export function useSshActions({ sshHosts, busy, setBusy, setActionError }: {
     editingSshHost, setEditingSshHost, editFormData, setEditFormData, editPassword, setEditPassword,
     showAdvancedEditSsh, setShowAdvancedEditSsh, confirmDeleteSshId, setConfirmDeleteSshId,
     handleTestSsh, handlePrepareSsh, handleRemoveSshIntegration, handleToggleDisableSsh, handleDeleteSsh,
-    handleStartEditSsh, handleSaveEditSsh,
+    handleStartEditSsh, handleSaveEditSsh, tunnels,
   };
 }

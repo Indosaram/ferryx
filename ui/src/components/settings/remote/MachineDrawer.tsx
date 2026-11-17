@@ -11,6 +11,7 @@ import { Label } from "../../ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../ui/sheet";
 import { useModalDialog } from "../../useModalDialog";
+import { SshTunnelsEditor, type SshTunnelsEditorHandlers } from "./SshTunnelsEditor";
 import { MachineStatusLabel, pairedDisplayName, sshRowStatus, usePairedRowStatus, type PairedStatusInput } from "./MachineRow";
 
 export interface SshTestState {
@@ -211,6 +212,11 @@ export interface SshDetailsProps {
   agentIntegrationEnabled: boolean;
   removalResult?: string;
   edit: SshEditState | null;
+  /**
+   * Saved tunnel definitions of the section, produced once by `useSshActions`. `null` means
+   * this caller predates the section and renders nothing — never a request.
+   */
+  tunnels: SshTunnelsEditorHandlers | null;
   confirmingDelete: boolean;
   onTest: () => void;
   onPrepare: () => void;
@@ -281,6 +287,7 @@ function SshDetails(props: SshDetailsProps) {
           onCancel={props.onCancelDelete}
         />
       ) : null}
+      {props.tunnels ? <SshTunnelsEditor host={host} busy={busy} {...props.tunnels} /> : null}
     </div>
   );
 }

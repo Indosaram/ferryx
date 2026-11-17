@@ -67,6 +67,12 @@ export interface RemoteSectionProps {
   accountOrigin?: string;
   accountOriginResolver?: () => string;
   onAccountSessionChange?: (token: string | null, origin: string) => void;
+  /**
+   * The capabilities the connected background service advertises. Absent/empty means the
+   * tunnel section explains itself and sends nothing; it is a caller input, never discovered
+   * by a failed invoke (MH-10).
+   */
+  daemonCapabilities?: readonly string[] | null;
 }
 
 export function RemoteSection({
@@ -82,6 +88,7 @@ export function RemoteSection({
   accountOrigin: accountOriginProp,
   accountOriginResolver = getConfiguredAccountOrigin,
   onAccountSessionChange,
+  daemonCapabilities,
 }: RemoteSectionProps) {
   const [configuredOrigin, setConfiguredOrigin] = useState(() => accountOriginResolver());
   const accountOrigin = accountOriginProp ?? configuredOrigin;
@@ -319,17 +326,27 @@ export function RemoteSection({
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // Details drawer: the open row key, and the control that receives focus back on close: the row's
+  // Details button, or its "More actions" trigger when the drawer was opened from that menu.
+  const [drawerKey, setDrawerKey] = useState<string | null>(null);
+
   const {
     sshTestResults, setSshTestResults, sshPreparedHosts, sshRemovalResults,
     editingSshHost, setEditingSshHost, editFormData, setEditFormData, editPassword, setEditPassword,
     showAdvancedEditSsh, setShowAdvancedEditSsh, confirmDeleteSshId, setConfirmDeleteSshId,
     handleTestSsh, handlePrepareSsh, handleRemoveSshIntegration, handleToggleDisableSsh, handleDeleteSsh,
-    handleStartEditSsh, handleSaveEditSsh,
-  } = useSshActions({ sshHosts, busy, setBusy, setActionError });
+    handleStartEditSsh, handleSaveEditSsh, tunnels,
+  } = useSshActions({
+    sshHosts,
+    busy,
+    setBusy,
+    setActionError,
+    capabilities: daemonCapabilities,
+    // The tunnel capability probe waits for a drawer: with no SSH drawer open nothing reads the
+    // section, and a settings surface must not ask the daemon anything it does not render.
+    tunnelSectionOpen: drawerKey !== null,
+  });
 
-  // Details drawer: the open row key, and the control that receives focus back on close: the row's
-  // Details button, or its "More actions" trigger when the drawer was opened from that menu.
-  const [drawerKey, setDrawerKey] = useState<string | null>(null);
   const lastDrawerKeyRef = useRef<string | null>(null);
   const drawerOpenedFromMenuRef = useRef(false);
   const detailsRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -525,6 +542,7 @@ export function RemoteSection({
     drawerContent = {
       kind: "ssh", ...sshStatusInput(host), test: sshTestResults[host.id], busy, agentIntegrationEnabled,
       removalResult: sshRemovalResults[host.id],
+      tunnels,
       confirmingDelete: confirmDeleteSshId === host.id,
       edit: editingSshHost?.id === host.id && editFormData
         ? {
