@@ -684,7 +684,7 @@ async fn spawn_writes_intent_before_pid() {
         assert_eq!(intent.pid, None, "an intent record carries no identity to kill");
         // The pid record replaces it, killable and with a process group.
         let after = dispatch.records().unwrap().load().unwrap();
-        let record = *after.values().find(|record| record.local_port == port).unwrap();
+        let record = after.values().find(|record| record.local_port == port).unwrap();
         assert_eq!(record.intent, RecordIntent::Running);
         assert!(record.pid.is_some(), "the pid record is killable");
         assert!(record.pgid.is_some(), "the pid record names its process group");
