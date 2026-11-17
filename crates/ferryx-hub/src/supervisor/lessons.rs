@@ -407,10 +407,31 @@ pub async fn injection_block_with_ids_for_turn(
         return Ok(None);
     }
     // A correction-selected lesson is used now, so its usage has to move with it: otherwise an
-    // actively useful corrective lesson looks untouched and `retire_stale` retires it.
+    // actively useful corrective lesson looks untouched and `retire_stale` retires it. The
+    // counter moves once per goal, though: a lesson admission already carried into the goal's
+    // in-flight turn is still used by the correction, but counting it again would report two
+    // uses of one rule.
     let now = Utc::now().to_rfc3339();
     let mut tx = pool.begin_write().await?;
     for lesson in &chosen {
+        let open: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM lesson_turn_injections
+             WHERE lesson_id = ? AND settled_at IS NULL",
+        )
+        .bind(&lesson.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if open > 0 {
+            sqlx::query(
+                "UPDATE supervisor_lessons SET last_injected_at = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(&now)
+            .bind(&lesson.id)
+            .execute(&mut *tx)
+            .await?;
+            continue;
+        }
         sqlx::query(
             "UPDATE supervisor_lessons
              SET injected = injected + 1, last_injected_at = ?, updated_at = ?
@@ -488,6 +509,17 @@ pub async fn settle(
     subject_ref: &str,
     outcome: Outcome,
 ) -> Result<Vec<String>, sqlx::Error> {
+    let ids = close_injections(pool, subject_ref, outcome).await?;
+    observe(pool, &ids, outcome).await?;
+    Ok(ids)
+}
+
+/// Closes every open injection of `subject_ref` with `outcome` without crediting it yet.
+async fn close_injections(
+    pool: &SqlitePool,
+    subject_ref: &str,
+    outcome: Outcome,
+) -> Result<Vec<String>, sqlx::Error> {
     let now = Utc::now().to_rfc3339();
     let mut tx = pool.begin_write().await?;
     let ids: Vec<String> = sqlx::query_scalar(
@@ -501,8 +533,36 @@ pub async fn settle(
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
-    observe(pool, &ids, outcome).await?;
     Ok(ids)
+}
+
+/// Settles a goal rollup: every open injection closes, but a lesson the settling turn already
+/// credited is not observed twice. Turn rows are the credit of record for a lesson that reached
+/// the goal through a dispatch turn; the rollup only covers what the turn path never saw.
+async fn settle_rollup(
+    pool: &SqlitePool,
+    goal_id: &str,
+    outcome: Outcome,
+) -> Result<Vec<String>, sqlx::Error> {
+    let ids = close_injections(pool, &goal_subject(goal_id), outcome).await?;
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    let credited: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT i.lesson_id FROM lesson_turn_injections i
+         JOIN supervisor_dispatches d ON d.request_id = i.turn_ref
+         WHERE d.goal_id = ? AND i.settled_at IS NOT NULL AND i.outcome = ?",
+    )
+    .bind(goal_id)
+    .bind(outcome.as_str())
+    .fetch_all(pool)
+    .await?;
+    let owed: Vec<String> = ids
+        .into_iter()
+        .filter(|id| !credited.contains(id))
+        .collect();
+    observe(pool, &owed, outcome).await?;
+    Ok(owed)
 }
 
 /// Settles each open turn injection once and credits it to the goal rollup.
@@ -564,9 +624,8 @@ pub async fn goal_completed(
     goal_id: &str,
     turn_ref: Option<&str>,
 ) -> Result<Vec<String>, sqlx::Error> {
-    let ids = settle(pool, &goal_subject(goal_id), Outcome::Helped).await?;
     settle_goal_turns(pool, turn_ref, Outcome::Helped).await?;
-    Ok(ids)
+    settle_rollup(pool, goal_id, Outcome::Helped).await
 }
 
 /// A goal ended without converging: its injected lessons hurt, and the judge is asked once
@@ -580,8 +639,8 @@ pub async fn goal_failed(
     turn_ref: Option<&str>,
 ) -> HubResult<Option<Lesson>> {
     let subject = goal_subject(goal_id);
-    settle(pool, &subject, Outcome::Hurt).await?;
     settle_goal_turns(pool, turn_ref, Outcome::Hurt).await?;
+    settle_rollup(pool, goal_id, Outcome::Hurt).await?;
     let project: Option<String> =
         sqlx::query_scalar("SELECT project_id FROM supervisor_goals WHERE goal_id = ?")
             .bind(goal_id)
