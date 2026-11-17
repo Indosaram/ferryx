@@ -19,7 +19,7 @@ use std::{
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Mutex as StdMutex,
+        Arc, Mutex as StdMutex,
     },
     time::Duration,
 };
@@ -59,7 +59,7 @@ impl Fixture {
             serde_json::to_vec(&json!({ "hosts": hosts, "tombstones": [] })).unwrap(),
         )
         .unwrap();
-        Self { _dir_path: dir, definitions, hosts: hosts_path }
+        Self { dir, definitions, hosts: hosts_path }
     }
 
     fn default_host() -> Self {
