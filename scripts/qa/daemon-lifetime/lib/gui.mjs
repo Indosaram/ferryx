@@ -681,7 +681,18 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
         command: '/usr/bin/osascript',
         args: ['-e', `tell application "System Events" to set frontmost of (first process whose unix id is ${Number(gui.pid)}) to true`],
       });
-      return { focused: true, pid: gui.pid };
+      // The window being frontmost does not focus the native terminal surface: the surface host
+      // routes macOS chords only when has_focused_session() is true (src-tauri/src/lib.rs), which
+      // needs a click into the pane. Report the window rect so the caller can click inside it.
+      const geometry = await agent.call('exec', {
+        command: '/usr/bin/osascript',
+        args: ['-e', `tell application "System Events" to tell (first process whose unix id is ${Number(gui.pid)}) to get {position, size} of window 1`],
+      }).catch(() => null);
+      const nums = String(geometry?.stdout ?? '').match(/-?\d+/g)?.map(Number) ?? [];
+      const rect = nums.length >= 4
+        ? { left: nums[0], top: nums[1], right: nums[0] + nums[2], bottom: nums[1] + nums[3] }
+        : null;
+      return { focused: true, pid: gui.pid, rect };
     }
     if (platform === 'linux') return focusLinux(gui);
     if (platform !== 'windows') return { skipped: platform };

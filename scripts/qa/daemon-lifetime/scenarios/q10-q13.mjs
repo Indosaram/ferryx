@@ -493,8 +493,11 @@ export async function Q11(ctx, result) {
   // Keys go to the foreground window: make it the GUI that attached (Windows: gui.focus).
   const focused = await ctx.gui.focus(ctx.state.gui);
   let terminalClick = null;
-  if (ctx.platform === 'windows' && typeof ctx.mahord?.click === 'function') {
-    const rect = focused?.after ?? focused?.before;
+  // Click into the pane on every platform that can click: macOS routes chords to the terminal only
+  // while has_focused_session() is true, and a frontmost window alone never sets it (run
+  // 20261117t142623z Q11: terminalClick null, focus.return has_focused_terminal=false).
+  if (typeof ctx.mahord?.click === 'function') {
+    const rect = focused?.rect ?? focused?.after ?? focused?.before;
     if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top) && Number.isFinite(rect.right) && Number.isFinite(rect.bottom)) {
       const w = rect.right - rect.left;
       const h = rect.bottom - rect.top;

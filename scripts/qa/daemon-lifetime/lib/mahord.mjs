@@ -182,7 +182,10 @@ export function createMacLocalInput({ exec }) {
     return osa(`tell application "System Events" to keystroke "${escapeAs(k)}"${using}`);
   };
   return {
-    click: async () => ({ ok: true }),
+    click: async (x, y) => {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false };
+      return osa(`tell application "System Events" to click at {${Math.round(x)}, ${Math.round(y)}}`);
+    },
     type: async (text) => osa(`tell application "System Events" to keystroke "${escapeAs(text)}"`),
     key: async (k) => sendKey(k),
     hotkey: async (keys) => {

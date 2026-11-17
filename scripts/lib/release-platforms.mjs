@@ -1364,7 +1364,11 @@ export async function buildHost({
       const ghosttyTargetDir = join(isolatedSource, "src-tauri", "vendor", "ghostty");
       rmSync(ghosttyTargetDir, { recursive: true, force: true });
       mkdirSync(dirname(ghosttyTargetDir), { recursive: true });
-      execFileSync("cp", ["-R", isolatedGhostty, ghosttyTargetDir]);
+      // -X strips extended attributes. On an APFS volume the cloned ghostty bundle carries
+      // com.apple.provenance, and a plain -R copy is refused with EPERM on this host (measured:
+      // cp -R -> 3053 EPERM, cp -RX -> 202 MB copied, 0 errors). The ghostty sources are plain
+      // files; no xattr in them is meaningful to the build.
+      execFileSync("cp", ["-RX", isolatedGhostty, ghosttyTargetDir]);
 
       // Stamp versions
       execFileSync("bun", ["scripts/sync-version.mjs", "--tag", plan.tag], {
