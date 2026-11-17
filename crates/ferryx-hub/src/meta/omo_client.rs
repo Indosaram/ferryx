@@ -1755,7 +1755,7 @@ mod rpc_tests {
             std::fs::create_dir_all(&dir).unwrap();
             let binary = dir.join("mhc");
             std::fs::write(&binary,r#"#!/usr/bin/env python3
-import json, os, sys, pathlib, threading
+import json, os, sys, pathlib, threading, time
 root = pathlib.Path(__file__).parent
 with (root / 'pids').open('a') as out: out.write(str(os.getpid())+'\n')
 session = root / 'session.jsonl'
@@ -1817,6 +1817,16 @@ for line in sys.stdin:
             event('agent_start')
             message('own run','m-own')
             event('agent_end',messages=[],willRetry=False)
+            event('agent_settled')
+        if scenario=='selfrun':
+            # The same resumed run, but it never announces itself with agent_start: it only
+            # reports through messages and tools, for far longer than the ack window.
+            for step in range(40):
+                event('message_start',message=dict(role='assistant',id='own-1'))
+                message('own %d'%step,'own-1')
+                event('tool_execution_start',toolCallId='own-tool',toolName='read',args={})
+                event('tool_execution_end',toolCallId='own-tool',toolName='read',result={},isError=False)
+                time.sleep(0.05)
             event('agent_settled')
         answer(c)
         lifecycle('running',True)
@@ -2236,6 +2246,15 @@ for line in sys.stdin:
             rx.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+    #[tokio::test]
+    async fn a_self_started_run_without_agent_start_does_not_time_out_the_prompt() {
+        let mut script = Script::new();
+        // Shorter than the self-started run: only tracking that run keeps the prompt waiting.
+        script.config.ack_window = Duration::from_millis(200);
+        let outcome = script.run("selfrun", None, None).await.unwrap();
+        assert_eq!(outcome.text, "final");
+        assert_eq!(prompts(&script), vec!["selfrun"]);
     }
     #[tokio::test]
     async fn an_engine_aborted_run_waits_for_its_own_continuation() {
