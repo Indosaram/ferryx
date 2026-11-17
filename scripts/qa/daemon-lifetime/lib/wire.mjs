@@ -1,7 +1,7 @@
 // Pure wire helpers: daemon data protocol v5 (JSON lines, serde tag "type", camelCase) and the
 // frozen control-v1 channel (src-tauri/src/daemon/control.rs, tests/fixtures/control-v1.json).
 
-export const DATA_PROTOCOL_VERSION = 5;
+export const DATA_PROTOCOL_VERSION = 6;
 export const CONTROL_SCHEMA = 1;
 export const CONTROL_OPS = Object.freeze(['Hello', 'Inventory', 'RequestUpgrade', 'RetireWhenIdle', 'Shutdown']);
 export const HANDOVER_V1_OP = 'handover-v1';

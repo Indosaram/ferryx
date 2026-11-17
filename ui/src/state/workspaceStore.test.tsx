@@ -21,7 +21,7 @@ import { emitNativeTerminalPresentation, getDurableNativeBinding, resetNativeTer
 import { createLayoutState } from "./layout";
 import { clearHmrWorkspaceState } from "./hmrWorkspaceState";
 import { clearWorkspaceSnapshot, setWorkspaceSnapshot } from "./workspaceSnapshotCache";
-const { useWorkspaceStore, workspaceReducer, selectGlobalUnreadBadgeCount, hasNavigableSession, PROVIDER_SESSION_PROBE_AGENTS } = await import("./workspaceStore");
+const { canonicalWorktreeKey, useWorkspaceStore, workspaceReducer, selectGlobalUnreadBadgeCount, hasNavigableSession, PROVIDER_SESSION_PROBE_AGENTS } = await import("./workspaceStore");
 type WorkspaceServices = import("./workspaceStore").WorkspaceServices;
 type WorkspaceState = import("./workspaceStore").WorkspaceState;
 
@@ -2441,5 +2441,34 @@ describe("provider session probe allowlist", () => {
     // the cwd fallback. A guess there would bind another conversation in the same directory; pi's
     // capture comes from its extension report (ctx.sessionManager) instead.
     expect(PROVIDER_SESSION_PROBE_AGENTS).not.toContain("pi");
+  });
+});
+
+describe("canonicalWorktreeKey and SET_WORKTREES verbatim prefix tolerance", () => {
+  it("keeps sessions whose worktreePath omits the Windows verbatim prefix when worktrees include \\\\?\\", () => {
+    const winPlain = "C:\\Users\\sook\\ferryx-wt\\qaruns\\repo";
+    const winVerbatim = "\\\\?\\" + winPlain;
+    expect(canonicalWorktreeKey(winPlain)).toBe(canonicalWorktreeKey(winVerbatim));
+    const base = {
+      ...restoredSplitState(),
+      workspaceId: "ws-win",
+      repoRoot: winPlain,
+      activeWorktreePath: winPlain,
+      worktrees: [{ path: winPlain, branch: "main", head: "abc", isMain: true, isLocked: false }],
+      sessions: {
+        "session-1": {
+          ...restoredSplitState().sessions["session-1"],
+          worktreePath: winPlain,
+          cwd: winPlain,
+          backendSessionId: "backend-1",
+        },
+      },
+    };
+    const next = workspaceReducer(base, {
+      type: "SET_WORKTREES",
+      worktrees: [{ path: winVerbatim, branch: "main", head: "abc", isMain: true, isLocked: false }],
+    });
+    expect(next.sessions["session-1"]?.backendSessionId).toBe("backend-1");
+    expect(next.layout.tabs).toHaveLength(1);
   });
 });

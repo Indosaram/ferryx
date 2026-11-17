@@ -119,6 +119,18 @@ async function resetWebviewProjects(ctx, target) {
   const bootstrap = seededProjectBootstrap(target);
   const present = await ctx.agent.call('exists', { file: files.db });
   const out = { file: files.db, present: Boolean(present), wrote: false, before: null, after: null, error: null };
+  if (!present && ctx.platform === 'mac' && String(ctx.gui?.bundleId ?? '').startsWith('com.ferryx.app.qa-')) {
+    const bid = ctx.gui.bundleId;
+    const wk = await ctx.agent.call('exec', { command: 'sh', args: ['-c', 'rm -rf "$HOME/Library/WebKit/$1" "$HOME/Library/Caches/$1" 2>/dev/null; p=$(python3 -c "import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)"); rm -rf "$p/Library/WebKit/$1" "$p/Library/Caches/$1" 2>/dev/null; echo CLEARED', 'sh', bid] });
+    out.macWebkitReset = { bundleId: bid, status: wk.status, stdout: String(wk.stdout ?? '').trim() };
+    return out;
+  }
+  if (!present && ctx.platform === 'windows') {
+    const webviewDir = hjoin(ctx.layout.root, 'webview');
+    await ctx.agent.call('remove', { target: webviewDir });
+    out.winWebviewReset = { dir: webviewDir, removed: !(await ctx.agent.call('exists', { file: webviewDir })) };
+    return out;
+  }
   if (!present) return out;
   // UTF-16LE like WebKit writes it; sqlite3 takes the bytes as a hex blob literal.
   const utf16 = (text) => {
@@ -211,6 +223,10 @@ export async function Q14(ctx, result) {
   for (const p of panes.filter((x) => x.childPid)) childExits.push({ pid: p.childPid, exit: await ctx.agent.call('waitExit', { pid: p.childPid, deadlineMs: 10_000 }) });
   assertion(result, 'every pre-boot PTY child exited', childExits.every((c) => !c.exit?.timedOut), childExits);
 
+  if (ctx.state.gui) {
+    await ctx.gui.quit(ctx.state.gui).catch(() => {});
+    ctx.state.gui = null;
+  }
   // The GUI's session as it would be on disk at boot: written only after the GUI quit.
   const sessionFile = hjoin(ctx.layout.sessions, 'session_state.json');
   // Scenarios share one sessions dir, so a file left by an earlier scenario (Q11 leaves its SSH
@@ -253,7 +269,10 @@ export async function Q14(ctx, result) {
   await evidence(ctx, result, 'remote-requests-reset.json', { removed: requests });
   await evidence(ctx, result, 'remote-projects-reset.json', { file: remoteProjects, before: prevRemote ? prevRemote.slice(0, 400) : null });
   const existing = null;
-  const target = rebootTarget(existing, { workspaceId: ctx.workspaceId, repoDir: ctx.repoDir });
+  const realRepoDir = ctx.platform === 'mac'
+    ? String((await ctx.agent.call('exec', { command: 'node', args: ['-e', 'process.stdout.write(require("fs").realpathSync(process.argv[1]))', ctx.repoDir] }))?.stdout ?? '').trim() || ctx.repoDir
+    : ctx.repoDir;
+  const target = rebootTarget(existing, { workspaceId: ctx.workspaceId, repoDir: realRepoDir });
   const seed = nonce('Q14SEED');
   const seeded = preBootSession(existing, { target, panes, daemonEpoch, seed, now: Date.now() });
   await ctx.agent.call('mkdir', { dir: ctx.layout.sessions });
@@ -298,7 +317,9 @@ export async function Q14(ctx, result) {
   // leftover instance, forward to it and exit before ever mapping a window - restore-window-list.txt
   // (run 20261111t073303z) shows the desktop with no QA GUI window at failure time. A reboot
   // premise has no GUI running, so the run's own GUI scopes are stopped first (harness-owned).
-  const stopLeftovers = await ctx.agent.call('exec', { command: 'systemctl', args: ['--user', 'stop', 'ferryx-qa-' + ctx.runId + '-gui-g*.scope'] });
+  const stopLeftovers = ctx.platform === 'linux'
+    ? await ctx.agent.call('exec', { command: 'systemctl', args: ['--user', 'stop', 'ferryx-qa-' + ctx.runId + '-gui-g*.scope'] })
+    : { status: 0, stdout: '', stderr: '' };
   await evidence(ctx, result, 'leftover-gui-stop.json', { status: stopLeftovers.status, stderr: String(stopLeftovers.stderr ?? '').slice(0, 200) });
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts[bootKey], { env: { [QA_HOST_BOOT_TIME_ENV]: String(hostNow) } });
 
@@ -308,7 +329,7 @@ export async function Q14(ctx, result) {
   // Escape on a bare window is a no-op, so dismissing blind is safe; a fresh host has no modal
   // and loses nothing.
   let dismissed = 0;
-  if (ctx.mahord) {
+  if (ctx.platform === 'linux' && ctx.mahord) {
     for (let i = 0; i < 2; i += 1) {
       await ctx.mahord.key('Escape');
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -322,7 +343,7 @@ export async function Q14(ctx, result) {
   // The window list is an X11/Wayland probe: only Linux maps a GUI window this way, and
   // 'sh' does not exist on Windows, where the call would fail with ENOENT instead of
   // reporting "no window".
-  const liveWins = ctx.mahord
+  const liveWins = ctx.platform === 'linux' && ctx.mahord
     ? await ctx.agent.call('exec', {
       command: 'sh',
       args: ['-c', 'DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 hyprctl clients -a 2>/dev/null || DISPLAY=:0 wmctrl -l 2>/dev/null || true', 'sh'],
@@ -342,7 +363,7 @@ export async function Q14(ctx, result) {
   const guiPid = ctx.state.gui?.pid;
   const hasWindow = (text) => Boolean(guiPid) && String(text ?? '').includes('pid: ' + guiPid);
   let windowRetry = { guiPid, mapped: !guiPid ? 'unknown' : hasWindow(String(liveWins?.stdout ?? '')), restarted: false };
-  if (guiPid && !hasWindow(String(liveWins?.stdout ?? ''))) {
+  if (ctx.platform === 'linux' && guiPid && !hasWindow(String(liveWins?.stdout ?? ''))) {
     const exit = await ctx.agent.call('waitExit', { pid: guiPid, deadlineMs: 5_000 }).catch(() => ({ timedOut: true }));
     if (exit?.timedOut) await ctx.agent.call('kill', { pid: guiPid, signal: 'SIGKILL' }).catch(() => {});
     ctx.state.gui = await ctx.gui.launch(ctx.artifacts[bootKey], { env: { [QA_HOST_BOOT_TIME_ENV]: String(hostNow) } });
@@ -430,7 +451,7 @@ export async function Q14(ctx, result) {
   const liveIds = (after?.sessions ?? []).filter((s) => s.readerOpen === true).map((s) => s.backendId);
   const verdict = classifyPreBootPanes(saved, { workspaceId: target.workspaceId, panes, liveIds });
   result.identities = { ...(result.identities ?? {}), panes: verdict.counts };
-  await evidence(ctx, result, 'panes.json', { verdict, settledMatched: Boolean(settled.matched), restoredAfterLaunchMs: restoredAt - launchedAt, settleMs: settledAt - restoredAt, liveIds });
+  await evidence(ctx, result, 'panes.json', { verdict, settledMatched: Boolean(settled.matched), restoredAfterLaunchMs: restoredAt - launchedAt, settleMs: settledAt - restoredAt, liveIds, afterSessions: after?.sessions ?? null });
   await evidence(ctx, result, 'saved-session.json', saved ?? {});
   assertion(result, 'no pre-boot backend id is live in the restarted owner', !panes.some((p) => liveIds.includes(p.backendSessionId)), { liveIds });
   assertion(result, 'zero panes stuck on Reconnecting (bound to a pre-boot backend id)', verdict.counts.reconnecting === 0, { reconnecting: verdict.counts.reconnecting, panes: verdict.rows.filter((r) => r.state === 'reconnecting') });

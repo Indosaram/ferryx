@@ -50,7 +50,7 @@ async function copyApp({ platform, agent }, from, to) {
   const steps = platform === 'mac'
     ? [{ command: 'rm', args: ['-rf', to.appPath] }, { command: 'ditto', args: [from.appPath, to.appPath] }]
     : platform === 'windows'
-      ? [{ command: 'powershell.exe', args: ['-NoProfile', '-Command', `$ErrorActionPreference='Stop'; Copy-Item -Force -LiteralPath ${psQuote(from.guiExecutable)} -Destination ${psQuote(to.guiExecutable)}`] }]
+      ? [{ command: 'powershell.exe', args: ['-NoProfile', '-Command', `$ErrorActionPreference='Stop'; for ($i = 0; $i -lt 15; $i++) { try { Copy-Item -Force -LiteralPath ${psQuote(from.guiExecutable)} -Destination ${psQuote(to.guiExecutable)}; exit 0 } catch { if ($i -eq 14) { throw }; Start-Sleep -Milliseconds 500 } }`] }]
       : [{ command: 'cp', args: ['-f', from.guiExecutable, to.guiExecutable] }];
   for (const step of steps) {
     const r = await agent.call('exec', step);

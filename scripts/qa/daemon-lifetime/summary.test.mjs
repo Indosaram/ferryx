@@ -914,7 +914,7 @@ test('Settings counts as open only on a new cmd_daemon_supervisor_get receipt, w
  * MahoRD keystrokes are the only path that commits the marker line. Variants inject the defects
  * each assertion exists to catch.
  */
-function q11World({ replayOnRelaunch = false, resendOnReconnect = false, releaseBeforeQuit = false, wrongAttach = false, setupWizard = false, behindConsole = false, platform = 'linux', noWizardEvent = false } = {}) {
+function q11World({ replayOnRelaunch = false, resendOnReconnect = false, releaseBeforeQuit = false, wrongAttach = false, setupWizard = false, behindConsole = false, platform = 'linux', noWizardEvent = false, gateVisibleWithoutWizard = false } = {}) {
   const sid = 'SSH1';
   const w = { log: '', line: '', echo: '', receipts: [], events: [], sessionFile: null, launches: [], quits: [], quitWhileHeld: null, writesByHandle: {}, typedBy: [], held: false, escapes: 0, wizardOpen: false, pendingAttach: null, focused: true, focusCalls: 0, lostKeys: 0, appender: false, debug: [], debugDir: null, wizardArmed: false };
   const call = async (method, params = {}) => {
@@ -973,6 +973,7 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
       case 'exec': return { status: 0, stdout: w.log, stderr: '' };
       // build-log branch: Q11 records this run's SSH remote-helper pids for teardown.
       case 'recordSshHelper': return [];
+      case 'remove': return true;
       default: throw new Error(`unexpected agent call ${method}`);
     }
   };
@@ -1033,9 +1034,14 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
           if (!setupWizard) flushAttach();
           // Windows: the wizard always opens on a fresh QA profile; the pane logs it to the GUI's TEMP.
           if (platform === 'windows') {
-            w.wizardArmed = true;
             w.debugDir = env.TEMP ?? null;
-            if (!noWizardEvent) w.debug.push(`{"event":"terminal.surface.skipped","details":{"localSessionId":"${tab.localSessionId}","reason":"surfaceVisible=false yielding=1 which=dialog:Welcome to Ferryx"}}`);
+            if (gateVisibleWithoutWizard) {
+              w.wizardArmed = false;
+              w.debug.push(`{"event":"terminal.surface.input.gate.state","details":{"paneIdentity":"${tab.localSessionId}","visible":true}}`);
+            } else {
+              w.wizardArmed = true;
+              if (!noWizardEvent) w.debug.push(`{"event":"terminal.surface.skipped","details":{"localSessionId":"${tab.localSessionId}","reason":"surfaceVisible=false yielding=1 which=dialog:Welcome to Ferryx"}}`);
+            }
           }
         }
         // A product that replays the uncertain write after relaunch.
@@ -1130,6 +1136,13 @@ test('Q11 on Windows closes the setup wizard that opens after the tab attached b
   const wizard = result.assertions.find((a) => a.name === 'the first-run setup wizard opened and was closed before any key was typed');
   assert.deepEqual([wizard?.ok, wizard?.detail.opened, wizard?.detail.closed], [true, true, true]);
   assert.ok(wizard.detail.focus.length === 1, 'the GUI is focused before its Escape');
+});
+
+test('Q11 on Windows proceeds without Escape when pane gate is visible and no wizard opens', async () => {
+  const { w, result, failed } = await runQ11({ platform: 'windows', gateVisibleWithoutWizard: true });
+  assert.deepEqual(failed, [], JSON.stringify(result.assertions.filter((a) => !a.ok)));
+  assert.deepEqual([w.escapes, w.lostKeys], [0, 0]);
+  assert.match(w.log, /^uncertain[0-9a-f]{12}\n$/);
 });
 
 test('Q11 on Windows never types when the setup wizard event never shows', async () => {

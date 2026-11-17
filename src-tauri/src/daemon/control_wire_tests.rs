@@ -175,6 +175,34 @@ async fn rejected_commit_after_reader_pause_keeps_the_session_on_the_predecessor
     manager.close_session(&session_id).await.expect("close the resumed session");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn stale_handover_expiry_timer_does_not_abandon_newer_prepared_request() {
+    let root = tempfile::tempdir().unwrap();
+    let (server, _legacy) = prepared_v5_predecessor(root.path());
+    let req_path = root.path().join(crate::daemon::handover_request::REQUEST_FILE);
+    std::fs::write(&req_path, "{}").unwrap();
+    let counter = std::sync::atomic::AtomicU64::new(2);
+
+    assert!(
+        !server.maybe_abandon_stale_handover(root.path().to_path_buf(), &counter, 1).await,
+        "an older timer (seq=1) must not abandon a newer handover attempt (seq=2)"
+    );
+    assert_eq!(
+        server.handover_manager.status(),
+        crate::daemon::handover::HandoverStatus::Prepared,
+        "newer Prepared state must remain intact"
+    );
+    assert!(req_path.exists(), "newer handover-request.json must not be removed");
+
+    assert!(
+        server.maybe_abandon_stale_handover(root.path().to_path_buf(), &counter, 2).await,
+        "matching timer (seq=2) must abandon the expired Prepared handover"
+    );
+    assert_eq!(server.handover_manager.status(), crate::daemon::handover::HandoverStatus::Active);
+    assert!(!req_path.exists(), "expired handover-request.json must be removed");
+}
+
 /// An expired request must roll back even when a candidate had already exported sessions and then
 /// died before committing. The predecessor has to return to Active and hand every exported session
 /// back, otherwise it stays Prepared forever and refuses all later upgrades while the parked

@@ -472,12 +472,21 @@ export async function runBenchmark(opts, { log = (line) => console.error(line) }
 /** Companion client (headless stand-in for the GUI): attaches to every session named on stdin. */
 async function runCompanion(opts) {
   const { conn } = await connectData(opts.runtimeDir, qaPlatform(opts.platform));
-  conn.closedPromise.then(() => process.exit(0));
+  const streams = [];
+  conn.closedPromise.then(() => {
+    for (const s of streams) s.close();
+    process.exit(0);
+  });
   process.stdout.write('COMPANION_READY\n');
   for await (const line of readline.createInterface({ input: process.stdin })) {
     const m = /^attach (\S+)$/.exec(line.trim());
-    if (m) await conn.call(D.attach(m[1], 0));
+    if (m) {
+      const { conn: stream } = await connectData(opts.runtimeDir, qaPlatform(opts.platform));
+      streams.push(stream);
+      await stream.call(D.attach(m[1], 0));
+    }
   }
+  for (const s of streams) s.close();
   process.exit(0);
 }
 

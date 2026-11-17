@@ -470,8 +470,10 @@ impl DaemonServer {
                     generation_key = %request.generation_key,
                     "RequestUpgrade accepted: successor generation job started as handover candidate"
                 );
+                static HANDOVER_ATTEMPT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let attempt_seq = HANDOVER_ATTEMPT_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 Arc::clone(self).serve_legacy_handover_socket(legacy_listener);
-                Arc::clone(self).abandon_handover_if_never_claimed(runtime_dir);
+                Arc::clone(self).abandon_handover_if_never_claimed(runtime_dir, &HANDOVER_ATTEMPT_SEQ, attempt_seq);
                 ControlReply::UpgradeAccepted
             }
             refused => {
@@ -519,16 +521,36 @@ impl DaemonServer {
     /// Prepared forever and refuses every later upgrade. `abort_handover` is Prepared-guarded, and
     /// the rollback above returns the exported sessions to this daemon.
     #[cfg(unix)]
-    fn abandon_handover_if_never_claimed(self: Arc<Self>, runtime_dir: PathBuf) {
+    pub(crate) async fn maybe_abandon_stale_handover(
+        &self,
+        runtime_dir: PathBuf,
+        attempt_counter: &std::sync::atomic::AtomicU64,
+        attempt_seq: u64,
+    ) -> bool {
+        if self.handover_manager.status() == crate::daemon::handover::HandoverStatus::Prepared
+            && attempt_counter.load(std::sync::atomic::Ordering::SeqCst) == attempt_seq
+        {
+            tracing::warn!("Handover request expired without a commit; predecessor stays the owner");
+            self.abandon_prepared_handover(runtime_dir).await;
+            return true;
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    fn abandon_handover_if_never_claimed(
+        self: Arc<Self>,
+        runtime_dir: PathBuf,
+        attempt_counter: &'static std::sync::atomic::AtomicU64,
+        attempt_seq: u64,
+    ) {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(
                 crate::daemon::handover_request::REQUEST_TTL_MS,
             ))
             .await;
-            if self.handover_manager.status() == crate::daemon::handover::HandoverStatus::Prepared {
-                tracing::warn!("Handover request expired without a commit; predecessor stays the owner");
-                self.abandon_prepared_handover(runtime_dir).await;
-            }
+            self.maybe_abandon_stale_handover(runtime_dir, attempt_counter, attempt_seq)
+                .await;
         });
     }
 }

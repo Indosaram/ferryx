@@ -377,10 +377,18 @@ export const LINE_EDITOR_READY = '\x1b[?2004h';
  * Windows has its own fresh-prompt probe (nonceRoundTrip). Returns the wait, or null when none.
  */
 export async function interruptSettled(ctx, conn, sessionId) {
-  const since = ctx.platform === 'windows' ? 0 : String(await conn.outputOf(sessionId) ?? '').length;
-  await interrupt(conn, sessionId);
-  if (ctx.platform === 'windows') return null;
-  return conn.waitOutput(sessionId, LINE_EDITOR_READY, INTERRUPT_SETTLE_MS, { since });
+  if (ctx.platform === 'windows') {
+    await interrupt(conn, sessionId);
+    return null;
+  }
+  let last = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const since = String(await conn.outputOf(sessionId) ?? '').length;
+    await interrupt(conn, sessionId);
+    last = await conn.waitOutput(sessionId, LINE_EDITOR_READY, attempt === 0 ? INTERRUPT_SETTLE_MS : 2_000, { since });
+    if (!last.timedOut) return last;
+  }
+  return last;
 }
 
 /** Wait for the shell's fresh prompt after Ctrl+C (Windows: PowerShell prompt; elsewhere none). */
@@ -434,9 +442,15 @@ export async function nonceRoundTrip(ctx, conn, sessionId, result, label, { fres
     const prompt = await conn.waitOutput(sessionId, '', PROMPT_AFTER_INTERRUPT_MS, { promptAfter: since });
     assertion(result, `${label}: fresh prompt after Ctrl+C`, !prompt.timedOut, { timedOut: Boolean(prompt.timedOut), since, tail: visibleText(String(prompt.text ?? '').slice(since)).slice(-200) });
   }
-  const marker = nonce('NONCE');
-  const w = await conn.call(D.write(sessionId, echoCommand(ctx.platform, marker)));
-  const out = await conn.waitOutput(sessionId, marker, 15_000);
+  let marker = nonce('NONCE');
+  let w = await conn.call(D.write(sessionId, echoCommand(ctx.platform, marker)));
+  let out = await conn.waitOutput(sessionId, marker, 15_000);
+  if (ctx.platform !== 'windows' && out.timedOut && out.count === 0 && /correct 'rintf'|command not found/.test(String(out.text ?? ''))) {
+    await interruptSettled(ctx, conn, sessionId);
+    marker = nonce('NONCE');
+    w = await conn.call(D.write(sessionId, echoCommand(ctx.platform, marker)));
+    out = await conn.waitOutput(sessionId, marker, 15_000);
+  }
   assertion(result, `${label}: write accepted`, w.type === 'writeOk', w);
   const passed = !out.timedOut && out.count === 1;
   const text = String(out.text ?? '');
@@ -499,7 +513,7 @@ export async function retireOwner(ctx, { depth = 0 } = {}) {
   ctx.state.conn = null;
   // The owner's own data protocol: Q08b leaves a protocol-6 (v1bump) owner, which refuses a
   // protocol-5 handshake (run-int2-all Q09), so its sessions were never closed and it never retired.
-  const version = owner.hello?.protocol_version ?? 5;
+  const version = owner.hello?.protocol_version ?? 6;
   let dataError = null;
   const conn = await dataConn(ctx, ctx.layout.runtime, { version }).catch((error) => { dataError = String(error?.message ?? error); return null; });
   if (conn) {
@@ -525,7 +539,7 @@ export async function retireOwner(ctx, { depth = 0 } = {}) {
 }
 
 /** Launches a GUI, waits for a new owner and seeds one local session; records the daemon pid. */
-export async function freshOwner(ctx, artifact, { env = {}, tag = 'QA_A', dataVersion = 5, expectKey = null } = {}) {
+export async function freshOwner(ctx, artifact, { env = {}, tag = 'QA_A', dataVersion = 6, expectKey = null } = {}) {
   const before = await ctx.agent.call('readFile', { file: hjoin(ctx.layout.runtime, 'owner.json') });
   const fromPid = before ? JSON.parse(before).pid : null;
   const gui = await ctx.gui.launch(artifact, { env });
@@ -565,7 +579,7 @@ export async function recoverOwnerAfterException(ctx, artifact) {
     await invalidateOwnerState(ctx);
     const owner = await ownerIdentity(ctx);
     if (owner.pid && owner.os) {
-      const version = owner.hello?.protocol_version ?? 5;
+      const version = owner.hello?.protocol_version ?? 6;
       const opened = await ctx.agent.call('dataOpen', { runtimeDir: ctx.layout.runtime, version, allowMismatch: true }).catch(() => null);
       if (opened?.handshake?.type === 'handshakeOk') {
         // ListSessionsOk.sessions is Vec<String> (protocol.rs ListSessionsOk): bare backend ids.
