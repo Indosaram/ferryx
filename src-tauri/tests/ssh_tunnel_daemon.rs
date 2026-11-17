@@ -80,7 +80,7 @@ async fn wait_until<T>(what: &str, budget: Duration, mut probe: impl FnMut() -> 
 /// to observe a stop.
 async fn await_row(connection: &mut Connection, spec_id: &str, want: TunnelState) -> TestResult<()> {
     let deadline = Instant::now() + TEARDOWN_BUDGET;
-    let mut last = String::new();
+    let mut last;
     loop {
         let list = connection.list().await?;
         match list.views.iter().find(|view| view.spec_id.0 == spec_id) {
@@ -103,7 +103,7 @@ async fn await_runtime(
     want: TunnelState,
 ) -> TestResult<TunnelView> {
     let deadline = Instant::now() + TEARDOWN_BUDGET;
-    let mut last = String::new();
+    let mut last;
     loop {
         let list = connection.list().await?;
         match list
@@ -631,8 +631,8 @@ impl Daemon {
 }
 
 struct Connection {
-    reader: BufReader<tokio::io::ReadHalf<UnixStream>>,
-    writer: tokio::io::WriteHalf<UnixStream>,
+    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: tokio::net::unix::OwnedWriteHalf,
 }
 
 impl Connection {
