@@ -280,10 +280,10 @@ export function SshTunnelsPanel({ hosts, clock, capabilities, enabled = true, sn
         <div className="space-y-1">
           <Label className="text-[12px]" htmlFor="adhoc-tunnel-host">Machine</Label>
           <Select
-            value={form.hostId || hosts[0]?.id || ""}
+            value={form.hostId}
             onValueChange={(value: string) => setForm((prev) => ({ ...prev, hostId: value }))}
           >
-            <SelectTrigger id="adhoc-tunnel-host" className="h-7 text-[12px]">
+            <SelectTrigger id="adhoc-tunnel-host" className="h-7 text-[12px]" aria-label="Machine for the forwarded port">
               <SelectValue placeholder="Select a machine" />
             </SelectTrigger>
             <SelectContent>

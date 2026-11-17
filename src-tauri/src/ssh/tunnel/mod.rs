@@ -2,6 +2,11 @@
 pub mod argv;
 // Todo 14: the two typed pre-runtime refusals and the probe-argv pin.
 pub mod refusals;
+// `registry` names `runtime_records`, and every one of its callers
+// (`daemon::tunnel_dispatch`, `daemon::tunnel_forwarding`) is unix-only. Leaving
+// it ungated made the Windows leg resolve a module that is compiled out there
+// (E0432 at registry.rs's `use super::runtime_records`).
+#[cfg(unix)]
 pub mod registry;
 // The sidecar lock, process groups and start-time reads are unix-only; Windows
 // refuses every tunnel command before reaching them, so this half is compiled out

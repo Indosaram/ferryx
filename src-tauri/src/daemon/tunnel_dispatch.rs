@@ -404,6 +404,13 @@ impl TunnelDispatch {
     /// Boot pass plus the never-cancelled re-sweep. Calling this twice is a no-op,
     /// so a handover restart cannot double-run the boot pass.
     pub fn start_background_tasks(self: &Arc<Self>) {
+        // A caller outside a reactor (a synchronous test, an early boot path)
+        // cannot spawn; returning before the latch keeps the later, runtime-backed
+        // call able to arm the sweep and the observer.
+        #[cfg(unix)]
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
         {
             let mut started = self.background.lock().unwrap();
             if *started {
@@ -483,6 +490,11 @@ impl TunnelDispatch {
         self.adopt_if_changed_locked(host, record_missing, None).await
     }
 
+    // Ungated would name `registry`, `runtime_records` and the unix-only
+    // `bump` on Windows, where none of them exist. Every caller
+    // (`observe_hosts`'s unix block, `adopt_if_changed`, `start_unix`) is
+    // already unix-only, so the gate below is the only one this needs.
+    #[cfg(unix)]
     async fn adopt_if_changed_locked(
         &self,
         host: &crate::ssh::SshHost,

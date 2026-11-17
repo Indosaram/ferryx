@@ -3,14 +3,15 @@ name: CI Build & Check
 # Phase 1 precheck: lint gates plus the Rust unit and integration suites, on a standard GitHub-hosted ARM64 macOS
 # runner, plus a separate MCP declaration/dispatch contract gate. The ubuntu UI job and the
 # Linux/Windows cargo legs are kept but run only on manual dispatch.
+#
+# A push to main does NOT start this workflow. Gates are pulled explicitly (`workflow_dispatch`)
+# or on a pull request, so landing a merge never queues a 30-minute macOS matrix behind a CI
+# queue that a previous main run is already occupying.
 on:
   pull_request:
     branches:
       - main
       - develop
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       legacy:
