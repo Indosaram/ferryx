@@ -1,5 +1,7 @@
 //! Wire types and validation shared by tunnel storage, protocol and runtime ownership.
 pub mod argv;
+// Todo 14: the two typed pre-runtime refusals and the probe-argv pin.
+pub mod refusals;
 pub mod registry;
 // The sidecar lock, process groups and start-time reads are unix-only; Windows
 // refuses every tunnel command before reaching them, so this half is compiled out

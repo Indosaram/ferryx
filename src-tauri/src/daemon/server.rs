@@ -78,12 +78,14 @@ pub(crate) fn capability_vector(is_local_transport: bool, target: Target) -> Vec
 }
 
 #[derive(Clone, Copy)]
-enum ConnectionTransport {
+// `pub(crate)` so the refusal pin in `ssh::tunnel::refusals` can pass a real peer
+// into the daemon's own local-transport predicate instead of copying its rule.
+pub(crate) enum ConnectionTransport {
     Local,
     Paired,
 }
 
-fn is_local_transport(transport: ConnectionTransport) -> bool {
+pub(crate) fn is_local_transport(transport: ConnectionTransport) -> bool {
     matches!(transport, ConnectionTransport::Local)
 }
 

@@ -78,7 +78,7 @@ impl Refusal {
             // Serialised code is `UNSUPPORTED`; the classification lives in details.
             Self::UnsupportedPlatform => IpcError::new(
                 IpcErrorCode::Unsupported,
-                "SSH tunnels are not available on Windows",
+                "SSH tunnels need a Unix control socket, which Windows does not provide",
             )
             .with_details(serde_json::json!({
                 "failureCode": UNSUPPORTED_PLATFORM,

@@ -113,12 +113,24 @@ fn stale() -> IpcError {
     )
 }
 
+/// Windows' refusal, carrying BOTH halves: `failureCode` is the `TunnelFailureCode`
+/// classification the UI reads as a tunnel state, `reason` is the route/store layer's
+/// vocabulary. It names the missing facility (the control socket the registry and the
+/// runtimes sidecar are built on) so an operator is not left with a bare "unsupported".
 fn unsupported_platform() -> IpcError {
-    refuse(
+    IpcError::new(
         IpcErrorCode::Unsupported,
-        "SSH tunnels are not supported on this platform",
-        "unsupported_platform",
+        "SSH tunnels need a Unix control socket, which this platform does not provide",
     )
+    .with_details(json!({
+        "reason": crate::ipc::ssh_tunnel::UNSUPPORTED_PLATFORM,
+        "failureCode": crate::ipc::ssh_tunnel::UNSUPPORTED_PLATFORM,
+        "platform": "windows",
+        // The facility this platform lacks, as a machine value: the registry's
+        // process-group reaping and the runtimes sidecar both need a Unix control
+        // socket, so silence about *why* would be a bare "unsupported".
+        "missingFacility": "control_socket",
+    }))
 }
 
 fn local_only() -> IpcError {
