@@ -299,7 +299,26 @@ describe("SshTunnelsEditor", () => {
     expect(payload.expectedRevision).toBeUndefined();
   });
 
-  it("starts and stops a saved definition by id without inventing a revision", async () => {
+  it("starts a stopped definition by id with the host revision it read", async () => {
+    await renderEditor([
+      listResponse({
+        definitions: [{ hostId: host.id, specs: [spec()] }],
+        views: [view({ state: "stopped", runtimeId: null })],
+        hostRevisions: [{ hostId: host.id, revision: 5 }],
+      }),
+    ]);
+
+    expect(await screen.findByTestId("ssh-tunnel-state-spec-1")).toHaveAttribute("data-state", "stopped");
+    fireEvent.click(screen.getByRole("button", { name: "Start tunnel Postgres" }));
+
+    await waitFor(() => expect(tunnelCalls(SSH_TUNNEL_COMMANDS.start)).toHaveLength(1));
+    // The revision is the one this snapshot read; a start that omits it fails `host_revision_stale`.
+    expect((tunnelCalls(SSH_TUNNEL_COMMANDS.start)[0] as [string, Record<string, unknown>])[1])
+      .toEqual({ hostId: host.id, specId: "spec-1", hostRevision: 5 });
+    expect(tunnelCalls(SSH_TUNNEL_COMMANDS.stop)).toHaveLength(0);
+  });
+
+  it("stops a listening definition by runtime id and never starts it", async () => {
     await renderEditor([
       listResponse({
         definitions: [{ hostId: host.id, specs: [spec()] }],
