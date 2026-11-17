@@ -317,8 +317,9 @@ async fn all_seven_requests_round_trip_over_in_process_pair() {
         other => panic!("stop failed: {other:?}"),
     }
 
-    // Failed replacement: an ad-hoc start that fails, then Restore with the
-    // reported port, keeps the runtime id and clears the failure.
+    // MH-6 makes the entry non-terminal: a start whose first attempt is
+    // host_unreachable keeps recovering, so a Restore of that same saved spec
+    // reuses the retained entry instead of minting a second runtime id.
     let port = free_port();
     let failing = Fixture::default_host();
     let failing_spawner = RealChildSpawner::new();
@@ -352,7 +353,7 @@ async fn all_seven_requests_round_trip_over_in_process_pair() {
     let restored = start_view(
         dispatch_failing
             .start(
-                start_request(Some(TunnelSpec { id: TunnelSpecId("ignored".into()), ..failing.spec(port) }), None, Some(0)),
+                start_request(Some(TunnelSpec { id: TunnelSpecId("restore".into()), ..failing.spec(port) }), None, Some(0)),
                 true,
             )
             .await,
@@ -603,7 +604,9 @@ async fn boot_sweep_skips_records_of_live_lock_holder() {
     use crate::ssh::tunnel::runtime_records::{PsProcessIdentity, RuntimeRecords};
 
     let fixture = Fixture::default_host();
-    let dispatch = fixture.dispatch(Arc::new(TestClock::new(30)));
+    // Step (3) needs a tunnel that actually reaches listening, so this test uses
+    // the real child spawner rather than the default ssh binary.
+    let dispatch = fixture.dispatch_with(Arc::new(TestClock::new(30)), RealChildSpawner::new());
     let records = dispatch.records().unwrap();
     let data = data_dir(&fixture);
 
