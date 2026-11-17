@@ -1569,13 +1569,16 @@ async fn run_owned(
         // Events before the prompt is accepted belong to a run the engine started by itself;
         // the prompt is admitted once that run settles, so the ack wait restarts then.
         if !acked {
-            match f["type"].as_str() {
-                Some("agent_start") => engine_busy = true,
-                Some("agent_settled") => {
-                    engine_busy = false;
-                    ack_until = tokio::time::Instant::now() + config.ack_window;
-                }
-                _ => {}
+            // Any frame before the prompt is accepted is evidence of a run the engine started
+            // by itself (a resumed session's notification turn reports through message and
+            // tool frames, not through agent_start). The prompt is admitted once that run
+            // settles, so the ack wait starts over then; until it does, the run's own output
+            // is the only deadline that applies.
+            if f["type"] == "agent_settled" {
+                engine_busy = false;
+                ack_until = tokio::time::Instant::now() + config.ack_window;
+            } else {
+                engine_busy = true;
             }
             continue;
         }
