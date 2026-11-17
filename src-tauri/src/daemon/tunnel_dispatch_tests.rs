@@ -267,7 +267,9 @@ fn data_dir(fixture: &Fixture) -> PathBuf {
 async fn all_seven_requests_round_trip_over_in_process_pair() {
     let fixture = Fixture::default_host();
     let clock = Arc::new(TestClock::new(1_000_000));
-    let dispatch = fixture.dispatch(clock);
+    // A scripted child, not the process spawner: the round trip must never reach
+    // the network, and an unfaked ssh attempt to 10.0.0.1 hangs until killed.
+    let dispatch = fixture.dispatch_with(clock, RealChildSpawner::new());
 
     // SpecsSave answers its own revision...
     let saved = dispatch.specs_save(save_request(fixture.specs(free_port()), Some(0)), true).await;
