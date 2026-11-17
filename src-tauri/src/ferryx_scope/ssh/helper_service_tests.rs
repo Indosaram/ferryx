@@ -388,6 +388,9 @@ fn ssh_helper_unit_launch_args_forward_env_and_drop_connection_vars() {
     assert!(text.contains(&"--setenv=PATH=/usr/bin".to_string()));
     assert!(text.contains(&"--user".to_string()));
     assert!(text.contains(&"--collect".to_string()));
+    // The helper must not inherit app.slice, which host oomd configs mark as a
+    // kill pool; every PTY child lives in this cgroup.
+    assert!(text.contains(&format!("--slice={HELPER_SLICE}")));
     assert!(!text
         .iter()
         .any(|arg| arg.starts_with("--setenv=SSH_CONNECTION=")));

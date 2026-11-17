@@ -326,6 +326,64 @@ Reload and start via `sudo systemctl daemon-reload && sudo systemctl enable --no
 
 ---
 
+### Remote Helper Units and Host Memory Pressure
+
+A remote host runs one transient helper unit per remote-root and host id
+(`ferryx-helper-<host>-<digest>.service`, `src-tauri/src/ferryx_scope/ssh/process.rs`).
+That unit owns every PTY the host serves, so **anything spawned inside it shares
+one cgroup**: every build, test run and agent process started from a Ferryx
+terminal on that host.
+
+The helper is launched with `--slice=ferryx-helper.slice`, which sits next to
+`app.slice` rather than inside it. This matters because distro and operator
+configs commonly mark `app.slice` as the only pool `systemd-oomd` may kill:
+
+```ini
+# /usr/lib/systemd/user/app.slice.d/10-oomd.conf  (shipped by omarchy)
+[Slice]
+ManagedOOMMemoryPressure=kill
+ManagedOOMSwap=kill
+```
+
+Without the dedicated slice the helper inherits that pool, and a single
+memory-hungry build or `vitest` run makes oomd kill the whole unit — every
+terminal session on the host dies at once, which looks like an SSH drop. Confirm
+the helper escaped the pool:
+
+```bash
+systemctl --user show 'ferryx-helper-*.service' -p Slice
+# Slice=ferryx-helper.slice
+systemctl --user show ferryx-helper.slice -p ManagedOOMSwap -p ManagedOOMMemoryPressure
+# both auto -> not a kill candidate
+```
+
+`ManagedOOMSwap`/`ManagedOOMMemoryPressure` of `auto` means *not monitored*;
+only `kill` units are candidates. `ManagedOOMPreference=avoid` is not a
+substitute here: it is only honoured for pressure-based kills, and swap-based
+election ignores it.
+
+Running heavy builds or test suites on a host is still a good way to make that
+host's oomd kill *something*. Run them outside the helper cgroup by giving them
+their own transient unit:
+
+```bash
+systemd-run --user --unit=build-$$ --collect --quiet \
+  --slice=ferryx-helper.slice --working-directory="$PWD" -- \
+  cargo test --lib
+```
+
+Even then, keep a memory ceiling so the host does not fall into global swap
+exhaustion, where oomd's swap limit (`Swap Used Limit`, default 90%) elects
+whichever cgroup it can see:
+
+```bash
+systemd-run --user --unit=build-$$ --collect --quiet \
+  --slice=ferryx-helper.slice --property=MemoryHigh=8G --property=MemoryMax=12G \
+  --working-directory="$PWD" -- cargo test --lib
+```
+
+---
+
 ## 6. Remote Gateway Configuration
 
 The remote gateway allows external Ferryx desktop clients or web browsers to connect to your headless server.

@@ -619,6 +619,20 @@ fn forwarded_env(env: &[(OsString, OsString)]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Slice the remote helper runs in.
+///
+/// Deliberately outside `app.slice`. Distributions and host configs routinely
+/// mark `app.slice` as the only pool systemd-oomd may kill (omarchy ships
+/// `/usr/lib/systemd/user/app.slice.d/10-oomd.conf` doing exactly that), and a
+/// transient unit's slice is inherited by every process it spawns. Since all
+/// PTY children of a host live under the helper's cgroup, being inside that
+/// pool means a single memory-heavy build or test run makes oomd kill the whole
+/// unit and every terminal session on the host with it. A slice under `-.slice`
+/// inherits `ManagedOOMSwap=auto`/`ManagedOOMMemoryPressure=auto` instead, which
+/// keeps oomd from ever electing the helper as a kill target.
+#[cfg(any(target_os = "linux", test))]
+const HELPER_SLICE: &str = "ferryx-helper.slice";
+
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn unit_launch_args(
     exe: &Path,
@@ -629,6 +643,10 @@ pub(crate) fn unit_launch_args(
     let mut args: Vec<OsString> = vec![
         "--user".into(),
         format!("--unit={}", helper_unit_name(host, root)).into(),
+        // Keep the helper out of app.slice: host oomd configs commonly mark
+        // app.slice as the sole kill pool (omarchy does), and every PTY child
+        // inherits this cgroup, so one heavy build would take every pane down.
+        format!("--slice={}", HELPER_SLICE).into(),
         "--collect".into(),
         "--quiet".into(),
     ];
