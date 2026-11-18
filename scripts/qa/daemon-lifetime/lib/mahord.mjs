@@ -190,6 +190,20 @@ async function openMahord(gui, { binary, log }) {
   };
 }
 
+/**
+ * The cliclick command that releases every modifier at once. cliclick's own usage says
+ * `ku:keys` takes "a comma-separated list of modifier keys", and `cliclick -m test 'ku:alt,ku:cmd,...'`
+ * rejects it with 'Invalid key "ku:cmd" given as argument to command "ku"' and exit 1, while
+ * `ku:alt,cmd,ctrl,shift` prints one 'Release ... key' line per key and exits 0. One command, one
+ * release per named key - the prefixes belong to the command identifier only.
+ */
+export const CLICLICK_RELEASE_KEYS = Object.freeze(['alt', 'cmd', 'ctrl', 'shift']);
+
+/** cliclick argv for releasing the held modifiers, as `exec` receives it. */
+export function cliclickReleaseArgv(keys = CLICLICK_RELEASE_KEYS) {
+  return [`ku:${keys.join(',')}`];
+}
+
 /** Local macOS System Events input adapter for Q11 when gui.kind === 'mac-local'. */
 export function createMacLocalInput({ exec }) {
   const osa = async (script) => exec('/usr/bin/osascript', ['-e', script]);
@@ -253,19 +267,30 @@ export function createMacLocalInput({ exec }) {
     // echoed. Nothing in the typing path can clear it (typeverified.mjs only resends and erases
     // characters), so the pane is returned to a clean modifier state before it is typed into.
     releaseModifiers: async () => {
-      const keys = ['alt', 'cmd', 'ctrl', 'shift'];
+      const keys = CLICLICK_RELEASE_KEYS;
       // cliclick posts real key-up CGEvents for every named modifier in one call.
-      const viaCliclick = await exec('/opt/homebrew/bin/cliclick', [`ku:${keys.join(',ku:')}`]).catch(() => null);
+      const viaCliclick = await exec('/opt/homebrew/bin/cliclick', cliclickReleaseArgv(keys)).catch(() => null);
       if (viaCliclick && viaCliclick.status === 0) return { ok: true, via: 'cliclick', keys };
       // Without cliclick, release them one script at a time: a name System Events rejects must not
-      // hide the others.
+      // hide the others. Report the failure that actually happened - the exit status and stderr of
+      // the key-up that did not land - so focus.json shows which modifier stayed down instead of a
+      // bare ok:false.
       const results = [];
       for (const name of keys) {
-        const r = await osa(`tell application "System Events" to key up ${MOD_NAMES[name] ?? name}`)
-          .catch((error) => ({ failed: String(error?.message ?? error) }));
-        results.push({ name, ok: !r?.failed });
+        let r = null;
+        let failure = null;
+        try {
+          r = await osa(`tell application "System Events" to key up ${MOD_NAMES[name] ?? name}`);
+        } catch (error) {
+          failure = String(error?.detail ?? error?.message ?? error);
+        }
+        // proc.run resolves status null when the child died from a signal (its 'close' handler takes
+        // the exit code only), so a key-up is successful only when the exit status IS 0: a null
+        // status means the osascript was killed and never released the modifier.
+        const ok = !failure && r?.status === 0;
+        results.push({ name, ok, ...(ok ? {} : { status: r?.status ?? null, error: failure ?? (String(r?.stderr ?? '').trim() || null) }) });
       }
-      return { ok: results.every((r) => r.ok), via: 'osascript', keys, results };
+      return { ok: results.every((r) => r.ok), via: 'osascript', keys, results, cliclick: viaCliclick ? { status: viaCliclick.status, stderr: String(viaCliclick.stderr ?? '').trim() } : null };
     },
     type: async (text) => osa(`tell application "System Events" to keystroke "${escapeAs(text)}"`),
     key: async (k) => sendKey(k),

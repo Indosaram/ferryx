@@ -414,6 +414,33 @@ export function appendedText(text) {
   return String(text ?? '').replace(/\r\n/g, '\n');
 }
 
+/** Widest sidebar the product draws, in px: ui/src/lib/sidebarPersistence.ts SUPERVISOR_SIDEBAR_RANGE.max. */
+export const SIDEBAR_MAX_PX = 480;
+
+/**
+ * A point inside the terminal pane of a GUI window rect, or null when no safe point exists.
+ *
+ * macOS draws the app sidebar on the left of the same window and lets the user widen it to
+ * SIDEBAR_MAX_PX, so a fraction of the whole window can land on the sidebar: the pane then never
+ * becomes first responder, has_focused_terminal stays false, and Q11's keystrokes reach nothing
+ * (run surv-mac-1117m Q11 focus.json terminalClick {x:1220,y:596} in a 1280-wide window). The mac
+ * point is the centre of the area right of that widest sidebar: x=880 at the 1280 default and
+ * x=640 at tauri's 800 px minimum. A window too narrow to hold a pane right of it - or one that is
+ * too small overall - yields null, because a click anywhere else would land in the sidebar or in
+ * another window. Other platforms keep the coordinates they were gated with.
+ */
+export function paneClickPoint(rect, platform) {
+  const w = rect.right - rect.left;
+  const h = rect.bottom - rect.top;
+  if (!(w > 300 && h > 200)) return null;
+  if (platform === 'mac') {
+    const pane = w - SIDEBAR_MAX_PX;
+    if (!(pane > 200)) return null;
+    return { x: Math.round(rect.left + SIDEBAR_MAX_PX + pane * 0.5), y: Math.round(rect.top + h * 0.55) };
+  }
+  return { x: Math.round(rect.left + w * 0.65), y: Math.round(rect.top + h * 0.55) };
+}
+
 export async function Q11(ctx, result) {
   if (!requireOwner(ctx, result)) return;
   if (!ctx.hooks.writeAckHoldArm?.present) return block(result, 'HOOK_MISSING', ctx.hooks.writeAckHoldArm.owner);
@@ -512,21 +539,21 @@ export async function Q11(ctx, result) {
   if (typeof ctx.mahord?.click === 'function') {
     const rect = focused?.rect ?? focused?.after ?? focused?.before;
     if (rect && Number.isFinite(rect.left) && Number.isFinite(rect.top) && Number.isFinite(rect.right) && Number.isFinite(rect.bottom)) {
-      const w = rect.right - rect.left;
-      const h = rect.bottom - rect.top;
-      if (w > 300 && h > 200) {
-        const cx = Math.round(rect.left + w * 0.65);
-        const cy = Math.round(rect.top + h * 0.55);
-        await ctx.mahord.click(cx, cy);
-        terminalClick = { x: cx, y: cy };
+      const point = paneClickPoint(rect, ctx.platform);
+      if (point) {
+        await ctx.mahord.click(point.x, point.y);
+        terminalClick = point;
         await releaseModifiers('after-click');
       }
     }
   }
+  // The last release belongs in the receipt too: focus.json is the on-disk account of the modifier
+  // state the typing began with, and writing it before the final release hid that release from the
+  // evidence (only the in-memory array had it).
+  await releaseModifiers('before-typing');
   await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused, terminalClick, modifierRelease });
   let typed;
   try {
-    await releaseModifiers('before-typing');
     typed = await typeVerified({
       mahord: ctx.mahord,
       text: marker,

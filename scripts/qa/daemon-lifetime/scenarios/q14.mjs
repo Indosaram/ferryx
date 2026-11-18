@@ -190,6 +190,54 @@ export function classifyPreBootPanes(saved, { workspaceId, panes, liveIds }) {
 
 const parse = (text) => { try { return text ? JSON.parse(text) : null; } catch { return null; } };
 
+/**
+ * Waits out the pane settle inside ONE budget measured from the restore, and returns what it saw.
+ *
+ * The plan promises every pre-boot pane is exited/replaced within SETTLE_DEADLINE_MS of the GUI
+ * restoring the workspace, so the saved-session read and the live re-describe share that single
+ * deadline instead of taking one each: once the saved-session wait spent the whole deadline, the
+ * old loop's own deadline had already passed, it never polled, and a pane whose replacement shell
+ * was opened asynchronously stayed classified as 'other' (run surv-mac-1117m Q14: counts preBoot:2,
+ * exited:1, other:1).
+ *
+ * A poll is one consistent snapshot: the classification uses the JSON parsed from the very text
+ * whose unbind test decided the saved half, never a value from an earlier poll. An observation only
+ * settles the wait when it is both settled and taken at or before the deadline - the clock is read
+ * AFTER the awaited file read and describe, so a slow answer that crosses the deadline cannot pass
+ * as on time. `elapsedMs` is the wait's duration measured from restoredAt, and no sleep is ever
+ * issued past the deadline.
+ */
+export async function settlePreBootPanes({ readSaved, describe, workspaceId, panes, restoredAt, deadlineMs = SETTLE_DEADLINE_MS, now = Date.now, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), pollMs = 500 }) {
+  const deadline = restoredAt + deadlineMs;
+  const unbound = new RegExp(absentPattern(panes.map((p) => `"backendSessionId":"${p.backendSessionId}"`)));
+  const liveIdsOf = (desc) => (desc?.sessions ?? []).filter((s) => s.readerOpen === true).map((s) => s.backendId);
+  const observe = async () => {
+    const savedText = String((await readSaved()) ?? '');
+    const saved = parse(savedText);
+    const after = await describe();
+    const liveIds = liveIdsOf(after);
+    const verdict = classifyPreBootPanes(saved, { workspaceId, panes, liveIds });
+    const at = now();
+    const expired = at > deadline;
+    // Unreadable JSON is never a settled state: only a save this poll actually parsed can prove the
+    // pre-boot binding is gone.
+    const settled = saved !== null && unbound.test(savedText) && verdict.counts.exited + verdict.counts.replaced === verdict.counts.preBoot;
+    return { saved, savedText, after, liveIds, verdict, settled, accepted: settled && !expired, expired, at };
+  };
+  let obs = await observe();
+  let polls = 1;
+  while (!obs.accepted && !obs.expired) {
+    const left = deadline - now();
+    if (left <= 0) break;
+    await sleep(Math.min(pollMs, left));
+    obs = await observe();
+    polls += 1;
+  }
+  // The wait's real duration: the accepted observation's time, or the full budget when it ran out.
+  const elapsedMs = Math.max(0, now() - restoredAt);
+  return { ...obs, settled: obs.accepted, polls, elapsedMs };
+}
+
 export async function Q14(ctx, result) {
   if (!requireOwner(ctx, result)) return;
   if (!ctx.hooks.qaHostBootOverride?.present) return block(result, 'HOOK_MISSING', ctx.hooks.qaHostBootOverride?.owner ?? 'qaHostBootOverride');
@@ -444,32 +492,19 @@ export async function Q14(ctx, result) {
   // Only the pane's live binding matters here: the product deliberately keeps the retired backend
   // id in lastBackendSessionId as history (ui/src/state/workspaceStore.ts retainedLastBackendSessionId),
   // so banning the bare id anywhere in the JSON never settles once a pane has rebound.
-  const settled = await ctx.agent.call('waitLog', { file: sessionFile, pattern: absentPattern(panes.map((p) => `"backendSessionId":"${p.backendSessionId}"`)), deadlineMs: SETTLE_DEADLINE_MS });
-  const restoredAtMs = restoredAt;
-  const settleDeadline = restoredAtMs + SETTLE_DEADLINE_MS;
-  const liveIdsOf = (desc) => (desc?.sessions ?? []).filter((s) => s.readerOpen === true).map((s) => s.backendId);
-  let saved = parse(await ctx.agent.call('readFile', { file: sessionFile }));
-  let after = ctx.state.conn ? await ctx.state.conn.describe() : null;
-  let liveIds = liveIdsOf(after);
-  let verdict = classifyPreBootPanes(saved, { workspaceId: target.workspaceId, panes, liveIds });
-  // A pane rebound to an id the fresh owner has not listed live *yet* is not a final state: the app
-  // opens the replacement shell asynchronously, so a describe() taken right after the restore reports
-  // an empty live list and every pane reads as "other" (run 20261117t142623z pane-0, liveIds []).
-  // Re-describe until every pane settles as exited/replaced or SETTLE_DEADLINE_MS runs out.
-  let settlePolls = 1;
-  while (Date.now() < settleDeadline && verdict.counts.exited + verdict.counts.replaced < verdict.counts.preBoot) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    saved = parse(await ctx.agent.call('readFile', { file: sessionFile })) ?? saved;
-    after = ctx.state.conn ? await ctx.state.conn.describe() : after;
-    liveIds = liveIdsOf(after);
-    verdict = classifyPreBootPanes(saved, { workspaceId: target.workspaceId, panes, liveIds });
-    settlePolls += 1;
-  }
-  const settledAt = Date.now();
+  // One budget, measured from the restore: the plan promises every pre-boot pane settles within
+  // SETTLE_DEADLINE_MS of the GUI restoring the workspace, and the saved-session wait plus the live
+  // re-describe inside settlePreBootPanes spend that single deadline (not one each).
+  const settle = await settlePreBootPanes({
+    readSaved: async () => await ctx.agent.call('readFile', { file: sessionFile }),
+    describe: async () => (ctx.state.conn ? await ctx.state.conn.describe() : null),
+    workspaceId: target.workspaceId, panes, restoredAt,
+  });
+  const { saved, after, liveIds, verdict } = settle;
   result.identities = { ...(result.identities ?? {}), panes: verdict.counts };
-  await evidence(ctx, result, 'panes.json', { verdict, settledMatched: Boolean(settled.matched), restoredAfterLaunchMs: restoredAt - launchedAt, settleMs: settledAt - restoredAt, settlePolls, liveIds, afterSessions: after?.sessions ?? null });
+  await evidence(ctx, result, 'panes.json', { verdict, settledMatched: settle.settled, restoredAfterLaunchMs: restoredAt - launchedAt, settleMs: settle.elapsedMs, settlePolls: settle.polls, settleExpired: settle.expired, liveIds, afterSessions: after?.sessions ?? null });
   await evidence(ctx, result, 'saved-session.json', saved ?? {});
   assertion(result, 'no pre-boot backend id is live in the restarted owner', !panes.some((p) => liveIds.includes(p.backendSessionId)), { liveIds });
   assertion(result, 'zero panes stuck on Reconnecting (bound to a pre-boot backend id)', verdict.counts.reconnecting === 0, { reconnecting: verdict.counts.reconnecting, panes: verdict.rows.filter((r) => r.state === 'reconnecting') });
-  assertion(result, `every pre-boot pane exited and offers a new shell within ${SETTLE_DEADLINE_MS} ms of the restore`, Boolean(settled.matched) && verdict.counts.exited + verdict.counts.replaced === verdict.counts.preBoot, { counts: verdict.counts, rows: verdict.rows, settleMs: settledAt - restoredAt });
+  assertion(result, `every pre-boot pane exited and offers a new shell within ${SETTLE_DEADLINE_MS} ms of the restore`, settle.settled && verdict.counts.exited + verdict.counts.replaced === verdict.counts.preBoot, { counts: verdict.counts, rows: verdict.rows, settleMs: settle.elapsedMs, expired: settle.expired });
 }

@@ -204,15 +204,44 @@ async function prepareWorktreeDeps({ host, agent, worktree }) {
 }
 
 /**
- * Local lanes build from the checkout the run was launched in, which may be a worktree that was
- * created by hand and therefore carries no ui/node_modules and no ghostty submodule. Both are
- * needed by tauri's beforeBuildCommand, and their absence surfaced only as an opaque
- * 'error: Script not found "tsc"' BUILD_FAILED (run surv-mac-1117h). Only install when a marker is
- * missing: a prepared tree must not pay a relink on every run.
+ * Files a build tree must carry before tauri's beforeBuildCommand (`bun run --cwd ui build` =
+ * `tsc && vite build`) and build_ghostty.rs can run. Both are probed as FILES, never as a shell
+ * test and never as a bare directory.
  */
-async function ensureLocalBuildDeps({ host, agent, worktree }) {
-  const probe = await agent.call('exec', { command: 'sh', args: ['-c', `test -x "${worktree}/ui/node_modules/.bin/tsc" && test -n "$(ls -A "${worktree}/src-tauri/ghostty" 2>/dev/null)" && echo DEPS_OK || echo DEPS_MISSING`] });
-  if (String(probe.stdout).includes('DEPS_OK')) return true;
+export const BUILD_DEPS = Object.freeze({
+  // npm ships this file on every platform; node_modules/.bin holds a POSIX symlink or, on Windows,
+  // a tsc.cmd shim, neither of which is a stable host-independent marker.
+  tsc: ['ui', 'node_modules', 'typescript', 'bin', 'tsc'],
+  // build_ghostty.rs treats a missing build.zig as an uninitialized submodule
+  // ('Ghostty source at ... appears uninitialized'), and an uninitialized gitlink is an EMPTY
+  // directory: a directory existence probe passes on a tree that cannot build. The submodule is
+  // src-tauri/vendor/ghostty (.gitmodules), not the retired src-tauri/ghostty path.
+  ghostty: ['src-tauri', 'vendor', 'ghostty', 'build.zig'],
+});
+
+/**
+ * Names in BUILD_DEPS that `worktree` does not carry, probed through the agent's own `exists`
+ * primitive: a `sh -c` probe dies on a Windows lane with 'spawn sh ENOENT' (run surv-win-1117g),
+ * because cmd/PowerShell hosts ship no POSIX shell.
+ */
+export async function missingBuildDeps({ host, agent, worktree }) {
+  const missing = [];
+  for (const [name, parts] of Object.entries(BUILD_DEPS)) {
+    const present = await agent.call('exists', { file: joinFor(host.platform, worktree, ...parts) });
+    if (!present) missing.push(name);
+  }
+  return missing;
+}
+
+/**
+ * A lane builds from a checkout the harness did not prepare itself, which may be a hand-made
+ * worktree carrying no ui/node_modules and no ghostty submodule. Their absence surfaced only as an
+ * opaque 'error: Script not found "tsc"' BUILD_FAILED (run surv-mac-1117h). Only install when a
+ * marker is missing, so a prepared tree never pays a relink on every run.
+ */
+async function ensureBuildDeps({ host, agent, worktree }) {
+  const missing = await missingBuildDeps({ host, agent, worktree });
+  if (missing.length === 0) return true;
   return prepareWorktreeDeps({ host, agent, worktree });
 }
 
@@ -285,7 +314,7 @@ export function assertRunnersComplete(runners = RUNNERS, ids) {
   return true;
 }
 
-function joinFor(platform, ...parts) {
+export function joinFor(platform, ...parts) {
   return platform === 'windows' ? path.win32.join(...parts) : path.posix.join(...parts);
 }
 
@@ -671,7 +700,11 @@ async function main() {
     // 'bun --bun tsc && vite build' died with 'error: Script not found "tsc"' and the whole gate
     // reported BUILD_FAILED before the first scenario (run surv-mac-1117h, 2026-11-18). Check first
     // and only pay the install when a dep is actually missing, so warm trees are untouched.
-    if (host.transport.kind === 'local' && !selfTest) await ensureLocalBuildDeps({ host, agent, worktree: buildFrom });
+    if (host.transport.kind === 'local' && !selfTest) await ensureBuildDeps({ host, agent, worktree: buildFrom });
+    // The v1 build is a plain tauri build too, from a worktree the harness never prepares: without
+    // these deps its beforeBuildCommand dies with 'error: Script not found "tsc"' and Q08b blocks
+    // on ARTIFACT_MISSING (run surv-linux-om5: BUILD_FAILED v1bump exit=1, bun run build exit 127).
+    if (opts.v1Worktree) await ensureBuildDeps({ host, agent, worktree: opts.v1Worktree });
     const plan = buildPlan({ host, runDir, worktree: buildFrom, v1Worktree: opts.v1Worktree, baselineWorktree: opts.baselineWorktree });
     const productName = tauriQaConfig(runId, host.platform).productName;
     const artifacts = {};
