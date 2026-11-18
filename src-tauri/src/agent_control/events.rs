@@ -2028,8 +2028,17 @@ mod tests {
             let next = after.publish(draft("s", AgentControlState::Working));
             assert!(next.sequence > cursor, "the new sequence domain advances beyond the old shared cursor: {next:?}");
             assert!(matches!(after.replay_in_instance(cursor, Some(&epoch)), AgentReplay::Gap { .. }));
-            assert!(matches!(after.replay_in_instance(cursor, Some(after.instance())), AgentReplay::Gap { .. }),
-                "the reused numeric cursor is below the post-restart agent head and must gap");
+            // The same number presented under the NEW epoch is a new-domain cursor: sequences below
+            // the adopted head were never minted here, so the replay starts after the cursor and
+            // every row it returns belongs to this run. (The old epoch, asserted above, gaps.)
+            match after.replay_in_instance(cursor, Some(after.instance())) {
+                AgentReplay::Events { events, .. } => {
+                    assert!(events.iter().all(|event| event.sequence > cursor), "a replay never re-sends consumed rows");
+                    assert!(!events.is_empty(), "the rows published in this epoch replay after the cursor");
+                    assert!(events.iter().all(|event| event.sequence <= after.head()), "a replay never runs past the head");
+                }
+                AgentReplay::Gap { .. } => panic!("a cursor inside this epoch's retained tail must replay, not gap"),
+            }
 
             let mut emptied = tail;
             emptied.retained.clear();
