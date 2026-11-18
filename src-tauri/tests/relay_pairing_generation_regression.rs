@@ -248,9 +248,10 @@ async fn a11_joint_fixture(inject_failure: bool) {
         resumed.send(Message::Text(json!({"type":"resize","generation":attached["generation"],"cols":103,"rows":37}).to_string().into())).await.unwrap();
         resumed.send(Message::Text(json!({"type":"ping"}).to_string().into())).await.unwrap();
         timeout(LIMIT, async { loop { if let Some(Ok(Message::Text(text))) = resumed.next().await { if serde_json::from_str::<serde_json::Value>(&text).unwrap()["type"] == "pong" { break; } } } }).await.unwrap();
-        assert_eq!(pty.get_size(), (103,37));
+        assert_eq!(pty.get_size(), (80, 24), "reattaching alone must not take over the PTY size");
         resumed.send(Message::Binary(b"trap 'printf \"\\nA11_%s:ok:END\\n\" INTERRUPTED' INT; printf '\\nA11_%s:ok:END\\n' ARMED\r".to_vec().into())).await.unwrap();
         assert_eq!(a11_marker(&mut resumed, "A11_ARMED:").await, "ok");
+        assert_eq!(pty.get_size(), (103, 37), "input on the new attachment must apply its requested size");
         resumed.send(Message::Text(json!({"type":"signal","generation":attached["generation"],"signal":"interrupt"}).to_string().into())).await.unwrap();
         assert_eq!(a11_marker(&mut resumed, "A11_INTERRUPTED:").await, "ok");
         // PTY-produced replay: no direct publication or synthetic gap injection.
