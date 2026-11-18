@@ -15,9 +15,13 @@ tauri-build = { version = "=2.7.3", features = [] }
 [dependencies]
 tauri = { version = "=2.12.4", features = [] }
 tauri-plugin-opener = "=2.7.2"
+# `request_push_permission` returns a named struct, which a Tauri command must serialize.
+# Same major as the one `tauri` itself resolves to, so this adds no second copy.
+serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL", "NSError", "NSObject"] }
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "block2", "UIActivity", "UIActivityViewController", "UIViewController", "UIResponder"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL", "NSError", "NSObject", "NSData", "NSPathUtilities"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "block2", "UIActivity", "UIActivityViewController", "UIViewController", "UIResponder", "UIApplication"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter"] }

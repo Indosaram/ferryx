@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   AGP_VERSION, GRADLE_VERSION, NDK_VERSION, patchAgp, patchAppGradle, patchGradleWrapper, patchTheme,
 } from "./android-patches.mjs";
-import { patchInfoPlist, patchLaunchScreen, patchProjectYml } from "./ios-patches.mjs";
+import { patchEntitlements, patchInfoPlist, patchLaunchScreen, patchProjectYml } from "./ios-patches.mjs";
 
 // Fixtures are the raw tauri-cli 2.11.4 mobile templates the init scripts patch.
 const fixture = name => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
@@ -73,6 +73,32 @@ describe("ios patches", () => {
     expect(patchProjectYml(yml, undefined)).toContain("      - path: PrivacyInfo.xcprivacy\n        buildPhase: resources\n");
   });
 
+  // A project generated before the team was known still carries the old signing settings, so
+  // re-running init must add the team rather than skip. Measured: xcodebuild refused the build with
+  // "Signing for ferryx-mobile_iOS requires a development team".
+  test("patching a second time adds a team the first run did not have, without duplicating lines", () => {
+    const first = patchProjectYml(yml, undefined);
+    const second = patchProjectYml(first, "ABCDE12345");
+    expect(second).toContain("        DEVELOPMENT_TEAM: ABCDE12345\n");
+    expect(second.match(/TARGETED_DEVICE_FAMILY/g)).toHaveLength(1);
+    expect(second.match(/ITSAppUsesNonExemptEncryption/g)).toHaveLength(1);
+    expect(second.match(/NSMicrophoneUsageDescription/g)).toHaveLength(1);
+    // The fixture is a raw handlebars template and keeps its own `{{apple.development-team}}`
+    // line, so count concrete team ids rather than every DEVELOPMENT_TEAM mention.
+    expect(second.match(/DEVELOPMENT_TEAM: [A-Z0-9]{10}\b/g)).toHaveLength(1);
+    expect(second.match(/PrivacyInfo\.xcprivacy/g)).toHaveLength(1);
+  });
+
+  test("changing the team rewrites it instead of stacking a second value", () => {
+    const a = patchProjectYml(yml, "AAAAAAAAAA");
+    const b = patchProjectYml(a, "BBBBBBBBBB");
+    expect(b).toContain("        DEVELOPMENT_TEAM: BBBBBBBBBB\n");
+    expect(b).not.toContain("AAAAAAAAAA");
+    // The fixture is a raw handlebars template, so its own unresolved
+    // `{{apple.development-team}}` line is still there; count only concrete team ids.
+    expect(b.match(/DEVELOPMENT_TEAM: [A-Z0-9]{10}\b/g)).toHaveLength(1);
+  });
+
   test("Info.plist gains ITSAppUsesNonExemptEncryption=false, or flips an existing true", () => {
     const plist = `<?xml version="1.0"?>\n<plist version="1.0">\n<dict>\n\t<key>CFBundleName</key>\n\t<string>Ferryx</string>\n</dict>\n</plist>\n`;
     expect(patchInfoPlist(plist)).toMatch(/<key>ITSAppUsesNonExemptEncryption<\/key>\n\t<false\/>\n<\/dict>/);
@@ -92,5 +118,56 @@ describe("ios patches", () => {
     expect(manifest).toMatch(/NSPrivacyCollectedDataTypeEmailAddress<\/string>\s*<key>NSPrivacyCollectedDataTypeLinked<\/key>\s*<true\/>/);
     expect(manifest).toContain("NSPrivacyCollectedDataTypePurposeAppFunctionality");
     expect(manifest).toMatch(/NSPrivacyAccessedAPICategoryUserDefaults<\/string>\s*<key>NSPrivacyAccessedAPITypeReasons<\/key>\s*<array>\s*<string>CA92\.1<\/string>/);
+  });
+
+  // `gen/apple` is gitignored, so a regenerated project is the normal case: without this patch
+  // the entitlements file comes back without `aps-environment` and APNs registration fails.
+  test("entitlements gain aps-environment so APNs can issue a device token", () => {
+    const empty = `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n</dict>\n</plist>\n`;
+    expect(patchEntitlements(empty)).toMatch(/<key>aps-environment<\/key>\n\t<string>development<\/string>/);
+  });
+
+  test("entitlements patch rewrites an existing production value to development", () => {
+    const signed = `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n\t<key>aps-environment</key>\n\t<string>production</string>\n</dict>\n</plist>\n`;
+    expect(patchEntitlements(signed)).toMatch(/<string>development<\/string>/);
+    expect(patchEntitlements(signed)).not.toMatch(/<string>production<\/string>/);
+  });
+
+  test("entitlements patch is idempotent", () => {
+    const once = patchEntitlements(`<plist version="1.0">\n<dict>\n</dict>\n</plist>\n`);
+    expect(patchEntitlements(once)).toBe(once);
+  });
+
+  test("entitlements patch fails loudly when the template drifts", () => {
+    expect(() => patchEntitlements("not a plist")).toThrow(/entitlements root dict/);
+  });
+
+  // Measured on a fresh `tauri ios init` (tauri-cli 2.11.x, macOS 27.2): the generated
+  // entitlements file is 0 bytes, which the root-dict anchor above cannot match. Treat an empty
+  // file as a template and emit a whole plist, or the init dies before building.
+  test("entitlements patch fills an empty file with a complete plist", () => {
+    for (const blank of ["", "   \n\t\n"]) {
+      const patched = patchEntitlements(blank);
+      expect(patched).toContain("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+      expect(patched).toContain("<!DOCTYPE plist");
+      expect(patched).toMatch(/<key>aps-environment<\/key>\n\t<string>development<\/string>/);
+      expect(patched.trimEnd().endsWith("</plist>")).toBe(true);
+    }
+  });
+
+  test("an empty entitlements file patches idempotently", () => {
+    const once = patchEntitlements("");
+    expect(patchEntitlements(once)).toBe(once);
+  });
+
+  // Measured on the actual `tauri ios init` output: the template ships the root dict
+  // self-closing (a bare dict with a single slash), which a `<dict>\s*` anchor never matches.
+  test("entitlements patch fills a self-closing root dict", () => {
+    const tauri =
+      '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict/>\n</plist>\n';
+    const patched = patchEntitlements(tauri);
+    expect(patched).not.toContain("<dict/>");
+    expect(patched).toMatch(/<dict>\n\t<key>aps-environment<\/key>\n\t<string>development<\/string>\n<\/dict>/);
+    expect(patchEntitlements(patched)).toBe(patched);
   });
 });

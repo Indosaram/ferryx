@@ -1,4 +1,9 @@
 import { getRemoteAuthToken } from "./remoteClient";
+import { requestNativePushPermission } from "./tauri";
+import { isMobileCompanion } from "./clientRuntime";
+
+/** What the native shell returns: the APNs token and the environment it was minted for. */
+type NativePushRegistration = { token: string; sandbox: boolean };
 
 /**
  * Path of the shipped service worker (`ui/public/sw.js`). The app bootstrap in
@@ -48,6 +53,14 @@ export function jsonPost(body: unknown): RequestInit {
 
 function pushCapable(): boolean {
   return typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window;
+}
+
+/**
+ * Whether this shell is the native iOS app, which registers APNs instead of Web Push: a WKWebView
+ * has no `PushManager`, so the Web Push path can never work there.
+ */
+function apnsCapable(): boolean {
+  return isMobileCompanion();
 }
 
 async function pushRegistration(): Promise<ServiceWorkerRegistration | null> {
@@ -128,6 +141,7 @@ export async function registerPushSubscription(
 
 /** Where push stands on this browser, read without ever prompting for permission. */
 export async function readPhoneAlertState(): Promise<PhoneAlertState> {
+  if (apnsCapable()) return "disabled";
   if (typeof window === "undefined" || !pushCapable() || typeof Notification === "undefined") return "unsupported";
   if (!window.isSecureContext) return "insecure";
   if (Notification.permission === "denied") return "denied";
@@ -149,6 +163,28 @@ export async function enablePhoneAlerts(
   request: PushRequest,
   preferences: PhoneAlertPreferences,
 ): Promise<PhoneAlertState> {
+  // The installed iOS app has no PushManager: it registers an APNs token instead.
+  if (apnsCapable()) {
+    let registration: NativePushRegistration | null;
+    try {
+      registration = await requestNativePushPermission();
+    } catch {
+      return "error";
+    }
+    if (!registration?.token) return "error";
+    try {
+      // `sandbox` must match the environment the token was minted for: a development build's
+      // token only exists on the APNs sandbox, and posting it to production answers
+      // `BadDeviceToken`, which the gateway treats as dead and drops.
+      const res = await request(
+        "/api/v1/push/apns",
+        jsonPost({ token: registration.token, sandbox: registration.sandbox, ...preferences }),
+      );
+      return res.ok ? "enabled" : "error";
+    } catch {
+      return "error";
+    }
+  }
   if (typeof window === "undefined" || !pushCapable() || typeof Notification === "undefined") return "unsupported";
   if (!window.isSecureContext) return "insecure";
   let permission = Notification.permission;
