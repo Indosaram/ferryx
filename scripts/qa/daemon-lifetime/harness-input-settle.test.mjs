@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { BUILD_DEPS, joinFor, missingBuildDeps } from './run.mjs';
 import { paneClickPoint, SIDEBAR_MAX_PX } from './scenarios/q10-q13.mjs';
 import { settlePreBootPanes, classifyPreBootPanes, SETTLE_DEADLINE_MS } from './scenarios/q14.mjs';
-import { CLICLICK_RELEASE_KEYS, cliclickReleaseArgv, createMacLocalInput } from './lib/mahord.mjs';
+import { CLICLICK_RELEASE_KEYS, cliclickReleaseArgv, cliclickTypeArgv, createMacLocalInput } from './lib/mahord.mjs';
 
 const PANES = [
   { localSessionId: 'q14-pane-0-r', backendSessionId: 'b-old-0' },
@@ -97,6 +97,109 @@ test('non-mac platforms keep the established click coordinates', () => {
   // rect.left + w*0.65, rect.top + h*0.55 - unchanged from the gated linux/windows runs.
   assert.deepEqual(paneClickPoint(rect, 'linux'), { x: 842, y: 488 });
   assert.deepEqual(paneClickPoint(rect, 'windows'), { x: 842, y: 488 });
+});
+
+test('printable text is typed through cliclick, never through System Events keystroke', async () => {
+  // Inspect the outgoing argv, not what the active input method ultimately inserts.
+  const { calls, input } = macInput((command) => (
+    command.endsWith('cliclick') ? { status: 0, stdout: '', stderr: '' } : { status: 0, stdout: '', stderr: '' }));
+  await input.key('u');
+  assert.deepEqual(calls.map((c) => c.command), ['/opt/homebrew/bin/cliclick']);
+  assert.deepEqual(calls[0].args, ['t:u']);
+
+  // The bulk text entry point follows the same rule.
+  calls.length = 0;
+  await input.type('QA12AB');
+  assert.deepEqual(calls.map((c) => c.args), [['t:QA12AB']]);
+
+  // A named key is still a key code, not text: Tab must press Tab, not type T-a-b.
+  calls.length = 0;
+  await input.key('Tab');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, '/usr/bin/osascript');
+  assert.match(calls[0].args[1], /key code 48$/);
+
+  // Shift+letter is the capital, delivered as the same printable character.
+  calls.length = 0;
+  await input.hotkey(['Shift', 'r']);
+  assert.deepEqual(calls.map((c) => c.args), [['t:R']]);
+});
+
+test('a non-printable or non-ASCII string keeps the System Events keystroke fallback', async () => {
+  assert.deepEqual(cliclickTypeArgv('abc'), ['t:abc']);
+  assert.equal(cliclickTypeArgv(''), null);
+  // Inputs outside the supported ASCII subset stay on the original path.
+  assert.equal(cliclickTypeArgv('ㅕ'), null);
+  assert.equal(cliclickTypeArgv('cafe\u0301'), null);
+  assert.equal(cliclickTypeArgv('a\nb'), null);
+  // The adapter conservatively leaves comma-containing text on the original path.
+  assert.equal(cliclickTypeArgv('a,b'), null);
+
+  const { calls, input } = macInput(() => ({ status: 0, stdout: '', stderr: '' }));
+  await input.type('ㅕ');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, '/usr/bin/osascript');
+});
+
+/** The rejection proc.run produces for a child that never started: an errno on `code`. */
+function spawnFailure(code, message = `spawn cliclick ${code}`) {
+  return Object.assign(new Error(message), { code });
+}
+
+test('a cliclick that never started falls back: the spawn failure proves nothing was sent', async () => {
+  // proc.run attaches the errno to a spawn rejection, so ENOENT means the binary never ran and no
+  // character reached the desktop. This is the only failure shape that may be retried.
+  const { calls, input } = macInput((command) => (
+    command.endsWith('cliclick') ? spawnFailure('ENOENT') : { status: 0, stdout: '', stderr: '' }));
+  await input.key('u');
+  assert.deepEqual(calls.map((c) => c.command), ['/opt/homebrew/bin/cliclick', '/usr/bin/osascript']);
+  assert.match(calls[1].args[1], /keystroke "u"$/);
+});
+
+test('a non-letter Shift chord keeps its real modifier instead of typing the bare character', async () => {
+  // Shift+1 is "!" and Shift+/ is "?". cliclick `t:1` / `t:/` would post the unshifted character, so
+  // these chords must stay chords rather than take the printable path.
+  const { calls, input } = macInput(() => ({ status: 0, stdout: '', stderr: '' }));
+  await input.hotkey(['Shift', '1']);
+  await input.hotkey(['Shift', '/']);
+  assert.deepEqual(calls.map((c) => c.command), ['/usr/bin/osascript', '/usr/bin/osascript']);
+  assert.match(calls[0].args[1], /keystroke "1" using \{shift down\}$/);
+  assert.match(calls[1].args[1], /keystroke "\/" using \{shift down\}$/);
+});
+
+test('a multi-modifier chord is never downgraded to text', async () => {
+  const { calls, input } = macInput(() => ({ status: 0, stdout: '', stderr: '' }));
+  await input.hotkey(['Cmd', 'Shift', 'r']);
+  assert.deepEqual(calls.map((c) => c.command), ['/usr/bin/osascript']);
+  assert.match(calls[0].args[1], /keystroke "r" using \{command down, shift down\}$/);
+});
+
+test('an ambiguous cliclick failure is reported, never replayed', async () => {
+  // Every case here means cliclick HAD started: a non-zero exit, a signalled child (proc.run resolves
+  // status null), and a deadline (a plain Error with no errno). Each may already have posted part of
+  // the text, so re-sending it through System Events would duplicate input.
+  const ambiguous = {
+    'non-zero exit after posting': () => ({ status: 1, stdout: '', stderr: 'killed after 2 chars' }),
+    'signalled child': () => ({ status: null, stdout: '', stderr: '' }),
+    'deadline without errno': () => new Error('deadline 60000ms: cliclick t:u'),
+  };
+  for (const [label, handler] of Object.entries(ambiguous)) {
+    const { calls, input } = macInput((command) => (
+      command.endsWith('cliclick') ? handler() : { status: 0, stdout: '', stderr: '' }));
+    await assert.rejects(() => input.key('u'), (error) => {
+      assert.equal(error.code, 'MAC_INPUT_DELIVERY_UNKNOWN', label);
+      return true;
+    });
+    // Exactly one delivery attempt, with no osascript replay of the same character.
+    assert.deepEqual(calls.map((c) => c.command), ['/opt/homebrew/bin/cliclick'], label);
+  }
+});
+
+test('a partially delivered string is not sent a second time in full', async () => {
+  const { calls, input } = macInput((command) => (
+    command.endsWith('cliclick') ? { status: 1, stdout: '', stderr: 'posted t:QA12' } : { status: 0, stdout: '', stderr: '' }));
+  await assert.rejects(() => input.type('QA12AB'), (error) => error.code === 'MAC_INPUT_DELIVERY_UNKNOWN');
+  assert.deepEqual(calls.map((c) => c.args), [['t:QA12AB']]);
 });
 
 test('the cliclick modifier release is one ku: command with plain key names', () => {

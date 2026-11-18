@@ -204,10 +204,64 @@ export function cliclickReleaseArgv(keys = CLICLICK_RELEASE_KEYS) {
   return [`ku:${keys.join(',')}`];
 }
 
+/**
+ * In the isolated maho-mac receiver, System Events' first plain `keystroke "u"` carried Option,
+ * while cliclick's `t:u` did not. Both delivered U+3155 with the two-set Hangul input source.
+ * Choosing cliclick avoids the observed modifier, not the layout or terminal-focus requirements.
+ */
+export function cliclickTypeArgv(text) {
+  const s = String(text ?? '');
+  // Keep comma-containing text on the existing path; this adapter only routes the tested subset.
+  if (!s || !/^[\x20-\x7e]+$/.test(s) || s.includes(',')) return null;
+  return [`t:${s}`];
+}
+
+/**
+ * Raised when a cliclick delivery may already have posted input, so re-sending would duplicate it.
+ *
+ * `exec` is proc.run, whose three outcomes are distinguishable at the call site:
+ *  - a child that never started rejects with an errno in `error.code` (ENOENT, EACCES), so nothing
+ *    reached the desktop and a System Events fallback is safe;
+ *  - a child that started always resolves, with a numeric status, or null when it died from a signal;
+ *  - a deadline rejects with a plain Error carrying no `code`.
+ * Only the first outcome proves that nothing was delivered. A non-zero exit after cliclick had
+ * already parsed and posted part of its argv, a signalled child, and a timed-out child all leave an
+ * unknown amount of text typed, so they surface here instead of being retried.
+ */
+export class MacInputDeliveryError extends Error {
+  constructor(detail) {
+    super(`MAC_INPUT_DELIVERY_UNKNOWN: ${JSON.stringify(detail)}`);
+    this.name = 'MacInputDeliveryError';
+    this.code = 'MAC_INPUT_DELIVERY_UNKNOWN';
+    this.detail = detail;
+  }
+}
+
 /** Local macOS System Events input adapter for Q11 when gui.kind === 'mac-local'. */
 export function createMacLocalInput({ exec }) {
   const osa = async (script) => exec('/usr/bin/osascript', ['-e', script]);
   const escapeAs = (text) => String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  // Only a spawn failure proves cliclick posted nothing: proc.run attaches the errno ('ENOENT') to
+  // that rejection, while a deadline rejects with a plain Error that has no `code`.
+  const neverStarted = (error) => typeof error?.code === 'string' && error.code.length > 0;
+  // Types one cliclick argv, or returns null when the binary never started so the caller may still
+  // fall back. Any other failure is recorded and rethrown: replaying the text could double the input.
+  const typeViaCliclick = async (argv) => {
+    let outcome;
+    try {
+      outcome = await exec('/opt/homebrew/bin/cliclick', argv);
+    } catch (error) {
+      if (neverStarted(error)) return null;
+      throw new MacInputDeliveryError({ argv, stage: 'exec', error: String(error?.message ?? error) });
+    }
+    if (outcome && outcome.status === 0) return outcome;
+    throw new MacInputDeliveryError({
+      argv,
+      stage: 'exit',
+      status: outcome?.status ?? null,
+      stderr: String(outcome?.stderr ?? '').trim(),
+    });
+  };
   // System Events only accepts the AppleScript modifier names; the chord vocabulary the scenarios
   // use is the cross-platform one (Meta/Control/Alt/Shift). Passing "meta down" straight through is
   // rejected by osascript, so Q10 never opened Settings on macOS (run 20261117t142623z).
@@ -243,6 +297,22 @@ export function createMacLocalInput({ exec }) {
     const using = mods.length ? ` using {${mods.map((m) => `${MOD_NAMES[String(m).toLowerCase()] ?? String(m).toLowerCase()} down`).join(', ')}}` : '';
     const code = KEY_CODES[String(k).toLowerCase()];
     if (code !== undefined) return osa(`tell application "System Events" to key code ${code}${using}`);
+    // Alternate text delivery is only for text that IS the intended literal character: an unmodified
+    // printable character, or Shift+letter, whose product is that capital letter. Every other chord
+    // keeps its real modifiers verbatim. Shift+1 means "!" and Shift+/ means "?"; typing `t:1` or
+    // `t:/` would post the unshifted character, so those chords must stay chords.
+    const key = String(k);
+    const lower = mods.map((m) => String(m).toLowerCase());
+    const shiftOnly = lower.length === 1 && lower[0] === 'shift';
+    const literal = mods.length === 0
+      ? key
+      : (shiftOnly && /^[A-Za-z]$/.test(key) ? key.toUpperCase() : null);
+    const argv = literal === null ? null : cliclickTypeArgv(literal);
+    if (argv) {
+      const delivered = await typeViaCliclick(argv);
+      if (delivered) return delivered;
+      // cliclick is not installed: nothing was sent, so System Events can still type the character.
+    }
     return osa(`tell application "System Events" to keystroke "${escapeAs(k)}"${using}`);
   };
   return {
@@ -259,13 +329,7 @@ export function createMacLocalInput({ exec }) {
       if (viaCliclick && viaCliclick.status === 0) return viaCliclick;
       return osa(`tell application "System Events" to click at {${cx}, ${cy}}`);
     },
-    // A latched modifier outlives the chord that set it. A synthetic chord posts the modifier key-down
-    // with the letter, and the app swallows that letter as a chord, so the matching key-up pairing
-    // the OS would derive from a real keystroke never happens: every later keystroke arrives with
-    // the modifier still set. Measured on maho-mac run surv-mac-1117n, where all of Q11's typing
-    // logged modifier_flags=524320 (0x80000 maskAlternate | 0x20 NX_DEVICELALTKEYMASK) and nothing
-    // echoed. Nothing in the typing path can clear it (typeverified.mjs only resends and erases
-    // characters), so the pane is returned to a clean modifier state before it is typed into.
+    // Release held modifiers separately: success here does not establish the flags of the next key.
     releaseModifiers: async () => {
       const keys = CLICLICK_RELEASE_KEYS;
       // cliclick posts real key-up CGEvents for every named modifier in one call.
@@ -292,7 +356,15 @@ export function createMacLocalInput({ exec }) {
       }
       return { ok: results.every((r) => r.ok), via: 'osascript', keys, results, cliclick: viaCliclick ? { status: viaCliclick.status, stderr: String(viaCliclick.stderr ?? '').trim() } : null };
     },
-    type: async (text) => osa(`tell application "System Events" to keystroke "${escapeAs(text)}"`),
+    type: async (text) => {
+      const argv = cliclickTypeArgv(text);
+      if (argv) {
+        const delivered = await typeViaCliclick(argv);
+        if (delivered) return delivered;
+        // cliclick is not installed: nothing was sent, so System Events can still type the text.
+      }
+      return osa(`tell application "System Events" to keystroke "${escapeAs(text)}"`);
+    },
     key: async (k) => sendKey(k),
     hotkey: async (keys) => {
       const mods = keys.slice(0, -1);
