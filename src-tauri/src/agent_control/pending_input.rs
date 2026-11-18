@@ -307,7 +307,13 @@ fn claim_one(
     }
     if let Some(attempt) = &record.attempt {
         if attempt.outcome.is_none() || attempt.outcome.as_deref() == Some("outcomeUnknown") {
-            return Claim::InFlight;
+            // The same caller re-presenting the very attempt it already holds is a retry of its own
+            // write, not a second caller: idempotent, so it may finish the delivery it started.
+            return if attempt.request_id == request_id {
+                Claim::Claimed
+            } else {
+                Claim::InFlight
+            };
         }
     }
     record.attempt = Some(PendingInputAttempt {
