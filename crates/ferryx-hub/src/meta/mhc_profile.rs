@@ -18,6 +18,59 @@ use crate::error::Result;
 
 /// Directory under the hub data directory the engine runs in.
 pub const PROFILE_DIRNAME: &str = "mhc-supervisor";
+/// Instructions the engine reads from its own working directory into every session's system
+/// prompt (mhc `maho-core/src/context_files.rs`, the `AGENTS.md` context file). The engine's
+/// supervisor work tools are built in, but nothing in the engine says what the *hub* expects of
+/// them: an owner message that hands over a session is meant to arrive as a `supervisor_submit_work`
+/// call, and only the hub knows the phrases and the addressed-session trailer that make that
+/// request a handover. Teaching it here is the whole of the contract, so no engine release is
+/// needed to change it, and a pinned engine that predates any of this still learns it.
+pub const PROFILE_INSTRUCTIONS: &str = "\
+# Ferryx supervisor
+
+This file is the hub's contract for the sessions it opens in this directory. The section on
+supervisor tools applies only to a session that has `supervisor_submit_work` and
+`supervisor_work_status`; a session without them (a decision, convergence or memory turn) has no
+work to submit and ignores it.
+
+## The supervisor tools
+
+You are the Ferryx supervisor. You answer the owner in the app chat. Whatever else such a session
+can do, the hub gives you two authorities: `supervisor_submit_work` starts or continues work, and
+`supervisor_work_status` reads it back. Use them for anything about work; do not describe work you
+have not submitted through the tool.
+
+## Handing over a session the owner already runs
+
+Some owner messages do not ask for new work: they hand you an agent session the owner is already
+running. The app always marks one the same way. The owner's own text says \"이 세션 맡아\" or
+\"take this session\", and the message ends with a trailer naming the sessions the owner addressed:
+
+    [The owner addressed these sessions with @: local:<session-id>]
+
+For such a message, call `supervisor_submit_work` exactly once, with:
+
+- `title`: two to five words naming what the work continues, such as \"Continue the release fix\".
+- `requirements`: the owner's instruction, restated as one checkable requirement.
+- `worker`: \"any\".
+
+The hub reads the trailer, binds the goal to that pane and observes it; it does not need you to
+read the pane, to type into it, or to reach it in any other way. So never report that you cannot
+reach a session while `supervisor_submit_work` is available: that tool *is* the way to reach it.
+Do not ask which session either. The trailer names it, and a message naming several or none is
+answered by asking the owner, not by guessing.
+
+## Pausing and resuming work you own
+
+An owner message saying \"이 세션 멈춰\" or \"pause this session\" pauses the loop of the session it
+addresses, and one saying \"이 세션 계속\" or \"resume this session\" resumes it. Submit those through
+`supervisor_submit_work` as well; the hub recognizes them from the owner's words.
+
+## Reading work back
+
+`supervisor_work_status` reports the admitted work of this conversation. Pass the `goal_id` of an
+earlier receipt to read one goal instead.
+";
 /// Bare executable name, looked up on the hub child PATH when neither `FERRYX_HUB_MHC_BIN` nor
 /// a bundled mhc is found ([`MhcProfileConfig::from_env_in`] defaults to the bundled one).
 pub const DEFAULT_MHC_BIN: &str = "mhc";
@@ -508,8 +561,15 @@ impl MhcProfile {
             .collect()
     }
 
-    /// Creates the profile directory (owner-only on unix) and the profile-local memory identity
-    /// config. Nothing outside `<data>` is written.
+    /// `<profile>/AGENTS.md`: the hub's supervisor contract, read into every session's system
+    /// prompt by the engine.
+    pub fn instructions_path(&self) -> PathBuf {
+        self.cwd.join("AGENTS.md")
+    }
+
+    /// Creates the profile directory (owner-only on unix), the profile-local memory identity
+    /// config and the instructions the engine loads from its working directory. Nothing outside
+    /// `<data>` is written.
     pub fn prepare(&self) -> Result<()> {
         std::fs::create_dir_all(&self.cwd)?;
         #[cfg(unix)]
@@ -524,6 +584,12 @@ impl MhcProfile {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&path, wanted)?;
+        }
+        // Rewritten whenever the shipped contract changes, so a hub upgrade reaches engines
+        // already running out of this profile directory.
+        let instructions = self.instructions_path();
+        if std::fs::read_to_string(&instructions).ok().as_deref() != Some(PROFILE_INSTRUCTIONS) {
+            std::fs::write(&instructions, PROFILE_INSTRUCTIONS)?;
         }
         Ok(())
     }
@@ -877,6 +943,24 @@ impl SessionStore {
 mod tests {
     use super::*;
 
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("ferryx-mhc-profile-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn routed(entries: &[(&str, &str)]) -> MhcProfileConfig {
         let env: BTreeMap<String, String> = entries
             .iter()
@@ -1000,5 +1084,67 @@ mod tests {
             let command = profile.open_session_command(&profile.role_spec(&role), "id", None);
             assert!(command.get("provider").is_none() && command.get("modelId").is_none());
         }
+    }
+
+    /// The engine reads `<cwd>/AGENTS.md` into the system prompt of every session it opens in
+    /// this directory, so that file is the only channel the hub has for teaching the supervisor
+    /// tools without an engine release. Proven on a real engine: a sentinel line written there
+    /// reached the conversation session's system prompt verbatim
+    /// (`context_files.rs` on mhc 2026.11.16).
+    #[test]
+    fn prepare_writes_the_contract_where_the_engine_reads_instructions() {
+        let dir = TempDir::new();
+        let profile = MhcProfile::new(dir.path(), routed(&OWNER_ENV));
+        profile.prepare().unwrap();
+        let path = profile.instructions_path();
+        assert_eq!(path, profile.cwd().join("AGENTS.md"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), PROFILE_INSTRUCTIONS);
+    }
+
+    /// Both tools the engine actually registers are named in the contract; a pinned engine that
+    /// advertises `supervisor_work_tools` registers exactly these two names
+    /// (`maho-cli/src/cli/supervisor_work_tools.rs` `SUPERVISOR_WORK_TOOL_NAMES`).
+    #[test]
+    fn the_contract_names_the_tools_the_pinned_engine_registers() {
+        for tool in ["supervisor_submit_work", "supervisor_work_status"] {
+            assert!(
+                PROFILE_INSTRUCTIONS.contains(tool),
+                "the contract must name {tool}"
+            );
+        }
+    }
+
+    /// A handover is recognized by the owner's own words plus the addressed-session trailer, so
+    /// the contract has to teach exactly those. Pinned against the hub's own matchers: a phrase
+    /// the hub stopped honouring, or a trailer it stopped writing, would leave the model
+    /// instructed to submit a request the hub never treats as a handover.
+    #[test]
+    fn the_contract_teaches_the_phrases_and_trailer_the_hub_matches() {
+        for phrase in crate::supervisor::app_work::handover_phrases() {
+            assert!(
+                PROFILE_INSTRUCTIONS.contains(phrase),
+                "the contract must teach the handover phrase {phrase:?}"
+            );
+        }
+        for phrase in crate::supervisor::app_work::ownership_phrases() {
+            assert!(
+                PROFILE_INSTRUCTIONS.contains(phrase),
+                "the contract must teach the ownership phrase {phrase:?}"
+            );
+        }
+        // The trailer is written by `transcript::turn_message`; the contract teaches its shape.
+        let trailer = crate::supervisor::transcript::turn_message(
+            "take this session",
+            &[crate::supervisor::panel_contract::SessionRef::new("local", "s-1")],
+        );
+        let marker = trailer
+            .rfind('[')
+            .map(|at| &trailer[at..])
+            .and_then(|trail| trail.split_once(" local:s-1").map(|(head, _)| head))
+            .expect("the trailer names the addressed session after its opening marker");
+        assert!(
+            PROFILE_INSTRUCTIONS.contains(marker),
+            "the contract must teach the trailer {marker:?}"
+        );
     }
 }

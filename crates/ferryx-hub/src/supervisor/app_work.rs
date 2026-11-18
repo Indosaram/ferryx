@@ -97,6 +97,12 @@ pub fn submit_from_call(
 /// The owner's own words that hand a session to the supervisor; matched case-insensitively.
 const HANDOVER_PHRASES: [&str; 2] = ["이 세션 맡아", "take this session"];
 
+/// Every phrase [`asks_for_handover`] honours, so the contract the engine reads can be pinned
+/// against the matcher instead of drifting from it.
+pub fn handover_phrases() -> impl Iterator<Item = &'static str> {
+    HANDOVER_PHRASES.into_iter()
+}
+
 /// The turn budget of a handed-over goal: the owner keeps paying for the pane, so the supervisor
 /// stops after the same small budget an app request gets.
 const HANDOVER_TURN_LIMIT: u32 = 5;
@@ -113,6 +119,12 @@ fn asks_for_handover(owner_text: &str) -> bool {
 /// case-insensitively like [`HANDOVER_PHRASES`].
 const PAUSE_PHRASES: [&str; 2] = ["이 세션 멈춰", "pause this session"];
 const RESUME_PHRASES: [&str; 2] = ["이 세션 계속", "resume this session"];
+
+/// Every pause/resume phrase [`OwnershipCommand::of`] honours, for the same pin as
+/// [`handover_phrases`].
+pub fn ownership_phrases() -> impl Iterator<Item = &'static str> {
+    PAUSE_PHRASES.into_iter().chain(RESUME_PHRASES)
+}
 
 /// What the owner asked of an owned session's ownership loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
