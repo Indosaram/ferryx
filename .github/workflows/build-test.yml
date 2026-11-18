@@ -660,11 +660,6 @@ jobs:
       #   ssh::direct::tests::failed_probe_distinguishes_non_utf8_and_empty_stderr
       #                                    asserts dash's literal `\xff` handling; it is a host-shell
       #                                    contract, not a product one.
-      #   daemon::server::a03_owner_cli_fixture::
-      #   ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match
-      #                                    build the CLI from inside the test process; on a hosted
-      #                                    Linux runner both fail with
-      #                                    "cargo build --bin ferryx-cli failed: exit status: 101".
       #   ssh::transport_unix::own_executable_tests::supervisor_program_survives_replacement_of_the_running_executable
       #                                    replaces the running executable, which the hosted image's
       #                                    mount does not permit.
@@ -672,16 +667,6 @@ jobs:
       #   daemon::session_service::machine_tests::
       #                                    assert behaviour of an installed mhc/omo pane owner, absent
       #                                    on a clean hosted image.
-      #   daemon::protocol::tests::test_handshake_token_wire_shape_and_backward_compatibility
-      #   daemon::protocol::tests::test_protocol_v4_handshake_and_list_sessions_epoch
-      #                                    compare against a fixture CLI handshake, so they inherit the
-      #                                    same in-process CLI build dependency.
-      #   browser::agent::cef_backend::tests::
-      #                                    needs the CEF runtime, which the hosted image does not ship.
-      #                                    writes non-UTF-8 bytes with `printf '\xff\xfe\xfd'`
-      #                                    through /bin/sh; dash on Linux prints those escapes
-      #                                    literally, so the probe never produces invalid UTF-8.
-      #                                    The suite is a host-shell contract, not a product one.
       - name: Cargo Test (host-dependent suites excluded)
         if: matrix.os_name == 'linux'
         run: |
@@ -715,14 +700,9 @@ jobs:
             --skip remote::tests::security::sockets::a10_pending_machine_input_is_dropped_on_disconnect_and_revoke \
             --skip terminal::tests::a_wedged_pty_does_not_block_the_async_runtime_thread \
             --skip ssh::direct::tests::failed_probe_distinguishes_non_utf8_and_empty_stderr \
-            --skip daemon::server::a03_owner_cli_fixture:: \
-            --skip ssh::password::tests::askpass_cli_process_serves_password_when_credentials_match \
             --skip ssh::transport_unix::own_executable_tests::supervisor_program_survives_replacement_of_the_running_executable \
             --skip daemon::server::identity_admission_tests:: \
-            --skip daemon::session_service::machine_tests:: \
-            --skip daemon::protocol::tests::test_handshake_token_wire_shape_and_backward_compatibility \
-            --skip daemon::protocol::tests::test_protocol_v4_handshake_and_list_sessions_epoch \
-            --skip browser::agent::cef_backend::tests::
+            --skip daemon::session_service::machine_tests::
 
       # The remote grid mirror spans Rust and TypeScript: this asserts real serialized
       # backend frames parse in the actual frontend parser. It lives here, not in the ui
