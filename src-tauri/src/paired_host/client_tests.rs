@@ -1895,6 +1895,7 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
         op: AgentControlOp::Wait {
             session_id: "s-1".into(),
             until: "idle".into(),
+            instance: Some("epoch-1".into()),
             after_revision: Some("rev".into()),
             after: 4,
             timeout_ms: 300_000,
@@ -1908,6 +1909,8 @@ fn agent_control_routes_require_the_remote_capability_and_skip_the_journal() {
         vec!["agent-control", "sessions", "s-1", "wait"]
     );
     assert_eq!(route.method, Method::GET);
+    assert_eq!(route.capability, Some(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY));
+    assert!(route.query.iter().any(|(key, value)| key == "instance" && value == "epoch-1"));
     assert_eq!(route.budget_secs, Some(315));
     assert!(route.idempotent);
     assert!(route.request_id.is_none());

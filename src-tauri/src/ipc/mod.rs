@@ -45,6 +45,10 @@ pub mod file_preview;
 pub mod file_preview_contract;
 #[cfg(feature = "desktop")]
 pub mod github_issue;
+// Not gated on `desktop`: the hub's lane pull-request sync runs in the headless daemon too, and it
+// must reuse this module's one read-only `gh pr view` argv rather than build a second one. Only the
+// Tauri command is `desktop`-gated (inside the module).
+pub mod github_pr;
 #[cfg(feature = "desktop")]
 pub mod host;
 #[cfg(feature = "desktop")]
@@ -132,6 +136,8 @@ pub use diagnostics::*;
 pub use error::*;
 #[cfg(feature = "desktop")]
 pub use github_issue::*;
+#[cfg(feature = "desktop")]
+pub use github_pr::*;
 #[cfg(feature = "desktop")]
 pub use host::*;
 #[cfg(feature = "desktop")]

@@ -110,7 +110,7 @@ pub async fn respond_with_speaker(
     let inbound = voice_inbound(&session, speaker, transcript, message_id);
     let session_id = inbound_pane(&inbound, &ctx.profiles, &ctx.meta_session_id);
     let before = read_pane(ctx.control.as_ref(), &session_id).await;
-    let cursor = event_cursor(ctx.control.as_ref()).await;
+    let (instance, cursor) = event_cursor(ctx.control.as_ref()).await?;
     ensure_session(&ctx.pool, &session).await?;
     insert_message(
         &ctx.pool,
@@ -145,6 +145,7 @@ pub async fn respond_with_speaker(
             AgentOp::Wait {
                 session_id: session_id.clone(),
                 until: "idle".into(),
+                instance: Some(instance),
                 after_revision: revision,
                 after: cursor,
                 timeout_ms: VOICE_TURN_TIMEOUT_MS,
@@ -267,13 +268,25 @@ fn snapshot_of(value: &Value) -> PaneSnapshot {
     snapshot
 }
 
-async fn event_cursor(control: &dyn AgentControl) -> u64 {
-    control
-        .execute(None, AgentOp::Events { after: 0 })
+async fn event_cursor(control: &dyn AgentControl) -> Result<(String, u64)> {
+    let value = control
+        .execute(None, AgentOp::Events { instance: None, after: 0 })
         .await
-        .ok()
-        .and_then(|value| value.get("afterSequence").and_then(Value::as_u64))
-        .unwrap_or(0)
+        .map_err(|error| HubError::message(format!("could not establish agent event cursor: {error}")))?;
+    if value.get("gap").and_then(Value::as_bool) == Some(true) {
+        return Err(HubError::message("agent event cursor requires a snapshot before waiting"));
+    }
+    let instance = value
+        .get("instance")
+        .and_then(Value::as_str)
+        .filter(|instance| !instance.is_empty())
+        .ok_or_else(|| HubError::message("agent event cursor has no epoch"))?
+        .to_owned();
+    let sequence = value
+        .get("afterSequence")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| HubError::message("agent event cursor has no sequence"))?;
+    Ok((instance, sequence))
 }
 
 async fn ensure_session(pool: &SqlitePool, key: &SessionKey) -> Result<()> {
@@ -446,9 +459,10 @@ mod tests {
             AgentOp::Wait {
                 until,
                 after,
+                instance,
                 after_revision,
                 ..
-            } if until == "idle" && *after == 5 && after_revision.as_deref() == Some("rev-1")
+            } if until == "idle" && *after == 5 && instance.as_deref() == Some("voice-run-1") && after_revision.as_deref() == Some("rev-1")
         )));
         assert!(ops.iter().all(|op| !matches!(
             op,
@@ -456,10 +470,37 @@ mod tests {
         )));
     }
 
+    #[tokio::test]
+    async fn a_voice_turn_fails_closed_without_an_event_epoch() {
+        let pool = crate::storage::memory().await.unwrap();
+        let control = Arc::new(ScriptedControl {
+            omit_event_epoch: true,
+            ..Default::default()
+        });
+        let profiles =
+            ProfileRouter::from_json(r#"[{"channel":42,"pane_session_id":"lane-pane"}]"#);
+        let ctx = VoiceTurnContext {
+            pool,
+            profiles,
+            meta_session_id: "meta".into(),
+            control: control.clone(),
+        };
+        let voice_channel = 910_000_000 + u64::from(std::process::id());
+        bind(voice_channel, discord_text_session(7, "42"));
+        let error = respond_with_speaker(&ctx, voice_channel, Some(99), "[voice] hi")
+            .await
+            .expect_err("a sequence without its epoch is not a safe cursor");
+        assert!(error.to_string().contains("no epoch"), "{error}");
+        let ops = control.ops.lock().expect("ops");
+        assert!(ops.iter().any(|op| matches!(op, AgentOp::Events { .. })));
+        assert!(!ops.iter().any(|op| matches!(op, AgentOp::Send { .. })), "do not send after cursor admission fails");
+    }
+
     #[derive(Default)]
     struct ScriptedControl {
         ops: StdMutex<Vec<AgentOp>>,
         reads: AtomicUsize,
+        omit_event_epoch: bool,
     }
 
     #[async_trait]
@@ -486,7 +527,11 @@ mod tests {
                     }
                 }));
             }
-            Ok(json!({ "ok": true, "afterSequence": 5 }))
+            if self.omit_event_epoch {
+                Ok(json!({ "ok": true, "afterSequence": 5 }))
+            } else {
+                Ok(json!({ "ok": true, "instance": "voice-run-1", "afterSequence": 5 }))
+            }
         }
     }
 }

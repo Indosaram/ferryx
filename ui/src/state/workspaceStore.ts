@@ -49,6 +49,8 @@ import {
   type LocalSplitSession,
 } from "../lib/localSplitLifecycle";
 import { createBrowserPaneContent, isManagedBranchPrefix, isTerminalTab, worktreeIdentity } from "../lib/types";
+import { declaredLaneLifecycleTransport, foldTabPin, importLocalWorktreeOrderOnce, isLaneLifecycleModel, worktreeLifecycleIdentity, type LaneLifecycleModel, type LaneLifecycleState, type LanePullRequestView } from "../lib/sidebarPersistence";
+import { toast } from "../components/ui/sonner";
 import type {
   AgentProviderSession,
   AgentBlockedKind,
@@ -486,12 +488,18 @@ function reconcileLoadedLocalRecovery(join?: (owner: LocalRecoveryOwner) => void
           // Expect our own publication before synchronous snapshot listeners run. An
           // external replacement still differs from this captured admission identity.
           owner.captured = { ...before, recoveryKey: admissionKey, recoveryToken: admissionToken };
-          applyLocalRecovery(workspaceId, { type: "LOCAL_RECOVERY_ATTEMPT", sessionId: session.id, key: admissionKey, token: admissionToken });
+          owner.admitting = true;
+          try {
+            applyLocalRecovery(workspaceId, { type: "LOCAL_RECOVERY_ATTEMPT", sessionId: session.id, key: admissionKey, token: admissionToken });
+          } finally {
+            owner.admitting = false;
+          }
           const fresh = () => {
             const current = getWorkspaceSnapshot(workspaceId)?.sessions[session.id];
             return !attempt.isCancelled() && localRecoveryOwners.get(key) === owner && Boolean(current &&
               current.backendSessionId === session.backendSessionId && current.incarnation === session.incarnation &&
-              current.daemonEpoch === session.daemonEpoch && current.lifecycle !== "exited" &&
+              current.daemonEpoch === owner.captured.daemonEpoch &&
+              current.lifecycle !== "exited" &&
               current.recoveryKey === admissionKey && current.recoveryToken === admissionToken);
           };
           if (!fresh()) return { kind: "cancelled" };
@@ -626,6 +634,31 @@ function sameProviderSession(
  */
 export const ATTENTION_SUPPRESSION_WINDOW_MS = 120_000;
 
+/**
+ * How long a lane lifecycle change stays undoable before the server sees it.
+ *
+ * The window is held CLIENT-side: nothing is written while it is open, so cancelling inside it
+ * is not an inverse write, it is no write at all, and no row can have changed.
+ */
+export const LANE_LIFECYCLE_UNDO_MS = 5_000;
+
+export type LaneLifecycleAction = "pin" | "settle" | "snooze" | "archive" | "activate";
+
+/** One change inside its undo window: what it will write, and what the row read before. */
+export type PendingLaneLifecycle = {
+  worktreeKey: string;
+  workspaceId: string;
+  path: string;
+  action: LaneLifecycleAction;
+  until?: string | null;
+  /** The row's state before this change; a cancel restores exactly it. */
+  previous: LaneLifecycleState | null;
+  /** The revision the write will carry, so a raced window is refused by the server. */
+  previousRevision: number;
+  /** Epoch ms when the window closes and the server write happens. */
+  expiresAt: number;
+};
+
 type WorkspaceTerminalActivity = TerminalActivity;
 
 export type WorkspaceState = {
@@ -638,6 +671,21 @@ export type WorkspaceState = {
   unreadTabIds: Record<string, boolean>;
   bellUnreadTabIds?: Record<string, boolean>;
   unreadWorktreePaths: Record<string, boolean>;
+  /**
+   * The server's lifecycle state per worktree key (`w:<wsId>/<slug>` or `p:<ws>/<path>`). Filled
+   * from the server read, so a pin/settle/snooze/archive outlives this window and an app restart.
+   * A key absent here has no lifecycle yet and reads `active`.
+   */
+  laneLifecycle?: Record<string, LaneLifecycleState>;
+  laneRevisions?: Record<string, number>;
+  /** Read-only PR observations from the same lifecycle response, keyed by worktree key. */
+  lanePullRequests?: Record<string, LanePullRequestView | null>;
+  /** The per-worktree pin set folded from `SET_TAB_PINNED`, keyed like `laneLifecycle`. */
+  lanePinnedTabs?: Record<string, string[]>;
+  /** The server-owned section order (`workspaceId -> lifecycle keys`) the sidebar renders by. */
+  laneOrder?: Record<string, string[]>;
+  /** Changes still inside their undo window. A cancelled entry is removed with no write. */
+  lanePending?: Record<string, PendingLaneLifecycle>;
   /** Optional for backwards compatibility with persisted/test states created before activity tracking. */
   activityBySessionId?: Record<string, TerminalActivity>;
   attentionEpisodeAtBySession?: Record<string, number>;
@@ -742,6 +790,10 @@ export type WorkspaceAction =
   | { type: "REORDER_TAB"; tabId: string; targetIndex: number }
   | { type: "RENAME_TAB"; tabId: string; label: string }
   | { type: "SET_TAB_PINNED"; tabId: string; pinned: boolean }
+  | { type: "SET_LANE_LIFECYCLE_MODEL"; rows: Record<string, LaneLifecycleState>; pinnedTabs: Record<string, string[]>; order: Record<string, string[]>; pullRequests?: Record<string, LanePullRequestView | null>; revisions?: Record<string, number>; frameRevisions?: Record<string, number> }
+  | { type: "BEGIN_LANE_LIFECYCLE"; pending: PendingLaneLifecycle }
+  | { type: "CANCEL_LANE_LIFECYCLE"; worktreeKey: string }
+  | { type: "COMMIT_LANE_LIFECYCLE"; worktreeKey: string; state: LaneLifecycleState; revision: number, pinnedTabs?: string[]; pullRequest?: LanePullRequestView | null }
   | {
       type: "SPLIT_PANE";
       tabId: string;
@@ -888,7 +940,7 @@ type UseWorkspaceStoreOptions = {
 
 // Optional tauri IPC additions (M8/M9) resolved lazily so test doubles that mock
 // "../lib/tauri" without them keep working; production always has both.
-function optionalTauriFn(name: "spawnTerminalDetailed" | "spawnTerminalsBatch"): unknown {
+function optionalTauriFn(name: "spawnTerminalDetailed" | "spawnTerminalsBatch" | "onSupervisorPanelEvent"): unknown {
   try {
     return (tauriIpc as Record<string, unknown>)[name];
   } catch {
@@ -2399,9 +2451,217 @@ export function useWorkspaceStore({
     [dispatch],
   );
   const setTabPinned = useCallback(
-    (tabId: string, pinned: boolean) => dispatch({ type: "SET_TAB_PINNED", tabId, pinned }),
+    (tabId: string, pinned: boolean) => {
+      dispatch({ type: "SET_TAB_PINNED", tabId, pinned });
+      // The pin is the owner saying "keep this row where it is", and the server's unit is the row.
+      // Persisting the folded set is what makes the pin survive a restart; the reducer already
+      // painted it, so a failed write leaves the visible state and only loses durability.
+      const state = stateRef.current;
+      const worktreePath = getTabWorktreePath(state, tabId);
+      const row = worktreePath ? state.worktrees.find((worktree) => worktree.path === worktreePath) : undefined;
+      if (!worktreePath || !row) return;
+      const { workspaceId, worktreeKey: key } = worktreeLifecycleIdentity(row, state.workspaceId);
+      const transport = declaredLaneLifecycleTransport();
+      if (!transport) return;
+      void transport
+        .writePinTabs({ worktreeKey: key, workspaceId, path: row.path, pinnedTabs: foldTabPin(state.lanePinnedTabs?.[key] ?? [], tabId, pinned) })
+        .catch((error: unknown) => {
+          console.error("Lane pin write failed; the pin is not durable until the next successful write.", error);
+          toast.error("Could not save the tab pin. Try again.");
+        });
+    },
     [dispatch],
   );
+
+  // ---------------------------------------------------------------------------------------
+  // Server-owned lane lifecycle with a client-held undo window
+  // ---------------------------------------------------------------------------------------
+  const laneUndoTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  /**
+   * The revision each row had when this window last read it. It rides along with a pending write
+   * as `expectedRevision`, so a change made in another window (or by T6's auto-settle) makes this
+   * one a 409 the client re-reads instead of a silently lost update.
+   */
+  const laneRevisionsRef = useRef<Record<string, number>>({});
+  const laneFrameRevisionRef = useRef(0);
+  const laneFrameRowsRef = useRef<Record<string, number>>({});
+
+  const applyLaneLifecycleModel = useCallback((model: LaneLifecycleModel, fromRead = false) => {
+    const rows: Record<string, LaneLifecycleState> = {};
+    const pinnedTabs: Record<string, string[]> = {};
+    const pullRequests: Record<string, LanePullRequestView | null> = {};
+    const revisions: Record<string, number> = {};
+    const order: Record<string, string[]> = {};
+    for (const section of model.sections) {
+      order[section.workspaceId] = section.rows.map((row) => row.worktreeKey);
+      for (const row of section.rows) {
+        rows[row.worktreeKey] = row.effectiveState;
+        pullRequests[row.worktreeKey] = row.pullRequest ?? null;
+        revisions[row.worktreeKey] = row.revision;
+        if (row.pinnedTabs.length > 0) pinnedTabs[row.worktreeKey] = row.pinnedTabs;
+      }
+    }
+    dispatch({ type: "SET_LANE_LIFECYCLE_MODEL", rows, pinnedTabs, order, pullRequests, revisions,
+      ...(fromRead ? { frameRevisions: { ...laneFrameRowsRef.current } } : {}),
+    });
+    laneRevisionsRef.current = stateRef.current.laneRevisions ?? {};
+  }, [dispatch]);
+
+  // Use the existing owner panel channel, independently of whether its panel is visible.
+  // Subscribe before the first read; a full row frame needs no refetch and wins a raced read.
+  useEffect(() => {
+    const subscribe = optionalTauriFn("onSupervisorPanelEvent") as typeof tauriIpc.onSupervisorPanelEvent | undefined;
+    if (!subscribe) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void subscribe((event) => {
+      if (disposed || event.type !== "panel.lanes" || !isLaneLifecycleModel(event.model)) return;
+      laneFrameRevisionRef.current += 1;
+      for (const section of event.model.sections) {
+        for (const row of section.rows) {
+          laneFrameRowsRef.current[row.worktreeKey] = Math.max(laneFrameRowsRef.current[row.worktreeKey] ?? -Infinity, row.revision);
+        }
+      }
+      applyLaneLifecycleModel(event.model);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((error: unknown) => console.error("Lane lifecycle event subscription failed.", error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [applyLaneLifecycleModel]);
+
+  /** Reads the server's lifecycle model once and folds it into state. */
+  const refreshLaneLifecycles = useCallback(async () => {
+    // Only the desktop shell declares a transport. Other surfaces have no lifecycle endpoint, so a
+    // read can only fail; they keep the imported order and paint no error for it.
+    const transport = declaredLaneLifecycleTransport();
+    if (!transport) return;
+    try {
+      const current = stateRef.current;
+      const identities = current.worktrees.map((row) => ({
+        ...worktreeLifecycleIdentity(row, current.workspaceId), path: row.path,
+      }));
+      const frameRevision = laneFrameRevisionRef.current;
+      const model = transport.reconcileIdentities
+        ? await transport.reconcileIdentities(identities)
+        : await transport.read();
+      if (frameRevision === laneFrameRevisionRef.current) applyLaneLifecycleModel(model, true);
+    } catch (error) {
+      console.error("Lane lifecycle read failed.", error);
+      toast.error("Could not load lane state. Local sidebar order is retained.");
+    }
+  }, [applyLaneLifecycleModel]);
+
+  /**
+   * Writes one pending change to the server. Called when the undo window expires and by the
+   * explicit second call ("Apply now"); never called while a window is open and never on cancel.
+   */
+  const commitLaneLifecycle = useCallback(
+    async (worktreeKey: string) => {
+      const timer = laneUndoTimersRef.current.get(worktreeKey);
+      if (timer) clearTimeout(timer);
+      laneUndoTimersRef.current.delete(worktreeKey);
+      const pending = stateRef.current.lanePending?.[worktreeKey];
+      if (!pending) return;
+      const transport = declaredLaneLifecycleTransport();
+      if (!transport) return;
+      try {
+        const row = await transport.write({
+          worktreeKey,
+          workspaceId: pending.workspaceId,
+          path: pending.path,
+          action: pending.action,
+          ...(pending.action === "pin" ? { pinned: true } : {}),
+          until: pending.until ?? null,
+          expectedRevision: pending.previousRevision,
+        });
+        dispatch({
+          type: "COMMIT_LANE_LIFECYCLE",
+          worktreeKey,
+          state: row.effectiveState,
+          revision: row.revision,
+          pullRequest: row.pullRequest ?? null,
+          ...(row.pinnedTabs.length > 0 ? { pinnedTabs: row.pinnedTabs } : {}),
+        });
+        laneRevisionsRef.current = stateRef.current.laneRevisions ?? {};
+      } catch (error) {
+        console.error("Lane lifecycle write failed.", error);
+        toast.error("Could not save the lane change. Reloading saved state.");
+        // The server refused (a raced window) or is unreachable: drop the pending entry so the
+        // row shows the server's truth again instead of a change that never landed.
+        dispatch({ type: "CANCEL_LANE_LIFECYCLE", worktreeKey });
+        void refreshLaneLifecycles();
+      }
+    },
+    [dispatch, refreshLaneLifecycles],
+  );
+
+  /**
+   * Starts a lifecycle change that the owner can undo for [`LANE_LIFECYCLE_UNDO_MS`].
+   *
+   * No server call happens here. The server hears about the change only when the timer fires or
+   * [`commitLaneLifecycle`] is called again, so a cancel inside the window writes no row at all.
+   */
+  const beginLaneLifecycle = useCallback(
+    (request: { worktreeKey: string; workspaceId: string; path: string; action: LaneLifecycleAction; until?: string | null }) => {
+      const { worktreeKey } = request;
+      // A second action on the same row commits the first one rather than dropping it silently.
+      if (stateRef.current.lanePending?.[worktreeKey]) void commitLaneLifecycle(worktreeKey);
+      const previous = stateRef.current.laneLifecycle?.[worktreeKey] ?? null;
+      const pending: PendingLaneLifecycle = {
+        ...request,
+        previous,
+        previousRevision: laneRevisionsRef.current[worktreeKey] ?? 0,
+        expiresAt: Date.now() + LANE_LIFECYCLE_UNDO_MS,
+      };
+      dispatch({ type: "BEGIN_LANE_LIFECYCLE", pending });
+      const timer = laneUndoTimersRef.current.get(worktreeKey);
+      if (timer) clearTimeout(timer);
+      laneUndoTimersRef.current.set(
+        worktreeKey,
+        setTimeout(() => void commitLaneLifecycle(worktreeKey), LANE_LIFECYCLE_UNDO_MS),
+      );
+    },
+    [commitLaneLifecycle, dispatch],
+  );
+
+  /**
+   * Cancels a change inside its window. This is the whole undo: the timer is cleared and the
+   * pending entry removed, so `commitLaneLifecycle` never runs and the transport is never called.
+   */
+  const cancelLaneLifecycle = useCallback(
+    (worktreeKey: string) => {
+      const timer = laneUndoTimersRef.current.get(worktreeKey);
+      if (timer) clearTimeout(timer);
+      laneUndoTimersRef.current.delete(worktreeKey);
+      dispatch({ type: "CANCEL_LANE_LIFECYCLE", worktreeKey });
+    },
+    [dispatch],
+  );
+
+  useEffect(() => {
+    // The one-time handover of the `localStorage` order happens before the first read, so the
+    // server's answer already contains it. It self-guards (a `localStorage` marker plus the hub's
+    // own `hub_meta` marker) and is a no-op after the first run, so a stale local copy can never
+    // overwrite a server order the owner changed since.
+    void (async () => {
+      try {
+        await importLocalWorktreeOrderOnce();
+      } catch (error) {
+        console.error("Lane order import failed; local order remains authoritative.", error);
+      }
+      await refreshLaneLifecycles();
+    })();
+    const timers = laneUndoTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, [refreshLaneLifecycles]);
+  // A listing can arrive after the one-time import; resolve it before painting lifecycle state.
+  useEffect(() => {
+    if (state.worktrees.length > 0) void refreshLaneLifecycles();
+  }, [state.worktrees, refreshLaneLifecycles]);
   const focusPane = useCallback((tabId: string, leafId: string) => dispatch({ type: "FOCUS_PANE", tabId, leafId }), [dispatch]);
   const setPaneView = useCallback(
     (tabId: string, leafId: string, view: PaneView) => dispatch({ type: "SET_PANE_VIEW", tabId, leafId, view }),
@@ -2878,6 +3138,10 @@ export function useWorkspaceStore({
     reorderTab,
     renameTab,
     setTabPinned,
+    refreshLaneLifecycles,
+    beginLaneLifecycle,
+    cancelLaneLifecycle,
+    commitLaneLifecycle,
     focusPane,
     setPaneView,
     setPaneRatio,
@@ -3703,8 +3967,80 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       return { ...state, layout: layoutReducer(state.layout, action) };
     case "RENAME_TAB":
       return { ...state, layout: layoutReducer(state.layout, action) };
-    case "SET_TAB_PINNED":
-      return { ...state, layout: layoutReducer(state.layout, action) };
+    case "SET_TAB_PINNED": {
+      const layout = layoutReducer(state.layout, action);
+      // The tab pin is the owner saying "keep this row where it is". The server's unit is the
+      // worktree row, so the pin folds into that row's per-worktree pin set under the lifecycle
+      // key (see `laneLifecycleKey`), which is what makes a pin survive a restart.
+      const worktreePath = getTabWorktreePath(state, action.tabId);
+      const row = worktreePath ? state.worktrees.find((worktree) => worktree.path === worktreePath) : undefined;
+      if (!worktreePath || !row) return { ...state, layout };
+      const { worktreeKey: key } = worktreeLifecycleIdentity(row, state.workspaceId);
+      const current = state.lanePinnedTabs?.[key] ?? [];
+      const next = foldTabPin(current, action.tabId, action.pinned);
+      if (next.length === current.length && next.every((tabId, index) => tabId === current[index])) {
+        return { ...state, layout };
+      }
+      return { ...state, layout, lanePinnedTabs: { ...state.lanePinnedTabs, [key]: next } };
+    }
+    case "SET_LANE_LIFECYCLE_MODEL": {
+      const rows = { ...action.rows };
+      const pinnedTabs = { ...action.pinnedTabs };
+      const pullRequests = { ...action.pullRequests };
+      const revisions = { ...action.revisions };
+      const order = { ...action.order };
+      for (const [key, revision] of Object.entries(state.laneRevisions ?? {})) {
+        const incoming = revisions[key] ?? -Infinity;
+        // Equal-revision frames still apply: PR observations can change without a lifecycle
+        // write. A cached read at that revision must not undo an already received frame.
+        if (incoming < revision || (incoming === revision && action.frameRevisions?.[key] === revision)) {
+          rows[key] = state.laneLifecycle![key];
+          if (state.lanePinnedTabs?.[key]) pinnedTabs[key] = state.lanePinnedTabs[key];
+          else delete pinnedTabs[key];
+          pullRequests[key] = state.lanePullRequests?.[key] ?? null;
+          revisions[key] = revision;
+          for (const [workspaceId, keys] of Object.entries(state.laneOrder ?? {})) {
+            if (keys.includes(key)) order[workspaceId] = keys;
+          }
+        }
+      }
+      return { ...state, laneLifecycle: rows, lanePinnedTabs: pinnedTabs, laneOrder: order, lanePullRequests: pullRequests, laneRevisions: revisions };
+    }
+    case "BEGIN_LANE_LIFECYCLE": {
+      const pending = action.pending;
+      // Nothing is written here. The entry exists only so the sidebar can show the new state and
+      // offer Undo; the server hears about it when the window closes (or at once on a commit).
+      return { ...state, lanePending: { ...state.lanePending, [pending.worktreeKey]: pending } };
+    }
+    case "CANCEL_LANE_LIFECYCLE": {
+      const pending = state.lanePending?.[action.worktreeKey];
+      if (!pending) return state;
+      const lanePending = { ...state.lanePending };
+      delete lanePending[action.worktreeKey];
+      // The row's state never changed in the store, so there is nothing to roll back; restoring
+      // `previous` covers a caller that optimistically painted the new state.
+      const restored = pending.previous;
+      return {
+        ...state,
+        lanePending,
+        laneLifecycle: restored
+          ? { ...state.laneLifecycle, [action.worktreeKey]: restored }
+          : state.laneLifecycle,
+      };
+    }
+    case "COMMIT_LANE_LIFECYCLE": {
+      const lanePending = { ...state.lanePending };
+      delete lanePending[action.worktreeKey];
+      if (action.revision < (state.laneRevisions?.[action.worktreeKey] ?? -Infinity)) return { ...state, lanePending };
+      return {
+        ...state,
+        lanePending,
+        laneRevisions: { ...state.laneRevisions, [action.worktreeKey]: action.revision },
+        laneLifecycle: { ...state.laneLifecycle, [action.worktreeKey]: action.state },
+        lanePullRequests: { ...state.lanePullRequests, [action.worktreeKey]: action.pullRequest ?? null },
+        lanePinnedTabs: action.pinnedTabs ? { ...state.lanePinnedTabs, [action.worktreeKey]: action.pinnedTabs } : state.lanePinnedTabs,
+      };
+    }
     case "SPLIT_PANE": {
       const requestedTabLayout = state.layout.layoutsByTabId?.[action.tabId];
       const requestedLeafIds = requestedTabLayout ? collectLeafIds(requestedTabLayout.root) : null;

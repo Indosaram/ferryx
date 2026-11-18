@@ -1,6 +1,8 @@
 // What the phone panel renders, derived from one PanelSnapshot: each session appears in exactly
 // one section (decisions, handling, sessions), and `panel.*` owner frames fold into the snapshot.
 import { groupOf } from "../../lib/attentionGroup";
+import { isLaneLifecycleModel, laneLifecycleKey, type LaneLifecycleModel } from "../../lib/sidebarPersistence";
+import type { SidebarModel } from "../../components/sidebar/sidebarModel";
 import type {
   ActionEntry,
   Escalation,
@@ -13,6 +15,23 @@ import type {
 
 // The phone folds frames with the same reducer the desktop does.
 export { applyPanelEvent } from "../../lib/supervisorPanel/model";
+
+/** Applies complete lifecycle rows to the remote's existing sidebar, with no network read. */
+export function applyLaneLifecycleModel(sidebar: SidebarModel, model: LaneLifecycleModel): SidebarModel {
+  const rows = new Map(model.sections.flatMap((section) => section.rows.map((row) => [row.worktreeKey, row] as const)));
+  return {
+    ...sidebar,
+    projects: sidebar.projects.map((project) => ({
+      ...project,
+      worktrees: project.worktrees.map((node) => {
+        const key = node.lifecycleKey ?? laneLifecycleKey({ workspaceId: node.workspaceId, path: node.path, worktreeSlug: node.worktreeSlug });
+        const row = rows.get(key);
+        if (!row || (row.revision ?? -Infinity) < (node.lifecycleRevision ?? -Infinity)) return node;
+        return { ...node, lifecycleKey: key, lifecycleRevision: row.revision, lifecycle: row.effectiveState, pinnedTabs: row.pinnedTabs, pullRequest: row.pullRequest ?? null };
+      }),
+    })),
+  };
+}
 
 export type PanelSections = {
   readonly decisions: readonly Escalation[];
@@ -113,6 +132,8 @@ export function parsePanelFrame(frame: unknown): PanelEvent | null {
       return Array.isArray(object?.rules) ? (object as unknown as PanelEvent) : null;
     case "panel.prs":
       return objectOf(object?.lane) ? (object as unknown as PanelEvent) : null;
+    case "panel.lanes":
+      return isLaneLifecycleModel(object?.model) ? (object as unknown as PanelEvent) : null;
     default:
       return null;
   }

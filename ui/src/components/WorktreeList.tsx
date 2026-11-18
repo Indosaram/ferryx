@@ -5,6 +5,8 @@ import { toast } from "sonner";
 
 import type { ActivitySummary } from "../lib/activity";
 import { openNativePopupMenu, type NativeMenuEntry } from "../lib/nativeMenu";
+import type { LaneLifecycleState } from "../lib/sidebarPersistence";
+import type { LaneLifecycleAction } from "../state/workspaceStore";
 import { getHostPlatform } from "../lib/platform";
 import { revealPath } from "../lib/tauri";
 import { useSupervisor } from "../lib/supervisor";
@@ -54,6 +56,13 @@ export type WorktreeRowProps = {
   readonly onResetAgentState?: (worktree: Worktree) => void;
   /** Opens the Changes tab; offered for local checkouts, including the main one. */
   readonly onShowChanges?: (worktree: Worktree) => void;
+  /** The server-reported lifecycle state of this row, when one was read. */
+  readonly laneState?: LaneLifecycleState | null;
+  /**
+   * Pin / settle / snooze / archive this row. The 5 s undo window lives in the store, so the row
+   * only names the action; it never writes the server itself.
+   */
+  readonly onLaneAction?: (worktree: Worktree, action: LaneLifecycleAction) => void;
   /** Precomputed row state (sidebarLiveState); without it the row derives its own. */
   readonly live?: SidebarRowLive;
 };
@@ -63,7 +72,11 @@ export type WorktreeListRowContext = Pick<
   WorktreeListProps,
   "repoRoot" | "activePath" | "activeWorkspaceId" | "statuses" | "unreadWorktreePaths" | "activityByWorktreePath" |
   "onSelect" | "onCreateWorktree" | "onDelete" | "onResetAgentState" | "onShowChanges" | "sortableWorkspaceId"
-> & { readonly agentsByPath: ReadonlyMap<string, ActiveAgent> };
+> & {
+  readonly agentsByPath: ReadonlyMap<string, ActiveAgent>;
+  readonly laneState?: LaneLifecycleState | null;
+  readonly onLaneAction?: (worktree: Worktree, action: LaneLifecycleAction) => void;
+};
 
 /** Row props for one worktree of a list; the sidebar container and WorktreeList share it. */
 export function worktreeListRowProps(worktree: Worktree, context: WorktreeListRowContext): WorktreeRowProps {
@@ -87,6 +100,9 @@ export function worktreeListRowProps(worktree: Worktree, context: WorktreeListRo
     onDelete: context.onDelete,
     onResetAgentState: context.onResetAgentState,
     onShowChanges: context.onShowChanges,
+    laneState: context.laneState ?? null,
+    ...(context.onLaneAction ? { onLaneAction: (row: Worktree, action: LaneLifecycleAction) =>
+      context.onLaneAction?.(row.workspaceId || !effectiveWorkspaceId ? row : { ...row, workspaceId: effectiveWorkspaceId }, action) } : {}),
   };
 }
 
@@ -124,6 +140,8 @@ export const WorktreeRow = memo(function WorktreeRow({
   onDelete,
   onResetAgentState,
   onShowChanges,
+  laneState,
+  onLaneAction,
   live,
 }: WorktreeRowProps) {
   const menuUnlistenRef = useRef<(() => void) | null>(null);
@@ -169,6 +187,20 @@ export const WorktreeRow = memo(function WorktreeRow({
     if (onResetAgentState) {
       items.push({ kind: "item", id: "reset-agent-state", label: "Reset Agent State", enabled: !isDisabled, icon: "refresh" });
     }
+    // The server-owned lifecycle. Offered on every row the server can key (all of them: a row's
+    // worktree identity is its key), so a snoozed or settled row is reachable from the row itself.
+    if (onLaneAction) {
+      items.push({ kind: "separator" });
+      items.push({
+        kind: "item",
+        id: "lane-pin-toggle",
+        label: laneState === "pinned" ? "Unpin Row" : "Pin Row",
+        enabled: !isDisabled,
+      });
+      items.push({ kind: "item", id: "lane-settle", label: "Settle Row", enabled: !isDisabled && laneState !== "settled" });
+      items.push({ kind: "item", id: "lane-snooze", label: "Snooze Row for 24h", enabled: !isDisabled && laneState !== "snoozed" });
+      items.push({ kind: "item", id: "lane-archive", label: "Archive Row", enabled: !isDisabled && laneState !== "archived" });
+    }
     items.push({ kind: "separator" });
     items.push({ kind: "item", id: "delete", label: deleteActionLabel, enabled: canDelete && !isDisabled, icon: "trash" });
     menuUnlistenRef.current?.();
@@ -194,6 +226,14 @@ export const WorktreeRow = memo(function WorktreeRow({
           onShowChanges?.(worktree);
         } else if (id === "reset-agent-state") {
           onResetAgentState?.(worktree);
+        } else if (id === "lane-pin-toggle") {
+          onLaneAction?.(worktree, laneState === "pinned" ? "activate" : "pin");
+        } else if (id === "lane-settle") {
+          onLaneAction?.(worktree, "settle");
+        } else if (id === "lane-snooze") {
+          onLaneAction?.(worktree, "snooze");
+        } else if (id === "lane-archive") {
+          onLaneAction?.(worktree, "archive");
         } else if (id === "delete") onDelete(worktree);
       },
       controller.signal,

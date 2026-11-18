@@ -1899,28 +1899,60 @@ const AGENT_STAMP_WRITE_WINDOW: std::time::Duration = std::time::Duration::from_
 /// now, then writes every change from one thread: the bus's sink only queues, so a publisher never
 /// waits on the journal. The thread holds the workspace service, not the gateway state, and ends
 /// (after a last write) when the bus, and with it the sink, is dropped.
+///
+/// The same thread is the writer of the observation tail behind `replay(after)`. It is one writer
+/// for one journal on purpose: stamps and observations land in the same file, so a reader never
+/// sees half a batch and there is no second store to precedence-rule against this one.
 fn install_agent_stamp_persistence(
     bus: &Arc<crate::agent_control::events::AgentEventBus>,
     workspaces: &Arc<crate::daemon::workspace_service::DaemonWorkspaceService>,
 ) -> Option<std::thread::JoinHandle<()>> {
+    use crate::agent_control::events::JournalUpdate;
     match workspaces.journal.agent_stamps() {
         Ok(stamps) => bus.seed_stamps(stamps),
         Err(error) => tracing::warn!(%error, "agent stamps were not loaded from the machine journal"),
     }
-    let (queue, updates) = std::sync::mpsc::channel();
-    let sink_queue = std::sync::Mutex::new(queue);
-    bus.set_stamp_sink(Arc::new(move |session_id, stamps| {
-        if let Ok(queue) = sink_queue.lock() {
-            let _ = queue.send((session_id.to_string(), stamps.clone()));
+    // Resume the durable tail before the observers start. A bus that already issued a sequence
+    // keeps its own epoch: its first reading replaces the stored tail (`ObservationHistory::push`
+    // refuses to splice two epochs), so the old rows are left in place rather than destroyed — a
+    // run that never observes anything must not throw away history a later run could resume.
+    match workspaces.journal.observation_history() {
+        Ok(history) if !history.is_empty() => {
+            if !bus.adopt_history(history) {
+                tracing::debug!("agent observations were not resumed: this bus already issued a sequence");
+            }
         }
-    }));
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "agent observations were not loaded from the machine journal"),
+    }
+    let (queue, updates) = std::sync::mpsc::channel();
+    let sink_queue = Arc::new(std::sync::Mutex::new(queue));
+    {
+        let stamp_queue = Arc::clone(&sink_queue);
+        bus.set_stamp_sink(Arc::new(move |session_id, stamps| {
+            if let Ok(queue) = stamp_queue.lock() {
+                let _ = queue.send(JournalUpdate::Stamps(session_id.to_string(), stamps.clone()));
+            }
+        }));
+    }
+    {
+        let observation_queue = Arc::clone(&sink_queue);
+        bus.set_observation_sink(Arc::new(move |instance, observation| {
+            if let Ok(queue) = observation_queue.lock() {
+                let _ = queue.send(JournalUpdate::Observed(
+                    instance.to_string(),
+                    observation.clone(),
+                ));
+            }
+        }));
+    }
     let workspaces = Arc::clone(workspaces);
     let spawned = std::thread::Builder::new().name("agent-stamps".into()).spawn(move || {
         while let Some((batch, closed)) =
-            crate::agent_control::events::next_stamp_batch(&updates, AGENT_STAMP_WRITE_WINDOW)
+            crate::agent_control::events::next_journal_batch(&updates, AGENT_STAMP_WRITE_WINDOW)
         {
-            if let Err(error) = workspaces.journal.record_agent_stamps(&batch) {
-                tracing::warn!(%error, "agent stamps were not written to the machine journal");
+            if let Err(error) = workspaces.journal.record_journal(batch) {
+                tracing::warn!(%error, "agent stamps and observations were not written to the machine journal");
             }
             if closed {
                 break;
@@ -1931,6 +1963,18 @@ fn install_agent_stamp_persistence(
         tracing::warn!(%error, "the agent stamp writer did not start");
     }
     spawned.ok()
+}
+
+#[cfg(test)]
+#[path = "agent_observation_journal_tests.rs"]
+mod agent_observation_journal_tests;
+
+/// Unix seconds, for the pending-input journal's timestamps.
+fn pending_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 /// The `/api/v1/sessions` visibility rule applied to pushes: a Machine-scope Control device

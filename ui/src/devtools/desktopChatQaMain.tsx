@@ -24,6 +24,7 @@ const transport = desktopChatTransportFrom({
   },
   stop: async () => ({ ok: false, code: "NOT_SUPPORTED", message: "This fixture has no running agent." }),
   answer: async () => ({ ok: false, code: "REQUEST_CONFLICT", message: "This fixture has no active prompt." }),
+  resolvePrompt: async () => ({ ok: false, code: "REQUEST_CONFLICT", message: "This fixture shows no prompt to dismiss." }),
 });
 
 function Harness() {

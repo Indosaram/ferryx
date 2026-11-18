@@ -4569,6 +4569,7 @@ fn gateway_capability_names(
         }
         capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+        capabilities.push(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
         capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
         capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);

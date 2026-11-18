@@ -175,6 +175,9 @@ export function usePhonePanel(input: {
         setPrLane(event.lane);
         return;
       }
+      // Sidebar lifecycle rows are applied by useRemoteSidebarModel, not this fleet snapshot.
+      // In particular, they must not invalidate the phone's in-flight initial panel read.
+      if (event.type === "panel.lanes") return;
       seqRef.current += 1;
       setState((previous) => (previous.kind === "ready" ? { kind: "ready", snapshot: applyPanelEvent(previous.snapshot, event) } : previous));
     });

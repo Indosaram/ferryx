@@ -7,6 +7,7 @@ import type { Worktree } from "../../lib/types";
 import type { RemoteHostState } from "../../state/remoteHostStore";
 import { buildSidebarModel, filterSidebarModel, sidebarLiveState, type SidebarModelInput } from "./sidebarModel";
 import { initialCollapsedProjects } from "./sidebarRows";
+import { worktreeLifecycleIdentity } from "../../lib/sidebarPersistence";
 
 const REMOTE = "git@github.com:indo/ferryx.git";
 const local: RegisteredProject = { workspaceId: "ferryx", repoRoot: "/code/ferryx", gitRoot: "/code/ferryx", gitRemote: REMOTE };
@@ -55,6 +56,31 @@ const activity = (state: "working" | "waiting"): ActivitySummary => ({
 });
 
 describe("buildSidebarModel", () => {
+  it("renders an unmanaged project-root pin under the action and tab-pin identity", () => {
+    const root = row(local.repoRoot, "main");
+    const identity = worktreeLifecycleIdentity(root, local.workspaceId);
+    expect(identity).toEqual({ workspaceId: "ferryx", worktreeKey: "p:ferryx/code/ferryx" });
+    const model = buildSidebarModel(fixture({
+      projects: [local], worktrees: [root],
+      laneLifecycles: { [identity.worktreeKey]: { state: "pinned", pinnedTabs: ["tab"] } },
+    }));
+    expect(model.projects[0].worktrees[0]).toMatchObject({ lifecycleKey: identity.worktreeKey, lifecycle: "pinned", pinnedTabs: ["tab"] });
+  });
+  it("carries the hub PR through the shared desktop and published row model", () => {
+    const pullRequest = {
+      laneKey: "relay-latency", repo: "indo/ferryx", prNumber: 42, state: "merged" as const,
+      url: "https://github.com/indo/ferryx/pull/42", title: "Relay latency",
+      headBranch: "lane/relay-latency", observedAt: "2026-11-15T00:00:00Z",
+    };
+    const model = buildSidebarModel(fixture({
+      laneLifecycles: { "w:ferryx/relay-latency": { state: "settled", pullRequest } },
+    }));
+    const rows = model.projects.flatMap((project) => project.worktrees);
+    expect(rows.find((node) => node.lifecycleKey === "w:ferryx/relay-latency")?.pullRequest).toEqual(pullRequest);
+    expect(rows.find((node) => node.path === "/code/ferryx")).not.toHaveProperty("pullRequest");
+    expect(JSON.parse(JSON.stringify(model)).projects[0].worktrees.find((node: { lifecycleKey: string }) => node.lifecycleKey === "w:ferryx/relay-latency").pullRequest).toEqual(pullRequest);
+  });
+
   it("keeps undragged rows in a stable order however the listing arrives", () => {
     const paths = ["/code/ferryx/.orca-worktrees/charlie", "/code/ferryx/.orca-worktrees/alpha", "/code/ferryx/.orca-worktrees/bravo"];
     const listing = (order: string[]) => fixture({

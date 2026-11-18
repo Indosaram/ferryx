@@ -55,6 +55,7 @@ export interface ReferencePromptCardProps {
   ) => Promise<boolean>;
   /** The answer was refused because the screen moved: re-read the prompt now. */
   readonly onPromptChanged?: () => void;
+  readonly onDismissAmbiguous?: () => Promise<void>;
   /** An answer went out; `toMessageBox`: the keyboard's focus was in the card and may go on to the message box. */
   readonly onAnswered?: (toMessageBox: boolean) => void;
   /** An option picked by a typed message, waiting in the card for Confirm. */
@@ -97,6 +98,7 @@ export function ReferencePromptCard({
   screenRevision,
   onAnswer,
   onPromptChanged,
+  onDismissAmbiguous,
   onAnswered,
   typedAnswer = null,
   onTypedAnswerDone,
@@ -337,6 +339,17 @@ export function ReferencePromptCard({
       )}
       {bodyBlock}
 
+      {prompt.answerStatus === "outcomeUnknown" && (
+        <div role="alert" className="space-y-2 rounded-lg border border-status-warning p-3">
+          <p className="text-sm">The previous answer may have reached the agent. Choose whether to dismiss this card; no answer will be resent.</p>
+          <button type="button" data-testid="reference-prompt-dismiss-ambiguous" className="min-h-11 rounded border px-3" onClick={() => {
+            if (window.confirm("Dismiss this ambiguous prompt? The previous answer may already have been applied. No answer will be resent.")) {
+              void onDismissAmbiguous?.();
+            }
+          }}>Dismiss without retrying</button>
+        </div>
+      )}
+
       {twoOptionApproval !== null ? (
         <ApprovalActionCard
           bare
@@ -345,12 +358,12 @@ export function ReferencePromptCard({
           declineLabel={prompt.options[twoOptionApproval[1] ?? 1]?.label ?? "Decline"}
           allowCustomFeedback={false}
           onAccept={(_feedback, event) =>
-            void answer({ optionIndex: twoOptionApproval[0] ?? 0 }, event, true)
+            prompt.answerStatus === "outcomeUnknown" ? undefined : void answer({ optionIndex: twoOptionApproval[0] ?? 0 }, event, true)
           }
           onDecline={(_feedback, event) =>
-            void answer({ optionIndex: twoOptionApproval[1] ?? 1 }, event, true)
+            prompt.answerStatus === "outcomeUnknown" ? undefined : void answer({ optionIndex: twoOptionApproval[1] ?? 1 }, event, true)
           }
-          isSubmitting={pending}
+          isSubmitting={pending || prompt.answerStatus === "outcomeUnknown"}
         />
       ) : (
         <>
@@ -373,7 +386,7 @@ export function ReferencePromptCard({
                     <input
                       type="checkbox"
                       checked={checked}
-                      disabled={pending}
+                      disabled={pending || prompt.answerStatus === "outcomeUnknown"}
                       onChange={() => toggle(index)}
                       className="sr-only"
                     />
@@ -411,7 +424,7 @@ export function ReferencePromptCard({
                     role="radio"
                     aria-checked={checked}
                     data-testid={`reference-prompt-option-${index}`}
-                    disabled={pending}
+                    disabled={pending || prompt.answerStatus === "outcomeUnknown"}
                     className={cn(
                       "flex w-full min-h-11 items-start gap-2.5 rounded-lg border border-chat-border px-3 py-2.5 text-left text-sm text-chat-foreground transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                       checked ? "bg-chat-surface-raised" : "bg-chat-surface hover:bg-chat-surface-hover",
@@ -441,7 +454,7 @@ export function ReferencePromptCard({
               type="button"
               data-testid="reference-prompt-submit"
               disabled={
-                pending || (prompt.multiSelect ? selected.length === 0 : pickedIndex === null)
+                pending || prompt.answerStatus === "outcomeUnknown" || (prompt.multiSelect ? selected.length === 0 : pickedIndex === null)
               }
               className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-chat-primary px-4 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 disabled:bg-chat-surface-raised disabled:text-chat-foreground-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onClick={(event) => {
@@ -478,7 +491,7 @@ export function ReferencePromptCard({
                   data-testid="reference-prompt-custom-input"
                   className="min-h-11 min-w-0 flex-1 rounded-lg border border-chat-border bg-chat-screen px-3 py-2 text-base text-chat-foreground placeholder:text-chat-foreground-tertiary transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   value={custom}
-                  disabled={pending}
+                  disabled={pending || prompt.answerStatus === "outcomeUnknown"}
                   enterKeyHint="send"
                   placeholder={prompt.options[customIndex]?.label ?? "Type an answer"}
                   aria-label={hasChoices ? undefined : "Your answer"}
@@ -499,7 +512,7 @@ export function ReferencePromptCard({
                 <button
                   type="button"
                   data-testid="reference-prompt-custom-send"
-                  disabled={pending || custom.trim().length === 0}
+                  disabled={pending || prompt.answerStatus === "outcomeUnknown" || custom.trim().length === 0}
                   className="flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border border-chat-border bg-chat-surface-raised px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   onClick={(event) => void answer({ customText: custom.trim() }, event)}
                 >
@@ -533,7 +546,7 @@ export function ReferencePromptCard({
               ref={confirmButtonRef}
               type="button"
               data-testid="reference-prompt-confirm-send"
-              disabled={pending}
+              disabled={pending || prompt.answerStatus === "outcomeUnknown"}
               className="flex min-h-11 w-full items-center justify-center gap-2 rounded-lg bg-chat-primary px-4 text-sm font-medium text-chat-primary-foreground transition-colors hover:bg-chat-primary/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onClick={(event) =>
                 void answer(typedAnswer, event).then((current) => {
@@ -551,7 +564,7 @@ export function ReferencePromptCard({
             <button
               type="button"
               data-testid="reference-prompt-confirm-cancel"
-              disabled={pending}
+              disabled={pending || prompt.answerStatus === "outcomeUnknown"}
               className="flex min-h-11 w-full items-center justify-center rounded-lg border border-chat-border bg-chat-surface px-4 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface-hover disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onClick={() => onTypedAnswerDone?.()}
             >

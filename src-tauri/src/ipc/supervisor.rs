@@ -190,6 +190,28 @@ pub async fn cmd_supervisor_read(
     read_from(daemon_client.send_request(DaemonRequest::SupervisorReadV1 { request }).await?)
 }
 
+/// Reach the daemon-owned hub over the same IPC channel as the Supervisor panel.
+#[tauri::command]
+pub async fn cmd_lane_lifecycle(
+    daemon_client: tauri::State<'_, Arc<DaemonClient>>,
+    operation: String,
+    body: serde_json::Value,
+) -> Result<Option<serde_json::Value>, IpcError> {
+    let Some(response) = daemon_client.lane_lifecycle(operation, body).await? else {
+        // Normal rolling handover: the webview uses its predecessor HTTP transport.
+        return Ok(None);
+    };
+    match response {
+        DaemonResponse::LaneLifecycleOk { status, value } => Ok(Some(serde_json::json!({ "status": status, "value": value }))),
+        DaemonResponse::Error { message, code, details } => {
+            let mut error = failure(message, code);
+            error.details = details;
+            Err(error)
+        }
+        _ => Err(IpcError::internal("Unexpected daemon lifecycle response")),
+    }
+}
+
 fn converse_from(response: DaemonResponse) -> Result<serde_json::Value, IpcError> {
     match response {
         DaemonResponse::SupervisorConverseV1Ok { value } => Ok(value),

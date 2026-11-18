@@ -39,3 +39,14 @@ pub async fn cmd_agent_prompt_answer(
         .agent_prompt_answer(session_id, prompt_id, screen_revision, answer, registry_id)
         .await
 }
+
+#[tauri::command]
+pub async fn cmd_agent_prompt_resolve_ambiguous(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    session_id: String,
+    prompt_id: String,
+    screen_revision: String,
+) -> Result<(), IpcError> {
+    daemon_client.inner().clone()
+        .agent_prompt_resolve_ambiguous(session_id, prompt_id, screen_revision).await
+}

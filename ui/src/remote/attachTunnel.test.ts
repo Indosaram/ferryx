@@ -140,6 +140,26 @@ function concatAll(arrays: Uint8Array[]): Uint8Array {
   return out;
 }
 
+/**
+ * Exact byte-for-byte equality for large buffers.
+ *
+ * `expect(actual).toEqual(expected)` deep-compares through Vitest's equality machinery, which
+ * costs seconds on a megabyte (measured 6.15 s for 1 MiB on the Linux gate host) and pushed the
+ * large-frame test past its budget instead of failing it. This asserts the same predicate — every
+ * byte equal, same length — in linear time, and reports the first differing offset so a real
+ * corruption still fails with a usable message.
+ */
+function expectBytesEqual(actual: Uint8Array, expected: Uint8Array): void {
+  expect(actual.length).toBe(expected.length);
+  for (let i = 0; i < expected.length; i++) {
+    if (actual[i] !== expected[i]) {
+      throw new Error(
+        `byte mismatch at offset ${i}: actual ${actual[i]} !== expected ${expected[i]}`,
+      );
+    }
+  }
+}
+
 async function computeAcceptKey(secKey: string): Promise<string> {
   const acceptInput = new TextEncoder().encode(secKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
   const digest = await crypto.subtle.digest("SHA-1", acceptInput);
@@ -386,7 +406,7 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
       const message = await received;
 
       // Then the payload is intact and was copied a bounded number of times, not once per chunk
-      expect(message).toEqual(payload);
+      expectBytesEqual(message, payload);
       expect(copied.bytes).toBeLessThan(payloadSize * 4);
     } finally {
       setSpy.mockRestore();

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::adapter::ProviderCapabilities;
 use super::matcher::{CompiledMatcherNode, MatcherError, MatcherNode};
 use super::region::{Region, RegionError, ScreenInput};
 
@@ -60,6 +61,13 @@ pub struct RawManifest {
     pub aliases: Vec<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// What this provider can do, as a declared fact beside its screen rules.
+    ///
+    /// Defaulted so every manifest written before the field existed keeps parsing unchanged and
+    /// yields [`ProviderCapabilities::default`], which is all `false`: a provider that declares
+    /// nothing can do nothing. A manifest opts in with a `[capabilities]` table; none does yet.
+    #[serde(default)]
+    pub capabilities: ProviderCapabilities,
     #[serde(default)]
     pub rules: Vec<RawRule>,
 }
@@ -93,6 +101,9 @@ pub struct CompiledManifest {
     pub min_engine_version: Option<u32>,
     pub aliases: Vec<String>,
     pub updated_at: Option<String>,
+    /// Carried through from [`RawManifest::capabilities`]; defaulted at the raw layer, so a
+    /// manifest without the table compiles to the conservative all-`false` value.
+    pub capabilities: ProviderCapabilities,
     pub rules: Vec<CompiledRule>,
 }
 
@@ -133,6 +144,7 @@ pub fn load_manifest_from_str(s: &str) -> Result<CompiledManifest, ManifestError
         min_engine_version: raw.min_engine_version,
         aliases: raw.aliases,
         updated_at: raw.updated_at,
+        capabilities: raw.capabilities,
         rules: compiled_rules,
     })
 }

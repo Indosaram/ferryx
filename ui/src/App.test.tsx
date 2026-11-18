@@ -193,6 +193,7 @@ vi.mock("./lib/tauri", () => ({
   listExternalWorktrees: vi.fn(async () => []),
   discardWindowSession: vi.fn(async () => undefined),
   onWindowSessionsOrphaned: vi.fn(async () => () => undefined),
+  reportDesktopWindowFocus: vi.fn(async () => undefined),
   onSessionCorrupted: vi.fn(async () => () => undefined),
   onWindowSessionsAdopt: vi.fn(async () => () => undefined),
   takePendingWindowAdoptions: vi.fn(async () => []),

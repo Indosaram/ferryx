@@ -263,6 +263,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY);
+            capabilities.push(crate::daemon::protocol::LANE_LIFECYCLE_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_CONVERSE_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_SETUP_CAPABILITY);
             capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY);

@@ -40,12 +40,16 @@ pub enum AgentOp {
         session_id: String,
         until: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         after_revision: Option<String>,
         #[serde(default, skip_serializing_if = "is_zero")]
         after: u64,
         timeout_ms: u64,
     },
     Events {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance: Option<String>,
         #[serde(default, skip_serializing_if = "is_zero")]
         after: u64,
     },
