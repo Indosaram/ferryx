@@ -1613,7 +1613,7 @@ export async function buildHost({
         const script = createLinuxBuildScript({ workspaceDir, plan, hostConfig });
         const result = await runHostScript(hostConfig, { posix: script }, { timeoutMs });
         toolchains = parseBuildResult(result.stdout);
-        for (const name of ["Ferryx_amd64.AppImage", "Ferryx_amd64.deb", "ferryx-cli-linux-amd64"]) {
+        for (const name of ["Ferryx_amd64.AppImage", "Ferryx_amd64.deb", "ferryx-cli-linux-amd64", "ferryx-rd-client-linux-amd64"]) {
           await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir}/out/${name}`, artifactsOutDir], { timeoutMs });
         }
       } else {
@@ -1636,7 +1636,7 @@ export async function buildHost({
           });
           const result = await runHostScript(hostConfig, { powershell: script }, { timeoutMs });
           toolchains = parseBuildResult(result.stdout);
-          const names = ["Ferryx_x64.msix"];
+          const names = ["Ferryx_x64.msix", "ferryx-rd-client-windows-amd64.exe"];
           if (plan.channels.nsisMigration) names.push("Ferryx_x64-setup.exe");
           for (const name of names) {
             await runProcess(scpCommand, [...sshArgs, `${hostConfig.ssh}:${workspaceDir.replaceAll("\\", "/")}/out/${name}`, artifactsOutDir], { timeoutMs });

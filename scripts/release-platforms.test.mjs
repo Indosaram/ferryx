@@ -25,6 +25,7 @@ import {
   verifyMacosFfmpegBundle,
 } from "./lib/release-platforms.mjs";
 import { parseReceipt } from "./lib/release-contract.mjs";
+import { writeRdClientArtifact } from "./fixtures/rd-client-artifact.mjs";
 
 test("release-platforms: exports required APIs", () => {
   assert.equal(typeof probeMacbook, "function");
@@ -313,6 +314,7 @@ test("buildHost: reuses existing host-scoped bundles when present", async () => 
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
       writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
+      writeRdClientArtifact(artifactsOutDir, "darwin");
       return {
         exitCode: 0,
         toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.17.0", rust: "1.92.0" },
@@ -414,6 +416,7 @@ test("buildHost: creates host-scoped bundles into platform subdirectory when sha
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
       writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
+      writeRdClientArtifact(artifactsOutDir, "darwin");
       return {
         exitCode: 0,
         toolchains: { node: "22.22.3", bun: "1.4.0", zig: "0.17.0", rust: "1.92.0" },
@@ -477,7 +480,7 @@ test("createBuildReceipt: creates valid receipt conforming to release contract",
         bytes: 12345,
         sha256: "a".repeat(64),
         signatureRelPath: "darwin/Ferryx.app.tar.gz.sig",
-        targets: ["darwin-aarch64", "darwin-x86_64"],
+        targets: ["darwin-aarch64"],
       },
       {
         kind: "dmg",
@@ -708,6 +711,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
       writeFileSync(dummySig, "untrusted comment: mock sig\nMOCK_SIGNATURE\n");
       writeFileSync(dummyDmg, "MOCK_DMG_CONTENT");
       writeFileSync(join(artifactsOutDir, "ferryx-cli-darwin-universal"), "MOCK_CLI_CONTENT");
+      writeRdClientArtifact(artifactsOutDir, "darwin");
 
       return {
         exitCode: 0,
@@ -730,7 +734,7 @@ test("buildHost: executes builder fixture, stages artifacts, and writes valid re
 
     assert.equal(receipt.host, "macbook");
     assert.equal(receipt.exitCode, 0);
-    assert.equal(receipt.artifacts.length, 3);
+    assert.deepEqual(receipt.artifacts.map(({ kind }) => kind).sort(), ["cli-darwin-universal", "dmg", "macos-updater", "rd-client-darwin-universal"]);
 
     const receiptPath = join(runDir, "receipts", "build-receipt-macbook.json");
     assert.ok(existsSync(receiptPath));
@@ -880,7 +884,11 @@ if [ "$1" = "--version" ]; then
 elif [ "$1" = "build" ]; then
   printf "%s\n" "$*" >> "$CARGO_TARGET_DIR/cargo-build-args.log"
   mkdir -p "$CARGO_TARGET_DIR/release"
-  printf "ELF_MOCK_CLI_BYTES" > "$CARGO_TARGET_DIR/release/ferryx-cli"
+  case "$*" in
+    *'--bin ferryx-cli') printf 'ELF_MOCK_CLI_BYTES' > "$CARGO_TARGET_DIR/release/ferryx-cli" ;;
+    *'--bin ferryx-rd-client') printf 'ELF_MOCK_RD_BYTES' > "$CARGO_TARGET_DIR/release/ferryx-rd-client" ;;
+    *) exit 1 ;;
+  esac
   exit 0
 fi
 `;
@@ -916,6 +924,7 @@ fi
     assert.equal(readFileSync(debFile, "utf8"), "DEB_MOCK_BYTES");
     assert.ok(existsSync(cliFile), "Standalone CLI binary must exist in output directory");
     assert.equal(readFileSync(cliFile, "utf8"), "ELF_MOCK_CLI_BYTES");
+    assert.equal(readFileSync(join(workspaceDir, "out", "ferryx-rd-client-linux-amd64"), "utf8"), "ELF_MOCK_RD_BYTES");
     assert.equal(existsSync(tarGzFile), false, "AppImage.tar.gz must NOT be created");
     // The standalone Linux CLI must build without the desktop feature, so it links no GTK/WebKit.
     const cargoBuildArgs = readFileSync(join(workspaceDir, "cargo-target", "cargo-build-args.log"), "utf8");
@@ -1476,7 +1485,8 @@ test("remote builders: every release builds, stages and checks the LGPL FFmpeg p
   assert.match(linux, /stage-ffmpeg\.mjs" --target x86_64-unknown-linux-gnu --check/);
   assert.match(linux, /export FFMPEG_DIR="\$ffmpeg_prefix"/);
   assert.match(linux, /bun tauri build --bundles appimage,deb -c "\$ffmpeg_overlay"/);
-  assert.doesNotMatch(linux, /--features/);
+  assert.doesNotMatch(linux, /^.*bun tauri build[^\n]*--features/m);
+  assert.match(linux, /--features cli --bin ferryx-rd-client/);
   assert.ok(linux.indexOf("--check") < linux.indexOf("bun tauri build"), "payload check precedes the build");
   assert.match(linux, /dpkg-deb -c /);
   assert.match(linux, /grep 'usr\/lib\/Ferryx\/ffmpeg\/libavcodec/);
@@ -1494,7 +1504,8 @@ test("remote builders: every release builds, stages and checks the LGPL FFmpeg p
   assert.match(windows, /bun tauri build --no-bundle;/);
   assert.match(windows, /-SkipSigning -FfmpegPayloadDir \$ffmpegPayload/);
   assert.match(windows, /bun tauri build --bundles nsis -c \$nsisConfigPath;/);
-  assert.doesNotMatch(windows, /--features/);
+  assert.doesNotMatch(windows, /^.*bun tauri build[^\n]*--features/m);
+  assert.match(windows, /--features cli --bin ferryx-rd-client/);
   assert.ok(windows.indexOf("--check") < windows.indexOf("tauri build"), "payload check precedes the build");
 });
 

@@ -17,6 +17,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { assembleRelease } from "./build-latest-json.mjs";
+import { writeRdClientArtifact } from "./fixtures/rd-client-artifact.mjs";
 import { verifyMinisign } from "./lib/minisign-verify.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -188,6 +189,7 @@ function createSyntheticReleaseFixture({
       },
     ],
   };
+  macReceipt.artifacts.push(writeRdClientArtifact(macDir, "darwin"));
   writeFileSync(join(receiptsDir, "build-receipt-macbook.json"), JSON.stringify(macReceipt, null, 2) + "\n");
 
   // Linux artifacts
@@ -248,6 +250,7 @@ function createSyntheticReleaseFixture({
       },
     ],
   };
+  linuxReceipt.artifacts.push(writeRdClientArtifact(linuxDir, "linux"));
   writeFileSync(join(receiptsDir, "build-receipt-omaki.json"), JSON.stringify(linuxReceipt, null, 2) + "\n");
 
   // Windows artifacts
@@ -257,6 +260,7 @@ function createSyntheticReleaseFixture({
   writeFileSync(join(winDir, "Ferryx_2026.908.1.0_x64.msix"), msixBuf);
 
   const winArtifacts = [
+    writeRdClientArtifact(winDir, "windows"),
     {
       kind: "msix",
       name: "Ferryx_2026.908.1.0_x64.msix",
@@ -376,6 +380,9 @@ test("assembleRelease creates complete release inventory, latest.json first, sta
     assert.equal(existsSync(join(outDir, "Ferryx_x64.msix")), true);
     assert.equal(existsSync(join(outDir, "ferryx-cli-linux-amd64")), true);
     assert.equal(existsSync(join(outDir, "ferryx-cli-darwin-universal")), true);
+    for (const name of ["ferryx-rd-client-linux-amd64", "ferryx-rd-client-darwin-universal", "ferryx-rd-client-windows-amd64.exe"]) {
+      assert.ok(existsSync(join(outDir, name)), name);
+    }
 
     // Original artifacts present
     assert.equal(existsSync(join(outDir, "Ferryx_2026.908.1_universal.dmg")), true);

@@ -78,14 +78,14 @@ export const KIND_DEFINITIONS = Object.freeze({
     isUpdater: false,
     expectedTargets: [],
     stableAlias: "ferryx-cli-linux-amd64",
-    allowedExtensions: ["-linux-amd64", "ferryx-cli"],
+    allowedExtensions: ["ferryx-cli-linux-amd64", "ferryx-cli"],
   },
   "cli-darwin-universal": {
     permittedHost: "macbook",
     isUpdater: false,
     expectedTargets: [],
     stableAlias: "ferryx-cli-darwin-universal",
-    allowedExtensions: ["-darwin-universal", "ferryx-cli"],
+    allowedExtensions: ["ferryx-cli-darwin-universal", "ferryx-cli"],
   },
   // The remote-desktop client: remote hosts need it to drive a GUI over the paired tunnel.
   "rd-client-linux-amd64": {
@@ -93,14 +93,14 @@ export const KIND_DEFINITIONS = Object.freeze({
     isUpdater: false,
     expectedTargets: [],
     stableAlias: "ferryx-rd-client-linux-amd64",
-    allowedExtensions: ["-linux-amd64", "ferryx-rd-client"],
+    allowedExtensions: ["ferryx-rd-client-linux-amd64", "ferryx-rd-client"],
   },
   "rd-client-darwin-universal": {
     permittedHost: "macbook",
     isUpdater: false,
     expectedTargets: [],
     stableAlias: "ferryx-rd-client-darwin-universal",
-    allowedExtensions: ["-darwin-universal", "ferryx-rd-client"],
+    allowedExtensions: ["ferryx-rd-client-darwin-universal", "ferryx-rd-client"],
   },
   // Windows needs the client and its FFmpeg DLL sidecars together: the client links FFmpeg
   // dynamically, so a bare .exe fails to start on a host without a system FFmpeg.

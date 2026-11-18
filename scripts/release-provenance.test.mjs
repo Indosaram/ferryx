@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { assembleReleaseRun, verifyReleaseRun } from "./release-local.mjs";
 import { msixWithVersion } from "./fixtures/msix-fixture.mjs";
+import { writeRdClientArtifact } from "./fixtures/rd-client-artifact.mjs";
 import {
   attachReleaseProvenance,
   CHECKSUMS_NAME,
@@ -321,13 +322,15 @@ function writeRun(tmp, key) {
     art("macos-updater", "darwin/Ferryx.app.tar.gz", true, ["darwin-aarch64"]),
     art("dmg", "darwin/Ferryx_2026.908.1_universal.dmg", false),
     art("cli-darwin-universal", "darwin/ferryx-cli-darwin-universal", false),
+    writeRdClientArtifact(join(artifacts, "darwin"), "darwin"),
   ]);
   write("omaki", [
     art("appimage", "linux/Ferryx_2026.908.1_amd64.AppImage", true, ["linux-x86_64"]),
     art("deb", "linux/Ferryx_2026.908.1_amd64.deb", false),
     art("cli-linux-amd64", "linux/ferryx-cli-linux-amd64", false),
+    writeRdClientArtifact(join(artifacts, "linux"), "linux"),
   ]);
-  write("maho-win", [art("msix", "windows/Ferryx_2026.908.1.0_x64.msix", false)]);
+  write("maho-win", [art("msix", "windows/Ferryx_2026.908.1.0_x64.msix", false), writeRdClientArtifact(join(artifacts, "windows"), "windows")]);
   return runDir;
 }
 
