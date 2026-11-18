@@ -16,7 +16,7 @@ use tokio::time::timeout;
 
 use crate::agent_control::{
     pty_run_id, AgentControl, AgentOp, Delivery, FixedLauncher, RecordingControl, StartReceipt,
-    TaskLauncher, WorkerSend,
+    TaskLauncher, WorkerSend, AGENT_LAUNCH_UNAVAILABLE,
 };
 use crate::goals::contract::{
     contract_of, set_contract, set_mode, set_proposal_state, RequirementSpec,
@@ -325,6 +325,22 @@ struct PausingLauncher {
 #[async_trait]
 impl TaskLauncher for PausingLauncher {
     async fn launch_pane(&self, _cwd: &str, _command: &[String]) -> crate::error::Result<String> {
+        self.hold().await
+    }
+
+    async fn launch_agent_pane(
+        &self,
+        _cwd: &str,
+    ) -> crate::error::Result<crate::agent_control::LaunchedAgent> {
+        Ok(crate::agent_control::LaunchedAgent {
+            agent: "claude".into(),
+            session_id: self.hold().await?,
+        })
+    }
+}
+
+impl PausingLauncher {
+    async fn hold(&self) -> crate::error::Result<String> {
         let goal = goal_of(&self.pool, &self.goal_id).await.unwrap().unwrap();
         transition_goal(
             &self.pool,
@@ -350,9 +366,25 @@ struct SequenceLauncher {
 #[async_trait]
 impl TaskLauncher for SequenceLauncher {
     async fn launch_pane(&self, cwd: &str, _command: &[String]) -> crate::error::Result<String> {
+        Ok(self.next(cwd))
+    }
+
+    async fn launch_agent_pane(
+        &self,
+        cwd: &str,
+    ) -> crate::error::Result<crate::agent_control::LaunchedAgent> {
+        Ok(crate::agent_control::LaunchedAgent {
+            agent: "claude".into(),
+            session_id: self.next(cwd),
+        })
+    }
+}
+
+impl SequenceLauncher {
+    fn next(&self, cwd: &str) -> String {
         self.cwds.lock().unwrap().push(cwd.to_owned());
         let number = self.launched.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(format!("pane-{number}"))
+        format!("pane-{number}")
     }
 }
 
@@ -365,11 +397,28 @@ struct BreakingLauncher {
 #[async_trait]
 impl TaskLauncher for BreakingLauncher {
     async fn launch_pane(&self, _cwd: &str, _command: &[String]) -> crate::error::Result<String> {
+        self.break_table().await;
+        Ok(PANE.to_owned())
+    }
+
+    async fn launch_agent_pane(
+        &self,
+        _cwd: &str,
+    ) -> crate::error::Result<crate::agent_control::LaunchedAgent> {
+        self.break_table().await;
+        Ok(crate::agent_control::LaunchedAgent {
+            agent: "claude".into(),
+            session_id: PANE.to_owned(),
+        })
+    }
+}
+
+impl BreakingLauncher {
+    async fn break_table(&self) {
         sqlx::query("ALTER TABLE supervisor_project_hosts RENAME TO supervisor_project_hosts_gone")
             .execute(&self.pool)
             .await
             .unwrap();
-        Ok(PANE.to_owned())
     }
 }
 
@@ -455,8 +504,13 @@ async fn one_request_admits_one_goal_and_starts_one_worker_without_a_drive_call(
         }]
     );
     assert_eq!(
-        launcher.launched.lock().unwrap().clone(),
-        vec![(REPO.to_owned(), Vec::<String>::new())]
+        launcher.agents.lock().unwrap().clone(),
+        vec![REPO.to_owned()],
+        "the lane pane runs an agent, and no bare shell pane is launched for it"
+    );
+    assert!(
+        launcher.launched.lock().unwrap().is_empty(),
+        "a supervisor worker instruction is never typed into a plain shell pane"
     );
     assert_eq!(
         sends(&control),
@@ -511,7 +565,11 @@ async fn a_replayed_source_message_returns_the_same_receipt_and_starts_no_second
     assert!(dispatcher.drain().await.is_empty());
 
     assert_eq!(sends(&control).len(), 1);
-    assert_eq!(launcher.launched.lock().unwrap().len(), 1);
+    assert_eq!(launcher.agents.lock().unwrap().len(), 1);
+    assert!(
+        launcher.launched.lock().unwrap().is_empty(),
+        "the worker pane is an agent session, not a shell"
+    );
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM supervisor_goals").await, 1);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM supervisor_dispatches").await, 1);
 }
@@ -834,9 +892,79 @@ async fn a_committed_ready_intent_is_drained_exactly_once_across_dispatchers() {
         sends(&control),
         vec![(None, PANE.to_owned(), work.receipt.dispatch_request_id.clone())]
     );
-    assert_eq!(launcher.launched.lock().unwrap().len(), 1);
+    assert_eq!(launcher.agents.lock().unwrap().len(), 1);
     assert!(first.drain().await.is_empty());
     assert!(second.drain().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_pty_dispatch_launches_an_agent_pane_not_a_shell() {
+    let pool = owner_pool().await;
+    let work = admitted(submit_work(&pool, &actor("m-1", BODY), &work()).await.unwrap());
+    let control = Arc::new(RecordingControl::observing());
+    let launcher = Arc::new(FixedLauncher::new(PANE));
+    let results = dispatcher(&pool, control.clone(), launcher.clone()).drain().await;
+    assert_eq!(
+        results,
+        vec![DispatchResult::Transmitted {
+            request_id: work.receipt.dispatch_request_id.clone(),
+            outcome: SendOutcome::Started,
+        }]
+    );
+    assert_eq!(
+        launcher.agents.lock().unwrap().clone(),
+        vec![REPO.to_owned()],
+        "the pane is opened through the agent launch, in the lane's worktree"
+    );
+    assert!(
+        launcher.launched.lock().unwrap().is_empty(),
+        "no shell pane is opened for a supervisor worker"
+    );
+    let binding = execution_binding_of(&pool, &work.receipt.goal_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.provider_session_id.as_deref(), Some(PANE));
+    assert_eq!(
+        sends(&control).len(),
+        1,
+        "the instruction is typed only after the agent pane exists"
+    );
+}
+
+#[tokio::test]
+async fn a_lane_with_no_installed_agent_is_held_and_types_nothing() {
+    let pool = owner_pool().await;
+    let work = admitted(submit_work(&pool, &actor("m-1", BODY), &work()).await.unwrap());
+    let control = Arc::new(RecordingControl::observing());
+    let launcher = Arc::new(FixedLauncher::without_agent(
+        PANE,
+        format!("{AGENT_LAUNCH_UNAVAILABLE}: no coding agent is installed"),
+    ));
+    let results = dispatcher(&pool, control.clone(), launcher.clone()).drain().await;
+    assert!(
+        matches!(
+            &results[..],
+            [DispatchResult::Held { state: RunState::Degraded, detail, .. }]
+                if detail.starts_with("LAUNCH_FAILED:") && detail.contains(AGENT_LAUNCH_UNAVAILABLE)
+        ),
+        "{results:?}"
+    );
+    assert!(
+        sends(&control).is_empty(),
+        "nothing is typed when the pane is not an agent session"
+    );
+    assert!(launcher.agents.lock().unwrap().is_empty());
+    assert!(launcher.launched.lock().unwrap().is_empty());
+    assert_eq!(run_state(&pool, &work.receipt.goal_id).await, RunState::Degraded);
+    let binding = execution_binding_of(&pool, &work.receipt.goal_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        binding.provider_session_id, None,
+        "no pane is bound to the goal, so a later turn cannot be typed into one"
+    );
 }
 
 #[tokio::test]
@@ -1153,6 +1281,7 @@ async fn an_unreadable_operation_grant_holds_the_goal_and_sends_nothing() {
     );
     assert!(sends(&control).is_empty());
     assert!(launcher.launched.lock().unwrap().is_empty(), "no pane is launched");
+    assert!(launcher.agents.lock().unwrap().is_empty(), "no agent pane is launched");
     assert_eq!(
         dispatch_state(&pool, &work.receipt.dispatch_request_id).await,
         "superseded"
