@@ -288,7 +288,13 @@ jobs:
   # =========================================================================
   ui-check:
     name: UI Build & Typecheck
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: on 2026-11-18 the floating label resolved to
+    # ubuntu26.04 and the Playwright install step died with
+    #   Cannot install dependencies for ubuntu26.04-x64 with Playwright 1.55.1!
+    #   ERROR: Playwright does not support ffmpeg on ubuntu26.04-x64
+    # which is an image gap, not a defect in this repository. The steps below need a
+    # Playwright-supported Ubuntu, so the label is stated instead of inherited.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
