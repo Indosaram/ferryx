@@ -85,19 +85,12 @@ workflows:
           cd src-tauri
           cargo clippy --all-targets --all-features 2>&1 | tee "$CM_BUILD_DIR/clippy.log"
 
-      - name: Build ferryx-cli
-        script: |
-          set -e
-          . "$HOME/.cargo/env"
-          cd src-tauri
-          cargo build --bin ferryx-cli
-
       - name: Gate - test lib
         script: |
           set -eo pipefail
           . "$HOME/.cargo/env"
           cd src-tauri
-          cargo test --lib --no-fail-fast -- --test-threads=1 \
+          cargo test --lib --test cli_help_version --no-fail-fast -- --test-threads=1 \
             --skip native_terminal::renderer:: \
             --skip terminal::tests::test_spawn_startup_command_omo \
             2>&1 | tee "$CM_BUILD_DIR/test_lib.log"

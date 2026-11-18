@@ -62,7 +62,7 @@ bun run --cwd ui test
 
 # Rust core
 cargo check --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo test --manifest-path src-tauri/Cargo.toml --lib --test cli_help_version
 
 # Site and docs
 BASE_URL=/ bun run --cwd site build

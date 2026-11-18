@@ -1,6 +1,6 @@
 //! In-crate owner CLI surface fixture. Wire under daemon::server with cfg(test, unix).
 //! The outer test launches a dedicated test-binary process with private roots.
-//! The CLI under test is built from this checkout on first use; no canonical daemon
+//! Cargo builds the CLI alongside the integration targets; no canonical daemon
 //! discovery is permitted.
 use super::*;
 use anyhow::{ensure, Context};
@@ -241,7 +241,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             relay_url: Some(relay_url.clone()), ..Default::default()
         }).await.map_err(anyhow::Error::msg)?;
         let local_capabilities = {
-            let mut capabilities = vec!["machinePairingV1", "sshPasswordV1", "dagStreamingV1"];
+            let mut capabilities = vec!["machinePairingV1", "sshPasswordV1", "dagStreamingV1", crate::daemon::protocol::SSH_TUNNEL_CAPABILITY];
             if server.paired_hosts.available().await {
                 capabilities.push("pairedHostInventoryV1");
                 capabilities.push(crate::paired_host::reachability::PAIRED_HOST_REACHABILITY_CAPABILITY);
@@ -258,6 +258,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_DISPATCH_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY);
@@ -270,6 +271,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::hub_runtime::SUPERVISOR_CONTROL_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY);
+            capabilities.push(crate::daemon::protocol::AGENT_MEMORY_BLOCK_CAPABILITY);
             capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY);
             capabilities.push(crate::remote::reference_chat::REFERENCE_HISTORY_DELTA_V1);
             capabilities.push(crate::remote::reference_chat::REFERENCE_PAYLOAD_V1);
@@ -334,6 +336,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
             capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
             if crate::hub_runtime::supervisor_available() {
