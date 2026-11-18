@@ -2454,7 +2454,7 @@ describe("canonicalWorktreeKey and SET_WORKTREES verbatim prefix tolerance", () 
       workspaceId: "ws-win",
       repoRoot: winPlain,
       activeWorktreePath: winPlain,
-      worktrees: [{ path: winPlain, branch: "main", head: "abc", isMain: true, isLocked: false }],
+      worktrees: [{ ...worktree, path: winPlain, branch: "main", head: "abc" }],
       sessions: {
         "session-1": {
           ...restoredSplitState().sessions["session-1"],
@@ -2466,7 +2466,7 @@ describe("canonicalWorktreeKey and SET_WORKTREES verbatim prefix tolerance", () 
     };
     const next = workspaceReducer(base, {
       type: "SET_WORKTREES",
-      worktrees: [{ path: winVerbatim, branch: "main", head: "abc", isMain: true, isLocked: false }],
+      worktrees: [{ ...worktree, path: winVerbatim, branch: "main", head: "abc" }],
     });
     expect(next.sessions["session-1"]?.backendSessionId).toBe("backend-1");
     expect(next.layout.tabs).toHaveLength(1);
