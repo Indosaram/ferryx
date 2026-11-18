@@ -49,7 +49,7 @@
 //!
 //! ## Where the reason is recorded
 //!
-//! In `lane_lifecycles.settle_reason` (migration `0058_lane_settle_reason.sql`), written by
+//! In `lane_lifecycles.settle_reason` (migration `0059_lane_settle_reason.sql`), written by
 //! [`lifecycle::apply`] through [`LifecycleOp::Settle`]'s `reason` field. Two values:
 //! `"inactivity"` and `"pr_merged"`. `NULL` means nobody named a reason: a manual settle from the
 //! HTTP layer, a row that never settled, or a row that moved on to another state (the reducer
