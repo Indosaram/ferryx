@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { rebootTarget, preBootSession, classifyPreBootPanes, absentPattern, STANDBY_PREFIX, QA_HOST_BOOT_TIME_ENV, BOOT_OVERRIDE_RECEIPT } from './scenarios/q14.mjs';
+import { rebootTarget, preBootSession, classifyPreBootPanes, absentPattern, STANDBY_PREFIX, QA_HOST_BOOT_TIME_ENV, BOOT_OVERRIDE_RECEIPT, describeAttribution } from './scenarios/q14.mjs';
 import { seededProjectBootstrap, listRemoteRequests } from './scenarios/q14.mjs';
 import { RUNNERS, assertRunnersComplete } from './run.mjs';
 import { SCENARIO_IDS, applicable } from './lib/summary.mjs';
@@ -131,4 +131,33 @@ test('the remote-request reset lists pairing requests without a shell (Windows h
   // A missing or unreadable sessions dir is no pending request, not a thrown scenario.
   assert.deepEqual(await listRemoteRequests({ call: async () => { throw new Error('ENOENT'); } }, '/nope'), []);
   assert.deepEqual(await listRemoteRequests({ call: async () => null }, '/nope'), []);
+});
+
+const ownerEpoch = 1795028552472;
+const ownerPid = 17312;
+const handshake = { type: 'handshakeOk', pid: ownerPid, epoch: ownerEpoch };
+const emptyReply = { type: 'describeLiveSessionsOk', epoch: ownerEpoch, sessions: [] };
+
+test('an empty describe from the restarted owner retains the identity of the responder', () => {
+  const receipt = describeAttribution(emptyReply, { ownerEpoch, ownerPid, handshake });
+  assert.deepEqual(receipt, {
+    ownerEpoch, ownerPid, responseEpoch: ownerEpoch, responseType: emptyReply.type,
+    handshakeEpoch: ownerEpoch, handshakePid: ownerPid, handshakeType: handshake.type, attributed: true,
+  });
+});
+
+test('a missing or different response cannot authenticate an empty describe', () => {
+  for (const reply of [null, { sessions: [] }, { ...emptyReply, type: 'listSessionsOk' },
+    { ...emptyReply, sessions: null }, { ...emptyReply, epoch: ownerEpoch - 1 }, { ...emptyReply, epoch: String(ownerEpoch) }]) {
+    assert.equal(describeAttribution(reply, { ownerEpoch, ownerPid, handshake }).attributed, false);
+  }
+});
+
+test('an unverified owner or a different data connection cannot claim the reply', () => {
+  for (const peer of [null, { ...handshake, type: 'protocolMismatch' },
+    { ...handshake, pid: ownerPid - 1 }, { ...handshake, epoch: ownerEpoch - 1 }, { ...handshake, epoch: null }]) {
+    assert.equal(describeAttribution(emptyReply, { ownerEpoch, ownerPid, handshake: peer }).attributed, false);
+  }
+  assert.equal(describeAttribution(emptyReply, { ownerPid, handshake }).attributed, false);
+  assert.equal(describeAttribution(emptyReply, { ownerEpoch, handshake }).attributed, false);
 });

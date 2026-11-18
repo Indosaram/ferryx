@@ -190,6 +190,23 @@ export function classifyPreBootPanes(saved, { workspaceId, panes, liveIds }) {
 
 const parse = (text) => { try { return text ? JSON.parse(text) : null; } catch { return null; } };
 
+export function describeAttribution(after, { ownerEpoch, ownerPid, handshake }) {
+  const id = (value) => Number.isSafeInteger(value) && value > 0 ? value : null;
+  const epoch = id(ownerEpoch);
+  const pid = id(ownerPid);
+  const responseEpoch = id(after?.epoch);
+  const handshakeEpoch = id(handshake?.epoch);
+  const handshakePid = id(handshake?.pid);
+  const responseType = after?.type ?? null;
+  const handshakeType = handshake?.type ?? null;
+  return {
+    ownerEpoch: epoch, ownerPid: pid, responseEpoch, responseType, handshakeEpoch, handshakePid, handshakeType,
+    attributed: responseType === 'describeLiveSessionsOk' && Array.isArray(after.sessions)
+      && handshakeType === 'handshakeOk' && pid !== null && handshakePid === pid
+      && epoch !== null && responseEpoch === epoch && handshakeEpoch === epoch,
+  };
+}
+
 /**
  * Waits out the pane settle inside ONE budget measured from the restore, and returns what it saw.
  *
@@ -501,10 +518,13 @@ export async function Q14(ctx, result) {
     workspaceId: target.workspaceId, panes, restoredAt,
   });
   const { saved, after, liveIds, verdict } = settle;
+  const attribution = describeAttribution(after, {
+    ownerEpoch: changed.owner.epoch, ownerPid: changed.owner.pid, handshake: ctx.state.conn?.handshake,
+  });
   result.identities = { ...(result.identities ?? {}), panes: verdict.counts };
-  await evidence(ctx, result, 'panes.json', { verdict, settledMatched: settle.settled, restoredAfterLaunchMs: restoredAt - launchedAt, settleMs: settle.elapsedMs, settlePolls: settle.polls, settleExpired: settle.expired, liveIds, afterSessions: after?.sessions ?? null });
+  await evidence(ctx, result, 'panes.json', { verdict, settledMatched: settle.settled, restoredAfterLaunchMs: restoredAt - launchedAt, settleMs: settle.elapsedMs, settlePolls: settle.polls, settleExpired: settle.expired, liveIds, afterSessions: after?.sessions ?? null, attribution });
   await evidence(ctx, result, 'saved-session.json', saved ?? {});
-  assertion(result, 'no pre-boot backend id is live in the restarted owner', !panes.some((p) => liveIds.includes(p.backendSessionId)), { liveIds });
+  assertion(result, 'no pre-boot backend id is live in the restarted owner', attribution.attributed && !panes.some((p) => liveIds.includes(p.backendSessionId)), { liveIds, attribution });
   assertion(result, 'zero panes stuck on Reconnecting (bound to a pre-boot backend id)', verdict.counts.reconnecting === 0, { reconnecting: verdict.counts.reconnecting, panes: verdict.rows.filter((r) => r.state === 'reconnecting') });
   assertion(result, `every pre-boot pane exited and offers a new shell within ${SETTLE_DEADLINE_MS} ms of the restore`, settle.settled && verdict.counts.exited + verdict.counts.replaced === verdict.counts.preBoot, { counts: verdict.counts, rows: verdict.rows, settleMs: settle.elapsedMs, expired: settle.expired });
 }
