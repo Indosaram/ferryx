@@ -492,6 +492,17 @@ export async function Q11(ctx, result) {
   const conpty = ctx.platform === 'windows';
   const since = conpty ? appenderSince : await conn.outputLength(sid);
   const render = conpty ? (raw) => renderConptyInput(raw, APPENDER_READY) : renderEcho;
+  // A modifier latched by an earlier synthetic chord makes every later keystroke a chord: run
+  // surv-mac-1117n logged modifier_flags=524320 (Option) for Q11's `u` and nothing echoed. Clear the
+  // modifier state before the window is focused, again after the pane click (the click itself can be
+  // posted with a modifier held), and immediately before typing.
+  const modifierRelease = [];
+  const releaseModifiers = async (at) => {
+    if (typeof ctx.mahord?.releaseModifiers !== 'function') return;
+    const released = await ctx.mahord.releaseModifiers().catch((error) => ({ ok: false, error: String(error?.message ?? error) }));
+    modifierRelease.push({ at, ...released });
+  };
+  await releaseModifiers('before-focus');
   // Keys go to the foreground window: make it the GUI that attached (Windows: gui.focus).
   const focused = await ctx.gui.focus(ctx.state.gui);
   let terminalClick = null;
@@ -508,12 +519,14 @@ export async function Q11(ctx, result) {
         const cy = Math.round(rect.top + h * 0.55);
         await ctx.mahord.click(cx, cy);
         terminalClick = { x: cx, y: cy };
+        await releaseModifiers('after-click');
       }
     }
   }
-  await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused, terminalClick });
+  await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused, terminalClick, modifierRelease });
   let typed;
   try {
+    await releaseModifiers('before-typing');
     typed = await typeVerified({
       mahord: ctx.mahord,
       text: marker,

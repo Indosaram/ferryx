@@ -245,6 +245,28 @@ export function createMacLocalInput({ exec }) {
       if (viaCliclick && viaCliclick.status === 0) return viaCliclick;
       return osa(`tell application "System Events" to click at {${cx}, ${cy}}`);
     },
+    // A latched modifier outlives the chord that set it. A synthetic chord posts the modifier key-down
+    // with the letter, and the app swallows that letter as a chord, so the matching key-up pairing
+    // the OS would derive from a real keystroke never happens: every later keystroke arrives with
+    // the modifier still set. Measured on maho-mac run surv-mac-1117n, where all of Q11's typing
+    // logged modifier_flags=524320 (0x80000 maskAlternate | 0x20 NX_DEVICELALTKEYMASK) and nothing
+    // echoed. Nothing in the typing path can clear it (typeverified.mjs only resends and erases
+    // characters), so the pane is returned to a clean modifier state before it is typed into.
+    releaseModifiers: async () => {
+      const keys = ['alt', 'cmd', 'ctrl', 'shift'];
+      // cliclick posts real key-up CGEvents for every named modifier in one call.
+      const viaCliclick = await exec('/opt/homebrew/bin/cliclick', [`ku:${keys.join(',ku:')}`]).catch(() => null);
+      if (viaCliclick && viaCliclick.status === 0) return { ok: true, via: 'cliclick', keys };
+      // Without cliclick, release them one script at a time: a name System Events rejects must not
+      // hide the others.
+      const results = [];
+      for (const name of keys) {
+        const r = await osa(`tell application "System Events" to key up ${MOD_NAMES[name] ?? name}`)
+          .catch((error) => ({ failed: String(error?.message ?? error) }));
+        results.push({ name, ok: !r?.failed });
+      }
+      return { ok: results.every((r) => r.ok), via: 'osascript', keys, results };
+    },
     type: async (text) => osa(`tell application "System Events" to keystroke "${escapeAs(text)}"`),
     key: async (k) => sendKey(k),
     hotkey: async (keys) => {
