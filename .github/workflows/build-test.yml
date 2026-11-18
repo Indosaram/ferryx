@@ -594,15 +594,21 @@ jobs:
       # publish, because unix authenticates by socket ownership instead. They fail before their
       # assertions run (TRANSPORT_UNAUTHORIZED), so they are skipped here and tracked as a gap in
       # Windows coverage of the machine transport rather than reported as a product failure.
+      # The test executable loads the SDK's avcodec/avformat/avutil/swscale DLLs at startup, and a
+      # hosted runner's PATH does not contain them: the binary died with 0xc0000135
+      # (STATUS_DLL_NOT_FOUND) before a single test ran. The linked import libraries come from this
+      # same SDK, so the DLLs are the matching pair, not a stray system copy.
+      # Prepended through GITHUB_PATH rather than an `env:` entry: setting PATH there replaces the
+      # whole variable for that step, which would drop cargo, bash and the rest of the runner
+      # toolchain instead of only adding one directory.
+      - name: Put the FFmpeg SDK DLLs on PATH (Windows)
+        if: matrix.os_name == 'windows'
+        shell: bash
+        run: echo "$(cygpath -w "$GITHUB_WORKSPACE")/src-tauri/resources/ffmpeg/sdk/bin" >> "$GITHUB_PATH"
+
       - name: Cargo Test (Windows lib scope)
         if: matrix.os_name == 'windows'
         shell: bash
-        env:
-          # The test executable loads the SDK's avcodec/avformat/avutil/swscale DLLs at startup, and
-          # a hosted runner's PATH does not contain them: the binary died with 0xc0000135
-          # (STATUS_DLL_NOT_FOUND) before a single test ran. The linked import libraries come from
-          # this same SDK, so the DLLs are the matching pair, not a stray system copy.
-          PATH: ${{ github.workspace }}\src-tauri\resources\ffmpeg\sdk\bin;${{ env.PATH }}
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml \
             --target ${{ matrix.target }} \
