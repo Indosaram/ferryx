@@ -6,6 +6,7 @@ libtest summary, at least one test ran in each, and nothing was ignored, filtere
 An ignored or missing suite is a failure, never a quiet green.
 """
 import argparse
+import io
 import re
 import subprocess
 import sys
@@ -15,6 +16,7 @@ TARGETS = (
     "relay_pairing_generation_regression",
 
 )
+SGR = re.compile(r"\x1b\[[0-9;]*m")
 RUNNING = re.compile(r"^\s*Running tests[/\\](?P<name>[A-Za-z0-9_]+)\.rs\b")
 RESULT = re.compile(
     r"^test result: (?P<status>\w+)\. (?P<passed>\d+) passed; (?P<failed>\d+) failed; "
@@ -34,6 +36,7 @@ def summaries(output):
     found = {}
     current = None
     for line in output.splitlines():
+        line = SGR.sub("", line)
         running = RUNNING.match(line)
         if running:
             current = running.group("name")
@@ -75,11 +78,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     targets = tuple(args.targets or TARGETS)
     # cargo output is UTF-8; a narrower console encoding (cp949, cp1252) must not crash the echo.
-    sys.stdout.reconfigure(errors="replace")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(errors="replace")
     process = subprocess.Popen(command(targets), stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                                errors="replace")
     captured = []
+    assert process.stdout is not None
     for line in process.stdout:
         sys.stdout.write(line)
         captured.append(line)

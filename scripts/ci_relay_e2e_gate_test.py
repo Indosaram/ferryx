@@ -19,13 +19,14 @@ def summary(passed=1, failed=0, ignored=0, filtered=0):
 # The fake cargo is an executable shebang script found on PATH, which only POSIX runs.
 @unittest.skipUnless(os.name == "posix", "fake cargo on PATH needs a POSIX shebang script")
 class RelayE2EGateTests(unittest.TestCase):
-    def run_gate(self, suites, exit_code=0):
+    def run_gate(self, suites, exit_code=0, *, color=False):
         """Runs the gate against a fake cargo that prints one block per (target, summary line)."""
         with tempfile.TemporaryDirectory() as directory:
             cargo = Path(directory) / "cargo"
             lines = []
             for name, line in suites:
-                lines.append("     Running tests/{}.rs (target/debug/deps/{}-0)".format(name, name))
+                running = "\x1b[1m\x1b[92m     Running\x1b[0m" if color else "     Running"
+                lines.append("{} tests/{}.rs (target/debug/deps/{}-0)".format(running, name, name))
                 lines.append(line)
             cargo.write_text("#!{}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\nprint({!r})\nsys.exit({})\n".format(
                 sys.executable, "\n".join(lines), exit_code))
@@ -48,6 +49,14 @@ class RelayE2EGateTests(unittest.TestCase):
         result = self.run_gate([("a", summary(3)), ("b", summary(2, ignored=1))])
         self.assertEqual(result.returncode, 1)
         self.assertIn("b: 1 ignored", result.stderr)
+
+    def test_colored_target_headers_preserve_each_suite_verdict(self):
+        passed = self.run_gate([("a", summary(3)), ("b", summary(2))], color=True)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        failed = self.run_gate([("a", summary(1)), ("b", summary(7, failed=1))], exit_code=101, color=True)
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("b: 1 failed", failed.stderr)
+        self.assertNotIn("no test summary", failed.stderr)
 
     def test_a_filtered_test_fails_the_gate(self):
         result = self.run_gate([("a", summary(3, filtered=2)), ("b", summary(2))])
