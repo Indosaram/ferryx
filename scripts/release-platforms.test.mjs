@@ -971,7 +971,11 @@ function createMacFinalizeFixture(tmp, { notaryStatus = "Accepted" } = {}) {
       return { status: 0, stdout: listFiles(args[0]).join("\n") + "\n", stderr: "" };
     }
     if (command === "file") {
-      return { status: 0, stdout: "Mach-O 64-bit executable\n", stderr: "" };
+      // Real `file` reports a Mach-O only for the executables; the helper
+      // manifest.json next to them is JSON, so it is never signed.
+      const target = args[args.length - 1];
+      const isMachO = existsSync(target) && readFileSync(target, "utf8").startsWith("macho:");
+      return { status: 0, stdout: `${isMachO ? "Mach-O 64-bit executable" : "JSON data"}\n`, stderr: "" };
     }
     if (command === "codesign") {
       const target = args[args.length - 1];
@@ -1190,6 +1194,191 @@ test("finalizeMacosBundle: signs the nested daemon helper bundle before the oute
     const verify = calls.findIndex((c) => c.startsWith("codesign --verify --deep --strict"));
     assert.ok(calls.indexOf(signs[outerApp]) < entitlementCheck, "entitlements are compared after the outer signature");
     assert.ok(entitlementCheck < verify, "entitlements are compared before the deep verify");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: refreshes the helper manifest after helper signing and before sealing the app", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-manifest-seal-order-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    const helpersDir = join(fixture.appPath, "Contents", "Resources", "helpers");
+    const manifestPath = join(helpersDir, "manifest.json");
+    // Staged manifest describing the unsigned helper bytes, as build-remote-helpers stages it.
+    writeFileSync(
+      manifestPath,
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          helperVersion: "2026.1118.1",
+          artifacts: ["aarch64-apple-darwin", "x86_64-apple-darwin"].map((target) => {
+            const bytes = readFileSync(join(helpersDir, target, "ferryx-remote-helper"));
+            return {
+              target,
+              filename: "ferryx-remote-helper",
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+              byteLength: bytes.length,
+            };
+          }),
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    // helper_assets::resolve_helper_asset hashes these exact bytes.
+    const manifestDescribesShippedHelpers = () => {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      return manifest.artifacts.every((artifact) => {
+        const bytes = readFileSync(join(helpersDir, artifact.target, artifact.filename));
+        return (
+          artifact.sha256 === createHash("sha256").update(bytes).digest("hex") &&
+          artifact.byteLength === bytes.length
+        );
+      });
+    };
+    assert.equal(manifestDescribesShippedHelpers(), true, "fixture precondition: manifest starts in sync");
+    const manifestBytes = () => readFileSync(manifestPath);
+    const manifestDigest = () => createHash("sha256").update(manifestBytes()).digest("hex");
+
+    // The refresh writes the manifest directly, so it is invisible to the exec
+    // fake. Bracket every spawn with the manifest's bytes and sync state: the
+    // refresh then shows up as the change between two spawns.
+    const boundaries = [];
+    const exec = (command, args, opts) => {
+      const before = { digest: manifestDigest(), inSync: manifestDescribesShippedHelpers() };
+      const result = fixture.exec(command, args, opts);
+      boundaries.push({ before, after: { digest: manifestDigest(), inSync: manifestDescribesShippedHelpers() } });
+      return result;
+    };
+
+    finalizeMacosBundle({
+      appPath: fixture.appPath,
+      dmgPath: fixture.dmgPath,
+      workspaceDir: fixture.workspaceDir,
+      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
+      exec,
+    });
+
+    const calls = fixture.calls;
+    assert.equal(calls.length, boundaries.length, "one boundary recorded per spawn");
+    const indexOf = (predicate, label) => {
+      const idx = calls.findIndex(predicate);
+      assert.notEqual(idx, -1, `expected command not issued: ${label}`);
+      return idx;
+    };
+    const helperSigns = calls
+      .map((call, index) => ({ call, index }))
+      .filter(({ call }) =>
+        call.startsWith("codesign --force") &&
+        call.includes("Contents/Resources/helpers/") &&
+        call.endsWith("ferryx-remote-helper"),
+      );
+    assert.equal(helperSigns.length, 2, "both embedded helpers are signed");
+    const lastHelperSign = helperSigns[helperSigns.length - 1].index;
+    assert.equal(
+      boundaries[lastHelperSign].after.inSync,
+      false,
+      "signing a helper invalidates the staged manifest",
+    );
+
+    const mainExecutableSign = indexOf(
+      (c) => c.startsWith("codesign --force") && c.endsWith(join("Contents", "MacOS", "ferryx")),
+      "codesign of the app's main executable",
+    );
+    const outerSeal = indexOf(
+      (c) => c.startsWith("codesign --force") && c.endsWith(fixture.appPath),
+      "codesign of the outer app bundle",
+    );
+    const deepVerify = indexOf(
+      (c) => c.startsWith("codesign --verify --deep --strict"),
+      "codesign --verify --deep --strict of the app",
+    );
+    const notaryZip = indexOf((c) => c.startsWith("ditto -c -k --keepParent"), "ditto zip for notarization");
+    const notarySubmit = indexOf((c) => c.startsWith("xcrun notarytool submit"), "notarytool submit for the app");
+
+    // The refresh lands between the last helper signature and the next spawn,
+    // so it precedes the main executables and the outer seal.
+    assert.equal(
+      boundaries[mainExecutableSign].before.inSync,
+      true,
+      "the manifest is re-derived from the signed helpers before the main executables are signed",
+    );
+    assert.notEqual(
+      boundaries[mainExecutableSign].before.digest,
+      boundaries[lastHelperSign].after.digest,
+      "the manifest was actually rewritten, not left at its staged contents",
+    );
+    assert.ok(mainExecutableSign < outerSeal, "the main executables are signed before the outer seal");
+    assert.ok(outerSeal < deepVerify, "the seal is deep-verified after it is written");
+    assert.ok(deepVerify < notaryZip, "nothing is zipped for Apple before the seal verifies");
+    assert.ok(deepVerify < notarySubmit, "nothing is submitted for notarization before the seal verifies");
+
+    // Nothing rewrites the manifest once the outer seal is in place: any later
+    // write would be exactly the 2026.11.18 "file modified" Invalid submission.
+    const sealedManifestDigest = boundaries[outerSeal].after.digest;
+    for (const [index, boundary] of boundaries.entries()) {
+      if (index < outerSeal) continue;
+      assert.equal(boundary.after.inSync, true, `spawn ${index} left the manifest inconsistent: ${calls[index]}`);
+      assert.equal(
+        boundary.after.digest,
+        sealedManifestDigest,
+        `spawn ${index} rewrote the manifest after the outer seal: ${calls[index]}`,
+      );
+      assert.equal(
+        boundary.before.digest,
+        sealedManifestDigest,
+        `spawn ${index} ran against a manifest that differs from the sealed one: ${calls[index]}`,
+      );
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: fails loudly when the sealed bundle does not deep-verify", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-seal-verify-fail-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    // The failure Apple reported for 2026.1118.2: a file inside the bundle
+    // changed after the seal.
+    const exec = (command, args, opts) => {
+      if (command === "codesign" && args[0] === "--verify" && args.includes("--deep")) {
+        fixture.calls.push([command, ...args].join(" "));
+        return {
+          status: 1,
+          stdout: "",
+          stderr: `${args[args.length - 1]}: a sealed resource is missing or invalid\nIn subcomponent: /tmp/Ferryx.app/Contents/MacOS/ferryx\nfile modified: Contents/Resources/helpers/manifest.json\n`,
+        };
+      }
+      return fixture.exec(command, args, opts);
+    };
+
+    assert.throws(
+      () =>
+        finalizeMacosBundle({
+          appPath: fixture.appPath,
+          dmgPath: fixture.dmgPath,
+          workspaceDir: fixture.workspaceDir,
+          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          notaryProfile: "FerryxNotary",
+          approveNotarization: true,
+          exec,
+        }),
+      /Sealed app bundle does not verify.*file modified: Contents\/Resources\/helpers\/manifest\.json/s,
+    );
+    assert.equal(
+      fixture.calls.some((c) => c.startsWith("xcrun notarytool submit")),
+      false,
+      "a bundle whose seal does not verify is never submitted for notarization",
+    );
+    assert.equal(
+      fixture.calls.some((c) => c.startsWith("ditto -c -k --keepParent")),
+      false,
+      "a bundle whose seal does not verify is never zipped",
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

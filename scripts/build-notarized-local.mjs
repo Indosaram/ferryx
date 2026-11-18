@@ -9,9 +9,10 @@
  *      and an isolated CARGO_TARGET_DIR
  *   3. assembleDaemonHelper: add the signed Contents/Helpers/Ferryx Daemon.app
  *      and record the outer app's entitlements
- *   4. finalizeMacosBundle: re-sign inside-out (loose Mach-O, nested helper
- *      bundles, outer app; runtime + timestamp, recorded entitlements), seal,
- *      notarytool submit (profile FerryxNotary), assert Accepted, staple,
+ *   4. finalizeMacosBundle: re-sign inside-out (helper payload Mach-O, helper
+ *      manifest refresh, remaining loose Mach-O, nested helper bundles, outer
+ *      app last; runtime + timestamp, recorded entitlements), deep-verify the
+ *      seal, notarytool submit (profile FerryxNotary), assert Accepted, staple,
  *      validate, and require spctl "Notarized Developer ID"
  *
  * A preflight runs first and fails in seconds instead of after the 20-minute build:

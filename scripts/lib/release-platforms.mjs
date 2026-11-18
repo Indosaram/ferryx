@@ -12,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -957,9 +957,19 @@ export function recreateDmgFromApp({ appPath, dmgPath, stagingDir, exec = macExe
  * notarizes the DMG from that final app so the image never ships the bundler's
  * pre-signing copy of the embedded helpers.
  *
- * Signing is inside-out: loose Mach-O files (the bundled bun with
- * BUN_ENTITLEMENTS, see machoEntitlements), then every nested bundle under
- * Contents/Helpers/*.app (signed as a bundle), then the outer app. No --deep.
+ * Signing is inside-out, in the order a manual reseal proved Accepted on
+ * 2026-11-18: the helper payload Mach-O files under Contents/Resources/helpers
+ * (helper_assets hashes those bytes), then the helper manifest is re-derived
+ * from those now-signed bytes, then every remaining loose Mach-O file (the
+ * bundled bun with BUN_ENTITLEMENTS, see machoEntitlements, and the main
+ * executables), then every nested bundle under Contents/Helpers/*.app (signed as
+ * a bundle), and only then the outer app. The manifest rewrite is a byte change
+ * inside the bundle, so it can never happen after the outer seal (measured
+ * 2026-11-18: the first notarization of 2026.1118.2 came back Invalid because
+ * codesign --verify --strict reported
+ * "file modified: Contents/Resources/helpers/manifest.json"). The outer seal is
+ * then deep-verified before anything is zipped for Apple.
+ * No --deep.
  * `entitlements` is the outer-entitlements file recorded by
  * assembleDaemonHelper (scripts/macos-daemon-helper.mjs): when it is non-empty
  * both bundle signatures carry it, and after signing the outer app's
@@ -1003,16 +1013,38 @@ export function finalizeMacosBundle({
   const recordedEntitlements = entitlements === null ? null : readFileSync(entitlements, "utf8");
   const bundleEntitlements = recordedEntitlements && recordedEntitlements.trim() !== "" ? entitlements : null;
 
-  // Re-sign every Mach-O binary (including embedded helpers) with hardened
-  // runtime and a secure timestamp, then the nested bundles, then seal the app.
+  // Re-sign inside-out. Pass 1 seals the helper payload the bundled manifest
+  // describes; the manifest is then re-derived while that subtree's bytes are
+  // final. Pass 2 seals the remaining loose Mach-O files, the nested helper
+  // bundles, and finally the outer app, so the seal covers every byte written
+  // above (a later write to any file is what invalidated the 2026.11.18 seal).
+  const machoFiles = signingIdentity
+    ? exec("find", [appPath, "-type", "f"])
+        .stdout.trim()
+        .split("\n")
+        .filter((itemPath) => itemPath && exec("file", ["-b", itemPath]).stdout.includes("Mach-O"))
+    : [];
+  const signLooseMachO = (itemPath) =>
+    exec("codesign", [...codesignArgs(signingIdentity, machoEntitlements(appPath, itemPath)), itemPath]);
+  // helper_assets::resolve_helper_asset hashes exactly these files.
+  const isHelperPayload = (itemPath) =>
+    relative(appPath, itemPath).split(sep).join("/").startsWith("Contents/Resources/helpers/");
+
+  for (const itemPath of machoFiles.filter(isHelperPayload)) {
+    signLooseMachO(itemPath);
+  }
+
+  // Signing rewrites each helper's code-signature blob, which changes its file length (measured:
+  // aarch64 1590640 -> 1599648) and its sha256. helper_assets::resolve_helper_asset compares the
+  // bundled bytes against manifest.json byteLength/sha256, so a stale manifest makes every SSH
+  // spawn fail with helper_asset_length_mismatch. Re-derive the manifest from the signed bytes
+  // here, while the outer bundle is still unsealed: the rewrite is a byte change the seal covers,
+  // so it must never run after the seal.
+  refreshBundledHelperManifest(appPath);
+
   if (signingIdentity) {
-    const findOut = exec("find", [appPath, "-type", "f"]).stdout;
-    for (const itemPath of findOut.trim().split("\n")) {
-      if (!itemPath) continue;
-      const fileType = exec("file", ["-b", itemPath]).stdout;
-      if (fileType.includes("Mach-O")) {
-        exec("codesign", [...codesignArgs(signingIdentity, machoEntitlements(appPath, itemPath)), itemPath]);
-      }
+    for (const itemPath of machoFiles.filter((itemPath) => !isHelperPayload(itemPath))) {
+      signLooseMachO(itemPath);
     }
     for (const bundlePath of nestedHelperBundles(appPath)) {
       exec("codesign", [...codesignArgs(signingIdentity, bundleEntitlements), bundlePath]);
@@ -1029,7 +1061,16 @@ export function finalizeMacosBundle({
     }
   }
 
-  exec("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath]);
+  // Fail loudly on a broken seal: a submission whose inner signature does not
+  // verify comes back Invalid minutes later with no useful local trace.
+  const sealVerify = exec("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath], {
+    allowFailure: true,
+  });
+  if (sealVerify.status !== 0) {
+    throw new Error(
+      `Sealed app bundle does not verify (${appPath}): ${(sealVerify.stderr || sealVerify.stdout).trim()}`,
+    );
+  }
   if (signingIdentity) {
     const signInfo = exec("codesign", ["-dv", "--verbose=4", appPath], { allowFailure: true });
     const combined = `${signInfo.stdout}\n${signInfo.stderr}`;
@@ -1039,12 +1080,6 @@ export function finalizeMacosBundle({
       throw new Error(`App bundle is not signed with expected identity '${signingIdentity}'`);
     }
   }
-
-  // Signing rewrites each helper's code-signature blob, which changes its file length (measured:
-  // aarch64 1590640 -> 1599648) and its sha256. helper_assets::resolve_helper_asset compares the
-  // bundled bytes against manifest.json byteLength/sha256, so a stale manifest makes every SSH
-  // spawn fail with helper_asset_length_mismatch. Re-derive the manifest from the signed bytes.
-  refreshBundledHelperManifest(appPath);
 
   const notarizations = [];
   if (approveNotarization && notaryProfile) {

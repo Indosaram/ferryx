@@ -571,11 +571,16 @@ the Tauri bundle exists and before `finalizeMacosBundle`, so the helper is insid
 stapled app, the DMG and the updater archive. It first records the outer app's entitlements
 (`codesign -d --entitlements :-`) into `outer-entitlements.plist` in the run directory (an
 empty file means none; today the app has none), then signs the helper as a bundle.
-`finalizeMacosBundle` signs inside-out: loose Mach-O files, then each bundle under
-`Contents/Helpers/*.app`, then the outer app, passing the recorded entitlements to both bundle
-signatures when present, never `--deep`. It fails if the outer app's entitlements afterwards
-differ from the recorded ones, and runs `codesign --verify --deep --strict` on the app. QA debug
-bundles use the same function with the ad-hoc identity `-` (no secure timestamp).
+`finalizeMacosBundle` signs inside-out: the helper payload under `Contents/Resources/helpers`, then the
+bundled helper manifest is re-derived from those signed bytes, then every other loose Mach-O file, then
+each bundle under `Contents/Helpers/*.app`, and only then the outer app, passing the recorded entitlements
+to both bundle signatures when present, never `--deep`. Signing a helper changes its length and SHA-256, so
+the manifest rewrite has to land before the outer seal; doing it afterwards leaves the app sealed over
+stale bytes and Apple rejects it as `Invalid` (2026-11-18: `codesign --verify --strict` reported
+`file modified: Contents/Resources/helpers/manifest.json`). It fails if the outer app's entitlements
+afterwards differ from the recorded ones, and deep-verifies the sealed app (`codesign --verify --deep
+--strict`) before zipping anything for notarization; a bundle that does not verify stops the run there.
+QA debug bundles use the same function with the ad-hoc identity `-` (no secure timestamp).
 
 At runtime nothing builds or edits a bundle: the daemon runtime stager copies
 `Ferryx Daemon.app` byte-for-byte (`ditto`) into the generation directory and verifies it

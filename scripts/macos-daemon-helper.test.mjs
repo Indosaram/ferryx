@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -182,6 +183,82 @@ test("assembleDaemonHelper + finalizeMacosBundle: signed helper inside a signed 
     writeFileSync(helperBinary, bytes);
     assert.notEqual(verifyStrict(helper.helperPath).status, 0, "byte-flipped helper must fail verification");
     assert.notEqual(verifyStrict(appPath, { deep: true }).status, 0, "outer app with a tampered helper must fail --deep");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: the sealed app verifies with the manifest refreshed from the signed helper bytes", (t) => {
+  if (skipUnlessMacos(t)) return;
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-manifest-seal-verify-"));
+  try {
+    const version = "2026.1118.2";
+    const appPath = createFixtureApp(tmp, version);
+    const helpersDir = join(appPath, "Contents", "Resources", "helpers", "aarch64-apple-darwin");
+    mkdirSync(helpersDir, { recursive: true });
+    copyFileSync("/usr/bin/true", join(helpersDir, "ferryx-remote-helper"));
+    const manifestPath = join(appPath, "Contents", "Resources", "helpers", "manifest.json");
+    // The staged manifest describes the unsigned helper, exactly as the staged
+    // resources ship it; signing the helper invalidates these values.
+    writeFileSync(
+      manifestPath,
+      JSON.stringify(
+        {
+          schemaVersion: 1,
+          helperVersion: version,
+          artifacts: [
+            {
+              target: "aarch64-apple-darwin",
+              filename: "ferryx-remote-helper",
+              sha256: "0".repeat(64),
+              byteLength: 1,
+            },
+          ],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    const describesSignedHelper = () => {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      const artifact = manifest.artifacts[0];
+      const bytes = readFileSync(join(appPath, "Contents", "Resources", "helpers", artifact.target, artifact.filename));
+      return (
+        artifact.sha256 === createHash("sha256").update(bytes).digest("hex") &&
+        artifact.byteLength === bytes.length
+      );
+    };
+
+    const workspaceDir = join(tmp, "workspace");
+    mkdirSync(workspaceDir, { recursive: true });
+    const calls = [];
+    finalizeMacosBundle({
+      appPath,
+      dmgPath: null,
+      workspaceDir,
+      signingIdentity: "-",
+      notaryProfile: "FixtureProfile",
+      approveNotarization: false,
+      exec: fakeNotarizationExec(calls),
+    });
+
+    assert.equal(describesSignedHelper(), true, "the manifest is re-derived from the signed helper bytes");
+    assert.equal(
+      verifyStrict(appPath, { deep: true }).status,
+      0,
+      "the sealed app verifies, so the manifest rewrite landed before the seal",
+    );
+
+    // The old order wrote the manifest after the seal; reproduce that one write
+    // and the seal breaks exactly as Apple reported it for 2026.1118.2.
+    writeFileSync(manifestPath, `${readFileSync(manifestPath, "utf8")}\n`);
+    const tampered = verifyStrict(appPath);
+    assert.notEqual(tampered.status, 0, "a manifest write after the seal invalidates the app signature");
+    assert.match(
+      `${tampered.stdout}\n${tampered.stderr}`,
+      /manifest\.json/,
+      "codesign names the rewritten manifest as the modified file",
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
