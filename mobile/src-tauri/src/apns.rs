@@ -242,7 +242,9 @@ mod ios {
                 fail_setup("the app delegate was not registered".into());
                 return;
             };
-            let raw = (&*class) as *const AnyClass as *mut AnyClass;
+            // `class` is already a shared reference to the registered class, so the cast
+            // takes its address directly; reborrowing through `&*` is what clippy flags.
+            let raw = class as *const AnyClass as *mut AnyClass;
 
                 extern "C-unwind" fn did_register(
                     _this: &AnyObject,
