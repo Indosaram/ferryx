@@ -44,6 +44,7 @@ describe("desktopChatLane disk-backed attachment integration", () => {
         submit,
         stop: async () => ({ ok: true, data: null }),
         answer: async () => ({ ok: true, data: null }),
+        resolvePrompt: async () => ({ ok: true, data: null }),
       });
       const stage = vi.fn<DesktopChatFileStaging["transport"]["stage"]>(async (target, payload) => {
         // The target/session stub reads the real file, rather than echoing upload metadata.

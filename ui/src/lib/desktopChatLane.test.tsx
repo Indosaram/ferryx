@@ -32,6 +32,7 @@ function setup(capabilities: readonly string[] | null = [DESKTOP_CHAT_FILE_CAPAB
     submit,
     stop: async () => ({ ok: true, data: null }),
     answer: async () => ({ ok: true, data: null }),
+    resolvePrompt: async () => ({ ok: true, data: null }),
   });
   const bytes = new TextEncoder().encode("notes");
   const file = new File([bytes], "notes.txt", { type: "text/plain" });

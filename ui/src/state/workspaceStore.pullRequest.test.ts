@@ -32,7 +32,7 @@ describe("server-owned PR observations in workspace state", () => {
       type: "SET_LANE_LIFECYCLE_MODEL", rows: { [key]: "pinned" }, pinnedTabs: { [key]: ["tab"] },
       order: { repo: [key] }, pullRequests: { [key]: merged }, revisions: { [key]: 2 },
     });
-    for (const revisions of [{ [key]: 1 }, {}]) {
+    for (const revisions of [{ [key]: 1 }, {} as Record<string, number>]) {
       const stale = workspaceReducer(loaded, {
         type: "SET_LANE_LIFECYCLE_MODEL", rows: { [key]: "active" }, pinnedTabs: {},
         order: { repo: [] }, pullRequests: { [key]: pr }, revisions,
