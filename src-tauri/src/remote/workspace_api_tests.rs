@@ -323,6 +323,7 @@ async fn project_http_fixture(inject_request_failure: bool) {
             "aborted HTTP server unexpectedly succeeded"
         );
     }
+    server.tunnel_dispatch.stop_background_tasks().await;
     drop(server);
     let restore = std::panic::AssertUnwindSafe(async {
         if inject_request_failure || outcome.is_err() {
@@ -335,6 +336,7 @@ async fn project_http_fixture(inject_request_failure: bool) {
         })
         .await
         .unwrap();
+        restored.tunnel_dispatch.stop_background_tasks().await;
         let catalog = restored
             .remote_state()
             .machine_services

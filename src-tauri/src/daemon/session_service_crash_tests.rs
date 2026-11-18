@@ -66,6 +66,7 @@ async fn actual_owner_crash_reconciles_without_respawn() {
             serde_json::to_vec(&target).unwrap(),
         )
         .unwrap();
+        owner.tunnel_dispatch.stop_background_tasks().await;
         drop(owner);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
@@ -116,6 +117,7 @@ async fn actual_owner_crash_reconciles_without_respawn() {
             if let Some(exit) = exit { let (count, flags) = exit.await.unwrap(); assert_eq!(count, 1); assert_ne!(flags & libc::NOTE_EXIT, 0); }
             let config = root.path().join("config"); let auth = root.path().join("auth");
             let restored = tokio::task::spawn_blocking(move || DaemonServer::new_with_paths(Some(config), Some(auth))).await.unwrap();
+            restored.tunnel_dispatch.stop_background_tasks().await;
             let journal = restored.session_service.workspace_service.journal.reconcile("device", &request.request_id).unwrap().unwrap();
             assert_eq!(serde_json::from_str::<RemoteTerminalTarget>(&journal.resource).unwrap(), target);
             let replay = restored.session_service.spawn_machine(request.clone(), "device".into(), "digest".into(), super::target(),

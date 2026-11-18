@@ -80,40 +80,40 @@ pub struct ProbeSocketFactory {
     #[cfg(test)]
     pub readiness_override_consumptions: AtomicUsize,
 }
+enum ProbeConnection { SelfConnected, Peer(TcpStream) }
+
 impl ProbeSocketFactory {
-    async fn connect(&self, addr: SocketAddr, readiness: bool) -> io::Result<(TcpStream, bool)> {
+    async fn connect(&self, addr: SocketAddr, readiness: bool) -> io::Result<ProbeConnection> {
         let socket = TcpSocket::new_v4()?;
-        #[allow(unused_mut)]
-        let mut overridden = false;
         #[cfg(test)]
-        {
+        let source_port = {
             let source = if readiness { &self.readiness_source_port_override } else { &self.availability_source_port_override };
-            if let Some(port) = source.lock().unwrap().take() {
-                socket.bind((Ipv4Addr::LOCALHOST, port).into()).expect("probe source override must bind");
-                overridden = true;
-                if readiness {
-                    self.readiness_override_consumptions.fetch_add(1, Ordering::SeqCst);
-                    self.readiness_override_consumed.notify_one();
-                }
-            }
-        }
+            source.lock().unwrap().take()
+        };
         #[cfg(not(test))]
-        let _ = readiness;
-        socket.connect(addr).await.map(|stream| (stream, overridden))
+        let source_port: Option<u16> = { let _ = readiness; None };
+        // Reserve our source endpoint, never the destination as an availability
+        // test. If the kernel chose the destination itself, a connect would be
+        // simultaneous open on Linux and EINVAL on Darwin, not a peer listener.
+        socket.bind((Ipv4Addr::LOCALHOST, source_port.unwrap_or(0)).into())?;
+        #[cfg(test)]
+        if readiness && source_port.is_some() {
+            self.readiness_override_consumptions.fetch_add(1, Ordering::SeqCst);
+            self.readiness_override_consumed.notify_one();
+        }
+        if is_self_connect(socket.local_addr()?, addr) { return Ok(ProbeConnection::SelfConnected); }
+        socket.connect(addr).await.map(ProbeConnection::Peer)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortAvailability { Available, Occupied, SelfConnected }
 pub fn is_self_connect(local: SocketAddr, peer: SocketAddr) -> bool { local == peer }
-fn self_connected(socket: &TcpStream) -> io::Result<bool> {
-    Ok(is_self_connect(socket.local_addr()?, socket.peer_addr()?))
-}
 /// Never bind to check availability: reuse-address diverges across BSD/Linux and
 /// disabling it rejects our own TIME_WAIT sockets. Equal endpoints mean TCP
 /// simultaneous open without a listener, NOT our own ssh listener.
 pub async fn probe_local_port_available(addr: SocketAddr, factory: &ProbeSocketFactory) -> PortAvailability {
     match timeout(PROBE_DEADLINE, factory.connect(addr, false)).await {
-        Ok(Ok((socket, _))) if self_connected(&socket).unwrap_or(false) => PortAvailability::SelfConnected,
+        Ok(Ok(ProbeConnection::SelfConnected)) => PortAvailability::SelfConnected,
         Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionRefused => PortAvailability::Available,
         _ => PortAvailability::Occupied,
     }
@@ -555,14 +555,8 @@ async fn readiness(port: u16, factory: Arc<ProbeSocketFactory>) -> Result<(), us
         if Instant::now() >= deadline { return Err(attempts); }
         attempts += 1;
         match tokio::time::timeout_at(deadline.min(Instant::now() + PROBE_DEADLINE), factory.connect(addr, true)).await {
-            Ok(Ok((mut socket, _overridden))) => {
-                if self_connected(&socket).unwrap_or(true) {
-                    // Simultaneous open owns P itself: close IMMEDIATELY, never
-                    // hold this socket through the 2s channel-attribution window.
-                    drop(socket);
-                    tokio::task::yield_now().await;
-                    continue;
-                }
+            Ok(Ok(ProbeConnection::SelfConnected)) => tokio::task::yield_now().await,
+            Ok(Ok(ProbeConnection::Peer(mut socket))) => {
                 // Exactly one destination channel. Retire it before publishing
                 // listening. Filtered destinations can report late (accepted
                 // residual); EOF/deadline can lose one diagnostic. An operator

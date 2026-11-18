@@ -245,7 +245,10 @@ pub struct TunnelDispatch {
     /// One `Notify` per host, fired at the end of every detached teardown exit
     /// path, so a caller can await the drain instead of polling.
     drained: Arc<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
-    background: Mutex<bool>,
+    #[cfg(unix)]
+    background_stop: tokio::sync::watch::Sender<bool>,
+    #[cfg(unix)]
+    background_start: Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     #[cfg(unix)]
     runtime: Option<Runtime>,
 }
@@ -260,25 +263,14 @@ struct Runtime {
 impl Runtime {
     fn build(
         paths: &TunnelPaths,
-        clock: Arc<dyn Clock>,
-        spawner: Arc<dyn crate::ssh::tunnel::registry::TunnelSpawner>,
+        registry: crate::ssh::tunnel::registry::TunnelRegistry,
     ) -> std::io::Result<Self> {
-        use crate::ssh::tunnel::{
-            argv::ConfigSource,
-            registry::{ProbeSocketFactory, TunnelRegistry},
-            runtime_records::{PsProcessIdentity, RuntimeRecords},
-        };
+        use crate::ssh::tunnel::runtime_records::{PsProcessIdentity, RuntimeRecords};
         let records = Arc::new(RuntimeRecords::open(
             paths.data.clone(),
             Arc::new(PsProcessIdentity),
         )?);
-        let registry = TunnelRegistry::new(
-            spawner,
-            ConfigSource::Real,
-            Arc::new(ProbeSocketFactory::default()),
-            clock,
-        )
-        .with_records(Arc::clone(&records));
+        let registry = registry.with_records(Arc::clone(&records));
         Ok(Self { registry: Arc::new(registry), records })
     }
 }
@@ -292,29 +284,35 @@ impl TunnelDispatch {
     /// transition stamp are driven by the same fake under test.
     pub fn with_clock(paths: TunnelPaths, clock: Arc<dyn Clock>) -> Self {
         #[cfg(unix)]
-        let spawner: Arc<dyn crate::ssh::tunnel::registry::TunnelSpawner> =
-            Arc::new(crate::ssh::tunnel::registry::ProcessSpawner);
+        let registry = crate::ssh::tunnel::registry::TunnelRegistry::new(
+            Arc::new(crate::ssh::tunnel::registry::ProcessSpawner),
+            crate::ssh::tunnel::argv::ConfigSource::Real, Arc::default(), Arc::clone(&clock),
+        );
         #[cfg(windows)]
-        let spawner = ();
-        Self::build(paths, clock, spawner)
+        let registry = ();
+        Self::build(paths, clock, registry)
     }
 
     /// Production uses the real spawner; a test drives the scripted one without
     /// reaching into the registry.
-    #[cfg(unix)]
-    pub fn with_spawner(
+    #[cfg(all(test, unix))]
+    pub(super) fn with_spawner(
         paths: TunnelPaths,
         clock: Arc<dyn Clock>,
         spawner: Arc<dyn crate::ssh::tunnel::registry::TunnelSpawner>,
     ) -> Self {
-        Self::build(paths, clock, spawner)
+        let registry = crate::ssh::tunnel::registry::TunnelRegistry::new(
+            spawner, crate::ssh::tunnel::argv::ConfigSource::Fixture { user: "", system: "" },
+            Arc::default(), Arc::clone(&clock),
+        ).with_runtime_dir(&paths.data.join("runtime"));
+        Self::build(paths, clock, registry)
     }
 
     #[cfg(unix)]
     fn build(
         paths: TunnelPaths,
         clock: Arc<dyn Clock>,
-        spawner: Arc<dyn crate::ssh::tunnel::registry::TunnelSpawner>,
+        registry: crate::ssh::tunnel::registry::TunnelRegistry,
     ) -> Self {
         let mut store = tunnel_store::load_store(&paths.definitions, clock.now_unix_ms())
             .unwrap_or_else(|_| TunnelStore::default());
@@ -326,7 +324,7 @@ impl TunnelDispatch {
         }
         let definitions = store.hosts.clone();
         let definitions_revision = store.definitions_revision;
-        let runtime = match Runtime::build(&paths, Arc::clone(&clock), spawner) {
+        let runtime = match Runtime::build(&paths, registry) {
             Ok(runtime) => Some(runtime),
             Err(error) => {
                 // Fails closed per request rather than leaking an unreclaimable
@@ -335,12 +333,14 @@ impl TunnelDispatch {
                 None
             }
         };
+        let (background_stop, start) = tokio::sync::watch::channel(false);
         Self {
             paths,
             clock,
             memory: Arc::new(Mutex::new(Memory { store, definitions, definitions_revision })),
             drained: Arc::new(Mutex::new(HashMap::new())),
-            background: Mutex::new(false),
+            background_stop,
+            background_start: Mutex::new(Some(start)),
             runtime,
         }
     }
@@ -360,7 +360,6 @@ impl TunnelDispatch {
             clock,
             memory: Arc::new(Mutex::new(Memory { store, definitions, definitions_revision })),
             drained: Arc::new(Mutex::new(HashMap::new())),
-            background: Mutex::new(false),
         }
     }
 
@@ -401,51 +400,61 @@ impl TunnelDispatch {
         self.notify(host_id).notify_waiters();
     }
 
-    /// Boot pass plus the never-cancelled re-sweep. Calling this twice is a no-op,
-    /// so a handover restart cannot double-run the boot pass.
     pub fn start_background_tasks(self: &Arc<Self>) {
-        // A caller outside a reactor (a synchronous test, an early boot path)
-        // cannot spawn; returning before the latch keeps the later, runtime-backed
-        // call able to arm the sweep and the observer.
         #[cfg(unix)]
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
         {
-            let mut started = self.background.lock().unwrap();
-            if *started {
-                return;
-            }
-            *started = true;
-        }
-        #[cfg(unix)]
-        if self.runtime.is_some() {
-            let dispatch = Arc::clone(self);
-            tokio::spawn(async move {
+            let Ok(handle) = tokio::runtime::Handle::try_current() else { return };
+            let Some(runtime) = &self.runtime else { return };
+            let Some(mut stop) = self.background_start.lock().unwrap().take() else { return };
+            let mut sweep_stop = stop.clone();
+            let dispatch = Arc::downgrade(self);
+            handle.spawn(async move {
                 let mut ticker = tokio::time::interval(SWEEP_TICK);
                 loop {
-                    ticker.tick().await;
-                    dispatch.sweep_once();
-                }
-            });
-            let dispatch = Arc::clone(self);
-            tokio::spawn(async move {
-                // Cancelled on idle, re-armed by the next live runtime: a
-                // cancelled-once observer that never re-arms is the bug this
-                // shape exists to prevent.
-                loop {
-                    let Ok(registry) = dispatch.registry() else { return };
-                    registry.wait_until_live().await;
-                    loop {
-                        let mut ticker = tokio::time::interval(OBSERVER_TICK);
-                        ticker.tick().await;
-                        tokio::select! {
-                            _ = ticker.tick() => dispatch.observe_hosts().await,
-                            _ = registry.wait_until_idle() => break,
+                    tokio::select! {
+                        biased;
+                        _ = sweep_stop.wait_for(|stopped| *stopped) => return,
+                        _ = ticker.tick() => {
+                            let Some(owner) = dispatch.upgrade() else { return };
+                            owner.sweep_once();
                         }
                     }
                 }
             });
+            let registry = Arc::clone(&runtime.registry);
+            let dispatch = Arc::downgrade(self);
+            handle.spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = stop.wait_for(|stopped| *stopped) => return,
+                        _ = registry.wait_until_live() => {}
+                    }
+                    let mut ticker = tokio::time::interval(OBSERVER_TICK);
+                    ticker.tick().await;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = stop.wait_for(|stopped| *stopped) => return,
+                            _ = registry.wait_until_idle() => break,
+                            _ = ticker.tick() => {
+                                let Some(owner) = dispatch.upgrade() else { return };
+                                owner.observe_hosts().await;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    pub(crate) async fn stop_background_tasks(&self) {
+        #[cfg(unix)]
+        {
+            drop(self.background_start.lock().unwrap().take());
+            self.background_stop.send_replace(true);
+            // Each loop owns one receiver until its last filesystem operation returns.
+            self.background_stop.closed().await;
         }
     }
 
@@ -1171,6 +1180,7 @@ impl TunnelDispatch {
     /// service's, so a clean exit reaps every child. A SIGKILL leaves the runtimes
     /// sidecar for the next daemon's sweep.
     pub async fn shutdown(&self) -> Result<(), IpcError> {
+        self.stop_background_tasks().await;
         #[cfg(unix)]
         {
             let registry = self.registry()?;

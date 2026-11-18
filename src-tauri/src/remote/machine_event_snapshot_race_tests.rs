@@ -129,6 +129,7 @@ async fn machine_event_snapshot_recovers_when_commit_overlaps_inventory() {
         .unwrap();
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
+    owner.tunnel_dispatch.stop_background_tasks().await;
     drop((service, state, owner));
     crate::ipc::run_blocking(move || {
         root.close().unwrap();
@@ -296,6 +297,7 @@ async fn stale_snapshot_retry_does_not_discard_worktree_commit_event() {
         .await
         .unwrap()
         .unwrap();
+    owner.tunnel_dispatch.stop_background_tasks().await;
     drop((service, state, owner));
     crate::ipc::run_blocking(move || {
         root.close().unwrap();
@@ -346,6 +348,7 @@ async fn desktop_focus_change_is_published_to_machine_subscribers_once() {
         seen.push(event["sessionId"].as_str().unwrap().to_string());
     }
     assert_eq!(seen, ["s1", "s2"]);
+    owner.tunnel_dispatch.stop_background_tasks().await;
     drop((state, owner));
     crate::ipc::run_blocking(move || {
         root.close().unwrap();
