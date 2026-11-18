@@ -72,6 +72,8 @@ impl TunnelSpawner for ProcessSpawner {
 #[derive(Default)]
 pub struct ProbeSocketFactory {
     #[cfg(test)]
+    hold_test_clock_for_tcp: bool,
+    #[cfg(test)]
     pub availability_source_port_override: Mutex<Option<u16>>,
     #[cfg(test)]
     pub readiness_source_port_override: Mutex<Option<u16>>,
@@ -102,7 +104,19 @@ impl ProbeSocketFactory {
             self.readiness_override_consumed.notify_one();
         }
         if is_self_connect(socket.local_addr()?, addr) { return Ok(ProbeConnection::SelfConnected); }
-        socket.connect(addr).await.map(ProbeConnection::Peer)
+        let connect = socket.connect(addr);
+        #[cfg(test)]
+        if self.hold_test_clock_for_tcp {
+            // A paused Tokio runtime can jump to the probe deadline before the kernel delivers
+            // ECONNREFUSED. Keep that clock still until connect completes or its wall budget expires.
+            let (done, pending) = std::sync::mpsc::channel::<()>();
+            let hold = tokio::task::spawn_blocking(move || { let _ = pending.recv_timeout(PROBE_DEADLINE); });
+            let result = connect.await;
+            drop(done);
+            hold.await.map_err(io::Error::other)?;
+            return result.map(ProbeConnection::Peer);
+        }
+        connect.await.map(ProbeConnection::Peer)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -986,10 +1000,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn reconnect_is_time_bounded() {
         let _port_guard = PORT_TEST_LOCK.lock().await;
+        let timed_registry = |spawner: Arc<Scripted>| {
+            let (mut registry, dir) = make_registry(spawner);
+            Arc::get_mut(&mut registry.core).unwrap().probes = Arc::new(ProbeSocketFactory {
+                hold_test_clock_for_tcp: true,
+                ..Default::default()
+            });
+            (registry, dir)
+        };
         let (fake, mut attempts) = Scripted::new((0..17).map(|_| Attempt::Fail("Connection refused")).chain([Attempt::Listen]).collect());
-        let (registry, _dir) = make_registry(fake.clone());
+        let (registry, _dir) = timed_registry(fake.clone());
         let initial = registry.start(&host(), spec(None), false).await.unwrap();
-        assert_eq!(initial.state, TunnelState::Reconnecting); assert_eq!(initial.failure, Some(TunnelFailureCode::HostUnreachable)); assert_eq!(initial.failure_piece, None);
+        assert_eq!(initial.state, TunnelState::Reconnecting, "{initial:?}"); assert_eq!(initial.failure, Some(TunnelFailureCode::HostUnreachable)); assert_eq!(initial.failure_piece, None);
         assert_eq!(registry.list(&HashMap::new()).unwrap()[0].failure, initial.failure);
         let start = attempts.recv().await.unwrap(); let id = initial.runtime_id.unwrap();
         state(&registry, &id, TunnelState::Listening).await;
@@ -1003,18 +1025,18 @@ mod tests {
         assert!(registry.transitions(&id).iter().any(|t| t.to == TunnelState::Reconnecting && t.code == Some(TunnelFailureCode::HostUnreachable)));
         assert_eq!(registry.list(&HashMap::new()).unwrap()[0].failure, Some(TunnelFailureCode::AuthFailed)); registry.shutdown().await.unwrap();
         for text in ["Permission denied (password)", "Host key verification failed"] {
-            let (fake, _) = Scripted::new(vec![Attempt::Fail(text)]); let (registry, _dir) = make_registry(fake.clone());
+            let (fake, _) = Scripted::new(vec![Attempt::Fail(text)]); let (registry, _dir) = timed_registry(fake.clone());
             let failed = registry.start(&host(), spec(None), false).await.unwrap(); assert_eq!(failed.state, TunnelState::Failed); assert_eq!(fake.calls.load(Ordering::SeqCst), 1); registry.shutdown().await.unwrap();
         }
-        let (fake, _) = Scripted::new(vec![Attempt::Fail("Connection refused")]); let (registry, _dir) = make_registry(fake.clone());
+        let (fake, _) = Scripted::new(vec![Attempt::Fail("Connection refused")]); let (registry, _dir) = timed_registry(fake.clone());
         let view = registry.start(&host(), spec(None), false).await.unwrap(); registry.stop(view.runtime_id.as_ref().unwrap()).await.unwrap();
         tokio::time::advance(Duration::from_secs(60)).await; assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
-        let (fake, _) = Scripted::new(vec![Attempt::Hang]); let (registry, _dir) = make_registry(fake);
+        let (fake, _) = Scripted::new(vec![Attempt::Hang]); let (registry, _dir) = timed_registry(fake);
         let deadline = Instant::now(); let view = registry.start(&host(), spec(None), false).await.unwrap();
         assert!(deadline.elapsed() <= START_DEADLINE); assert_eq!(view.state, TunnelState::Reconnecting); assert_eq!(view.failure, Some(TunnelFailureCode::HostUnreachable)); assert_eq!(view.failure_piece, None);
         assert_eq!(registry.list(&HashMap::new()).unwrap()[0].failure, view.failure); registry.shutdown().await.unwrap();
 
-        let (fake, _) = Scripted::new(vec![Attempt::Listen]); let (registry, _dir) = make_registry(fake.clone());
+        let (fake, _) = Scripted::new(vec![Attempt::Listen]); let (registry, _dir) = timed_registry(fake.clone());
         let mut imported = host(); imported.source = SshHostSource::Config;
         let definition = spec(Some(allocate_port().unwrap()));
         let failed = registry.start(&imported, definition.clone(), true).await.unwrap();
