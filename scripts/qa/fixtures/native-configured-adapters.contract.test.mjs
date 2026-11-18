@@ -143,17 +143,26 @@ it.each(['before-receipt', 'during-probe', 'reused-pid'])('retains PTY cleanup o
     await ctx.spawn.prepare({ recordOwnedPid: owner => owned.push(owner), signal: scenario.signal });
     const binding = prearmPresentationBinding({ cursor: { path: '/presentation', afterLine: -1 },
       runId: 'run', operationId: 'op', subscribe: ctx.provider.subscribe, signal: scenario.signal });
-    const cancelled = expect(binding.promise).rejects.toThrow('presentation cancelled');
+    // Settle both promises through plain handlers, then assert on the outcome.
+    // `expect(<pending promise>).rejects` parks Bun's runner inside the assertion
+    // call, so a rejection that arrives later never runs and the suite spins at
+    // 100% CPU; the handlers below subscribe before either promise is settled.
+    const cancelled = binding.promise.then(() => null, (error) => error);
     if (mode === 'before-receipt') scenario.abort(new Error('presentation cancelled'));
-    const releasing = ctx.transport.release({ signal: cleanup.signal });
-    const released = mode === 'reused-pid' ? expect(releasing).rejects.toThrow('exact PID') : releasing;
+    const releasing = ctx.transport.release({ signal: cleanup.signal }).then(() => null, (error) => error);
     await probing.promise;
     if (mode !== 'before-receipt') scenario.abort(new Error('presentation cancelled'));
-    await cancelled;
+    const cancelError = await cancelled;
+    expect(cancelError).toBeInstanceOf(Error);
+    expect(cancelError.message).toBe('presentation cancelled');
     expect(owned.map(owner => owner.pid)).toEqual([77]);
     expect(release).not.toHaveBeenCalled();
     admissionProbe.resolve();
-    await released;
+    const releaseError = await releasing;
+    if (mode === 'reused-pid') {
+      expect(releaseError).toBeInstanceOf(Error);
+      expect(releaseError.message).toContain('exact PID');
+    } else expect(releaseError).toBeNull();
     expect(owned.map(owner => owner.pid)).toEqual(mode === 'reused-pid' ? [77] : [77, 88]);
     if (mode !== 'reused-pid') expect(owned[1]).toMatchObject({ ...cleanupPty, ownershipPath: '/owned', ownershipLineIndex: 3 });
     expect(release).toHaveBeenCalledOnce();
