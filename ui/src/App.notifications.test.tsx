@@ -225,10 +225,44 @@ vi.mock("./lib/tauri", () => ({
 
 const workspaceStoreModule = await import("./state/workspaceStore");
 const realUseWorkspaceStore = workspaceStoreModule.useWorkspaceStore;
+const { setLaneLifecycleTransport } = await import("./lib/sidebarPersistence");
 const { clearHmrWorkspaceState } = await import("./state/hmrWorkspaceState");
 const { toast } = await import("sonner");
 type ActivityNotificationTarget = import("./state/workspaceStore").ActivityNotificationTarget;
 type ActivityNotificationEvent = import("./state/workspaceStore").ActivityNotificationEvent;
+type LaneLifecycleModel = import("./lib/sidebarPersistence").LaneLifecycleModel;
+type LaneLifecycleTransport = import("./lib/sidebarPersistence").LaneLifecycleTransport;
+
+/**
+ * The store reads its server-owned lane lifecycle model through this endpoint on restore and on
+ * every worktree-listing change. Left to the default HTTP transport it is a real request to a hub
+ * that is not running here, so each read rejects and the store correctly reports "Could not load
+ * lane state" - once per read, which the notification assertions see as a second error toast.
+ * Answer it the way a hub with no stored lifecycle does: an empty model, no rows to reorder.
+ */
+const emptyLaneLifecycleModel: LaneLifecycleModel = { sections: [], revision: 0 };
+function laneView(request: { worktreeKey: string; workspaceId: string; path: string }) {
+  return {
+    worktreeKey: request.worktreeKey,
+    workspaceId: request.workspaceId,
+    worktreePath: request.path,
+    state: "active" as const,
+    effectiveState: "active" as const,
+    pinnedTabs: [] as string[],
+    snoozedUntil: null,
+    position: 0,
+    revision: 1,
+    updatedAt: "2026-11-16T00:00:00Z",
+  };
+}
+const laneLifecycleEndpoint: LaneLifecycleTransport = {
+  read: async () => emptyLaneLifecycleModel,
+  reconcileIdentities: async () => emptyLaneLifecycleModel,
+  write: async (request) => laneView(request),
+  writePinTabs: async (request) => laneView(request),
+  importOrder: async () => true,
+  reorder: async () => undefined,
+};
 const activityListeners = new Set<(event: ActivityNotificationEvent) => void>();
 function emitActivityTargets(): void {
   for (const target of currentActivityTargets) {
@@ -399,6 +433,7 @@ describe("App notification coordinator wiring", () => {
   beforeEach(() => {
     flashedSessions.length = 0;
     resetWorkspaceRestore();
+    setLaneLifecycleTransport(laneLifecycleEndpoint);
     localStorage.clear();
     panel.handlers.length = 0;
     panel.load.mockReset();
@@ -527,6 +562,7 @@ describe("App notification coordinator wiring", () => {
 
   afterEach(() => {
     cleanup();
+    setLaneLifecycleTransport(null);
     clearHmrWorkspaceState();
     clearWorkspaceSnapshot();
     storeSpy?.mockRestore();

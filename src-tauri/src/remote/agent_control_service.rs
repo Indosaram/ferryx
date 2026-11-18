@@ -620,8 +620,8 @@ fn registry_agent(observed: &Observed) -> Option<String> {
     observed.entry.get("agent").and_then(serde_json::Value::as_str).map(str::to_string)
 }
 
-fn replay_value(replay: events::AgentReplay) -> serde_json::Value {
-    match replay {
+fn replay_value(replay: events::AgentReplay, instance: &str) -> serde_json::Value {
+    let mut value = match replay {
         events::AgentReplay::Events {
             events,
             after_sequence,
@@ -638,7 +638,9 @@ fn replay_value(replay: events::AgentReplay) -> serde_json::Value {
             "snapshot": snapshot.iter().map(|event| event.sequenced()).collect::<Vec<_>>(),
             "afterSequence": after_sequence,
         }),
-    }
+    };
+    value["instance"] = serde_json::json!(instance);
+    value
 }
 
 /// A wait's reply. `instance` is the observer epoch its sequences belong to: a caller holding a
@@ -932,6 +934,7 @@ async fn dispatch(
         AgentControlOp::Wait {
             session_id,
             until,
+            instance,
             after_revision,
             after,
             timeout_ms,
@@ -944,6 +947,15 @@ async fn dispatch(
             }
             let timeout_ms = policy::clamp_wait_timeout(timeout_ms)?;
             live(state, &session_id).await?;
+            if instance.as_deref() != Some(state.agent_events.instance()) {
+                return Ok(wait_value(
+                    WaitHit::Gap {
+                        snapshot: state.agent_events.snapshot(),
+                        after_sequence: state.agent_events.revision(),
+                    },
+                    state.agent_events.instance(),
+                ));
+            }
             let hit = events::wait_for(
                 &state.agent_events,
                 &session_id,
@@ -961,7 +973,10 @@ async fn dispatch(
                 )),
             }
         }
-        AgentControlOp::Events { after } => Ok(replay_value(state.agent_events.replay(after))),
+        AgentControlOp::Events { instance, after } => Ok(replay_value(
+            state.agent_events.replay_in_instance(after, instance.as_deref()),
+            state.agent_events.instance(),
+        )),
         AgentControlOp::Acknowledge { session_id } => {
             live(state, &session_id).await?;
             if crate::terminal::paired_runtime::Runtime::owns(&session_id) {
@@ -1378,12 +1393,74 @@ fn prompt_view(
         options,
         kind,
         needs_confirmation,
+        answer_status: None,
+    })
+}
+
+fn pending_open_error(error: String) -> ScopeError {
+    reference_chat_scope(
+        ScopeErrorCode::OperationOutcomeUnknown,
+        format!("the pending input could not be recorded, so the answer was not attempted: {error}"),
+    )
+}
+
+/// The durable record a detected card leaves: its wire id, the screen read and the card's view.
+fn pending_input_of(
+    session_id: &str,
+    view: &crate::daemon::protocol::AgentPromptView,
+) -> crate::agent_control::pending_input::NewPendingInput {
+    crate::agent_control::pending_input::NewPendingInput {
+        prompt_id: view.prompt_id.clone(),
+        session_id: session_id.to_string(),
+        screen_revision: view.screen_revision.clone(),
+        question: view.question.clone(),
+        options: view
+            .options
+            .iter()
+            .map(|option| crate::agent_control::pending_input::PendingInputOption {
+                key: option.key.clone(),
+                label: option.label.clone(),
+            })
+            .collect(),
+        kind: serde_json::to_value(view.kind)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "choice".into()),
+        needs_confirmation: view.needs_confirmation,
+    }
+}
+
+fn pending_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// Run one pending-input journal transition off the runtime, on the machine services this gateway
+/// owns. `None` when the gateway has no machine journal (a bare gateway in a test): the prompt
+/// routes then behave exactly as they did before this table existed - they read and answer the
+/// pane, and nothing is recorded.
+///
+/// The journal's methods are blocking file I/O with a file lock and an fsync, so they must not run
+/// on a tokio worker (`machine_operation_journal` says so at its head).
+async fn on_pending_journal<T, F>(state: &Arc<RemoteGatewayState>, step: F) -> Option<Result<T, String>>
+where
+    T: Send + 'static,
+    F: FnOnce(&crate::agent_control::pending_input::Journal) -> Result<T, String> + Send + 'static,
+{
+    let services = Arc::clone(state.machine_services.as_ref()?);
+    let joined = tokio::task::spawn_blocking(move || step(&services.workspaces.journal)).await;
+    Some(match joined {
+        Ok(result) => result,
+        Err(error) => Err(format!("the pending-input task did not finish: {error}")),
     })
 }
 
 /// `AgentPromptGet`: the card the pane's screen holds now, through the same detectors the
 /// reference-chat prompt route runs. A screen that cannot be read whole is refused rather than
-/// reported as holding no prompt.
+/// reported as holding no prompt. Live detection wins; when it finds nothing, the durable card for
+/// this exact screen revision is returned before reconciliation can settle it as gone.
 pub(crate) async fn prompt_get(
     state: &Arc<RemoteGatewayState>,
     session_id: &str,
@@ -1399,15 +1476,116 @@ pub(crate) async fn prompt_get(
             "the pane's screen could not be reconstructed, so no card may be answered from it",
         ));
     }
-    let Some(agent) = agent.filter(|agent| reference_prompts::ReferencePromptFamily::of_agent(agent).is_some())
-    else {
-        return Ok(None);
+    let mut view = if let Some(agent) =
+        agent.filter(|agent| reference_prompts::ReferencePromptFamily::of_agent(agent).is_some())
+    {
+        let identity = reference_chat_identity(state, &target, Some(&agent)).await;
+        let session = reference_chat_prompt_session_for_screen(state, &identity, &agent, &snapshot.text).await;
+        let prompt = reference_prompts::detect_reference_prompt_in_session(&agent, &snapshot.text, &session.borrow());
+        let prompt = reference_prompts::reference_prompt_occurrence(session_id, prompt, &snapshot.revision);
+        prompt.as_ref().and_then(|prompt| prompt_view(prompt, snapshot.revision.clone()))
+    } else {
+        None
     };
-    let identity = reference_chat_identity(state, &target, Some(&agent)).await;
-    let session = reference_chat_prompt_session_for_screen(state, &identity, &agent, &snapshot.text).await;
-    let prompt = reference_prompts::detect_reference_prompt_in_session(&agent, &snapshot.text, &session.borrow());
-    let prompt = reference_prompts::reference_prompt_occurrence(session_id, prompt, &snapshot.revision);
-    Ok(prompt.and_then(|prompt| prompt_view(&prompt, snapshot.revision)))
+    if state.machine_services.is_none() {
+        return Ok(view);
+    }
+    let found = view.as_ref().map(|view| pending_input_of(session_id, view));
+    // Use the revision prompt_view hands to pending_input_of, never a second digest. The screen
+    // read has finished, so no journal lock spans it. A live card needs no durable lookup.
+    let screen_revision = snapshot.revision;
+    let session_owned = session_id.to_string();
+    let ambiguous = {
+        let lookup_session = session_owned.clone();
+        on_pending_journal(state, move |journal| {
+            crate::agent_control::pending_input::unresolved_ambiguous_for_session(journal, &lookup_session)
+        }).await
+    };
+    let mut ambiguous_prompt_selected = false;
+    let stored = match ambiguous {
+        Some(Ok(Some(input))) => {
+            ambiguous_prompt_selected = true;
+            Some(Ok(Some(input)))
+        }
+        Some(Err(error)) => Some(Err(error)),
+        _ if found.is_none() => {
+        let lookup_session = session_owned.clone();
+        let lookup = on_pending_journal(state, move |journal| {
+            let exact = crate::agent_control::pending_input::open_for_screen(
+                journal, &lookup_session, &screen_revision,
+            )?;
+            match exact {
+                Some(input) => Ok(Some(input)),
+                None => crate::agent_control::pending_input::unresolved_ambiguous_for_session(
+                    journal, &lookup_session,
+                ),
+            }
+        })
+        .await;
+        lookup
+        }
+        _ => None,
+    };
+    let reconciled = match stored {
+        Some(Ok(Some(stored))) => Some(Ok(Some(stored))),
+        Some(Err(error)) => Some(Err(error)),
+        _ => {
+            let now = pending_now_secs();
+            let to_record = found.clone();
+            let reconciliation = on_pending_journal(state, move |journal| {
+                let result = crate::agent_control::pending_input::reconcile(journal, to_record, &session_owned, now);
+                result
+            })
+            .await;
+            reconciliation
+        }
+    };
+    if view.is_none() || ambiguous_prompt_selected {
+        return match reconciled {
+            Some(Ok(Some(stored))) => {
+                let kind = serde_json::from_value(serde_json::Value::String(stored.kind))
+                    .map_err(|error| reference_chat_scope(
+                        ScopeErrorCode::OperationOutcomeUnknown,
+                        format!("the stored pending input has an invalid kind: {error}"),
+                    ))?;
+                Ok(Some(crate::daemon::protocol::AgentPromptView {
+                    prompt_id: stored.prompt_id,
+                    screen_revision: stored.screen_revision,
+                    question: stored.question,
+                    options: stored.options.into_iter().map(|option| {
+                        crate::daemon::protocol::AgentPromptViewOption { key: option.key, label: option.label }
+                    }).collect(),
+                    kind,
+                    needs_confirmation: stored.needs_confirmation,
+                    answer_status: stored.attempt.as_ref().and_then(|attempt| {
+                        (attempt.outcome.is_none() || attempt.outcome.as_deref() == Some("outcomeUnknown"))
+                            .then(|| "outcomeUnknown".to_string())
+                    }),
+                }))
+            }
+            Some(Err(error)) => Err(reference_chat_scope(
+                ScopeErrorCode::OperationOutcomeUnknown,
+                format!("the pending input could not be read: {error}"),
+            )),
+            _ => Ok(None),
+        };
+    }
+    // A journal write failure must not hide a fresher live card.
+    match reconciled {
+        Some(Ok(Some(stored))) if found.as_ref().is_some_and(|found| found.prompt_id == stored.prompt_id) => {
+            if let Some(view) = view.as_mut() {
+                view.answer_status = stored.attempt.as_ref().and_then(|attempt| {
+                    (attempt.outcome.is_none() || attempt.outcome.as_deref() == Some("outcomeUnknown"))
+                        .then(|| "outcomeUnknown".to_string())
+                });
+            }
+        }
+        Some(Err(error)) => {
+            tracing::warn!(%error, session_id, "the pending input was not recorded for this read");
+        }
+        _ => {}
+    }
+    Ok(view)
 }
 
 /// The reference answer an `AgentPromptAnswerInput` names, after the daemon boundary's length
@@ -1448,6 +1626,41 @@ pub(crate) async fn prompt_answer(
     answer: crate::daemon::protocol::AgentPromptAnswerInput,
     registry_id: Option<String>,
 ) -> Result<crate::scoped_contracts::DeliveryReceipt, ScopeError> {
+    prompt_answer_under(state, session_id, prompt_id, screen_revision, answer, registry_id, None).await
+}
+
+pub(crate) async fn prompt_resolve_ambiguous(
+    state: &Arc<RemoteGatewayState>,
+    session_id: String,
+    prompt_id: String,
+    screen_revision: String,
+) -> Result<(), ScopeError> {
+    let Some(result) = on_pending_journal(state, move |journal| {
+        let record = crate::agent_control::pending_input::get(journal, &prompt_id)?
+            .ok_or_else(|| "PROMPT_NOT_FOUND".to_string())?;
+        crate::agent_control::pending_input::dismiss_ambiguous_for_screen(
+            journal, &prompt_id, &session_id, &screen_revision, pending_now_secs(),
+        )
+    }).await else {
+        return Err(reference_chat_scope(ScopeErrorCode::Unsupported, "ambiguous prompt resolution requires the daemon journal"));
+    };
+    result.map_err(|error| reference_chat_scope(ScopeErrorCode::RequestConflict, error))
+}
+
+/// [`prompt_answer`], delivering under `request_id` when the caller already committed one.
+///
+/// The startup retry passes the id its predecessor claimed, so the retry finishes that attempt
+/// instead of looking like a second caller (which [`crate::agent_control::pending_input::claim`]
+/// refuses as in flight). Every other caller mints a fresh id.
+pub(crate) async fn prompt_answer_under(
+    state: &Arc<RemoteGatewayState>,
+    session_id: String,
+    prompt_id: String,
+    screen_revision: String,
+    answer: crate::daemon::protocol::AgentPromptAnswerInput,
+    registry_id: Option<String>,
+    claimed_request_id: Option<String>,
+) -> Result<crate::scoped_contracts::DeliveryReceipt, ScopeError> {
     let owner_answer =
         crate::hub_runtime::panel_autonomy::owner_prompt_answer_of(&session_id, &prompt_id, answer.key.as_deref());
     let answer = reference_answer(answer)?;
@@ -1459,8 +1672,61 @@ pub(crate) async fn prompt_answer(
         ));
     };
     let target = control_target(state, &session_id);
-    let request_id = format!("agent-prompt-{}", uuid::Uuid::new_v4());
+    let request_id = claimed_request_id.unwrap_or_else(|| format!("agent-prompt-{}", uuid::Uuid::new_v4()));
+    // Commit the intent before any byte is typed. This is the whole of the durability contract: a
+    // process that dies after this call leaves a claimed row, and the next daemon retries it.
+    let answer_json = serde_json::to_value(&answer).unwrap_or(serde_json::Value::Null);
+    {
+        let prompt_id = prompt_id.clone();
+        let session_id = session_id.clone();
+        let request_id = request_id.clone();
+        let now = pending_now_secs();
+        let claimed = on_pending_journal(state, move |journal| {
+            crate::agent_control::pending_input::claim(
+                journal,
+                &prompt_id,
+                &session_id,
+                &request_id,
+                &answer_json,
+                now,
+            )
+        })
+        .await;
+        match claimed {
+            // This gateway has no journal: the answer proceeds exactly as it did before.
+            None => {}
+            // The row was stamped (or was already ours): this caller owns the write.
+            Some(Ok(crate::agent_control::pending_input::Claim::Claimed)) => {}
+            // One prompt, one delivery: this answer already went out, so the receipt that delivery
+            // produced is the answer to this call and nothing is typed again.
+            Some(Ok(crate::agent_control::pending_input::Claim::Replayed(receipt))) => {
+                return Ok(receipt)
+            }
+            Some(Ok(crate::agent_control::pending_input::Claim::AlreadyAnswered)) => {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::RequestConflict,
+                    "this prompt was already answered with a different answer, so nothing was typed",
+                ))
+            }
+            Some(Ok(crate::agent_control::pending_input::Claim::InFlight)) => {
+                return Err(reference_chat_scope(
+                    ScopeErrorCode::ControlConflict,
+                    "another answer to this prompt is being delivered right now, so nothing was typed",
+                ))
+            }
+            // This journal never recorded the card. The shared answer path below still validates
+            // the screen before typing, so the answer proceeds - it is just not yet at-most-once,
+            // which reading the card first makes true.
+            Some(Ok(crate::agent_control::pending_input::Claim::Unrecorded)) => {}
+            Some(Err(error)) => return Err(pending_open_error(error)),
+        }
+    }
     let state = Arc::clone(state);
+    // The spawn below owns `state`; the receipt write after it needs its own handle.
+    let state_after = Arc::clone(&state);
+    // The spawn below owns these; the receipt write after it needs its own copies.
+    let prompt_id_after = prompt_id.clone();
+    let request_id_after = request_id.clone();
     // Owned by its own task, like every answer: a caller that disconnects must not leave a menu
     // moved but unconfirmed.
     let transaction = tokio::spawn(async move {
@@ -1490,7 +1756,38 @@ pub(crate) async fn prompt_answer(
         let clock = reference_input::SystemReferenceClock;
         runtime.answers.answer(&request, &step, &screen, &writer, &clock).await
     });
-    match transaction.await {
+    let delivered = transaction.await;
+    // Record what the write did. If this outcome write fails, the durable claim remains
+    // ambiguous: after restart it cannot be safely retried and requires explicit dismissal.
+    {
+        let outcome = match &delivered {
+            Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => {
+                crate::agent_control::pending_input::DeliveryOutcome::Accepted {
+                    request_id: request_id_after.clone(),
+                    receipt: receipt.clone(),
+                }
+            }
+            Ok(reference_input::ReferenceInputOutcome::NotTyped { error }) => {
+                crate::agent_control::pending_input::DeliveryOutcome::NotTyped {
+                    request_id: request_id_after.clone(),
+                    code: control_wire_code(error).to_string(),
+                }
+            }
+            _ => crate::agent_control::pending_input::DeliveryOutcome::OutcomeUnknown {
+                request_id: request_id_after.clone(),
+            },
+        };
+        let prompt_id_recorded = prompt_id_after.clone();
+        let now = pending_now_secs();
+        if let Some(Err(error)) = on_pending_journal(&state_after, move |journal| {
+            crate::agent_control::pending_input::record(journal, &prompt_id_recorded, outcome, now)
+        })
+        .await
+        {
+            tracing::warn!(%error, "the pending input's delivery was not recorded");
+        }
+    }
+    match delivered {
         Ok(reference_input::ReferenceInputOutcome::Accepted { receipt }) => {
             if let Some(answer) = owner_answer {
                 tokio::spawn(answer.recorded());
@@ -1823,6 +2120,8 @@ fn http_reauthorize(
 pub(crate) struct EventsQuery {
     #[serde(default)]
     after: u64,
+    #[serde(default)]
+    instance: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1831,6 +2130,8 @@ pub(crate) struct WaitQuery {
     until: String,
     #[serde(default)]
     after: u64,
+    #[serde(default)]
+    instance: Option<String>,
     timeout_ms: u64,
     #[serde(default)]
     revision: Option<String>,
@@ -1917,7 +2218,16 @@ pub(crate) async fn http_events(
         Ok(Query(query)) => query,
         Err(rejection) => return query_error(rejection),
     };
-    control_finish(handle(&state, AgentControlOp::Events { after: query.after }).await)
+    control_finish(
+        handle(
+            &state,
+            AgentControlOp::Events {
+                instance: query.instance,
+                after: query.after,
+            },
+        )
+        .await,
+    )
 }
 
 pub(crate) async fn http_ack(
@@ -1951,6 +2261,7 @@ pub(crate) async fn http_wait(
             AgentControlOp::Wait {
                 session_id,
                 until: query.until,
+                instance: query.instance,
                 after_revision: query.revision,
                 after: query.after,
                 timeout_ms: query.timeout_ms,
@@ -3924,7 +4235,7 @@ mod tests {
             });
         }
 
-        let gapped = handle(&state, AgentControlOp::Events { after: 0 })
+        let gapped = handle(&state, AgentControlOp::Events { instance: None, after: 0 })
             .await
             .expect("a fallen cursor is still a successful replay");
         assert_eq!(gapped["gap"], true, "{gapped}");
@@ -3935,6 +4246,7 @@ mod tests {
             AgentControlOp::Wait {
                 session_id: session_id.to_string(),
                 until: "any".into(),
+                instance: None,
                 after_revision: None,
                 after: 0,
                 timeout_ms: 1_000,
@@ -3948,6 +4260,7 @@ mod tests {
         let tail = handle(
             &state,
             AgentControlOp::Events {
+                instance: Some(state.agent_events.instance().to_owned()),
                 after: latest.sequence.saturating_sub(1),
             },
         )
@@ -4004,6 +4317,128 @@ mod tests {
             .await
             .expect("the screen is readable")
             .expect("the menu is a prompt")
+    }
+
+    /// Keep the real daemon journal, but use the deterministic screen backend for prompt reads.
+    async fn durable_prompt_pane(
+        session_id: &str,
+        screen: &str,
+    ) -> (tempfile::TempDir, Arc<FixedPane>, Arc<RemoteGatewayState>) {
+        let (root, services) = crate::ipc::run_blocking(|| {
+            let root = tempfile::tempdir().expect("temporary daemon root");
+            let server = crate::daemon::server::DaemonServer::new_with_paths(
+                Some(root.path().join("config")),
+                Some(root.path().join("auth")),
+            );
+            let services = server.remote_state().machine_services.clone().expect("daemon services");
+            Ok((root, services))
+        }).await.expect("daemon journal");
+        let (backend, mut state) = pane(session_id, screen);
+        Arc::get_mut(&mut state).expect("unpublished gateway").machine_services = Some(services);
+        (root, backend, state)
+    }
+
+    fn stored_prompt(revision: String) -> crate::daemon::protocol::AgentPromptView {
+        crate::daemon::protocol::AgentPromptView {
+            prompt_id: "durable-card".into(),
+            screen_revision: revision,
+            question: "Resume the pending operation?".into(),
+            options: vec![crate::daemon::protocol::AgentPromptViewOption {
+                key: "0".into(), label: "Resume".into(),
+            }],
+            kind: crate::daemon::protocol::AgentPromptViewKind::Approval,
+            needs_confirmation: true,
+            answer_status: None,
+        }
+    }
+
+    async fn store_prompt(
+        state: &Arc<RemoteGatewayState>,
+        session_id: &str,
+        view: &crate::daemon::protocol::AgentPromptView,
+    ) {
+        let input = pending_input_of(session_id, view);
+        on_pending_journal(state, move |journal| {
+            crate::agent_control::pending_input::open(journal, input, pending_now_secs())
+        }).await.expect("journal installed").expect("card persisted");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_get_returns_the_stored_card_when_live_detection_finds_nothing() {
+        let session_id = "agent-prompt-durable-fallback";
+        let (_root, backend, state) = durable_prompt_pane(session_id, "$ ").await;
+        let snapshot = reference_chat_snapshot_screen(&state, &control_target(&state, session_id))
+            .await.expect("screen snapshot");
+        let stored = stored_prompt(snapshot.revision);
+        store_prompt(&state, session_id, &stored).await;
+
+        let actual = prompt_get(&state, session_id, Some("codex".into()))
+            .await.expect("readable journal").expect("stored card");
+
+        assert_eq!(actual, stored, "every existing wire field survives the fallback");
+        // A second read must not lose the row to the no-live-card reconciliation.
+        assert_eq!(prompt_get(&state, session_id, None).await.expect("readable"), Some(stored));
+        assert!(backend.writes.lock().expect("writes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_get_prioritizes_ambiguous_card_then_reveals_live_card_after_dismissal() {
+        let session_id = "agent-prompt-live-wins";
+        let (_root, backend, state) = durable_prompt_pane(session_id, CODEX_MENU).await;
+        let live = desktop_prompt(&state, session_id).await;
+        let stored = stored_prompt(live.screen_revision.clone());
+        assert_ne!(stored.prompt_id, live.prompt_id);
+        store_prompt(&state, session_id, &stored).await;
+        let journal = &state.machine_services.as_ref().unwrap().workspaces.journal;
+        crate::agent_control::pending_input::claim(
+            journal,
+            &stored.prompt_id,
+            session_id,
+            "request-ambiguous-live",
+            &serde_json::json!({"optionIndex": 0}),
+            pending_now_secs(),
+        ).unwrap();
+
+        let first = desktop_prompt(&state, session_id).await;
+        assert_eq!(first.prompt_id, stored.prompt_id);
+        assert_eq!(first.screen_revision, stored.screen_revision);
+        assert_eq!(first.answer_status.as_deref(), Some("outcomeUnknown"));
+        crate::agent_control::pending_input::dismiss_ambiguous_for_screen(
+            journal, &stored.prompt_id, session_id, &stored.screen_revision, pending_now_secs(),
+        ).unwrap();
+        let next = desktop_prompt(&state, session_id).await;
+        assert_eq!(next.prompt_id, live.prompt_id);
+        assert_eq!(next.screen_revision, live.screen_revision);
+        assert_eq!(next.answer_status, None);
+        assert!(backend.writes.lock().expect("writes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_get_returns_an_ambiguous_card_when_the_screen_revision_changes() {
+        let session_id = "agent-prompt-other-screen";
+        let (_root, _backend, state) = durable_prompt_pane(session_id, "$ ").await;
+        let snapshot = reference_chat_snapshot_screen(&state, &control_target(&state, session_id))
+            .await.expect("screen snapshot");
+        let stored = stored_prompt(format!("{}-different", snapshot.revision));
+        store_prompt(&state, session_id, &stored).await;
+        let input = crate::agent_control::pending_input::get(
+            &state.machine_services.as_ref().unwrap().workspaces.journal,
+            &stored.prompt_id,
+        ).unwrap().unwrap();
+        crate::agent_control::pending_input::claim(
+            &state.machine_services.as_ref().unwrap().workspaces.journal,
+            &stored.prompt_id,
+            session_id,
+            "request-ambiguous",
+            &serde_json::json!({"optionIndex": 0}),
+            input.opened_at + 1,
+        ).unwrap();
+
+        let visible = prompt_get(&state, session_id, Some("codex".into()))
+            .await.expect("readable").expect("ambiguous card remains visible");
+        assert_eq!(visible.prompt_id, stored.prompt_id);
+        assert_eq!(visible.screen_revision, stored.screen_revision, "never authorize against the changed screen");
+        assert_eq!(visible.answer_status.as_deref(), Some("outcomeUnknown"));
     }
 
     fn pick(key: &str) -> crate::daemon::protocol::AgentPromptAnswerInput {
@@ -4175,6 +4610,7 @@ mod tests {
             options: Vec::new(),
             kind: crate::daemon::protocol::AgentPromptViewKind::FreeText,
             needs_confirmation: false,
+            answer_status: None,
         };
         let wire = serde_json::to_value(&view).expect("wire");
         assert_eq!(wire["needsConfirmation"], false, "{wire}");

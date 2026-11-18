@@ -6,7 +6,7 @@ import { emptyProjectGroupIds, initialCollapsedProjects } from "../components/si
 import { sidebarSessionSignals } from "../components/sidebar/sidebarSessionSignals";
 import { agentStatesByPath, useSidebarModel } from "../components/sidebar/useSidebarModel";
 import { groupProjects } from "./projectGrouping";
-import { loadCollapsedProjects, loadWorktreeOrder, subscribeSidebarPersistence } from "./sidebarPersistence";
+import { loadCollapsedProjects, loadWorktreeOrder, subscribeSidebarPersistence, type SidebarLaneLifecycle } from "./sidebarPersistence";
 import { syncDesktopSidebar, toIpcError, type RegisteredProject } from "./tauri";
 import type { ActiveAgent, Worktree } from "./types";
 import type { ActivitySummary } from "./activity";
@@ -98,6 +98,12 @@ export type DesktopSidebarInput = {
   readonly worktrees: readonly Worktree[];
   readonly inactiveProjectWorktrees: Readonly<Record<string, Worktree[]>>;
   readonly emptyWorkspaceIds: readonly string[];
+  /**
+   * The server-owned order and lifecycle state. Published so a remote reader sees the same rows
+   * in the same order the desktop does; absent before the owner's first lifecycle read.
+   */
+  readonly laneOrder?: Readonly<Record<string, readonly string[]>>;
+  readonly laneLifecycles?: Readonly<Record<string, SidebarLaneLifecycle>>;
   /** The live-only signals the Sidebar receives; published so the remote shows the same rows. */
   readonly activityByWorktreePath: Readonly<Record<string, ActivitySummary | undefined>>;
   readonly unreadWorktreePaths: Readonly<Record<string, boolean>>;
@@ -110,7 +116,7 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
   const publish = (model: SidebarModel, resend = false) => {
     void send(model, resend).catch((error) => console.error("Desktop sidebar publish failed:", error));
   };
-  const { enabled, projects, activeProjectId, worktrees, inactiveProjectWorktrees } = input;
+  const { enabled, projects, activeProjectId, worktrees, inactiveProjectWorktrees, laneOrder, laneLifecycles } = input;
   const [persistenceVersion, bumpPersistence] = useReducer((version: number) => version + 1, 0);
   useEffect(() => {
     const unsubscribe = subscribeSidebarPersistence(bumpPersistence);
@@ -123,14 +129,18 @@ export function useDesktopSidebarPublisher(input: DesktopSidebarInput) {
   // The caller derives this list on every render; key on its content so identical lists do not rebuild.
   const emptyKey = input.emptyWorkspaceIds.join("\n");
   // The Sidebar holds these in React state and persists every change; read them back from storage.
+  // The server-owned order comes from the caller (`input.laneOrder`), because it is not in storage
+  // at all once the one-time import landed.
   const persisted = useMemo(() => {
     const emptyGroupIds = emptyProjectGroupIds(groupProjects(projects), emptyKey === "" ? [] : emptyKey.split("\n"));
     return {
       worktreeOrder: loadWorktreeOrder(),
       collapsedGroupIds: initialCollapsedProjects({ stored: loadCollapsedProjects(), projects, activeProjectId, emptyGroupIds }),
+      ...(laneOrder ? { laneOrder } : {}),
+      ...(laneLifecycles ? { laneLifecycles } : {}),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- persistenceVersion invalidates the storage reads inside
-  }, [projects, activeProjectId, emptyKey, persistenceVersion]);
+  }, [projects, activeProjectId, emptyKey, persistenceVersion, laneOrder, laneLifecycles]);
   const built = useSidebarModel({ projects, activeProjectId, worktrees, inactiveProjectWorktrees }, persisted).model;
   const { activityByWorktreePath, unreadWorktreePaths, agents } = input;
   const model = useMemo(() => enabled

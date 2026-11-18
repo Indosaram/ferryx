@@ -461,7 +461,7 @@ async fn paired_goal(pool: &SqlitePool) -> (String, String) {
     (goal_id, request_id)
 }
 
-fn host_waits(control: &RecordingControl) -> Vec<(Option<String>, String, String, u64)> {
+fn host_waits(control: &RecordingControl) -> Vec<(Option<String>, String, String, Option<String>, u64)> {
     control
         .ops()
         .into_iter()
@@ -469,9 +469,10 @@ fn host_waits(control: &RecordingControl) -> Vec<(Option<String>, String, String
             AgentOp::Wait {
                 session_id,
                 until,
+                instance,
                 after,
                 ..
-            } => Some((host, session_id, until, after)),
+            } => Some((host, session_id, until, instance, after)),
             _ => None,
         })
         .collect()
@@ -513,7 +514,7 @@ async fn a_paired_host_run_settles_from_a_wait_on_that_host() {
     assert_eq!(bound_run(&pool, &goal_id).await, None);
     assert_eq!(
         host_waits(&control),
-        vec![(Some(HOST.to_owned()), PANE.to_owned(), "idle".to_owned(), 1)],
+        vec![(Some(HOST.to_owned()), PANE.to_owned(), "idle".to_owned(), Some(EPOCH.to_owned()), 1)],
         "one wait on the host, for an idle reading after the start reading"
     );
 }

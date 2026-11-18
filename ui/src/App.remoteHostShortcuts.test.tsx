@@ -328,10 +328,13 @@ describe("Blocker H3: local workspace shortcut suppression when remote host is a
     // backend session (the point of this test is remote suppression, not the guard decision).
     const closeDialog = await screen.findByRole("dialog", { name: "Close tab" });
     expect(workspace.closePane).not.toHaveBeenCalled();
-    await act(async () => {
-      fireEvent.click(within(closeDialog).getByRole("button", { name: "Close tab" }));
+    // fireEvent already runs inside act; wrapping it in an async act here never settles
+    // because the async flush drains the queued terminal focus timers, so await the
+    // resulting state instead of the act boundary.
+    fireEvent.click(within(closeDialog).getByRole("button", { name: "Close tab" }));
+    await waitFor(() => {
+      expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
     });
-    expect(workspace.closePane).toHaveBeenCalledExactlyOnceWith("tab-1", "leaf-1");
     expect(workspace.closeTab).not.toHaveBeenCalled();
   });
 

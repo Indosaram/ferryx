@@ -936,8 +936,25 @@ pub async fn list(state: State<Arc<RemoteGatewayState>>, headers: HeaderMap) -> 
     list_inventory(state, headers, false).await
 }
 
-/// GET /api/v1/workspace/sidebar: the desktop's sidebar model, or `{model: null}` before any sync.
+/// GET /api/v1/workspace/sidebar: the desktop model plus the owner's durable lifecycle read.
+/// Lifecycle state cannot depend on a desktop being connected to republish its cached snapshot.
 pub async fn sidebar(State(state): State<Arc<RemoteGatewayState>>, headers: HeaderMap) -> Response {
+    // The same owner permission as `panel.lanes`; other sidebar readers retain the old shape.
+    let lifecycle = if super::server::agent_control_service::http_device(&state, &headers, true).is_ok() {
+        match crate::hub_runtime::lane_lifecycle("read", serde_json::Value::Null).await {
+            Ok((200, model)) => Some(model),
+            Ok((status, error)) => {
+                tracing::warn!(status, %error, "sidebar lifecycle read failed");
+                None
+            }
+            Err(error) => {
+                tracing::debug!(?error, "sidebar lifecycle unavailable without a serving hub");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let id = uuid::Uuid::new_v4().to_string();
     execute(
         state,
@@ -950,10 +967,12 @@ pub async fn sidebar(State(state): State<Arc<RemoteGatewayState>>, headers: Head
                     .machine_services
                     .as_ref()
                     .expect("authorized services");
-                response(
-                    200,
-                    serde_json::json!({"model": services.workspaces.sidebar.model()}),
-                )
+                // `lifecycle` is additive: absent (not null) when unreadable, keeping the legacy shape.
+                let mut body = serde_json::json!({"model": services.workspaces.sidebar.model()});
+                if let Some(lifecycle) = lifecycle {
+                    body["lifecycle"] = lifecycle;
+                }
+                response(200, body)
             }
             Err(e) => failure(&e, &id),
         },

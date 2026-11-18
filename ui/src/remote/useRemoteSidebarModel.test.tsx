@@ -2,6 +2,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { sidebarLiveState, type SidebarModel } from "../components/sidebar/sidebarModel";
+import { laneLifecycleKey } from "../lib/sidebarPersistence";
 import type { SupervisorHttpResponse } from "./remoteSupervisor";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 import { useRemoteSidebarModel, type RemoteSidebarMachine } from "./useRemoteSidebarModel";
@@ -30,6 +31,7 @@ const published = (revision: number, label: string): SidebarModel => ({
     groupId: "ferryx", label, hostLabel: null, members: [{ workspaceId: "ferryx", kind: "local", machineId: null }],
     primaryWorkspaceId: "ferryx", status: null, filterLabels: ["ferryx"], worktreesEmptyHint: null,
     worktrees: [{ key: "sidebar-worktree:ferryx:/code/ferryx", workspaceId: "ferryx", path: "/code/ferryx", worktreeSlug: null,
+      lifecycleKey: laneLifecycleKey({ workspaceId: "ferryx", path: "/code/ferryx", worktreeSlug: null }), lifecycle: "active" as const, pinnedTabs: [],
       label: "ferryx", hostLabel: null, stale: false, listingFailure: null }],
   }],
   collapsedGroupIds: ["ferryx"], advancedFeatures: true, emptyState: null,

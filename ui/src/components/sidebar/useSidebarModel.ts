@@ -6,7 +6,7 @@ import { useEffect, useMemo, useReducer, useSyncExternalStore } from "react";
 
 import { useAdvancedFeatures } from "../../lib/advancedFeatures";
 import { getPairedHostReachability, subscribePairedHostReachability } from "../../lib/pairedHostReachability";
-import type { WorktreeOrder } from "../../lib/sidebarPersistence";
+import type { SidebarLaneLifecycle, WorktreeOrder } from "../../lib/sidebarPersistence";
 import { useSshHosts } from "../../lib/sshHosts";
 import type { RegisteredProject } from "../../lib/tauri";
 import type { ActiveAgent, AgentState, Worktree } from "../../lib/types";
@@ -26,8 +26,17 @@ export type DesktopSidebarSource = {
 };
 
 export type DesktopSidebarPersisted = {
+  /** The pre-import `localStorage` order; ignored for any workspace the server orders. */
   readonly worktreeOrder: WorktreeOrder;
   readonly collapsedGroupIds: ReadonlySet<string>;
+  /**
+   * The server-owned section order (`workspaceId -> lifecycle keys`). The sidebar reads its
+   * order from here, so a drag outlives this window. Absent before the first server read (or
+   * without a hub), which keeps the local order as the fallback.
+   */
+  readonly laneOrder?: Readonly<Record<string, readonly string[]>>;
+  /** Per-row server state and folded pin set, keyed by lifecycle key. */
+  readonly laneLifecycles?: Readonly<Record<string, SidebarLaneLifecycle>>;
 };
 
 /** Rows input (for drag-and-drop grouping) and the model, from the live desktop stores. */
@@ -48,15 +57,17 @@ export function useSidebarModel(source: DesktopSidebarSource, persisted: Desktop
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reachabilityVersion invalidates the store read inside
     [activeProjectId, hosts, inactiveProjectWorktrees, projects, worktrees, remoteState, reachabilityVersion],
   );
-  const { worktreeOrder, collapsedGroupIds } = persisted;
+  const { worktreeOrder, collapsedGroupIds, laneOrder, laneLifecycles } = persisted;
   const model = useMemo(() => buildSidebarModel({
     ...rowsInput,
     source: "desktop",
     generatedAt: "",
     worktreeOrder,
+    ...(laneOrder ? { laneOrder } : {}),
+    ...(laneLifecycles ? { laneLifecycles } : {}),
     collapsedGroupIds,
     advancedFeatures,
     listingFailures,
-  }), [advancedFeatures, collapsedGroupIds, listingFailures, rowsInput, worktreeOrder]);
+  }), [advancedFeatures, collapsedGroupIds, laneLifecycles, laneOrder, listingFailures, rowsInput, worktreeOrder]);
   return { model, rowsInput };
 }

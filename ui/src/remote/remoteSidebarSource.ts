@@ -6,6 +6,8 @@ import type { RegisteredProject } from "../lib/tauri";
 import type { AgentState, Worktree } from "../lib/types";
 import { AGENT_STATES, PUBLISHED_ATTENTION_ROWS_CAP } from "../components/sidebar/sidebarSessionSignals";
 import type { SupervisorFetch, SupervisorHttpResponse } from "./remoteSupervisor";
+import { isLaneLifecycleModel } from "../lib/sidebarPersistence";
+import { applyLaneLifecycleModel } from "./supervisorPanel/panelModel";
 
 /** Same adapter as the supervisor feed: the device token is already bound, callers pass a path. */
 export type SidebarFetch = SupervisorFetch;
@@ -241,8 +243,10 @@ export async function loadRemoteSidebar(fetchLike: SidebarFetch): Promise<Remote
     if (answer.status !== 404 && !ok(answer)) {
       return { kind: "error", code: "HTTP_ERROR", message: `Sidebar request failed (${answer.status})` };
     }
-    const published = ok(answer) ? objectOf(answer.data)?.model : null;
-    return { kind: "ok", model: isSidebarModel(published) ? published : await inventoryModel(fetchLike) };
+    const data = ok(answer) ? objectOf(answer.data) : null;
+    const published = data?.model;
+    const model = isSidebarModel(published) ? published : await inventoryModel(fetchLike);
+    return { kind: "ok", model: isLaneLifecycleModel(data?.lifecycle) ? applyLaneLifecycleModel(model, data.lifecycle) : model };
   } catch (err) {
     if (err instanceof SidebarRequestError) return { kind: "error", code: err.code, message: err.message };
     throw err;

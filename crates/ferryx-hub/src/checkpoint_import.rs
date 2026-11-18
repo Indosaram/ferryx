@@ -23,8 +23,9 @@ use crate::checkpoint::{
     PairedHostMapping, PrivateFileWriter, ARCHIVE_DATABASE, ARCHIVE_ENV, ARCHIVE_MANIFEST,
     ARCHIVE_MEMORY_BUNDLE, ARCHIVE_PROFILE, CHECKPOINT_FORMAT_VERSION,
     CHECKPOINT_MAX_ARCHIVE_BYTES, CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES,
-    CHECKPOINT_MAX_COMPRESSED_BYTES, HOST_ID_TABLES, LOCAL_HOST_ID, MACHINE_HOST_PREFIX,
-    REMOTE_HOST_UNMAPPED, SUPERVISOR_IDENTITY_MISMATCH, UNMAPPED_HOST_PREFIX,
+    CHECKPOINT_MAX_COMPRESSED_BYTES, CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED, HOST_ID_TABLES,
+    LOCAL_HOST_ID, MACHINE_HOST_PREFIX, REMOTE_HOST_UNMAPPED, SUPERVISOR_IDENTITY_MISMATCH,
+    UNMAPPED_HOST_PREFIX,
 };
 
 /// The live hub database file name.
@@ -48,6 +49,13 @@ pub enum ImportError {
     Checkpoint(#[from] CheckpointError),
     #[error("SUPERVISOR_IDENTITY_MISMATCH: target holds {target}, checkpoint carries {incoming}")]
     IdentityMismatch { target: String, incoming: String },
+    /// The checkpoint's provider did not declare conversation rollback, so restoring its
+    /// filesystem would leave the conversation behind. Raised by
+    /// [`crate::checkpoint::refuse_unless_manifest_rollback`] before the import writes anything.
+    #[error("CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED: {refusal}")]
+    ProviderRollbackUnsupported {
+        refusal: crate::checkpoint::ProviderRollbackRefusal,
+    },
     #[error("checkpoint manifest: {0}")]
     Manifest(String),
     #[error("memory restore: {0}")]
@@ -66,6 +74,7 @@ impl ImportError {
         match self {
             Self::Checkpoint(error) => error.code(),
             Self::IdentityMismatch { .. } => SUPERVISOR_IDENTITY_MISMATCH,
+            Self::ProviderRollbackUnsupported { .. } => CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED,
             Self::Manifest(_) => "CHECKPOINT_MANIFEST_INVALID",
             Self::Memory(_) => "CHECKPOINT_MEMORY_RESTORE_FAILED",
             Self::Io(_) | Self::Sql(_) | Self::Hub(_) => "CHECKPOINT_IMPORT_FAILED",
@@ -704,6 +713,10 @@ struct ImportStatus<'a> {
 /// `paired` lists every machine paired with this one (its local host id and machine id).
 /// Nothing is live until the next hub open calls [`apply_staged_swap`]; any failure here
 /// rolls back the memory repo, the env file, the profile and the staged file.
+///
+/// The provider gate runs first, before the staging directory even has a name: a checkpoint
+/// whose provider cannot rewind its conversation is refused with
+/// [`CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED`] and the target tree is left byte-identical.
 pub async fn import(
     archive: &Path,
     target_hub_dir: &Path,
@@ -711,6 +724,18 @@ pub async fn import(
     paired: &[PairedHostMapping],
     options: ImportOptions,
 ) -> Result<ImportOutcome, ImportError> {
+    // Gate first: it only reads the archive's manifest, and it must run before the staging
+    // directory is created below, so a refusal writes nothing at all.
+    {
+        let archive = archive.to_owned();
+        let manifest = tokio::task::spawn_blocking(move || crate::checkpoint::peek_manifest(&archive))
+            .await
+            .map_err(io::Error::other)??;
+        if let Some(manifest) = &manifest {
+            crate::checkpoint::refuse_unless_manifest_rollback(manifest)
+                .map_err(|refusal| ImportError::ProviderRollbackUnsupported { refusal })?;
+        }
+    }
     let staging = target_hub_dir.join(format!(".checkpoint-staging-{}", uuid::Uuid::new_v4()));
     let result =
         import_staged(archive, target_hub_dir, own_machine_id, paired, options, &staging).await;
@@ -928,8 +953,8 @@ pub async fn open_with_staged_swap(
 mod tests {
     use super::*;
     use crate::checkpoint::{
-        build_archive, export, read_archive, ExportRequest, CHECKPOINT_TOO_LARGE,
-        SUPERVISOR_MEMORY_AGENT,
+        build_archive, export, read_archive, ExportRequest, CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED,
+        CHECKPOINT_TOO_LARGE, SUPERVISOR_MEMORY_AGENT,
     };
 
     const SUP: &str = "aaaaaaaa-0000-4000-8000-000000000001";
@@ -1099,6 +1124,17 @@ mod tests {
     /// Machine-a exports its hub through [`crate::checkpoint::export`]. `remote` configures
     /// `memory.sync.remote` in the profile, so the memory is recorded instead of bundled.
     async fn fixture(name: &str, goals: &[(&str, &str, &str)], remote: bool) -> Fixture {
+        fixture_naming_provider(name, goals, remote, None).await
+    }
+
+    /// [`fixture`] with the exporter's provider set before the archive is written, so the archive
+    /// under test comes from the real writer instead of hand-edited bytes.
+    async fn fixture_naming_provider(
+        name: &str,
+        goals: &[(&str, &str, &str)],
+        remote: bool,
+        provider: Option<crate::checkpoint::ProviderCoordinates>,
+    ) -> Fixture {
         let root = temp_root(name);
         let source = root.join("source");
         fs::create_dir_all(&source).unwrap();
@@ -1140,6 +1176,7 @@ mod tests {
         request.env_file = Some(env);
         request.profile_omo_jsonc = Some(profile_path);
         request.memory_root = Some(memory_root);
+        request.provider = provider;
         let exported = export(&pool, &request).await.unwrap();
         pool.close().await;
         Fixture {
@@ -1748,6 +1785,7 @@ mod tests {
             excluded_tables: Vec::new(),
             host_map: BTreeMap::new(),
             has_profile: false,
+            provider: None,
         };
         let manifest = serde_json::to_vec(&manifest).unwrap();
         let archive = root.join("checkpoint.tar.zst");
@@ -1759,5 +1797,185 @@ mod tests {
         assert_eq!(error.code(), "CHECKPOINT_MANIFEST_INVALID");
         assert!(!hub.join(INCOMING_DB).exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A pre-change archive: its `manifest.json` has every field the old writer emitted and no
+    /// `provider` key at all. It must still deserialize, which is exactly why the new field
+    /// carries `#[serde(default)]` rather than being required.
+    #[test]
+    fn an_archive_manifest_written_before_the_provider_field_still_deserializes() {
+        let old = serde_json::json!({
+            "format_version": CHECKPOINT_FORMAT_VERSION,
+            "created_at": NOW,
+            "source_machine_id": "machine-a",
+            "supervisor_id": SUP,
+            "memory_agent": SUPERVISOR_MEMORY_AGENT,
+            "memory": {"kind": "absent"},
+            "env_keys": [],
+            "excluded_tables": [],
+            "host_map": {},
+            "has_profile": false,
+        });
+        let manifest: CheckpointManifest = serde_json::from_slice(&serde_json::to_vec(&old).unwrap())
+            .expect("an archive written before `provider` existed must still deserialize");
+        assert_eq!(manifest.format_version, CHECKPOINT_FORMAT_VERSION);
+        assert_eq!(manifest.provider, None, "an old archive names no provider");
+        // And the gate does not turn an old archive into a refusal: no provider named, nothing
+        // claimed, so only the daemon-side live check can speak for a real restore.
+        assert!(crate::checkpoint::refuse_unless_manifest_rollback(&manifest).is_ok());
+    }
+
+    /// The restore gate: a checkpoint whose provider declared no conversation rollback is
+    /// refused with a typed code, and the target tree is byte-identical afterwards: no staging
+    /// directory, no staged database, nothing written.
+    #[tokio::test]
+    async fn a_checkpoint_whose_provider_cannot_roll_back_is_refused_before_anything_is_written() {
+        let fx = fixture("provider-refused", &[("lane-a", G1, "local")], false).await;
+        let files = read_archive(&fs::read(&fx.archive).unwrap()).unwrap();
+        let mut manifest: CheckpointManifest =
+            serde_json::from_slice(&files[ARCHIVE_MANIFEST]).unwrap();
+        manifest.provider = Some(crate::checkpoint::ProviderCoordinates {
+            id: "claude".to_owned(),
+            rollback_conversation: false,
+        });
+        let manifest = serde_json::to_vec(&manifest).unwrap();
+        let mut entries: Vec<(&str, &[u8])> = vec![(ARCHIVE_MANIFEST, manifest.as_slice())];
+        for (name, data) in &files {
+            if name != ARCHIVE_MANIFEST {
+                entries.push((name.as_str(), data.as_slice()));
+            }
+        }
+        let archive = fx.root.join("provider-refused.tar.zst");
+        fs::write(&archive, build_archive(&entries).unwrap()).unwrap();
+
+        // The target does not exist yet. `import` creates the staging directory (and its
+        // parents) as its very first filesystem action, so a gate that ran after that action
+        // would leave `hub` behind. Its absence after the refusal is the ordering proof.
+        let hub = fx.root.join("hub");
+        assert!(!hub.exists(), "the target starts absent");
+
+        let error = import(&archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED);
+        assert!(error.to_string().contains("claude"), "the refusal names the provider");
+        assert!(!hub.exists(), "the gate ran before the staging directory was created");
+        assert!(!hub.join(INCOMING_DB).exists(), "nothing staged");
+        assert!(
+            !fs::read_dir(&fx.root)
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".checkpoint-staging-")),
+            "no staging directory was ever created"
+        );
+        fs::remove_dir_all(&fx.root).unwrap();
+    }
+
+    /// The end-to-end round trip T4 needs: a conversation exported by provider X produces a
+    /// manifest carrying X, and importing that same archive into a machine whose build does not
+    /// accept X is refused with nothing written. The archive comes from the real writer, so the
+    /// refusal is reachable from a real checkpoint - not only from hand-edited bytes.
+    #[tokio::test]
+    async fn an_export_records_its_provider_and_an_archive_naming_another_provider_is_refused() {
+        use crate::checkpoint::ProviderCoordinates;
+
+        // Provider X writes the checkpoint.
+        let fx = fixture_naming_provider(
+            "provider-round-trip",
+            &[("lane-a", G1, "local")],
+            false,
+            Some(ProviderCoordinates {
+                id: "claude".to_owned(),
+                rollback_conversation: false,
+            }),
+        )
+        .await;
+
+        // The produced archive's own manifest carries X: no hand-editing anywhere in this test.
+        let files = read_archive(&fs::read(&fx.archive).unwrap()).unwrap();
+        let written: CheckpointManifest = serde_json::from_slice(&files[ARCHIVE_MANIFEST]).unwrap();
+        assert_eq!(
+            written.provider.clone(),
+            Some(ProviderCoordinates {
+                id: "claude".to_owned(),
+                rollback_conversation: false,
+            }),
+            "the exported manifest names the provider that owned the conversation"
+        );
+        assert_eq!(
+            crate::checkpoint::peek_manifest(&fx.archive).unwrap().and_then(|m| m.provider),
+            written.provider,
+            "the reader sees the same provider the writer recorded"
+        );
+
+        // Restoring it is refused before anything is written, and `claude` is what it names.
+        let hub = fx.root.join("hub");
+        assert!(!hub.exists(), "the target starts absent");
+        let error = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED);
+        assert!(error.to_string().contains("claude"), "the refusal names the provider");
+        assert!(!hub.exists(), "the gate ran before the staging directory was created");
+        assert!(!hub.join(INCOMING_DB).exists(), "nothing staged");
+
+        // And the other direction of the same fact: an archive of a provider that DID declare
+        // rollback imports, so the refusal above is about the capability, not about name-matching.
+        let permitting = fixture_naming_provider(
+            "provider-permitted",
+            &[("lane-a", G1, "local")],
+            false,
+            Some(ProviderCoordinates {
+                id: "claude".to_owned(),
+                rollback_conversation: true,
+            }),
+        )
+        .await;
+        let permitted_hub = permitting.root.join("hub");
+        import(
+            &permitting.archive,
+            &permitted_hub,
+            "machine-a",
+            &[],
+            options(&permitting.root, &permitted_hub, 1_800_000_000),
+        )
+        .await
+        .expect("an archive whose provider declared rollback imports");
+        assert!(permitted_hub.join(INCOMING_DB).exists(), "the permitted archive is staged");
+
+        fs::remove_dir_all(&fx.root).unwrap();
+        fs::remove_dir_all(&permitting.root).unwrap();
+    }
+
+    /// Legacy archives really do exist with `"provider": null`, and they must keep importing:
+    /// the field is additive, so no provider named means nothing claimed and nothing refused.
+    #[tokio::test]
+    async fn a_legacy_archive_with_a_null_provider_still_imports() {
+        let fx = fixture_naming_provider("provider-null", &[("lane-a", G1, "local")], false, None).await;
+
+        // The writer itself produced `null`, which is what every checkpoint before this change
+        // carries.
+        let files = read_archive(&fs::read(&fx.archive).unwrap()).unwrap();
+        let written: CheckpointManifest = serde_json::from_slice(&files[ARCHIVE_MANIFEST]).unwrap();
+        assert_eq!(written.provider, None, "a caller with no provider knowledge records none");
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&files[ARCHIVE_MANIFEST])
+                .unwrap()
+                .get("provider")
+                .is_some_and(serde_json::Value::is_null),
+            "the archive really carries `provider: null`, not a missing key"
+        );
+
+        let hub = fx.root.join("hub");
+        let outcome = import(&fx.archive, &hub, "machine-a", &[], options(&fx.root, &hub, 1_800_000_000))
+            .await
+            .expect("a legacy archive naming no provider still imports");
+        assert_eq!(outcome.supervisor_id.as_deref(), Some(SUP));
+        assert!(hub.join(INCOMING_DB).exists(), "the legacy archive is staged");
+        fs::remove_dir_all(&fx.root).unwrap();
     }
 }

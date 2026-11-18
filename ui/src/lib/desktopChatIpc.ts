@@ -32,6 +32,7 @@ export const desktopChatIpcTransport = desktopChatTransportFrom({
   submit: (input, signal) => request(input, signal),
   stop: (input, signal) => request(input, signal),
   answer: (input, signal) => request(input, signal),
+  resolvePrompt: (input, signal) => request(input, signal),
 });
 
 export function desktopChatIdentity(): Promise<DesktopChatIdentity> {

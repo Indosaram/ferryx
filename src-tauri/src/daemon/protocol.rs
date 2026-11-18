@@ -19,6 +19,8 @@ pub const DAEMON_PROTOCOL_VERSION: u32 = 7;
 pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `PasteWrite`/`CancelPaste`.
 pub const PASTE_CANCEL_CAPABILITY: &str = "pasteCancelV1";
+/// Optional desktop lifecycle operations; never send them without negotiating this capability.
+pub const LANE_LIFECYCLE_CAPABILITY: &str = "laneLifecycleV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `AgentPromptGet`/`AgentPromptAnswer`.
 pub const AGENT_PROMPT_CAPABILITY: &str = "agentPromptV1";
 /// Advertised in `GetCapabilities` by a daemon that spawns `TerminalStartup::AgentLaunch`.
@@ -1029,6 +1031,9 @@ pub enum DaemonRequest {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         mcp: bool,
     },
+    /// Desktop lane lifecycle surface, using the hub's shared wire contract.
+    #[serde(rename_all = "camelCase")]
+    LaneLifecycle { operation: String, body: serde_json::Value },
     /// A read-only unified supervisor view (conversation page or memory receipts), served by
     /// the same hub service as the remote `GET /api/v1/supervisor/*` routes.
     #[serde(rename = "supervisorReadV1", rename_all = "camelCase")]
@@ -1076,6 +1081,12 @@ pub enum DaemonRequest {
         answer: AgentPromptAnswerInput,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         registry_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    AgentPromptResolveAmbiguous {
+        session_id: String,
+        prompt_id: String,
+        screen_revision: String,
     },
     PairedHostList,
     /// Gated by `pairedHostReachabilityV1`; an older daemon never receives it.
@@ -1483,6 +1494,8 @@ pub struct AgentPromptView {
     /// Picking an option must be confirmed first (approval, plan and menu prompts), by the same
     /// rule the remote chat applies.
     pub needs_confirmation: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_status: Option<String>,
 }
 
 /// Authenticated identity of a paired DAG subscription. The desktop names the host
@@ -1619,6 +1632,8 @@ pub enum DaemonResponse {
     AgentPromptAnswerOk {
         receipt: crate::scoped_contracts::DeliveryReceipt,
     },
+    #[serde(rename_all = "camelCase")]
+    AgentPromptResolveAmbiguousOk,
     #[serde(rename_all = "camelCase")]
     ProtocolMismatch {
         expected_version: u32,
@@ -1827,6 +1842,9 @@ pub enum DaemonResponse {
     SupervisorRequestV1Ok {
         receipt: serde_json::Value,
     },
+    /// Status and JSON body of the hub lifecycle handler.
+    #[serde(rename_all = "camelCase")]
+    LaneLifecycleOk { status: u16, value: serde_json::Value },
     /// The view a `SupervisorReadV1` asked for.
     #[serde(rename = "supervisorReadV1Ok", rename_all = "camelCase")]
     SupervisorReadV1Ok {
@@ -2395,7 +2413,7 @@ mod tests {
         assert!(encoded.get("sessionId").is_none(), "absent id must not be serialized");
         let decoded: DaemonRequest = serde_json::from_value(encoded).expect("decode spawn without sessionId");
         assert!(matches!(decoded, DaemonRequest::Spawn { session_id: None, .. }));
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, if cfg!(feature = "qa-protocol-bump") { 7 } else { 6 });
     }
 
     #[test]
@@ -2410,7 +2428,7 @@ mod tests {
         assert!(matches!(&decoded, DaemonResponse::HandshakeOk {
             capabilities, admission_time_unix_ms: None, .. } if capabilities.is_empty()));
         assert_eq!(serde_json::to_value(decoded).expect("encode legacy handshake"), handshake);
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, if cfg!(feature = "qa-protocol-bump") { 7 } else { 6 });
     }
 
     #[test]
@@ -3730,7 +3748,8 @@ mod tests {
                 .expect("deserialize legacy handshake");
         match legacy {
             DaemonRequest::Handshake { version, token } => {
-                assert_eq!(version, DAEMON_PROTOCOL_VERSION);
+                // A legacy frame decodes with its own version; negotiation rejects it later.
+                assert_eq!(version, 5);
                 assert_eq!(token, None);
             }
             other => panic!("unexpected variant: {other:?}"),
@@ -3739,7 +3758,7 @@ mod tests {
 
     #[test]
     fn test_protocol_v4_handshake_and_list_sessions_epoch() {
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, if cfg!(feature = "qa-protocol-bump") { 7 } else { 6 });
 
         let hs = DaemonResponse::HandshakeOk {
             version: DAEMON_PROTOCOL_VERSION,
@@ -3753,7 +3772,7 @@ mod tests {
         };
         let hs_json = serde_json::to_string(&hs).expect("serialize handshake");
         assert!(hs_json.contains(r#""epoch":777777"#));
-        assert!(hs_json.contains(r#""version":5"#));
+        assert!(hs_json.contains(&format!(r#""version":{DAEMON_PROTOCOL_VERSION}"#)));
         assert!(hs_json.contains(r#""binaryPath":"/bin/ferryx""#));
         assert!(hs_json.contains(r#""binaryMtimeMs":1700000000000"#));
         assert!(hs_json.contains(r#""daemonVersion":"2026.902.2""#));
@@ -3855,7 +3874,7 @@ mod tests {
             _ => panic!("Expected Spawn variant"),
         }
 
-        assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
+        assert_eq!(DAEMON_PROTOCOL_VERSION, if cfg!(feature = "qa-protocol-bump") { 7 } else { 6 });
     }
 
     #[test]

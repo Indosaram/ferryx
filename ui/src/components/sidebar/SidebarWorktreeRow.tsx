@@ -1,7 +1,10 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { Eye, LoaderCircle } from "lucide-react";
 import type { MouseEvent, ReactNode } from "react";
 
 import { cn } from "../../lib/cn";
+import { openExternalUrl } from "../../lib/browserTauri";
 import type { SidebarRowLive, SidebarWorktreeNode } from "./sidebarModel";
 import { SidebarStateSlot } from "./SidebarStateSlot";
 
@@ -9,7 +12,7 @@ import { SidebarStateSlot } from "./SidebarStateSlot";
 export type SidebarDensity = "compact" | "touch";
 
 export type SidebarWorktreeRowProps = {
-  readonly node: Pick<SidebarWorktreeNode, "path" | "label" | "hostLabel" | "stale">;
+  readonly node: Pick<SidebarWorktreeNode, "path" | "label" | "hostLabel" | "stale" | "pullRequest">;
   readonly live: SidebarRowLive;
   readonly density?: SidebarDensity;
   readonly onSelect?: () => void;
@@ -43,6 +46,7 @@ export function SidebarWorktreeRow({
   trailing,
 }: SidebarWorktreeRowProps) {
   const touch = density === "touch";
+  const pullRequest = node.pullRequest;
   return (
     <div
       data-stale={node.stale ? "true" : undefined}
@@ -127,6 +131,30 @@ export function SidebarWorktreeRow({
           />
         )}
       </button>
+      {pullRequest ? (
+        <a
+          href={pullRequest.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          data-pr-state={pullRequest.state}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (!isTauri()) return;
+            event.preventDefault();
+            void openExternalUrl(pullRequest.url).catch((error: unknown) => {
+              console.error("Could not open pull request.", error);
+              toast.error("Could not open pull request.");
+            });
+          }}
+          className={cn(
+            "mx-2 mb-1 inline-flex items-center gap-1 rounded leading-tight hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            touch ? "text-xs text-chat-foreground-secondary" : "text-[10px] text-muted-foreground",
+          )}
+        >
+          <span>#{pullRequest.prNumber}</span>
+          <span className={pullRequest.state === "open" ? undefined : "font-semibold"}>{pullRequest.state}</span>
+        </a>
+      ) : null}
       {trailing === undefined ? null : (
         <div
           className={cn(

@@ -59,14 +59,15 @@ pub fn to_agent_control_op(op: &AgentOp) -> Result<AgentControlOp, String> {
             session_id: session_id.clone(),
             request_id: Some(request_id.clone()),
         },
-        AgentOp::Wait { session_id, until, after_revision, after, timeout_ms } => AgentControlOp::Wait {
+        AgentOp::Wait { session_id, until, instance, after_revision, after, timeout_ms } => AgentControlOp::Wait {
             session_id: session_id.clone(),
             until: until.clone(),
+            instance: instance.clone(),
             after_revision: after_revision.clone(),
             after: *after,
             timeout_ms: *timeout_ms,
         },
-        AgentOp::Events { after } => AgentControlOp::Events { after: *after },
+        AgentOp::Events { instance, after } => AgentControlOp::Events { instance: instance.clone(), after: *after },
     })
 }
 
@@ -99,6 +100,10 @@ fn lines_of(turns: &[ReferenceTurn]) -> Vec<String> {
 }
 
 pub(crate) mod panel_autonomy;
+
+#[cfg(all(test, unix))]
+#[path = "hub_runtime/replay_bridge_tests.rs"]
+mod replay_bridge_tests;
 
 struct DaemonBridge {
     client: DaemonClient,
@@ -2835,6 +2840,11 @@ async fn publish_checkpoint_naming(launch: &HubLaunch) -> Result<(String, bool),
     request.env_file = ferryx_hub::hub_env::env_file_path();
     request.memory_root =
         ferryx_hub::hub_env::home_dir().map(|home| home.join(".omo").join("memory").join("agents"));
+    // The archive records the provider whose conversation this hub's filesystem belongs to, so a
+    // restore on another machine can refuse when that provider cannot rewind (T4's gate). This
+    // is the production writer for `CheckpointManifest::provider`; without it every real archive
+    // carried `null` and the gate only ever fired on a hand-edited archive.
+    request.provider = cp::supervisor_conversation_provider();
     let exported = ferryx_hub::checkpoint::export(&launch.hub.pool, &request).await;
     let result = match exported {
         Ok(exported) => {
@@ -3822,6 +3832,23 @@ pub async fn supervisor_memory(
 /// Capability a daemon advertises once it serves `DaemonRequest::SupervisorReadV1`.
 pub const SUPERVISOR_READ_CAPABILITY: &str = "supervisorReadV1";
 
+/// Lifecycle storage belongs to the hub owned by this daemon, just like the supervisor view.
+pub async fn lane_lifecycle(
+    operation: &str,
+    body: Value,
+) -> Result<(u16, Value), ferryx_hub::supervisor::request::RequestFailure> {
+    if let Some(refusal) = standby_refusal() {
+        return Err(refusal);
+    }
+    let Some((hub, _)) = supervisor_view() else {
+        return Err(ferryx_hub::supervisor::request::RequestFailure::new(
+            "SUPERVISOR_UNAVAILABLE",
+            "the supervisor hub is not open in this daemon",
+        ));
+    };
+    Ok(ferryx_hub::lanes::lifecycle_api::desktop_request(hub.pool.clone(), operation, body).await)
+}
+
 /// The desktop's read of the unified supervisor besides the snapshot: the same conversation
 /// page and memory view the remote `GET /api/v1/supervisor/{conversation,memory}` routes serve.
 pub async fn supervisor_read(
@@ -3959,6 +3986,7 @@ pub const PANEL_DECISION_EVENT: &str = "panel.decision";
 pub const PANEL_ACTION_EVENT: &str = "panel.action";
 pub const PANEL_RULES_EVENT: &str = "panel.rules";
 pub const PANEL_PRS_EVENT: &str = "panel.prs";
+pub const PANEL_LANES_EVENT: &str = "panel.lanes";
 
 /// Owner-scoped panel frames on their way to owner event sockets. The supervisor workers that
 /// own decisions, the action log and rules call the `publish_panel_*` functions below; the
@@ -4030,6 +4058,28 @@ pub fn publish_panel_prs(lane: &ferryx_hub::supervisor::pr_lane::PrLane) {
     };
     if changed {
         let _ = PANEL_EVENTS.send(json!({ "type": PANEL_PRS_EVENT, "lane": lane }));
+    }
+}
+
+/// Last published lifecycle model. Reconnection still reads SQLite through the lifecycle API;
+/// this slot only suppresses unchanged republication, just like `PR_LANE`.
+static PANEL_LANES: std::sync::LazyLock<
+    std::sync::RwLock<Option<ferryx_hub::lanes::lifecycle::LaneLifecycleModel>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
+
+/// Publishes rows with their canonical worktree identity, PR and effective lifecycle state.
+/// `panel.prs` keeps its existing PR-list shape for desktop and phone consumers.
+pub fn publish_panel_lanes(model: &ferryx_hub::lanes::lifecycle::LaneLifecycleModel) {
+    let changed = {
+        let mut slot = PANEL_LANES
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changed = slot.as_ref().is_none_or(|previous| previous != model);
+        *slot = Some(model.clone());
+        changed
+    };
+    if changed {
+        let _ = PANEL_EVENTS.send(json!({ "type": PANEL_LANES_EVENT, "model": model }));
     }
 }
 
@@ -5302,6 +5352,17 @@ async fn spawn_generation(launch: &HubLaunch) -> Generation {
             publish_panel_prs,
         )));
     }
+    // T7's lane pull-request projection, and the sweep that settles on it (T6). Both halves are one
+    // task on purpose: a merge observed here settles the row in the same pass, in the right order.
+    // The `gh` read is `GhPrSource`, which reuses the module's one read-only `pr view` argv on a
+    // blocking worker. Aborting this generation's tasks (lease loss, handover, `hub stop`) is what
+    // stops it; the loop owns no restart policy of its own.
+    tasks.push(tokio::spawn(ferryx_hub::lane_pr_sync::serve(
+        launch.hub.pool.clone(),
+        Arc::new(crate::ipc::github_pr::GhPrSource),
+        ferryx_hub::lane_pr_sync::SYNC_EVERY,
+        publish_panel_lanes,
+    )));
     // omo's judge breaker alert reaches the owner through the owner alert sweep.
     ferryx_hub::judge::install_alerts(
         launch.hub.pool.clone(),
@@ -5846,6 +5907,45 @@ async fn open_mcp_pool(path: &std::path::Path) -> Result<ferryx_hub::goals::Sqli
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without this test an unchanged callback could flood the owner channel, or a changed PR
+    /// with an unchanged lifecycle revision could be suppressed by comparing revisions only.
+    #[tokio::test]
+    async fn panel_lanes_suppresses_identical_content_but_publishes_pr_and_settle_changes() {
+        use ferryx_hub::lanes::lifecycle::{self, LaneLifecycleModel, LifecycleOp};
+        let pool = ferryx_hub::storage::memory().await.expect("database");
+        let now = "2026-11-15T00:00:00Z";
+        lifecycle::apply(&pool, "w:publication/ledger", "publication", "/code/ledger", &LifecycleOp::Activate, None, now)
+            .await.expect("active row");
+        let mut model: LaneLifecycleModel = lifecycle::model(&pool, now).await.expect("model");
+        let mut events = subscribe_panel_events();
+        let mut next_lanes = || {
+            while let Ok(frame) = events.try_recv() {
+                if frame["type"] == PANEL_LANES_EVENT { return Some(frame); }
+            }
+            None
+        };
+        publish_panel_lanes(&model);
+        assert_eq!(next_lanes().expect("initial frame"), json!({ "type": PANEL_LANES_EVENT, "model": model }));
+        publish_panel_lanes(&model.clone());
+        assert!(next_lanes().is_none(), "same content is not republished");
+
+        let row = &mut model.sections[0].rows[0];
+        row.pull_request = Some(ferryx_hub::lanes::pull_request::LanePullRequest {
+            lane_key: "ledger".into(), repo: "acme/ledger".into(), pr_number: 12, state: "merged".into(),
+            url: "https://github.com/acme/ledger/pull/12".into(), title: "Ledger".into(),
+            head_branch: "lane/ledger".into(), observed_at: now.into(),
+        });
+        publish_panel_lanes(&model);
+        let merged = next_lanes().expect("PR change frame");
+        assert_eq!(merged["model"]["sections"][0]["rows"][0]["pullRequest"]["state"], "merged");
+        model.sections[0].rows[0].effective_state = "settled".into();
+        model.sections[0].rows[0].state = "settled".into();
+        publish_panel_lanes(&model);
+        assert_eq!(next_lanes().expect("settle frame")["model"]["sections"][0]["rows"][0]["effectiveState"], "settled");
+        publish_panel_lanes(&model);
+        assert!(next_lanes().is_none(), "settled content is also deduplicated");
+    }
 
     fn standby_under(holder: &str) -> crate::daemon::supervisor_lease_role::Role {
         crate::daemon::supervisor_lease_role::Role::Standby {
@@ -7416,6 +7516,28 @@ mod tests {
         assert_eq!(effects.counts(), (0, 0, 0), "no flush, no pane, no generation");
         assert!(control.ops().is_empty(), "nothing was sent");
         set_lease_gate(None);
+    }
+
+    #[tokio::test]
+    async fn a_published_standby_refuses_lifecycle_writes_with_the_service_failure() {
+        let pool = ferryx_hub::storage::memory().await.expect("hub database");
+        let effects = CountingEffects::new();
+        let (launch, _) = test_launch(pool.clone(), HubConfig::default(), &effects);
+        let running = Arc::new(tokio::sync::Mutex::new(None));
+        publish_hub(&launch, &running);
+        stand_by_for_test(Some(("mach-b", "Laptop B")));
+        let expected = standby_refusal().expect("standby failure").to_json();
+        let refused = lane_lifecycle("apply", json!({
+            "worktreeKey": "p:ferryx/code/ferryx", "workspaceId": "ferryx",
+            "path": "/code/ferryx", "action": "pin", "pinned": true,
+        })).await;
+        stand_by_for_test(None);
+        slot_set(&SUPERVISOR_VIEW, None);
+        slot_set(&SUPERVISOR_LAUNCH, None);
+        assert_eq!(refused.expect_err("standby must refuse").to_json(), expected);
+        let model = ferryx_hub::lanes::lifecycle::model(&pool, "2026-11-15T00:00:00Z")
+            .await.expect("read lifecycle rows");
+        assert!(model.sections.is_empty(), "the published stale database was not written");
     }
 
     /// control.sock `report` on a standby is refused with SUPERVISOR_STANDBY naming the holder

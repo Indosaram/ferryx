@@ -3784,9 +3784,9 @@ pub(super) fn validate_http_query(path: &str, query: Option<&str>) -> Result<(),
         ],
         ["reference-chat", _, "files"] => reference_chat_read_fields,
         ["reference-chat", _, "files", _] => reference_chat_read_fields,
-        ["agent-control", "events"] => &["after"],
+        ["agent-control", "events"] => &["after", "instance"],
         ["supervisor", "conversation"] => &["projectId", "after"],
-        ["agent-control", "sessions", _, "wait"] => &["until", "after", "timeoutMs", "revision"],
+        ["agent-control", "sessions", _, "wait"] => &["until", "after", "instance", "timeoutMs", "revision"],
         _ => &[],
     };
     let mut seen = std::collections::HashSet::new();
@@ -6580,10 +6580,12 @@ mod tests {
             );
         }
         assert!(validate_http_query("agent-control/events", Some("after=3")).is_ok());
+        assert!(validate_http_query("agent-control/events", Some("after=3&instance=run-a")).is_ok());
+        assert!(validate_http_query("agent-control/events", Some("after=3&unknown=run-a")).is_err());
         assert!(validate_http_query("agent-control/events", Some("secret=1")).is_err());
         assert!(validate_http_query(
             "agent-control/sessions/s-1/wait",
-            Some("until=idle&after=1&timeoutMs=1000&revision=rev")
+            Some("until=idle&after=1&instance=run-a&timeoutMs=1000&revision=rev")
         )
         .is_ok());
         assert!(!agent_control_mutation(
@@ -9383,6 +9385,10 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Startup and live cursor queries must both arrive through the real socket.
+            #[cfg(windows)]
+            let mut answered_queries = 0usize;
+
             let echoed = timeout(Duration::from_secs(20), async {
                 let mut seen = String::new();
                 while let Some(Ok(message)) = terminal_socket.next().await {
@@ -9391,22 +9397,26 @@ mod tests {
                             seen.push_str(&String::from_utf8_lossy(&bytes));
 
                             #[cfg(windows)]
-                            if seen.contains("\x1b[6n") {
-                                // ConPTY asks the terminal client for its cursor before
-                                // starting the shell. Answer the real terminal query.
-                                terminal_socket
-                                    .send(TMessage::Binary(b"\x1b[1;1R".to_vec().into()))
-                                    .await
-                                    .unwrap();
-                                terminal_socket
-                                    .send(TMessage::Binary(
-                                        b"set Q4_WORD=executed\recho ferryx_%Q4_WORD%_marker\r"
-                                            .to_vec()
-                                            .into(),
-                                    ))
-                                    .await
-                                    .unwrap();
-                                seen = seen.replace("\x1b[6n", "");
+                            {
+                                // Counted cumulatively and never erased: answering is per query,
+                                // so the window must only grow or a later query reads as answered.
+                                let queries = seen.matches("\x1b[6n").count();
+                                while answered_queries < queries {
+                                    // Answer both replayed startup and live queries here.
+                                    terminal_socket
+                                        .send(TMessage::Binary(b"\x1b[1;1R".to_vec().into()))
+                                        .await
+                                        .unwrap();
+                                    terminal_socket
+                                        .send(TMessage::Binary(
+                                            b"set Q4_WORD=executed\recho ferryx_%Q4_WORD%_marker\r"
+                                                .to_vec()
+                                                .into(),
+                                        ))
+                                        .await
+                                        .unwrap();
+                                    answered_queries += 1;
+                                }
                             }
                         }
                         tokio_tungstenite::tungstenite::Message::Text(text) => {

@@ -639,25 +639,28 @@ impl ReferenceRouteFixture {
         // The attach's own replay is the pane's first word, and it is the only way to hear it:
         // this harness attaches after the fixture created the session, so anything the pane
         // emitted in between was published before any subscription existed, and a live-only
-        // reader can never be told about it. (On Windows that includes ConPTY's cursor query,
-        // which leaves the shell unstarted until it is answered; on any platform it includes the
-        // shell's own first output.) `output_hub::subscribe_with_sequence` takes the snapshot and
-        // the subscription in one critical section, so seeded from the snapshot the window below
-        // covers the pane from its first byte onward, in either order of the reader and this
-        // attach. That is why the window is seeded; it is not offered as the cause of a failure
-        // on any particular platform.
+        // reader can never be told about it. `output_hub::subscribe_with_sequence` takes the
+        // snapshot and the subscription in one critical section, so seeded from the snapshot the
+        // window below covers the pane from its first byte onward, in either order of the reader
+        // and this attach. That is why the window is seeded; it is not offered as the cause of a
+        // failure on any particular platform. Startup cursor queries remain in this replay
+        // because the terminal emulator must answer them.
         let mut seen: Vec<u8> = attachment.snapshot.history;
         let seeded = seen.len();
         let gap = attachment.snapshot.gap.is_some();
         let mut watch = attachment.receiver;
+        let mut query_window = seen.clone();
         let mut queries = 0usize;
         let mut answered = 0usize;
         let mut last_write_error: Option<String> = None;
-        // The replay is scanned BEFORE the wait for live output. On Windows the pane's cursor
-        // query arrives in this replay and the shell does not start until it is answered, so a
-        // detector that watched only live chunks would wait on a pane that is waiting on the
-        // answer. The live loop below repeats the same pass for anything that arrives later.
-        if let Some(error) = self.answer_cursor_queries(&seen, &mut queries, &mut answered).await {
+        // The query window is scanned BEFORE the wait for live output. On Windows the pane's
+        // cursor query may have arrived before this attach and the shell does not start until it
+        // is answered, so a detector that watched only live chunks would wait on a pane that is
+        // waiting on the answer. The live loop below repeats the same pass for anything later.
+        if let Some(error) = self
+            .answer_cursor_queries(&query_window, &mut queries, &mut answered)
+            .await
+        {
             last_write_error = Some(error);
         }
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -678,6 +681,7 @@ impl ReferenceRouteFixture {
                 match watch.recv().await {
                     Ok(chunk) => {
                         seen.extend_from_slice(&chunk.bytes);
+                        query_window.extend_from_slice(&chunk.bytes);
                         if seen
                             .windows(marker.len())
                             .any(|window| window == marker.as_bytes())
@@ -685,11 +689,12 @@ impl ReferenceRouteFixture {
                             return true;
                         }
                         // A shell that asks its terminal for the cursor before it starts is
-                        // answered here, and the same pass already ran over the replay. Whether
-                        // this host's pane asks is not assumed: the count and the dispatch are
-                        // reported in the failure below.
-                        if let Some(error) =
-                            self.answer_cursor_queries(&seen, &mut queries, &mut answered).await
+                        // answered here, and the same pass already ran over the window above.
+                        // Whether this host's pane asks is not assumed: the count and the
+                        // dispatch are reported in the failure below.
+                        if let Some(error) = self
+                            .answer_cursor_queries(&query_window, &mut queries, &mut answered)
+                            .await
                         {
                             last_write_error = Some(error);
                             return false;

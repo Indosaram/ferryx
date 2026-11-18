@@ -44,6 +44,7 @@ export function DesktopChatPane({
         typedAnswer={lane.typedAnswer}
         error={lane.promptError}
         onAnswer={lane.answerPrompt}
+        onDismissAmbiguous={lane.dismissAmbiguousPrompt}
         onPromptChanged={lane.onPromptChanged}
         onAnswered={(toMessageBox) => {
           lane.clearTypedAnswer();

@@ -23,6 +23,7 @@ import type { TerminalSession } from "./types";
 export interface DesktopChatPromptRead {
   readonly prompt: ReferencePrompt | null;
   readonly screenRevision: string | null;
+  readonly answerStatus?: "outcomeUnknown" | null;
 }
 
 export interface DesktopChatRequests {
@@ -34,6 +35,7 @@ export interface DesktopChatRequests {
   readonly submit: { readonly params: ReferenceSubmitPayload; readonly data: unknown };
   readonly stop: { readonly params: ReferenceStopPayload; readonly data: unknown };
   readonly answer: { readonly params: ReferencePromptAnswerPayload; readonly data: unknown };
+  readonly resolvePrompt: { readonly params: { readonly promptId: string; readonly screenRevision: string }; readonly data: unknown };
 }
 
 export type DesktopChatRequestKind = keyof DesktopChatRequests;
@@ -66,6 +68,7 @@ export interface DesktopChatTransport {
   (request: DesktopChatRequest<"submit">, signal: AbortSignal): DesktopChatResponse<"submit">;
   (request: DesktopChatRequest<"stop">, signal: AbortSignal): DesktopChatResponse<"stop">;
   (request: DesktopChatRequest<"answer">, signal: AbortSignal): DesktopChatResponse<"answer">;
+  (request: DesktopChatRequest<"resolvePrompt">, signal: AbortSignal): DesktopChatResponse<"resolvePrompt">;
 }
 
 export type DesktopChatHandlers = {
@@ -78,6 +81,7 @@ export function desktopChatTransportFrom(handlers: DesktopChatHandlers): Desktop
   function dispatch(request: DesktopChatRequest<"submit">, signal: AbortSignal): DesktopChatResponse<"submit">;
   function dispatch(request: DesktopChatRequest<"stop">, signal: AbortSignal): DesktopChatResponse<"stop">;
   function dispatch(request: DesktopChatRequest<"answer">, signal: AbortSignal): DesktopChatResponse<"answer">;
+  function dispatch(request: DesktopChatRequest<"resolvePrompt">, signal: AbortSignal): DesktopChatResponse<"resolvePrompt">;
   function dispatch(request: DesktopChatAnyRequest, signal: AbortSignal): Promise<DesktopChatResult<unknown>> {
     switch (request.kind) {
       case "history":
@@ -90,6 +94,8 @@ export function desktopChatTransportFrom(handlers: DesktopChatHandlers): Desktop
         return handlers.stop(request, signal);
       case "answer":
         return handlers.answer(request, signal);
+      case "resolvePrompt":
+        return handlers.resolvePrompt(request, signal);
     }
   }
   return dispatch;

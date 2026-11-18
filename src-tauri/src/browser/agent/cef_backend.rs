@@ -434,7 +434,7 @@ mod tests {
         let expressions = cdp.expressions();
         assert_eq!(expressions.len(), 2);
         assert!(expressions[0].contains(r#""action":{"type":"credentialCheck"}"#));
-        assert!(expressions[1].contains(r#""action":{"type":"focus"}"#));
+        assert!(expressions[1].contains(r#""action":{"type":"focusBind"}"#));
         assert_eq!(cdp.calls().last().unwrap(), &("Input.insertText".to_string(), json!({ "text": "hello" })));
     }
 

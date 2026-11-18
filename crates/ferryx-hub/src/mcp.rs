@@ -356,6 +356,7 @@ async fn call_tool(
                             .and_then(Value::as_str)
                             .unwrap_or("any")
                             .to_owned(),
+                        instance: args.get("instance").and_then(Value::as_str).map(str::to_owned),
                         after_revision: args
                             .get("revision")
                             .and_then(Value::as_str)

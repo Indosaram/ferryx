@@ -86,6 +86,7 @@ export interface DesktopChatLane {
   readonly stop: () => Promise<void>;
   /** For `ReferencePromptCard.onAnswer`: throws `DesktopChatRefusal` carrying the wire code. */
   readonly answerPrompt: (payload: ReferencePromptAnswerPayload) => Promise<boolean>;
+  readonly dismissAmbiguousPrompt: () => Promise<void>;
   readonly onPromptChanged: () => void;
   readonly clearTypedAnswer: () => void;
   readonly loadOlder: () => Promise<void>;
@@ -256,16 +257,19 @@ export function useDesktopChat({
         }
         if (promptRead !== null && promptRead.ok) {
           const { prompt, screenRevision } = promptRead.data;
-          const moved = prompt?.id !== prev.prompt?.id || screenRevision !== prev.screenRevision;
-          if (prompt === null || screenRevision === null) {
+          const promptWithStatus = prompt === null || promptRead.data.answerStatus == null
+            ? prompt
+            : { ...prompt, answerStatus: promptRead.data.answerStatus };
+          const moved = promptWithStatus?.id !== prev.prompt?.id || screenRevision !== prev.screenRevision;
+          if (promptWithStatus === null || screenRevision === null) {
             next = { ...next, prompt: null, screenRevision: null, typedAnswer: null, promptError: null };
           } else if (moved) {
             next = {
               ...next,
-              prompt,
+              prompt: promptWithStatus,
               screenRevision,
               promptGeneration: prev.promptGeneration + 1,
-              typedAnswer: prompt.id === prev.prompt?.id ? prev.typedAnswer : null,
+              typedAnswer: promptWithStatus.id === prev.prompt?.id ? prev.typedAnswer : null,
             };
           }
         } else if (promptRead !== null) {
@@ -402,6 +406,23 @@ export function useDesktopChat({
     return true;
   }, [isCurrent, patch, read]);
 
+  const dismissAmbiguousPrompt = useCallback(async (): Promise<void> => {
+    const t = targetRef.current;
+    const current = stateRef.current;
+    if (t === null || current.prompt === null || current.screenRevision === null) return;
+    const key = referenceTargetKey(t);
+    const promptId = current.prompt.id;
+    const screenRevision = current.screenRevision;
+    const response = await transportRef.current(
+      { kind: "resolvePrompt", requestId: newDesktopChatRequestId(), target: t, registryId: registryRef.current,
+        params: { promptId, screenRevision } },
+      MUTATION_SIGNAL,
+    );
+    if (!response.ok) throw new DesktopChatRefusal(response.code, response.message);
+    patch(key, (prev) => ({ ...prev, prompt: null, screenRevision: null, promptGeneration: prev.promptGeneration + 1 }));
+    void read();
+  }, [patch, read]);
+
   const send = useCallback((text: string): boolean => {
     const t = targetRef.current;
     const key = t === null ? null : referenceTargetKey(t);
@@ -535,6 +556,7 @@ export function useDesktopChat({
     send,
     stop,
     answerPrompt,
+    dismissAmbiguousPrompt,
     onPromptChanged,
     clearTypedAnswer,
     loadOlder,

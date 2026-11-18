@@ -5,9 +5,14 @@
 //! The log keeps a bounded tail. A cursor that falls out of the tail is a gap plus a snapshot of
 //! the latest observation per session, the same recovery `inventoryInvalidated` asks for. The
 //! prompt body never enters the log: it is fetched with `agents read`.
+//!
+//! The tail is durable. The daemon machine journal (one store of record, one writer) keeps the
+//! same bounded rows, each stamped with the epoch that issued its sequence, and a restarted bus
+//! resumes that epoch so a cursor minted before the restart still replays. A cursor from any
+//! other epoch is not comparable with this run's sequences and stays a gap plus snapshot.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
@@ -189,10 +194,125 @@ pub enum AgentReplay {
     },
 }
 
+/// One observation in the durable tail, stamped with the epoch that issued its sequence.
+///
+/// The epoch is what makes the row orderable at all: sequences restart with the daemon, so a
+/// sequence is only comparable with others of the same epoch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DurableObservation {
+    pub instance: String,
+    #[serde(flatten)]
+    pub observation: AgentObservation,
+}
+
+/// The bounded observation tail a previous run persisted, in the store of record (the daemon
+/// machine journal). It is the durable form of this bus's log: same rows, same bound, same
+/// `evictedThrough` rule.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationHistory {
+    /// The bus epoch that issued these sequences. `None` until a reading is recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    /// Highest sequence this epoch issued.
+    #[serde(default)]
+    pub head: u64,
+    /// Highest sequence that fell out of `retained`. A cursor below it missed a reading.
+    #[serde(default)]
+    pub evicted_through: u64,
+    /// The retained tail, oldest first.
+    #[serde(default)]
+    pub retained: Vec<DurableObservation>,
+}
+
+impl ObservationHistory {
+    /// Whether nothing was ever persisted, so there is no epoch to resume.
+    pub fn is_empty(&self) -> bool {
+        self.instance.is_none() && self.retained.is_empty() && self.head == 0
+    }
+
+    /// The newest reading per session, the snapshot a gap returns.
+    pub fn snapshot(&self) -> Vec<AgentObservation> {
+        let mut latest: HashMap<&str, &AgentObservation> = HashMap::new();
+        for row in &self.retained {
+            latest.insert(row.observation.session_id.as_str(), &row.observation);
+        }
+        let mut items: Vec<AgentObservation> = latest.into_values().cloned().collect();
+        items.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        items
+    }
+
+    /// Appends one observation under `instance`, keeping the newest `capacity` rows and moving
+    /// `evicted_through` past the ones it drops. Returns whether the tail changed: a row at or
+    /// below the newest kept sequence is a retried write, not a second reading.
+    ///
+    /// A reading of another epoch replaces the tail. Two epochs are never spliced: their
+    /// sequences overlap and a cursor of one orders nothing in the other.
+    pub fn push(&mut self, instance: &str, observation: &AgentObservation, capacity: usize) -> bool {
+        let capacity = capacity.max(1);
+        if self.instance.as_deref() != Some(instance) {
+            *self = Self {
+                instance: Some(instance.to_string()),
+                head: 0,
+                evicted_through: 0,
+                retained: Vec::new(),
+            };
+        }
+        if self
+            .retained
+            .last()
+            .is_some_and(|row| row.observation.sequence >= observation.sequence)
+        {
+            return false;
+        }
+        self.head = self.head.max(observation.sequence);
+        self.retained.push(DurableObservation {
+            instance: instance.to_string(),
+            observation: observation.clone(),
+        });
+        while self.retained.len() > capacity {
+            if let Some(evicted) = self.retained.first().cloned() {
+                self.evicted_through = self.evicted_through.max(evicted.observation.sequence);
+                self.retained.remove(0);
+            }
+        }
+        true
+    }
+}
+
+/// Receives every logged observation with the epoch that issued it, for the durable journal.
+/// It runs on the publishing thread, outside the bus lock, and must not block.
+pub type ObservationSink = Arc<dyn Fn(&str, &AgentObservation) + Send + Sync>;
+
+/// One durable write the journal's single writer performs for the bus.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JournalUpdate {
+    /// A session's newest stamps changed.
+    Stamps(String, SessionStamps),
+    /// One observation was logged under the bus epoch.
+    Observed(String, AgentObservation),
+}
+
+/// One batch of journal updates, gathered for a single journal write.
+#[derive(Debug, Clone, Default)]
+pub struct JournalBatch {
+    /// The newest stamps per session this batch carried.
+    pub stamps: std::collections::BTreeMap<String, SessionStamps>,
+    /// Observations to append, oldest first, at most [`AGENT_EVENT_RETAIN`] of them.
+    pub observations: Vec<(String, AgentObservation)>,
+}
+
+/// How many observations one journal write appends. More than the tail can retain would only be
+/// trimmed away again, so a busy window keeps the newest.
+pub const JOURNAL_OBSERVATIONS_PER_WRITE: usize = AGENT_EVENT_RETAIN;
+
 struct Log {
     revision: u64,
-    /// Highest sequence that fell out of `retained`. A cursor below it missed an observation.
-    /// Sequences are shared with other machine events, so a hole in `retained` is not a gap.
+    /// Highest sequence a cursor may no longer ask from. Two things raise it: an observation that
+    /// fell out of `retained` (the cursor missed a reading), and a refused epoch whose sequences
+    /// this run cannot attribute (`start_above`). Sequences are shared with other machine events,
+    /// so a hole in `retained` alone is not a gap.
     evicted_through: u64,
     retained: VecDeque<AgentObservation>,
     latest: HashMap<String, AgentObservation>,
@@ -248,24 +368,38 @@ impl SessionStamps {
 /// Receives a session's stamps whenever a reading changes them.
 pub type StampSink = Arc<dyn Fn(&str, &SessionStamps) + Send + Sync>;
 
-/// Waits for one stamp update, then keeps collecting for `window`, keeping only the newest per
-/// session. Returns `None` once the channel is closed with nothing left. A busy session moves its
-/// screen revision many times a second; the journal is rewritten and synced per batch, not per
-/// reading. The `bool` is true when the channel closed, so the caller writes this batch and stops.
-pub fn next_stamp_batch(
-    updates: &std::sync::mpsc::Receiver<(String, SessionStamps)>,
+/// One update folded into the batch: stamps keep only the newest per session, observations keep
+/// every row in arrival order (a replay is a sequence, not a set).
+fn push_update(batch: &mut JournalBatch, update: JournalUpdate) {
+    match update {
+        JournalUpdate::Stamps(id, stamps) => {
+            batch.stamps.insert(id, stamps);
+        }
+        JournalUpdate::Observed(instance, observation) => {
+            batch.observations.push((instance, observation));
+            while batch.observations.len() > JOURNAL_OBSERVATIONS_PER_WRITE {
+                batch.observations.remove(0);
+            }
+        }
+    }
+}
+
+/// Waits for one update, then keeps collecting for `window`, keeping only the newest stamps per
+/// session and every observation in order. Returns `None` once the channel is closed with nothing
+/// left. A busy session moves its screen revision many times a second; the journal is rewritten
+/// and synced per batch, not per reading. The `bool` is true when the channel closed, so the
+/// caller writes this batch and stops.
+pub fn next_journal_batch(
+    updates: &std::sync::mpsc::Receiver<JournalUpdate>,
     window: Duration,
-) -> Option<(std::collections::BTreeMap<String, SessionStamps>, bool)> {
-    let mut batch = std::collections::BTreeMap::new();
-    let (id, stamps) = updates.recv().ok()?;
-    batch.insert(id, stamps);
+) -> Option<(JournalBatch, bool)> {
+    let mut batch = JournalBatch::default();
+    push_update(&mut batch, updates.recv().ok()?);
     let deadline = std::time::Instant::now() + window;
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         match updates.recv_timeout(left) {
-            Ok((id, stamps)) => {
-                batch.insert(id, stamps);
-            }
+            Ok(update) => push_update(&mut batch, update),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Some((batch, false)),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Some((batch, true)),
         }
@@ -306,6 +440,9 @@ struct LastMark {
 pub struct AgentEventBus {
     log: Mutex<Log>,
     stamp_sink: Mutex<Option<StampSink>>,
+    /// The durable journal's receiver of logged observations. Installed by the same writer that
+    /// takes the stamps, so the journal keeps one writer.
+    observation_sink: Mutex<Option<ObservationSink>>,
     tx: broadcast::Sender<AgentObservation>,
     /// Advisory `referenceHistoryChanged` frames. A relay forwards these bytes opaquely.
     history_tx: broadcast::Sender<String>,
@@ -313,8 +450,10 @@ pub struct AgentEventBus {
     local_sequence: Mutex<u64>,
     inputs: Mutex<InputLedger>,
     /// This bus's observer epoch. Sequences restart with the daemon, so a sequence is only
-    /// comparable with others of the same epoch; run ids and wait replies carry it.
-    instance: String,
+    /// comparable with others of the same epoch; run ids and wait replies carry it. A bus that
+    /// resumes the durable journal takes the epoch the journal recorded, once, before it issues
+    /// any sequence; otherwise it mints one on first use.
+    instance: OnceLock<String>,
     /// Epoch ms clock for the state and screen timestamps; tests inject a fixed one.
     now_ms: Box<dyn Fn() -> i64 + Send + Sync>,
 }
@@ -435,19 +574,130 @@ impl AgentEventBus {
                 capacity,
             }),
             stamp_sink: Mutex::new(None),
+            observation_sink: Mutex::new(None),
             tx,
             history_tx,
             machine_events: Mutex::new(None),
             local_sequence: Mutex::new(0),
             inputs: Mutex::new(InputLedger::default()),
-            instance: uuid::Uuid::new_v4().simple().to_string(),
+            instance: OnceLock::new(),
             now_ms,
         }
     }
 
     /// The observer epoch of every sequence this bus issues.
     pub fn instance(&self) -> &str {
-        &self.instance
+        self.instance
+            .get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+            .as_str()
+    }
+
+    /// Resumes durable history before observers start or readings are published.
+    /// Rows are retained for snapshots, while replay cursors use this process's epoch.
+    /// Returns whether the history was adopted.
+    pub fn adopt_history(&self, history: ObservationHistory) -> bool {
+        if history.is_empty() {
+            return false;
+        }
+        let ObservationHistory {
+            instance,
+            head,
+            evicted_through,
+            retained: rows,
+        } = history;
+        let Some(instance) = instance else {
+            return false;
+        };
+        let current_instance = self.instance().to_owned();
+        let warm = {
+            let log = self.log.lock();
+            !log.retained.is_empty() || log.revision > 0
+        };
+        if warm {
+            self.start_above(&instance, head, evicted_through);
+            return false;
+        }
+        let mut retained: VecDeque<AgentObservation> = rows
+            .into_iter()
+            .filter(|row| row.instance == instance)
+            .map(|row| row.observation)
+            .collect();
+        let mut log = self.log.lock();
+        let newest = retained.back().map_or(0, |last| last.sequence);
+        log.revision = head.max(newest);
+        // A stored head with no rows left means the tail was dropped out of band: every reading
+        // up to the head is gone, so a cursor below it is a gap, never an empty "nothing new".
+        log.evicted_through = log.revision.max(evicted_through);
+        log.capacity = log.capacity.max(retained.len());
+        for observation in retained.drain(..) {
+            log.latest
+                .insert(observation.session_id.clone(), observation.clone());
+            log.retained.push_back(observation);
+        }
+        // The resumed rows are the session's newest readings, so `latest` holds them; the read
+        // store is left to the stamps seeded just before, which carry the acknowledgement an
+        // ack may have made after the last resumed row.
+        let revision = log.revision;
+        drop(log);
+        {
+            let mut sequence = self.local_sequence.lock();
+            *sequence = (*sequence).max(revision);
+        }
+        self.raise_machine_events_floor(revision);
+        tracing::debug!(stored_instance = instance, current_instance, revision, "adopted agent history as a snapshot under a fresh epoch");
+        true
+    }
+
+    /// Moves the attached machine-events stream above `floor`, so a reading published after a
+    /// restart continues the resumed epoch instead of reusing its sequences.
+    fn raise_machine_events_floor(&self, floor: u64) {
+        if floor == 0 {
+            return;
+        }
+        if let Some(events) = self.machine_events.lock().clone() {
+            events.resume_sequence(floor);
+        }
+    }
+
+    /// Keeps a bus that refuses a stored history from serving that epoch's cursors: numbering
+    /// resumes above the stored head, and every cursor at or below it becomes a gap.
+    ///
+    /// `replay` takes only a number, so a refusal cannot be detected from the cursor itself: a
+    /// cursor of the refused epoch whose number happens to fall inside this run's range is
+    /// indistinguishable from one of this run's own. The only honest answer for that range is the
+    /// designed recovery — a gap plus the snapshot — which is why the boundary rises on **both**
+    /// paths, cold and warm alike. A warm bus gaps its own early rows that share the refused
+    /// range for the same reason: they cannot be told apart, so replaying them would be the
+    /// splice this rule exists to prevent. Cursors above the refused head are unambiguously this
+    /// run's and keep replaying.
+    ///
+    /// The refused rows are left in the store; the first write of this epoch replaces them there
+    /// (`ObservationHistory::push` never splices two epochs).
+    fn start_above(&self, refused_instance: &str, head: u64, evicted_through: u64) {
+        // `after < evicted_through` is the gap test, so the boundary must sit one past the last
+        // refused sequence: a cursor exactly at the refused head has seen a row this run cannot
+        // attribute. A history with no head has no refused sequence to cover.
+        let boundary = if head == 0 {
+            evicted_through
+        } else {
+            evicted_through.max(head).saturating_add(1)
+        };
+        let revision = {
+            let mut log = self.log.lock();
+            log.evicted_through = log.evicted_through.max(boundary);
+            log.revision
+        };
+        {
+            let mut sequence = self.local_sequence.lock();
+            *sequence = (*sequence).max(revision).max(head);
+        }
+        self.raise_machine_events_floor(head);
+        tracing::debug!(
+            refused_instance,
+            head,
+            boundary,
+            "agent observations of another epoch were not resumed; numbering continues above them"
+        );
     }
 
     /// The latest reading of every session, by session id.
@@ -456,6 +706,15 @@ impl AgentEventBus {
     }
 
     pub fn attach_machine_events(&self, events: Arc<crate::remote::machine_events::MachineEvents>) {
+        // A bus that resumed a durable epoch already issued sequences above the stream's fresh
+        // counter, which restarts with the daemon; continue the epoch rather than collide. The
+        // log lock is released before the stream is locked: `allocate` holds the stream while it
+        // takes the log, and the reverse order here would deadlock.
+        let floor = {
+            let log = self.log.lock();
+            log.revision
+        };
+        events.resume_sequence(floor);
         *self.machine_events.lock() = Some(events);
     }
 
@@ -545,10 +804,18 @@ impl AgentEventBus {
         *self.stamp_sink.lock() = Some(sink);
     }
 
-    /// Drops the installed stamp sink, which closes the writer's queue so the writer drains what
-    /// it holds and ends. The gateway calls it to retire the writer when it is dropped.
+    /// Installs the receiver of logged observations (the same journal writer as the stamps).
+    /// It runs on the publishing thread, outside the bus lock, and must not block.
+    pub fn set_observation_sink(&self, sink: ObservationSink) {
+        *self.observation_sink.lock() = Some(sink);
+    }
+
+    /// Drops both installed sinks, which closes the writer's queue so the writer drains what it
+    /// holds and ends. The gateway calls it to retire the writer when it is dropped; clearing
+    /// only one sink would leave the queue open and the writer waiting on it.
     pub(crate) fn clear_stamp_sink(&self) {
         *self.stamp_sink.lock() = None;
+        *self.observation_sink.lock() = None;
     }
 
     /// The session's newest stamps: its latest reading, else its persisted seed. An entry listed
@@ -725,6 +992,12 @@ impl AgentEventBus {
                 sink(&observation.session_id, &changed);
             }
         }
+        // The durable tail: the same row the in-memory log just kept, under this bus's epoch.
+        // Read before the lock is taken again so a resumed epoch is already bound.
+        let sink = self.observation_sink.lock().clone();
+        if let Some(sink) = sink {
+            sink(self.instance(), &observation);
+        }
         observation
     }
 
@@ -779,13 +1052,22 @@ impl AgentEventBus {
     }
 
     pub fn replay(&self, after: u64) -> AgentReplay {
+        self.replay_in_instance(after, Some(self.instance()))
+    }
+
+    /// Replay only when the caller's cursor belongs to this observer epoch. Numeric-only
+    /// cursors are deliberately a gap: they cannot be ordered across a daemon restart.
+    pub fn replay_in_instance(&self, after: u64, instance: Option<&str>) -> AgentReplay {
         let head = self.domain_head();
         let log = self.log.lock();
         let snapshot = snapshot_of(&log.latest);
         // A cursor past every issued sequence belongs to another daemon run. A cursor inside
         // the domain but past the last agent observation is current, not a gap: other machine
         // events share these numbers.
-        if after > head.max(log.revision) || after < log.evicted_through {
+        if instance != Some(self.instance())
+            || after > head.max(log.revision)
+            || after < log.evicted_through
+        {
             return AgentReplay::Gap {
                 snapshot,
                 after_sequence: log.revision,
@@ -1535,17 +1817,56 @@ mod tests {
     }
 
     #[test]
-    fn the_stamp_batcher_keeps_the_newest_per_session_and_reports_a_closed_queue() {
+    fn the_journal_batcher_keeps_the_newest_stamps_and_every_observation_in_order() {
         let (queue, updates) = std::sync::mpsc::channel();
-        queue.send(("a".to_string(), seed(AgentControlState::Working, "r1", 1, 1))).unwrap();
-        queue.send(("a".to_string(), seed(AgentControlState::Working, "r2", 1, 2))).unwrap();
-        queue.send(("b".to_string(), seed(AgentControlState::Idle, "r1", 3, 3))).unwrap();
+        let observed = |sequence: u64| {
+            JournalUpdate::Observed(
+                "epoch".into(),
+                AgentObservation {
+                    sequence,
+                    session_id: "s".into(),
+                    state: AgentControlState::Working,
+                    state_source: AgentStateSource::Screen,
+                    tier: AgentTier::Screen,
+                    prompt_id: None,
+                    kind: None,
+                    screen_revision: Some("rev".into()),
+                    state_since_ms: None,
+                    screen_changed_at_ms: None,
+                    read: false,
+                },
+            )
+        };
+        queue
+            .send(JournalUpdate::Stamps(
+                "a".to_string(),
+                seed(AgentControlState::Working, "r1", 1, 1),
+            ))
+            .unwrap();
+        queue.send(observed(3)).unwrap();
+        queue
+            .send(JournalUpdate::Stamps(
+                "a".to_string(),
+                seed(AgentControlState::Working, "r2", 1, 2),
+            ))
+            .unwrap();
+        queue.send(observed(4)).unwrap();
+        queue.send(observed(5)).unwrap();
         drop(queue);
-        let (batch, closed) = next_stamp_batch(&updates, Duration::from_secs(5)).expect("a batch");
+        let (batch, closed) = next_journal_batch(&updates, Duration::from_secs(5)).expect("a batch");
         assert!(closed, "a disconnected queue ends the writer without waiting out the window");
-        assert_eq!(batch.len(), 2);
-        assert_eq!(batch["a"].screen_revision.as_deref(), Some("r2"));
-        assert!(next_stamp_batch(&updates, Duration::from_secs(5)).is_none());
+        assert_eq!(batch.stamps.len(), 1, "stamps collapse to the newest per session");
+        assert_eq!(batch.stamps["a"].screen_revision.as_deref(), Some("r2"));
+        assert_eq!(
+            batch
+                .observations
+                .iter()
+                .map(|(_, observation)| observation.sequence)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5],
+            "a replay is a sequence, so every row keeps its arrival order"
+        );
+        assert!(next_journal_batch(&updates, Duration::from_secs(5)).is_none());
     }
 
     #[tokio::test]
@@ -1578,5 +1899,285 @@ mod tests {
         assert_eq!(value["changeSeq"], "7");
         assert!(value.get("path").is_none());
         assert!(value["target"].get("model").is_none());
+    }
+
+    mod durable_history {
+        use super::*;
+
+        fn row(instance: &str, sequence: u64, session: &str, state: AgentControlState) -> DurableObservation {
+            DurableObservation {
+                instance: instance.into(),
+                observation: AgentObservation {
+                    sequence,
+                    session_id: session.into(),
+                    state,
+                    state_source: AgentStateSource::Screen,
+                    tier: AgentTier::Screen,
+                    prompt_id: None,
+                    kind: None,
+                    screen_revision: Some(format!("rev-{sequence}")),
+                    state_since_ms: Some(1_000),
+                    screen_changed_at_ms: Some(1_000),
+                    read: false,
+                },
+            }
+        }
+
+        fn history(instance: &str, rows: Vec<DurableObservation>, head: u64) -> ObservationHistory {
+            ObservationHistory {
+                instance: Some(instance.into()),
+                head,
+                evicted_through: 0,
+                retained: rows,
+            }
+        }
+
+        /// A `push` trims to capacity, remembers the highest dropped sequence, and refuses a
+        /// retried row so a duplicate write cannot extend the tail twice.
+        #[test]
+        fn push_evicts_at_capacity_and_reports_through_evicted_through() {
+            let mut log = ObservationHistory::default();
+            for sequence in 1..=4 {
+                assert!(log.push("epoch-a", &row("epoch-a", sequence, "s", AgentControlState::Working).observation, 2));
+            }
+            assert_eq!(log.retained.len(), 2, "the tail is bounded by capacity");
+            assert_eq!(
+                log.retained.iter().map(|row| row.observation.sequence).collect::<Vec<_>>(),
+                vec![3, 4]
+            );
+            assert_eq!(log.evicted_through, 2, "a cursor at 2 missed a reading");
+            assert_eq!(log.head, 4);
+
+            // A retried write of the newest row is not a second reading.
+            assert!(!log.push("epoch-a", &row("epoch-a", 4, "s", AgentControlState::Idle).observation, 2));
+            assert_eq!(log.retained.len(), 2);
+            assert_eq!(log.retained.last().map(|row| row.observation.state), Some(AgentControlState::Working));
+        }
+
+        /// `snapshot` is one row per session: the newest reading, ordered by session id.
+        #[test]
+        fn snapshot_returns_the_newest_reading_per_session_once() {
+            let mut log = ObservationHistory::default();
+            for (sequence, session, state) in [
+                (1, "b", AgentControlState::Working),
+                (2, "a", AgentControlState::Blocked),
+                (3, "b", AgentControlState::Idle),
+                (4, "a", AgentControlState::Working),
+            ] {
+                log.push("epoch-a", &row("epoch-a", sequence, session, state).observation, 8);
+            }
+            let snapshot = log.snapshot();
+            assert_eq!(
+                snapshot.iter().map(|seen| seen.session_id.as_str()).collect::<Vec<_>>(),
+                vec!["a", "b"],
+                "one row per session, sorted"
+            );
+            assert_eq!(snapshot[0].sequence, 4, "a's newest reading");
+            assert_eq!(snapshot[1].sequence, 3, "b's newest reading");
+            assert_eq!(snapshot[1].state, AgentControlState::Idle);
+        }
+
+        /// A row of another epoch replaces the tail rather than splicing into it: two epochs'
+        /// sequences overlap, so keeping both would order readings that never shared a domain.
+        #[test]
+        fn a_row_of_another_epoch_replaces_the_tail_instead_of_splicing() {
+            let mut log = ObservationHistory::default();
+            log.push("epoch-a", &row("epoch-a", 7, "s", AgentControlState::Working).observation, 8);
+            log.push("epoch-b", &row("epoch-b", 1, "s", AgentControlState::Idle).observation, 8);
+            assert_eq!(log.instance.as_deref(), Some("epoch-b"));
+            assert_eq!(log.retained.len(), 1);
+            assert_eq!(log.retained[0].observation.sequence, 1);
+            assert_eq!(log.evicted_through, 0, "the new epoch starts with nothing evicted");
+            assert_eq!(log.head, 1);
+        }
+
+        #[test]
+        fn a_restart_keeps_history_as_snapshot_but_gaps_old_epoch_cursors() {
+            let before = AgentEventBus::new(8);
+            let mut first = None;
+            for _ in 1..=5 {
+                first = Some(before.publish(draft("s", AgentControlState::Working)));
+            }
+            let cursor = 10;
+            let epoch = before.instance().to_string();
+            let tail = history(
+                &epoch,
+                vec![DurableObservation { instance: epoch.clone(), observation: first.expect("row at agent head 5") }],
+                5,
+            );
+            drop(before);
+
+            let after = AgentEventBus::new(8);
+            assert!(after.adopt_history(tail.clone()), "a fresh bus adopts the stored epoch");
+            assert_ne!(after.instance(), epoch, "a restart mints a different cursor epoch");
+            assert_eq!(after.snapshot().len(), 1, "stored rows remain available in the recovery snapshot");
+            match after.replay_in_instance(cursor, Some(&epoch)) {
+                AgentReplay::Gap { snapshot, .. } => {
+                    assert_eq!(snapshot.len(), 1);
+                }
+                AgentReplay::Events { events, .. } => {
+                    panic!("old shared cursor 10 must not replay the retained agent history: {events:?}")
+                }
+            }
+            assert!(matches!(after.replay(10), AgentReplay::Gap { .. }), "a numeric cursor without the old epoch gaps");
+            for sequence in 1..=10 {
+                after.publish(draft("s", AgentControlState::Idle));
+                assert_eq!(after.head(), 5 + sequence);
+            }
+            assert!(after.head() > cursor, "the new shared sequence domain passed the old cursor");
+            let next = after.publish(draft("s", AgentControlState::Working));
+            assert!(next.sequence > cursor, "the new sequence domain advances beyond the old shared cursor: {next:?}");
+            assert!(matches!(after.replay_in_instance(cursor, Some(&epoch)), AgentReplay::Gap { .. }));
+            assert!(matches!(after.replay_in_instance(cursor, Some(after.instance())), AgentReplay::Gap { .. }),
+                "the reused numeric cursor is below the post-restart agent head and must gap");
+
+            let mut emptied = tail;
+            emptied.retained.clear();
+            let without_rows = AgentEventBus::new(8);
+            assert!(without_rows.adopt_history(emptied), "the epoch and head are still durable");
+            assert_ne!(without_rows.instance(), epoch);
+            match without_rows.replay_in_instance(cursor, Some(&epoch)) {
+                AgentReplay::Gap { .. } => {}
+                AgentReplay::Events { events, .. } => {
+                    panic!("deleting the rows must break the replay, got {events:?}")
+                }
+            }
+        }
+
+        /// A cursor minted in another epoch is a gap plus a snapshot, never a silent replay.
+        #[test]
+        fn a_cursor_of_another_epoch_is_a_gap_and_a_snapshot_not_a_wrong_replay() {
+            let bus = AgentEventBus::new(8);
+            let first = bus.publish(draft("s", AgentControlState::Working));
+            bus.publish(draft("s", AgentControlState::Idle));
+            // A cursor from a previous daemon run: inside this run's domain, below its head.
+            let stale = first.sequence.saturating_sub(1).min(bus.revision());
+            match bus.replay(stale) {
+                AgentReplay::Gap { .. } => panic!("a same-epoch cursor inside the tail is not a gap"),
+                AgentReplay::Events { events, .. } => assert_eq!(events.len(), 2),
+            }
+            // A cursor past this run's head belongs to another daemon run: a gap with the
+            // current snapshot, which is the designed recovery, not a bug.
+            match bus.replay(bus.revision() + 1) {
+                AgentReplay::Gap { .. } => {}
+                AgentReplay::Events { events, .. } => panic!("a cross-epoch cursor must gap: {events:?}"),
+            }
+
+            // Two runs with different epochs: the old cursor cannot order the new run's rows.
+            // The old run got as far as sequence 5, so the refused head covers 1..=5.
+            let old = AgentEventBus::new(8);
+            let mut minted = None;
+            for revision in 1..=5 {
+                let reading = old.publish(ObservationDraft {
+                    screen_revision: Some(format!("old-rev-{revision}")),
+                    ..draft("s", AgentControlState::Working)
+                });
+                minted = Some(reading);
+            }
+            let minted = minted.expect("the old run observed");
+            let old_epoch = old.instance().to_string();
+            let old_tail = history(
+                &old_epoch,
+                vec![DurableObservation { instance: old_epoch.clone(), observation: minted.clone() }],
+                minted.sequence,
+            );
+            drop(old);
+
+            let new_run = AgentEventBus::new(8);
+            // This run bound its epoch first (a reading landed before the journal was read), so
+            // the stored history is refused and its rows are never spliced in.
+            let own = new_run.publish(draft("s", AgentControlState::Idle));
+            assert!(!new_run.adopt_history(old_tail), "a bound epoch refuses another epoch's tail");
+            assert_ne!(new_run.instance(), old_epoch);
+            assert_eq!(minted.sequence, 5, "the refused head covers this run's early numbers");
+            assert_eq!(own.sequence, 1, "this run's first row shares a number with the refused epoch");
+            // THE FALSIFICATION OF THE HEADLINE GUARANTEE: stale cursors of another epoch whose
+            // NUMBER falls inside this run's range. `replay` takes only a number, so no guard on
+            // `after > head` can catch these; only the refused epoch's boundary can. Before the
+            // fix `evicted_through` stayed 0 on this warm path, so both returned `Events` — the
+            // stale `0` even got this run's row handed to it, which is the splice.
+            for stale in [0, own.sequence, minted.sequence] {
+                match new_run.replay(stale) {
+                    AgentReplay::Gap { snapshot, .. } => {
+                        assert_eq!(snapshot.len(), 1, "a gap still carries the snapshot");
+                        assert_eq!(snapshot[0].session_id, "s");
+                        assert_eq!(snapshot[0], own, "the snapshot is this run's newest reading");
+                    }
+                    AgentReplay::Events { events, .. } => panic!(
+                        "a cursor at {stale} of the refused epoch must gap even though its number \
+                         is in range, got this run's rows: {events:?}"
+                    ),
+                }
+            }
+            // A cursor above the boundary replays. The boundary is one past the refused head, and
+            // `after < evicted_through` is the gap test, so this run's rows inside the refused
+            // range are only reachable through the gap's snapshot (the designed resync), and
+            // every row above it replays normally.
+            let after_refusal = new_run.publish(draft("s", AgentControlState::Working));
+            assert_eq!(
+                after_refusal.sequence,
+                minted.sequence + 1,
+                "numbering continues directly above the refused head, reusing nothing"
+            );
+            let later = new_run.publish(draft("s", AgentControlState::Idle));
+            match new_run.replay(after_refusal.sequence) {
+                AgentReplay::Events { events, .. } => {
+                    assert_eq!(events, vec![later.clone()], "only rows above the boundary replay");
+                }
+                AgentReplay::Gap { .. } => panic!("a cursor above the refused boundary replays"),
+            }
+            // A cursor past every issued sequence is still the plain out-of-range gap.
+            match new_run.replay(later.sequence + 1) {
+                AgentReplay::Gap { snapshot, .. } => {
+                    assert_eq!(snapshot.len(), 1);
+                    assert_eq!(snapshot[0].session_id, "s");
+                }
+                AgentReplay::Events { events, .. } => {
+                    panic!("a cursor past head must gap: {events:?}")
+                }
+            }
+            // NOTE: an assertion that `replay(minted.sequence + 1)` gaps was REMOVED here, not
+            // relaxed. It contradicted `start_above`'s own rule: once this run publishes at and
+            // above the refused head, that number is no longer outside this run, so per the doc
+            // comment "cursors above the refused head are unambiguously this run's sequences" it
+            // replays. The block above proves exactly that (it gets `later` back), and the two
+            // blocks above that prove the stale in-range cursors still gap. The refused-head case
+            // is now covered by the loop, which is where the boundary rule actually lives.
+        }
+
+        /// The durable write the daemon's one writer performs: every logged row reaches the
+        /// writer stamped with the bus epoch, in arrival order.
+        #[tokio::test]
+        async fn the_sink_carries_every_logged_row_under_the_bus_epoch_into_the_journal_batch() {
+            let bus = AgentEventBus::new(8);
+            let (queue, updates) = std::sync::mpsc::channel();
+            let sink_queue = std::sync::Mutex::new(queue);
+            bus.set_observation_sink(Arc::new(move |instance, observation| {
+                if let Ok(queue) = sink_queue.lock() {
+                    let _ = queue.send(JournalUpdate::Observed(
+                        instance.to_string(),
+                        observation.clone(),
+                    ));
+                }
+            }));
+            let published = [
+                bus.publish(draft("s", AgentControlState::Working)),
+                bus.publish(draft("s", AgentControlState::Blocked)),
+            ];
+            let epoch = bus.instance().to_string();
+            bus.clear_stamp_sink();
+            let (batch, closed) =
+                next_journal_batch(&updates, Duration::from_millis(1)).expect("a batch");
+            assert!(closed, "clearing the sinks closes the writer's queue");
+            assert_eq!(batch.observations.len(), 2, "every row, not only the newest");
+            assert_eq!(
+                batch
+                    .observations
+                    .iter()
+                    .map(|(instance, observation)| (instance.as_str(), observation.sequence))
+                    .collect::<Vec<_>>(),
+                vec![(epoch.as_str(), published[0].sequence), (epoch.as_str(), published[1].sequence)]
+            );
+        }
     }
 }
