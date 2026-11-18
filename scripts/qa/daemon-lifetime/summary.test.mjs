@@ -913,10 +913,14 @@ test('Settings counts as open only on a new cmd_daemon_supervisor_get receipt, w
  * connection (M12: a resend on reconnect through another handle lands in it too), and the GUI's
  * MahoRD keystrokes are the only path that commits the marker line. Variants inject the defects
  * each assertion exists to catch.
+ *
+ * `focusRefusal` makes gui.focus answer a refused/absent/malformed result the way the real driver
+ * can (mac activation that never took, Windows/Linux focused:false, a thrown osascript). The
+ * contract under test is that no Escape, click, key or modifier release leaves the harness then.
  */
-function q11World({ replayOnRelaunch = false, resendOnReconnect = false, releaseBeforeQuit = false, wrongAttach = false, setupWizard = false, behindConsole = false, platform = 'linux', noWizardEvent = false, gateVisibleWithoutWizard = false } = {}) {
+function q11World({ replayOnRelaunch = false, resendOnReconnect = false, releaseBeforeQuit = false, wrongAttach = false, setupWizard = false, behindConsole = false, platform = 'linux', noWizardEvent = false, gateVisibleWithoutWizard = false, focusRefusal = null } = {}) {
   const sid = 'SSH1';
-  const w = { log: '', line: '', echo: '', receipts: [], events: [], sessionFile: null, launches: [], quits: [], quitWhileHeld: null, writesByHandle: {}, typedBy: [], held: false, escapes: 0, wizardOpen: false, pendingAttach: null, focused: true, focusCalls: 0, lostKeys: 0, appender: false, debug: [], debugDir: null, wizardArmed: false };
+  const w = { log: '', line: '', echo: '', receipts: [], events: [], sessionFile: null, launches: [], quits: [], quitWhileHeld: null, writesByHandle: {}, typedBy: [], held: false, escapes: 0, wizardOpen: false, pendingAttach: null, focused: true, focusCalls: 0, lostKeys: 0, appender: false, debug: [], debugDir: null, wizardArmed: false, inputs: [], releases: 0 };
   const call = async (method, params = {}) => {
     switch (method) {
       case 'writeFile':
@@ -997,9 +1001,12 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
     // MahoRD keys one at a time (lib/typeverified.mjs): each printable key reaches the line and its
     // echo; Enter commits the line. A whole-text burst is not used (MahoRD drops keys from it).
     mahord: {
+      // Every global-input call is recorded, so a test can assert the desktop received nothing.
+      releaseModifiers: async () => { w.releases += 1; w.inputs.push(['releaseModifiers']); return { ok: true, via: 'fake', keys: ['alt', 'cmd', 'ctrl', 'shift'] }; },
       // A GUI behind the console that started it (Windows run-q11 r2) gets no key until focused.
       hotkey: async (keys) => { assert.equal(keys[0], 'Shift'); if (!w.focused) { w.lostKeys += 1; return; } if (coveredByWizard()) return; typeChar(keys[1].toUpperCase()); },
       key: async (key) => {
+        w.inputs.push(['key', key]);
         if (!w.focused) { w.lostKeys += 1; return; }
         if (key === 'Escape') {
           w.escapes += 1;
@@ -1020,7 +1027,14 @@ function q11World({ replayOnRelaunch = false, resendOnReconnect = false, release
       },
     },
     gui: {
-      focus: async () => { w.focusCalls += 1; w.focused = true; return { focused: true }; },
+      focus: async () => {
+        w.focusCalls += 1;
+        if (typeof focusRefusal === 'string') throw new Error(focusRefusal);
+        // An explicit refusal leaves w.focused false, so a stray key would show up as lostKeys.
+        if (focusRefusal) { w.focused = false; return focusRefusal; }
+        w.focused = true;
+        return { focused: true, pid: 10 };
+      },
       quit: async (g) => { w.quits.push(g.pid); if (w.receipts.some((r) => r.includes('write-applied'))) w.quitWhileHeld ??= w.held; return { code: 0 }; },
       launch: async (_artifact, { env } = {}) => {
         const pid = 10 + w.launches.length;
@@ -1073,6 +1087,17 @@ test('Q11 types the marker through a GUI tab restored onto the SSH session and q
   assert.equal(w.quitWhileHeld, true);
   assert.match(w.log, /^uncertain[0-9a-f]{12}\n$/);
   assert.equal(w.escapes, 0, 'no Escape when the tab attached without a setup wizard');
+  // The guard changes nothing on the owned path: the modifier releases still bracket the pane
+  // click and the typing, and the keys are still the marker characters typed one at a time
+  // followed by the single commit Enter.
+  const keys = w.inputs.filter(([kind]) => kind === 'key').map(([, k]) => k);
+  const marker = w.log.trim();
+  assert.equal(keys.length, marker.length + 1, 'one key per marker character plus the commit Enter');
+  assert.equal(keys.slice(0, -1).join(''), marker, 'the typed characters are the committed marker');
+  assert.equal(keys.at(-1), 'Enter', 'the commit Enter is last');
+  // Two releases in this world: the fake focus reports no window rect, so there is no pane click
+  // and therefore no 'after-click' release; 'before-focus' and 'before-typing' still both run.
+  assert.equal(w.releases, 2, 'before-focus and before-typing releases still happen');
   // No data connection writes the marker: only the cat command and the closing interrupt.
   for (const writes of Object.values(w.writesByHandle)) for (const text of writes) assert.ok(!text.includes('uncertain'), text);
 });
@@ -1080,6 +1105,55 @@ test('Q11 types the marker through a GUI tab restored onto the SSH session and q
 test('Q11 fails when the uncertain write is replayed after the relaunch', async () => {
   const { failed } = await runQ11({ replayOnRelaunch: true });
   assert.ok(failed.includes('remote log contains the marker exactly once (no replay of the uncertain write)'), failed.join('; '));
+});
+
+/**
+ * The measured defects (surv-mac-1117n / surv-mac-1117p): a focus that was never proven, and a
+ * driver that answered focused:false, both still let the walk drive Escape, the pane click and the
+ * typing. Each of the three shapes a real gui.focus can answer is checked here, and each must
+ * leave the desktop untouched and block on the ownership barrier instead of failing the product.
+ */
+const REFUSALS = [
+  ['a refused mac activation', { focused: false, reason: 'mac activation did not make this pid the frontmost process' }],
+  ['a Windows/Linux focused:false', { focused: false, before: { ok: true, hwnd: 222 } }],
+  ['a malformed answer', { focused: 'yes' }],
+];
+
+for (const [label, refusal] of REFUSALS) {
+  test(`Q11 sends no desktop input on ${label}`, async () => {
+    const { w, result } = await runQ11({ focusRefusal: refusal });
+    assert.equal(result.status, 'BLOCKED');
+    assert.equal(result.barrier.kind, 'GUI_INPUT_OWNERSHIP_UNCONFIRMED');
+    assert.deepEqual(w.inputs, [], 'not one key, chord, click or modifier release reached the desktop');
+    assert.equal(w.releases, 0, 'the modifier key-up is global input too');
+    assert.deepEqual(w.typedBy, [], 'nothing was typed into the pane');
+    assert.equal(w.log, '', 'the remote session received no marker');
+    // The barrier is diagnostic, not silent: it names the step that was refused and the driver's
+    // answer. block(result, kind, detail) keeps that object under barrier.detail.
+    assert.match(String(result.barrier.detail.detail), /gui\.focus did not prove the recorded QA window holds the foreground/);
+    assert.ok(result.barrier.detail.focus && result.barrier.detail.focus.focused !== true, JSON.stringify(result.barrier));
+  });
+}
+
+test('Q11 blocks, and never types, when gui.focus throws', async () => {
+  const { w, result } = await runQ11({ focusRefusal: 'osascript exited 1' });
+  assert.equal(result.barrier.kind, 'GUI_INPUT_OWNERSHIP_UNCONFIRMED');
+  assert.deepEqual(w.inputs, []);
+  assert.match(result.barrier.detail.error, /osascript exited 1/, 'the driver error is carried into the barrier');
+});
+
+test('Q11 with a refused focus records the ownership evidence and no false product failure', async () => {
+  const { result } = await runQ11({ focusRefusal: { focused: false } });
+  const names = result.evidence.map((f) => f.split('/').pop());
+  assert.ok(names.includes('Q11-input-ownership.json'), names.join(', '));
+  // The scenario stops at the withheld input, so nothing downstream (typing, the remote log) is
+  // asserted as a product failure: the steps that did run before the refusal still passed.
+  assert.deepEqual(result.assertions.filter((a) => !a.ok), [], 'no product failure was recorded');
+  assert.ok(!result.assertions.some((a) => a.name.startsWith('the marker typed through the GUI')), 'typing was never attempted');
+  // On this (Linux) world the tab attaches without an Escape, so the first withheld input is the
+  // desktop input that would have preceded the typing.
+  assert.equal(result.barrier.detail.scenario, 'Q11');
+  assert.equal(result.barrier.detail.at, 'before-focus');
 });
 
 test('Q11 fails when the marker is resent through a reconnected data connection (M12)', async () => {

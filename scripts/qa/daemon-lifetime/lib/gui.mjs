@@ -189,9 +189,83 @@ export function windowsRectFiles(layout, tag) {
   return { request: `${layout.root}\\gui-${tag}.rect.request`, answer: `${layout.root}\\gui-${tag}.rect.json` };
 }
 
-/** Title bar point of a window rect: left part of the caption, clear of the caption buttons. */
+/**
+ * Title bar point of a window rect: left part of the caption, clear of the caption buttons.
+ * Pure geometry, no desktop input. The Windows focus path deliberately does NOT click it: the
+ * launcher's targeted MainWindowHandle raise is the activation, and another visible Ferryx window
+ * can cover this point.
+ */
 export function titleBarPoint(rect) {
   return { x: rect.left + Math.min(200, Math.floor((rect.right - rect.left) / 4)), y: rect.top + 12 };
+}
+
+/** A client rect as hyprctl -j clients reports it, or null when it carries no usable geometry. */
+function clientRect(c) {
+  if (!Array.isArray(c?.at) || !Array.isArray(c?.size)) return null;
+  const [x, y] = c.at.map(Number);
+  const [w, h] = c.size.map(Number);
+  if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return null;
+  return { left: x, top: y, right: x + w, bottom: y + h };
+}
+
+function containsPoint(rect, point) {
+  return point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom;
+}
+
+/**
+ * Whether a global coordinate click at `point` provably lands on the client of `pid`.
+ *
+ * A mapped QA window's own geometry does not establish that a click aimed inside it hits it: any
+ * other mapped, visible window on the same workspace that covers that point receives the click
+ * instead, and hyprctl reports no stacking order to say which one is on top. So a click is allowed
+ * only when exactly one mapped, visible client on that workspace contains the point and that client
+ * is ours - the one case where the hit is unambiguous without guessing z-order. Anything else
+ * (an overlap, an ambiguous workspace, no geometry) refuses, because the only alternative would be
+ * to send global input to a window this harness cannot name.
+ */
+export function clickReach(clients, pid, point) {
+  const list = Array.isArray(clients) ? clients : [];
+  const target = list.find((c) => Number(c.pid) === Number(pid) && c.mapped === true);
+  if (!target) return { ok: false, reason: 'no mapped client for this pid' };
+  const targetRect = clientRect(target);
+  if (!targetRect) return { ok: false, reason: 'mapped window has no geometry' };
+  if (!containsPoint(targetRect, point)) return { ok: false, reason: 'point is outside the recorded window' };
+  const wsId = target.workspace?.id;
+  const covering = list.filter((c) => {
+    if (c.mapped !== true || c.hidden === true) return false;
+    if (wsId !== undefined && c.workspace?.id !== undefined && c.workspace.id !== wsId) return false;
+    const r = clientRect(c);
+    return Boolean(r) && containsPoint(r, point);
+  });
+  if (covering.length > 1) {
+    return {
+      ok: false,
+      reason: 'another window covers the click point',
+      covering: covering.map((c) => ({ pid: Number(c.pid), class: c.class ?? null, title: c.title ?? null })),
+    };
+  }
+  if (covering.length === 0 || Number(covering[0].pid) !== Number(pid)) {
+    return { ok: false, reason: 'the click point belongs to no mapped client of this pid' };
+  }
+  return { ok: true, rect: targetRect };
+}
+
+/**
+ * True only when a gui.focus result proves this recorded QA window holds the foreground.
+ *
+ * Everything the scenarios send afterwards - keys, hotkey chords, clicks, modifier key-ups - is
+ * global desktop input: cliclick posts real CGEvents on macOS, MahoRD's SendInput goes to the
+ * foreground window on Windows, and a Linux WM acts on the FOCUSED window. So only an explicit
+ * `focused: true` authorises input; a focus step that failed, was skipped for the platform,
+ * answered nothing parseable, or threw authorises none. "Not false" is never consent: at this
+ * candidate mac focus returned focused:true even when its osascript activation failed, and every
+ * later key reached whichever application was actually frontmost (run surv-mac-1117n).
+ */
+export function ownsForeground(focus) {
+  return Boolean(focus) && typeof focus === 'object'
+    && focus.focused === true
+    && focus.skipped === undefined
+    && focus.refused === undefined;
 }
 
 /** A Windows launch that stopped at a named stage; receipt is what was written to logs\. */
@@ -649,13 +723,23 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
     // which is the only truthful focus signal in this build — `hyprctl -j activewindow` can answer
     // {} while a window is genuinely focused. The click lands on the window's own title bar, far
     // from any interactive control the GUI may draw.
+    //
+    // That click is global input at absolute coordinates, so the window's own rect is not enough to
+    // aim it: another mapped window covering the point would take the click, and hyprctl exposes no
+    // stacking order to say which one is on top. It is sent only where the hit is unambiguous -
+    // clickReach proves exactly one visible client on that workspace contains the point and that it
+    // is ours. Where that cannot be proved the focus is refused instead, and the scenario then
+    // withholds every key, chord and click through ownsForeground.
     const target = cs.find((c) => Number(c.pid) === Number(gui.pid) && c.mapped === true);
-    const at = Array.isArray(target?.at) ? target.at : null;
-    const size = Array.isArray(target?.size) ? target.size : null;
-    if (!at || !size) return { focused: false, reason: 'mapped window has no geometry', instance: inst };
-    const point = { x: Math.round(at[0] + size[0] / 2), y: Math.round(at[1] + 12) };
+    const rect = clientRect(target);
+    if (!rect) return { focused: false, reason: 'mapped window has no geometry', instance: inst };
+    const point = { x: Math.round((rect.left + rect.right) / 2), y: rect.top + 12 };
     const focusedNow = (list) => list.some((c) => Number(c.pid) === Number(gui.pid) && Number(c.focusHistoryID) === 0);
     if (focusedNow(cs)) return { focused: true, pid: gui.pid, instance: inst, clicked: null, waitedMs: 0 };
+    const reach = clickReach(cs, gui.pid, point);
+    if (!reach.ok) {
+      return { focused: false, reason: `focus click withheld: ${reach.reason}`, pid: gui.pid, instance: inst, point, covering: reach.covering ?? null, rect };
+    }
     if (!mahord) throw new Error('Linux GUI focus needs MahoRD to click the title bar');
     await mahord.click(point.x, point.y);
     for (let waited = 0; waited <= LINUX_FOCUS_DEADLINE_MS; waited += 500) {
@@ -677,13 +761,24 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
    */
   async function focus(gui) {
     if (platform === 'mac' && gui?.pid) {
-      await agent.call('exec', {
+      // The activation is a request, not a result: `set frontmost` answers ok even when macOS
+      // refuses it (an app without accessibility trust, a process that already exited, a
+      // space/fullscreen transition). Reporting focused:true on the strength of having asked is
+      // what let every later key reach whichever app was actually frontmost, so the activation's
+      // exit status is read, and the frontmost unix id is then read back from the same desktop.
+      // Only that read-back naming this recorded pid counts as ownership.
+      const activation = await agent.call('exec', {
         command: '/usr/bin/osascript',
         args: ['-e', `tell application "System Events" to set frontmost of (first process whose unix id is ${Number(gui.pid)}) to true`],
-      });
-      // The window being frontmost does not focus the native terminal surface: the surface host
-      // routes macOS chords only when has_focused_session() is true (src-tauri/src/lib.rs), which
-      // needs a click into the pane. Report the window rect so the caller can click inside it.
+      }).catch((error) => ({ status: null, stdout: '', stderr: String(error?.message ?? error), failed: true }));
+      const readBack = await agent.call('exec', {
+        command: '/usr/bin/osascript',
+        args: ['-e', 'tell application "System Events" to get unix id of first process whose frontmost is true'],
+      }).catch((error) => ({ status: null, stdout: '', stderr: String(error?.message ?? error), failed: true }));
+      const frontPid = Number(String(readBack?.stdout ?? '').trim().split(/\s+/)[0]);
+      const owns = activation?.status === 0 && readBack?.status === 0 && Number.isInteger(frontPid) && frontPid === Number(gui.pid);
+      // The window rect is reported for the pane click whether or not focus was confirmed: a caller
+      // that refused the input still records where the window was (evidence, not authorisation).
       const geometry = await agent.call('exec', {
         command: '/usr/bin/osascript',
         args: ['-e', `tell application "System Events" to tell (first process whose unix id is ${Number(gui.pid)}) to get {position, size} of window 1`],
@@ -692,7 +787,20 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
       const rect = nums.length >= 4
         ? { left: nums[0], top: nums[1], right: nums[0] + nums[2], bottom: nums[1] + nums[3] }
         : null;
-      return { focused: true, pid: gui.pid, rect };
+      if (!owns) {
+        return {
+          focused: false,
+          pid: gui.pid,
+          rect,
+          activation: { status: activation?.status ?? null, stderr: String(activation?.stderr ?? '').slice(0, 400) },
+          readBack: { status: readBack?.status ?? null, pid: Number.isInteger(frontPid) ? frontPid : null, raw: String(readBack?.stdout ?? '').slice(0, 200) },
+          reason: 'mac activation did not make this pid the frontmost process',
+        };
+      }
+      // The window being frontmost does not focus the native terminal surface: the surface host
+      // routes macOS chords only when has_focused_session() is true (src-tauri/src/lib.rs), which
+      // needs a click into the pane. Report the window rect so the caller can click inside it.
+      return { focused: true, pid: gui.pid, rect, frontPid, activation: { status: activation.status } };
     }
     if (platform === 'linux') return focusLinux(gui);
     if (platform !== 'windows') return { skipped: platform };
@@ -706,12 +814,26 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
       return JSON.parse(await agent.call('readFile', { file: f.answer }));
     };
     const before = await query();
-    if (!before.ok || !before.hwnd) return { focused: false, before };
-    if (before.foreground === before.hwnd) return { focused: true, clicked: null, before };
-    const point = titleBarPoint(before);
-    await mahord.click(point.x, point.y);
-    const after = await query();
-    return { focused: after.foreground === after.hwnd, clicked: point, before, after };
+    // Every rect query already raises the recorded GUI's own MainWindowHandle
+    // (fixtures/windows-gui-launcher.ps1: $proc.Refresh(); $h = $proc.MainWindowHandle; [QaJob]::Raise($h);
+    // then GetWindowRect and GetForegroundWindow), so this answer is the result of a targeted
+    // activation, not a snapshot taken before one. A nonzero handle and ok are the proof that the
+    // raise was aimed at a real window; `foreground === hwnd` is the read-back that it took.
+    const usable = Boolean(before) && before.ok === true && Number.isInteger(before.hwnd) && before.hwnd > 0;
+    if (!usable) {
+      return { focused: false, reason: 'launcher did not report a usable main window for its own raise', before };
+    }
+    if (before.foreground === before.hwnd) return { focused: true, clicked: null, raised: true, before };
+    // The targeted raise did NOT take the foreground. Do not fall back to a coordinate click on the
+    // title bar: another visible Ferryx window (a second QA GUI, a dialog) can cover that point, and
+    // a blind SendInput at those coordinates would land in it. Refuse; the scenarios then withhold
+    // every key, chord, click and modifier release through ownsForeground.
+    return {
+      focused: false,
+      reason: 'the launcher raise did not take the foreground',
+      raised: true,
+      before,
+    };
   }
 
   /**
@@ -722,27 +844,35 @@ export function createGuiDriver({ host, agent, runId, layout, allowedRoots, forb
    */
   async function quit(gui) {
     if (!gui?.pid) return { skipped: 'no GUI' };
-    const exited = agent.call('waitExit', { pid: gui.pid, deadlineMs: 30_000 });
     if (platform === 'mac') {
+      const exited = agent.call('waitExit', { pid: gui.pid, deadlineMs: 30_000 });
       await agent.call('exec', { command: '/usr/bin/osascript', args: ['-e', macQuitScript(bundleId)] });
-    } else if (platform === 'windows') {
-      await agent.call('writeFile', { file: windowsCloseFiles(layout, gui.tag).request, content: '1' });
-    } else {
-      if (!mahord) throw new Error('remote GUI quit needs MahoRD');
-      // MahoRD remote_key_press takes one key; chords go through remote_hotkey. omarchy's Hyprland
-      // binds SUPER+Q to close window
-      // (~/.config/hypr/bindings.lua:52) and Ferryx has no Ctrl+Q quit on Linux (shortcuts.ts:453 is macOS only).
-      // SUPER+Q closes the FOCUSED window, so the GUI's own window has to be mapped and focused
-      // first: a systemd-run GUI maps only after WebKit paints (run dlq-lin17), and without this
-      // step the chord closed nothing and Q01/Q03b timed out with gui.scopeReady=false.
-      const focus = await focusLinux(gui);
-      await mahord.hotkey(['Meta', 'q']);
-      const out = await exited;
-      return { ...out, focus };
+      return exited;
     }
+    if (platform === 'windows') {
+      const exited = agent.call('waitExit', { pid: gui.pid, deadlineMs: 30_000 });
+      await agent.call('writeFile', { file: windowsCloseFiles(layout, gui.tag).request, content: '1' });
+      const out = await exited;
+      return { ...out, close: await agent.call('readFile', { file: windowsCloseFiles(layout, gui.tag).receipt }) };
+    }
+    if (!mahord) throw new Error('remote GUI quit needs MahoRD');
+    // MahoRD remote_key_press takes one key; chords go through remote_hotkey. omarchy's Hyprland
+    // binds SUPER+Q to close window
+    // (~/.config/hypr/bindings.lua:52) and Ferryx has no Ctrl+Q quit on Linux (shortcuts.ts:453 is macOS only).
+    // SUPER+Q closes the FOCUSED window, so the GUI's own window has to be mapped and focused
+    // first: a systemd-run GUI maps only after WebKit paints (run dlq-lin17), and without this
+    // step the chord closed nothing and Q01/Q03b timed out with gui.scopeReady=false.
+    // The chord is global input: sent on unconfirmed focus it closes another application's
+    // window. So it is gated on the verified focus, and the exit is subscribed only after that
+    // check, so a refusal returns at once instead of leaving a 30 s waiter behind.
+    const focus = await focusLinux(gui);
+    if (!ownsForeground(focus)) {
+      return { refused: 'focus-not-verified', focused: false, focus };
+    }
+    const exited = agent.call('waitExit', { pid: gui.pid, deadlineMs: 30_000 });
+    await mahord.hotkey(['Meta', 'q']);
     const out = await exited;
-    if (platform !== 'windows') return out;
-    return { ...out, close: await agent.call('readFile', { file: windowsCloseFiles(layout, gui.tag).receipt }) };
+    return { ...out, focus };
   }
 
   /** Q02: SIGKILL / Stop-Process of the recorded GUI pid only. */
