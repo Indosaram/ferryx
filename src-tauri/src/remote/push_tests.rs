@@ -107,6 +107,13 @@ fn gateway(dir: &std::path::Path) -> Arc<RemoteGatewayState> {
     state
 }
 
+/// What the mock APNs router carries: where to report each send, the fixed answer, and why.
+type MockApnsState = (
+    mpsc::UnboundedSender<(String, Option<String>)>,
+    StatusCode,
+    Option<&'static str>,
+);
+
 /// A local stand-in for Apple's push host. `POST /3/device/{token}` records the token and the
 /// `authorization` header, and answers the configured status plus an optional `reason` body, so
 /// the whole delivery path (JWT, headers, gone-token mapping) runs without reaching Apple.
@@ -123,11 +130,7 @@ impl MockApns {
         let app = Router::new().route(
             "/3/device/{token}",
             post(
-                |AxState((tx, status, reason)): AxState<(
-                    mpsc::UnboundedSender<(String, Option<String>)>,
-                    StatusCode,
-                    Option<&'static str>,
-                )>,
+                |AxState((tx, status, reason)): AxState<MockApnsState>,
                  axum::extract::Path(token): axum::extract::Path<String>,
                  headers: axum::http::HeaderMap| async move {
                     let authorization = headers
