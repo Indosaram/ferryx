@@ -149,6 +149,65 @@ pub fn raise_file_descriptor_limit() -> Option<u64> {
     None
 }
 
+/// Raises the soft descriptor limit before a test binary reaches `main`.
+///
+/// `cargo test --lib` links this library into an executable whose `main` belongs to libtest, not
+/// to [`main`] in `main.rs`, so nothing on a test run calls [`raise_file_descriptor_limit`](raise_file_descriptor_limit)
+/// and the suite keeps launchd's soft limit of 256. A suite that runs thousands of cases four at
+/// a time, each holding sockets, pipes and PTY masters, exhausts that in the first few hundred and
+/// every later `open`/`spawn` fails with EMFILE: on 2026-11-18 at origin/main 558 of 705 failures
+/// in `cargo test --lib` were `Os { code: 24, "Too many open files" }`, including 29 PTY cases
+/// that die while building their runtime, before any assertion of theirs runs.
+///
+/// Darwin calls `__mod_init_func` entries from dyld before `main`, which is the only hook that
+/// precedes every test without naming a constructor the tests must remember to call; the
+/// `ctor` crate does the same thing, and hand-writing it avoids taking a dependency on the
+/// library the production build already inherits transitively. Linux does not need it: its
+/// default soft limit is 1024 and the suite passes there in CI.
+#[cfg(all(test, target_os = "macos"))]
+mod test_descriptor_limit {
+    extern "C" fn raise_on_start() {
+        super::raise_file_descriptor_limit();
+    }
+
+    #[used]
+    // The plain "segment,section" spelling: `__mod_init_func` is the section dyld scans for
+    // initializers on Apple targets and is what this lane's `--all-targets` clippy run
+    // compiled. (`ctor`/`dtor` append a third, optional symbol component to the same section.)
+    #[link_section = "__DATA,__mod_init_func"]
+    static RAISE_ON_START: extern "C" fn() = raise_on_start;
+
+    /// The hook ran: prove the limit this process actually carries, not that a function was
+    /// registered. With the hook absent the soft limit stays at launchd's 256 and this fails.
+    #[test]
+    fn the_test_binary_runs_above_the_launchd_default() {
+        let mut limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `getrlimit` only writes the struct passed by pointer.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) },
+            0,
+            "the process reports no descriptor limit"
+        );
+        let hard = if limits.rlim_max == libc::RLIM_INFINITY {
+            u64::MAX
+        } else {
+            limits.rlim_max
+        };
+        // What the raise should have produced, from the hard limit this host actually grants.
+        // `rlim_cur` is already a `u64` on Darwin; no widening cast is needed here.
+        let expected = crate::file_descriptor_limit_target(256, hard);
+        assert!(
+            limits.rlim_cur >= expected,
+            "soft limit {} is below the {} a test run needs; the start-of-process raise did not run",
+            limits.rlim_cur,
+            expected
+        );
+    }
+}
+
 #[cfg(test)]
 mod file_descriptor_limit_tests {
     use super::{file_descriptor_limit_target, FILE_DESCRIPTOR_LIMIT_CAP};
