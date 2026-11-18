@@ -396,9 +396,12 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
     expect(screen.queryByRole("heading", { name: "Paired machines" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "SSH Machines" })).toBeNull();
 
-    // Mixed in ONE list
-    expect(screen.getByText("Linux Build Box")).toBeInTheDocument();
-    expect(screen.getByText("Dev Server")).toBeInTheDocument();
+    // Mixed in ONE list. Scope to the list: the tunnel form's machine picker also
+    // offers every host, and a Radix Select inside a form mirrors its items into a
+    // hidden native <select>, so a page-wide text query would count that copy too.
+    const machineList = screen.getByRole("list", { name: "Remote machines" });
+    expect(within(machineList).getByText("Linux Build Box")).toBeInTheDocument();
+    expect(within(machineList).getByText("Dev Server")).toBeInTheDocument();
   });
 
   it("renders EXACTLY ONE Add Machine button even when the inventory is empty", async () => {
@@ -532,7 +535,8 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       render(<RemoteSection store={store} inventory={inventory} />);
     });
 
-    expect(screen.getByText("Dev Server")).toBeInTheDocument();
+    const machineList = screen.getByRole("list", { name: "Remote machines" });
+    expect(within(machineList).getByText("Dev Server")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add Project on Dev Server" })).toBeInTheDocument();
   });
 
@@ -901,8 +905,9 @@ describe("RemoteSection UX Unification & Review Blockers", () => {
       render(<RemoteSection store={store} inventory={inventory} />);
     });
 
-    const pairedEl = screen.getByText("Colliding Paired").closest("[data-machine-id]");
-    const sshEl = screen.getByText("Colliding SSH").closest("[data-machine-id]");
+    const machineList = screen.getByRole("list", { name: "Remote machines" });
+    const pairedEl = within(machineList).getByText("Colliding Paired").closest("[data-machine-id]");
+    const sshEl = within(machineList).getByText("Colliding SSH").closest("[data-machine-id]");
 
     expect(pairedEl).toHaveAttribute("data-machine-id", `paired:${collidingId}`);
     expect(sshEl).toHaveAttribute("data-machine-id", `ssh:${collidingId}`);
