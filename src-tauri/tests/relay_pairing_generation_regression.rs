@@ -190,10 +190,21 @@ async fn a11_joint_fixture(inject_failure: bool) {
         let (mut stale, _) = tokio_tungstenite::connect_async(format!("{wsbase}/api/v1/terminal/{id}?ticket={ticket}&daemonEpoch=1")).await.unwrap();
         let rejected = timeout(LIMIT, stale.next()).await.unwrap();
         assert!(matches!(rejected, None | Some(Err(_)) | Some(Ok(Message::Close(_)))));
-        for suffix in ["daemonEpoch=01", "daemonEpoch=1&daemonEpoch=2", "afterSequence=01", "afterSequence=18446744073709551616", "token=forbidden", "rows=+2", "rows=02"] {
+        for (suffix, expected) in [
+            ("daemonEpoch=01", StatusCode::BAD_REQUEST),
+            ("daemonEpoch=1&daemonEpoch=2", StatusCode::BAD_REQUEST),
+            ("afterSequence=01", StatusCode::BAD_REQUEST),
+            ("afterSequence=18446744073709551616", StatusCode::BAD_REQUEST),
+            ("token=forbidden", StatusCode::UNAUTHORIZED),
+            ("rows=+2", StatusCode::BAD_REQUEST),
+            ("rows=02", StatusCode::BAD_REQUEST),
+        ] {
             let ticket = a11_ticket(&client, &base, token, id).await;
             let response = timeout(LIMIT, tokio_tungstenite::connect_async(format!("{wsbase}/api/v1/terminal/{id}?ticket={ticket}&{suffix}"))).await.unwrap();
-            assert!(matches!(response, Err(tokio_tungstenite::tungstenite::Error::Http(ref r)) if r.status() == StatusCode::UNAUTHORIZED), "{suffix}");
+            let Err(tokio_tungstenite::tungstenite::Error::Http(rejection)) = response else {
+                panic!("expected HTTP rejection for {suffix}");
+            };
+            assert_eq!(rejection.status(), expected, "{suffix}");
         }
         for foreign in [format!("{}/host/foreign/api/v1/terminal/{id}", relay_origin.replace("http://", "ws://")), format!("{wsbase}/api/v1/terminal/foreign")] {
             let ticket = a11_ticket(&client, &base, token, id).await;
@@ -205,7 +216,7 @@ async fn a11_joint_fixture(inject_failure: bool) {
         let ticket = a11_ticket(&client, &base, token, id).await;
         let malformed = format!("{wsbase}/api/v1/terminal/{id}?ticket={ticket}&daemonEpoch={epoch}&cols=01");
         let response = timeout(LIMIT, tokio_tungstenite::connect_async(malformed)).await.unwrap();
-        assert!(matches!(response, Err(tokio_tungstenite::tungstenite::Error::Http(ref r)) if r.status() == StatusCode::UNAUTHORIZED), "noncanonical cols must fail relay admission before upgrade");
+        assert!(matches!(response, Err(tokio_tungstenite::tungstenite::Error::Http(ref r)) if r.status() == StatusCode::BAD_REQUEST), "noncanonical cols must fail relay admission before upgrade");
         let ticket = a11_ticket(&client, &base, token, id).await;
         let url = format!("{wsbase}/api/v1/terminal/{id}?ticket={ticket}&daemonEpoch={epoch}&afterSequence=0");
         let (mut socket, _) = timeout(LIMIT, tokio_tungstenite::connect_async(&url)).await.unwrap().unwrap();
