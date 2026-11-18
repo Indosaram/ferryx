@@ -86,6 +86,8 @@ export async function invoke(command: string, rawArgs?: unknown): Promise<unknow
     case 'cmd_terminal_preferences': return { fontFamily: 'monospace', fontSize: 13, macosOptionAsAlt: false, cursorStyle: 'block', theme: {}, source: 'defaults', status: 'absent', sourcePath: null };
     // The web demo has no libghostty compositor; acknowledge the surface commands so
     // NativeTerminalPane does not surface an attach failure over the preview.
+    case 'cmd_native_terminal_attach_viewer':
+      return { sessionId: a.sessionId, viewer: false, attachTuple: null };
     case 'cmd_native_terminal_attach':
       return {
         sessionId: a.sessionId,
