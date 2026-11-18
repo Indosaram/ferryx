@@ -521,11 +521,18 @@ jobs:
           if command -v cygpath >/dev/null 2>&1; then BIN=$(cygpath -w "$BIN"); fi
           chmod +x "$BIN" 2>/dev/null || true
           [ -x "$BIN" ] || { echo "sccache: binary missing, skipping"; exit 0; }
-          echo "RUSTC_WRAPPER=$BIN" >> "$GITHUB_ENV"
-          echo "SCCACHE_REDIS=redis://:${SCCACHE_PASSWORD}@${SCCACHE_HOST}:6379" >> "$GITHUB_ENV"
-          echo "SCCACHE_IDLE_TIMEOUT=0" >> "$GITHUB_ENV"
-          "$BIN" --version
-
+          RUSTC=$(rustup which rustc)
+          export SCCACHE_REDIS="redis://:${SCCACHE_PASSWORD}@${SCCACHE_HOST}:6379"
+          export SCCACHE_IDLE_TIMEOUT=0
+          if ! "$BIN" "$RUSTC" -vV >/dev/null 2>&1; then
+            echo "::warning::sccache could not run rustc; compiling without the shared cache"
+            exit 0
+          fi
+          {
+            echo "RUSTC_WRAPPER=$BIN"
+            echo "SCCACHE_REDIS=$SCCACHE_REDIS"
+            echo "SCCACHE_IDLE_TIMEOUT=$SCCACHE_IDLE_TIMEOUT"
+          } >> "$GITHUB_ENV"
 
       # Fixture suites commit through git. Hosted runners ship no global identity, so
       # `git commit` inside a fixture repository fails before the assertion under test runs.
