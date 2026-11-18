@@ -503,7 +503,7 @@ fn aliases(config: &Config, host: &SshHost) -> Result<Vec<String>, IpcError> {
             };
             if value(&effective, "hostname").is_some_and(|v| v.eq_ignore_ascii_case(&host.hostname))
                 && value(&effective, "port").and_then(|v| v.parse::<u16>().ok()).unwrap_or(22) == host.port.unwrap_or(22)
-                && host.username.as_deref().map_or(true, |u| value(&effective, "user") == Some(u))
+                && host.username.as_deref().is_none_or(|u| value(&effective, "user") == Some(u))
                 && same_identity { candidates.insert(alias.to_string()); }
         }
     }

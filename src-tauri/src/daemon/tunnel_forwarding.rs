@@ -655,9 +655,13 @@ impl Drop for Fixture {
 // Daemon-ownership harness for the detach case
 // ---------------------------------------------------------------------------
 
+/// One client request as the actor receives it. `Start` carries a whole `SshHost` beside a saved
+/// spec, which made it the largest variant by an order of magnitude; a `Command` is what every
+/// client message queues through one channel, so the host is boxed to keep the queue's per-entry
+/// footprint at the size of the common case instead of the rare one.
 enum Command {
     Start {
-        host: SshHost,
+        host: Box<SshHost>,
         spec: TunnelSpec,
         reply: oneshot::Sender<Result<TunnelView, IpcError>>,
     },
@@ -744,7 +748,7 @@ impl TunnelClient {
     async fn start(&self, host: SshHost, spec: TunnelSpec) -> TunnelView {
         let (reply, answer) = oneshot::channel();
         self.tx
-            .send(Command::Start { host, spec, reply })
+            .send(Command::Start { host: Box::new(host), spec, reply })
             .await
             .expect("daemon command channel");
         answer

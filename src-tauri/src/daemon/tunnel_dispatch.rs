@@ -117,6 +117,11 @@ fn stale() -> IpcError {
 /// classification the UI reads as a tunnel state, `reason` is the route/store layer's
 /// vocabulary. It names the missing facility (the control socket the registry and the
 /// runtimes sidecar are built on) so an operator is not left with a bare "unsupported".
+///
+/// Only the `#[cfg(windows)]` alternative bodies below refuse a request this way, so the
+/// helper exists on exactly the targets that call it: on unix every arm has a real body
+/// and a second, unreachable refusal would be dead code carrying a Windows-only claim.
+#[cfg(windows)]
 fn unsupported_platform() -> IpcError {
     IpcError::new(
         IpcErrorCode::Unsupported,
@@ -1099,9 +1104,11 @@ impl TunnelDispatch {
         let saved = lock.save_specs(
             &request.host_id,
             request.specs.clone(),
-            request.expected_revision,
-            request.force,
-            request.discard_invalid,
+            tunnel_store::SavePolicy {
+                expected_revision: request.expected_revision,
+                force: request.force,
+                discard_invalid: request.discard_invalid,
+            },
             &memory.store,
             now,
         )?;
@@ -1145,11 +1152,7 @@ impl TunnelDispatch {
                 .map(|specs| specs.len() as u32)
                 .unwrap_or(0);
             memory.store.invalid_rows.remove(&request.host_id);
-            memory.store.definitions_revision = memory
-                .store
-                .definitions_revision
-                .checked_add(1)
-                .unwrap_or(u64::MAX);
+            memory.store.definitions_revision = memory.store.definitions_revision.saturating_add(1);
             if let Err(error) = lock.persist_authority(&memory.store, now) {
                 tracing::warn!(host = %request.host_id, ?error, "Cannot persist a forgotten host");
             }

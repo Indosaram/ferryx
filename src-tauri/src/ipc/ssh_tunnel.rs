@@ -380,7 +380,9 @@ pub fn validate_save_request(
     for spec in &request.specs {
         validate_saved_spec(spec)?;
     }
-    for error in validate_specs_for_host(&request.specs) {
+    // A host's duplicate ids and ports are refused by its FIRST offending row: the caller
+    // gets the structured pair, not the whole list, which is what the GUI renders.
+    if let Some(error) = validate_specs_for_host(&request.specs).into_iter().next() {
         return Err(match error {
             // The only refusal in the plan that carries `port_in_use`; a start-time
             // `port_in_use` is an Ok + Failed view and is never an Err.
@@ -970,8 +972,9 @@ mod tests {
             |h| h.identity_file = Some("~/.ssh/id_other".into()),
             |h| h.jump_host = Some("other-bastion".into()),
         ];
-        let mut expected_revision = 5;
-        for mutate in mutations {
+        // Each mutation lands one revision after the previous one, starting from the revision the
+        // command observed; the counter is the loop index so no separate `+= 1` can drift from it.
+        for (expected_revision, mutate) in (5u64..).zip(mutations) {
             let mut next = host("host-a");
             mutate(&mut next);
             let changed = changed_identity(Some(&host("host-a")), &next)
@@ -987,7 +990,6 @@ mod tests {
             assert_eq!(forwarded.host_revision, expected_revision - 1);
             assert_eq!(forwarded.identity.as_ref(), Some(&changed));
             assert_eq!(revision, expected_revision);
-            expected_revision += 1;
         }
 
         // b3: a delete forgets the host's definitions exactly once.

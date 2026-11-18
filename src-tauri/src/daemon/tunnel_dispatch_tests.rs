@@ -5,13 +5,17 @@
 //! Every unix fn is gated per fn, never by a module-level `#![cfg(unix)]`: that
 //! would also compile out `windows_arms_refuse_before_store`, leaving it compiled
 //! nowhere.
-use super::*;
 use crate::daemon::protocol::*;
 use crate::ssh::tunnel::registry::{
-    ProcessSpawner, Signal, SpawnedTunnel, TunnelChild, TunnelSpawner,
+    ProcessSpawner, Signal, SpawnedTunnel, TunnelSpawner,
 };
 use crate::ssh::tunnel::runtime_records::{OwnerIdentity, RecordIntent, RuntimeRecord, RuntimeRecords};
 use crate::ssh::tunnel_store::Clock;
+/// The wall clock the Windows-only refusal table needs. Imported by name rather than through a
+/// `super::*` glob: the glob resolved nothing on the unix target this module mostly runs on, so
+/// every darwin build carried an unused-import warning that no code path could ever consume.
+#[cfg(windows)]
+use crate::ssh::tunnel_store::SystemClock;
 use crate::ssh::tunnel::{TunnelFailureCode, TunnelRuntimeId, TunnelSpec, TunnelSpecId, TunnelState};
 
 use super::tunnel_dispatch::{TunnelDispatch, TunnelPaths};
@@ -49,7 +53,9 @@ fn host_json(id: &str, hostname: &str, auth: &str, disabled: Option<bool>) -> se
 }
 
 struct Fixture {
-    dir: TempDir,
+    // Held for the fixture's lifetime: dropping the TempDir removes the directory all three
+    // paths live under, so it is a resource owner rather than a field anyone reads.
+    _dir: TempDir,
     definitions: PathBuf,
     hosts: PathBuf,
 }
@@ -64,7 +70,7 @@ impl Fixture {
             serde_json::to_vec(&json!({ "hosts": hosts, "tombstones": [] })).unwrap(),
         )
         .unwrap();
-        Self { dir, definitions, hosts: hosts_path }
+        Self { _dir: dir, definitions, hosts: hosts_path }
     }
 
     fn default_host() -> Self {
@@ -77,15 +83,6 @@ impl Fixture {
 
     fn write_definitions(&self, store: serde_json::Value) {
         std::fs::write(&self.definitions, serde_json::to_vec(&store).unwrap()).unwrap();
-    }
-
-    fn seed_revision(&self, revision: u64) {
-        self.write_definitions(json!({
-            "version": 1,
-            "definitions_revision": 0,
-            "host_revisions": { HOST: revision },
-            "hosts": {}
-        }));
     }
 
     fn dispatch(&self, clock: Arc<dyn Clock>) -> Arc<TunnelDispatch> {
@@ -532,7 +529,7 @@ async fn shutdown_reaps_child_and_releases_port() {
     // Subscribed BEFORE the call: awaiting the signal afterwards would pass
     // against a shutdown that only sends the kill and returns, because this
     // runtime outlives the call and its reaper would eventually fire.
-    let mut exit = dispatch
+    let exit = dispatch
         .registry()
         .unwrap()
         .subscribe_exit(view.runtime_id.as_ref().unwrap())
@@ -701,18 +698,22 @@ async fn spawn_writes_intent_before_pid() {
             dispatch.start(start_request(Some(fixture.spec(port)), None, Some(0)), true).await,
         )
         .view;
-        let seen = spawner.at_spawn.lock().unwrap();
-        let at_spawn = seen.first().expect("the sidecar was read at spawn time");
-        let intent = at_spawn
-            .iter()
-            .find(|record| record.local_port == port)
-            .expect("a record for this port existed before the child did");
-        assert_eq!(
-            intent.intent,
-            RecordIntent::Spawning,
-            "the sidecar must name the port before the child exists"
-        );
-        assert_eq!(intent.pid, None, "an intent record carries no identity to kill");
+        // The guard is scoped to the spawn observations it reads: `shutdown` below awaits, and a
+        // std MutexGuard held across an await point can deadlock the task that would take it.
+        {
+            let seen = spawner.at_spawn.lock().unwrap();
+            let at_spawn = seen.first().expect("the sidecar was read at spawn time");
+            let intent = at_spawn
+                .iter()
+                .find(|record| record.local_port == port)
+                .expect("a record for this port existed before the child did");
+            assert_eq!(
+                intent.intent,
+                RecordIntent::Spawning,
+                "the sidecar must name the port before the child exists"
+            );
+            assert_eq!(intent.pid, None, "an intent record carries no identity to kill");
+        }
         // The pid record replaces it, killable and with a process group.
         let after = dispatch.records().unwrap().load().unwrap();
         let record = after.values().find(|record| record.local_port == port).unwrap();

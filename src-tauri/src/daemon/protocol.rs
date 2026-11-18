@@ -2955,7 +2955,13 @@ mod tests {
         assert!(encoded.get("sessionId").is_none(), "absent id must not be serialized");
         let decoded: DaemonRequest = serde_json::from_value(encoded).expect("decode spawn without sessionId");
         assert!(matches!(decoded, DaemonRequest::Spawn { session_id: None, .. }));
+        // The version this file's DTOs belong to, stated so a bump cannot land here unnoticed.
+        // Gated on the QA feature for the same reason as `capability_constant_and_protocol_version_pinned`:
+        // `--all-features` raises the constant to the QA value and a bare 6 would fail there.
+        #[cfg(not(feature = "qa-protocol-bump"))]
         assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
+        #[cfg(feature = "qa-protocol-bump")]
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 7);
     }
 
     #[test]
@@ -2970,7 +2976,10 @@ mod tests {
         assert!(matches!(&decoded, DaemonResponse::HandshakeOk {
             capabilities, admission_time_unix_ms: None, .. } if capabilities.is_empty()));
         assert_eq!(serde_json::to_value(decoded).expect("encode legacy handshake"), handshake);
+        #[cfg(not(feature = "qa-protocol-bump"))]
         assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
+        #[cfg(feature = "qa-protocol-bump")]
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 7);
     }
 
     #[test]
@@ -4416,7 +4425,10 @@ mod tests {
             _ => panic!("Expected Spawn variant"),
         }
 
+        #[cfg(not(feature = "qa-protocol-bump"))]
         assert_eq!(DAEMON_PROTOCOL_VERSION, 6);
+        #[cfg(feature = "qa-protocol-bump")]
+        assert_eq!(DAEMON_PROTOCOL_VERSION, 7);
     }
 
     #[test]

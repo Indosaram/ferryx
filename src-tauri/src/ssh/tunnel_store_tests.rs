@@ -11,7 +11,7 @@ fn file() -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 fn save(path: &Path, host: &str, specs: Vec<TunnelSpec>, revision: Option<u64>, force: bool, discard_invalid: bool) -> Result<TunnelStore, IpcError> {
-    lock_store(path)?.save_specs(host, specs, revision, force, discard_invalid, &TunnelStore::default(), 100)
+    lock_store(path)?.save_specs(host, specs, SavePolicy { expected_revision: revision, force, discard_invalid }, &TunnelStore::default(), 100)
 }
 fn digest(path: &Path) -> Vec<u8> { Sha256::digest(fs::read(path).unwrap()).to_vec() }
 fn reason(error: IpcError, code: IpcErrorCode, reason: &str) {
@@ -237,7 +237,7 @@ fn authority_survives_restart_with_identity_pending_and_stale_rules() {
     let entry = loaded.active_host_identity("a").unwrap(); assert_eq!(entry.fingerprint, identity()); assert_eq!(entry.recorded_at_unix_ms, Some(100)); assert_eq!(entry.revision, revision);
     assert_eq!(load_store(&path, 50).unwrap().active_host_identity("a").unwrap().recorded_at_unix_ms, Some(50));
     memory.mark_identity_pending("a", 150); assert_eq!(memory.active_host_identity("a").unwrap().recorded_at_unix_ms, None);
-    lock_store(&path).unwrap().save_specs("b", vec![spec(5002)], Some(0), false, false, &memory, 200).unwrap();
+    lock_store(&path).unwrap().save_specs("b", vec![spec(5002)], SavePolicy { expected_revision: Some(0), force: false, discard_invalid: false }, &memory, 200).unwrap();
     let disk: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap(); assert_eq!(disk["host_identities"]["a"]["recordedAtUnixMs"], 150);
     memory.stamp_identity("a", revision + 1, 200); assert_eq!(memory.active_host_identity("a").unwrap().recorded_at_unix_ms, None);
     memory.stamp_identity("a", revision, 200); lock_store(&path).unwrap().persist_authority(&memory, 200).unwrap();

@@ -1,3 +1,10 @@
+// Same reason as `lib.rs`: this example drives the QA barrier's render/reattach stages, whose
+// futures carry `NativeTerminalSurfaceHostState` across an `await` in `run_on_main_thread`. The
+// compiler must then prove `wgpu_core::validation::NumericType: Sync` through the whole object
+// graph, which overflows the default limit of 128 with `E0275` - and it does so here, in the
+// example's own crate root, where `lib.rs`'s limit does not reach.
+#![recursion_limit = "512"]
+
 use ferryx_lib::native_terminal::composition::{CellMetrics, LogicalBounds};
 use ferryx_lib::native_terminal::surface_host::{
     NativeTerminalBoundsRequest, NativeTerminalSurfaceHostState,

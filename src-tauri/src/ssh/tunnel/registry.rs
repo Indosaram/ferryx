@@ -8,7 +8,7 @@
 use super::{argv::{self, ConfigSource}, *};
 use super::runtime_records::{RuntimeRecords, SweptRecord};
 use crate::ssh::{password, SshHost};
-use crate::ssh::tunnel_store::{Clock, SystemClock};
+use crate::ssh::tunnel_store::Clock;
 use serde::Serialize;
 use std::{collections::{HashMap, VecDeque}, future::Future, io, net::{Ipv4Addr, SocketAddr}, path::{Path, PathBuf}, pin::Pin, process::{ExitStatus, Stdio}, sync::{Arc, Mutex, Weak, atomic::{AtomicUsize, Ordering}}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tokio::{io::{AsyncRead, AsyncReadExt}, net::{TcpSocket, TcpStream}, sync::{mpsc, watch}, time::{Instant, timeout}};
@@ -696,6 +696,7 @@ async fn run_entry(weak: Weak<Core>, id: TunnelRuntimeId, host: SshHost, mut can
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::ssh::tunnel_store::SystemClock;
     use crate::ssh::{SshAuthMethod, SshHostSource};
     use tokio::io::AsyncWriteExt;
     use std::sync::atomic::AtomicBool;
@@ -792,7 +793,7 @@ mod tests {
                             match tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await {
                                 Ok(listener) => break listener,
                                 Err(error) => {
-                                    if *killed.borrow() != None {
+                                    if (*killed.borrow()).is_some() {
                                         drop(write); done.send_replace(Some(15)); return;
                                     }
                                     if error.kind() != io::ErrorKind::AddrInUse || std::time::Instant::now() >= deadline {

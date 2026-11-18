@@ -55,6 +55,11 @@ use tokio::sync::broadcast;
 #[derive(Clone, Copy)]
 pub(crate) enum Target {
     Unix,
+    /// Named only by the capability-vector call sites and their tests: non-unix builds reach
+    /// it through `current()`, and unix builds reach it only from tests that pin Windows'
+    /// answer (the oracle). It stays outside `cfg(test)` so those tests exercise the same
+    /// type the Windows build compiles, not a test-only copy of it.
+    #[cfg(any(not(unix), test))]
     Windows,
 }
 

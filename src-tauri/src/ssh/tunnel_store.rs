@@ -269,7 +269,9 @@ pub fn lock_store(path: &Path) -> Result<StoreLock, IpcError> {
         use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
         if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(io_error)?; }
         let sidecar = path.with_file_name("ssh_tunnels.lock");
-        let file = fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).open(&sidecar).map_err(|e| {
+        // A lock file is opened once and never written: truncating it here would discard a
+        // holder's bytes for no gain, and the fd's lifetime is the only state that matters.
+        let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).open(&sidecar).map_err(|e| {
             store_error(&path.to_string_lossy(), "store_lock_unavailable").with_details(json!({"reason": "store_lock_unavailable", "path": path, "osError": e.raw_os_error()}))
         })?;
         loop {
@@ -301,6 +303,20 @@ impl Drop for StoreLock {
     }
 }
 
+/// How strictly a save compares against what is already on disk.
+///
+/// All three travel together because they are one decision: `expected_revision` is the
+/// revision the caller saw, `force` waives ONLY that comparison (corruption and a foreign
+/// version stay protected), and `discard_invalid` additionally drops this host's unreadable
+/// rows. Passing them as separate arguments let a call site supply `force` while silently
+/// omitting the revision it meant to compare against.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SavePolicy {
+    pub expected_revision: Option<u64>,
+    pub force: bool,
+    pub discard_invalid: bool,
+}
+
 /// Deterministic write failure injection for authority reconciliation tests.
 #[derive(Debug)]
 pub struct WriteFault;
@@ -309,7 +325,8 @@ impl StoreLock {
     /// `force` waives ONLY revision comparison. Corrupt and foreign-version
     /// files remain protected; partial rows survive unless discard_invalid is
     /// explicitly true, and then ONLY this host's unreadable rows are discarded.
-    pub fn save_specs(&self, host_id: &str, specs: Vec<TunnelSpec>, expected_revision: Option<u64>, force: bool, discard_invalid: bool, memory: &TunnelStore, now_ms: u64) -> Result<TunnelStore, IpcError> {
+    pub fn save_specs(&self, host_id: &str, specs: Vec<TunnelSpec>, policy: SavePolicy, memory: &TunnelStore, now_ms: u64) -> Result<TunnelStore, IpcError> {
+        let SavePolicy { expected_revision, force, discard_invalid } = policy;
         if expected_revision.is_none() && !force {
             return Err(IpcError::new(IpcErrorCode::InvalidArgument, "Tunnel definitions revision is required").with_details(json!({"reason": "revision_required"})));
         }
