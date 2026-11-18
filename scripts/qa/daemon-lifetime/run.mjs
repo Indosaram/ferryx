@@ -204,6 +204,19 @@ async function prepareWorktreeDeps({ host, agent, worktree }) {
 }
 
 /**
+ * Local lanes build from the checkout the run was launched in, which may be a worktree that was
+ * created by hand and therefore carries no ui/node_modules and no ghostty submodule. Both are
+ * needed by tauri's beforeBuildCommand, and their absence surfaced only as an opaque
+ * 'error: Script not found "tsc"' BUILD_FAILED (run surv-mac-1117h). Only install when a marker is
+ * missing: a prepared tree must not pay a relink on every run.
+ */
+async function ensureLocalBuildDeps({ host, agent, worktree }) {
+  const probe = await agent.call('exec', { command: 'sh', args: ['-c', `test -x "${worktree}/ui/node_modules/.bin/tsc" && test -n "$(ls -A "${worktree}/src-tauri/ghostty" 2>/dev/null)" && echo DEPS_OK || echo DEPS_MISSING`] });
+  if (String(probe.stdout).includes('DEPS_OK')) return true;
+  return prepareWorktreeDeps({ host, agent, worktree });
+}
+
+/**
  * The gate's build tree. A remote worktree must exist and carry its deps before build A; creating it
  * here (and removing it at teardown) is what lets a gate run on a host that has no checkout yet -
  * run 20261112t072829z only built after ui/node_modules and the ghostty submodule were added by hand,
@@ -653,6 +666,12 @@ async function main() {
     // A remote worktree the harness did not prepare itself (deps: ghostty submodule, ui/node_modules)
     // fails build A in tauri's beforeBuildCommand. Preparing here is idempotent when it is already done.
     if (host.transport.kind !== 'local' && !selfTest) await prepareGateWorktree({ host, agent, worktree: buildFrom, live, summary, writeSummary });
+    // The same beforeBuildCommand runs on a local lane, where buildFrom is whatever checkout the run
+    // was launched from. A fresh worktree there has no ui/node_modules, so tauri's
+    // 'bun --bun tsc && vite build' died with 'error: Script not found "tsc"' and the whole gate
+    // reported BUILD_FAILED before the first scenario (run surv-mac-1117h, 2026-11-18). Check first
+    // and only pay the install when a dep is actually missing, so warm trees are untouched.
+    if (host.transport.kind === 'local' && !selfTest) await ensureLocalBuildDeps({ host, agent, worktree: buildFrom });
     const plan = buildPlan({ host, runDir, worktree: buildFrom, v1Worktree: opts.v1Worktree, baselineWorktree: opts.baselineWorktree });
     const productName = tauriQaConfig(runId, host.platform).productName;
     const artifacts = {};

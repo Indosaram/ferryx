@@ -124,13 +124,33 @@ async function openMahord(gui, { binary, log }) {
     if (msg.error) p.reject(new Error(JSON.stringify(msg.error))); else p.resolve(msg.result);
   });
   child.stderr.on('data', (d) => log({ mahordStderr: String(d) }));
-  const exited = new Promise((resolve) => child.once('exit', (code) => {
-    for (const p of pending.values()) p.reject(new Error(`maho-client exited ${code}`));
-    resolve(code);
-  }));
+  // A client that dies at once must fail the handshake immediately, not sit until the RPC
+  // deadline. Measured on maho-win 2026-11-18: the WinGet ferryx-rd-client.exe ships without its
+  // FFmpeg DLLs, so it exits 0xC0000135 (STATUS_DLL_NOT_FOUND) in ~0 ms. 'exit' then fired before
+  // the initialize entry existed in 'pending', so nothing was rejected and every run reported
+  // 'deadline 90000ms: mahord initialize' - a transport-shaped message for a broken install.
+  // A spawn-level failure (ENOENT, EACCES, bad image) emits 'error' and never 'exit'; that event
+  // also had no listener, which is an unhandled error waiting to crash the run.
+  let exitState = null;
+  const exited = new Promise((resolve) => {
+    child.once('error', (error) => {
+      exitState = { error };
+      for (const p of pending.values()) p.reject(new Error(`maho-client failed to start: ${error.message}`));
+      resolve(null);
+    });
+    child.once('exit', (code, signal) => {
+      exitState = { code, signal };
+      for (const p of pending.values()) p.reject(new Error(`maho-client exited ${code ?? signal}`));
+      resolve(code);
+    });
+  });
+  const deathMessage = () => (exitState.error
+    ? `maho-client failed to start: ${exitState.error.message}`
+    : `maho-client exited ${exitState.code ?? exitState.signal} before answering`);
   // Shared hosts hit build bursts that stall the RD encode loop for tens of seconds; a 30s
   // deadline turned that into a hard Q00 failure (run 20261111t050123z). 90s rides them out.
   const rpc = (method, params, deadlineMs = 90_000) => {
+    if (exitState) return Promise.reject(new Error(deathMessage()));
     const id = nextId++;
     const p = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
@@ -178,17 +198,74 @@ export function createMacLocalInput({ exec }) {
   // use is the cross-platform one (Meta/Control/Alt/Shift). Passing "meta down" straight through is
   // rejected by osascript, so Q10 never opened Settings on macOS (run 20261117t142623z).
   const MOD_NAMES = { meta: 'command', cmd: 'command', command: 'command', control: 'control', ctrl: 'control', alt: 'option', option: 'option', shift: 'shift' };
+  // Named keys must be sent as key CODES. `keystroke "Tab"` types the four letters T-a-b; it never
+  // presses the Tab key, so Q10's Tab/Space walk drove nothing and its opt-out marker was never
+  // written (runs 20261117t234809z, and every earlier mac run). Every scenario key that is not a
+  // single printable character belongs here; `Enter`/`Return` already did, which is why Q11 could
+  // commit its line while its focus walk stayed inert.
+  const KEY_CODES = {
+    tab: 48,
+    space: 49,
+    escape: 53,
+    enter: 36,
+    return: 36,
+    backspace: 51,
+    delete: 117,
+    forwarddelete: 117,
+    arrowleft: 123,
+    left: 123,
+    arrowright: 124,
+    right: 124,
+    arrowdown: 125,
+    down: 125,
+    arrowup: 126,
+    up: 126,
+    home: 115,
+    end: 119,
+    pageup: 116,
+    pagedown: 121,
+  };
   const sendKey = async (k, mods = []) => {
     const using = mods.length ? ` using {${mods.map((m) => `${MOD_NAMES[String(m).toLowerCase()] ?? String(m).toLowerCase()} down`).join(', ')}}` : '';
-    if (k === 'Escape') return osa('tell application "System Events" to key code 53');
-    if (k === 'Enter' || k === 'Return') return osa('tell application "System Events" to key code 36');
-    if (k === 'Backspace') return osa('tell application "System Events" to key code 51');
+    const code = KEY_CODES[String(k).toLowerCase()];
+    if (code !== undefined) return osa(`tell application "System Events" to key code ${code}${using}`);
     return osa(`tell application "System Events" to keystroke "${escapeAs(k)}"${using}`);
   };
   return {
+    // System Events' `click at` reports success without posting a real mouse event, so the native
+    // terminal never received the click that sets has_focused_session() and Q11's keystrokes went
+    // to a window that was frontmost but not focused. cliclick posts a genuine CGEvent; it is
+    // present on maho-mac (/opt/homebrew/bin/cliclick). Fall back to System Events only when the
+    // binary is missing so the adapter still works on a host without it.
     click: async (x, y) => {
       if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false };
-      return osa(`tell application "System Events" to click at {${Math.round(x)}, ${Math.round(y)}}`);
+      const cx = Math.round(x);
+      const cy = Math.round(y);
+      const viaCliclick = await exec('/opt/homebrew/bin/cliclick', [`c:${cx},${cy}`]).catch(() => null);
+      if (viaCliclick && viaCliclick.status === 0) return viaCliclick;
+      return osa(`tell application "System Events" to click at {${cx}, ${cy}}`);
+    },
+    // A latched modifier outlives the chord that set it. A synthetic chord posts the modifier key-down
+    // with the letter, and the app swallows that letter as a chord, so the matching key-up pairing
+    // the OS would derive from a real keystroke never happens: every later keystroke arrives with
+    // the modifier still set. Measured on maho-mac run surv-mac-1117n, where all of Q11's typing
+    // logged modifier_flags=524320 (0x80000 maskAlternate | 0x20 NX_DEVICELALTKEYMASK) and nothing
+    // echoed. Nothing in the typing path can clear it (typeverified.mjs only resends and erases
+    // characters), so the pane is returned to a clean modifier state before it is typed into.
+    releaseModifiers: async () => {
+      const keys = ['alt', 'cmd', 'ctrl', 'shift'];
+      // cliclick posts real key-up CGEvents for every named modifier in one call.
+      const viaCliclick = await exec('/opt/homebrew/bin/cliclick', [`ku:${keys.join(',ku:')}`]).catch(() => null);
+      if (viaCliclick && viaCliclick.status === 0) return { ok: true, via: 'cliclick', keys };
+      // Without cliclick, release them one script at a time: a name System Events rejects must not
+      // hide the others.
+      const results = [];
+      for (const name of keys) {
+        const r = await osa(`tell application "System Events" to key up ${MOD_NAMES[name] ?? name}`)
+          .catch((error) => ({ failed: String(error?.message ?? error) }));
+        results.push({ name, ok: !r?.failed });
+      }
+      return { ok: results.every((r) => r.ok), via: 'osascript', keys, results };
     },
     type: async (text) => osa(`tell application "System Events" to keystroke "${escapeAs(text)}"`),
     key: async (k) => sendKey(k),
