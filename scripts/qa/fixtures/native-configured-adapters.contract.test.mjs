@@ -430,9 +430,12 @@ it.each(['close', 'EOF'])('rejects pending and later calls after child %s', asyn
 it('settles a real child error and refuses later calls', async () => {
   const { child, rpc } = rpcFixture();
   const failure = Object.assign(new Error('child transport failed'), { code: 'EPIPE' });
-  const pending = expect(rpc.call('probe', {})).rejects.toBe(failure);
+  // Subscribe before the error is emitted: `expect(<pending promise>).rejects`
+  // drains the loop synchronously, and the emitter below is the only thing that
+  // can settle it.
+  const settled = rpc.call('probe', {}).then(() => null, (error) => error);
   child.emit('error', failure);
-  await pending;
+  expect(await settled).toBe(failure);
   await expect(rpc.call('unwatch', {})).rejects.toBe(failure);
   expect(child.stdin.write).toHaveBeenCalledTimes(1);
   child.stdout.destroy(); child.stderr.destroy();
@@ -666,7 +669,10 @@ describe('configured native producer event adapter', () => {
     expect(raw).not.toHaveProperty('source');
   });
 
-  it.each([null, [], {}, { kind: 1 }, { event: 'attached' }])(
+  // Explicit one-element rows: a bare `[]` row reads as "zero arguments" to some
+  // runners (Bun then treats the single parameter as a done callback and times
+  // out), while the contract needs the empty array as the value under test.
+  it.each([[null], [[]], [{}], [{ kind: 1 }], [{ event: 'attached' }]])(
     'rejects malformed or untyped event %j without manufacturing a receipt',
     (raw) => expect(nativeProducerEvent(raw)).toBeNull(),
   );
@@ -838,10 +844,11 @@ describe('private local PTY owner command RPC', () => {
 describe('configured native adapter snapshot request and validation', () => {
   const splitTuple = (pane, backend) => ({ backendSessionId: backend, incarnation: 'i', daemonEpoch: 'e', frontendSessionId: 'f-' + pane,
     paneIdentity: pane, bindingKey: 'k-' + pane, attemptGeneration: 1 });
-  const splitHarness = (events) => {
+  const splitHarness = (events, onHotkey) => {
     const listeners = new Set();
     const order = [];
     const mahord = { hotkey: vi.fn(async (keys) => { order.push(['hotkey', keys.join('+')]);
+      onHotkey?.();
       for (const event of events) for (const listener of [...listeners]) listener(event); }) };
     const subscribe = (listener) => { order.push(['subscribe']); listeners.add(listener); return () => listeners.delete(listener); };
     return { mahord, subscribe, order, listeners };
@@ -864,11 +871,17 @@ describe('configured native adapter snapshot request and validation', () => {
 
   it('second pane wait is cancellable and never accepts the target pane', async () => {
     const target = splitTuple('pane-a', 'backend-a');
-    const h = splitHarness([presented(target)]);
+    // Wait on the chord the fixture actually sends rather than re-reading a spy:
+    // Bun's vitest shim has no vi.waitFor, and polling the spy would spin.
+    const chordSent = Promise.withResolvers();
+    const expired = AbortSignal.timeout(2_000);
+    const h = splitHarness([presented(target)], () => chordSent.resolve());
     const controller = new AbortController();
     const pending = splitSecondPane({ mahord: h.mahord, platform: 'linux', presentation: { cursor: async () => ({ path: '/p', afterLine: 1 }) },
       subscribe: h.subscribe, target, gui: { pid: 9 }, runId: 'run', operationId: 'op', signal: controller.signal });
-    await vi.waitFor(() => expect(h.mahord.hotkey).toHaveBeenCalledOnce());
+    await Promise.race([chordSent.promise, new Promise((_, reject) =>
+      expired.addEventListener('abort', () => reject(new Error('split-down chord was never sent')), { once: true }))]);
+    expect(h.mahord.hotkey).toHaveBeenCalledOnce();
     controller.abort(new Error('cancelled'));
     await expect(pending).rejects.toThrow('cancelled');
     expect(h.listeners.size).toBe(0);
