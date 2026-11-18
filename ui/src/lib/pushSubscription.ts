@@ -208,6 +208,17 @@ export async function enablePhoneAlerts(
 
 /** Removes the subscription on the gateway first; the browser copy goes only once that worked. */
 export async function disablePhoneAlerts(request: PushRequest): Promise<PhoneAlertState> {
+  // The installed iOS app registered an APNs token, not a Web Push subscription, so there is no
+  // local subscription to unsubscribe and the token row is the only record to remove. Skipping
+  // this left the phone receiving decision alerts after the user switched them off.
+  if (apnsCapable()) {
+    try {
+      const res = await request("/api/v1/push/apns/unsubscribe", { method: "POST" });
+      return res.ok ? "disabled" : "error";
+    } catch {
+      return "error";
+    }
+  }
   if (!pushCapable()) return "unsupported";
   try {
     const registration = await pushRegistration();

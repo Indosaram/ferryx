@@ -4313,6 +4313,19 @@ async fn push_unsubscribe(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/v1/push/apns/unsubscribe`: the iOS install stops receiving alerts. Apple has no
+/// push endpoint to delete, so the only record is the stored row: without this the token stays
+/// registered and the phone keeps getting decision alerts after the user switched them off.
+/// It takes no body because a WKWebView cannot read its own token back to name it.
+async fn push_apns_unsubscribe(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let device = push_device(&state, &headers)?;
+    push_store_write(&state, move |store| store.revoke_apns_device(&device.id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn push_preferences(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -4383,8 +4396,8 @@ struct PushTestResponse {
     removed: usize,
 }
 
-/// Sends one test push to every subscription of the calling device. Desktop focus does not
-/// hold it back: the user asked for it.
+/// Sends one test push to every subscription of the calling device, over both transports.
+/// Desktop focus does not hold it back: the user asked for it.
 async fn push_test(
     State(state): State<Arc<RemoteGatewayState>>,
     headers: HeaderMap,
@@ -4392,7 +4405,12 @@ async fn push_test(
     use crate::remote::push::{AgentStateNotification, SendOutcome};
     let device = push_device(&state, &headers)?;
     let targets = state.push.store.for_device(&device.id);
-    if targets.is_empty() || state.auth_manager.live_device(&device.id).is_none() {
+    // An iOS install has no PushManager and registers only an APNs token, so a Web Push only
+    // lookup would answer 404 to exactly the phone whose settings button asked.
+    let apns_targets = state.push.store.apns_for_device(&device.id);
+    let apns = if apns_targets.is_empty() { None } else { state.push.apns().await };
+    let any_apns = apns.is_some();
+    if (targets.is_empty() && apns_targets.is_empty()) || state.auth_manager.live_device(&device.id).is_none() {
         return Err((StatusCode::NOT_FOUND, "No push subscription for this device".into()));
     }
     let notification = AgentStateNotification {
@@ -4404,21 +4422,41 @@ async fn push_test(
         body: "Phone alerts are working.".into(),
         url: None,
     };
-    let outcomes = futures_util::future::join_all(
+    let mut outcomes = futures_util::future::join_all(
         targets.iter().map(|sub| state.push.send(sub, &notification)),
     )
     .await;
+    if let Some(sender) = &apns {
+        outcomes.extend(
+            futures_util::future::join_all(
+                apns_targets
+                    .iter()
+                    .map(|sub| state.push.send_apns(sender, sub, &notification)),
+            )
+            .await,
+        );
+    }
     let delivered = outcomes.iter().filter(|o| **o == SendOutcome::Delivered).count();
     let removed = outcomes.iter().filter(|o| **o == SendOutcome::Gone).count();
-    if delivered == 0 && removed < outcomes.len() {
-        let reason = outcomes
-            .iter()
-            .find_map(|outcome| match outcome {
-                SendOutcome::Failed(reason) => Some(reason.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        return Err((StatusCode::BAD_GATEWAY, reason));
+    if delivered == 0 {
+        // A token is registered but this daemon holds no Apple key, so nothing could be sent to
+        // it. Answering 200 would tell the phone its alerts work when the alert never left here.
+        if !apns_targets.is_empty() && !any_apns {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "APNs is not configured on this computer, so the test alert was not sent".into(),
+            ));
+        }
+        if removed < outcomes.len() {
+            let reason = outcomes
+                .iter()
+                .find_map(|outcome| match outcome {
+                    SendOutcome::Failed(reason) => Some(reason.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            return Err((StatusCode::BAD_GATEWAY, reason));
+        }
     }
     Ok(Json(PushTestResponse { sent: outcomes.len(), delivered, removed }))
 }
@@ -9126,6 +9164,7 @@ pub(crate) fn cors_origin_allowed(
             "/api/v1/push/vapid-public-key"
                 | "/api/v1/push/subscribe"
                 | "/api/v1/push/apns"
+                | "/api/v1/push/apns/unsubscribe"
                 | "/api/v1/push/unsubscribe"
                 | "/api/v1/push/preferences"
                 | "/api/v1/push/session-mute"
@@ -9659,11 +9698,13 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route("/api/v1/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/v1/push/subscribe", post(push_subscribe))
         .route("/api/v1/push/apns", post(push_apns_subscribe))
+        .route("/api/v1/push/apns/unsubscribe", post(push_apns_unsubscribe))
         .route("/api/v1/push/unsubscribe", post(push_unsubscribe))
         .route("/api/v1/push/preferences", post(push_preferences))
         .route("/api/push/vapid-public-key", get(push_vapid_public_key))
         .route("/api/push/subscribe", post(push_subscribe))
         .route("/api/push/apns", post(push_apns_subscribe))
+        .route("/api/push/apns/unsubscribe", post(push_apns_unsubscribe))
         .route("/api/push/unsubscribe", post(push_unsubscribe))
         .route("/api/push/preferences", post(push_preferences))
         .fallback(remote_fallback)

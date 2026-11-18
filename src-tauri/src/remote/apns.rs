@@ -71,6 +71,12 @@ impl ApnsCredentials {
         }
     }
 
+    /// Test-only: credentials from a PEM already in memory, so a test needs no `.p8` on disk.
+    #[cfg(test)]
+    pub(crate) fn for_test(key_pem: String, key_id: &str, team_id: &str) -> Self {
+        Self { key_pem, key_id: key_id.to_string(), team_id: team_id.to_string() }
+    }
+
     /// Reads the key at `path`. Call from a blocking worker: it touches disk.
     pub fn from_parts(path: PathBuf, key_id: String, team_id: String) -> Result<Self, ApnsError> {
         let key_pem = std::fs::read_to_string(&path).map_err(|error| {
@@ -257,14 +263,50 @@ pub struct ApnsSender {
     client: reqwest::Client,
     /// The app's bundle id, which APNs requires as `apns-topic`.
     topic: String,
+    /// Test-only: a local mock stands in for Apple, so a test can prove the send path without
+    /// reaching the network. Production always posts to [`ApnsEnvironment::host`].
+    #[cfg(test)]
+    base_url: Option<String>,
 }
 
 impl ApnsSender {
     pub fn new(credentials: ApnsCredentials, topic: String, client: reqwest::Client) -> Self {
-        Self { tokens: ApnsTokenCache::new(credentials), client, topic }
+        Self {
+            tokens: ApnsTokenCache::new(credentials),
+            client,
+            topic,
+            #[cfg(test)]
+            base_url: None,
+        }
     }
 
-    /// The sender for `FERRYX_APNS_*`, or `None` when APNs is unconfigured.
+    /// Test-only: a sender that posts to a local mock instead of Apple's host.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        credentials: ApnsCredentials,
+        topic: String,
+        client: reqwest::Client,
+        base_url: String,
+    ) -> Self {
+        Self {
+            tokens: ApnsTokenCache::new(credentials),
+            client,
+            topic,
+            base_url: Some(base_url),
+        }
+    }
+
+    /// Where this send goes: Apple's host for the app's environment, or the test mock.
+    fn host_for(&self, environment: ApnsEnvironment) -> &str {
+        #[cfg(test)]
+        if let Some(base) = self.base_url.as_deref() {
+            return base;
+        }
+        environment.host()
+    }
+
+    /// The sender for `FERRYX_APNS_*`, or `None` when APNs is unconfigured. Reads the key file,
+    /// so call it from a blocking worker.
     pub fn from_env(client: reqwest::Client) -> Result<Option<Self>, ApnsError> {
         let Some(credentials) = ApnsCredentials::from_env()? else {
             return Ok(None);
@@ -289,7 +331,7 @@ impl ApnsSender {
             Ok(body) => body,
             Err(error) => return ApnsOutcome::Failed(error.to_string()),
         };
-        let url = format!("{}/3/device/{}", sub.environment.host(), sub.token);
+        let url = format!("{}/3/device/{}", self.host_for(sub.environment), sub.token);
         let request = self
             .client
             .post(&url)

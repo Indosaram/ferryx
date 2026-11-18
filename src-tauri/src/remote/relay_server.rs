@@ -3593,6 +3593,7 @@ pub(super) fn allowed_http_route(method: &Method, path: &str) -> bool {
             | ("POST", ["direct", "offer"])
             | ("GET", ["push", "vapid-public-key"])
             | ("POST", ["push", "subscribe" | "unsubscribe" | "preferences" | "apns"])
+            | ("POST", ["push", "apns", "unsubscribe"])
             | ("POST", ["push", "test" | "session-mute" | "panel-presence"])
             | ("GET", ["session", _])
             | ("GET", ["agent-history", _])
@@ -6093,6 +6094,7 @@ mod tests {
             "push/unsubscribe",
             "push/preferences",
             "push/apns",
+            "push/apns/unsubscribe",
             "push/test",
             "push/session-mute",
             "push/panel-presence",

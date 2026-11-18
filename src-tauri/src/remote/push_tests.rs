@@ -3,7 +3,7 @@
 use super::*;
 use ferryx_hub::supervisor::push_policy::{DECISION_BATCH_WINDOW, PANEL_PRESENCE_STALE};
 use crate::remote::state::RemoteGatewayState;
-use axum::{extract::State as AxState, http::StatusCode, routing::post, Router};
+use axum::{extract::State as AxState, http::StatusCode, response::IntoResponse, routing::post, Router};
 use base64::Engine;
 use std::sync::Arc;
 use std::time::Instant;
@@ -105,6 +105,94 @@ fn gateway(dir: &std::path::Path) -> Arc<RemoteGatewayState> {
     ));
     state.push.store.allow_loopback_endpoints();
     state
+}
+
+/// A local stand-in for Apple's push host. `POST /3/device/{token}` records the token and the
+/// `authorization` header, and answers the configured status plus an optional `reason` body, so
+/// the whole delivery path (JWT, headers, gone-token mapping) runs without reaching Apple.
+struct MockApns {
+    base_url: String,
+    sends: mpsc::UnboundedReceiver<(String, Option<String>)>,
+    tasks: tokio::task::JoinSet<()>,
+}
+
+impl MockApns {
+    /// `status`/`reason` are fixed, so a test asserts an outcome without racing the mock.
+    async fn start(status: StatusCode, reason: Option<&'static str>) -> Self {
+        let (tx, sends) = mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/3/device/{token}",
+            post(
+                |AxState((tx, status, reason)): AxState<(
+                    mpsc::UnboundedSender<(String, Option<String>)>,
+                    StatusCode,
+                    Option<&'static str>,
+                )>,
+                 axum::extract::Path(token): axum::extract::Path<String>,
+                 headers: axum::http::HeaderMap| async move {
+                    let authorization = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    let _ = tx.send((token, authorization));
+                    match reason {
+                        Some(reason) => (status, axum::Json(serde_json::json!({ "reason": reason }))).into_response(),
+                        None => status.into_response(),
+                    }
+                },
+            ),
+        )
+        .with_state((tx, status, reason));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self { base_url: format!("http://{addr}"), sends, tasks }
+    }
+
+    /// Points `state`'s APNs sender at this mock. Must run before the first send.
+    fn install(&self, state: &Arc<RemoteGatewayState>) {
+        let credentials = crate::remote::apns::ApnsCredentials::for_test(
+            test_key_pem(),
+            "HLC2K69Y8G",
+            "5DUM8WPB4C",
+        );
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let sender = crate::remote::apns::ApnsSender::for_test(
+            credentials,
+            "com.ferryx.mobile".to_string(),
+            client,
+            self.base_url.clone(),
+        );
+        state.push.install_apns_for_test(Arc::new(sender));
+    }
+
+    /// The sends already received. Callers await the send first, so nothing is in flight.
+    fn received(&mut self) -> Vec<(String, Option<String>)> {
+        let mut out = Vec::new();
+        while let Ok(send) = self.sends.try_recv() {
+            out.push(send);
+        }
+        out
+    }
+}
+
+impl Drop for MockApns {
+    fn drop(&mut self) {
+        self.tasks.abort_all();
+    }
+}
+
+/// A throwaway P-256 key in PKCS#8 PEM: the shape Apple's `.p8` has, and enough for the JWT the
+/// mock host accepts.
+fn test_key_pem() -> String {
+    use jwt_simple::algorithms::ES256KeyPair;
+    ES256KeyPair::generate().to_pem().unwrap()
 }
 
 fn paired_device(state: &RemoteGatewayState) -> String {
@@ -596,11 +684,13 @@ fn preferences_update_only_the_callers_subscriptions() {
     assert_eq!(body.phone_finished_mode, FinishedMode::LongTurns);
 }
 
-/// The APNs mutators take `apns` before `subscriptions`, which is the reverse of `mutate`. If
-/// they ever go back to taking it, a concurrent web-push write and an APNs write deadlock; this
-/// test runs both so that regression cannot hide behind a single-threaded pass.
+/// Persistence and ownership rules for the APNs half of the store, plus the wire format both
+/// transports share. This is a single-threaded sequence: it proves that an APNs row round-trips
+/// through the file, that one token cannot be adopted or removed by another device, and that a
+/// gone token is dropped from disk. The lock order between the two maps is proven by
+/// [`concurrent_web_push_and_apns_writes_do_not_deadlock`], not here.
 #[test]
-fn apns_subscriptions_persist_and_do_not_interleave_with_web_push_writes() {
+fn apns_subscriptions_persist_and_keep_one_owner_per_token() {
     use crate::remote::apns::ApnsEnvironment;
 
     let dir = tempfile::tempdir().unwrap();
@@ -650,4 +740,352 @@ fn apns_subscriptions_persist_and_do_not_interleave_with_web_push_writes() {
     store.remove_gone_apns(&token).unwrap();
     assert!(store.list_apns().is_empty());
     assert!(PushStore::load(Some(path)).list_apns().is_empty());
+}
+
+/// A store that persists both transports must acquire `subscriptions` before `apns` on every
+/// path that takes both; an inverted order deadlocks the two writers against each other. The
+/// two writers here run at the same time and are released together by a barrier, so neither can
+/// finish before the other starts, and the test fails by hanging into the deadline rather than
+/// by passing a sequential sequence.
+#[test]
+fn concurrent_web_push_and_apns_writes_do_not_deadlock() {
+    use crate::remote::apns::ApnsEnvironment;
+    use std::sync::Barrier;
+
+    const ROUNDS: usize = 200;
+    // In memory: this test is about lock acquisition, not about the file, and a shared path would
+    // add disk races that have nothing to do with the property under test.
+    let store = Arc::new(PushStore::new());
+    store.allow_loopback_endpoints();
+    let barrier = Arc::new(Barrier::new(2));
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+    let web = {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        let done = done_tx.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            for round in 0..ROUNDS {
+                store
+                    .subscribe(
+                        "web",
+                        PushSubscribeRequest {
+                            endpoint: format!("http://127.0.0.1:9/push/{round}"),
+                            keys: PushSubscriptionKeys { p256dh: "k".into(), auth: "a".into() },
+                            phone_needs_input: true,
+                            phone_finished_mode: FinishedMode::Off,
+                        },
+                    )
+                    .unwrap();
+                store.set_preferences("web", &PushPreferences { phone_needs_input: Some(round % 2 == 0), phone_finished_mode: None }).unwrap();
+            }
+            let _ = done.send("web");
+        })
+    };
+    let apns = {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        let done = done_tx.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            for round in 0..ROUNDS {
+                let token = format!("{round:064x}");
+                store.subscribe_apns("ios", &token, ApnsEnvironment::Sandbox, true).unwrap();
+            }
+            let _ = done.send("apns");
+        })
+    };
+
+    // Both writers must finish. A deadlock never sends, so the deadline is what reports it; the
+    // timeout is a deadlock detector, not a substitute for waiting on the real completion signal.
+    for _ in 0..2 {
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("an inverted lock order deadlocked the two writers");
+    }
+    web.join().unwrap();
+    apns.join().unwrap();
+    assert_eq!(store.list_subscriptions().len(), ROUNDS, "every endpoint the Web Push writer registered is stored");
+    assert_eq!(store.list_apns().len(), ROUNDS, "every token the APNs writer registered is stored");
+}
+
+/// An iOS install registers an APNs token and never a Web Push subscription, so a device whose
+/// only row is an APNs token must still be pushed to. This is the regression that made an iOS
+/// phone receive nothing while the daemon logged healthy Web Push fan-out.
+#[tokio::test]
+async fn an_apns_only_device_receives_the_decision_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockApns::start(StatusCode::OK, None).await;
+    mock.install(&state);
+    let device = paired_device(&state);
+    let token = "ab".repeat(32);
+    state
+        .push
+        .store
+        .subscribe_apns(&device, &token, crate::remote::apns::ApnsEnvironment::Sandbox, true)
+        .unwrap();
+
+    assert_eq!(state.dispatch_decision_push(&[REF.to_string()]).await, 1);
+    let received = mock.received();
+    assert_eq!(received.len(), 1, "the APNs token is a delivery target on its own");
+    assert_eq!(received[0].0, token, "the request names the registered token");
+    assert!(
+        received[0].1.as_deref().is_some_and(|auth| auth.starts_with("bearer ")),
+        "Apple authenticates the send with a provider JWT: {:?}",
+        received[0].1
+    );
+}
+
+/// Apple answers 410 (or 400 `BadDeviceToken`/`Unregistered`) for a token that can never be
+/// delivered again. That row must be deleted, or every later fan-out keeps posting to a dead
+/// token; the deletion must also reach the file, since a restart reloads from it.
+#[tokio::test]
+async fn a_gone_apns_token_is_deleted_and_the_deletion_is_persisted() {
+    for (status, reason) in [
+        (StatusCode::GONE, None),
+        (StatusCode::BAD_REQUEST, Some("BadDeviceToken")),
+        (StatusCode::BAD_REQUEST, Some("Unregistered")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = gateway(dir.path());
+        let mut mock = MockApns::start(status, reason).await;
+        mock.install(&state);
+        let device = paired_device(&state);
+        let token = "cd".repeat(32);
+        state
+            .push
+            .store
+            .subscribe_apns(&device, &token, crate::remote::apns::ApnsEnvironment::Sandbox, true)
+            .unwrap();
+
+        assert_eq!(state.dispatch_decision_push(&[REF.to_string()]).await, 1);
+        assert_eq!(mock.received().len(), 1);
+        assert!(
+            state.push.store.list_apns().is_empty(),
+            "{status} {reason:?} must delete the token"
+        );
+        let reloaded = PushStore::load(Some(dir.path().join(PUSH_SUBSCRIPTIONS_FILE)));
+        assert!(
+            reloaded.list_apns().is_empty(),
+            "{status} {reason:?} deletion must be persisted"
+        );
+    }
+}
+
+/// A token Apple still accepts must survive, so the test above cannot pass by deleting every row.
+#[tokio::test]
+async fn a_delivered_apns_token_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockApns::start(StatusCode::OK, None).await;
+    mock.install(&state);
+    let device = paired_device(&state);
+    let token = "ef".repeat(32);
+    state
+        .push
+        .store
+        .subscribe_apns(&device, &token, crate::remote::apns::ApnsEnvironment::Sandbox, true)
+        .unwrap();
+
+    assert_eq!(state.dispatch_decision_push(&[REF.to_string()]).await, 1);
+    assert_eq!(mock.received().len(), 1);
+    assert_eq!(state.push.store.list_apns().len(), 1, "a delivered token stays registered");
+}
+
+/// A revoke is the owner deleting the device, so both transports' rows must go. Before this the
+/// hook cleaned only the Web Push map, leaving the APNs token able to receive alerts.
+#[tokio::test]
+async fn revoke_removes_the_device_apns_token_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let device = paired_device(&state);
+    let other = paired_device(&state);
+    let mine = "11".repeat(32);
+    let theirs = "22".repeat(32);
+    state
+        .push
+        .store
+        .subscribe_apns(&device, &mine, crate::remote::apns::ApnsEnvironment::Sandbox, true)
+        .unwrap();
+    state
+        .push
+        .store
+        .subscribe_apns(&other, &theirs, crate::remote::apns::ApnsEnvironment::Sandbox, true)
+        .unwrap();
+
+    assert!(state.auth_manager.revoke_device(&device).unwrap());
+    let left = state.push.store.list_apns();
+    assert_eq!(left.len(), 1, "only the revoked device's token is dropped");
+    assert_eq!(left[0].device_id, other);
+    let reloaded = PushStore::load(Some(dir.path().join(PUSH_SUBSCRIPTIONS_FILE)));
+    assert_eq!(reloaded.list_apns(), left, "the revocation is persisted");
+}
+
+/// The restart-time prune runs before any send, and an unpaired device must lose both rows: an
+/// iOS install has only the APNs row, so pruning the Web Push map alone left its token live.
+#[tokio::test]
+async fn an_unpaired_device_loses_its_apns_token_on_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let device = paired_device(&state);
+    state
+        .push
+        .store
+        .subscribe_apns(&device, &"33".repeat(32), crate::remote::apns::ApnsEnvironment::Sandbox, true)
+        .unwrap();
+    drop(state);
+    // The auth store is gone, so the device is unpaired; only the push store still names it.
+    std::fs::remove_file(dir.path().join("remote-auth.json")).unwrap();
+
+    let restarted = gateway(dir.path());
+    assert!(restarted.push.store.list_apns().is_empty(), "the APNs token of an unpaired device is pruned");
+    assert!(PushStore::load(Some(dir.path().join(PUSH_SUBSCRIPTIONS_FILE)))
+        .list_apns()
+        .is_empty());
+}
+
+/// Preferences are the owner's single switch panel, and an iOS install's only row is its APNs
+/// token, so turning "needs input" off has to reach that row: otherwise the switch saves nothing
+/// and the phone keeps alerting.
+#[tokio::test]
+async fn preferences_reach_the_apns_row_and_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let device = paired_device(&state);
+    let token = "44".repeat(32);
+    state
+        .push
+        .store
+        .subscribe_apns(&device, &token, crate::remote::apns::ApnsEnvironment::Sandbox, true)
+        .unwrap();
+
+    let updated = state
+        .push
+        .store
+        .set_preferences(&device, &PushPreferences { phone_needs_input: Some(false), phone_finished_mode: None })
+        .unwrap();
+    assert_eq!(updated, 1, "the APNs row counts as one subscription");
+    assert!(!state.push.store.list_apns()[0].needs_input);
+    assert!(
+        !PushStore::load(Some(dir.path().join(PUSH_SUBSCRIPTIONS_FILE))).list_apns()[0].needs_input,
+        "the preference is persisted"
+    );
+
+    // And the fan-out honours it: a token with needs_input off gets no decision alert.
+    let mut mock = MockApns::start(StatusCode::OK, None).await;
+    mock.install(&state);
+    assert_eq!(state.dispatch_decision_push(&[REF.to_string()]).await, 0);
+    assert!(mock.received().is_empty());
+}
+
+/// The settings "test alert" on an installed iOS app used to answer 404: the handler looked only
+/// for a Web Push subscription, and an iOS install has none. It must reach APNs for such a
+/// device, and the test has to go through the real route to prove the phone sees a 200.
+#[tokio::test]
+async fn push_test_sends_through_apns_for_an_apns_only_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let mut mock = MockApns::start(StatusCode::OK, None).await;
+    mock.install(&state);
+    let code = state
+        .auth_manager
+        .create_pairing_code(crate::remote::auth::DevicePermission::Control);
+    let (token, device) = state.auth_manager.exchange_pairing_code(&code, "iPhone").unwrap();
+    let apns_token = "55".repeat(32);
+    state
+        .push
+        .store
+        .subscribe_apns(&device.id, &apns_token, crate::remote::apns::ApnsEnvironment::Sandbox, true)
+        .unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, crate::remote::server::create_remote_router(state))
+            .await
+            .unwrap();
+    });
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = http
+        .post(format!("http://{addr}/api/v1/push/test"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK, "an iOS install is a valid test target");
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["sent"], 1);
+    assert_eq!(body["delivered"], 1);
+    let received = mock.received();
+    assert_eq!(received.len(), 1, "the test alert reached APNs");
+    assert_eq!(received[0].0, apns_token);
+    server.abort();
+}
+
+/// A device with no subscription on either transport still gets 404: the APNs path must not turn
+/// an unregistered phone into a 200.
+#[tokio::test]
+async fn push_test_still_answers_404_without_any_subscription() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let code = state
+        .auth_manager
+        .create_pairing_code(crate::remote::auth::DevicePermission::Control);
+    let (token, _) = state.auth_manager.exchange_pairing_code(&code, "iPhone").unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, crate::remote::server::create_remote_router(state))
+            .await
+            .unwrap();
+    });
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = http
+        .post(format!("http://{addr}/api/v1/push/test"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    server.abort();
+}
+
+/// A token is registered but this daemon holds no Apple key, so the alert cannot be sent. Saying
+/// 200 here would tell the phone its alerts work when nothing left the machine.
+#[tokio::test]
+async fn push_test_reports_a_missing_apple_key_instead_of_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gateway(dir.path());
+    let code = state
+        .auth_manager
+        .create_pairing_code(crate::remote::auth::DevicePermission::Control);
+    let (token, device) = state.auth_manager.exchange_pairing_code(&code, "iPhone").unwrap();
+    state
+        .push
+        .store
+        .subscribe_apns(&device.id, &"66".repeat(32), crate::remote::apns::ApnsEnvironment::Sandbox, true)
+        .unwrap();
+    // No APNs sender installed: the env probe finds no FERRYX_APNS_* key in this test process.
+    assert!(state.push.apns().await.is_none(), "this test needs APNs to be unconfigured");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, crate::remote::server::create_remote_router(state))
+            .await
+            .unwrap();
+    });
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = http
+        .post(format!("http://{addr}/api/v1/push/test"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    server.abort();
 }

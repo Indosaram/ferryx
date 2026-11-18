@@ -1090,18 +1090,28 @@ impl RemoteGatewayState {
         ));
         let push = Arc::new(crate::remote::push::PushService::new(identity_dir.as_deref()));
         // A device pruned while the daemon was down (idle expiry, revocation journal) must not
-        // keep receiving pushes after a restart.
+        // keep receiving pushes after a restart. Both transports are pruned: an iOS install has
+        // only an APNs row, so pruning the Web Push map alone leaves its token live forever.
         if let Err(error) = push
             .store
             .retain_devices(|device_id| auth_manager.live_device(device_id).is_some())
         {
             tracing::warn!("dropping push subscriptions of unpaired devices failed: {error}");
         }
+        if let Err(error) = push
+            .store
+            .retain_apns_devices(|device_id| auth_manager.live_device(device_id).is_some())
+        {
+            tracing::warn!("dropping APNs tokens of unpaired devices failed: {error}");
+        }
         {
             let push = Arc::clone(&push);
             auth_manager.on_device_revoked(Arc::new(move |device_id: &str| {
                 if let Err(error) = push.store.revoke_device(device_id) {
                     tracing::warn!("dropping a revoked device's push subscriptions failed: {error}");
+                }
+                if let Err(error) = push.store.revoke_apns_device(device_id) {
+                    tracing::warn!("dropping a revoked device's APNs tokens failed: {error}");
                 }
             }));
         }
@@ -1670,7 +1680,7 @@ impl RemoteGatewayState {
                 (!refs.is_empty()).then_some((sub, refs))
             })
             .collect();
-        let apns = self.push.apns();
+        let apns = self.push.apns().await;
         if targets.is_empty() && (apns_targets.is_empty() || apns.is_none()) {
             return 0;
         }

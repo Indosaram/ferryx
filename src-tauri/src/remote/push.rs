@@ -284,9 +284,10 @@ impl PushStore {
         })
     }
 
-    /// Applies preferences to every subscription the device owns; returns how many it has.
+    /// Applies preferences to every subscription the device owns, Web Push and APNs; returns how
+    /// many it has. One write: the two maps are what one owner action changes.
     pub fn set_preferences(&self, device_id: &str, prefs: &PushPreferences) -> Result<usize, PushStoreError> {
-        self.mutate(|subs| {
+        self.mutate_both(|subs, apns| {
             let mut count = 0;
             for stored in subs.values_mut().filter(|stored| stored.device_id == device_id) {
                 if let Some(needs_input) = prefs.phone_needs_input {
@@ -297,13 +298,31 @@ impl PushStore {
                 }
                 count += 1;
             }
+            // An iOS install has no Web Push subscription, so its only row is the APNs token.
+            // APNs carries no finished-turn mode, so only the needs-input switch applies.
+            for stored in apns.values_mut().filter(|stored| stored.device_id == device_id) {
+                if let Some(needs_input) = prefs.phone_needs_input {
+                    stored.needs_input = needs_input;
+                }
+                count += 1;
+            }
             Ok(count)
         })
     }
 
+    /// Drops every Web Push subscription the device owns, after the device itself was revoked.
     pub fn revoke_device(&self, device_id: &str) -> Result<(), PushStoreError> {
         self.mutate(|subs| {
             subs.retain(|_, stored| stored.device_id != device_id);
+            Ok(())
+        })
+    }
+
+    /// Drops every APNs token the device owns, after the device itself was revoked. Apple has no
+    /// push endpoint to delete, so this row is the only record that the install is gone.
+    pub fn revoke_apns_device(&self, device_id: &str) -> Result<(), PushStoreError> {
+        self.mutate_apns(|apns| {
+            apns.retain(|_, stored| stored.device_id != device_id);
             Ok(())
         })
     }
@@ -340,20 +359,37 @@ impl PushStore {
     /// Registers an APNs token for `device_id`. Re-registering the same token refreshes it
     /// instead of duplicating, and a token owned by another device is refused: a phone must not
     /// be able to steal another phone's alerts.
-    /// Mutates the APNs map under the same lock order as [`Self::mutate`]: `subscriptions` first,
-    /// then `apns`, then `muted`. Taking `apns` first here would invert that order and deadlock
-    /// against a concurrent web-push registration.
+    ///
+    /// Every path here takes `subscriptions` before `apns`; taking `apns` first would invert that
+    /// order and deadlock against a concurrent Web Push write, which is what
+    /// `concurrent_web_push_and_apns_writes_do_not_deadlock` guards. [`Self::mutate_both`] holds
+    /// the order in one place so a new caller cannot pick a different one.
     fn mutate_apns<T>(
         &self,
         change: impl FnOnce(&mut HashMap<String, crate::remote::apns::ApnsSubscription>) -> Result<T, PushStoreError>,
     ) -> Result<T, PushStoreError> {
-        let subs = self.subscriptions.lock();
+        self.mutate_both(|_, apns| change(apns))
+    }
+
+    /// Mutates the Web Push and APNs maps together, in the same lock order as [`Self::mutate`],
+    /// and persists both in one write. Used where one owner action changes both transports; a
+    /// failed write rolls both maps back, so the file never describes half the change.
+    fn mutate_both<T>(
+        &self,
+        change: impl FnOnce(
+            &mut HashMap<String, StoredSubscription>,
+            &mut HashMap<String, crate::remote::apns::ApnsSubscription>,
+        ) -> Result<T, PushStoreError>,
+    ) -> Result<T, PushStoreError> {
+        let mut subs = self.subscriptions.lock();
         let mut apns = self.apns.lock();
-        let before = apns.clone();
-        let result = change(&mut apns)?;
-        if *apns != before {
+        let subs_before = subs.clone();
+        let apns_before = apns.clone();
+        let result = change(&mut subs, &mut apns)?;
+        if *subs != subs_before || *apns != apns_before {
             if let Err(error) = self.persist(&subs, &apns, &self.muted.lock()) {
-                *apns = before;
+                *subs = subs_before;
+                *apns = apns_before;
                 return Err(error.into());
             }
         }
@@ -402,6 +438,13 @@ impl PushStore {
         let mut subs: Vec<_> = self.apns.lock().values().cloned().collect();
         subs.sort_by(|a, b| a.token.cmp(&b.token));
         subs
+    }
+
+    pub fn apns_for_device(&self, device_id: &str) -> Vec<crate::remote::apns::ApnsSubscription> {
+        self.list_apns()
+            .into_iter()
+            .filter(|stored| stored.device_id == device_id)
+            .collect()
     }
 
     /// Drops a token APNs reported as unregistered.
@@ -598,19 +641,39 @@ impl PushService {
     }
 
     /// The APNs sender for `FERRYX_APNS_*`, probed once. `None` leaves web push as the only
-    /// route, which is what every build without an Apple key does.
-    pub fn apns(self: &Arc<Self>) -> Option<crate::remote::apns::SharedApns> {
-        self.apns
-            .get_or_init(|| {
-                match crate::remote::apns::ApnsSender::from_env(self.client.clone()) {
-                    Ok(sender) => sender.map(Arc::new),
-                    Err(error) => {
-                        tracing::warn!("APNs stays disabled: {error}");
-                        None
-                    }
-                }
-            })
-            .clone()
+    /// route, which is what every build without an Apple key does. Reading the configured `.p8`
+    /// touches disk, so the probe runs on a blocking worker; the result is cached either way.
+    pub async fn apns(self: &Arc<Self>) -> Option<crate::remote::apns::SharedApns> {
+        if let Some(cached) = self.apns.get() {
+            return cached.clone();
+        }
+        let service = Arc::clone(self);
+        let probed = match crate::ipc::run_blocking(move || Ok(service.probe_apns())).await {
+            Ok(sender) => sender,
+            Err(error) => {
+                tracing::warn!("APNs probe failed: {}", error.message);
+                None
+            }
+        };
+        self.apns.get_or_init(|| probed).clone()
+    }
+
+    /// The synchronous half of [`Self::apns`]: `FERRYX_APNS_*` plus the key file. Blocking only.
+    fn probe_apns(&self) -> Option<crate::remote::apns::SharedApns> {
+        match crate::remote::apns::ApnsSender::from_env(self.client.clone()) {
+            Ok(sender) => sender.map(Arc::new),
+            Err(error) => {
+                tracing::warn!("APNs stays disabled: {error}");
+                None
+            }
+        }
+    }
+
+    /// Test-only: installs the sender the env probe would have built, so a test can point APNs
+    /// at a local mock instead of Apple. Must run before the first [`Self::apns`] call.
+    #[cfg(test)]
+    pub(crate) fn install_apns_for_test(&self, sender: crate::remote::apns::SharedApns) {
+        let _ = self.apns.set(Some(sender));
     }
 
     /// Posts one APNs alert, dropping the token when Apple says it is dead.

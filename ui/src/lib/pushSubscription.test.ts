@@ -124,6 +124,23 @@ describe("pushSubscription on the native iOS shell", () => {
     ).resolves.toBe("error");
     expect(requests).toEqual([]);
   });
+
+  it("removes the APNs token when the owner turns alerts off", async () => {
+    // The iOS shell has no local subscription to unsubscribe, so the token row on the gateway is
+    // the only thing that can stop the alerts; skipping it left the phone alerting after opt-out.
+    const requests: string[] = [];
+    const request = nativeShell(async () => ({ token: "ab".repeat(32), sandbox: true }), requests);
+
+    await expect(disablePhoneAlerts(request as never)).resolves.toBe("disabled");
+    expect(requests).toEqual(["/api/v1/push/apns/unsubscribe"]);
+  });
+
+  it("keeps reporting the outage when the gateway refuses the APNs removal", async () => {
+    nativeShellState.mobile = true;
+    const request = vi.fn(async () => new Response(null, { status: 500 }));
+    await expect(disablePhoneAlerts(request as never)).resolves.toBe("error");
+    expect(request).toHaveBeenCalledWith("/api/v1/push/apns/unsubscribe", expect.objectContaining({ method: "POST" }));
+  });
 });
 
 describe("pushSubscription service worker registration", () => {
