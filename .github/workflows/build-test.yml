@@ -597,6 +597,12 @@ jobs:
       - name: Cargo Test (Windows lib scope)
         if: matrix.os_name == 'windows'
         shell: bash
+        env:
+          # The test executable loads the SDK's avcodec/avformat/avutil/swscale DLLs at startup, and
+          # a hosted runner's PATH does not contain them: the binary died with 0xc0000135
+          # (STATUS_DLL_NOT_FOUND) before a single test ran. The linked import libraries come from
+          # this same SDK, so the DLLs are the matching pair, not a stray system copy.
+          PATH: ${{ github.workspace }}\src-tauri\resources\ffmpeg\sdk\bin;${{ env.PATH }}
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml \
             --target ${{ matrix.target }} \
