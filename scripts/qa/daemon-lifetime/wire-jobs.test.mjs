@@ -274,14 +274,14 @@ test('linux run storage leaves tmpfs while sockets keep a short path', async () 
 });
 
 test('agent command: local node or quoted ssh', () => {
-  const local = agentCommand(hostFor('mac'), { agentPath: '/a/agent.mjs', runId: RUN, runDir: '/r' });
+  const local = agentCommand(hostFor('mac', { transport: { kind: 'local' } }), { agentPath: '/a/agent.mjs', runId: RUN, runDir: '/r' });
   assert.equal(local.args[0], '/a/agent.mjs');
-  const ssh = agentCommand(hostFor('linux'), { agentPath: "/a b/agent's.mjs", runId: RUN, runDir: '/r', allowRoots: ['/t'] });
+  const ssh = agentCommand(hostFor('linux', { transport: { kind: 'ssh', target: 'linux-fixture' } }), { agentPath: "/a b/agent's.mjs", runId: RUN, runDir: '/r', allowRoots: ['/t'] });
   assert.equal(ssh.command, 'ssh');
   assert.ok(ssh.args.includes('BatchMode=yes'));
   assert.match(ssh.args.at(-1), /'\/a b\/agent'\\''s\.mjs'/);
   assert.match(ssh.args.at(-1), /'--allow-root' '\/t'/);
-  const win = agentCommand(hostFor('windows'), { agentPath: 'C:\\a\\agent.mjs', runId: RUN, runDir: 'C:\\r' });
+  const win = agentCommand(hostFor('windows', { transport: { kind: 'ssh', target: 'windows-fixture', shell: 'cmd' } }), { agentPath: 'C:\\a\\agent.mjs', runId: RUN, runDir: 'C:\\r' });
   assert.match(win.args.at(-1), /^"node" "C:\\a\\agent\.mjs"/);
 });
 
@@ -343,7 +343,7 @@ test('Windows GUI launch types only a short path MahoRD can deliver', async () =
 // does at its deadline; pending receipts stay pending.
 const focusRecord = (o) => JSON.stringify({ kind: 'focus', focusHwnd: 0x5012c, rootHwnd: 0x5012a, processName: 'explorer.exe', rootClass: '#32770', focusedClass: 'Edit', parentClass: 'ComboBox', foreground: true, ...o, seq: 1 });
 
-async function windowsLaunchFixture({ afterWinR = [focusRecord()], typedMatch = true, lostBeforeText = false, receipts = {}, observer = {}, exec = {} } = {}) {
+async function windowsLaunchFixture({ focusEvents = [], receipts = {}, observer = {}, exec = {}, launchExec = {} } = {}) {
   const { createGuiDriver, windowsLaunchFiles, windowsObserverTask } = await import('./lib/gui.mjs');
   const { isolationLayout } = await import('./lib/guards.mjs');
   const layout = isolationLayout('C:\\r', 'windows');
@@ -351,21 +351,19 @@ async function windowsLaunchFixture({ afterWinR = [focusRecord()], typedMatch = 
   const task = windowsObserverTask(RUN, 'g1');
   const calls = [];
   const written = new Map();
-  const events = [];
-  const state = { armed: false, latched: null };
-  const ob = { pid: 9100, sessionId: 1, activeConsoleSessionId: 1, hooks: 3, start: '1337', executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ready: true, armAck: true, latchAck: true, ...observer };
+  const ob = { pid: 9100, sessionId: 1, activeConsoleSessionId: 1, hooks: 3, start: '1337', executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ready: true, ...observer };
   const pending = new Promise(() => {});
   const answer = { [files.cmdStarted]: true, [files.launcherStarted]: true, [files.published]: true, [files.launcherError]: pending, [files.observerError]: pending, ...receipts };
   const agent = { call: async (method, params) => {
-    calls.push(['agent', method, params.file ?? params.command ?? params.pid, params.args?.[0]]);
+    calls.push(['agent', method, params.file ?? params.command ?? params.pid, params.args?.[0], params.args]);
     if (method === 'writeFile') {
       written.set(params.file, params.content);
-      if (params.file === files.observerArm && ob.armAck) { state.armed = true; events.push(JSON.stringify({ kind: 'armed', pid: ob.pid, seq: 0 })); }
-      const m = /\.target-(\d+)$/.exec(params.file);
-      if (m && ob.latchAck) { state.latched = Number(m[1]); events.push(JSON.stringify({ kind: 'latched', focusHwnd: state.latched, seq: 2 })); }
       return true;
     }
-    if (method === 'exec' && params.command === 'schtasks') return exec[params.args[0]] ?? { status: 0, stdout: 'SUCCESS', stderr: '' };
+    if (method === 'exec' && params.command === 'schtasks') {
+      const replies = params.args[2] === task ? exec : launchExec;
+      return replies[params.args[0]] ?? { status: 0, stdout: 'SUCCESS', stderr: '' };
+    }
     if (method === 'exec') return { status: 0, stdout: 'C:\\R\\LAUNCHG1.CMD\r\n', stderr: '' };
     if (method === 'waitPath') {
       if (params.file === files.observerReady) return ob.ready;
@@ -374,12 +372,13 @@ async function windowsLaunchFixture({ afterWinR = [focusRecord()], typedMatch = 
     if (method === 'readFile') {
       if (params.file === files.observerReady) return JSON.stringify({ pid: ob.pid, sessionId: ob.sessionId, activeConsoleSessionId: ob.activeConsoleSessionId, nonce: ob.nonce ?? JSON.parse(written.get(files.observerArgs)).nonce, hooks: ob.hooks, start: ob.start });
       if (params.file === files.published) return JSON.stringify({ pid: 4242, jobAssigned: true, noBreakaway: false, launcherPid: 7 });
+      if (params.file === files.observerEvents) return focusEvents.join('\n');
       return 'boom at line 44';
     }
     if (method === 'probe') return params.pid === ob.pid ? { executable: ob.executable, startTime: ob.probeStart ?? ob.start } : null;
     if (method === 'waitLog') {
       const re = new RegExp(params.pattern, params.flags);
-      const hit = events.map((line) => re.exec(line)).find(Boolean);
+      const hit = focusEvents.map((line) => re.exec(line)).find(Boolean);
       return hit ? { matched: hit[0] } : { matched: null, timedOut: true };
     }
     if (method === 'waitExit') return { pid: params.pid, exitedAt: 1 };
@@ -388,38 +387,36 @@ async function windowsLaunchFixture({ afterWinR = [focusRecord()], typedMatch = 
   } };
   const mahord = {
     click: async () => calls.push(['mahord', 'click']),
-    hotkey: async (keys) => {
-      calls.push(['mahord', 'hotkey', keys.join('+')]);
-      // A focus change is reported only once armed: the observer drops events before "armed".
-      if (keys.join('+') === 'Meta+r' && state.armed) events.push(...afterWinR);
-    },
-    type: async (text) => {
-      calls.push(['mahord', 'type', text]);
-      if (lostBeforeText) events.push(JSON.stringify({ kind: 'lost', focusHwnd: 77, seq: 3 }));
-      else if (state.latched) events.push(JSON.stringify({ kind: 'text', match: typedMatch, length: text.length, seq: 3 }));
-    },
+    hotkey: async (keys) => calls.push(['mahord', 'hotkey', keys.join('+')]),
+    type: async (text) => calls.push(['mahord', 'type', text]),
     key: async (key) => calls.push(['mahord', 'key', key]),
     screenshot: async () => { calls.push(['mahord', 'screenshot']); return Buffer.from('png'); },
   };
   const gui = createGuiDriver({ host: { platform: 'windows', transport: { user: 'sook' } }, agent, runId: RUN, layout, allowedRoots: ['C:\\r'], forbidden: [], mahord });
   const mahordCalls = () => calls.filter((c) => c[0] === 'mahord').map((c) => c.slice(1).join(' '));
   const schtasks = () => calls.filter((c) => c[2] === 'schtasks').map((c) => c[3]);
-  const sentInput = () => mahordCalls().filter((c) => c.startsWith('type') || c.startsWith('key') || c === 'hotkey Control+a');
+  const sentInput = () => mahordCalls().filter((c) => c !== 'screenshot');
   const receipt = () => JSON.parse(written.get(files.receipt));
   return { gui, files, task, calls, written, mahordCalls, schtasks, sentInput, receipt, artifact: { guiExecutable: 'C:\\r\\ferryx.exe' } };
 }
 
-test('Windows launch: observer acknowledged before Win+R, typing only into the identified Run dialog, Enter only after read-back', async () => {
+test('Windows launch verifies the observer before running the limited task without any desktop input', async () => {
   const fx = await windowsLaunchFixture();
   const gui = await fx.gui.launch(fx.artifact, { tag: 'g1' });
   assert.equal(gui.pid, 4242);
-  assert.deepEqual(fx.mahordCalls(), ['click', 'hotkey Meta+r', 'hotkey Control+a', 'type C:\\R\\LAUNCHG1.CMD', 'key Enter']);
-  assert.deepEqual(fx.schtasks(), ['/Create', '/Run', '/End', '/Delete']);
-  const order = fx.calls.map((c) => (c[0] === 'mahord' ? c[2] ?? c[1] : c[3] ?? (typeof c[2] === 'string' ? c[2].split('\\').pop() : c[1])));
-  assert.ok(order.indexOf('observer-g1.arm') < order.indexOf('Meta+r'), 'armed before Win+R');
-  assert.ok(order.indexOf('/Delete') < order.indexOf('launch-g1.cmd.started'), 'observer removed before waiting on the launch');
+  assert.deepEqual(fx.mahordCalls(), []);
+  const launchTask = `Ferryx\\ferryx-qa-${RUN}-launch-g1`;
+  const tasks = fx.calls.filter((c) => c[2] === 'schtasks').map((c) => c[4]);
+  assert.deepEqual(tasks.map(([verb, , name]) => [verb, name]), [
+    ['/Create', fx.task], ['/Run', fx.task], ['/Create', launchTask], ['/Run', launchTask], ['/End', fx.task], ['/Delete', fx.task],
+  ]);
+  assert.equal(tasks[2][tasks[2].indexOf('/RL') + 1], 'LIMITED');
+  assert.ok(tasks[2][tasks[2].indexOf('/TR') + 1].includes(`"${fx.files.launchCmd}"`));
+  const probe = fx.calls.findIndex((c) => c[1] === 'probe' && c[2] === 9100);
+  assert.ok(probe >= 0 && probe < fx.calls.findIndex((c) => c[4] === tasks[2]));
+  assert.ok(fx.calls.findIndex((c) => c[4] === tasks[5]) < fx.calls.findIndex((c) => c[1] === 'waitPath' && c[2] === fx.files.cmdStarted));
   const stages = fx.receipt().stages.map((s) => s.stage);
-  assert.deepEqual(stages, ['observer-ready', 'observer-armed', 'run-dialog-focus', 'latched', 'typed', 'observer-stopped', 'cmd-executed', 'launcher-started', 'published']);
+  assert.deepEqual(stages, ['observer-ready', 'launch-task-create', 'launch-task-run', 'observer-stopped', 'cmd-executed', 'launcher-started', 'published']);
   assert.equal(fx.receipt().observer.task, fx.task);
   assert.equal(fx.receipt().observer.pid, 9100);
   assert.deepEqual(fx.receipt().observer.cleanup, { stopRequested: true, exited: true, ended: 0, deleted: true, errors: [] });
@@ -455,23 +452,25 @@ test('Run dialog identity: explorer #32770 root, Edit focused, foreground; title
   assert.ok(!isRunDialogFocus(null));
 });
 
-test('unrelated focus changes never unlock typing; the launch fails at run-dialog-not-identified and still removes the observer', async () => {
-  const fx = await windowsLaunchFixture({ afterWinR: [focusRecord({ rootClass: 'Shell_TrayWnd', focusedClass: 'Shell_TrayWnd' }), focusRecord({ processName: 'OpenConsole.exe', rootClass: 'ConsoleWindowClass', focusedClass: 'ConsoleWindowClass' }), focusRecord({ focusedClass: 'Button' })] });
-  await assert.rejects(fx.gui.launch(fx.artifact, { tag: 'g1' }), (e) => e.name === 'WindowsLaunchError' && e.stage === 'run-dialog-not-identified');
+test('unrelated focus cannot substitute for the private command receipt or unlock desktop input', async () => {
+  const files = (await windowsLaunchFixture()).files;
+  const fx = await windowsLaunchFixture({ receipts: { [files.cmdStarted]: false }, focusEvents: [focusRecord({ rootClass: 'Shell_TrayWnd' }), focusRecord({ processName: 'OpenConsole.exe' }), focusRecord({ focusedClass: 'Button' })] });
+  await assert.rejects(fx.gui.launch(fx.artifact, { tag: 'g1' }), (e) => e.name === 'WindowsLaunchError' && e.stage === 'cmd-not-executed');
   assert.deepEqual(fx.sentInput(), []);
-  assert.deepEqual(fx.schtasks(), ['/Create', '/Run', '/End', '/Delete']);
+  assert.deepEqual(fx.schtasks(), ['/Create', '/Run', '/Create', '/Run', '/End', '/Delete', '/Query']);
   assert.equal(fx.written.get(fx.files.observerStop) !== undefined, true);
   assert.equal(fx.written.get(fx.files.screenshot), Buffer.from('png').toString('base64'));
-  assert.equal(fx.receipt().failedStage, 'run-dialog-not-identified');
+  assert.equal(fx.receipt().failedStage, 'cmd-not-executed');
   assert.equal(fx.receipt().observer.cleanup.deleted, true);
 });
 
-test('Enter is never sent unless the latched Edit reads back the typed path', async () => {
-  for (const [opts, detail] of [[{ typedMatch: false }, /did not read back/], [{ lostBeforeText: true }, /focus left the Run dialog/]]) {
-    const fx = await windowsLaunchFixture(opts);
-    await assert.rejects(fx.gui.launch(fx.artifact, { tag: 'g1' }), (e) => e.stage === 'typed-text-not-confirmed' && detail.test(e.message));
-    assert.ok(!fx.mahordCalls().includes('key Enter'), fx.mahordCalls().join(', '));
-    assert.deepEqual(fx.schtasks(), ['/Create', '/Run', '/End', '/Delete']);
+test('a refused launch task never falls back to typing or Enter', async () => {
+  for (const [verb, stage] of [['/Create', 'launch-task-not-created'], ['/Run', 'launch-task-not-run']]) {
+    const fx = await windowsLaunchFixture({ launchExec: { [verb]: { status: 1, stdout: '', stderr: 'denied' } } });
+    await assert.rejects(fx.gui.launch(fx.artifact, { tag: 'g1' }), (e) => e.stage === stage);
+    assert.deepEqual(fx.sentInput(), []);
+    assert.equal(fx.calls.some((c) => c[1] === 'record'), false);
+    assert.deepEqual(fx.schtasks().slice(-2), ['/End', '/Delete']);
   }
 });
 
@@ -483,8 +482,8 @@ test('observer startup must be acknowledged and owned before any GUI input; ever
     [{ observer: { executable: 'C:\\x\\notepad.exe' } }, 'observer-not-owned', false],
     [{ observer: { sessionId: 0, activeConsoleSessionId: 1 } }, 'observer-wrong-session', true],
     [{ observer: { hooks: 2 } }, 'observer-not-ready', true],
-    [{ observer: { armAck: false } }, 'observer-not-armed', true],
-    [{ observer: { latchAck: false } }, 'observer-not-latched', true],
+    [{ observer: { sessionId: 2, activeConsoleSessionId: 1 } }, 'observer-wrong-session', true],
+    [{ observer: { hooks: 0 } }, 'observer-not-ready', true],
     [{ exec: { '/Run': { status: 1, stdout: '', stderr: 'ERROR: denied' } } }, 'observer-task-not-run', false],
     [{ exec: { '/Create': { status: 1, stdout: '', stderr: 'ERROR: denied' } } }, 'observer-task-not-created', false],
   ];
@@ -492,9 +491,8 @@ test('observer startup must be acknowledged and owned before any GUI input; ever
     const fx = await windowsLaunchFixture(opts);
     await assert.rejects(fx.gui.launch(fx.artifact, { tag: 'g1' }), (e) => e.stage === stage, stage);
     const input = fx.mahordCalls().filter((c) => c !== 'screenshot');
-    if (stage === 'observer-not-latched') assert.deepEqual(input, ['click', 'hotkey Meta+r'], stage);
-    else if (stage === 'observer-not-armed') assert.deepEqual(input, ['click'], stage);
-    else assert.deepEqual(input, [], `${stage}: no GUI input before the observer is ready`);
+    assert.deepEqual(input, [], `${stage}: no GUI input before the observer is ready`);
+    assert.equal(fx.calls.some((c) => c[2] === 'schtasks' && c[4]?.[2] !== fx.task), false, stage);
     assert.deepEqual(fx.schtasks().slice(-2), ['/End', '/Delete'], `${stage} removes the task`);
     assert.equal(fx.calls.some((c) => c[1] === 'waitExit'), pidKnown, `${stage}: only a confirmed pid is waited on`);
     assert.equal(fx.receipt().failedStage, stage);

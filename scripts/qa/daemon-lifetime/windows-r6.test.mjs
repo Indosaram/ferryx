@@ -341,98 +341,70 @@ test('run.mjs ends scenario GUIs in a finally after the exception recovery', () 
 
 const focus = (o = {}) => JSON.stringify({ kind: 'focus', focusHwnd: 0x5012c, rootHwnd: 0x5012a, processName: 'explorer.exe', rootClass: '#32770', focusedClass: 'Edit', parentClass: 'ComboBox', foreground: true, ...o });
 
-/**
- * One interactive desktop: each tag has its own observer events list, and every MahoRD call is
- * logged with the tag that currently holds the input section. Scripts decide outcomes per attempt.
- */
-function desktop({ winR = () => [focus()], afterEscape = () => [focus({ processName: 'WindowsTerminal.exe', rootClass: 'CASCADIA', focusedClass: 'CASCADIA' })], typedMatch = () => true, cmdStarted = () => true, gate = null, reconnect = null } = {}) {
+function desktop({ taskFailure = null, cmdStarted = () => true, gate = null, focusRecords = [], reconnect = null } = {}) {
   const layout = isolationLayout('C:\\r', 'windows');
-  const events = new Map();
   const written = new Map();
-  const exists = new Set();
+  const running = new Set();
   const log = [];
-  const attempts = new Map();
-  let active = null;
-  let seq = 0;
-  const push = (tag, line) => { const s = ++seq; const rec = JSON.parse(line); events.get(tag).push(JSON.stringify({ ...rec, seq: s })); };
-  const tagOf = (file) => /observer-([a-z0-9]+)\./i.exec(file)?.[1] ?? /launch-([a-z0-9]+)\./i.exec(file)?.[1] ?? null;
-  const agent = { call: async (m, p = {}) => {
-    if (m === 'writeFile') {
-      written.set(p.file, p.content);
-      const tag = tagOf(p.file);
-      // The args file is written first inside the input section: from then on input belongs to tag.
-      if (/observer-[a-z0-9]+\.args\.json$/i.test(p.file)) { active = tag; events.set(tag, []); attempts.set(tag, (attempts.get(tag) ?? 0) + 1); }
-      if (/\.arm$/.test(p.file)) { log.push(['arm', tag]); events.get(tag).push(JSON.stringify({ kind: 'armed', pid: 9100, seq: 0 })); }
-      const t = /\.target-(\d+)$/.exec(p.file);
-      if (t) events.get(tag).push(JSON.stringify({ kind: 'latched', focusHwnd: Number(t[1]), seq: 0 }));
-      if (/\.stop$/.test(p.file)) { log.push(['stop', tag]); if (active === tag) active = null; }
-      if (/\.go$/.test(p.file)) log.push(['go']);
+  const tagOf = (file) => /(?:observer|launch|launcher|gui)-([a-z0-9]+)\./i.exec(file)?.[1];
+  const agent = { call: async (method, params = {}) => {
+    if (method === 'writeFile') {
+      written.set(params.file, params.content);
+      if (params.file.endsWith('.go')) log.push(['go']);
       return true;
     }
-    if (m === 'exec' && p.command === 'schtasks') return { status: 0, stdout: 'SUCCESS', stderr: '' };
-    if (m === 'exec') return { status: 0, stdout: 'C:\\R\\LAUNCH.CMD\r\n', stderr: '' };
-    if (m === 'waitPath') {
-      if (/ready\.json$/.test(p.file)) return true;
-      if (/\.err$/.test(p.file)) return new Promise(() => {});
-      if (/cmd\.started$/.test(p.file)) {
-        const tag = tagOf(p.file);
-        const ok = cmdStarted(tag, attempts.get(tag));
-        if (ok) exists.add(p.file);
+    if (method === 'exec' && params.command === 'schtasks') {
+      const [verb, , task] = params.args;
+      const name = /-(obs|launch)-([a-z0-9]+)$/.exec(task);
+      assert.ok(name, task);
+      const [, kind, tag] = name;
+      log.push([kind, tag, verb]);
+      if (kind === 'launch' && verb === taskFailure) return { status: 1, stdout: '', stderr: 'fixture denied' };
+      if (kind === 'launch' && verb === '/Run') running.add(tag);
+      return { status: 0, stdout: '', stderr: '' };
+    }
+    if (method === 'exec') return { status: 0, stdout: 'C:\\R\\LAUNCH.CMD\r\n', stderr: '' };
+    if (method === 'waitPath') {
+      if (params.file.endsWith('.err')) return new Promise(() => {});
+      if (params.file.endsWith('.cmd.started')) {
+        const tag = tagOf(params.file);
+        const ok = running.has(tag) && await cmdStarted(tag);
         log.push(['cmdStarted', tag, ok]);
         return ok;
       }
-      if (/launcher-([a-z0-9]+)\.started$/i.test(p.file) && gate) return gate();
+      if (/launcher-[a-z0-9]+\.started$/i.test(params.file) && gate) return gate();
       return true;
     }
-    if (m === 'exists') return exists.has(p.file);
-    if (m === 'remove') { const tag = tagOf(p.target); if (/events\.jsonl$/.test(p.target)) events.set(tag, []); return true; }
-    if (m === 'readFile') {
-      if (/ready\.json$/.test(p.file)) { const tag = tagOf(p.file); return JSON.stringify({ pid: 9100, sessionId: 1, activeConsoleSessionId: 1, nonce: JSON.parse(written.get(windowsLaunchFiles(layout, tag).observerArgs)).nonce, hooks: 3, start: '1' }); }
-      if (/events\.jsonl$/.test(p.file)) return (events.get(tagOf(p.file)) ?? []).join('\n');
-      if (/gui-([a-z0-9]+)\.json$/i.test(p.file)) return JSON.stringify({ pid: 4000 + seq, jobAssigned: true, noBreakaway: false, launcherPid: 7 });
-      if (/closed\.json$/.test(p.file)) return '{"closeMainWindow":true}';
+    if (method === 'readFile') {
+      const tag = tagOf(params.file);
+      if (params.file.endsWith('ready.json')) return JSON.stringify({ pid: 9100, sessionId: 1, activeConsoleSessionId: 1, nonce: JSON.parse(written.get(windowsLaunchFiles(layout, tag).observerArgs)).nonce, hooks: 3, start: '1' });
+      if (params.file.endsWith('events.jsonl')) return focusRecords.join('\n');
+      if (/gui-[a-z0-9]+\.json$/i.test(params.file)) return JSON.stringify({ pid: 4000 + tag.charCodeAt(0), jobAssigned: true, noBreakaway: false, launcherPid: 7 });
+      if (params.file.endsWith('closed.json')) return '{"closeMainWindow":true}';
       return null;
     }
-    if (m === 'probe') return { executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', startTime: '1' };
-    if (m === 'waitLog') {
-      const re = new RegExp(p.pattern, p.flags);
-      const hit = (events.get(tagOf(p.file)) ?? []).map((l) => re.exec(l)).find(Boolean);
-      return hit ? { matched: hit[0] } : { matched: null, timedOut: true };
-    }
-    if (m === 'waitExit') return { pid: p.pid, exitedAt: 1 };
-    if (m === 'record') return { pid: p.pid, startTime: 1 };
-    if (m === 'kill') return true;
-    throw new Error(`unexpected ${m}`);
+    if (method === 'probe') return { executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', startTime: '1' };
+    if (method === 'waitExit') return { pid: params.pid, exitedAt: 1 };
+    if (method === 'record') { log.push(['record', params.pid]); return { pid: params.pid, startTime: 1 }; }
+    if (method === 'kill') return true;
+    throw new Error('unexpected fixture call: ' + method);
   } };
-  const mahord = {
-    click: async () => log.push(['click', active]),
-    hotkey: async (keys) => {
-      log.push(['hotkey', active, keys.join('+')]);
-      if (keys.join('+') === 'Meta+r') for (const l of winR(active, attempts.get(active))) push(active, l);
-    },
-    type: async (text) => {
-      log.push(['type', active]);
-      push(active, JSON.stringify({ kind: 'text', match: typedMatch(active, attempts.get(active)), length: text.length }));
-    },
-    key: async (key) => {
-      log.push(['key', active, key]);
-      if (key === 'Escape') for (const l of afterEscape(active, attempts.get(active))) push(active, l);
-    },
-    screenshot: async () => Buffer.from('png'),
-  };
+  const input = [];
+  const mahord = Object.fromEntries(['click', 'hotkey', 'type', 'key'].map((name) => [name, async (...args) => { input.push([name, ...args]); }]));
+  mahord.screenshot = async () => Buffer.from('png');
   if (reconnect) mahord.reconnect = async () => { log.push(['reconnect']); return reconnect(); };
   const gui = createGuiDriver({ host: { platform: 'windows' }, agent, runId: RUN, layout, allowedRoots: ['C:\\r'], forbidden: [], mahord });
-  return { gui, log, written, layout, artifact: { guiExecutable: 'C:\\r\\ferryx.exe' } };
+  return { gui, log, input, written, layout, artifact: { guiExecutable: 'C:\\r\\ferryx.exe' } };
 }
 
-test('Windows launches never interleave their keyboard sections, even when started concurrently', async () => {
+test('concurrent Windows launches wait for the previous command receipt before starting the next task', async () => {
   const d = desktop();
   await Promise.all([d.gui.launch(d.artifact, { tag: 'a' }), d.gui.launch(d.artifact, { tag: 'b' })]);
-  const input = d.log.filter((l) => ['click', 'hotkey', 'type', 'key'].includes(l[0]));
-  assert.deepEqual(input.map((l) => l[1]), ['a', 'a', 'a', 'a', 'a', 'b', 'b', 'b', 'b', 'b']);
-  const cmd = d.log.findIndex((l) => l[0] === 'cmdStarted' && l[1] === 'a');
-  const armB = d.log.findIndex((l) => l[0] === 'arm' && l[1] === 'b');
-  assert.ok(cmd < armB, 'the next launch arms only after the previous one executed its .cmd');
+  assert.deepEqual(d.log.filter(([kind]) => kind === 'launch' || kind === 'cmdStarted'), [
+    ['launch', 'a', '/Create'], ['launch', 'a', '/Run'], ['cmdStarted', 'a', true],
+    ['launch', 'b', '/Create'], ['launch', 'b', '/Run'], ['cmdStarted', 'b', true],
+  ]);
+  assert.deepEqual(d.input, []);
 });
 
 test('launchBatch types each launch alone, writes one go file after every .cmd executed, then finishes all', async () => {
@@ -468,66 +440,47 @@ test('a batch .cmd waits, bounded, for its go file before starting the launcher;
   assert.ok(lines.includes(`if %n% geq ${GO_WAIT_SECONDS} exit /b 1`));
 });
 
-test('a failed Run dialog is dismissed with Escape only while an explorer #32770 holds the foreground, then retried once', async () => {
-  // Attempt 1: Win+R lands on the explorer error box (#32770, Button focused); attempt 2 succeeds.
-  const d = desktop({ winR: (tag, n) => (n === 1 ? [focus({ focusedClass: 'Button' })] : [focus()]) });
-  const g = await d.gui.launch(d.artifact, { tag: 'a' });
-  assert.equal(g.tag, 'a');
-  const keys = d.log.filter((l) => l[0] === 'key').map((l) => l[2]);
-  assert.deepEqual(keys, ['Escape', 'Enter']);
+test('a foreground Explorer error dialog is left untouched by the task launch', async () => {
+  const d = desktop({ focusRecords: [focus({ focusedClass: 'Button' })] });
+  const gui = await d.gui.launch(d.artifact, { tag: 'a' });
+  assert.equal(gui.tag, 'a');
+  assert.deepEqual(d.input, []);
+  assert.deepEqual(d.log.filter(([kind]) => kind === 'launch'), [['launch', 'a', '/Create'], ['launch', 'a', '/Run']]);
+});
+
+test('a foreign foreground window cannot authorize input after the launch task is refused', async () => {
+  const d = desktop({ focusRecords: [focus({ processName: 'WindowsTerminal.exe' })], taskFailure: '/Create' });
+  await assert.rejects(d.gui.launch(d.artifact, { tag: 'a' }), (e) => e.stage === 'launch-task-not-created');
+  assert.deepEqual(d.input, []);
+  assert.ok(!d.log.some(([kind, , verb]) => kind === 'launch' && verb === '/Run'));
+});
+
+test('a missing command receipt is diagnosed once without another launch or pid registration', async () => {
+  const d = desktop({ cmdStarted: () => false });
+  await assert.rejects(d.gui.launch(d.artifact, { tag: 'a' }), (e) => e.stage === 'cmd-not-executed' && e.receipt.attempt === 1);
+  assert.deepEqual(d.log.filter(([kind]) => kind === 'launch'), [['launch', 'a', '/Create'], ['launch', 'a', '/Run'], ['launch', 'a', '/Query']]);
+  assert.ok(!d.log.some(([kind]) => kind === 'record'));
+});
+
+test('a task with a command receipt needs neither keyboard focus nor an RD reconnect', async () => {
+  const d = desktop({ reconnect: () => 1 });
+  await d.gui.launch(d.artifact, { tag: 'a' });
   const receipt = JSON.parse(d.written.get(windowsLaunchFiles(d.layout, 'a').receipt));
-  assert.equal(receipt.attempt, 2);
-  assert.equal(receipt.priorAttempts[0].failedStage, 'run-dialog-not-identified');
-  assert.equal(receipt.priorAttempts[0].dismissal.clear, true);
+  assert.equal(receipt.attempt, 1);
+  assert.deepEqual(receipt.priorAttempts, []);
+  assert.ok(d.log.some(([kind, tag, ok]) => kind === 'cmdStarted' && tag === 'a' && ok));
+  assert.ok(!d.log.some(([kind]) => kind === 'reconnect'));
+  assert.deepEqual(d.input, []);
 });
 
-test('no Escape when the foreground is not an explorer dialog, and no retry when the dismissal is unconfirmed', async () => {
-  const d = desktop({ winR: () => [focus({ processName: 'WindowsTerminal.exe', rootClass: 'CASCADIA', focusedClass: 'CASCADIA' })] });
-  await assert.rejects(d.gui.launch(d.artifact, { tag: 'a' }), (e) => e.stage === 'run-dialog-not-identified' && e.receipt.attempt === 2);
-  assert.ok(!d.log.some((l) => l[0] === 'key'), 'never a blind key');
-  // Escape that the observer never follows: not clear, so no second attempt.
-  const stuck = desktop({ winR: () => [focus({ focusedClass: 'Button' })], afterEscape: () => [] });
-  await assert.rejects(stuck.gui.launch(stuck.artifact, { tag: 'a' }), (e) => e.stage === 'run-dialog-not-identified' && e.receipt.attempt === 1 && e.receipt.dismissal.clear === false);
-  assert.equal(stuck.log.filter((l) => l[0] === 'key').length, 1);
-});
-
-test('exactly one retry, and none once the .cmd executed or after a later stage', async () => {
-  const twice = desktop({ winR: () => [focus({ focusedClass: 'Button' })] });
-  await assert.rejects(twice.gui.launch(twice.artifact, { tag: 'a' }), (e) => e.receipt.attempt === 2);
-  assert.equal(twice.log.filter((l) => l[0] === 'arm').length, 2);
-  const typed = desktop({ typedMatch: (tag, n) => n === 2 });
-  assert.equal((await typed.gui.launch(typed.artifact, { tag: 'a' })).tag, 'a');
-  const noCmd = desktop({ cmdStarted: () => false });
-  await assert.rejects(noCmd.gui.launch(noCmd.artifact, { tag: 'a' }), (e) => e.stage === 'cmd-not-executed' && e.receipt.attempt === 1);
-  assert.equal(noCmd.log.filter((l) => l[0] === 'arm').length, 1, 'cmd-not-executed is never retried');
-});
-
-test('Win+R that changed nothing on the desktop (only3 Q13 g15/g16): MahoRD reconnects, then one retry', async () => {
-  // Attempt 1: the armed observer records no focus or foreground change at all after Win+R.
-  const d = desktop({ winR: (tag, n) => (n === 1 ? [] : [focus()]), reconnect: () => 1 });
-  const g = await d.gui.launch(d.artifact, { tag: 'a' });
-  assert.equal(g.tag, 'a');
-  const order = d.log.map((l) => l[0]);
-  const rc = order.indexOf('reconnect');
-  assert.ok(rc > 0 && rc < order.lastIndexOf('arm'), 'reconnect before the second attempt arms');
-  assert.ok(!d.log.some((l) => l[0] === 'key' && l[2] === 'Escape'), 'nothing to dismiss: never a blind key');
-  const receipt = JSON.parse(d.written.get(windowsLaunchFiles(d.layout, 'a').receipt));
-  assert.equal(receipt.attempt, 2);
-  assert.equal(receipt.priorAttempts[0].undelivered, true);
-  assert.equal(receipt.priorAttempts[0].mahordReconnect, 1);
-});
-
-test('an undelivered Win+R is retried only once and never without a reconnect', async () => {
-  const twice = desktop({ winR: () => [], reconnect: () => 1 });
-  await assert.rejects(twice.gui.launch(twice.artifact, { tag: 'a' }), (e) => e.stage === 'run-dialog-not-identified' && e.receipt.attempt === 2);
-  assert.equal(twice.log.filter((l) => l[0] === 'reconnect').length, 1);
-  // A focus change that is not the Run dialog (a foreign window took the foreground) is the
-  // existing clear-desktop retry, never a reconnect.
-  const foreign = desktop({ winR: () => [focus({ processName: 'RobloxStudioBeta.exe', rootClass: 'Qt', focusedClass: 'Qt' })], reconnect: () => 1 });
-  await assert.rejects(foreign.gui.launch(foreign.artifact, { tag: 'a' }), (e) => e.receipt.attempt === 2 && e.receipt.priorAttempts[0].undelivered === false);
-  assert.ok(!foreign.log.some((l) => l[0] === 'reconnect'));
-  const noReconnect = desktop({ winR: () => [] });
-  await assert.rejects(noReconnect.gui.launch(noReconnect.artifact, { tag: 'a' }), (e) => e.receipt.attempt === 1);
+test('a rejected task start does not replay the command or reconnect the desktop', async () => {
+  for (const reconnect of [null, () => 1]) {
+    const d = desktop({ taskFailure: '/Run', reconnect });
+    await assert.rejects(d.gui.launch(d.artifact, { tag: 'a' }), (e) => e.stage === 'launch-task-not-run' && e.receipt.attempt === 1);
+    assert.deepEqual(d.log.filter(([kind]) => kind === 'launch' || kind === 'reconnect'), [['launch', 'a', '/Create'], ['launch', 'a', '/Run']]);
+    assert.ok(!d.log.some(([kind]) => kind === 'record'));
+    assert.deepEqual(d.input, []);
+  }
 });
 
 test('onlyArmedRecord: the armed record alone is proof Win+R reached nothing; garbage or any other record is not', () => {
@@ -546,7 +499,7 @@ test('connectMahord.reconnect closes the old maho-client and routes every later 
     const rec = (name) => async (...a) => { s.calls.push([name, ...a]); };
     return { click: rec('click'), type: rec('type'), key: rec('key'), hotkey: rec('hotkey'), screenshot: rec('screenshot'), close: async () => { s.closed = true; } };
   };
-  const m = await connectMahord({ kind: 'mahord' }, { open });
+  const m = await connectMahord({ kind: 'mahord' }, { binary: 'fixture-rd-client', open });
   await m.hotkey(['Meta', 'r']);
   assert.equal(await m.reconnect(), 1);
   await m.hotkey(['Meta', 'r']);

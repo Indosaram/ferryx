@@ -168,22 +168,23 @@ test('runBuildStep keeps the agent tail in build-<name>.log when the full copy f
 });
 
 test('scp source: posix paths as-is, Windows paths with forward slashes (C:\\ fails on maho-win)', () => {
-  assert.equal(scpSource(hostFor('linux'), '/home/indo/x/build-C.log'), 'omarchy:/home/indo/x/build-C.log');
-  assert.equal(scpSource(hostFor('windows'), 'C:\\Users\\sook\\ferryx-wt\\qaruns\\r\\build-logs\\build-C.log'), 'maho-win:C:/Users/sook/ferryx-wt/qaruns/r/build-logs/build-C.log');
+  assert.equal(scpSource(hostFor('linux', { transport: { kind: 'ssh', target: 'linux-fixture' } }), '/home/indo/x/build-C.log'), 'linux-fixture:/home/indo/x/build-C.log');
+  assert.equal(scpSource(hostFor('windows', { transport: { kind: 'ssh', target: 'windows-fixture' } }), 'C:\\Users\\sook\\ferryx-wt\\qaruns\\r\\build-logs\\build-C.log'), 'windows-fixture:C:/Users/sook/ferryx-wt/qaruns/r/build-logs/build-C.log');
 });
 
 test('fetchHostFile: scp for SSH hosts, a plain copy for the local host, a failed scp throws', async () => {
   const dir = tmp();
   const calls = [];
   const exec = async (cmd, args) => { calls.push([cmd, args]); return { status: 0, stdout: '', stderr: '' }; };
-  await fetchHostFile(hostFor('linux'), '/r/build-logs/build-B.log', path.join(dir, 'sub', 'build-B.log'), { exec });
+  const sshHost = hostFor('linux', { transport: { kind: 'ssh', target: 'linux-fixture' } });
+  await fetchHostFile(sshHost, '/r/build-logs/build-B.log', path.join(dir, 'sub', 'build-B.log'), { exec });
   assert.equal(calls[0][0], 'scp');
-  assert.deepEqual(calls[0][1].slice(-2), ['omarchy:/r/build-logs/build-B.log', path.join(dir, 'sub', 'build-B.log')]);
+  assert.deepEqual(calls[0][1].slice(-2), ['linux-fixture:/r/build-logs/build-B.log', path.join(dir, 'sub', 'build-B.log')]);
   assert.ok(calls[0][1].includes('BatchMode=yes'));
-  await assert.rejects(fetchHostFile(hostFor('linux'), '/r/x', path.join(dir, 'y'), { exec: async () => ({ status: 1, stdout: '', stderr: 'no such file' }) }), /no such file/);
+  await assert.rejects(fetchHostFile(sshHost, '/r/x', path.join(dir, 'y'), { exec: async () => ({ status: 1, stdout: '', stderr: 'no such file' }) }), /no such file/);
   const src = path.join(dir, 'src.log');
   writeFileSync(src, 'local bytes');
-  await fetchHostFile(hostFor('mac'), src, path.join(dir, 'dst.log'));
+  await fetchHostFile(hostFor('mac', { transport: { kind: 'local' } }), src, path.join(dir, 'dst.log'));
   assert.equal(readFileSync(path.join(dir, 'dst.log'), 'utf8'), 'local bytes');
   rmSync(dir, { recursive: true, force: true });
 });
