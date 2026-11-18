@@ -124,13 +124,33 @@ async function openMahord(gui, { binary, log }) {
     if (msg.error) p.reject(new Error(JSON.stringify(msg.error))); else p.resolve(msg.result);
   });
   child.stderr.on('data', (d) => log({ mahordStderr: String(d) }));
-  const exited = new Promise((resolve) => child.once('exit', (code) => {
-    for (const p of pending.values()) p.reject(new Error(`maho-client exited ${code}`));
-    resolve(code);
-  }));
+  // A client that dies at once must fail the handshake immediately, not sit until the RPC
+  // deadline. Measured on maho-win 2026-11-18: the WinGet ferryx-rd-client.exe ships without its
+  // FFmpeg DLLs, so it exits 0xC0000135 (STATUS_DLL_NOT_FOUND) in ~0 ms. 'exit' then fired before
+  // the initialize entry existed in 'pending', so nothing was rejected and every run reported
+  // 'deadline 90000ms: mahord initialize' - a transport-shaped message for a broken install.
+  // A spawn-level failure (ENOENT, EACCES, bad image) emits 'error' and never 'exit'; that event
+  // also had no listener, which is an unhandled error waiting to crash the run.
+  let exitState = null;
+  const exited = new Promise((resolve) => {
+    child.once('error', (error) => {
+      exitState = { error };
+      for (const p of pending.values()) p.reject(new Error(`maho-client failed to start: ${error.message}`));
+      resolve(null);
+    });
+    child.once('exit', (code, signal) => {
+      exitState = { code, signal };
+      for (const p of pending.values()) p.reject(new Error(`maho-client exited ${code ?? signal}`));
+      resolve(code);
+    });
+  });
+  const deathMessage = () => (exitState.error
+    ? `maho-client failed to start: ${exitState.error.message}`
+    : `maho-client exited ${exitState.code ?? exitState.signal} before answering`);
   // Shared hosts hit build bursts that stall the RD encode loop for tens of seconds; a 30s
   // deadline turned that into a hard Q00 failure (run 20261111t050123z). 90s rides them out.
   const rpc = (method, params, deadlineMs = 90_000) => {
+    if (exitState) return Promise.reject(new Error(deathMessage()));
     const id = nextId++;
     const p = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
