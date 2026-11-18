@@ -50,6 +50,19 @@ pub fn app_scope() -> ConversationScope {
     }
 }
 
+/// The requirement a worker is graded against for one piece of the owner's own text: `r1`-style
+/// ids in call order, the text trimmed, and the one verifier wording every natural-language
+/// requirement gets. The app's `submit` and the panel's handover both build contracts this way,
+/// so a handed-over goal is graded exactly like an app-requested one.
+pub fn requirement_spec(index: usize, text: &str) -> RequirementSpec {
+    let text = text.trim();
+    RequirementSpec {
+        id: format!("r{}", index + 1),
+        text: text.to_owned(),
+        verifier: format!("independent verification that: {text}"),
+    }
+}
+
 /// The model's `submit` call as an untrusted [`SubmitWork`] proposal. It declares only the
 /// baseline operations a natural-language execution request carries; anything wider needs the
 /// owner's explicit choice.
@@ -62,11 +75,7 @@ pub fn submit_from_call(
     let requirements: Vec<RequirementSpec> = requirements
         .iter()
         .enumerate()
-        .map(|(index, text)| RequirementSpec {
-            id: format!("r{}", index + 1),
-            text: text.trim().to_owned(),
-            verifier: format!("independent verification that: {}", text.trim()),
-        })
+        .map(|(index, text)| requirement_spec(index, text))
         .collect();
     SubmitWork {
         project_id: None,
