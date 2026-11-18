@@ -13,6 +13,7 @@ import {
 import { startSshd, sshRestoreSession, recordSshHelper } from '../lib/sshd.mjs';
 import { typeVerified, renderEcho, renderConptyInput } from '../lib/typeverified.mjs';
 import { legacyLogFiles } from '../lib/jobs.mjs';
+import { ownsForeground } from '../lib/gui.mjs';
 
 export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_FILE_NAME, in <FERRYX_DATA_DIR>/remote
 
@@ -54,6 +55,46 @@ export const SETTINGS_OPENED_RECEIPT = 'Daemon supervisor status read';
 export const SETTINGS_OPEN_ATTEMPTS = 3;
 export const SETTINGS_OPEN_DEADLINE_MS = 10_000;
 
+/** Barrier kind recorded when desktop input was withheld for want of a proven foreground. */
+export const OWNERSHIP_UNCONFIRMED = 'GUI_INPUT_OWNERSHIP_UNCONFIRMED';
+
+/**
+ * Ask the GUI driver to make the recorded QA window the foreground, and report whether it proved
+ * it. The scenarios' keys, chords, clicks and modifier key-ups are global desktop input - cliclick
+ * posts real CGEvents on macOS, MahoRD's SendInput lands in the foreground window on Windows, and a
+ * Linux WM acts on the focused window - so they are sent only on an explicit `focused: true`.
+ *
+ * A focus step that failed, threw, was skipped for the platform, or answered something unusable is
+ * not permission: at the measured candidate gui.mjs reported mac focus as focused:true even when
+ * its osascript activation had failed, and every later key went to whichever application really
+ * was frontmost (run surv-mac-1117n). Windows and Linux could answer focused:false and the walk
+ * still pressed Escape and typed. Either way the caller now gets owned:false with the driver's own
+ * answer attached, so the refusal is recorded rather than silently swallowed.
+ */
+export async function confirmInputOwnership(ctx, gui, at) {
+  let focus = null;
+  let error = null;
+  try {
+    focus = await ctx.gui.focus(gui);
+  } catch (e) {
+    error = String(e?.message ?? e);
+  }
+  return { at, owned: ownsForeground(focus), focus, error };
+}
+
+/**
+ * The bounded, JSON-safe part of a focus answer for the receipt: what the driver claimed, why it
+ * declined, and the platform detail that explains it. Never the raw child buffers.
+ */
+export function summarizeFocus(focus) {
+  // An absent or null focus is preserved as null; any other non-object is kept as its string form.
+  if (!focus || typeof focus !== 'object') return { value: focus == null ? null : String(focus) };
+  const keys = ['focused', 'skipped', 'refused', 'reason', 'pid', 'frontPid', 'instance', 'clicked', 'waitedMs', 'rect', 'activation', 'readBack', 'before', 'after'];
+  const out = {};
+  for (const k of keys) if (focus[k] !== undefined) out[k] = focus[k];
+  return out;
+}
+
 /** A pattern that matches once the log holds at least `count` receipt lines. */
 export function nthReceiptPattern(receipt, count) {
   return `(?:${receipt}[\\s\\S]*?){${count}}`;
@@ -66,11 +107,21 @@ export function nthReceiptPattern(receipt, count) {
  * A press with no new receipt within the deadline did not open the dialog, so pressing again is
  * safe; a receipt that arrives late only means a later press closes the dialog, which the next
  * press then reopens with its own receipt. Bounded by SETTINGS_OPEN_ATTEMPTS.
+ *
+ * `gate`, when given, is awaited before every press and must answer owned:true; the shortcut is a
+ * global chord, so a window whose foreground was never proven gets no press at all. Scarce callers
+ * pass their own gate (toggleAutostartOffThroughSettings); the plain two-argument form keeps the
+ * receipt-only contract the settings unit tests drive.
  */
-export async function openSettings(ctx, logFile) {
+export async function openSettings(ctx, logFile, gate = null) {
   const attempts = [];
   const count = async () => (((await ctx.agent.call('readFile', { file: logFile })) ?? '').split(SETTINGS_OPENED_RECEIPT).length - 1);
   for (let i = 0; i < SETTINGS_OPEN_ATTEMPTS; i += 1) {
+    const guard = gate ? await gate() : { owned: true };
+    if (!guard.owned) {
+      attempts.push({ before: null, opened: false, refused: OWNERSHIP_UNCONFIRMED, guard });
+      return { opened: false, refused: OWNERSHIP_UNCONFIRMED, attempts, guard };
+    }
     const before = await count();
     // The product binds settings.toggle to the platform modifier (ui/src/lib/shortcuts.ts: metaKey on
     // macOS, Ctrl elsewhere); pressing Control+, on a Mac produced no receipt in run 20261117t142623z.
@@ -85,21 +136,39 @@ export async function openSettings(ctx, logFile) {
 /**
  * Drives the real settings toggle through MahoRD; the product writes the marker as its receipt.
  * Nothing is toggled unless Settings provably opened.
+ *
+ * Every step here is global desktop input (Escape, the settings chord, the Tab/Space walk), so each
+ * group is preceded by a focus of the recorded GUI and withheld unless that focus proved ownership.
+ * Q10 launches a fresh GUI and used to rely on "a fresh GUI holds keyboard focus"; that is an
+ * assumption about another application's window, not a proof, and on the measured candidate every
+ * key it sent went wherever the foreground really was.
  */
-async function toggleAutostartOffThroughSettings(ctx, optout, logFile) {
+async function toggleAutostartOffThroughSettings(ctx, optout, logFile, gui) {
   if (!ctx.mahord) throw new Error('the settings toggle needs MahoRD on remote hosts');
+  const guards = [];
+  const own = async (at) => {
+    const guard = await confirmInputOwnership(ctx, gui, at);
+    guards.push({ at, owned: guard.owned, error: guard.error, focus: summarizeFocus(guard.focus) });
+    return guard;
+  };
   // A leftover pairing modal ("The verification time has expired") from an earlier scenario can
   // own the focus stack: the settings receipt still lands because General mounts behind it, but the
   // Tab/Space walk then drives the modal and no opt-out marker is written (run 20261110t162427z Q10:
   // marker absent, screenshot showed the expired-QR dialog over a blank window). Dismiss overlays
   // before opening; Escape on a bare window is a no-op.
+  const dismount = await own('before-dismiss');
+  if (!dismount.owned) {
+    return { opened: { opened: false, refused: OWNERSHIP_UNCONFIRMED }, marker: false, before: null, after: null, refused: OWNERSHIP_UNCONFIRMED, guards, focus: dismount };
+  }
   for (let i = 0; i < 2; i += 1) {
     await ctx.mahord.key('Escape');
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  const opened = await openSettings(ctx, logFile);
+  const opened = await openSettings(ctx, logFile, () => own('settings-open'));
   if (!opened.opened) {
-    return { opened, marker: false, before: null, after: await ctx.mahord.screenshot().catch(() => null) };
+    // A refused gate sent no chord, so there is nothing to screenshot as a product result.
+    const shot = opened.refused ? null : await ctx.mahord.screenshot().catch(() => null);
+    return { opened, marker: false, before: null, after: shot, refused: opened.refused ?? null, guards };
   }
   // The receipt is logged when cmd_daemon_supervisor_get answers, which is what renders the switch,
   // so focus is walked only after the switch exists.
@@ -107,6 +176,7 @@ async function toggleAutostartOffThroughSettings(ctx, optout, logFile) {
   let after = null;
   let marker = false;
   let attempts = 0;
+  let refused = null;
   // Walk to the switch, then keep advancing one control at a time: General gains and loses
   // focusable controls (a Select, the Advanced features switch) as the product evolves, so a
   // single hardcoded count silently toggles the wrong switch when the layout shifts. The marker is
@@ -115,6 +185,8 @@ async function toggleAutostartOffThroughSettings(ctx, optout, logFile) {
   // SUPERVISOR_SWITCH_PROBES.
   for (let attempt = 1; attempt <= 2 && !marker; attempt += 1) {
     attempts = attempt;
+    const walk = await own(`walk-${attempt}`);
+    if (!walk.owned) { refused = OWNERSHIP_UNCONFIRMED; break; }
     if (attempt === 1) {
       for (let i = 0; i < SUPERVISOR_SWITCH_TABS; i += 1) await ctx.mahord.key('Tab');
     }
@@ -126,15 +198,23 @@ async function toggleAutostartOffThroughSettings(ctx, optout, logFile) {
       if (!marker) await ctx.mahord.key('Tab');
     }
     if (marker) break;
+    const dismiss = await own(`dismiss-${attempt}`);
+    if (!dismiss.owned) { refused = OWNERSHIP_UNCONFIRMED; break; }
     await ctx.mahord.key('Escape');
     await new Promise((resolve) => setTimeout(resolve, 250));
     if (attempt === 1) {
-      const reopened = await openSettings(ctx, logFile);
-      if (!reopened.opened) break;
+      const reopened = await openSettings(ctx, logFile, () => own('settings-reopen'));
+      if (!reopened.opened) { refused ??= reopened.refused ?? null; break; }
     }
   }
-  await ctx.mahord.key('Escape');
-  return { opened, marker, before, after, attempts };
+  // The closing Escape is the same global key: it is sent only while the GUI still owns the
+  // foreground, and a walk that already lost it leaves it unsent.
+  if (!refused) {
+    const closing = await own('closing-escape');
+    if (closing.owned) await ctx.mahord.key('Escape');
+    else refused = OWNERSHIP_UNCONFIRMED;
+  }
+  return { opened, marker, before, after, attempts, refused, guards };
 }
 
 /** remove_autostart runs right after the marker write in the same command: wait for its effect. */
@@ -169,9 +249,25 @@ export async function Q10(ctx, result) {
   assertion(result, 'newest generation registered for login before opt-out', autostarts(regBefore) === true, regBefore.raw?.slice?.(0, 400) ?? regBefore.raw);
   // The owner's own tree right before the toggle: Q00's watchdog was replaced long ago (run-int2-all Q10).
   const treeBefore = ctx.platform === 'windows' ? await ctx.jobs.windowsTree(ctx.stagedRoot, { ownerPid: owner.pid }) : null;
-  const toggle = await toggleAutostartOffThroughSettings(ctx, optout, guiLog);
+  const toggle = await toggleAutostartOffThroughSettings(ctx, optout, guiLog, ctx.state.gui);
   if (toggle.before) await evidence(ctx, result, 'settings-before-space.png.b64', toggle.before.toString('base64'));
   if (toggle.after) await evidence(ctx, result, 'settings-after-space.png.b64', toggle.after.toString('base64'));
+  // The refusal is proved, not inferred: no key reaches the desktop without a verified foreground,
+  // so a Q10 that could not own the GUI records why and sends no Tab/Space walk into a stranger's
+  // window. This is the Q10 half of the ownership contract Q11 got from run surv-mac-1117n.
+  await evidence(ctx, result, 'input-ownership.json', { guards: toggle.guards ?? [], refused: toggle.refused ?? null });
+  if (toggle.refused) {
+    // No chord was pressed and no walk was driven, so "Settings opened" is not a product fact here:
+    // it is only recorded in the barrier detail, never as a failed assertion of the product.
+    return block(result, toggle.refused, {
+      scenario: 'Q10',
+      at: toggle.guards?.findLast?.((g) => !g.owned)?.at ?? null,
+      focus: toggle.guards?.findLast?.((g) => !g.owned) ?? null,
+      opened: toggle.opened,
+      marker: toggle.marker,
+      detail: 'desktop input was withheld: gui.focus did not prove the recorded QA window holds the foreground',
+    });
+  }
   assertion(result, 'Settings opened (cmd_daemon_supervisor_get receipt) before the toggle', toggle.opened.opened, toggle.opened.attempts);
   assertion(result, 'settings toggle wrote the opt-out marker (product receipt)', toggle.marker === true, optout);
   const regAfter = toggle.marker ? await waitAutostartRemoved(ctx, key) : await loginRegistration(ctx, key);
@@ -280,9 +376,16 @@ export async function waitRestoredAttach(ctx, sid, gui) {
   const first = await wait(ATTACH_BEFORE_ESCAPE_MS);
   if (first.matched) return { ...first, escapeSent: false, focus: null };
   // The key must reach the GUI, not the window that holds the foreground (Windows: see gui.focus).
-  const focus = await ctx.gui.focus(gui);
+  // Escape is a global key: on a focus that was never proven it goes to whatever application is
+  // frontmost, and this harness would then have pressed Escape into an unrelated desktop. Withhold
+  // it and report the refusal; the attach wait still runs, so a tab that attaches on its own is
+  // still observed rather than being turned into a false failure.
+  const guard = await confirmInputOwnership(ctx, gui, 'attach-escape');
+  if (!guard.owned) {
+    return { ...(await wait(ATTACH_AFTER_ESCAPE_MS)), escapeSent: false, refused: OWNERSHIP_UNCONFIRMED, focus: summarizeFocus(guard.focus), focusError: guard.error };
+  }
   await ctx.mahord.key('Escape');
-  return { ...(await wait(ATTACH_AFTER_ESCAPE_MS)), escapeSent: true, focus };
+  return { ...(await wait(ATTACH_AFTER_ESCAPE_MS)), escapeSent: true, focus: summarizeFocus(guard.focus) };
 }
 
 /**
@@ -347,7 +450,14 @@ export async function dismissSetupWizard(ctx, gui, pane) {
   const focus = [];
   // A lost Escape (MahoRD drops keys) leaves the pane covered, so it is resent (bounded).
   while (!closed.matched && escapes < WIZARD_ESCAPE_SENDS) {
-    focus.push(await ctx.gui.focus(gui));
+    // Escape is global input and the wizard check alone does not prove this window owns the
+    // keyboard: only a verified focus authorises the key, and a refused round ends the loop with
+    // the refusal recorded instead of typing Escape into another application.
+    const guard = await confirmInputOwnership(ctx, gui, `wizard-escape-${escapes + 1}`);
+    focus.push({ ...summarizeFocus(guard.focus), owned: guard.owned, error: guard.error });
+    if (!guard.owned) {
+      return { expected: true, opened: true, closed: false, escapes, focus, refused: OWNERSHIP_UNCONFIRMED, wizardNotTriggered: false };
+    }
     await ctx.mahord.key('Escape');
     escapes += 1;
     closed = await ctx.agent.call('waitLog', { file, pattern: wizardClosedPattern(pane), deadlineMs: WIZARD_CLOSED_MS });
@@ -500,8 +610,25 @@ export async function Q11(ctx, result) {
   }
   ctx.state.gui = await ctx.gui.launch(ctx.artifacts.A, { env: guiEnv });
   const wizard = await dismissSetupWizard(ctx, ctx.state.gui, pane);
+  // A wizard Escape this harness withheld is a barrier of its own: the wizard is still up because no
+  // key was sent, which says nothing about the product. Recorded before the attach assertion so the
+  // summary names the real cause rather than a missing attach receipt.
+  if (wizard.refused) {
+    await evidence(ctx, result, 'input-ownership.json', { at: 'wizard-escape', owned: false, focus: wizard.focus, refused: wizard.refused });
+    return block(result, wizard.refused, {
+      scenario: 'Q11-wizard', at: 'wizard-escape', focus: wizard.focus,
+      detail: 'Escape was withheld: gui.focus did not prove the recorded QA window holds the foreground',
+    });
+  }
   if (wizard.expected && !assertion(result, 'the first-run setup wizard opened and was closed before any key was typed', wizard.opened && wizard.closed, wizard)) return;
   const attached = await waitRestoredAttach(ctx, sid, ctx.state.gui);
+  if (attached.refused) {
+    await evidence(ctx, result, 'input-ownership.json', { at: 'attach-escape', owned: false, focus: attached.focus, error: attached.focusError, refused: attached.refused });
+    return block(result, attached.refused, {
+      scenario: 'Q11-attach', at: 'attach-escape', focus: attached.focus, error: attached.focusError,
+      detail: 'Escape was withheld: gui.focus did not prove the recorded QA window holds the foreground',
+    });
+  }
   let tuple = null;
   try { tuple = attached.matched ? JSON.parse(attached.matched).attachTuple : null; } catch { tuple = null; }
   if (!assertion(result, 'a GUI tab is attached to the SSH session (native attach receipt)', tuple?.backendSessionId === sid && tuple?.incarnation === incarnation, { tuple, incarnation, attached })) {
@@ -529,9 +656,30 @@ export async function Q11(ctx, result) {
     const released = await ctx.mahord.releaseModifiers().catch((error) => ({ ok: false, error: String(error?.message ?? error) }));
     modifierRelease.push({ at, ...released });
   };
-  await releaseModifiers('before-focus');
   // Keys go to the foreground window: make it the GUI that attached (Windows: gui.focus).
-  const focused = await ctx.gui.focus(ctx.state.gui);
+  // Every step from here on is global desktop input - the modifier key-ups, the pane click and the
+  // typing - so ownership is proved first and nothing is sent without it. The modifier release is
+  // itself a global key-up: on an unowned desktop it clears modifiers for a stranger, so it sits
+  // inside the guard too, and its 'before-focus' position in the record is kept by name.
+  const guard = await confirmInputOwnership(ctx, ctx.state.gui, 'before-focus');
+  const focused = summarizeFocus(guard.focus);
+  if (!guard.owned) {
+    // No click, no chord, no key, no modifier release: the GUI is not the foreground, so there is
+    // nothing this scenario may safely send to it. Record the driver's own answer and stop with the
+    // barrier, keeping the attach evidence that already proves the tab exists.
+    await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused, terminalClick: null, modifierRelease, refused: OWNERSHIP_UNCONFIRMED });
+    await evidence(ctx, result, 'input-ownership.json', { at: guard.at, owned: false, focus: focused, error: guard.error });
+    // The barrier, not a failed assertion, carries this: the product was never exercised, so
+    // reporting it as a product failure would be a false negative.
+    return block(result, OWNERSHIP_UNCONFIRMED, {
+      scenario: 'Q11',
+      at: guard.at,
+      focus: focused,
+      error: guard.error,
+      detail: 'desktop input was withheld: gui.focus did not prove the recorded QA window holds the foreground',
+    });
+  }
+  await releaseModifiers('before-focus');
   let terminalClick = null;
   // Click into the pane on every platform that can click: macOS routes chords to the terminal only
   // while has_focused_session() is true, and a frontmost window alone never sets it (run
@@ -552,6 +700,7 @@ export async function Q11(ctx, result) {
   // evidence (only the in-memory array had it).
   await releaseModifiers('before-typing');
   await evidence(ctx, result, 'focus.json', { beforeEscape: attached.focus ?? null, beforeTyping: focused, terminalClick, modifierRelease });
+  await evidence(ctx, result, 'input-ownership.json', { at: guard.at, owned: true, focus: focused });
   let typed;
   try {
     typed = await typeVerified({
@@ -589,6 +738,18 @@ export async function Q11(ctx, result) {
   // Enter that did land would show as an extra line, which the exact remote-log check reports.
   let applied = { matched: null };
   let enterSends = 0;
+  // Enter commits the line, so it is desktop input like the rest: the pane proves it still owns the
+  // foreground before the first commit, and a refusal leaves the line uncommitted rather than
+  // pressing Enter into whatever else is frontmost.
+  const commit = await confirmInputOwnership(ctx, ctx.state.gui, 'commit-enter');
+  if (!commit.owned) {
+    await evidence(ctx, result, 'input-ownership.json', { at: commit.at, owned: false, focus: summarizeFocus(commit.focus), error: commit.error });
+    // Barrier only: the line was never committed, so the product is not implicated.
+    return block(result, OWNERSHIP_UNCONFIRMED, {
+      scenario: 'Q11-commit', at: commit.at, focus: summarizeFocus(commit.focus), error: commit.error,
+      detail: 'Enter was withheld: gui.focus did not prove the recorded QA window holds the foreground',
+    });
+  }
   while (!applied.matched && enterSends < 3) {
     enterSends += 1;
     await ctx.mahord.key('Enter');

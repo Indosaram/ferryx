@@ -4,7 +4,7 @@ import { selectWindowsTree } from './lib/os-jobs.mjs';
 import { createJobs } from './lib/jobs.mjs';
 import { sshdArgs, sshdConfig, startSshd, BANNER_PROBE_SCRIPT } from './lib/sshd.mjs';
 import { createOutputRoute, waitForContent, readLogText, LOG_NOT_YET_CODES } from './lib/agent.mjs';
-import { createGuiDriver, windowsLaunchCmdContent, windowsLaunchFiles, windowsCloseFiles, windowsRectFiles, titleBarPoint, lastObserverRecord, isExplorerDialogForeground, onlyArmedRecord, GO_WAIT_SECONDS } from './lib/gui.mjs';
+import { createGuiDriver, windowsLaunchCmdContent, windowsLaunchFiles, windowsCloseFiles, windowsRectFiles, titleBarPoint, lastObserverRecord, isExplorerDialogForeground, onlyArmedRecord, ownsForeground, GO_WAIT_SECONDS } from './lib/gui.mjs';
 import { isolationLayout } from './lib/guards.mjs';
 import { connectMahord } from './lib/mahord.mjs';
 import { requireOwner, nonceRoundTrip, hasShownPrompt, FIRST_PROMPT_MS } from './scenarios/common.mjs';
@@ -784,41 +784,59 @@ test('Q13: no first prompt is a failed assertion, never a hang; Linux never wait
 /**
  * run-q11 only-q11-q13-r2 (Q11-attach-screenshot.png): the GUI opened behind the console of its
  * launch .cmd, so MahoRD's Escape went to the console. gui.focus asks the launcher for the GUI's
- * window rect and the foreground hwnd and clicks the GUI's own title bar only when they differ.
+ * window rect and the foreground hwnd; every such query raises the launcher's own
+ * MainWindowHandle first (fixtures/windows-gui-launcher.ps1), so the answer is the read-back of a
+ * targeted activation. There is no coordinate fallback: the recorded obstruction is another
+ * visible Ferryx window, which may cover the title-bar point.
  */
-function rectDesktop({ foregroundAfterClick }) {
+function rectDesktop({ foregroundAfterRaise, ok = true, hwnd = 222 }) {
   const layout = isolationLayout('C:\\r', 'windows');
   const clicks = [];
   let foreground = 111;
   let answer = null;
-  const rect = { ok: true, hwnd: 222, left: 100, top: 50, right: 1700, bottom: 1050 };
+  const rect = { ok, hwnd, left: 100, top: 50, right: 1700, bottom: 1050 };
   const agent = { call: async (m, p = {}) => {
     if (m === 'writeFile' && p.file === windowsRectFiles(layout, 'g2').request) { answer = JSON.stringify({ seq: Number(p.content), ...rect, foreground }); return true; }
     if (m === 'waitLog' && p.file === windowsRectFiles(layout, 'g2').answer) return new RegExp(p.pattern).test(answer ?? '') ? { matched: answer } : { matched: null, timedOut: true };
     if (m === 'readFile' && p.file === windowsRectFiles(layout, 'g2').answer) return answer;
     throw new Error(`unexpected agent call ${m} ${p.file ?? ''}`);
   } };
-  const mahord = { click: async (x, y) => { clicks.push([x, y]); if (foregroundAfterClick) foreground = rect.hwnd; } };
+  const mahord = { click: async (x, y) => { clicks.push([x, y]); if (foregroundAfterRaise) foreground = rect.hwnd; } };
   const gui = createGuiDriver({ host: { platform: 'windows' }, agent, runId: RUN, layout, allowedRoots: ['C:\\r'], forbidden: [], mahord });
   return { gui, clicks, setForeground: (h) => { foreground = h; } };
 }
 
-test('Windows gui.focus clicks the GUI title bar when another window holds the foreground, and proves it after', async () => {
-  const d = rectDesktop({ foregroundAfterClick: true });
-  const r = await d.gui.focus({ tag: 'g2', pid: 9 });
-  assert.equal(r.focused, true);
-  assert.deepEqual(d.clicks, [[300, 62]]);
+test('Windows gui.focus trusts the launcher raise only when the read-back names its own hwnd, and never clicks', async () => {
+  // The launcher's targeted raise took the foreground: the read-back proves ownership.
+  const owned = rectDesktop({ foregroundAfterRaise: true });
+  owned.setForeground(222);
+  const r = await owned.gui.focus({ tag: 'g2', pid: 9 });
+  assert.deepEqual([r.focused, r.raised, r.clicked], [true, true, null]);
+  assert.deepEqual(owned.clicks, [], 'a proven raise needs no input at all');
+
+  // occluded: a valid nonzero handle, ok, but the raise did not take the foreground because another
+  // visible Ferryx window covers the GUI. No coordinate click may be substituted for it.
+  const occluded = rectDesktop({ foregroundAfterRaise: false });
+  const o = await occluded.gui.focus({ tag: 'g2', pid: 9 });
+  assert.deepEqual([o.focused, o.reason], [false, 'the launcher raise did not take the foreground']);
+  assert.deepEqual(occluded.clicks, [], 'no title-bar click when the targeted raise did not take');
+  assert.equal(ownsForeground(o), false, 'the refusals the scenarios act on');
+
+  // A launcher that reports no usable window (failed rect call or no main window) is a refusal too.
+  const noWindow = rectDesktop({ foregroundAfterRaise: true, ok: false });
+  assert.deepEqual([(await noWindow.gui.focus({ tag: 'g2', pid: 9 })).focused, noWindow.clicks], [false, []]);
+  const noHandle = rectDesktop({ foregroundAfterRaise: true, hwnd: 0 });
+  assert.deepEqual([(await noHandle.gui.focus({ tag: 'g2', pid: 9 })).focused, noHandle.clicks], [false, []]);
+
+  // The title-bar geometry helper is still exported for other callers, unchanged.
   assert.deepEqual(titleBarPoint({ left: 100, top: 50, right: 1700 }), { x: 300, y: 62 });
-  const stuck = rectDesktop({ foregroundAfterClick: false });
-  assert.equal((await stuck.gui.focus({ tag: 'g2', pid: 9 })).focused, false, 'a click that did not take the foreground is reported, not assumed');
-  const already = rectDesktop({ foregroundAfterClick: false });
-  already.setForeground(222);
-  const a = await already.gui.focus({ tag: 'g2', pid: 9 });
-  assert.deepEqual([a.focused, already.clicks.length], [true, 0]);
   const ps1 = readFileSync(new URL('./fixtures/windows-gui-launcher.ps1', import.meta.url), 'utf8');
   assert.match(ps1, /"gui-\$Tag\.rect\.request"/);
   assert.match(ps1, /GetForegroundWindow\(\)/);
   assert.match(ps1, /"gui-\$Tag\.rect\.json"/);
+  // The targeted raise is what the driver now relies on: it must still be in the fixture.
+  assert.match(ps1, /\[QaJob\]::Raise\(\$h\)/);
+  assert.match(ps1, /\$h = \$proc\.MainWindowHandle/);
 });
 
 
