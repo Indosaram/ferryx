@@ -855,6 +855,76 @@ async fn a_correction_naming_a_withheld_operation_waits_for_the_owner() {
     assert_eq!(turns_used(&pool, &lane).await, 0);
 }
 
+/// The reports the app transcript holds for `goal_id`, in the order they were written.
+async fn reports_of(pool: &SqlitePool, goal_id: &str) -> Vec<String> {
+    use crate::supervisor::goal_report::report_key;
+    let states = [RunState::Completed, RunState::Degraded, RunState::AwaitingOwner];
+    let mut texts = Vec::new();
+    for state in states {
+        let text: Option<String> =
+            sqlx::query_scalar("SELECT text FROM supervisor_app_transcript WHERE request_id = ?")
+                .bind(report_key(goal_id, state))
+                .fetch_optional(pool)
+                .await
+                .unwrap();
+        texts.extend(text);
+    }
+    texts
+}
+
+/// A goal the verifier completes is reported to the owner once. The completion is committed by
+/// `CompletionDriver::finish` inside its own transaction, so nothing but the settle hook at that
+/// commit site can report it: without it the owner hears nothing, however the goal ended.
+#[tokio::test]
+async fn a_goal_the_verifier_completes_is_reported_once() {
+    let pool = owner_pool().await;
+    let (goal, lane) = admit(&pool, "m-1", None).await;
+    let control = idle_control();
+    dispatcher(&pool, control.clone(), PANE).drain().await;
+    let _repo = use_clean_repo(&pool, &lane, "READY").await;
+    assert_eq!(reports_of(&pool, &goal).await, Vec::<String>::new(), "nothing before the settle");
+    settle(&pool, PANE, 1_000).await;
+
+    let model = ScriptedModel::new(&[ASSESS_COMPLETE, CONVERGED]);
+    completion_scheduler(&pool, model, control)
+        .tick(epoch())
+        .await
+        .unwrap();
+    let (state, detail) = goal_state(&pool, &goal).await;
+    assert_eq!(state, RunState::Completed, "{detail}");
+
+    let reports = reports_of(&pool, &goal).await;
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].starts_with("completed: Write result.txt\n"), "{reports:?}");
+    assert!(reports[0].contains(VERIFIED), "{reports:?}");
+}
+
+/// A verify-time hold that commits inside the verifier's transaction is reported once too: the
+/// owner is asked the question the grant withheld, in the same app transcript.
+#[tokio::test]
+async fn a_goal_the_verifier_holds_for_the_owner_is_reported_once() {
+    let pool = owner_pool().await;
+    let (goal, lane) = admit(&pool, "m-1", None).await;
+    let control = idle_control();
+    dispatcher(&pool, control.clone(), PANE).drain().await;
+    let _repo = use_clean_repo(&pool, &lane, "NOT READY").await;
+    settle(&pool, PANE, 1_000).await;
+
+    let model = ScriptedModel::new(&[ASSESS_PUSH]);
+    completion_scheduler(&pool, model, control)
+        .tick(epoch())
+        .await
+        .unwrap();
+    let (state, detail) = goal_state(&pool, &goal).await;
+    assert_eq!(state, RunState::AwaitingOwner, "{detail}");
+    assert!(detail.starts_with(GRANT_EXCEEDED), "{detail}");
+
+    let reports = reports_of(&pool, &goal).await;
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].starts_with("needs owner: Write result.txt\n"), "{reports:?}");
+    assert!(reports[0].contains(GRANT_EXCEEDED), "{reports:?}");
+}
+
 /// A pause and resume while the run goes bumps the goal revision but asks the worker nothing
 /// new: the settled run is still graded and completes the goal.
 #[tokio::test]

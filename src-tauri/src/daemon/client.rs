@@ -1080,6 +1080,17 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
         } => DaemonClient::PAIRED_MUTATION_OUTER_TIMEOUT,
         // A move waits for the holder's final checkpoint, its transfer and the import.
         DaemonRequest::SupervisorMoveHere { .. } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
+        // Setup run can host the owner-memory import turn in the same exchange (a live Ready
+        // engine seeds before answering), and an import turn is a full model turn: the todo12
+        // probes measured 12-25 s per turn on an idle engine, and a 15 s budget cut the first
+        // import off mid-turn. The hub aborts that turn when this client hangs up, which left the
+        // durable ingest session in waiting_human/interrupted_run and every later prompt timed
+        // out (todo12 root cause). 180 s is the budget the other long supervisor actions use:
+        // ~7x the measured import turn, still under the hub's own 600 s engine turn ceiling
+        // (crates/ferryx-hub/src/meta/mhc_profile.rs, MhcTimeouts::turn).
+        DaemonRequest::SupervisorSetup {
+            request: crate::daemon::protocol::SupervisorSetupAction::Run { .. },
+        } => SUPERVISOR_GOAL_REQUEST_TIMEOUT,
         // Turning the remote desktop host on probes capture and binds; the host bounds that at 30 s.
         DaemonRequest::RemoteDesktopHostSet { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
         DaemonRequest::ReferenceChat { .. } => REFERENCE_CHAT_REQUEST_TIMEOUT,
@@ -6180,6 +6191,25 @@ mod tests {
         assert_eq!(request_timeout(&show), std::time::Duration::from_secs(15));
         assert_eq!(request_timeout(&DaemonRequest::SupervisorSnapshot), std::time::Duration::from_secs(15));
         assert_eq!(request_timeout(&DaemonRequest::Ping), std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn a_supervisor_setup_run_outlasts_the_import_turn_and_status_keeps_fifteen_seconds() {
+        use crate::daemon::protocol::SupervisorSetupAction;
+        let run = DaemonRequest::SupervisorSetup {
+            request: SupervisorSetupAction::Run { import_memory: true, projects: Vec::new() },
+        };
+        assert_eq!(request_timeout(&run), std::time::Duration::from_secs(180));
+        // The import turn is a whole model turn; the old 15 s default cut it off mid-turn.
+        assert!(request_timeout(&run) > std::time::Duration::from_secs(15));
+        let projects_only = DaemonRequest::SupervisorSetup {
+            request: SupervisorSetupAction::Run { import_memory: false, projects: Vec::new() },
+        };
+        assert_eq!(request_timeout(&projects_only), std::time::Duration::from_secs(180));
+        let status = DaemonRequest::SupervisorSetup { request: SupervisorSetupAction::Status };
+        assert_eq!(request_timeout(&status), std::time::Duration::from_secs(15));
+        let switches = DaemonRequest::SupervisorSetup { request: SupervisorSetupAction::ProjectMemory };
+        assert_eq!(request_timeout(&switches), std::time::Duration::from_secs(15));
     }
 
     #[test]

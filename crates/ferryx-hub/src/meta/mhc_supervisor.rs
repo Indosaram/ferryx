@@ -1818,7 +1818,10 @@ impl Inner {
 
     /// Aborts and drains a turn its caller no longer waits for, then closes a one-shot context.
     /// A context that does not settle in time, or whose turn outcome is unknown (`reset`), is
-    /// dropped and closed, so its next use resumes cleanly with a fresh handle.
+    /// dropped and closed, so its next use resumes cleanly with a fresh handle. A durable role
+    /// also drops its persisted session: an engine session left in waiting_human/interrupted_run
+    /// by an aborted turn answers no later prompt (todo12), so resuming it would wedge the role
+    /// for good. Its next turn opens a fresh durable identity with no session file to resume.
     async fn finish(&self, spec: &RoleSpec, after: Cleanup) {
         let Cleanup {
             engine,
@@ -1852,11 +1855,20 @@ impl Inner {
         };
         if (reset || !settled) && !close {
             engine.forget(&spec.key);
+            self.discard_persisted(&spec.key);
             engine.client.close_session(&handle);
         }
         engine.client.unsubscribe(&handle);
         if close {
             engine.client.close_session(&handle);
+        }
+    }
+
+    /// Drops a role's persisted session binding, if any, and logs a failure to persist the
+    /// drop: the next open would otherwise resume the same stuck session file.
+    fn discard_persisted(&self, key: &str) {
+        if let Err(error) = self.store().remove(key) {
+            tracing::warn!(%error, role = key, "a dropped supervisor session identity was not persisted");
         }
     }
 

@@ -293,8 +293,117 @@ impl DaemonBridge {
     }
 }
 
+/// The coding agents a supervisor lane may start, when the owner has not configured one, in
+/// preference order. These are registry ids, not command names: the engine's own agent CLI is
+/// `maho` (its command is `mhc`). A hub install has the engine far more often than a
+/// third-party CLI; `claude` is what the todo 12 journey used by hand.
+pub const LANE_AGENT_ORDER: &[&str] = &["claude", "codex", "maho", "opencode", "omo"];
+
+/// The agent a supervisor lane starts: the owner's configured one when it is installed, else
+/// the first of [`LANE_AGENT_ORDER`] that is. `None` when no candidate is installed, so the
+/// caller holds the goal instead of opening a shell for it.
+pub(crate) fn lane_agent(
+    configured: Option<&str>,
+    installed: impl Fn(&str) -> bool,
+) -> Option<&'static crate::agent_detect::registry::AgentSpec> {
+    use crate::agent_detect::registry::{self, AgentSpec};
+    let runnable = |spec: &AgentSpec| {
+        spec.command_names
+            .first()
+            .is_some_and(|command| installed(command))
+    };
+    // A configured agent that is not installed is not silently replaced: the launch would
+    // otherwise run a worker under an agent the owner did not choose.
+    if let Some(id) = configured.map(str::trim).filter(|id| !id.is_empty()) {
+        return registry::by_id(id).filter(|spec| runnable(spec));
+    }
+    LANE_AGENT_ORDER
+        .iter()
+        .find_map(|id| registry::by_id(id).filter(|spec| runnable(spec)))
+}
+
 #[async_trait]
 impl TaskLauncher for DaemonBridge {
+    /// Opens the lane pane through the owner's own agent launch (`ferryx-cli agents spawn`), so
+    /// the pane's foreground process is a coding agent, never a shell: a supervisor types its
+    /// worker instruction into this pane, and a shell would only reject it.
+    ///
+    /// The agent is the owner's configured one (`FERRYX_HUB_LANE_AGENT`) when it is installed,
+    /// else the first installed agent of [`LANE_AGENT_ORDER`]. Nothing installed means nothing
+    /// launched: the goal is held instead of being typed into a shell.
+    async fn launch_agent_pane(
+        &self,
+        cwd: &str,
+    ) -> Result<ferryx_hub::agent_control::LaunchedAgent, HubError> {
+        use ferryx_hub::agent_control::AGENT_LAUNCH_UNAVAILABLE;
+        let workspace = ferryx_hub::hub_env::var("FERRYX_HUB_WORKSPACE").map_err(|_| {
+            HubError::config("FERRYX_HUB_WORKSPACE is required before the hub can launch a pane")
+        })?;
+        let preferred = ferryx_hub::hub_env::var("FERRYX_HUB_LANE_AGENT").ok();
+        let Some(agent) = lane_agent(preferred.as_deref(), |command| {
+            crate::ipc::agents::resolve_binary(
+                command,
+                &crate::terminal::shell::legacy_search_paths(),
+            )
+            .is_some()
+        }) else {
+            return Err(HubError::message(format!(
+                "{AGENT_LAUNCH_UNAVAILABLE}: no coding agent of {} is installed on this machine, so lane {cwd} has no agent to run",
+                LANE_AGENT_ORDER.join(", ")
+            )));
+        };
+        // The request shape `ferryx-cli agents spawn --agent <name> --cwd <dir>` sends, with no
+        // prompt: the supervisor's instruction is delivered afterwards under its own request id,
+        // so the turn it starts is attributed to that dispatch.
+        let request = AgentControlOp::Spawn {
+            agent: agent.id.to_owned(),
+            cwd: cwd.to_owned(),
+            workspace_id: Some(workspace),
+            parent_session_id: None,
+            name: None,
+            prompt: None,
+            command: None,
+            args: Vec::new(),
+            request_id: hub_spawn_request_id(),
+        };
+        let (supervisor_fence, supervisor_account) = crate::agent_control::fence::wire(
+            crate::agent_control::fence::stamp_for(&request).map_err(|refusal| {
+                HubError::message(format!("{} {}", refusal.code(), refusal.message()))
+            })?,
+        );
+        let response = self
+            .client
+            .send_request(DaemonRequest::AgentControl {
+                request,
+                host_id: None,
+                supervisor_fence,
+                supervisor_account,
+            })
+            .await
+            .map_err(|error| HubError::message(error.to_string()))?;
+        match response {
+            DaemonResponse::AgentControlOk { result } => {
+                let session_id = result
+                    .get("session")
+                    .and_then(|session| session.get("sessionId"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| HubError::message("the daemon's agent spawn named no session"))?
+                    .to_owned();
+                Ok(ferryx_hub::agent_control::LaunchedAgent {
+                    agent: agent.id.to_owned(),
+                    session_id,
+                })
+            }
+            DaemonResponse::Error { message, code, .. } => Err(HubError::message(match code {
+                Some(code) => format!("{code} {message}"),
+                None => message,
+            })),
+            _ => Err(HubError::message(
+                "the daemon returned an unexpected answer to the lane's agent spawn",
+            )),
+        }
+    }
+
     async fn remote_hosts(&self) -> Result<Vec<String>, HubError> {
         use crate::paired_host::inventory::{AuthStatus, GrantScope};
         let hosts = self
@@ -5878,6 +5987,66 @@ async fn open_mcp_pool(path: &std::path::Path) -> Result<ferryx_hub::goals::Sqli
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which agents a fake host has installed.
+    fn installed_on(host: &'static [&'static str]) -> impl Fn(&str) -> bool {
+        move |command| host.contains(&command)
+    }
+
+    #[test]
+    fn a_lane_agent_prefers_the_configured_one_when_it_is_installed() {
+        let agent = lane_agent(Some("codex"), installed_on(&["claude", "codex"])).expect("codex");
+        assert_eq!(agent.id, "codex");
+        assert_eq!(agent.command_names[0], "codex", "the launched command is the agent's own");
+    }
+
+    #[test]
+    fn a_lane_agent_falls_back_to_the_first_installed_candidate() {
+        let agent = lane_agent(None, installed_on(&["mhc", "claude"])).expect("claude");
+        assert_eq!(agent.id, "claude", "the preference order decides, not the install order");
+    }
+
+    #[test]
+    fn the_preference_order_lists_claude_before_codex() {
+        let claude = lane_agent(None, installed_on(&["codex", "claude"])).expect("claude");
+        assert_eq!(claude.id, "claude");
+        assert_eq!(claude.command_names, &["claude"]);
+        let codex = lane_agent(None, installed_on(&["codex", "mhc"])).expect("codex");
+        assert_eq!(codex.id, "codex");
+    }
+
+    /// The engine's agent CLI is `mhc`, but its registry id is `maho`: a lane must resolve the
+    /// spec by id and launch `mhc`, or an engine-only host would look like it has no agent.
+    #[test]
+    fn an_engine_only_host_resolves_maho_for_its_mhc_command() {
+        let agent = lane_agent(None, installed_on(&["mhc"])).expect("maho");
+        assert_eq!(agent.id, "maho");
+        assert_eq!(
+            agent.command_names.first().copied(),
+            Some("mhc"),
+            "the launched command is mhc; the id only names the spec"
+        );
+    }
+
+    #[test]
+    fn a_configured_agent_that_is_not_installed_is_not_replaced_silently() {
+        assert!(
+            lane_agent(Some("codex"), installed_on(&["claude"])).is_none(),
+            "a lane never runs under an agent the owner did not choose"
+        );
+        assert!(
+            lane_agent(Some("not-an-agent"), installed_on(&["claude"])).is_none(),
+            "an unknown id is a refusal, not a fallback"
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_installed_agent_names_no_lane_agent() {
+        assert!(
+            lane_agent(None, installed_on(&[])).is_none(),
+            "the caller holds the goal LAUNCH_FAILED instead of typing into a shell"
+        );
+    }
 
     fn standby_under(holder: &str) -> crate::daemon::supervisor_lease_role::Role {
         crate::daemon::supervisor_lease_role::Role::Standby {

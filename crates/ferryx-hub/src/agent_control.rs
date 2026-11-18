@@ -401,11 +401,36 @@ pub struct RemotePane {
     pub cwd: String,
 }
 
+/// Code of a lane launch that found no coding agent to start: nothing was launched and
+/// nothing was typed, so the goal is held instead of being sent to a shell.
+pub const AGENT_LAUNCH_UNAVAILABLE: &str = "AGENT_LAUNCH_UNAVAILABLE";
+
+/// A pane opened with a coding agent as its foreground process: the agent's id and the
+/// daemon session id the pane was created under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchedAgent {
+    pub agent: String,
+    pub session_id: String,
+}
+
 /// Launches a pane and returns its daemon session id. The lane runner uses this
 /// instead of the gateway's SSH/tmux runner.
 #[async_trait]
 pub trait TaskLauncher: Send + Sync {
     async fn launch_pane(&self, cwd: &str, command: &[String]) -> Result<String>;
+
+    /// Launches a supervisor worker pane in `cwd` that runs a coding agent, through the same
+    /// launch path an owner's agent pane uses. A supervisor types its instruction into this
+    /// pane, so it must never be a bare shell: a launcher that cannot start an agent refuses
+    /// here ([`AGENT_LAUNCH_UNAVAILABLE`]) instead of opening a shell pane.
+    ///
+    /// This default refuses, so a launcher that predates the agent launch never opens a shell
+    /// for a supervisor goal.
+    async fn launch_agent_pane(&self, _cwd: &str) -> Result<LaunchedAgent> {
+        Err(HubError::message(format!(
+            "{AGENT_LAUNCH_UNAVAILABLE}: this launcher cannot start a coding agent in a pane"
+        )))
+    }
 
     /// Paired hosts that can take a lane now (machine grant, paired, online).
     async fn remote_hosts(&self) -> Result<Vec<String>> {
@@ -430,6 +455,11 @@ pub trait TaskLauncher: Send + Sync {
 pub struct FixedLauncher {
     pub session_id: Mutex<String>,
     pub launched: Mutex<Vec<(String, Vec<String>)>>,
+    /// The cwd of every agent pane this launcher opened.
+    pub agents: Mutex<Vec<String>>,
+    /// When set, [`TaskLauncher::launch_agent_pane`] fails with this text instead of opening
+    /// an agent pane (a host with no installed agent).
+    pub agent_refusal: Mutex<Option<String>>,
 }
 
 impl FixedLauncher {
@@ -437,7 +467,16 @@ impl FixedLauncher {
         Self {
             session_id: Mutex::new(session_id.into()),
             launched: Mutex::new(Vec::new()),
+            agents: Mutex::new(Vec::new()),
+            agent_refusal: Mutex::new(None),
         }
+    }
+
+    /// A launcher whose agent pane launch is refused, as on a host with no coding agent.
+    pub fn without_agent(session_id: impl Into<String>, refusal: impl Into<String>) -> Self {
+        let launcher = Self::new(session_id);
+        *launcher.agent_refusal.lock().expect("refusal") = Some(refusal.into());
+        launcher
     }
 }
 
@@ -449,6 +488,17 @@ impl TaskLauncher for FixedLauncher {
             .expect("launched")
             .push((cwd.to_owned(), command.to_vec()));
         Ok(self.session_id.lock().expect("session").clone())
+    }
+
+    async fn launch_agent_pane(&self, cwd: &str) -> Result<LaunchedAgent> {
+        if let Some(refusal) = self.agent_refusal.lock().expect("refusal").clone() {
+            return Err(HubError::message(refusal));
+        }
+        self.agents.lock().expect("agents").push(cwd.to_owned());
+        Ok(LaunchedAgent {
+            agent: "fixed".to_owned(),
+            session_id: self.session_id.lock().expect("session").clone(),
+        })
     }
 }
 

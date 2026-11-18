@@ -695,6 +695,7 @@ impl CompletionDriver {
             )
             .await?;
             tx.commit().await?;
+            super::after_settle(&self.pool, &goal.goal_id, RunState::AwaitingOwner).await;
             super::changes::announce(&goal.goal_id);
             wakes::poke();
             // The turn budget ran out with requirements unproven: the goal ends unconverged.
@@ -860,6 +861,7 @@ impl CompletionDriver {
         )
         .await?;
         tx.commit().await?;
+        super::after_settle(&self.pool, &goal.goal_id, RunState::Completed).await;
         super::changes::announce(&goal.goal_id);
         if let Err(error) =
             super::lessons::goal_completed(&self.pool, &goal.goal_id, Some(&run.request_id)).await

@@ -75,6 +75,27 @@ pub async fn hand_to_supervisor(
     Some(hand_over(&installed, host_id, session_id, instruction).await)
 }
 
+/// The contract of a handed-over goal: one requirement, the owner's instruction, built the way
+/// the app chat builds the requirements of a `submit`. Admission refuses a contract with no
+/// requirement (`GoalError::EmptyContract`), so a handover with nothing to grade is refused here
+/// instead of being admitted empty.
+pub(crate) fn handover_requirements(
+    instruction: &str,
+) -> Result<Vec<ferryx_hub::goals::contract::RequirementSpec>, ferryx_hub::supervisor::admission::AdmissionError>
+{
+    use ferryx_hub::supervisor::admission::AdmissionError;
+    if instruction.trim().is_empty() {
+        return Err(AdmissionError::Refused {
+            code: "SUPERVISOR_INSTRUCTION_REQUIRED",
+            message: "a handover needs the owner's instruction: it is the requirement the goal is graded against".into(),
+        });
+    }
+    Ok(vec![ferryx_hub::supervisor::app_work::requirement_spec(
+        0,
+        instruction,
+    )])
+}
+
 async fn hand_over(
     installed: &Installed,
     host_id: &str,
@@ -87,6 +108,7 @@ async fn hand_over(
         ChannelProvider, ExecutionKind, ExecutionTarget,
     };
 
+    let requirements = handover_requirements(instruction)?;
     let pool = installed.autonomy.pool();
     let owner = installation_owner(pool).await?;
     let Some(identity) = identity_of(pool, &owner).await? else {
@@ -153,7 +175,7 @@ async fn hand_over(
         title: title.to_owned(),
         cwd: session.cwd.clone(),
         instruction: instruction.to_owned(),
-        requirements: Vec::new(),
+        requirements,
         mode: ferryx_hub::goals::types::GoalMode::Supervised,
         turn_limit: HANDOVER_TURN_LIMIT,
         operation_grant: OperationClass::BASELINE.to_vec(),
@@ -938,6 +960,119 @@ pub(crate) mod tests {
             Some(Installed { hub, autonomy, recovery: scheduler, session_tools, remote_fleet: None }),
         );
         cards[0].prompt.prompt_id.clone()
+    }
+
+    /// A recoverable worktree, the pane's own path: the project host binding of the fixture and
+    /// the pane's cwd are the same checkout.
+    const HANDOVER_CWD: &str = "/nonexistent/handover-test";
+
+    /// An agent pane in this computer's fleet, working in [`HANDOVER_CWD`].
+    fn agent_pane(cwd: &str) -> FleetSession {
+        FleetSession {
+            pending_prompt: None,
+            state: "working".into(),
+            cwd: cwd.to_owned(),
+            ..blocked("p1")
+        }
+    }
+
+    /// The state `hand_over` reads: a hub with one project checked out at `cwd`, the autonomy
+    /// service over it, and a fleet that reports one agent pane there.
+    async fn handover_fixture(cwd: &str) -> (ferryx_hub::goals::SqlitePool, Installed) {
+        let pool = ferryx_hub::storage::memory().await.unwrap();
+        ferryx_hub::supervisor::provision_owner(
+            &pool,
+            "desktop:owner",
+            "ferryx",
+            "github.com/example/ferryx",
+            "local",
+            &format!("{cwd}/.git"),
+        )
+        .await
+        .unwrap();
+        let autonomy = Autonomy::open(pool.clone(), Arc::new(NoControl), Arc::new(Silent))
+            .await
+            .unwrap();
+        let installed = Installed {
+            hub: ferryx_hub::Hub::with_policy(
+                pool.clone(),
+                Arc::new(ferryx_hub::agent_control::RecordingControl::default()),
+                ferryx_hub::HubConfig::default(),
+                ferryx_hub::sessions::watch::NotifyPolicy::default(),
+            ),
+            recovery: build_recovery(
+                &autonomy,
+                Arc::new(NoControl),
+                Arc::new(FixedFleet {
+                    sessions: Vec::new(),
+                }),
+                Arc::new(FakeClock::new(START_MS)),
+            ),
+            session_tools: Arc::new(ferryx_hub::meta::mhc_supervisor::SessionTools::new(
+                Arc::new(NoControl),
+                Arc::new(FixedFleet {
+                    sessions: vec![agent_pane(cwd)],
+                }),
+            )),
+            autonomy,
+            remote_fleet: None,
+        };
+        (pool, installed)
+    }
+
+    /// Handing over a running pane admits a goal graded against the owner's own instruction:
+    /// one requirement, in the app chat's `r1` shape. Admission refuses a contract with no
+    /// requirement, which is what the empty `Vec` used to send it.
+    #[tokio::test]
+    async fn a_handed_over_pane_carries_the_owner_instruction_as_its_one_requirement() {
+        let (pool, installed) = handover_fixture(HANDOVER_CWD).await;
+        let instruction = "  finish the fetch cache and run the verifier  ";
+
+        let admission = hand_over(&installed, "local", "s1", instruction)
+            .await
+            .expect("a handover with an instruction is admitted");
+        let goal = ferryx_hub::supervisor::goal_of(&pool, &admission.receipt.goal_id)
+            .await
+            .unwrap()
+            .expect("the goal was committed");
+        assert_eq!(goal.run_state, ferryx_hub::supervisor::RunState::Running);
+
+        let contract = ferryx_hub::goals::contract::contract_of(&pool, &goal.lane_key)
+            .await
+            .unwrap()
+            .expect("the goal has a contract");
+        assert_eq!(contract.requirements.len(), 1, "{contract:?}");
+        let requirement = &contract.requirements[0];
+        assert_eq!(requirement.id, "r1");
+        assert_eq!(requirement.text, instruction.trim());
+        assert_eq!(
+            requirement.verifier,
+            format!("independent verification that: {}", instruction.trim())
+        );
+        // The pane is observed, not typed into: no dispatch is left to send.
+        let ready = ferryx_hub::supervisor::dispatches_of(&pool, &admission.receipt.goal_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|dispatch| dispatch.state == ferryx_hub::supervisor::DispatchState::Ready)
+            .count();
+        assert_eq!(ready, 0);
+    }
+
+    /// An instruction with nothing in it is refused with the panel's own code instead of being
+    /// admitted as a contract with no requirement to grade.
+    #[tokio::test]
+    async fn a_handover_with_no_instruction_is_refused_rather_than_admitted_empty() {
+        let (pool, installed) = handover_fixture(HANDOVER_CWD).await;
+
+        let error = hand_over(&installed, "local", "s1", "  \n\t ")
+            .await
+            .expect_err("an empty instruction is refused");
+        assert_eq!(error.code(), "SUPERVISOR_INSTRUCTION_REQUIRED");
+        let snapshot = ferryx_hub::supervisor::request::snapshot(&pool)
+            .await
+            .unwrap();
+        assert_eq!(snapshot["goals"].as_array().unwrap().len(), 0, "nothing was admitted");
     }
 
     /// Only a pass that left the lane running is a resume; a stop of any kind is not.

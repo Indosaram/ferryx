@@ -750,7 +750,9 @@ impl Dispatcher {
     }
 
     /// Launches the worker pane in the lane's directory and binds it to the current
-    /// generation. A lane at a repository root first gets its task-owned worktree
+    /// generation. The pane runs a coding agent ([`TaskLauncher::launch_agent_pane`]): a
+    /// supervisor types its worker instruction into this pane, so a bare shell would only
+    /// reject it. A lane at a repository root first gets its task-owned worktree
     /// (`<repo>-lanes/<lane>` on branch `lane/<lane>`), exactly like the legacy lane runner;
     /// `create` records it and points `lanes.cwd` at it, and a lane that already owns one keeps
     /// the one `lanes.cwd` names.
@@ -782,8 +784,11 @@ impl Dispatcher {
                 ));
             }
         };
-        let session = match self.launcher.launch_pane(&cwd, &[]).await {
-            Ok(session) => session,
+        // The pane that takes this instruction must be an agent session: a worker instruction
+        // typed at a shell prompt is a parse error, and the goal then never observes a turn.
+        // A launcher that cannot start an agent refuses here, so the goal is held instead.
+        let session = match self.launcher.launch_agent_pane(&cwd).await {
+            Ok(launched) => launched.session_id,
             Err(error) => {
                 let detail = format!("{LAUNCH_FAILED}: {error}");
                 return Ok(Launch::Held(

@@ -1598,6 +1598,44 @@ async fn a_prompt_accepted_late_cannot_answer_the_next_decision() {
     assert_ne!(prompts[1]["sessionId"], old);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_prompt_drops_the_persisted_session_so_the_role_reopens_fresh() {
+    let harness = Harness::new("timeout-fresh", all_capabilities());
+    let supervisor = harness.supervisor();
+    assert_eq!(supervisor.decide("first").await.unwrap(), "answer:first");
+    let opens = harness.peer.of_type("open_session");
+    assert_eq!(opens.len(), 1);
+    let stuck = opens[0]["durableSessionId"].as_str().unwrap().to_owned();
+    let store = SessionStore::load(supervisor.profile().sessions_path());
+    assert_eq!(store.get("decision-0").unwrap().durable_session_id, stuck);
+    // The engine never acknowledges this prompt: the client times it out and the outcome is
+    // unknown, which is when an engine session is left in waiting_human/interrupted_run.
+    let fault = supervisor.decide("LATE stuck").await.unwrap_err();
+    assert_eq!(fault, SupervisorFault::timeout("prompt"));
+    let old = harness.peer.of_type("prompt")[1]["sessionId"].clone();
+    harness
+        .peer
+        .wait_for("the abort and close of the timed-out prompt", |frames| {
+            let on_old = |kind: &str| {
+                frames
+                    .iter()
+                    .any(|frame| frame["type"] == kind && frame["sessionId"] == old)
+            };
+            on_old("abort") && on_old("close_session")
+        })
+        .await;
+    // The persisted binding is gone, so the stuck session file is never resumed again.
+    let store = SessionStore::load(supervisor.profile().sessions_path());
+    assert!(store.get("decision-0").is_none(), "{:?}", store.sessions());
+    assert_eq!(supervisor.decide("next").await.unwrap(), "answer:next");
+    let opens = harness.peer.of_type("open_session");
+    assert_eq!(opens.len(), 2);
+    assert!(opens[1].get("sessionPath").is_none(), "{:?}", opens[1]);
+    let reopened = opens[1]["durableSessionId"].as_str().unwrap();
+    assert_ne!(reopened, stuck);
+    assert!(uuid::Uuid::parse_str(reopened).is_ok());
+}
+
 #[tokio::test]
 async fn a_prompt_the_engine_did_not_start_is_aborted_as_a_protocol_fault() {
     for disposition in ["handled", "queued"] {
