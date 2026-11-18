@@ -1069,7 +1069,8 @@ async fn push_test_reports_a_missing_apple_key_instead_of_success() {
         .store
         .subscribe_apns(&device.id, &"66".repeat(32), crate::remote::apns::ApnsEnvironment::Sandbox, true)
         .unwrap();
-    // No APNs sender installed: the env probe finds no FERRYX_APNS_* key in this test process.
+    // No APNs sender: pinned so the assertion does not depend on this machine's environment.
+    state.push.install_no_apns_for_test();
     assert!(state.push.apns().await.is_none(), "this test needs APNs to be unconfigured");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

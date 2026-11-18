@@ -676,6 +676,13 @@ impl PushService {
         let _ = self.apns.set(Some(sender));
     }
 
+    /// Test-only: pins the probe to "not configured". Without it, a test asserting the
+    /// unconfigured path would depend on the ambient `FERRYX_APNS_*` of the machine it runs on.
+    #[cfg(test)]
+    pub(crate) fn install_no_apns_for_test(&self) {
+        let _ = self.apns.set(None);
+    }
+
     /// Posts one APNs alert, dropping the token when Apple says it is dead.
     pub async fn send_apns(
         self: &Arc<Self>,
