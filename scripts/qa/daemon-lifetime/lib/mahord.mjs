@@ -178,17 +178,52 @@ export function createMacLocalInput({ exec }) {
   // use is the cross-platform one (Meta/Control/Alt/Shift). Passing "meta down" straight through is
   // rejected by osascript, so Q10 never opened Settings on macOS (run 20261117t142623z).
   const MOD_NAMES = { meta: 'command', cmd: 'command', command: 'command', control: 'control', ctrl: 'control', alt: 'option', option: 'option', shift: 'shift' };
+  // Named keys must be sent as key CODES. `keystroke "Tab"` types the four letters T-a-b; it never
+  // presses the Tab key, so Q10's Tab/Space walk drove nothing and its opt-out marker was never
+  // written (runs 20261117t234809z, and every earlier mac run). Every scenario key that is not a
+  // single printable character belongs here; `Enter`/`Return` already did, which is why Q11 could
+  // commit its line while its focus walk stayed inert.
+  const KEY_CODES = {
+    tab: 48,
+    space: 49,
+    escape: 53,
+    enter: 36,
+    return: 36,
+    backspace: 51,
+    delete: 117,
+    forwarddelete: 117,
+    arrowleft: 123,
+    left: 123,
+    arrowright: 124,
+    right: 124,
+    arrowdown: 125,
+    down: 125,
+    arrowup: 126,
+    up: 126,
+    home: 115,
+    end: 119,
+    pageup: 116,
+    pagedown: 121,
+  };
   const sendKey = async (k, mods = []) => {
     const using = mods.length ? ` using {${mods.map((m) => `${MOD_NAMES[String(m).toLowerCase()] ?? String(m).toLowerCase()} down`).join(', ')}}` : '';
-    if (k === 'Escape') return osa('tell application "System Events" to key code 53');
-    if (k === 'Enter' || k === 'Return') return osa('tell application "System Events" to key code 36');
-    if (k === 'Backspace') return osa('tell application "System Events" to key code 51');
+    const code = KEY_CODES[String(k).toLowerCase()];
+    if (code !== undefined) return osa(`tell application "System Events" to key code ${code}${using}`);
     return osa(`tell application "System Events" to keystroke "${escapeAs(k)}"${using}`);
   };
   return {
+    // System Events' `click at` reports success without posting a real mouse event, so the native
+    // terminal never received the click that sets has_focused_session() and Q11's keystrokes went
+    // to a window that was frontmost but not focused. cliclick posts a genuine CGEvent; it is
+    // present on maho-mac (/opt/homebrew/bin/cliclick). Fall back to System Events only when the
+    // binary is missing so the adapter still works on a host without it.
     click: async (x, y) => {
       if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false };
-      return osa(`tell application "System Events" to click at {${Math.round(x)}, ${Math.round(y)}}`);
+      const cx = Math.round(x);
+      const cy = Math.round(y);
+      const viaCliclick = await exec('/opt/homebrew/bin/cliclick', [`c:${cx},${cy}`]).catch(() => null);
+      if (viaCliclick && viaCliclick.status === 0) return viaCliclick;
+      return osa(`tell application "System Events" to click at {${cx}, ${cy}}`);
     },
     type: async (text) => osa(`tell application "System Events" to keystroke "${escapeAs(text)}"`),
     key: async (k) => sendKey(k),
