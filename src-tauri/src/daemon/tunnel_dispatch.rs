@@ -437,11 +437,10 @@ impl TunnelDispatch {
                             biased;
                             _ = stop.wait_for(|stopped| *stopped) => return,
                             _ = registry.wait_until_idle() => break,
-                            _ = ticker.tick() => {
-                                let Some(owner) = dispatch.upgrade() else { return };
-                                owner.observe_hosts().await;
-                            }
+                            _ = ticker.tick() => {}
                         }
+                        let Some(owner) = dispatch.upgrade() else { return };
+                        owner.observe_hosts().await;
                     }
                 }
             });
