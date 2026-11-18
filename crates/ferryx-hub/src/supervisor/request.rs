@@ -1033,6 +1033,8 @@ async fn resume(
     .await?;
     clear_lane_pause(&mut tx, &goal.lane_key).await?;
     tx.commit().await?;
+    // A release with nothing to do next holds the goal for the owner: that is a settle.
+    super::after_settle(pool, goal_id, to).await;
     wakes::poke();
     super::dispatcher::poke();
     Ok(to.as_str())

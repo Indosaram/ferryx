@@ -2386,12 +2386,25 @@ pub async fn transition_goal(
     tx.commit().await?;
     changes::announce(goal_id);
     wakes::poke();
-    if goal_report::is_settled(to) {
-        if let Err(error) = goal_report::report_settled(pool, goal_id).await {
-            tracing::warn!(goal_id, %error, "could not report the settled goal to its origin");
-        }
-    }
+    after_settle(pool, goal_id, to).await;
     Ok(goal)
+}
+
+/// Reports a goal a transition committed in a settled state ([`goal_report::is_settled`]): the
+/// owner hears about a completion, a failure or a question wherever the request came from.
+///
+/// Every path that commits a settle calls this right after its transaction commits. A settle the
+/// verifier writes inside its own transaction ([`completion`]) never passes through
+/// [`transition_goal`], so the report has to be raised at the commit site to happen at all.
+/// [`goal_report::report_settled`] keys on the goal and its state, so calling it again for the
+/// same settle writes nothing.
+pub(crate) async fn after_settle(pool: &SqlitePool, goal_id: &str, to: RunState) {
+    if !goal_report::is_settled(to) {
+        return;
+    }
+    if let Err(error) = goal_report::report_settled(pool, goal_id).await {
+        tracing::warn!(goal_id, %error, "could not report the settled goal to its origin");
+    }
 }
 
 /// Holds a goal `degraded` with `detail` only while `run_id` is still the live run of the
@@ -2434,6 +2447,7 @@ pub async fn hold_live_run(
     tx.commit().await?;
     changes::announce(goal_id);
     wakes::poke();
+    after_settle(pool, goal_id, RunState::Degraded).await;
     Ok(true)
 }
 
