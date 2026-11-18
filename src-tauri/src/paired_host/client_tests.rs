@@ -2141,3 +2141,118 @@ fn discover_repos_route_and_desktop_id_rewrite() {
     assert!(encoded.get("registeredWorkspaceId").is_none());
     assert_eq!(encoded["target"], json!({"kind": "pairedDaemon", "hostId": "host-1"}));
 }
+
+fn layout_tab(id: &str, session: &str) -> m::SharedTab {
+    m::SharedTab {
+        id: id.into(),
+        kind: "terminal".into(),
+        label: id.into(),
+        pinned: false,
+        pane_tree: Some(m::SharedPane::Leaf {
+            leaf_id: format!("leaf-{id}"),
+            backend_session_id: session.into(),
+        }),
+    }
+}
+
+#[test]
+fn layout_operations_route_to_the_layout_capability() {
+    let read = Operation::LayoutGet {
+        workspace_id: "ws-1".into(),
+        after_revision: None,
+    };
+    assert!(!read.is_mutation());
+    let route = read.route().expect("route succeeds");
+    assert_eq!(route.capability, Some("layoutSyncV1"));
+    assert_eq!(route.segments, vec!["workspace", "layout"]);
+    assert_eq!(route.method, Method::GET);
+    assert_eq!(route.query, vec![("workspaceId".to_string(), "ws-1".to_string())]);
+    // A plain read is not a poll: no budget override, the transport default applies.
+    assert_eq!(route.budget_secs, None);
+    assert!(!route.conflict_is_answer);
+    assert!(route.idempotent);
+
+    // A long-poll must outlast the host's 25 s park, so it gets its own budget.
+    let poll = Operation::LayoutGet {
+        workspace_id: "ws-1".into(),
+        after_revision: Some(4),
+    };
+    let route = poll.route().expect("route succeeds");
+    assert_eq!(
+        route.query,
+        vec![
+            ("workspaceId".to_string(), "ws-1".to_string()),
+            ("afterRevision".to_string(), "4".to_string()),
+        ]
+    );
+    assert_eq!(route.budget_secs, Some(40));
+    assert!(route.idempotent, "a poll is a repeatable read");
+
+    let write = Operation::LayoutPut {
+        workspace_id: "ws-1".into(),
+        base_revision: 4,
+        tabs: vec![layout_tab("t1", "s1")],
+    };
+    assert!(write.is_mutation());
+    let route = write.route().expect("route succeeds");
+    assert_eq!(route.capability, Some("layoutSyncV1"));
+    assert_eq!(route.segments, vec!["workspace", "layout"]);
+    assert_eq!(route.method, Method::PUT);
+    // A stale base answers 409 with the stored document; that body is the caller's result.
+    assert!(route.conflict_is_answer);
+    // No journal id: the base revision is what makes a replay a no-op.
+    assert_eq!(route.request_id, None);
+    assert!(route.idempotent);
+    let body: serde_json::Value = serde_json::from_slice(route.body.as_ref().unwrap()).unwrap();
+    assert_eq!(body["workspaceId"], "ws-1");
+    assert_eq!(body["baseRevision"], 4);
+    assert_eq!(
+        body["tabs"],
+        json!([{
+            "id": "t1",
+            "kind": "terminal",
+            "label": "t1",
+            "pinned": false,
+            "paneTree": {"type": "leaf", "leafId": "leaf-t1", "backendSessionId": "s1"},
+        }])
+    );
+}
+
+#[test]
+fn layout_operations_carry_their_contract_kind_names() {
+    let read = Operation::LayoutGet {
+        workspace_id: "ws-1".into(),
+        after_revision: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&read).unwrap(),
+        json!({"kind": "layoutGet", "workspaceId": "ws-1"}),
+        "an absent afterRevision is omitted, not null"
+    );
+    let poll = Operation::LayoutGet {
+        workspace_id: "ws-1".into(),
+        after_revision: Some(2),
+    };
+    assert_eq!(
+        serde_json::to_value(&poll).unwrap(),
+        json!({"kind": "layoutGet", "workspaceId": "ws-1", "afterRevision": 2})
+    );
+    let write = Operation::LayoutPut {
+        workspace_id: "ws-1".into(),
+        base_revision: 2,
+        tabs: vec![],
+    };
+    assert_eq!(
+        serde_json::to_value(&write).unwrap(),
+        json!({"kind": "layoutPut", "workspaceId": "ws-1", "baseRevision": 2, "tabs": []})
+    );
+    // Round-trip: the same bytes the desktop sends decode back to the same operation.
+    for operation in [read, poll, write] {
+        let encoded = serde_json::to_vec(&operation).unwrap();
+        let decoded: Operation = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded).unwrap(),
+            serde_json::to_value(&operation).unwrap()
+        );
+    }
+}

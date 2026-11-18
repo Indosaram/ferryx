@@ -223,6 +223,8 @@ import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } 
 import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { describeLadderRow, listShortcutWorktrees } from "./state/shortcutLadder";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
+import { layoutSyncHostTransport, useLayoutSync, usePairedLayoutAdapter } from "./state/useLayoutSync";
+import { publishPersistedLayouts } from "./state/layoutSync";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
 import { getTabById, getTabLayoutById, getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
 import { activityStateOfGroup, groupOf, type AttentionBySessionId } from "./lib/attentionGroup";
@@ -1621,8 +1623,17 @@ function WorkspaceApp({
         if (current && !current()) throw new Error("Recovery admission cancelled");
         cachedLoadedSessionRef.current = session;
         await saveSession(session);
+        // Layout sync: workspaces this window is not showing still have to reach the daemon, or
+        // a paired client could never sync them (it never publishes over revision 0).
+        if (isNativeRuntime && isPrimary) {
+          void publishPersistedLayouts(
+            Object.values(session.workspaces),
+            layoutSyncHostTransport,
+            activeProjectRef.current?.workspaceId ?? null,
+          ).catch((error) => console.error("Layout sync publish failed:", error));
+        }
     });
-  }, []);
+  }, [isNativeRuntime, isPrimary]);
   useEffect(() => {
     setLocalRecoveryPersistence((workspaceId, snapshot, current) => {
       const project = projectsRef.current.find((candidate) => candidate.workspaceId === workspaceId);
@@ -1635,6 +1646,21 @@ function WorkspaceApp({
       console.error("Failed to save workspace session:", error);
     });
   }, [persistSessionStrict]);
+
+  // Layout sync: after a local layout change the host publishes it (300ms debounce) and every
+  // window long-polls for remote changes. A remote document only reshapes this view.
+  const pairedLayoutAdapterForSync = usePairedLayoutAdapter(activeProject);
+  useLayoutSync({
+    project: activeProject,
+    state,
+    dispatch: dispatchWorkspaceAction,
+    adapter: pairedLayoutAdapterForSync,
+    enabled: isNativeRuntime
+      && registeredProjectId === activeProject.workspaceId
+      && workspaceRestoreStatus === "restored"
+      && (activeProject.target?.kind !== "pairedDaemon" || pairedMachineFeaturesEnabled),
+    onError: (error) => console.error("Layout sync failed:", error),
+  });
 
   useEffect(() => {
     setLocalSplitPersistence((owner) => {
@@ -2068,7 +2094,7 @@ function WorkspaceApp({
               pairedDescriptor.backendSessionId !== captured.backendSessionId ||
               pairedDescriptor.incarnation !== captured.incarnation || pairedDescriptor.daemonEpoch !== captured.daemonEpoch ||
               pairedDescriptor.hostId !== expectedTarget.hostId || target.machineId !== pairedHostMachineId(expectedTarget.hostId) ||
-              target.daemonEpoch !== captured.daemonEpoch || target.sessionId !== captured.backendSessionId) return;
+              target.daemonEpoch !== captured.daemonEpoch || !target.sessionId) return;
 
           if (status.state === "disconnected" && status.failure?.kind === "disconnected") {
             // Exact codes from paired_daemon::Proxy::recovery_failed, not transport error prose.
@@ -2121,7 +2147,7 @@ function WorkspaceApp({
               status.generation < (admissionIdentity.generation ?? 0) ||
               pairedDescriptor.hostId !== expectedTarget.hostId ||
               target.machineId !== pairedHostMachineId(expectedTarget.hostId) || target.daemonEpoch !== captured.daemonEpoch ||
-              target.sessionId !== pairedDescriptor.backendSessionId) return;
+              !target.sessionId) return;
 
           const currentGeneration = status.generation;
           if (currentGeneration <= 0 || currentGeneration < (admissionIdentity.generation ?? 0)) return;

@@ -630,3 +630,79 @@ mod tests;
 #[path = "machine_protocol_lifecycle.rs"]
 mod lifecycle;
 pub use lifecycle::*;
+
+/// Capability name a host advertises once it serves the workspace layout document.
+pub const LAYOUT_SYNC_CAPABILITY: &str = "layoutSyncV1";
+
+/// One workspace's layout document: tabs and pane structure only, never view state
+/// (no active tab, focus, scroll or split mode). `workspace_id` is the HOST workspace id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedLayout {
+    pub workspace_id: String,
+    pub revision: u64,
+    pub tabs: Vec<SharedTab>,
+}
+
+impl SharedLayout {
+    /// The document a workspace that has never published reads as.
+    pub fn empty(workspace_id: &str) -> Self {
+        Self {
+            workspace_id: workspace_id.to_owned(),
+            revision: 0,
+            tabs: Vec::new(),
+        }
+    }
+}
+
+/// One tab. `pane_tree` is null for tabs that own no panes (non-terminal kinds).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedTab {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub pinned: bool,
+    pub pane_tree: Option<SharedPane>,
+}
+
+/// A pane tree node. Field names and the split shape mirror the desktop's `PaneNode`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SharedPane {
+    Leaf {
+        leaf_id: String,
+        backend_session_id: String,
+    },
+    Split {
+        direction: SharedPaneDirection,
+        ratio: f64,
+        first: Box<SharedPane>,
+        second: Box<SharedPane>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SharedPaneDirection {
+    Horizontal,
+    Vertical,
+}
+
+/// `PUT /api/v1/workspace/layout` body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutPutRequest {
+    #[serde(deserialize_with = "required")]
+    pub workspace_id: String,
+    pub base_revision: u64,
+    pub tabs: Vec<SharedTab>,
+}
+
+/// One completed layout write: the stored document, and whether the caller's base lost.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutPutOutcome {
+    pub layout: SharedLayout,
+    pub conflict: bool,
+}

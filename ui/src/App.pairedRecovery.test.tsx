@@ -499,7 +499,8 @@ describe("App paired recovery boundary", () => {
         target: {
           machineId: identityCase === "target-machine" ? "other-host" : "host-a",
           daemonEpoch: identityCase === "target-epoch" ? "other-epoch" : "epoch-paired",
-          sessionId: identityCase === "target-session" ? "other-session" : "paired-proxy-123",
+          // The target names the host's own session, never the proxy backend id.
+          sessionId: identityCase === "target-session" ? "" : "host-session-1",
         },
       };
       const emitStatus = native.terminalRemoteStatusHandler;
@@ -600,7 +601,7 @@ describe("App paired recovery boundary", () => {
       incarnation: eventCase === "descriptor-incarnation" ? "foreign" : "inc-paired",
       target: { machineId: eventCase === "target-machine" ? "foreign" : "host-a",
         daemonEpoch: eventCase === "target-epoch" ? "foreign" : "epoch-paired",
-        sessionId: eventCase === "target-session" ? "foreign" : "paired-proxy-123" },
+        sessionId: eventCase === "target-session" ? "" : "host-session-1" },
     };
     try {
       if (order === "after-response") await act(async () => { release(receipt); await response; });

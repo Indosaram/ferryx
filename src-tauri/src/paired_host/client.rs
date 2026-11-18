@@ -81,6 +81,20 @@ pub enum Operation {
     FileRead {
         request: m::FileReadRequest,
     },
+    /// The host's shared layout document for one workspace (`layoutSyncV1`). With
+    /// `after_revision` this long-polls until the host's revision is newer.
+    LayoutGet {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_revision: Option<u64>,
+    },
+    /// Publishes a layout document. Never journaled: a stale base is answered with the host's
+    /// stored document, so a retry cannot double-apply.
+    LayoutPut {
+        workspace_id: String,
+        base_revision: u64,
+        tabs: Vec<m::SharedTab>,
+    },
     /// Writes one byte range of a host file. Offset writes are idempotent and are not journaled.
     FileWrite {
         request: m::FileWriteRequest,
@@ -152,6 +166,10 @@ pub enum OperationResult {
     FileWrite(m::FileWriteResult),
     FileList(m::FileListResult),
     FileMkdir(m::FileMkdirResult),
+    /// The host's stored layout document (also the answer to a stale-base write).
+    Layout(m::SharedLayout),
+    /// A layout write whose base revision the host had already moved past.
+    LayoutConflict(m::SharedLayout),
     AgentControl(serde_json::Value),
     Resources(crate::daemon::resource_usage::HostResourceSnapshot),
     /// The holder's answer to a supervisor request or observation.
@@ -407,6 +425,11 @@ struct Route {
     idempotent: bool,
     /// Overrides the default HTTP budget. `wait` needs up to five minutes.
     budget_secs: Option<u64>,
+    /// A 409 answer is this route's domain result, not a failure (layout compare-and-set).
+    conflict_is_answer: bool,
+    /// Set by the transport when the host answered the conflict status this route accepts, so
+    /// the decoder can tell an accepted write from a stale-base answer carrying the same shape.
+    saw_conflict: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl Operation {
     pub fn is_mutation(&self) -> bool {
@@ -417,6 +440,7 @@ impl Operation {
             self,
             Self::RegisterProject { .. }
                 | Self::UnregisterProject { .. }
+                | Self::LayoutPut { .. }
                 | Self::CreateWorktree { .. }
                 | Self::DeleteWorktree { .. }
                 | Self::CreateSession { .. }
@@ -448,6 +472,8 @@ impl Operation {
             response_limit: m::MACHINE_JSON_MAX_BYTES,
             idempotent: true,
             budget_secs: None,
+            conflict_is_answer: false,
+            saw_conflict: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let mut path;
         match self {
@@ -574,6 +600,23 @@ impl Operation {
             Self::FileMkdir { .. } => {
                 path = "workspace/file-mkdir";
                 r.capability = Some(super::file_tree::PAIRED_FILE_MKDIR_CAPABILITY);
+            }
+            Self::LayoutGet {
+                workspace_id,
+                after_revision,
+            } => {
+                path = "workspace/layout";
+                r.capability = Some(m::LAYOUT_SYNC_CAPABILITY);
+                r.query.push(("workspaceId".into(), workspace_id.clone()));
+                if let Some(revision) = after_revision {
+                    r.query.push(("afterRevision".into(), revision.to_string()));
+                    // The host parks up to 25 s before it answers; outlast that park.
+                    r.budget_secs = Some(40);
+                }
+            }
+            Self::LayoutPut { workspace_id, .. } => {
+                path = "workspace/layout";
+                r.capability = Some(m::LAYOUT_SYNC_CAPABILITY);
             }
             Self::DagStream { .. } => {
                 path = "capabilities";
@@ -748,6 +791,24 @@ impl Operation {
                         .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
                 );
             }
+            Self::LayoutPut {
+                workspace_id,
+                base_revision,
+                tabs,
+            } => {
+                // The host answers a stale base with 409 + the stored document, which is the
+                // caller's domain result rather than a transport error.
+                r.conflict_is_answer = true;
+                r.method = Method::PUT;
+                r.body = Some(
+                    serde_json::to_vec(&serde_json::json!({
+                        "workspaceId": workspace_id,
+                        "baseRevision": base_revision,
+                        "tabs": tabs,
+                    }))
+                    .map_err(|_| ClientError::local("INVALID_REQUEST"))?,
+                );
+            }
             Self::SupervisorRequest { envelope: body }
             | Self::SupervisorObserve { observation: body } => {
                 r.method = Method::POST;
@@ -782,7 +843,10 @@ impl Operation {
         r.idempotent = r.method == Method::GET
             || matches!(
                 self,
-                Self::FileRead { .. }
+                // A layout write is a base-revision compare-and-set, so replaying it can only
+                // produce the same accepted revision or the same conflict document.
+                Self::LayoutPut { .. }
+                    | Self::FileRead { .. }
                     | Self::FileWrite { .. }
                     | Self::FileList { .. }
                     | Self::FileMkdir { .. }
@@ -1071,6 +1135,8 @@ impl MachineClient {
             // The host creates or returns the same record for this device.
             idempotent: true,
             budget_secs: Some(30),
+            conflict_is_answer: false,
+            saw_conflict: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let (bytes, _rotated) = self.http_rotating(&host, &lease, &route).await?;
         Ok(bytes)
@@ -1678,8 +1744,15 @@ impl MachineClient {
         let rotated = response
             .header(crate::remote::server::ROTATED_TOKEN_HEADER)
             .map(str::to_owned);
-        if !status.is_success() {
+        // A layout compare-and-set answers its stale base with 409 and the stored document;
+        // that body is the caller's result, so it is decoded like a success.
+        if !status.is_success() && !(route.conflict_is_answer && status.as_u16() == 409) {
             return Err(map_operation_http_error(status, content_type.as_ref(), None, &response.body));
+        }
+        if status.as_u16() == 409 {
+            route
+                .saw_conflict
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Ok((response.body, rotated))
     }
@@ -1756,7 +1829,14 @@ impl MachineClient {
                         if bytes.len()+chunk.len()>limit { return Err(ClientError::local("PAYLOAD_TOO_LARGE")); } bytes.extend_from_slice(&chunk);
                     } Ok(bytes)
                 }).await.map_err(|_| ClientError::local("TIMEOUT"))??;
-                if !status.is_success() { return Err(map_operation_http_error(status, content_type.as_ref(), relay_stage, &bytes)); }
+                if !status.is_success() && !(route.conflict_is_answer && status.as_u16() == 409) {
+                    return Err(map_operation_http_error(status, content_type.as_ref(), relay_stage, &bytes));
+                }
+                if status.as_u16() == 409 {
+                    route
+                        .saw_conflict
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 Ok((bytes, rotated))
             })=> result.map_err(|_|ClientError::local("TIMEOUT"))?
         }
@@ -2012,7 +2092,10 @@ impl MachineClient {
                 }
             }
         };
-        let result = map_result(&host, &request.operation, &bytes).map_err(|mut error| {
+        let conflict = route
+            .saw_conflict
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let result = map_result(&host, &request.operation, &bytes, conflict).map_err(|mut error| {
             if let Some(id) = &route.request_id {
                 error.request_id = Some(id.clone());
                 error.ambiguous = true;
@@ -2107,7 +2190,20 @@ fn workspace_identity(
     }
     Ok(())
 }
-fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<OperationResult> {
+fn map_result(
+    host: &HostView,
+    operation: &Operation,
+    bytes: &[u8],
+    conflict: bool,
+) -> Result<OperationResult> {
+    /// `{"layout": SharedLayout}`: the body of both a layout read and a layout write answer.
+    /// The conflict answer adds `conflict: true` beside the same `layout` field, so unknown
+    /// keys are tolerated here and the status, not the body, decides which result it is.
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LayoutAnswer {
+        layout: m::SharedLayout,
+    }
     Ok(match operation {
         Operation::Capabilities => OperationResult::Capabilities(decode(bytes)?),
         Operation::Directories { .. } => OperationResult::Directories(decode(bytes)?),
@@ -2228,6 +2324,26 @@ fn map_result(host: &HostView, operation: &Operation, bytes: &[u8]) -> Result<Op
         Operation::FileWrite { .. } => OperationResult::FileWrite(decode(bytes)?),
         Operation::FileList { .. } => OperationResult::FileList(decode(bytes)?),
         Operation::FileMkdir { .. } => OperationResult::FileMkdir(decode(bytes)?),
+        Operation::LayoutGet { workspace_id, .. } => {
+            let row: LayoutAnswer = decode(bytes)?;
+            if row.layout.workspace_id != *workspace_id {
+                return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+            }
+            OperationResult::Layout(row.layout)
+        }
+        // A stale base answers the host's stored document with 409 instead of an error, so the
+        // transport records that status and the body decodes the same either way.
+        Operation::LayoutPut { workspace_id, .. } => {
+            let row: LayoutAnswer = decode(bytes)?;
+            if row.layout.workspace_id != *workspace_id {
+                return Err(ClientError::local("PAIRED_HOST_INVALID_RESPONSE"));
+            }
+            if conflict {
+                OperationResult::LayoutConflict(row.layout)
+            } else {
+                OperationResult::Layout(row.layout)
+            }
+        }
         // The capability probe returns this host's advertised capabilities; the stream
         // is opened separately over a socket.
         Operation::DagStream { .. } => OperationResult::Capabilities(decode(bytes)?),

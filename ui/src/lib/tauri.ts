@@ -12,6 +12,7 @@ import { switchDebug } from "./switchDebug";
 import { shortcutContext, traceShortcutAction } from "./shortcutDiagnostics";
 import { getDurableNativeBinding } from "./nativeTerminalLifecycle";
 import { currentWindowLabel } from "./windowIdentity";
+import { decodeSharedLayout, type SharedLayout, type SharedTab } from "../state/layoutSync";
 
 /**
  * Listens for an event the backend routes to one window with `emit_to(label)` (session-owner and
@@ -1770,6 +1771,36 @@ export async function saveSession(session: import('./types').PersistedWorkspaceS
 export async function loadSession(): Promise<import('./types').PersistedWorkspaceSession | null> {
   if (!isTauri()) return null;
   return invokeCommand<import('./types').PersistedWorkspaceSession | null>('cmd_session_load');
+}
+
+/**
+ * Reads one workspace's shared layout document. `afterRevision` turns the call into a
+ * long poll: the daemon answers as soon as the document is newer than that revision.
+ */
+export async function layoutGet(
+  workspaceId: string,
+  afterRevision?: number | null,
+): Promise<SharedLayout> {
+  const raw = await invokeCommand<unknown>('cmd_layout_get', {
+    workspaceId,
+    ...(afterRevision == null ? {} : { afterRevision }),
+  });
+  return decodeSharedLayout(raw);
+}
+
+/**
+ * Publishes a layout document against `baseRevision`. A stale base is not an error: the
+ * daemon answers with the current document and `conflict: true` so the caller can adopt it.
+ */
+export async function layoutPut(
+  workspaceId: string,
+  baseRevision: number,
+  tabs: SharedTab[],
+): Promise<{ layout: SharedLayout; conflict: boolean }> {
+  const raw = await invokeCommand<unknown>('cmd_layout_put', { workspaceId, baseRevision, tabs });
+  const envelope = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null;
+  const conflict = envelope?.conflict === true;
+  return { layout: decodeSharedLayout(envelope && 'layout' in envelope ? envelope.layout : raw), conflict };
 }
 
 export async function clearSession(): Promise<void> {

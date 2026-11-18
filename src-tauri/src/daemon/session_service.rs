@@ -1,4 +1,5 @@
 use super::workspace_service::DaemonWorkspaceService;
+use crate::remote::machine_protocol::{SharedLayout, SharedTab};
 #[path = "retained_recovery.rs"]
 mod retained_recovery;
 use crate::daemon::agent_state::AgentStateHub;
@@ -54,9 +55,15 @@ mod session_metadata_provider;
 
 const SPAWN_REQUEST_TTL: Duration = Duration::from_secs(30);
 
+/// One layout long-poll parks at most this long before it answers with the stored document.
+pub(crate) const LAYOUT_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(25);
+
 #[cfg(test)]
 #[path = "session_service_machine_tests.rs"]
 mod machine_tests;
+#[cfg(test)]
+#[path = "layout_store_tests.rs"]
+mod layout_store_tests;
 
 pub(crate) struct SpawnOptions {
     pub worktree: Option<WorktreeIdentity>,
@@ -484,6 +491,27 @@ pub(crate) struct MachineController {
     pub disconnected: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
 
+/// Who sets a session's PTY size when the desktop and a paired remote view it at different sizes.
+/// The side that last typed drives; the other renders at the driver's size.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SizeDriver {
+    Desktop,
+    Remote { device: String, generation: u64 },
+}
+
+/// Replies a terminal emulator writes on its own (cursor position, device attributes, colour and
+/// mode reports). They are not typing, so they never move the size driver.
+pub(crate) fn is_terminal_report(data: &[u8]) -> bool {
+    match data {
+        [0x1b, b']' | b'P' | b'_', ..] => true,
+        [0x1b, b'[', body @ .., last] => {
+            matches!(last, b'R' | b'c' | b'n' | b't' | b'y' | b'I' | b'O')
+                && body.iter().all(|b| b.is_ascii_digit() || matches!(b, b';' | b'?' | b'>' | b'$' | b'='))
+        }
+        _ => false,
+    }
+}
+
 impl From<&str> for MachineController {
     fn from(device: &str) -> Self {
         Self {
@@ -540,6 +568,12 @@ pub struct DaemonSessionService {
     pub(super) session_metadata: Arc<RwLock<HashMap<String, StoredSessionMeta>>>,
     pub(super) provider_session_claims: Arc<Mutex<HashMap<ProviderSessionClaimKey, String>>>,
     pub(super) desktop_geometries: Arc<Mutex<HashMap<String, (u16, u16)>>>,
+    pub(super) size_drivers: Arc<Mutex<HashMap<String, SizeDriver>>>,
+    /// Layout documents per workspace. Nothing is written to disk: the desktop republishes on
+    /// start, so a fresh daemon serves every workspace at revision 0 again.
+    pub(super) layouts: Arc<Mutex<HashMap<String, crate::remote::machine_protocol::SharedLayout>>>,
+    /// Ticked by every accepted layout write; layout long-polls park on it.
+    pub(super) layout_generation: tokio::sync::watch::Sender<u64>,
     pub(super) agent_states: Arc<AgentStateHub>,
     /// Installed once the gateway's observer exists. Sessions spawned before that are caught by
     /// `watch_live` at install time.
@@ -552,6 +586,85 @@ impl DaemonSessionService {
     #[cfg(test)]
     pub(crate) fn set_test_shell_command(&self, cmd: portable_pty::CommandBuilder) {
         *self.test_shell_command.lock() = Some(cmd);
+    }
+
+    /// The workspace's layout document; revision 0 with no tabs before the first publish.
+    pub(crate) fn layout(&self, workspace_id: &str) -> SharedLayout {
+        self.layouts
+            .lock()
+            .get(workspace_id)
+            .cloned()
+            .unwrap_or_else(|| SharedLayout::empty(workspace_id))
+    }
+
+    /// Stores `tabs` as revision `base_revision + 1`. A caller whose base is stale receives the
+    /// stored document instead, so it can rebase without a second read.
+    pub(crate) fn put_layout(
+        &self,
+        workspace_id: &str,
+        base_revision: u64,
+        tabs: Vec<SharedTab>,
+    ) -> Result<SharedLayout, SharedLayout> {
+        let next = {
+            let mut layouts = self.layouts.lock();
+            let current = layouts
+                .get(workspace_id)
+                .cloned()
+                .unwrap_or_else(|| SharedLayout::empty(workspace_id));
+            if current.revision != base_revision {
+                return Err(current);
+            }
+            let next = SharedLayout {
+                workspace_id: workspace_id.to_owned(),
+                revision: current.revision.saturating_add(1),
+                tabs,
+            };
+            layouts.insert(workspace_id.to_owned(), next.clone());
+            next
+        };
+        self.bump_layout_generation();
+        Ok(next)
+    }
+
+    /// Answers at once when the stored revision is already past `after_revision`, else parks
+    /// until a write lands or `timeout` elapses and answers with whatever is stored.
+    pub(crate) async fn wait_layout(
+        &self,
+        workspace_id: &str,
+        after_revision: u64,
+        timeout: Duration,
+    ) -> SharedLayout {
+        // Subscribing before the first read is what keeps a write that lands between the read
+        // and the park from being missed.
+        let mut generation = self.layout_generation.subscribe();
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let current = self.layout(workspace_id);
+            // Any other revision answers at once, a lower one included: layouts live in daemon
+            // memory only, so a restart or handover starts again at 0 and a poll waiting for
+            // "newer than N" would otherwise park forever.
+            if current.revision != after_revision {
+                return current;
+            }
+            match tokio::time::timeout_at(deadline, generation.changed()).await {
+                Ok(Ok(())) => continue,
+                // The sender lives as long as the service, so a closed channel reads as a timeout.
+                Ok(Err(_)) | Err(_) => return current,
+            }
+        }
+    }
+
+    /// Forgets a workspace's document when that workspace is unregistered.
+    pub(super) fn forget_layout(&self, workspace_id: &str) {
+        if self.layouts.lock().remove(workspace_id).is_some() {
+            self.bump_layout_generation();
+        }
+    }
+
+    fn bump_layout_generation(&self) {
+        self.layout_generation.send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
     }
 
     pub(crate) fn agent_state_hub(&self) -> Arc<AgentStateHub> {
@@ -862,6 +975,72 @@ impl DaemonSessionService {
 
     pub fn desktop_geometry(&self, session_id: &str) -> Option<(u16, u16)> {
         self.desktop_geometries.lock().get(session_id).copied()
+    }
+
+    /// A desktop resize applies unless a paired remote typed into the session more recently.
+    pub fn desktop_drives_size(&self, session_id: &str) -> bool {
+        !matches!(self.size_drivers.lock().get(session_id), Some(SizeDriver::Remote { .. }))
+    }
+
+    /// Desktop input takes the size back. Returns the desktop geometry to restore when a remote held it.
+    pub fn claim_desktop_size(&self, session_id: &str) -> Option<(u16, u16)> {
+        let previous = self
+            .size_drivers
+            .lock()
+            .insert(session_id.to_string(), SizeDriver::Desktop);
+        if matches!(previous, Some(SizeDriver::Remote { .. })) {
+            self.desktop_geometry(session_id)
+        } else {
+            None
+        }
+    }
+
+    /// Remote input takes the size. True when this socket was not already the driver.
+    pub fn claim_remote_size(&self, session_id: &str, device: &str, generation: u64) -> bool {
+        let next = SizeDriver::Remote { device: device.to_string(), generation };
+        let mut drivers = self.size_drivers.lock();
+        if drivers.get(session_id) == Some(&next) {
+            return false;
+        }
+        drivers.insert(session_id.to_string(), next);
+        true
+    }
+
+    /// A remote resize applies when that socket drives, or when no one has claimed a session
+    /// that no desktop window sized (a headless or remote-only session).
+    pub fn remote_drives_size(&self, session_id: &str, device: &str, generation: u64) -> bool {
+        let driver = self.size_drivers.lock().get(session_id).cloned();
+        match driver {
+            Some(SizeDriver::Remote { device: d, generation: g }) => d == device && g == generation,
+            Some(SizeDriver::Desktop) => false,
+            None => self.desktop_geometry(session_id).is_none(),
+        }
+    }
+
+    /// A closing remote socket hands the size back to the desktop. True when it was the driver,
+    /// so the caller restores the desktop geometry.
+    pub fn release_remote_size(&self, session_id: &str, device: &str, generation: u64) -> bool {
+        let mut drivers = self.size_drivers.lock();
+        let held = matches!(
+            drivers.get(session_id),
+            Some(SizeDriver::Remote { device: d, generation: g }) if d == device && *g == generation
+        );
+        if held {
+            drivers.insert(session_id.to_string(), SizeDriver::Desktop);
+        }
+        held
+    }
+
+    /// Desktop typing takes the size back from a paired remote and restores the desktop geometry.
+    pub(crate) async fn take_desktop_size(&self, session_id: &str, data: &[u8]) {
+        if is_terminal_report(data) {
+            return;
+        }
+        if let Some((cols, rows)) = self.claim_desktop_size(session_id) {
+            if let Err(error) = self.resize_session(session_id, cols, rows).await {
+                tracing::warn!(session_id, %error, "desktop size restore after desktop input failed");
+            }
+        }
     }
 
     fn refuse_unsafe_continue(&self, startup: Option<&TerminalStartup>) -> Result<(), SpawnError> {
@@ -2571,6 +2750,7 @@ impl DaemonSessionService {
     /// unknown workspace (e.g. after a daemon restart) succeeds as a no-op.
     pub async fn handle_unregister_workspace(&self, workspace_id: &str) -> Result<(), String> {
         let _spawn_guard = Arc::clone(&self.spawn_lock).lock_owned().await;
+        self.forget_layout(workspace_id);
         // SSH owns a separate inventory, but still needs the session cleanup
         // below. Never send remote identities through the local catalog gate.
         if !crate::ssh::projects::is_remote(workspace_id) {
@@ -2887,6 +3067,7 @@ impl DaemonSessionService {
         let agent_watch = self.agent_watch.lock().clone();
         let cleanup_watch = agent_watch.clone();
         let desktop_geometries = Arc::clone(&self.desktop_geometries);
+        let size_drivers = Arc::clone(&self.size_drivers);
         let handover_manager = self.handover_manager.clone();
         let machine_lifecycles = self.machine_lifecycles.clone();
         let client_request_id = client_request_id.to_string();
@@ -3355,6 +3536,7 @@ impl DaemonSessionService {
                 let cleanup_metadata = Arc::clone(&session_metadata);
                 let cleanup_claims = Arc::clone(&provider_session_claims);
                 let cleanup_desktop_geometries = Arc::clone(&desktop_geometries);
+                let cleanup_size_drivers = Arc::clone(&size_drivers);
                 let cleanup_agent_states = Arc::clone(&agent_states);
                 let cleanup_watch = cleanup_watch.clone();
                 let handover_manager = handover_manager.clone();
@@ -3535,6 +3717,7 @@ impl DaemonSessionService {
                     cleanup_desktop_geometries
                         .lock()
                         .remove(&cleanup_session_id);
+                    cleanup_size_drivers.lock().remove(&cleanup_session_id);
                     if let Some(manager) = handover_manager.upgrade() {
                         manager.check_retirement_if_empty(&terminal_service);
                     }
@@ -3654,6 +3837,7 @@ impl DaemonSessionService {
     pub(super) fn release_session_ownership(&self, session_id: &str) {
         self.session_router.remove_workspace(session_id);
         self.desktop_geometries.lock().remove(session_id);
+        self.size_drivers.lock().remove(session_id);
         self.spawn_idempotency_cache
             .lock()
             .retain(|_, entry| entry.session_id != session_id);

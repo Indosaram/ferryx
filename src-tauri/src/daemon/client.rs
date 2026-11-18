@@ -704,6 +704,8 @@ fn request_is_retry_safe(req: &DaemonRequest) -> bool {
             | DaemonRequest::AgentMemoryBlock { .. }
             | DaemonRequest::AgentControlSettingsGet
             | DaemonRequest::SupervisorSettings { enabled: None }
+            // A read either answered the stored revision or parked; either answer is repeatable.
+            | DaemonRequest::LayoutGet { .. }
             | DaemonRequest::ReferenceChatIdentity
     )
 }
@@ -733,6 +735,8 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::CreateWorktree { .. } => "createWorktree",
         DaemonRequest::DeleteWorktree { .. } => "deleteWorktree",
         DaemonRequest::RegisterWorkspace { .. } => "registerWorkspace",
+        DaemonRequest::LayoutGet { .. } => "layoutGet",
+        DaemonRequest::LayoutPut { .. } => "layoutPut",
         DaemonRequest::SyncDesktopLocalProjects { .. } => "syncDesktopLocalProjects",
         DaemonRequest::SyncDesktopSidebar { .. } => "syncDesktopSidebar",
         DaemonRequest::UnregisterWorkspace { .. } => "unregisterWorkspace",
@@ -1061,6 +1065,8 @@ const SUPERVISOR_GOAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration
 const REMOTE_DESKTOP_SET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 /// Outlasts the reference input queue's 45 s submit deadline so the daemon reports the outcome.
 const REFERENCE_CHAT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// A layout long-poll parks for 25 s in the daemon; the reply must outlast that park.
+const LAYOUT_LONG_POLL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
 
 fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
     match request {
@@ -1094,6 +1100,10 @@ fn request_timeout(request: &DaemonRequest) -> std::time::Duration {
         // Turning the remote desktop host on probes capture and binds; the host bounds that at 30 s.
         DaemonRequest::RemoteDesktopHostSet { .. } => REMOTE_DESKTOP_SET_TIMEOUT,
         DaemonRequest::ReferenceChat { .. } => REFERENCE_CHAT_REQUEST_TIMEOUT,
+        DaemonRequest::LayoutGet {
+            after_revision: Some(_),
+            ..
+        } => LAYOUT_LONG_POLL_REQUEST_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }
@@ -2571,6 +2581,9 @@ impl DaemonClient {
             | Operation::FileWrite { .. }
             | Operation::FileList { .. }
             | Operation::FileMkdir { .. }
+            | Operation::LayoutGet { .. }
+            // A layout write carries no journal id: its base revision makes a replay a no-op.
+            | Operation::LayoutPut { .. }
             | Operation::Resources
             | Operation::Operation { .. } => None,
             // Idempotent: a holder's fence push raises a maximum and never types anything.
@@ -3996,6 +4009,64 @@ impl DaemonClient {
             .spawn_terminal_with_startup(client_request_id, workspace_id, options, None, None)
             .await?
             .session_id)
+    }
+
+    /// Reads one workspace's layout document. With `after_revision` the daemon parks until the
+    /// stored revision is newer (long-poll), then answers with whatever it has.
+    pub async fn layout_get(
+        &self,
+        workspace_id: &str,
+        after_revision: Option<u64>,
+    ) -> Result<crate::remote::machine_protocol::SharedLayout, IpcError> {
+        // One shot: a long-poll parks up to 25 s and must not hold the shared connection.
+        match self
+            .send_request_one_shot(DaemonRequest::LayoutGet {
+                workspace_id: workspace_id.to_owned(),
+                after_revision,
+            })
+            .await?
+        {
+            DaemonResponse::LayoutOk { layout } => Ok(layout),
+            DaemonResponse::Error { message, .. } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::internal("Unexpected daemon response")),
+        }
+    }
+
+    /// Publishes a layout document. A stale base is a domain answer, not a failure: the caller
+    /// receives the stored document with `conflict` set and rebases onto it.
+    pub async fn layout_put(
+        &self,
+        workspace_id: &str,
+        base_revision: u64,
+        tabs: Vec<crate::remote::machine_protocol::SharedTab>,
+    ) -> Result<crate::remote::machine_protocol::LayoutPutOutcome, IpcError> {
+        match self
+            .send_request(DaemonRequest::LayoutPut {
+                workspace_id: workspace_id.to_owned(),
+                base_revision,
+                tabs,
+            })
+            .await?
+        {
+            DaemonResponse::LayoutOk { layout } => {
+                Ok(crate::remote::machine_protocol::LayoutPutOutcome {
+                    layout,
+                    conflict: false,
+                })
+            }
+            DaemonResponse::LayoutConflict { layout } => {
+                Ok(crate::remote::machine_protocol::LayoutPutOutcome {
+                    layout,
+                    conflict: true,
+                })
+            }
+            DaemonResponse::Error { message, .. } => {
+                Err(IpcError::new(IpcErrorCode::InternalError, message))
+            }
+            _ => Err(IpcError::internal("Unexpected daemon response")),
+        }
     }
 
     pub(crate) async fn spawn_terminal_with_startup(

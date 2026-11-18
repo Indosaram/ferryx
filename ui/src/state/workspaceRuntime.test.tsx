@@ -273,6 +273,34 @@ describe("useWorkspaceRuntime", () => {
     expect(syncedPaths).not.toContain("/repo/stale-a");
   });
 
+  it("retries a host CAPACITY_EXCEEDED refusal and still lists the worktrees", async () => {
+    vi.useFakeTimers();
+    try {
+      const { services } = createServices();
+      services.listWorktrees = vi
+        .fn()
+        .mockRejectedValueOnce({ code: "CAPACITY_EXCEEDED", message: "busy", details: {} })
+        .mockResolvedValueOnce([worktree]);
+      const syncWorktrees = vi.fn(async () => undefined);
+      const { result } = renderHook(() =>
+        useWorkspaceRuntime({
+          activeWorktreePath: null,
+          syncWorktrees,
+          ensureTabForWorktree: vi.fn(async () => "tab-main"),
+          services,
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300);
+      });
+      expect(services.listWorktrees).toHaveBeenCalledTimes(2);
+      expect(syncWorktrees).toHaveBeenCalledWith([worktree]);
+      expect(result.current.runtimeError).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("extracts error message cleanly instead of logging [object Object]", async () => {
     const { services } = createServices();
     const structuredError = {

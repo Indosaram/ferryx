@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { remoteHostStore, type RemoteHostStore } from "../state/remoteHostStore";
 import { decodeMachineJson, decodePairedProject, decodeU64, type DiscoveredRepositories } from "./pairedDaemonContracts";
+import { decodeSharedLayout, type SharedLayout } from "../state/layoutSync";
 import type { AgentContinueStartup } from "./tauri";
 import type { AgentProviderSession } from "./types";
 
@@ -29,7 +30,9 @@ export type PairedHostOperation =
   | { kind: "session"; sessionId: string; daemonEpoch: string }
   | { kind: "createSession"; request: CreateSessionRequest }
   | { kind: "closeSession"; sessionId: string; request: CloseSessionRequest }
-  | { kind: "operation"; requestId: string };
+  | { kind: "operation"; requestId: string }
+  | { kind: "layoutGet"; workspaceId: string; afterRevision?: string }
+  | { kind: "layoutPut"; workspaceId: string; baseRevision: string; tabs: unknown };
 export interface PairedHostOperationRequest extends PairedHostContext { operation: PairedHostOperation }
 export type PairedHostInvoke = (command: "paired_host_operation", args: { request: PairedHostOperationRequest }) => Promise<unknown>;
 export class PairedOperationError extends Error {
@@ -88,6 +91,7 @@ const requiredCapability = {
   unregisterProject: "machineWorkspaceV1", worktrees: "managedWorktreesV1", worktreeStatus: "managedWorktreesV1",
   createWorktree: "managedWorktreesV1", deleteWorktree: "managedWorktreesV1", sessions: "terminalCreateV1",
   session: "terminalCreateV1", createSession: "terminalCreateV1", closeSession: "terminalCreateV1", operation: "machineWorkspaceV1",
+  layoutGet: "layoutSyncV1", layoutPut: "layoutSyncV1",
 };
 function safeError(value: unknown): PairedOperationError {
   try {
@@ -123,7 +127,7 @@ export function createPairedDaemonProjectAdapter(
     if (!host.machineId) return invalid("NATIVE_CONTEXT_REQUIRED");
     return host;
   }
-  async function execute<T>(operation: PairedHostOperation, parse: (value: unknown) => T): Promise<T> {
+  async function execute<T>(operation: PairedHostOperation, parse: (value: unknown, kind: string) => T): Promise<T> {
     // A rolled-back or incompatible peer must not inherit earlier admission.
     if (operation.kind === "capabilities") negotiated = undefined;
     const host = current();
@@ -131,6 +135,8 @@ export function createPairedDaemonProjectAdapter(
     if (operation.kind === "createSession" && operation.request.startup.kind === "agentContinue" && !(negotiated && negotiated.capabilities.includes("terminalContinueV1"))) return invalid("UNSUPPORTED_CAPABILITY");
     if (operation.kind === "operation") json("operation", { state: "pending", requestId: operation.requestId });
     if ("workspaceId" in operation && operation.workspaceId !== undefined) remoteId(operation.workspaceId);
+    if (operation.kind === "layoutGet" && operation.afterRevision !== undefined) decodeU64(operation.afterRevision);
+    if (operation.kind === "layoutPut") decodeU64(operation.baseRevision);
     if ("request" in operation) {
       const kinds = { registerProject: "registerRequest", unregisterProject: "unregisterRequest", createWorktree: "createWorktreeRequest", deleteWorktree: "deleteWorktreeRequest", createSession: "createSessionRequest", closeSession: "closeSessionRequest" };
       json(kinds[operation.kind], operation.request);
@@ -143,7 +149,7 @@ export function createPairedDaemonProjectAdapter(
     const envelope = object(raw);
     if (envelope.hostId !== hostId || envelope.generation !== generation) return invalid("CROSS_HOST_RESULT");
     const result = object(envelope.result);
-    if (result.kind !== operation.kind) return invalid();
+    if (typeof result.kind !== "string" || !acceptedKinds(operation).includes(result.kind)) return invalid();
     // Check every remote session target, including journal outcomes, before parsing/adoption.
     function provenance(value: unknown): void {
       if (!value || typeof value !== "object") return;
@@ -160,7 +166,7 @@ export function createPairedDaemonProjectAdapter(
       const target = object(detail.status === "expired" ? detail.target : object(detail.session).target);
       if (target.sessionId !== operation.sessionId || target.daemonEpoch !== operation.daemonEpoch) return invalid("CROSS_HOST_RESULT");
     }
-    return parse(result.data);
+    return parse(result.data, String(result.kind));
   }
   return {
     context: Object.freeze({ hostId, generation }),
@@ -194,7 +200,35 @@ export function createPairedDaemonProjectAdapter(
       // Only registerProject/projects return Rust-mapped desktop project IDs.
       return parsed;
     }),
+    /** One workspace's shared layout document; `afterRevision` parks until it is newer. */
+    layoutGet: (workspaceId: string, afterRevision?: string) =>
+      execute({ kind: "layoutGet", workspaceId, ...(afterRevision === undefined ? {} : { afterRevision }) },
+        (value, kind) => layoutDocument(value, kind)),
+    /** Publishes against `baseRevision`; a stale base answers the current document as a conflict. */
+    layoutPut: (workspaceId: string, baseRevision: string, tabs: unknown) =>
+      execute({ kind: "layoutPut", workspaceId, baseRevision, tabs },
+        (value, kind) => layoutDocument(value, kind)),
   };
 }
 function noContent(value: unknown): null { if (value !== null) return invalid(); return null; }
+/**
+ * Layout operations answer `layout` (a read, or a write that won) and `layoutConflict` (a write
+ * that lost). Both carry the current document; everything else keeps replying with its own kind.
+ */
+function acceptedKinds(operation: PairedHostOperation): string[] {
+  // A read never conflicts, so a conflict answer to one is a host bug worth rejecting.
+  if (operation.kind === "layoutGet") return ["layout"];
+  if (operation.kind === "layoutPut") return ["layout", "layoutConflict"];
+  return [operation.kind];
+}
+/**
+ * A layout answer carries the document itself; `layoutConflict` is the host saying the caller's
+ * base revision lost and this document is the one it kept.
+ */
+function layoutDocument(value: unknown, kind: string): { layout: SharedLayout; conflict: boolean } {
+  if (kind !== "layout" && kind !== "layoutConflict") return invalid();
+  let layout: SharedLayout;
+  try { layout = decodeSharedLayout(value); } catch { return invalid(); }
+  return { layout, conflict: kind === "layoutConflict" };
+}
 export type PairedDaemonProjectAdapter = ReturnType<typeof createPairedDaemonProjectAdapter>;

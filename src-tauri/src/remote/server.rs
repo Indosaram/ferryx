@@ -2464,6 +2464,7 @@ async fn machine_terminal_upgrade(
         .write_buffer_size(0)
         .on_upgrade(move |socket| async move {
             let session_id = session.target.session_id.clone();
+            let device_id = device.id.clone();
             let mut fenced = lease.cancelled.clone();
             let generation = lease.generation;
             let resized = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2485,7 +2486,11 @@ async fn machine_terminal_upgrade(
             // No task is detached, no input survives this scope, and failed
             // upgrades also drop the captured lease without closing the PTY.
             drop(lease);
-            if resized.load(std::sync::atomic::Ordering::Acquire) {
+            // Only the socket that drove the size hands it back to the desktop.
+            let released = state.machine_services.as_ref().is_some_and(|services| {
+                services.sessions.release_remote_size(&session_id, &device_id, generation)
+            });
+            if released && resized.load(std::sync::atomic::Ordering::Acquire) {
                 let _ = state.session_backend.restore_desktop_geometry(&session_id).await;
             }
         });
@@ -2973,6 +2978,8 @@ async fn handle_machine_terminal_socket(
     };
     let recv_mirror = mirror.clone();
     let recv_grid_notify = Arc::clone(&grid_notify);
+    // The size this viewer asked for; applied only while it drives the PTY size.
+    let requested_size: parking_lot::Mutex<Option<(u16, u16)>> = parking_lot::Mutex::new(None);
     let receive = async {
         loop {
             let Some(message) = input_rx.recv().await else {
@@ -3011,6 +3018,23 @@ async fn handle_machine_terminal_socket(
             let operation = async {
                 match message {
                     Message::Binary(bytes) if bytes.len() <= 64 * 1024 => {
+                        // Typing here makes this viewer the size driver, so its size takes over.
+                        if !crate::daemon::session_service::is_terminal_report(&bytes)
+                            && services.sessions.claim_remote_size(&target.session_id, &device.id, generation)
+                        {
+                            let requested = *requested_size.lock();
+                            if let Some((cols, rows)) = requested {
+                                if state.session_backend.resize(&target.session_id, cols, rows).await.is_ok() {
+                                    resized.store(true, std::sync::atomic::Ordering::Release);
+                                    if let Some(mirror) = &recv_mirror {
+                                        let resized_mirror = mirror.lock().resize(cols, rows).is_ok();
+                                        if resized_mirror {
+                                            recv_grid_notify.notify_one();
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         #[cfg(feature = "local-split-qa")]
                         let obs_seq = machine_delivery_observer::record_ingress(target, generation, "write", &bytes, None);
                         let input = pty.write_input_cancellable(&bytes);
@@ -3045,6 +3069,12 @@ async fn handle_machine_terminal_socket(
                                 && (recv_mirror.is_none()
                                     || (cols <= REMOTE_GRID_MAX_COLS && rows <= REMOTE_GRID_MAX_ROWS)) =>
                             {
+                                *requested_size.lock() = Some((cols, rows));
+                                // A viewer that is not driving keeps the driver's size instead of
+                                // flipping the PTY (and the other screen) to its own.
+                                if !services.sessions.remote_drives_size(&target.session_id, &device.id, generation) {
+                                    return Ok(());
+                                }
                                 state
                                     .session_backend
                                     .resize(&target.session_id, cols, rows)
@@ -4556,6 +4586,7 @@ fn gateway_capability_names(
         ]);
         capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_LIST_CAPABILITY);
         capabilities.push(crate::paired_host::file_tree::PAIRED_FILE_MKDIR_CAPABILITY);
+        capabilities.push(super::machine_protocol::LAYOUT_SYNC_CAPABILITY);
         capabilities.push(super::repo_discovery::REPO_DISCOVERY_CAPABILITY);
         capabilities.push(super::resources_api::RESOURCE_USAGE_CAPABILITY);
         if terminal_ready {
@@ -5219,6 +5250,55 @@ async fn unregister_project_boundary(
             super::workspace_api::unregister(State(state), path, headers, body),
         )
         .await)
+}
+
+/// Authenticates without an admission slot: the layout GET long-polls for 25 s and the layout
+/// PUT only touches an in-memory map, so neither may hold a project read/mutation permit.
+fn layout_device(
+    state: &RemoteGatewayState,
+    headers: &HeaderMap,
+) -> Result<DeviceInfo, Refusal> {
+    let device = authenticate_machine_request(state, headers)
+        .map_err(|response| Refusal::from(*response))?;
+    if device.access_scope != DeviceAccessScope::Machine
+        || device.permission != DevicePermission::Control
+    {
+        return Err(machine_error(
+            StatusCode::FORBIDDEN,
+            "MACHINE_ACCESS_REQUIRED",
+        )
+        .into());
+    }
+    if state.machine_services.is_none() {
+        return Err(machine_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "MACHINE_SERVICE_UNAVAILABLE",
+        )
+        .into());
+    }
+    Ok(device)
+}
+
+async fn layout_get_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    query: Result<Query<super::workspace_api::layout::LayoutQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, Refusal> {
+    layout_device(&state, &headers)?;
+    let query = query.map_err(|_| machine_error(StatusCode::BAD_REQUEST, "INVALID_REQUEST"))?;
+    Ok(super::workspace_api::layout::get(State(state), query, headers).await)
+}
+
+async fn layout_put_boundary(
+    State(state): State<Arc<RemoteGatewayState>>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+) -> Result<Response, Refusal> {
+    layout_device(&state, &headers)?;
+    let body = axum::body::to_bytes(request.into_body(), super::machine_protocol::MACHINE_JSON_MAX_BYTES)
+        .await
+        .map_err(|_| machine_error(StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"))?;
+    Ok(super::workspace_api::layout::put(State(state), headers, body).await)
 }
 
 async fn operation_boundary(
@@ -9496,6 +9576,16 @@ pub fn create_remote_router(state: Arc<RemoteGatewayState>) -> Router {
         .route(
             "/api/v1/workspace/sidebar",
             get(super::workspace_api::sidebar),
+        )
+        // The layout long-poll parks up to 25 s in the daemon, so these handlers answer from
+        // the in-process store instead of a daemon round trip.
+        .route(
+            "/api/v1/workspace/layout",
+            get(layout_get_boundary).put(layout_put_boundary).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    super::machine_protocol::MACHINE_JSON_MAX_BYTES,
+                ),
+            ),
         )
         .route(
             "/api/v1/workspace/operations/{requestId}",

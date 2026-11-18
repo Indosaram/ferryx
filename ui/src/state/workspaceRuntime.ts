@@ -53,6 +53,22 @@ const PREVIEW_WORKTREE: Worktree = {
   prunable: null,
 };
 
+/// A host answers CAPACITY_EXCEEDED while its bounded read slots are busy (a startup burst).
+/// That refusal is retryable; without a retry the worktree list stays empty until next focus.
+const CAPACITY_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000];
+
+async function listWithCapacityRetry(list: () => Promise<Worktree[]>, isCurrent: () => boolean): Promise<Worktree[]> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await list();
+    } catch (error) {
+      const delay = CAPACITY_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || toIpcError(error).code !== "CAPACITY_EXCEEDED" || !isCurrent()) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 function extractErrorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
@@ -170,7 +186,9 @@ export function useWorkspaceRuntime({
             allowCreate: options?.allowCreate ?? true,
             activeWorktreePath: activeWorktreePathRef.current,
           });
-          const listed = rootOnlyRef.current ? [] : await servicesRef.current.listWorktrees(workspaceId);
+          const listed = rootOnlyRef.current
+            ? []
+            : await listWithCapacityRetry(() => servicesRef.current.listWorktrees(workspaceId), isCurrent);
           switchDebug("worktree.refresh.listed", {
             workspaceId,
             generation,

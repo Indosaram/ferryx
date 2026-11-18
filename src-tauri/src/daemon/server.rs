@@ -4376,6 +4376,9 @@ impl DaemonServer {
             session_metadata: Arc::new(RwLock::new(HashMap::new())),
             provider_session_claims: Arc::new(Mutex::new(HashMap::new())),
             desktop_geometries: Arc::new(Mutex::new(HashMap::new())),
+            size_drivers: Arc::new(Mutex::new(HashMap::new())),
+            layouts: Arc::new(Mutex::new(HashMap::new())),
+            layout_generation: tokio::sync::watch::channel(0).0,
             #[cfg(test)]
             test_shell_command: parking_lot::Mutex::new(None),
         });
@@ -7187,6 +7190,9 @@ impl DaemonServer {
                         Ok(DaemonRequest::Attach { .. })
                             | Ok(DaemonRequest::MachineGateway)
                             | Ok(DaemonRequest::MachineMetadataSubscribe { .. })
+                            // A layout long-poll parks for up to 25 s; it must not pin a
+                            // retiring daemon that long.
+                            | Ok(DaemonRequest::LayoutGet { .. })
                             | Ok(DaemonRequest::SubscribeRemoteEvents)
                             | Ok(DaemonRequest::SubscribeDag { .. })
                             // The handover exchange itself never holds a guard: the commit waits
@@ -7692,6 +7698,37 @@ impl DaemonServer {
                         Err(e) => daemon_error(e),
                     }
                 }
+                // A long-poll holds no retirement guard (it parks up to 25 s) and asks the
+                // service directly; the layout store is in-memory only.
+                Ok(DaemonRequest::LayoutGet {
+                    workspace_id,
+                    after_revision,
+                }) => match after_revision {
+                    Some(after) => DaemonResponse::LayoutOk {
+                        layout: self
+                            .session_service
+                            .wait_layout(
+                                &workspace_id,
+                                after,
+                                super::session_service::LAYOUT_LONG_POLL_TIMEOUT,
+                            )
+                            .await,
+                    },
+                    None => DaemonResponse::LayoutOk {
+                        layout: self.session_service.layout(&workspace_id),
+                    },
+                },
+                Ok(DaemonRequest::LayoutPut {
+                    workspace_id,
+                    base_revision,
+                    tabs,
+                }) => match self
+                    .session_service
+                    .put_layout(&workspace_id, base_revision, tabs)
+                {
+                    Ok(layout) => DaemonResponse::LayoutOk { layout },
+                    Err(layout) => DaemonResponse::LayoutConflict { layout },
+                },
                 Ok(DaemonRequest::Spawn {
                     client_request_id,
                     workspace_id,
@@ -7950,6 +7987,7 @@ impl DaemonServer {
                     #[cfg(feature = "local-split-qa")]
                     let tok = super::qa_producers::record_daemon_mutation_ingress(&session_id, "write", &data);
                     if self.session_router.is_local_session(&session_id) {
+                        self.take_desktop_size(&session_id, &data).await;
                         match self.write_session_input(&session_id, data).await {
                             Ok(()) => {
                                 #[cfg(feature = "local-split-qa")]
@@ -8002,6 +8040,7 @@ impl DaemonServer {
                                 .await
                                 .map_err(crate::ipc::IpcError::from)
                         } else {
+                            self.take_desktop_size(&session_id, &data).await;
                             self.write_session_paste_chunk(&session_id, &paste_id, data, final_chunk).await
                         };
                         match result {
@@ -8041,7 +8080,11 @@ impl DaemonServer {
                     self.record_desktop_geometry(&session_id, cols, rows);
                     #[cfg(feature = "local-split-qa")]
                     let tok = super::qa_producers::record_daemon_mutation_ingress(&session_id, "resize", format!("{cols}x{rows}").as_bytes());
-                    if self.session_router.is_local_session(&session_id) {
+                    if self.session_router.is_local_session(&session_id) && !self.desktop_drives_size(&session_id) {
+                        // A paired remote typed last and owns the size; the desktop size is kept
+                        // and comes back when the desktop types or the remote leaves.
+                        DaemonResponse::ResizeOk
+                    } else if self.session_router.is_local_session(&session_id) {
                         match self.resize_session(&session_id, cols, rows).await {
                             Ok(()) => {
                                 #[cfg(feature = "local-split-qa")]
@@ -15376,6 +15419,66 @@ mod instance_lock_deadline_tests {
             None,
             "session close must remove desktop geometry record"
         );
+    }
+
+    #[test]
+    fn terminal_reports_are_not_typing() {
+        use crate::daemon::session_service::is_terminal_report;
+        assert!(is_terminal_report(b"\x1b[12;40R"));
+        assert!(is_terminal_report(b"\x1b[?62;22c"));
+        assert!(is_terminal_report(b"\x1b[I"));
+        assert!(is_terminal_report(b"\x1b]11;rgb:0000/0000/0000\x1b\\"));
+        assert!(!is_terminal_report(b"ls\r"));
+        assert!(!is_terminal_report(b"\x1b[A"));
+        assert!(!is_terminal_report(b"\x03"));
+    }
+
+    #[tokio::test]
+    async fn pty_size_follows_the_side_that_typed_last() {
+        use crate::remote::backend::RemoteSessionBackend;
+
+        let server = Arc::new(DaemonServer::new());
+        let repo = tempfile::tempdir().unwrap();
+        let _ = std::process::Command::new("git").args(["init"]).current_dir(repo.path()).output();
+        server
+            .handle_register_workspace("default", repo.path().to_str().unwrap())
+            .unwrap();
+        let session_id = server
+            .handle_spawn("req-driver-1", "default", crate::daemon::session_service::SpawnOptions { worktree: None, cwd: None, cols: 82, rows: 61, shell: None }, None)
+            .await
+            .unwrap();
+        let session = server.terminal_service.get_session(&session_id).unwrap();
+        server.record_desktop_geometry(&session_id, 82, 61);
+        let service = &server.session_service;
+
+        // A paired viewer that has not typed cannot resize a desktop-sized session.
+        assert!(!service.remote_drives_size(&session_id, "air", 1));
+
+        // Remote typing makes that socket the driver; its resize applies and a desktop resize is held.
+        assert!(service.claim_remote_size(&session_id, "air", 1));
+        assert!(!service.claim_remote_size(&session_id, "air", 1), "re-claiming is not a change");
+        assert!(service.remote_drives_size(&session_id, "air", 1));
+        assert!(!service.remote_drives_size(&session_id, "air", 2), "an older or newer socket does not drive");
+        service.resize(&session_id, 50, 67).await.unwrap();
+        assert!(!service.desktop_drives_size(&session_id));
+        assert_eq!(session.get_size(), (50, 67));
+
+        // Desktop typing takes the size back and restores the desktop geometry.
+        service.take_desktop_size(&session_id, b"\x1b[12;40R").await;
+        assert_eq!(session.get_size(), (50, 67), "a terminal report is not typing");
+        service.take_desktop_size(&session_id, b"x").await;
+        assert_eq!(session.get_size(), (82, 61));
+        assert!(service.desktop_drives_size(&session_id));
+        assert!(!service.remote_drives_size(&session_id, "air", 1));
+
+        // A remote socket that no longer drives does not restore on close.
+        assert!(!service.release_remote_size(&session_id, "air", 1));
+        assert!(service.claim_remote_size(&session_id, "air", 1));
+        assert!(service.release_remote_size(&session_id, "air", 1));
+        assert!(service.desktop_drives_size(&session_id));
+
+        server.handle_close(&session_id).await.unwrap();
+        assert!(service.size_drivers.lock().get(&session_id).is_none());
     }
 
     #[tokio::test]

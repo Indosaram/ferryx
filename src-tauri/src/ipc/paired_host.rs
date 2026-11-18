@@ -62,6 +62,30 @@ pub async fn cmd_retry_paired_session<R: tauri::Runtime>(
                 generation: outcome.generation,
             };
             let _ = app.emit("paired_session_recovery_status", &outcome);
+            // A proxy that is already attached publishes no new status after an admitted retry,
+            // so a pane recovering on it would wait for a `connected` event that never comes.
+            // Replay the current connected status once, before this command returns.
+            if outcome.state == "proxy_attached" {
+                if let (Some(generation), Ok(Some(descriptor))) = (
+                    outcome.generation,
+                    daemon.paired_terminal_descriptor(backend_session_id.clone()).await,
+                ) {
+                    let _ = app.emit("terminal_remote_status", serde_json::json!({
+                        "sessionId": backend_session_id,
+                        "state": "connected",
+                        "generation": generation,
+                        "failure": null,
+                        "replayGap": null,
+                        "descriptor": {
+                            "backendSessionId": backend_session_id,
+                            "hostId": descriptor.host_id,
+                            "target": descriptor.target,
+                            "incarnation": outcome.incarnation,
+                            "daemonEpoch": outcome.daemon_epoch,
+                        },
+                    }));
+                }
+            }
             Some(actor)
         }
         _ => None,

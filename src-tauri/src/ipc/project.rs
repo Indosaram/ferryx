@@ -314,6 +314,35 @@ pub async fn cmd_sync_desktop_sidebar(
     daemon_client.sync_desktop_sidebar(model).await
 }
 
+#[cfg(feature = "desktop")]
+/// Reads one workspace's shared layout document. With `after_revision` the daemon parks until
+/// the stored revision is newer, so the desktop's long-poll loop costs one call per change.
+#[tauri::command]
+pub async fn cmd_layout_get(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    workspace_id: String,
+    after_revision: Option<u64>,
+) -> Result<crate::remote::machine_protocol::SharedLayout, IpcError> {
+    daemon_client
+        .layout_get(&workspace_id, after_revision)
+        .await
+}
+
+#[cfg(feature = "desktop")]
+/// Publishes this desktop's layout. A stale base answers the stored document with
+/// `conflict: true` instead of failing, so the caller rebases without a second read.
+#[tauri::command]
+pub async fn cmd_layout_put(
+    daemon_client: State<'_, Arc<DaemonClient>>,
+    workspace_id: String,
+    base_revision: u64,
+    tabs: Vec<crate::remote::machine_protocol::SharedTab>,
+) -> Result<crate::remote::machine_protocol::LayoutPutOutcome, IpcError> {
+    daemon_client
+        .layout_put(&workspace_id, base_revision, tabs)
+        .await
+}
+
 /// Lists the local branches and tags a worktree can be based on. Remote-tracking
 /// branches are deliberately excluded.
 #[cfg(feature = "desktop")]

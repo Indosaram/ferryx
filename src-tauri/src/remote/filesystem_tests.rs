@@ -630,6 +630,7 @@ async fn directory_http_fixture(inject_send_failure: bool) {
                 "pairedFileWriteV1",
                 "pairedFileListV1",
                 "pairedFileMkdirV1",
+                "layoutSyncV1",
                 "repoDiscoveryV1",
                 "resourceUsageV1",
                 "terminalCreateV1",

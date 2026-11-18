@@ -1257,6 +1257,20 @@ pub enum DaemonRequest {
     UnregisterWorkspace {
         workspace_id: String,
     },
+    /// Reads one workspace's layout document, parking until it is newer than `after_revision`
+    /// when that is set (long-poll).
+    #[serde(rename_all = "camelCase")]
+    LayoutGet {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_revision: Option<u64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    LayoutPut {
+        workspace_id: String,
+        base_revision: u64,
+        tabs: Vec<crate::remote::machine_protocol::SharedTab>,
+    },
     #[serde(rename_all = "camelCase")]
     CreateWorktree {
         workspace_id: String,
@@ -2161,6 +2175,15 @@ pub enum DaemonResponse {
         revision: u64,
     },
     UnregisterWorkspaceOk,
+    #[serde(rename_all = "camelCase")]
+    LayoutOk {
+        layout: crate::remote::machine_protocol::SharedLayout,
+    },
+    /// The caller's base revision was stale; `layout` is the stored document to rebase onto.
+    #[serde(rename_all = "camelCase")]
+    LayoutConflict {
+        layout: crate::remote::machine_protocol::SharedLayout,
+    },
     #[serde(rename_all = "camelCase")]
     CreateWorktreeOk {
         worktree: crate::worktree::Worktree,

@@ -1,4 +1,5 @@
 //! Machine-only project routes. Blocking transactions share the daemon admission gate.
+pub(crate) mod layout;
 pub(crate) mod worktrees;
 use super::{
     auth::{DeviceAccessScope, DevicePermission},

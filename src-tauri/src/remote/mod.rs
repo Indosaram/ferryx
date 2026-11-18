@@ -77,6 +77,11 @@ mod filesystem_tests;
 #[cfg(test)]
 mod workspace_api_tests;
 
+// The layout route binds a private loopback listener, so it runs on every target.
+#[cfg(test)]
+#[path = "layout_route_tests.rs"]
+mod layout_route_tests;
+
 // Calls the real /api/v1/workspace/state, so it runs on every target.
 #[cfg(test)]
 #[path = "session_attention_privacy_tests.rs"]
