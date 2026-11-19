@@ -1,5 +1,7 @@
 // OS-job queries and QA-scoped job actions, all through the host agent (which runs the guard).
 
+import { lstatSync } from 'node:fs';
+import path from 'node:path';
 import { parseLaunchctlPrint, launchctlProgram, parseSystemctlShow, selectWindowsTree, parseScheduledTaskState } from './os-jobs.mjs';
 import { qaSupervisorName, isQaJobName } from './guards.mjs';
 import { hjoin } from './hostpath.mjs';
@@ -7,6 +9,23 @@ import { hjoin } from './hostpath.mjs';
 /** stdout/stderr of the Q13 legacy daemon job, on every platform (the baseline prints FERRYX_DAEMON_READY to stdout). */
 export function legacyLogFiles(layout) {
   return { stdout: hjoin(layout.logs, 'legacy.stdout.log'), stderr: hjoin(layout.logs, 'legacy.stderr.log') };
+}
+
+// A launchd generation job can inherit the account's home even when the QA GUI has a private HOME.
+export function macHubIsolationVerdict({ account, runnerHome, dedicatedAccount, inspect = (file) => lstatSync(file, { throwIfNoEntry: false }) }) {
+  const refuse = (reason) => ({ blocked: true, reason });
+  const home = account?.homedir;
+  if (!account?.username || !Number.isSafeInteger(account.uid) || account.uid <= 0 || typeof home !== 'string' || !path.posix.isAbsolute(home) || home === '/' || path.posix.normalize(home) !== home) return refuse('unverified-account');
+  if (runnerHome !== home) return refuse('home-mismatch');
+  try {
+    const stat = inspect(home);
+    if (!stat?.isDirectory() || stat.uid !== account.uid) return refuse('unverified-home');
+    if (inspect(path.posix.join(home, '.ferryx'))) return refuse('existing-ferryx-state');
+  } catch (error) {
+    return { ...refuse('account-state-unreadable'), code: error?.code ?? null };
+  }
+  if (dedicatedAccount !== account.username) return refuse('dedicated-login-required');
+  return { blocked: false, reason: 'clean-dedicated-login' };
 }
 
 /**
