@@ -251,7 +251,7 @@ test('artifact paths per platform layout', () => {
   assert.equal(win.cliExecutable, 'C:\\t\\debug\\ferryx-cli.exe');
   assert.deepEqual(windowsArtifactCopyCommand(win.guiExecutable, win.cliExecutable, 'C:\\run\\artifacts\\A'), {
     command: 'powershell.exe',
-    args: ['-NoProfile', '-Command', "Copy-Item -LiteralPath 'C:\\t\\debug\\ferryx.exe','C:\\t\\debug\\ferryx-cli.exe' -Destination 'C:\\run\\artifacts\\A'; Copy-Item -Path 'C:\\t\\debug\\*.dll' -Destination 'C:\\run\\artifacts\\A'"],
+    args: ['-NoProfile', '-Command', "$ErrorActionPreference='Stop'; Copy-Item -LiteralPath 'C:\\t\\debug\\ferryx.exe','C:\\t\\debug\\ferryx-cli.exe' -Destination 'C:\\run\\artifacts\\A'; Get-ChildItem -LiteralPath 'C:\\t\\debug' -File -Filter '*.dll' | Copy-Item -Destination 'C:\\run\\artifacts\\A'"],
   });
 });
 

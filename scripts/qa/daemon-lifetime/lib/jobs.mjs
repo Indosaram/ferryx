@@ -74,20 +74,26 @@ export function createJobs({ host, agent, runId, layout, uid = null }) {
   }
 
   /** Lists QA-named jobs of this run (for teardown and leftover checks). */
-  async function listQaJobs() {
+  async function listQaJobs({ strict = false } = {}) {
+    const list = async (spec) => {
+      const r = await agent.call('exec', spec);
+      if (strict && r.status !== 0) throw new Error(`cannot enumerate QA jobs: ${r.stderr}`);
+      return r;
+    };
     if (platform === 'mac') {
-      const r = await agent.call('exec', { command: 'launchctl', args: ['list'] });
+      const r = await list({ command: 'launchctl', args: ['list'] });
       return r.stdout.split('\n').map((l) => l.trim().split(/\s+/).pop()).filter((n) => n && (n === base || n.startsWith(`${base}.`)));
     }
     if (platform === 'linux') {
-      const r = await agent.call('exec', { command: 'systemctl', args: ['--user', 'list-units', '--all', '--plain', '--no-legend', '--no-pager'] });
+      const r = await list({ command: 'systemctl', args: ['--user', 'list-units', '--all', '--plain', '--no-legend', '--no-pager'] });
       const units = r.stdout.split('\n').map((l) => l.trim().split(/\s+/)[0]).filter((n) => n && n.startsWith(base));
-      const files = await agent.call('exec', { command: 'systemctl', args: ['--user', 'list-unit-files', '--plain', '--no-legend', '--no-pager'] });
+      const files = await list({ command: 'systemctl', args: ['--user', 'list-unit-files', '--plain', '--no-legend', '--no-pager'] });
       for (const l of files.stdout.split('\n')) { const n = l.trim().split(/\s+/)[0]; if (n && n.startsWith(base) && !units.includes(n)) units.push(n); }
       return units;
     }
-    const r = await agent.call('exec', { command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command',
-      `Get-ScheduledTask -TaskPath '\\Ferryx\\' -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -like '${base}*' } | ForEach-Object { 'Ferryx\\' + $_.TaskName }`] });
+    const query = strict ? `Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskPath -eq '\\Ferryx\\' }` : `Get-ScheduledTask -TaskPath '\\Ferryx\\' -ErrorAction SilentlyContinue`;
+    const r = await list({ command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command',
+      `${query} | Where-Object { $_.TaskName -like '${base}*' } | ForEach-Object { 'Ferryx\\' + $_.TaskName }`] });
     return r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   }
 
