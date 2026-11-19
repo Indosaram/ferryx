@@ -2,7 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, basename } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath, readdir } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { runProvisionedScenario, verifyCandidate } from './session-recovery-provisioned.mjs';
 import { teardownOwnedChildren } from './session-recovery-consistency.mjs';
@@ -11,7 +11,7 @@ import { buildWebSelection } from './fixtures/session-recovery-web-config.mjs';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const here = fileURLToPath(import.meta.url);
 const sourceHash = 'a'.repeat(64);
-const receipts = vi.hoisted(() => new Map());
+const receipts = new Map();
 afterEach(() => vi.useRealTimers());
 
 // No disk creation, real identity, global environment mutation, or browser launch.
@@ -25,20 +25,21 @@ async function options() {
     webSelection: { target: { sessionId: 'a' }, rebindTarget: { sessionId: 'b' } } };
 }
 
-// Artifact reads are the boundary; fixtures preserve actual hashing and inventory logic.
-vi.mock('node:fs/promises', async importOriginal => {
-  const original = await importOriginal();
-  return { ...original,
-    mkdir: async () => {},
-    writeFile: async (path, body, options) => {
-      if (options.flag !== 'wx' || receipts.has(path)) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
-      receipts.set(path, JSON.parse(body));
-    },
-    realpath: async path => path === '/fixture/ui' || path === '/fixture/ui/index.html' ? path : original.realpath(path),
-    readdir: async path => path === '/fixture/ui' ? [{ name: 'index.html', isDirectory: () => false, isFile: () => true }] : original.readdir(path),
-    readFile: async path => path === '/fixture/ui/index.html' ? Buffer.from('candidate-ui') : original.readFile(path),
-  };
-});
+// Artifact reads and receipt writes are the boundary; the fixtures preserve the real hashing
+// and inventory logic. They are injected through the runner's existing seam argument rather
+// than by mocking node:fs/promises, because Bun's runner shares a builtin mock across the
+// whole process, so a file-scoped mock silently rewrites the filesystem for every later file.
+const artifactSeams = {
+  mkdir: async () => {},
+  writeFile: async (path, body, options) => {
+    if (options.flag !== 'wx' || receipts.has(path)) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+    receipts.set(path, JSON.parse(body));
+  },
+  realpath: async path => path === '/fixture/ui' || path === '/fixture/ui/index.html' ? path : realpath(path),
+  readdir: async path => path === '/fixture/ui' ? [{ name: 'index.html', isDirectory: () => false, isFile: () => true }] : readdir(path),
+  readFile: async path => path === '/fixture/ui/index.html' ? Buffer.from('candidate-ui') : readFile(path),
+};
+const run = (options, extra = {}) => runProvisionedScenario(options, { ...artifactSeams, ...extra });
 
 async function valid() {
   const value = await options();
@@ -50,7 +51,7 @@ async function valid() {
 
 test('verifies same-source binary and complete UI inventory', async () => {
   const input = await valid();
-  const receipt = await verifyCandidate(input.candidate);
+  const receipt = await verifyCandidate(input.candidate, artifactSeams);
   expect(receipt.sourceHash).toBe(sourceHash);
   expect(receipt.binarySha256).toBe(input.candidate.binary.sha256);
   expect(receipt.uiSha256).toBe(input.candidate.ui.sha256);
@@ -62,16 +63,16 @@ test.each(['source', 'binary', 'ui'])('rejects changed %s provenance before disp
   if (kind === 'binary') input.candidate.binary.sha256 = '0'.repeat(64);
   if (kind === 'ui') input.candidate.ui.files[0].sha256 = '0'.repeat(64);
   const dispatchScenario = vi.fn();
-  const result = await runProvisionedScenario(input, { dispatchScenario });
+  const result = await run(input, { dispatchScenario });
   expect(result.status).toBe('failed');
   expect(dispatchScenario).not.toHaveBeenCalled();
 });
 
 test('unsupported row does not impose native prerequisites on controlled web', async () => {
-  const missing = await runProvisionedScenario({ scenario: 'local-outage' });
+  const missing = await run({ scenario: 'local-outage' });
   const input = await valid();
   const dispatchScenario = vi.fn(async () => ({ status: 'passed' }));
-  const result = await runProvisionedScenario(input, { dispatchScenario });
+  const result = await run(input, { dispatchScenario });
   expect(missing).toMatchObject({ status: 'incomplete', barrierCode: 'PROVISIONING_ADAPTER_UNSUPPORTED' });
   expect(result).toMatchObject({ status: 'passed', evidenceScope: 'controlled-ui', realProcessAcceptance: false });
   expect(dispatchScenario).toHaveBeenCalledOnce();
@@ -81,7 +82,7 @@ test('requires caller creation contract only for the cold-start row', async () =
   const input = await valid();
   input.scenario = 'cold-start-unknown';
   const dispatchScenario = vi.fn();
-  const result = await runProvisionedScenario(input, { dispatchScenario });
+  const result = await run(input, { dispatchScenario });
   expect(result.barrierCode).toBe('ACTUAL_CREATE_ROUTE_REQUIRED');
   expect(dispatchScenario).not.toHaveBeenCalled();
 });
@@ -107,7 +108,7 @@ test('web builder preserves supplied codecs and local explicit creation schema',
   input.scenario = 'cold-start-unknown';
   input.webSelection = selection;
   const dispatchScenario = vi.fn(async () => ({ status: 'unverified' }));
-  const result = await runProvisionedScenario(input, { dispatchScenario });
+  const result = await run(input, { dispatchScenario });
   expect(dispatchScenario).toHaveBeenCalledOnce();
   expect(result).toMatchObject({ status: 'unverified', realProcessAcceptance: false });
 });
@@ -116,8 +117,8 @@ test('each row receives a distinct ledger at existing context seam', async () =>
   const ledgers = [];
   const dispatchScenario = async (_, ctx) => { ledgers.push(ctx.ledger); return { status: 'passed' }; };
   const input = await valid();
-  await runProvisionedScenario(input, { dispatchScenario });
-  await runProvisionedScenario(input, { dispatchScenario });
+  await run(input, { dispatchScenario });
+  await run(input, { dispatchScenario });
   expect(ledgers).toHaveLength(2);
   expect(ledgers[0]).not.toBe(ledgers[1]);
   expect(ledgers.map(ledger => ledger.entries)).toEqual([[], []]);
@@ -129,7 +130,7 @@ test('cancellation disposes exactly the opened resource once', async () => {
   input.signal = controller.signal;
   const entered = Promise.withResolvers();
   const dispose = vi.fn(async () => {});
-  const pending = runProvisionedScenario(input, {
+  const pending = run(input, {
     createScenarioContext: (options, ledger) => ({ ...options, ledger, openWebOutcome: async () => ({ dispose }) }),
     dispatchScenario: async (_, ctx) => {
       await ctx.openWebOutcome({});
@@ -171,7 +172,7 @@ test('persists verified digests and executor evidence without claiming real PID'
   input.invocation = { command: ['bun', 'caller.mjs'], entrypoint: 'runProvisionedScenario' };
   const evidence = [{ target: { sessionId: 'a', pid: 42 }, timeline: [{ event: 'attached' }],
     captures: [{ path: '/fixture/capture.png' }] }];
-  const result = await runProvisionedScenario(input, { dispatchScenario: async () => ({ status: 'passed', evidence }) });
+  const result = await run(input, { dispatchScenario: async () => ({ status: 'passed', evidence }) });
   expect(receipts.get(result.receiptPath)).toMatchObject({ runId: 'row', scenario: 'confirmed-exit',
     candidate: { sourceHash, binarySha256: input.candidate.binary.sha256, uiSha256: input.candidate.ui.sha256 },
     invocation: input.invocation, evidenceScope: 'controlled-ui', realProcessAcceptance: false,
@@ -180,8 +181,8 @@ test('persists verified digests and executor evidence without claiming real PID'
 
 test('unsupported rows persist independent non-overwriting receipts', async () => {
   const input = { scenario: 'local-outage', evidenceDir: '/fixture/evidence', runId: 'same' };
-  const first = await runProvisionedScenario(input);
-  const second = await runProvisionedScenario(input);
+  const first = await run(input);
+  const second = await run(input);
   expect(first.receiptPath).not.toBe(second.receiptPath);
   expect(receipts.get(first.receiptPath)).toMatchObject({ status: 'incomplete', candidate: null,
     barrierCode: 'PROVISIONING_ADAPTER_UNSUPPORTED', realProcessAcceptance: false });
@@ -190,7 +191,7 @@ test('unsupported rows persist independent non-overwriting receipts', async () =
 
 test.each(['EACCES', 'EEXIST'])('receipt write failure %s cannot return passed', async code => {
   const input = await valid();
-  const result = await runProvisionedScenario(input, {
+  const result = await run(input, {
     dispatchScenario: async () => ({ status: 'passed' }),
     writeFile: async (_, __, options) => {
       expect(options.flag).toBe('wx');
@@ -209,7 +210,7 @@ test('late open disposal rejection is observed and cleanup stays unproven', asyn
   const entered = Promise.withResolvers();
   const disposed = Promise.withResolvers();
   const dispatchDone = Promise.withResolvers();
-  const pending = runProvisionedScenario(input, {
+  const pending = run(input, {
     createScenarioContext: (options, ledger) => ({ ...options, ledger, openWebOutcome: () => {
       entered.resolve(); return opening.promise;
     } }),

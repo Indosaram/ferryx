@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -38,6 +38,37 @@ function resolveAstGrepBinary() {
   return null;
 }
 
+// Every rule path matches a GPU call nested inside either a direct `run_on_main_thread(` call or
+// the project's `dispatch_render_on_main_thread(` wrapper, so a file that mentions neither
+// wrapper cannot contain a match. The rule is a conjunction of a call pattern and an enclosing
+// wrapper, and no `--rule` may relax that, so parsing the other files can only ever produce an
+// empty result. Skipping them avoids parsing all 729 Rust files here: the full scan costs
+// ~3.8s, which left this gate within a second of Bun's 5s per-test deadline and made it fail
+// whenever the suite ran it under load.
+const RULE_ENCLOSING_MARKERS = ["run_on_main_thread(", "dispatch_render_on_main_thread("];
+
+function confinesMatches(file) {
+  try {
+    const source = readFileSync(file, "utf8");
+    return RULE_ENCLOSING_MARKERS.some((marker) => source.includes(marker));
+  } catch {
+    // An unreadable file must not be silently exempted from the gate.
+    return true;
+  }
+}
+
+function collectCandidateFiles(target) {
+  const stat = statSync(target);
+  if (stat.isFile()) return [target];
+  const candidates = [];
+  for (const entry of readdirSync(target, { withFileTypes: true })) {
+    const child = join(target, entry.name);
+    if (entry.isDirectory()) candidates.push(...collectCandidateFiles(child));
+    else if (entry.isFile() && entry.name.endsWith(".rs") && confinesMatches(child)) candidates.push(child);
+  }
+  return candidates;
+}
+
 export async function scanThreadPolicy(targets = DEFAULT_TARGETS) {
   if (!existsSync(RULE_FILE)) {
     throw new Error(`thread policy rule file is missing: ${RULE_FILE}`);
@@ -52,8 +83,12 @@ export async function scanThreadPolicy(targets = DEFAULT_TARGETS) {
   if (present.length === 0) {
     throw new Error(`no scan target exists: ${targets.join(", ")}`);
   }
+  // Scanning nothing must still report nothing: ast-grep exits non-zero when it is handed no
+  // path, so a tree with no enclosing-wrapper call is answered directly.
+  const candidates = present.flatMap(collectCandidateFiles);
+  if (candidates.length === 0) return [];
 
-  const proc = Bun.spawnSync([binary, "scan", "--rule", RULE_FILE, "--json=stream", ...present], {
+  const proc = Bun.spawnSync([binary, "scan", "--rule", RULE_FILE, "--json=stream", ...candidates], {
     stdout: "pipe",
     stderr: "pipe",
   });

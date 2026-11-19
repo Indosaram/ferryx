@@ -9,18 +9,24 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const failure = code => Object.assign(new Error(code), { code });
 
 // Each artifact receipt must identify the same frozen source, not merely a label.
-export async function verifyCandidate(candidate) {
+// Artifact reads are the boundary for source-only contract tests, which inject them here
+// rather than mocking node:fs/promises: Bun's runner shares a builtin mock across the whole
+// process, so a file-scoped mock would silently rewrite the filesystem for later files.
+export async function verifyCandidate(candidate, seams = {}) {
+  const readFileImpl = seams.readFile ?? readFile;
+  const realpathImpl = seams.realpath ?? realpath;
+  const readdirImpl = seams.readdir ?? readdir;
   const { stamp, sourceHash, binary, ui } = candidate ?? {};
   if (!stamp || !/^[a-f0-9]{64}$/.test(sourceHash ?? '') ||
       binary?.sourceHash !== sourceHash || ui?.sourceHash !== sourceHash ||
       !binary.path || !ui.path || !Array.isArray(ui.files) || !ui.files.length) {
     throw failure('CANDIDATE_RECEIPT_REQUIRED');
   }
-  if (hash(await readFile(binary.path)) !== binary.sha256) throw failure('BINARY_HASH_MISMATCH');
-  const root = await realpath(ui.path);
+  if (hash(await readFileImpl(binary.path)) !== binary.sha256) throw failure('BINARY_HASH_MISMATCH');
+  const root = await realpathImpl(ui.path);
   const actual = [];
   async function collect(dir, prefix = '') {
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
+    for (const entry of await readdirImpl(dir, { withFileTypes: true })) {
       const name = prefix + entry.name;
       if (entry.isDirectory()) await collect(resolve(dir, entry.name), name + '/');
       else if (entry.isFile()) actual.push(name);
@@ -33,10 +39,10 @@ export async function verifyCandidate(candidate) {
   for (const file of ui.files) {
     if (!file.path || isAbsolute(file.path) || seen.has(file.path)) throw failure('UI_INVENTORY_INVALID');
     seen.add(file.path);
-    const path = await realpath(resolve(root, file.path));
+    const path = await realpathImpl(resolve(root, file.path));
     const rel = relative(root, path);
     if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) throw failure('UI_PATH_OUTSIDE_ROOT');
-    if (hash(await readFile(path)) !== file.sha256) throw failure('UI_FILE_HASH_MISMATCH');
+    if (hash(await readFileImpl(path)) !== file.sha256) throw failure('UI_FILE_HASH_MISMATCH');
     inventory.push([file.path, file.sha256]);
   }
   if (!seen.has('index.html')) throw failure('UI_INDEX_REQUIRED');
@@ -99,7 +105,7 @@ export async function runProvisionedScenario(options, seams = {}) {
   });
   cancelled.catch(() => {});
   try {
-    provenance = await Promise.race([verifyCandidate(candidate), cancelled]);
+    provenance = await Promise.race([verifyCandidate(candidate, seams), cancelled]);
     controller.signal.throwIfAborted();
     const ctx = (seams.createScenarioContext ?? createScenarioContext)({
       evidenceDir, runId, timeoutMs, signal: controller.signal,
