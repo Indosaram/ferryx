@@ -171,10 +171,13 @@ mod test_descriptor_limit {
     }
 
     #[used]
-    // The plain "segment,section" spelling: `__mod_init_func` is the section dyld scans for
-    // initializers on Apple targets and is what this lane's `--all-targets` clippy run
-    // compiled. (`ctor`/`dtor` append a third, optional symbol component to the same section.)
-    #[link_section = "__DATA,__mod_init_func"]
+    // The spelling `ctor` 1.0.13 and `dtor` 0.3.0 emit for `target_vendor = "apple"`: the
+    // `__DATA` segment and `__mod_init_func` section dyld scans for initializers, plus the third
+    // component LLVM accepts for Mach-O sections. `clang -c` with either this section or the
+    // shorter "__DATA,__mod_init_func" puts the pointer in `(__DATA,__mod_init_func)`, so the
+    // string is valid; no macOS host was reachable while this was written, so the module itself
+    // has not been compiled and only a Darwin run can confirm the hook fires.
+    #[link_section = "__DATA,__mod_init_func,mod_init_funcs"]
     static RAISE_ON_START: extern "C" fn() = raise_on_start;
 
     /// The hook ran: prove the limit this process actually carries, not that a function was
