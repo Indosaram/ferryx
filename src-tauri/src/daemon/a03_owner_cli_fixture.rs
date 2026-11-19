@@ -257,6 +257,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push("sessionOwnershipTransferV1");
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY);
@@ -264,12 +265,14 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY);
+            capabilities.push(crate::daemon::protocol::LANE_LIFECYCLE_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_CONVERSE_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_SETUP_CAPABILITY);
             capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY);
             capabilities.push(crate::hub_runtime::SUPERVISOR_CONTROL_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY);
+            capabilities.push(crate::daemon::protocol::AGENT_PROMPT_RESOLVE_AMBIGUOUS_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY);
             capabilities.push(crate::daemon::protocol::AGENT_MEMORY_BLOCK_CAPABILITY);
             capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY);
@@ -335,6 +338,7 @@ async fn scenario(binary: &Path, root: &Path, machine: bool) -> anyhow::Result<(
             }
             capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY);
+            capabilities.push(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY);
             capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY);
             capabilities.push(crate::agent_control::fence::SUPERVISOR_FENCE_CAPABILITY);

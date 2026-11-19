@@ -1050,9 +1050,13 @@ async fn remote_ssh_first_spawn_provisions_qualified_helper_automatically() {
     // runs from a private copy inside its own temporary directory: the shared
     // `target/debug/deps/helpers` subtree (which may hold foreign artifacts) is
     // never written to and never removed.
+    // Unlike the fixture root in `dir`, this one holds no socket, so it does not
+    // need a short `/tmp` path and must not inherit that pin: the copy is as large
+    // as this test binary, and a small `/tmp` tmpfs fails it with ENOSPC while the
+    // harness temp directory still has room.
     let assets = tempfile::Builder::new()
         .prefix("fx-provision-assets")
-        .tempdir_in("/tmp")
+        .tempdir()
         .unwrap();
     let child_binary = assets.path().join("ferryx-lib-provision-tests");
     std::fs::copy(std::env::current_exe().unwrap(), &child_binary).unwrap();

@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 
 import { deriveFocusedTerminal } from "../../App";
+import { laneLifecycleKey } from "../../lib/sidebarPersistence";
 import { directSidebarInventory } from "../../remote/directSidebarInventory";
 import type { RemoteWorkspaceModel } from "../../remote/RemoteSessionList";
 import { remoteSidebarSignals } from "../../remote/remoteSidebarLive";
@@ -27,7 +28,22 @@ function workspace(id: string, state: Activity, seen = false): WorkspaceState {
   } as unknown as WorkspaceState;
 }
 
-const node = (id: string) => ({ key: `${id}:/${id}`, workspaceId: id, path: `/${id}`, worktreeSlug: null, label: "main", hostLabel: null, stale: false, listingFailure: null });
+const node = (id: string) => {
+  const path = `/${id}`;
+  return {
+    key: `${id}:/${id}`,
+    workspaceId: id,
+    path,
+    worktreeSlug: null,
+    lifecycleKey: laneLifecycleKey({ workspaceId: id, path, worktreeSlug: null }),
+    lifecycle: "active" as const,
+    pinnedTabs: [],
+    label: "main",
+    hostLabel: null,
+    stale: false,
+    listingFailure: null,
+  };
+};
 
 const MODEL: SidebarModel = {
   schemaVersion: 1, revision: 1, generatedAt: "", source: "desktop", collapsedGroupIds: [], advancedFeatures: true, emptyState: null,

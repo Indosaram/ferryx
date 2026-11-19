@@ -66,6 +66,25 @@ function pick(index: number): HTMLElement {
 }
 
 describe("ReferencePromptCard", () => {
+  it("requires explicit confirmation before dismissing an ambiguous answer", async () => {
+    const onDismissAmbiguous = vi.fn(async () => undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderCard({
+      prompt: prompt({ answerStatus: "outcomeUnknown" }),
+      onDismissAmbiguous,
+    });
+    fireEvent.click(screen.getByTestId("reference-prompt-dismiss-ambiguous"));
+    expect(onDismissAmbiguous).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByTestId("reference-prompt-dismiss-ambiguous"));
+    await waitFor(() => expect(onDismissAmbiguous).toHaveBeenCalledTimes(1));
+  });
+  it("disables all answer choices for an ambiguous prompt", () => {
+    renderCard({ prompt: prompt({ answerStatus: "outcomeUnknown" }) });
+    expect(screen.getByTestId("reference-prompt-option-0")).toBeDisabled();
+    expect(screen.getByTestId("reference-prompt-option-1")).toBeDisabled();
+    expect(screen.getByTestId("reference-prompt-submit")).toBeDisabled();
+  });
   beforeEach(cleanup);
   afterEach(cleanup);
 

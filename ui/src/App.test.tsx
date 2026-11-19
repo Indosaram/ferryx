@@ -31,17 +31,38 @@ if (!(window as any).__TAURI_EVENT_PLUGIN_INTERNALS__) {
   };
 }
 
+// This file exercises the macOS shortcut contract. Its detector reads navigator.platform and
+// navigator.userAgent together, and jsdom's user agent interpolates the real process.platform
+// ("win32" on a Windows runner), which the classifier tests before Mac - so platform alone left
+// the fixture split across hosts and Cmd chords stopped matching. process.platform is left alone
+// so the nested Windows cases keep their own override.
+const originalNavigatorPlatform = Object.getOwnPropertyDescriptor(globalThis.navigator, "platform");
+const originalNavigatorUserAgent = Object.getOwnPropertyDescriptor(globalThis.navigator, "userAgent");
 Object.defineProperty(globalThis.navigator, "platform", {
   configurable: true,
   value: "MacIntel",
+});
+Object.defineProperty(globalThis.navigator, "userAgent", {
+  configurable: true,
+  value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
 });
 
 const { readFileSync } = await import("node:fs");
 const { resolve } = await import("node:path");
 
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
-const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
+const { afterAll, afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
+// Both are inherited accessors with no own property, so absence must restore by deletion.
+afterAll(() => {
+  for (const [key, descriptor] of [
+    ["platform", originalNavigatorPlatform],
+    ["userAgent", originalNavigatorUserAgent],
+  ] as const) {
+    if (descriptor) Object.defineProperty(globalThis.navigator, key, descriptor);
+    else Reflect.deleteProperty(globalThis.navigator, key);
+  }
+});
 import type { LayoutState, TabPaneLayout, Worktree } from "./lib/types";
 import type { TerminalActivity } from "./lib/activity";
 import { createLayoutState } from "./state/layout";
@@ -193,6 +214,7 @@ vi.mock("./lib/tauri", () => ({
   listExternalWorktrees: vi.fn(async () => []),
   discardWindowSession: vi.fn(async () => undefined),
   onWindowSessionsOrphaned: vi.fn(async () => () => undefined),
+  reportDesktopWindowFocus: vi.fn(async () => undefined),
   onSessionCorrupted: vi.fn(async () => () => undefined),
   onWindowSessionsAdopt: vi.fn(async () => () => undefined),
   takePendingWindowAdoptions: vi.fn(async () => []),
@@ -819,8 +841,10 @@ describe("App project workspace flow", () => {
       const browser = await import("./lib/browserTauri");
       const { BrowserPane } = await import("./components/BrowserPane");
       const platform = Object.getOwnPropertyDescriptor(navigator, "platform")!;
+      const userAgent = Object.getOwnPropertyDescriptor(navigator, "userAgent")!;
       const processPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
       Object.defineProperty(navigator, "platform", { configurable: true, value: "Win32" });
+      Object.defineProperty(navigator, "userAgent", { configurable: true, value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" });
       Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
       const back = vi.spyOn(browser, "goBackBrowser").mockResolvedValue();
       const forward = vi.spyOn(browser, "goForwardBrowser").mockResolvedValue();
@@ -891,6 +915,7 @@ describe("App project workspace flow", () => {
         cleanup();
         for (const spy of [back, forward, find, bounds, visibility, shortcut, download]) spy.mockRestore();
         Object.defineProperty(navigator, "platform", platform);
+        Object.defineProperty(navigator, "userAgent", userAgent);
         Object.defineProperty(process, "platform", processPlatform);
       }
     });

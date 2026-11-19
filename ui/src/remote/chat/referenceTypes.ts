@@ -422,6 +422,7 @@ export interface ReferencePrompt {
   readonly steps?: readonly ReferencePromptStep[];
   /** The last-resort card for a blocked pane no reader knows. */
   readonly fallback?: boolean | null;
+  readonly answerStatus?: "outcomeUnknown";
 }
 
 /** The user's answer: exactly one of the three shapes. */

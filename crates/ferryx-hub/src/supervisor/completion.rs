@@ -739,6 +739,12 @@ impl CompletionDriver {
             &now_rfc3339(),
         )
         .await?;
+        if let Err(error) =
+            super::lessons::count_turn_injected(&mut tx, &dispatch.request_id, &injected_lessons)
+                .await
+        {
+            tracing::warn!(%error, request_id = %dispatch.request_id, "turn lessons were not recorded");
+        }
         let detail = format!(
             "{VERIFIER_FAILED}: unproven {unproven}; corrective run {}",
             dispatch.request_id
@@ -753,12 +759,6 @@ impl CompletionDriver {
         )
         .await?;
         tx.commit().await?;
-        if let Err(error) =
-            super::lessons::note_turn_injected(&self.pool, &dispatch.request_id, &injected_lessons)
-                .await
-        {
-            tracing::warn!(%error, request_id = %dispatch.request_id, "turn lessons were not recorded");
-        }
         super::changes::announce(&goal.goal_id);
         wakes::poke();
         super::dispatcher::poke();

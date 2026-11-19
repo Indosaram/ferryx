@@ -29,6 +29,47 @@ pub const CHECKPOINT_ID_HEADER: &str = "x-ferryx-checkpoint-id";
 /// A move would lose changes: only an explicit `force` may take over.
 pub const SUPERVISOR_FORCE_REQUIRED: &str = "SUPERVISOR_FORCE_REQUIRED";
 const INDEX_FILE: &str = "index.json";
+/// The agent that runs the supervisor's conversation, as `agent_detect::registry` names it: the
+/// retained engine is the `mhc` binary, and `mhc` is `maho`'s command name
+/// (`registry::by_id("maho")`), not omo's.
+const SUPERVISOR_CONVERSATION_AGENT: &str = "maho";
+/// The `agent_detect` manifest id that answers for that agent's conversation.
+///
+/// `maho` is deliberately absent from `SHIPPED_MANIFESTS`: it runs omo's TUI, so omo's manifest is
+/// the one that describes those screens (`registry.rs`, module doc: "an agent that runs another
+/// agent's TUI (maho runs omo's) is detected by that manifest instead of by a duplicated one").
+/// Both restore gates resolve a provider id against the manifests, so recording the registry id
+/// would make every archive name a provider no manifest answers to - a gate that fires for the
+/// wrong reason. The manifest id is the vocabulary the gates and the capability table share.
+const SUPERVISOR_CONVERSATION_PROVIDER: &str = "omo";
+
+/// The provider conversation a checkpoint of *this* hub belongs to, as the exporter can see it.
+///
+/// The archive records this so a later restore can refuse when that provider cannot rewind its
+/// conversation (T4's gate, both halves). A checkpoint is a snapshot of the supervisor hub, and
+/// the conversation a filesystem restore cannot put back in step is the retained engine's: the
+/// supervisor's own turns are the only long-lived conversation the hub owns.
+///
+/// This function is what makes the field real. `ferryx-hub` cannot name a provider at all (it has
+/// no `agent_detect` dependency), which is why `ExportRequest::provider` defaulted to `None` and
+/// why both gates only ever saw `null` from a real archive. Resolving here, where the manifests
+/// live, is the only place the answer exists.
+///
+/// `rollback_conversation` is the manifest's own declaration, never an assumption: every shipped
+/// manifest declares nothing (T3), so this is `false` today, and it becomes `true` only when a
+/// provider measures and declares the capability. `None` when no manifest answers to the id,
+/// which would be a build defect, not a runtime condition: a caller then records nothing rather
+/// than naming a provider the gates cannot resolve.
+pub fn supervisor_conversation_provider() -> Option<ferryx_hub::checkpoint::ProviderCoordinates> {
+    // The registry is the agent-identity table: an id it does not know names no agent, so there
+    // is no conversation to record and nothing the gates could resolve.
+    crate::agent_detect::registry::by_id(SUPERVISOR_CONVERSATION_AGENT)?;
+    let adapter = crate::agent_detect::provider_adapter(SUPERVISOR_CONVERSATION_PROVIDER)?;
+    Some(ferryx_hub::checkpoint::ProviderCoordinates {
+        id: adapter.id.clone(),
+        rollback_conversation: adapter.supports(crate::agent_detect::ProviderCapability::RollbackConversation),
+    })
+}
 
 /// `<data>/supervisor-checkpoint`, `None` when the data dir cannot be resolved.
 pub fn checkpoint_dir() -> Option<PathBuf> {

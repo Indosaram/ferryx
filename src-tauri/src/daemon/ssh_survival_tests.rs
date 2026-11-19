@@ -1656,6 +1656,7 @@ async fn ssh_reconnect_safety_atomic_attach_remote_generation_consistency() {
         .attach_remote_with_sequence("atomic-gen-backend", None)
         .unwrap();
     assert_eq!(gen, Some(1));
+    // Cursor-position queries must reach the terminal emulator, including during startup.
     assert_eq!(attachment.snapshot.history, b"initial query\x1b[6n");
 
     // Advance generation via disconnect + retry

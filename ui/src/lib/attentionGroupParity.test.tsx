@@ -8,6 +8,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { deriveFocusedTerminal } from "../App";
+import { laneLifecycleKey } from "../lib/sidebarPersistence";
 import type { SidebarModel } from "../components/sidebar/sidebarModel";
 import { sidebarLiveState } from "../components/sidebar/sidebarModel";
 import { worktreeRowSlot } from "../components/sidebar/sidebarSlots";
@@ -194,7 +195,7 @@ describe("one attention group on every surface", () => {
       projects: [{
         groupId: "p", label: "p", hostLabel: "laptop", members: [{ workspaceId: "w", kind: "local", machineId: "laptop" }],
         primaryWorkspaceId: "w", status: null, filterLabels: ["p"], worktreesEmptyHint: null,
-        worktrees: [{ key: "w:/q", workspaceId: "w", path: "/q", worktreeSlug: null, label: "main", hostLabel: null, stale: false, listingFailure: null }],
+        worktrees: [{ key: "w:/q", workspaceId: "w", path: "/q", worktreeSlug: null, lifecycleKey: laneLifecycleKey({ workspaceId: "w", path: "/q", worktreeSlug: null }), lifecycle: "active" as const, pinnedTabs: [], label: "main", hostLabel: null, stale: false, listingFailure: null }],
       }],
     } as unknown as SidebarModel;
     const inventory: RemoteSessionInventory = {

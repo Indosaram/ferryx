@@ -1643,6 +1643,30 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
     }
   }
 
+  async function withWindowsHost<T>(fn: () => T | Promise<T>): Promise<T> {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+    const originalUserAgent = Object.getOwnPropertyDescriptor(navigator, "userAgent");
+    const originalProcessPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    try {
+      Object.defineProperty(navigator, "platform", { value: "Win32", configurable: true });
+      Object.defineProperty(navigator, "userAgent", {
+        value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        configurable: true,
+      });
+      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+      return await fn();
+    } finally {
+      for (const [target, key, descriptor] of [
+        [navigator, "platform", originalPlatform],
+        [navigator, "userAgent", originalUserAgent],
+        [process, "platform", originalProcessPlatform],
+      ] as const) {
+        if (descriptor) Object.defineProperty(target, key, descriptor);
+        else Reflect.deleteProperty(target, key);
+      }
+    }
+  }
+
   it("focuses the hidden input sink and notifies native focus after successful attach", async () => {
     const session = createSession("term-session-1", "daemon-pty-123");
     const { getByTestId } = await renderNative(<NativeTerminalPane sessionId="term-session-1" session={session} />);
@@ -3028,26 +3052,30 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("treats a pane whose session already names its agent as an agent before activity arrives", async () => {
-    const sessionId = "term-session-agent-type-before-activity";
-    const session = { ...createSession(sessionId), agentType: "claude" };
-    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "cmd_local_paste_clipboard_image") return null;
-      return undefined;
-    });
+    // agentReadsLocalClipboard is gated by isWindowsHost(), which reads process.platform before any
+    // navigator signal, so this group's shortcut-platform mock alone does not make the host macOS.
+    await withMacHost(async () => {
+      const sessionId = "term-session-agent-type-before-activity";
+      const session = { ...createSession(sessionId), agentType: "claude" };
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "cmd_local_paste_clipboard_image") return null;
+        return undefined;
+      });
 
-    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
-    const textarea = getByTestId("native-terminal-focus-sink");
-    textarea.focus();
-    tauriCoreMocks.invoke.mockClear();
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
+      const textarea = getByTestId("native-terminal-focus-sink");
+      textarea.focus();
+      tauriCoreMocks.invoke.mockClear();
 
-    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
-    Object.defineProperty(pasteEvent, "clipboardData", { value: { getData: () => "" } });
-    act(() => {
-      textarea.dispatchEvent(pasteEvent);
-    });
+      const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(pasteEvent, "clipboardData", { value: { getData: () => "" } });
+      act(() => {
+        textarea.dispatchEvent(pasteEvent);
+      });
 
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId, agentPaste: true });
+      await waitFor(() => {
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId, agentPaste: true });
+      });
     });
   });
 
@@ -3807,35 +3835,89 @@ describe("NativeTerminalPane focus, keyboard, and IME prototype contract", () =>
   });
 
   it("hands a local agent pane's image paste to the agent's own paste chord instead of a temp-file path", async () => {
-    const sessionId = "term-session-local-agent-image-paste";
-    const session = createSession(sessionId);
-    const activity: TerminalActivity = { isAgent: true, state: "waiting", title: "OmO" };
-    tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
-      if (cmd === "cmd_local_paste_clipboard_image") return null;
-      return undefined;
-    });
+    // Same gate as the case above: isWindowsHost() short-circuits the agent-paste branch from the
+    // runtime field, so the fixture pins it rather than only the shortcut-platform mock.
+    await withMacHost(async () => {
+      const sessionId = "term-session-local-agent-image-paste";
+      const session = createSession(sessionId);
+      const activity: TerminalActivity = { isAgent: true, state: "waiting", title: "OmO" };
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "cmd_local_paste_clipboard_image") return null;
+        return undefined;
+      });
 
-    const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} activity={activity} />);
-    const textarea = getByTestId("native-terminal-focus-sink");
-    textarea.focus();
-    tauriCoreMocks.invoke.mockClear();
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} activity={activity} />);
+      const textarea = getByTestId("native-terminal-focus-sink");
+      textarea.focus();
+      tauriCoreMocks.invoke.mockClear();
 
-    const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
-    Object.defineProperty(pasteEvent, "clipboardData", {
-      value: { getData: () => "" },
-    });
-    act(() => {
-      textarea.dispatchEvent(pasteEvent);
-    });
+      const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(pasteEvent, "clipboardData", {
+        value: { getData: () => "" },
+      });
+      act(() => {
+        textarea.dispatchEvent(pasteEvent);
+      });
 
-    await waitFor(() => {
-      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId, agentPaste: true });
+      await waitFor(() => {
+        expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_local_paste_clipboard_image", { sessionId, agentPaste: true });
+        const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
+          ([cmd, args]) => cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
+        );
+        expect(chordCalls).toHaveLength(1);
+      });
+      expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_paste", expect.anything());
+    });
+  });
+
+  it("writes a Windows local agent's image paste as a temp-file path instead of the agent's own paste chord", async () => {
+    // Windows agents bind image paste to a different chord than 0x16, so the pane must keep the path.
+    await withWindowsHost(async () => {
+      useNonMacShortcutPlatform();
+      const sessionId = "term-session-windows-agent-image-paste";
+      const session = { ...createSession(sessionId), agentType: "claude" };
+      const localPath = "C:\\Users\\dev\\AppData\\Local\\Temp\\ferryx-paste\\win-agent.png";
+      let settlePathPaste!: () => void;
+      const pathPasteSent = new Promise<void>((resolve) => {
+        settlePathPaste = resolve;
+      });
+      tauriCoreMocks.invoke.mockImplementation(async (cmd: string, args?: { agentPaste?: boolean }) => {
+        if (cmd === "cmd_local_paste_clipboard_image") {
+          return args?.agentPaste === true ? null : { localPath, byteLength: 2048 };
+        }
+        if (cmd === "cmd_native_terminal_paste") settlePathPaste();
+        return undefined;
+      });
+
+      const { getByTestId } = await renderNative(<NativeTerminalPane sessionId={sessionId} session={session} />);
+      const textarea = getByTestId("native-terminal-focus-sink");
+      textarea.focus();
+      tauriCoreMocks.invoke.mockClear();
+
+      const pasteEvent = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(pasteEvent, "clipboardData", {
+        value: { getData: () => "" },
+      });
+      act(() => {
+        textarea.dispatchEvent(pasteEvent);
+      });
+
+      await act(async () => {
+        await pathPasteSent;
+      });
+      expect(tauriCoreMocks.invoke).toHaveBeenCalledWith("cmd_native_terminal_paste", {
+        sessionId,
+        text: "'" + localPath + "' ",
+      });
+      const localCalls = tauriCoreMocks.invoke.mock.calls.filter(
+        ([cmd]) => cmd === "cmd_local_paste_clipboard_image",
+      );
+      expect(localCalls).toEqual([["cmd_local_paste_clipboard_image", { sessionId }]]);
       const chordCalls = tauriCoreMocks.invoke.mock.calls.filter(
         ([cmd, args]) => cmd === "cmd_native_terminal_send_input" && args?.input?.text === "\u0016",
       );
-      expect(chordCalls).toHaveLength(1);
+      expect(chordCalls).toHaveLength(0);
     });
-    expect(tauriCoreMocks.invoke).not.toHaveBeenCalledWith("cmd_native_terminal_paste", expect.anything());
   });
 
   it("degrades to the agent's paste chord with no error toast when the remote host cannot read a clipboard image", async () => {

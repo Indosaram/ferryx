@@ -51,10 +51,15 @@
 //! ## What `NotTyped` means on this route
 //!
 //! [ReferenceInputOutcome::NotTyped] is the answer route's "none of the **answer's** keys went
-//! out", which is the same promise submit and Stop make. One case sends a key before the
-//! answer's own: opening a folded OmO form with `alt+up`. That refusal carries
-//! [REFERENCE_PROMPT_FOLDED_FORM_MESSAGE], which says exactly which key was sent, and is
-//! `retryable` so the caller may read the form and answer it.
+//! out", which is the same promise submit and Stop make. It is produced only before any key is
+//! dispatched, so the caller may read the screen and answer again; whether it should is the
+//! error's own `retryable` flag.
+//!
+//! Once a key has been sent, every later refusal is [ReferenceInputOutcome::OutcomeUnknown]
+//! instead. That includes opening a folded OmO form with `alt+up`: if the form then fails to
+//! appear, or the answer fails after it opened, the open key has already reached the pane, so the
+//! refusal is `OutcomeUnknown` and carries [REFERENCE_PROMPT_FOLDED_FORM_MESSAGE] when the form is
+//! what did not open. Nothing after a dispatched key may be retried automatically.
 //!
 //! ## The one part of this port the pinned JS does not pin
 //!
@@ -67,12 +72,13 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_util::future::BoxFuture;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
+use crate::remote::state::RemoteGatewayState;
 use crate::scoped_contracts::{DeliveryReceipt, DeliveryStage, ScopeError, ScopeErrorCode};
 
 use super::input::{
@@ -656,7 +662,23 @@ pub fn note_reference_prompt_occurrence(
     screen_revision: &str,
     reader: ReferencePromptReader,
 ) -> Option<String> {
-    let Ok(mut ledger) = reference_occurrence_ledger().lock() else {
+    note_reference_prompt_occurrence_in(
+        reference_occurrence_ledger(),
+        session,
+        content,
+        screen_revision,
+        reader,
+    )
+}
+
+fn note_reference_prompt_occurrence_in(
+    ledger: &Mutex<ReferenceOccurrenceLedger>,
+    session: &str,
+    content: Option<&str>,
+    screen_revision: &str,
+    reader: ReferencePromptReader,
+) -> Option<String> {
+    let Ok(mut ledger) = ledger.lock() else {
         return content.map(str::to_string);
     };
     let pane = ledger.pane(session);
@@ -705,7 +727,17 @@ pub fn reference_prompt_occurrence(
     prompt: Option<ReferencePrompt>,
     screen_revision: &str,
 ) -> Option<ReferencePrompt> {
-    let public = note_reference_prompt_occurrence(
+    reference_prompt_occurrence_in(reference_occurrence_ledger(), session, prompt, screen_revision)
+}
+
+fn reference_prompt_occurrence_in(
+    ledger: &Mutex<ReferenceOccurrenceLedger>,
+    session: &str,
+    prompt: Option<ReferencePrompt>,
+    screen_revision: &str,
+) -> Option<ReferencePrompt> {
+    let public = note_reference_prompt_occurrence_in(
+        ledger,
         session,
         prompt.as_ref().map(|prompt| prompt.id.as_str()),
         screen_revision,
@@ -719,7 +751,15 @@ pub fn reference_prompt_occurrence(
 
 /// The public id `content` has on `session` now, without counting a reading.
 pub fn reference_prompt_current_id(session: &str, content: &str) -> String {
-    let number = reference_occurrence_ledger()
+    reference_prompt_current_id_in(reference_occurrence_ledger(), session, content)
+}
+
+fn reference_prompt_current_id_in(
+    ledger: &Mutex<ReferenceOccurrenceLedger>,
+    session: &str,
+    content: &str,
+) -> String {
+    let number = ledger
         .lock()
         .ok()
         .and_then(|ledger| ledger.panes.get(session)?.cards.get(content).map(|card| card.number))
@@ -729,7 +769,21 @@ pub fn reference_prompt_current_id(session: &str, content: &str) -> String {
 
 /// Record that this occurrence was answered through Ferryx on `screen_revision`.
 fn mark_reference_prompt_answered(session: &str, prompt_id: &str, screen_revision: &str) {
-    let Ok(mut ledger) = reference_occurrence_ledger().lock() else {
+    mark_reference_prompt_answered_in(
+        reference_occurrence_ledger(),
+        session,
+        prompt_id,
+        screen_revision,
+    );
+}
+
+fn mark_reference_prompt_answered_in(
+    ledger: &Mutex<ReferenceOccurrenceLedger>,
+    session: &str,
+    prompt_id: &str,
+    screen_revision: &str,
+) {
+    let Ok(mut ledger) = ledger.lock() else {
         return;
     };
     let number = reference_prompt_occurrence_number(prompt_id);
@@ -739,6 +793,191 @@ fn mark_reference_prompt_answered(session: &str, prompt_id: &str, screen_revisio
             card.answered_on = Some(screen_revision.to_string());
         }
     }
+}
+
+/// The number `content` carries on `session`, after a retained number is adopted if it is higher.
+///
+/// The id only ever moves forward, and a card this process already answered is never renumbered:
+/// a stale row can neither lower nor reopen an occurrence the process owns.
+fn settle_reference_prompt_occurrence(
+    ledger: &Mutex<ReferenceOccurrenceLedger>,
+    session: &str,
+    content: &str,
+    retained: Option<u64>,
+) -> Option<u64> {
+    let Ok(mut ledger) = ledger.lock() else {
+        return None;
+    };
+    let pane = ledger.panes.get_mut(session)?;
+    if pane.showing.as_deref() != Some(content) {
+        return None;
+    }
+    let card = pane.cards.get_mut(content)?;
+    if let Some(number) = retained.filter(|number| *number > card.number) {
+        if card.answered_on.is_none() {
+            card.number = number;
+        }
+    }
+    Some(card.number)
+}
+
+/// What the durable journal says about the asking a whole-screen read found.
+enum RetainedOccurrence {
+    /// No open row names this card on this pane and this screen.
+    Absent,
+    /// Exactly one occurrence number is open for it.
+    One(u64),
+    /// Several distinct numbers are open for one card on one screen. Nothing here can tell which
+    /// asking the screen is showing, and picking one would type an answer into another.
+    Conflict,
+}
+
+/// What the open rows for this pane, this content and this revision retained.
+///
+/// A bare id is not a different card from that card's first occurrence: both are number zero, and
+/// they are counted as one number here.
+fn retained_reference_prompt_occurrence(
+    journal: &crate::agent_control::pending_input::Journal,
+    session_id: &str,
+    content: &str,
+    screen_revision: &str,
+) -> Result<RetainedOccurrence, String> {
+    let mut numbers: Vec<u64> = Vec::new();
+    for input in journal.open_pending_inputs()? {
+        if input.session_id != session_id || input.screen_revision != screen_revision {
+            continue;
+        }
+        if reference_prompt_content_id(&input.prompt_id) != content {
+            continue;
+        }
+        let number = reference_prompt_occurrence_number(&input.prompt_id);
+        if !numbers.contains(&number) {
+            numbers.push(number);
+        }
+    }
+    match numbers.as_slice() {
+        [] => Ok(RetainedOccurrence::Absent),
+        [number] => Ok(RetainedOccurrence::One(*number)),
+        _ => Ok(RetainedOccurrence::Conflict),
+    }
+}
+
+fn restart_scope_error(
+    code: ScopeErrorCode,
+    retryable: bool,
+    message: impl Into<String>,
+) -> ScopeError {
+    ScopeError {
+        code,
+        message: message.into(),
+        retryable,
+        details: serde_json::Value::Null,
+    }
+}
+
+/// [reference_prompt_occurrence], with the occurrence a previous run of the daemon journaled.
+///
+/// The occurrence ledger is process-local, so after a restart a re-asked question would get the
+/// first asking's id and an answer to that earlier asking would be typed into the pending one.
+/// The id is read back out of the same ledger the pre-write check reads, so the two cannot
+/// disagree, and it is taken only from one matching open row, never from a request or an answer.
+///
+/// A read that cannot say which asking the screen shows is refused instead of answered: two open
+/// rows for one card on one screen are [ScopeErrorCode::RequestConflict], and a journal that
+/// cannot be read is [ScopeErrorCode::InventoryIncomplete]. Neither exposes an id, and neither
+/// writes a row, so a third asking cannot be minted over the two that are already pending.
+///
+/// A gateway with no machine journal (a bare gateway, or a caller predating the pending-input
+/// table) behaves exactly as [reference_prompt_occurrence]: nothing durable exists to restore.
+pub async fn reference_prompt_occurrence_after_restart(
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    prompt: Option<ReferencePrompt>,
+    screen_revision: &str,
+) -> Result<Option<ReferencePrompt>, ScopeError> {
+    reference_prompt_occurrence_after_restart_in(
+        reference_occurrence_ledger(),
+        state,
+        session_id,
+        prompt,
+        screen_revision,
+    )
+    .await
+}
+
+/// The journal is read before the ledger is touched, so a refused lookup leaves the occurrence a
+/// later write would name exactly as this process found it, and no lock is held across the read.
+async fn reference_prompt_occurrence_after_restart_in(
+    ledger: &Mutex<ReferenceOccurrenceLedger>,
+    state: &Arc<RemoteGatewayState>,
+    session_id: &str,
+    prompt: Option<ReferencePrompt>,
+    screen_revision: &str,
+) -> Result<Option<ReferencePrompt>, ScopeError> {
+    let Some(services) = state.machine_services.as_ref().map(Arc::clone) else {
+        return Ok(reference_prompt_occurrence_in(
+            ledger,
+            session_id,
+            prompt,
+            screen_revision,
+        ));
+    };
+    let Some(detected) = prompt else {
+        reference_prompt_occurrence_in(ledger, session_id, None, screen_revision);
+        return Ok(None);
+    };
+    let content = reference_prompt_content_id(&detected.id).to_string();
+    let session = session_id.to_string();
+    let revision = screen_revision.to_string();
+    let lookup_content = content.clone();
+    let retained = crate::ipc::run_blocking(move || {
+        retained_reference_prompt_occurrence(
+            &services.workspaces.journal,
+            &session,
+            &lookup_content,
+            &revision,
+        )
+        .map_err(crate::ipc::error::IpcError::internal)
+    })
+    .await;
+    let retained = match retained {
+        Ok(RetainedOccurrence::Absent) => None,
+        Ok(RetainedOccurrence::One(number)) => Some(number),
+        Ok(RetainedOccurrence::Conflict) => {
+            return Err(restart_scope_error(
+                ScopeErrorCode::RequestConflict,
+                false,
+                "the pane has more than one asking of this card open on this screen, \
+                 so the asking on screen cannot be told apart from the others",
+            ));
+        }
+        Err(error) => {
+            tracing::warn!(%error, session_id, "the pending-input journal was not read for a card");
+            return Err(restart_scope_error(
+                ScopeErrorCode::InventoryIncomplete,
+                true,
+                "the pane's answer journal could not be read, \
+                 so the asking on screen could not be identified",
+            ));
+        }
+    };
+    let Some(prompt) = reference_prompt_occurrence_in(
+        ledger,
+        session_id,
+        Some(detected),
+        screen_revision,
+    ) else {
+        return Ok(None);
+    };
+    let Some(number) = settle_reference_prompt_occurrence(ledger, session_id, &content, retained)
+    else {
+        return Ok(Some(prompt));
+    };
+    let id = reference_prompt_public_id(&content, number);
+    if prompt.id == id {
+        return Ok(Some(prompt));
+    }
+    Ok(Some(ReferencePrompt { id, ..prompt }))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3402,6 +3641,376 @@ mod tests {
             log.len(),
             4,
             "the submit's paste and Enter, then the answer's two keys: {log:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Restart: the durable occurrence, and a process that has never seen it
+    // -----------------------------------------------------------------------------------------
+
+    use crate::agent_control::pending_input::{
+        open as open_pending_input, NewPendingInput, PendingInputOption,
+    };
+    use crate::daemon::server::DaemonServer;
+    use crate::terminal::TerminalService;
+    use crate::worktree::registry::WorkspaceRegistry;
+
+    const RESTART_SESSION: &str = "sess-restart-reask";
+    const RESTART_PROCESS_SESSION: &str = "sess-restart-process-cache";
+    const RESTART_REVISION: &str = "rev-restart-1";
+    const RESTART_NOW: u64 = 1_700_000_000;
+
+    /// A private disk journal written by one daemon and reopened by a second one, so the rows come
+    /// back from the file and not from the store that wrote them.
+    async fn restart_services(
+        root: &std::path::Path,
+        sessions: Vec<NewPendingInput>,
+    ) -> Arc<crate::daemon::MachineServices> {
+        let root = root.to_path_buf();
+        crate::ipc::run_blocking(move || {
+            let config = root.join("config");
+            let auth = root.join("auth");
+            let first = DaemonServer::new_with_paths(Some(config.clone()), Some(auth.clone()));
+            let written = first
+                .remote_state()
+                .machine_services
+                .clone()
+                .expect("the daemon owns a machine journal");
+            for request in sessions {
+                open_pending_input(&written.workspaces.journal, request, RESTART_NOW)
+                    .expect("the later occurrence is journaled");
+            }
+            drop(written);
+            drop(first);
+            let restarted = DaemonServer::new_with_paths(Some(config), Some(auth));
+            Ok::<_, crate::ipc::error::IpcError>(restarted
+                .remote_state()
+                .machine_services
+                .clone()
+                .expect("the restarted daemon reopens the same journal"))
+        })
+        .await
+        .expect("daemon journal")
+    }
+
+    fn restart_gateway(
+        services: Option<Arc<crate::daemon::MachineServices>>,
+    ) -> Arc<RemoteGatewayState> {
+        let mut gateway = RemoteGatewayState::new(
+            Arc::new(TerminalService::default()),
+            WorkspaceRegistry::new(),
+        );
+        if let Some(services) = services {
+            gateway.machine_services = Some(services);
+        }
+        Arc::new(gateway)
+    }
+
+    fn later_occurrence(session: &str, revision: &str, prompt_id: String) -> NewPendingInput {
+        NewPendingInput {
+            prompt_id,
+            session_id: session.to_string(),
+            screen_revision: revision.to_string(),
+            question: "Which package manager should I use?".into(),
+            options: vec![PendingInputOption { key: "0".into(), label: "npm".into() }],
+            kind: "choice".into(),
+            needs_confirmation: false,
+        }
+    }
+
+    fn fresh_ledger() -> Mutex<ReferenceOccurrenceLedger> {
+        Mutex::new(ReferenceOccurrenceLedger::default())
+    }
+
+    fn open_ids_read_back_from_disk(path: &std::path::Path) -> Vec<String> {
+        let mut ids: Vec<String> =
+            crate::remote::machine_operation_journal::MachineOperationJournal::open(
+                path.to_path_buf(),
+            )
+            .open_pending_inputs()
+            .expect("the journal reads")
+            .into_iter()
+            .map(|input| input.prompt_id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn full_read() -> Option<ReferencePrompt> {
+        detect_reference_prompt_in_session(
+            "claude",
+            CLAUDE_QUESTION,
+            &ReferencePromptSession::default(),
+        )
+    }
+
+    /// The card's content id, the later asking's public id, and the journaled row that names it.
+    fn restart_case() -> (String, String, NewPendingInput) {
+        let content = full_read().expect("a claude card").id;
+        let later = format!("{content}{REFERENCE_PROMPT_OCCURRENCE_SEPARATOR}1");
+        (content.clone(), later.clone(), later_occurrence(RESTART_SESSION, RESTART_REVISION, later))
+    }
+
+    #[tokio::test]
+    async fn a_restarted_daemon_restores_the_journaled_later_occurrence_on_a_full_read() {
+        let (content, later, _) = restart_case();
+        let row = later_occurrence(RESTART_PROCESS_SESSION, RESTART_REVISION, later.clone());
+        let root = tempfile::tempdir().expect("tempdir");
+        let services = restart_services(root.path(), vec![row]).await;
+        let journal = &services.workspaces.journal;
+        let stored = crate::agent_control::pending_input::get_for_session(
+            journal,
+            &later,
+            RESTART_PROCESS_SESSION,
+        )
+        .expect("the journal reopens");
+        let stored = match stored {
+            crate::agent_control::pending_input::PendingInputEntry::Owned(stored) => stored,
+            other => panic!("this pane owns the row it wrote, got {other:?}"),
+        };
+        assert_eq!(stored.prompt_id, later, "the later occurrence is on disk under its own id");
+        assert_eq!(stored.screen_revision, RESTART_REVISION);
+        assert!(stored.is_open());
+        let state = restart_gateway(Some(services));
+
+        let prompt = reference_prompt_occurrence_after_restart(
+            &state,
+            RESTART_PROCESS_SESSION,
+            full_read(),
+            RESTART_REVISION,
+        )
+        .await
+        .expect("the journal reopens")
+        .expect("the pane still shows the card");
+
+        assert_eq!(prompt.id, later, "the persisted asking is the one on screen");
+        assert_eq!(
+            reference_prompt_current_id(RESTART_PROCESS_SESSION, &content),
+            prompt.id,
+            "the pre-write occurrence check agrees with the id the read returned"
+        );
+        assert_ne!(
+            reference_prompt_current_id(RESTART_PROCESS_SESSION, &content),
+            content,
+            "the earlier asking's id is not what stands between a stale answer and this one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_read_that_matches_no_trusted_row_keeps_the_first_asking() {
+        let (content, later, row) = restart_case();
+        for (label, rows, session, revision) in [
+            (
+                "another pane",
+                vec![later_occurrence("sess-other-pane", RESTART_REVISION, later.clone())],
+                RESTART_SESSION,
+                RESTART_REVISION,
+            ),
+            (
+                "another screen",
+                vec![later_occurrence(RESTART_SESSION, "rev-other-screen", later.clone())],
+                RESTART_SESSION,
+                RESTART_REVISION,
+            ),
+            (
+                "the earlier asking",
+                vec![later_occurrence(RESTART_SESSION, RESTART_REVISION, content.clone())],
+                RESTART_SESSION,
+                RESTART_REVISION,
+            ),
+            ("another screen than the read", vec![row.clone()], RESTART_SESSION, "rev-restart-2"),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let services = restart_services(root.path(), rows).await;
+            let state = restart_gateway(Some(services));
+            let ledger = fresh_ledger();
+
+            let prompt = reference_prompt_occurrence_after_restart_in(
+                &ledger,
+                &state,
+                session,
+                full_read(),
+                revision,
+            )
+            .await
+            .expect("the journal is readable")
+            .expect("the pane still shows the card");
+
+            assert_eq!(prompt.id, content, "{label} is not evidence about this asking");
+            assert_eq!(
+                reference_prompt_current_id_in(&ledger, session, &content),
+                prompt.id,
+                "{label}: the pre-write check agrees"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn two_open_askings_refuse_the_read_and_leave_both_rows_alone() {
+        let (content, later, row) = restart_case();
+        let second = format!("{content}{REFERENCE_PROMPT_OCCURRENCE_SEPARATOR}2");
+        let cases = [
+            (
+                "the first asking beside the later one",
+                vec![
+                    later_occurrence(RESTART_SESSION, RESTART_REVISION, content.clone()),
+                    row.clone(),
+                ],
+                [content.clone(), later.clone()],
+            ),
+            (
+                "two later askings",
+                vec![
+                    row.clone(),
+                    later_occurrence(RESTART_SESSION, RESTART_REVISION, second.clone()),
+                ],
+                [later.clone(), second.clone()],
+            ),
+        ];
+        for (label, rows, expected) in cases {
+            let root = tempfile::tempdir().expect("tempdir");
+            let services = restart_services(root.path(), rows).await;
+            let journal_path = root.path().join("machine-operations.v1.json");
+            let before = open_ids_read_back_from_disk(&journal_path);
+            assert_eq!(before.len(), 2, "{label}: precondition, two askings are open");
+            assert!(expected.iter().all(|id| before.contains(id)), "{label}: {before:?}");
+            let state = restart_gateway(Some(Arc::clone(&services)));
+            let ledger = fresh_ledger();
+
+            let refused = reference_prompt_occurrence_after_restart_in(
+                &ledger,
+                &state,
+                RESTART_SESSION,
+                full_read(),
+                RESTART_REVISION,
+            )
+            .await;
+
+            let error = refused.expect_err("two open askings are not one asking on screen");
+            assert_eq!(error.code, ScopeErrorCode::RequestConflict, "{label}: {error:?}");
+            assert_eq!(
+                reference_prompt_current_id_in(&ledger, RESTART_SESSION, &content),
+                content,
+                "{label}: a refused read exposes no asking, not even the first one"
+            );
+            assert_eq!(
+                open_ids_read_back_from_disk(&journal_path),
+                before,
+                "{label}: a refused read writes nothing durably, so no third asking is minted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_journal_is_refused_instead_of_becoming_a_new_asking() {
+        let (content, later, _) = restart_case();
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("machine-operations.v1.json"), b"{not a store")
+            .expect("the journal path is writable");
+        let services = restart_services(root.path(), vec![]).await;
+        let state = restart_gateway(Some(services));
+        let ledger = fresh_ledger();
+
+        let refused = reference_prompt_occurrence_after_restart_in(
+            &ledger,
+            &state,
+            RESTART_SESSION,
+            full_read(),
+            RESTART_REVISION,
+        )
+        .await;
+
+        let error = refused.expect_err("an unreadable journal cannot restore an asking");
+        assert_eq!(error.code, ScopeErrorCode::InventoryIncomplete, "{error:?}");
+        assert_eq!(
+            reference_prompt_current_id_in(&ledger, RESTART_SESSION, &content),
+            content,
+            "{later} is not claimed out of a journal that could not be read"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_in_process_occurrence_is_never_pushed_back_by_the_journal() {
+        let (content, later, row) = restart_case();
+        let root = tempfile::tempdir().expect("tempdir");
+        let services = restart_services(root.path(), vec![row]).await;
+        let state = restart_gateway(Some(services));
+        let ledger = fresh_ledger();
+
+        for revision in ["rev-answer-1", "rev-answer-2"] {
+            let seen =
+                reference_prompt_occurrence_in(&ledger, RESTART_SESSION, full_read(), revision)
+                    .expect("listed");
+            mark_reference_prompt_answered_in(&ledger, RESTART_SESSION, &seen.id, revision);
+            assert!(
+                reference_prompt_occurrence_in(&ledger, RESTART_SESSION, None, "rev-working")
+                    .is_none(),
+                "the card left the pane after it was answered on {revision}"
+            );
+        }
+        let ahead = format!("{content}{REFERENCE_PROMPT_OCCURRENCE_SEPARATOR}2");
+        assert_eq!(
+            reference_prompt_occurrence_in(&ledger, RESTART_SESSION, full_read(), RESTART_REVISION)
+                .expect("listed again")
+                .id,
+            ahead,
+            "precondition: this process is ahead of the journaled {later}"
+        );
+
+        let prompt = reference_prompt_occurrence_after_restart_in(
+            &ledger,
+            &state,
+            RESTART_SESSION,
+            full_read(),
+            RESTART_REVISION,
+        )
+        .await
+        .expect("the journal is readable")
+        .expect("still shown");
+
+        assert_eq!(prompt.id, ahead, "the journal is behind this process: {later}");
+        assert_eq!(reference_prompt_current_id_in(&ledger, RESTART_SESSION, &content), ahead);
+    }
+
+    #[tokio::test]
+    async fn a_gateway_with_no_journal_and_a_missing_card_keep_the_plain_occurrence() {
+        let (content, _, _) = restart_case();
+        let bare = restart_gateway(None);
+        let ledger = fresh_ledger();
+        assert_eq!(
+            reference_prompt_occurrence_after_restart_in(
+                &ledger,
+                &bare,
+                RESTART_SESSION,
+                full_read(),
+                RESTART_REVISION,
+            )
+            .await
+            .expect("a gateway with no journal is not an error")
+            .map(|prompt| prompt.id),
+            Some(content.clone()),
+            "a caller with no journal keeps the previous behaviour"
+        );
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_, later, row) = restart_case();
+        let services = restart_services(root.path(), vec![row]).await;
+        let state = restart_gateway(Some(services));
+        let ledger = fresh_ledger();
+        assert!(reference_prompt_occurrence_after_restart_in(
+            &ledger,
+            &state,
+            RESTART_SESSION,
+            None,
+            RESTART_REVISION,
+        )
+        .await
+        .expect("a screen with no card is not an error")
+        .is_none());
+        assert_eq!(
+            reference_prompt_current_id_in(&ledger, RESTART_SESSION, &content),
+            content,
+            "a read that found no card seeds nothing, so {later} stays unclaimed"
         );
     }
 }

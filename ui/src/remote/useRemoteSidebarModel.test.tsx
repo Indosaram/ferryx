@@ -2,6 +2,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { sidebarLiveState, type SidebarModel } from "../components/sidebar/sidebarModel";
+import { laneLifecycleKey } from "../lib/sidebarPersistence";
 import type { SupervisorHttpResponse } from "./remoteSupervisor";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
 import { useRemoteSidebarModel, type RemoteSidebarMachine } from "./useRemoteSidebarModel";
@@ -30,6 +31,7 @@ const published = (revision: number, label: string): SidebarModel => ({
     groupId: "ferryx", label, hostLabel: null, members: [{ workspaceId: "ferryx", kind: "local", machineId: null }],
     primaryWorkspaceId: "ferryx", status: null, filterLabels: ["ferryx"], worktreesEmptyHint: null,
     worktrees: [{ key: "sidebar-worktree:ferryx:/code/ferryx", workspaceId: "ferryx", path: "/code/ferryx", worktreeSlug: null,
+      lifecycleKey: laneLifecycleKey({ workspaceId: "ferryx", path: "/code/ferryx", worktreeSlug: null }), lifecycle: "active" as const, pinnedTabs: [],
       label: "ferryx", hostLabel: null, stale: false, listingFailure: null }],
   }],
   collapsedGroupIds: ["ferryx"], advancedFeatures: true, emptyState: null,
@@ -192,6 +194,33 @@ describe("useRemoteSidebarModel", () => {
 
     await waitFor(() => expect(result.current[0]?.model?.projects[0]?.label).toBe("rev 2"));
     expect(m.sidebarFetches()).toBe(2);
+  });
+
+  // A daemon restart reopens the events socket with a boundary numbered at the persisted head,
+  // which the reader may already have seen. The reason is the only thing that can retire the
+  // model read before that restart.
+  it("refetches the desktop model on the restart boundary an existing subscription receives", async () => {
+    let revision = 1;
+    const m = fakeMachine(() => ({ "/api/v1/workspace/sidebar": json(200, { model: published(revision, `rev ${revision}`) }) }));
+    const { result } = renderHook(() => useRemoteSidebarModel({ machines: [m.machine] }));
+    await waitFor(() => expect(result.current[0]?.model?.revision).toBe(1));
+    revision = 9;
+
+    m.emit({ type: "inventoryInvalidated", reason: "restart", sequence: "1", revision: "1", payload: {} });
+
+    await waitFor(() => expect(result.current[0]?.model?.revision).toBe(9));
+    expect(m.sidebarFetches()).toBe(2);
+  });
+
+  it("does not refetch the desktop model on a change boundary that already carried its change", async () => {
+    const m = fakeMachine(() => ({ "/api/v1/workspace/sidebar": json(200, { model: published(1, "rev 1") }) }));
+    const { result } = renderHook(() => useRemoteSidebarModel({ machines: [m.machine] }));
+    await waitFor(() => expect(result.current[0]?.model?.revision).toBe(1));
+
+    m.emit({ type: "inventoryInvalidated", reason: "filesystem", payload: {} });
+    await act(async () => {});
+
+    expect(m.sidebarFetches()).toBe(1);
   });
 
   it("refetches when the connection is replaced after a reconnect", async () => {
