@@ -290,6 +290,25 @@ impl Recorder {
     fn last(&self) -> WakeTurn {
         self.turns().last().cloned().unwrap()
     }
+
+    /// Consume one pending `Busy` answer, if any are left.
+    ///
+    /// `AtomicUsize::fetch_update` did this in one call, but it was renamed to
+    /// `try_update` in Rust 1.95 and deprecated there; this crate still builds on
+    /// 1.89, so keep an equivalent compare-exchange loop.
+    fn take_busy(&self) -> bool {
+        let mut left = self.busy_left.load(Ordering::SeqCst);
+        while let Some(next) = left.checked_sub(1) {
+            match self
+                .busy_left
+                .compare_exchange(left, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return true,
+                Err(actual) => left = actual,
+            }
+        }
+        false
+    }
 }
 
 #[async_trait]
@@ -299,13 +318,7 @@ impl WakeHandler for Recorder {
         if let Some(signal) = &self.signal {
             let _ = signal.send(turn.clone());
         }
-        if self
-            .busy_left
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                left.checked_sub(1)
-            })
-            .is_ok()
-        {
+        if self.take_busy() {
             return WakeAck::Busy;
         }
         match &self.inner {

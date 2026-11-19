@@ -63,14 +63,13 @@ pub fn parse_wake_gate(stdout: &str) -> bool {
         }
     }
     let lower = last.to_ascii_lowercase();
-    if lower == "wakeagent: false"
-        || lower == "wake_agent: false"
-        || lower == "{\"wakeagent\": false}"
-        || lower == "{\"wakeagent\":false}"
-    {
-        return false;
-    }
-    true
+    !matches!(
+        lower.as_str(),
+        "wakeagent: false"
+            | "wake_agent: false"
+            | "{\"wakeagent\": false}"
+            | "{\"wakeagent\":false}"
+    )
 }
 
 pub fn is_cron_silence_response(text: &str) -> bool {
