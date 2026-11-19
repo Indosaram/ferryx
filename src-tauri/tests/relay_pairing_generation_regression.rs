@@ -295,7 +295,9 @@ async fn a11_joint_fixture(inject_failure: bool) {
             let Message::Binary(frame) = timeout(LIMIT, replay_socket.next()).await.unwrap().unwrap().unwrap() else { panic!("replay bytes") };
             let decoded = ferryx_lib::remote::terminal_wire::decode_frame(&frame).unwrap();
             assert!(decoded.terminal_bytes.ends_with(expected.as_bytes()));
-            assert!(!decoded.terminal_bytes.windows(10).any(|w| w == b"A11_BEFORE"));
+            let before_marker = b"A11_BEFORE";
+            let includes_before = decoded.terminal_bytes.windows(before_marker.len()).any(|w| w == before_marker);
+            assert_eq!(includes_before, gap, "only a full replay after a gap includes output at the cursor");
             if gap { assert!(decoded.terminal_bytes.starts_with(b"\x1bc")); }
             replay_socket.close(None).await.unwrap();
         }
