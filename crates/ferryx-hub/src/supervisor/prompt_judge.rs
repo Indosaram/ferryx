@@ -105,17 +105,16 @@ impl PromptJudge for EnginePromptJudge {
     }
 }
 
-/// Owner memory the engine sees: recent taught, corrected and ingested text, newest first.
+/// Owner memory the engine sees: recent taught, corrected and ingested text, newest first. Read
+/// through [`super::memory::taught_text`], the one owner of the provenance schema.
 async fn owner_memory(pool: &SqlitePool) -> Vec<String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT body FROM supervisor_memory_sources
-          WHERE action IN ('teach','correct','ingest')
-          ORDER BY created_at DESC, rowid DESC LIMIT ?",
-    )
-    .bind(MEMORY_ROWS)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default()
+    match super::memory::taught_text(pool, MEMORY_ROWS).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "the owner's memory was not read; judging without it");
+            Vec::new()
+        }
+    }
 }
 
 /// The question the engine is asked, from everything the hub knows about this owner's

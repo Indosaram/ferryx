@@ -697,6 +697,18 @@ async fn owner(pool: &SqlitePool) {
 /// One admitted goal bound to the pane `s1` on host `mac`, at revision 1, with the owner
 /// request `body`, so the gate reads a real binding.
 async fn bound_goal(pool: &SqlitePool, body: &str) {
+    bound_goal_on(pool, "mac", "s1", "msg-goal-1", body).await;
+}
+
+/// [`bound_goal`] for an explicit host and session: a provider session id is unique on one
+/// host only, so a test can put the same id on two of them.
+async fn bound_goal_on(
+    pool: &SqlitePool,
+    host: &str,
+    session_id: &str,
+    source_message_id: &str,
+    body: &str,
+) {
     let identity: (String, String) =
         sqlx::query_as("SELECT supervisor_id, owner_principal FROM supervisor_identity LIMIT 1")
             .fetch_one(pool)
@@ -710,13 +722,13 @@ async fn bound_goal(pool: &SqlitePool, body: &str) {
         supervisor_id: identity.0,
         owner_principal: identity.1,
         source_adapter: crate::supervisor::ChannelProvider::Desktop,
-        source_message_id: "msg-goal-1".into(),
+        source_message_id: source_message_id.into(),
         body: body.into(),
         project_id: project,
         channel_binding_id: None,
         target: crate::supervisor::ExecutionTarget {
             kind: crate::supervisor::ExecutionKind::Pty,
-            host_id: "mac".into(),
+            host_id: host.into(),
         },
         title: "Wire the fetch cache".into(),
         cwd: POOL_CWD.into(),
@@ -735,8 +747,8 @@ async fn bound_goal(pool: &SqlitePool, body: &str) {
         &request,
         &crate::supervisor::AdmitTerms::default(),
         Some(&crate::supervisor::BoundSession {
-            host_id: "mac".into(),
-            session_id: "s1".into(),
+            host_id: host.into(),
+            session_id: session_id.into(),
         }),
     )
     .await
@@ -954,6 +966,29 @@ async fn the_prompt_shows_the_engine_the_owner_memory_the_goal_and_the_screen() 
     ] {
         assert!(prompt.contains(needle), "missing {needle:?} in\n{prompt}");
     }
+}
+
+#[tokio::test]
+async fn a_session_id_reused_on_another_host_does_not_bind_that_goal() {
+    let fixture = fixture().await;
+    owner(&fixture.pool).await;
+    // `s1` on `mac` serves the goal; `s1` on `other` is another worker and serves none.
+    bound_goal(&fixture.pool, "Use pnpm").await;
+    let gate = fixture.autonomy.gate();
+
+    let bound = gate
+        .bound_goal(&session(None))
+        .await
+        .unwrap()
+        .expect("mac:s1 serves the goal");
+    assert_eq!(bound.title, "Use pnpm");
+    let mut elsewhere = session(None);
+    elsewhere.host_id = "other".to_owned();
+    elsewhere.session_ref = SessionRef::new("other", "s1");
+    assert!(
+        gate.bound_goal(&elsewhere).await.unwrap().is_none(),
+        "the same provider session id on another host must not bind this goal"
+    );
 }
 
 #[tokio::test]

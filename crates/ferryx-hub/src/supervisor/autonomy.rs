@@ -321,7 +321,7 @@ impl DecisionGate {
             host_id: &session.host_id,
             worktree,
         };
-        let decisions = self.contract_decisions(session).await;
+        let decisions = self.contract_decisions(session).await?;
         self.history
             .decide(&context, &rules, decisions.as_ref().map(|(revision, decisions)| {
                 super::answer_history::ContractDecisions {
@@ -333,12 +333,17 @@ impl DecisionGate {
     }
 
     /// The goal contract's decisions for the goal `session` is bound to, with the goal revision
-    /// they were decided at; `None` for a session no goal is bound to.
+    /// they were decided at; `Ok(None)` for a session no goal is bound to. A read that fails is
+    /// an error, never "no contract": the caller escalates rather than answer a prompt the
+    /// owner already decided, so a database fault can only cost the owner a tap, not a wrong
+    /// answer (the `observe` error arm says the earlier answers could not be read).
     async fn contract_decisions(
         &self,
         session: &FleetSession,
-    ) -> Option<(i64, Vec<super::answers::PromptDecision>)> {
-        let goal = self.bound_goal(session).await?;
+    ) -> Result<Option<(i64, Vec<super::answers::PromptDecision>)>> {
+        let Some(goal) = self.bound_goal(session).await? else {
+            return Ok(None);
+        };
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT prompt_id, option_label, source FROM supervisor_goal_decisions
               WHERE goal_id = ? AND goal_revision = ? ORDER BY id",
@@ -346,8 +351,7 @@ impl DecisionGate {
         .bind(&goal.goal_id)
         .bind(goal.revision)
         .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
+        .await?;
         let decisions: Vec<super::answers::PromptDecision> = rows
             .into_iter()
             .filter_map(|(prompt_id, option_label, source)| {
@@ -364,46 +368,47 @@ impl DecisionGate {
                 })
             })
             .collect();
-        (!decisions.is_empty()).then_some((goal.revision, decisions))
+        Ok((!decisions.is_empty()).then_some((goal.revision, decisions)))
     }
 
-    /// The goal `session` is bound to through its execution binding: its revision, the owner's
-    /// admitted request and the contract's requirements.
-    pub async fn bound_goal(&self, session: &FleetSession) -> Option<BoundGoal> {
+    /// The goal `session` is bound to through its execution binding on the session's own host:
+    /// its revision, the owner's admitted request and the contract's requirements. A provider
+    /// session id is unique on one host only, so the host is part of the lookup: the same id on
+    /// another host is another worker, bound to another goal (or none), and reading it as this
+    /// one would bind this session to a goal it never ran.
+    pub async fn bound_goal(&self, session: &FleetSession) -> Result<Option<BoundGoal>> {
         let backend_session_id = session.session_ref.backend_session_id();
         if backend_session_id.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let row: (String, i64, String, Option<String>) = sqlx::query_as::<
-            _,
-            (String, i64, String, Option<String>),
-        >(
-            "SELECT g.goal_id, g.revision, g.lane_key, r.body
-               FROM supervisor_execution_bindings b
-               JOIN supervisor_goals g ON g.goal_id = b.goal_id
-               LEFT JOIN supervisor_requests r ON r.goal_id = g.goal_id
-              WHERE b.provider_session_id = ?
-              ORDER BY r.id LIMIT 1",
-        )
-        .bind(backend_session_id)
-        .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten()?;
-        let (goal_id, revision, lane_key, title) = row;
+        let row: Option<(String, i64, String, Option<String>)> =
+            sqlx::query_as::<_, (String, i64, String, Option<String>)>(
+                "SELECT g.goal_id, g.revision, g.lane_key, r.body
+                   FROM supervisor_execution_bindings b
+                   JOIN supervisor_goals g ON g.goal_id = b.goal_id
+                   LEFT JOIN supervisor_requests r ON r.goal_id = g.goal_id
+                  WHERE b.host_id = ? AND b.provider_session_id = ?
+                  ORDER BY r.id LIMIT 1",
+            )
+            .bind(&session.host_id)
+            .bind(backend_session_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some((goal_id, revision, lane_key, title)) = row else {
+            return Ok(None);
+        };
         let requirements: Vec<String> = sqlx::query_scalar(
             "SELECT text FROM lane_goal_requirements WHERE lane_key = ? ORDER BY rowid",
         )
         .bind(&lane_key)
         .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-        Some(BoundGoal {
+        .await?;
+        Ok(Some(BoundGoal {
             goal_id,
             revision,
             title: title.unwrap_or_default(),
             requirements,
-        })
+        }))
     }
 
     /// Asks the engine what the owner would pick, from the owner's memory, the project's memory,
@@ -420,7 +425,13 @@ impl DecisionGate {
         reason: &str,
     ) -> Option<AnswerDecision> {
         let judge = self.judge.as_ref()?;
-        let goal = self.bound_goal(session).await;
+        let goal = match self.bound_goal(session).await {
+            Ok(goal) => goal,
+            Err(error) => {
+                tracing::warn!(%error, "the bound goal could not be read; judging without it");
+                None
+            }
+        };
         let repo = self.repos.key(&session.cwd).await;
         let asked = judge_prompt(&self.pool, session, prompt, goal.as_ref(), &repo).await;
         let asked = super::prompt_judge::with_screen(asked, screen);
@@ -567,6 +578,20 @@ pub struct Autonomy {
     answered: Mutex<HashMap<SessionRef, AutonomousAnswer>>,
 }
 
+/// What [`Autonomy::build`] needs, so the constructor takes one argument rather than eight.
+/// `open_with` and `open_with_health` fill in the same stores; only the judge and the health
+/// probe differ.
+pub struct AutonomyParts {
+    pub pool: SqlitePool,
+    pub control: Arc<dyn SessionControl>,
+    pub publisher: Arc<dyn PanelPublisher>,
+    pub rules: Arc<dyn RuleStore>,
+    pub log: Arc<dyn ActionLog>,
+    pub repos: Arc<RepoResolver>,
+    pub judge: Option<Arc<dyn PromptJudge>>,
+    pub health: Arc<dyn SupervisorHealth>,
+}
+
 impl Autonomy {
     /// The hub database this service's stores live in.
     pub fn pool(&self) -> &SqlitePool {
@@ -601,7 +626,17 @@ impl Autonomy {
         ));
         let repos = Arc::new(RepoResolver::default());
         let health: Arc<dyn SupervisorHealth> = Arc::new(RecordedEngineHealth::new(pool.clone()));
-        Self::build(pool, control, publisher, rules, log, repos, judge, health).await
+        Self::build(AutonomyParts {
+            pool,
+            control,
+            publisher,
+            rules,
+            log,
+            repos,
+            judge,
+            health,
+        })
+        .await
     }
 
     /// [`Self::open_with`] with the health probe replaced: a test (or a caller that knows
@@ -622,20 +657,30 @@ impl Autonomy {
             publisher.clone(),
         ));
         let repos = Arc::new(RepoResolver::default());
-        Self::build(pool, control, publisher, rules, log, repos, judge, health).await
+        Self::build(AutonomyParts {
+            pool,
+            control,
+            publisher,
+            rules,
+            log,
+            repos,
+            judge,
+            health,
+        })
+        .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn build(
-        pool: SqlitePool,
-        control: Arc<dyn SessionControl>,
-        publisher: Arc<dyn PanelPublisher>,
-        rules: Arc<dyn RuleStore>,
-        log: Arc<dyn ActionLog>,
-        repos: Arc<RepoResolver>,
-        judge: Option<Arc<dyn PromptJudge>>,
-        health: Arc<dyn SupervisorHealth>,
-    ) -> Result<Arc<Self>> {
+    async fn build(parts: AutonomyParts) -> Result<Arc<Self>> {
+        let AutonomyParts {
+            pool,
+            control,
+            publisher,
+            rules,
+            log,
+            repos,
+            judge,
+            health,
+        } = parts;
         Ok(Arc::new(Self {
             history: AnswerHistory::new(pool.clone()),
             gate: Arc::new(DecisionGate::new(pool, rules.clone(), repos.clone(), judge)),
@@ -1063,7 +1108,14 @@ impl Autonomy {
     /// already decided for that revision keeps its first label (a later answer to the same
     /// prompt is the same decision seen twice).
     async fn decide_for_goal(&self, session: &FleetSession, prompt: &PendingPrompt, label: &str) {
-        let Some(goal) = self.gate.bound_goal(session).await else {
+        let goal = match self.gate.bound_goal(session).await {
+            Ok(goal) => goal,
+            Err(error) => {
+                tracing::warn!(%error, "the bound goal could not be read; the answer was not recorded");
+                return;
+            }
+        };
+        let Some(goal) = goal else {
             return;
         };
         let written = sqlx::query(
@@ -1182,4 +1234,3 @@ impl ActionUndo for Autonomy {
 
 #[cfg(test)]
 mod tests;
-

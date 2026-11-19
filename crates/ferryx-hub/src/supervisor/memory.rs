@@ -639,6 +639,21 @@ pub fn learn_in_background(
     json!({"state": "queued", "sourceId": format!("{adapter}:{request_id}"), "taskOnlyLines": once.len()})
 }
 
+/// The text the owner taught, newest first, limited to `limit` rows: what was sent to learning
+/// (`teach`, `correct`, `ingest`). This is the provenance read of the memory schema; nothing
+/// outside `memory.rs` reads its columns.
+pub async fn taught_text(pool: &SqlitePool, limit: i64) -> Result<Vec<String>, RequestFailure> {
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT body FROM supervisor_memory_sources
+          WHERE action IN ('teach','correct','ingest')
+          ORDER BY created_at DESC, rowid DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// The latest owner-ingest provenance rows (newest first): what was sent for learning, from
 /// which message, and whether it arrived.
 pub async fn recent_ingests(pool: &SqlitePool, limit: i64) -> Result<Vec<Value>, RequestFailure> {
