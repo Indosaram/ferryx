@@ -2808,14 +2808,13 @@ mod tests {
         // A dropped sender makes `changed()` ready on every poll. The 1022.5 daemon kept the
         // listener alive in that state and burned a full core (37 CPU minutes in 40).
         let pool = crate::storage::memory().await.unwrap();
-        let dir = std::env::temp_dir().join(format!("fx-cron-drop-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // Short by construction: a unix socket path is capped at 104 bytes on macOS.
+        let dir = crate::test_dirs::ShortDir::new("cron-drop");
         let path = dir.join("run.sock");
         let (tx, rx) = tokio::sync::watch::channel(false);
         drop(tx);
         let server = tokio::spawn(serve_native_socket(path.clone(), pool, rx));
         let finished = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(
             matches!(finished, Ok(Ok(Ok(())))),
             "serve_native_socket kept running after its stop sender was dropped"
@@ -2826,8 +2825,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_native_socket_stops_when_true_is_sent() {
         let pool = crate::storage::memory().await.unwrap();
-        let dir = std::env::temp_dir().join(format!("fx-cron-stop-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // Short by construction: a unix socket path is capped at 104 bytes on macOS.
+        let dir = crate::test_dirs::ShortDir::new("cron-stop");
         let path = dir.join("run.sock");
         let (tx, rx) = tokio::sync::watch::channel(false);
         let server = tokio::spawn(serve_native_socket(path.clone(), pool, rx));
@@ -2844,7 +2843,6 @@ mod tests {
         tx.send(true).unwrap();
         let finished = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
         let gone = !path.exists();
-        let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(finished, Ok(Ok(Ok(())))));
         assert!(gone, "a clean stop removes the socket file");
     }
@@ -2857,9 +2855,9 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let path =
-            std::env::temp_dir().join(format!("ferryx-cron-{}-run.sock", std::process::id()));
-        let _ = std::fs::remove_file(&path);
+        // Short by construction: a unix socket path is capped at 104 bytes on macOS.
+        let dir = crate::test_dirs::ShortDir::new("cron-run");
+        let path = dir.join("run.sock");
         let (tx, rx) = tokio::sync::watch::channel(false);
         let server_pool = pool.clone();
         let server_path = path.clone();

@@ -275,12 +275,9 @@ mod tests {
     #[tokio::test]
     async fn a_successor_stops_a_live_foreign_hub_and_takes_over_its_control_socket() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        let dir = std::env::temp_dir().join(format!(
-            "ferryx-ctl-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        // Unix socket paths are capped at 104 bytes on macOS, so the socket tree grows under a
+        // short directory, never under `TMPDIR`.
+        let dir = crate::test_dirs::ShortDir::new("ctl");
         let path = dir.join("control.sock");
         assert!(preempt_foreign_hub(&path).await.is_none());
         // An old-style hub: answers stop, keeps its listener.
@@ -316,6 +313,5 @@ mod tests {
             "new clients reach the successor, not the old hub"
         );
         old_task.abort();
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -77,3 +77,57 @@ pub mod voice_session;
 pub use config::{secret_from_env, HubConfig};
 pub use error::{HubError, Result};
 pub use hub::Hub;
+
+/// Short-lived directories for tests that bind unix sockets.
+///
+/// A unix socket path is capped at 104 bytes on macOS (`sun_path`, including the terminating
+/// NUL) and at 108 on Linux. A path built under `env::temp_dir()` already spends most of that
+/// on a macOS `TMPDIR` (`/var/folders/xx/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/T/`), and
+/// [`schedule::bind_native_socket`] adds a staging entry inside the socket's parent on top. So
+/// socket tests take their directory from here, which is short by construction, and drop it.
+#[cfg(test)]
+pub(crate) mod test_dirs {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    /// A fresh empty directory that removes itself and everything in it on drop.
+    pub(crate) struct ShortDir {
+        path: PathBuf,
+    }
+
+    impl ShortDir {
+        /// A directory tagged `tag`, unique to this process and this call.
+        pub(crate) fn new(tag: &str) -> Self {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = base().join(format!("fx-{}-{n}-{tag}", std::process::id()));
+            std::fs::create_dir_all(&path).expect("a short test directory is created");
+            Self { path }
+        }
+
+        /// `name` inside the directory.
+        pub(crate) fn join(&self, name: &str) -> PathBuf {
+            self.path.join(name)
+        }
+    }
+
+    impl Drop for ShortDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// The shortest directory this platform offers for a socket tree: `/tmp` where it exists,
+    /// the system temp directory elsewhere.
+    fn base() -> PathBuf {
+        #[cfg(unix)]
+        {
+            let tmp = Path::new("/tmp");
+            if tmp.is_dir() {
+                return tmp.to_path_buf();
+            }
+        }
+        std::env::temp_dir()
+    }
+}

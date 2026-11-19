@@ -1305,12 +1305,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn stop_reaches_the_socket_and_the_reply_names_the_op() {
-        let dir = std::env::temp_dir().join(format!(
-            "ferryx-control-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        // Unix socket paths are capped at 104 bytes on macOS, so the socket tree grows under a
+        // short directory, never under `TMPDIR`.
+        let dir = crate::test_dirs::ShortDir::new("control");
         let path = dir.join("control.sock");
         let listener = crate::schedule::bind_native_socket(&path).await.unwrap();
         let path_for_client = path.clone();
@@ -1332,7 +1329,6 @@ mod tests {
             .unwrap();
         server.await.unwrap();
         assert!(reply.contains("Stop"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
