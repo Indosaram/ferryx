@@ -324,16 +324,14 @@ impl RuntimeRecords {
                     continue;
                 }
                 let killed = match (record.pid, record.pgid, record.process_start_time.as_deref()) {
-                    (Some(pid), Some(pgid), Some(start)) => {
-                        if self.source.start_time(pid).as_deref() == Some(start) {
-                            spawner.kill_group(pgid, Signal::Kill);
-                            true
-                        } else {
-                            false
-                        }
+                    (Some(pid), Some(pgid), Some(start))
+                        if self.source.start_time(pid).as_deref() == Some(start) =>
+                    {
+                        spawner.kill_group(pgid, Signal::Kill);
+                        true
                     }
-                    // No identity: release the claim only. Never kill whoever
-                    // holds the port.
+                    // No identity, or a pid whose start time no longer matches:
+                    // release the claim only. Never kill whoever holds the port.
                     _ => false,
                 };
                 swept.push(SweptRecord {

@@ -1,7 +1,6 @@
 //! Layout store behavior: revisions, stale-base conflict, per-workspace isolation and the
 //! long-poll wake path. No wall-clock sleeps: the waiter is registered before the write, so the
 //! only ordering the test relies on is that its own write happens after it subscribed.
-use super::*;
 use crate::remote::machine_protocol::{SharedPane, SharedPaneDirection, SharedLayout, SharedTab};
 use std::time::Duration;
 

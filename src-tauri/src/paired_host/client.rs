@@ -614,7 +614,9 @@ impl Operation {
                     r.budget_secs = Some(40);
                 }
             }
-            Self::LayoutPut { workspace_id, .. } => {
+            // The workspace id travels in the PUT body (`workspaceId`), and the answer's
+            // document is checked against it in `map_result`, so the route needs no query.
+            Self::LayoutPut { .. } => {
                 path = "workspace/layout";
                 r.capability = Some(m::LAYOUT_SYNC_CAPABILITY);
             }
