@@ -29,7 +29,7 @@ import { hostFor, buildPlan, assertQaBuild, worktreePaths } from './lib/hosts.mj
 import { probeHooks, missingHooksFor, QA_FAULT_ENV, QA_FAULTS } from './lib/hooks.mjs';
 import { generationKey, assertDistinctKeys } from './lib/wire.mjs';
 import { startAgent, fetchHostFile } from './lib/remote.mjs';
-import { createJobs } from './lib/jobs.mjs';
+import { createJobs, macHubIsolationVerdict } from './lib/jobs.mjs';
 import { createGuiDriver, macGuiExecutable } from './lib/gui.mjs';
 import { assembleDaemonHelper } from '../../macos-daemon-helper.mjs';
 import { finalizeMacosBundle } from '../../lib/release-platforms.mjs';
@@ -613,6 +613,8 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
   return summary.teardown;
 }
 
+// macOS generation jobs inherit the login home: designate a clean QA login with
+// FERRYX_QA_MAC_ACCOUNT=<login>. This is a designation, not an override for an existing installation.
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const host = hostFor(opts.platform);
@@ -638,6 +640,26 @@ async function main() {
   summary.revisions.dirty = (await run('git', ['-C', REPO, 'status', '--porcelain', '--untracked-files=no'])).stdout.trim().split('\n').filter(Boolean);
   summary.hooks = probeHooks(REPO, host.platform);
   writeSummary();
+
+  if (host.platform === 'mac') {
+    let account;
+    try { account = os.userInfo(); } catch { account = null; }
+    const verdict = process.platform === 'darwin' && host.transport.kind === 'local'
+      ? macHubIsolationVerdict({ account, runnerHome: os.homedir(), dedicatedAccount: process.env.FERRYX_QA_MAC_ACCOUNT })
+      : { blocked: true, reason: 'not-local-darwin' };
+    summary.macHubIsolation = { ...verdict, hostname: os.hostname(), account: account?.username ?? null, accountHome: account?.homedir ?? null };
+    if (!opts.selfCheck && verdict.blocked) {
+      block(summary.scenarios.find((s) => s.id === 'Q00'), 'MAC_QA_JOB_HUB_NOT_ISOLATED', summary.macHubIsolation);
+      for (const row of summary.scenarios) {
+        if (row.id !== 'Q00' && row.applicable && selected.includes(row.id)) block(row, 'Q00_PRECONDITION', 'Q00 is BLOCKED');
+      }
+      summary.exitCode = computeExitCode(summary, selected);
+      summary.finishedAt = new Date().toISOString();
+      writeSummary();
+      log({ blocked: verdict.reason, summary: summaryPath, exitCode: summary.exitCode });
+      return summary.exitCode;
+    }
+  }
 
   const agentPath = joinFor(host.platform, host.transport.kind === 'local' ? HERE : '', 'lib', 'agent.mjs');
   const remoteHarness = host.transport.kind === 'local' ? HERE : joinFor(host.platform, worktreePaths(host, opts.worktreeSlug).worktree, 'scripts', 'qa', 'daemon-lifetime');
