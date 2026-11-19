@@ -107,8 +107,8 @@ async fn a11_joint_fixture(inject_failure: bool) {
     // headers to the requesting TCP client. Receiving it proves durable create
     // completed; aborting the client before release really loses the reply.
     let (committed_tx, committed_rx) = tokio::sync::oneshot::channel();
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    let gate = std::sync::Arc::new(tokio::sync::Mutex::new(Some((committed_tx, release_rx))));
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let gate = std::sync::Arc::new(tokio::sync::Mutex::new(Some((committed_tx, release.clone()))));
     let router = relay_router(state).layer(axum::middleware::from_fn(move |request: axum::extract::Request, next: axum::middleware::Next| {
         let gate = gate.clone();
         async move {
@@ -119,7 +119,7 @@ async fn a11_joint_fixture(inject_failure: bool) {
                 let bytes = axum::body::to_bytes(body, 65536).await.unwrap();
                 let (sent, release) = gate.lock().await.take().unwrap();
                 sent.send((parts.status, bytes.clone())).unwrap();
-                let _ = timeout(LIMIT, release).await;
+                timeout(LIMIT, release.notified()).await.expect("client did not release the held relay response");
                 axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
             } else { response }
         }
@@ -153,7 +153,7 @@ async fn a11_joint_fixture(inject_failure: bool) {
         assert_eq!(status, StatusCode::CREATED);
         let session: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         pending.abort(); assert!(pending.await.unwrap_err().is_cancelled());
-        release_tx.send(()).unwrap();
+        release.notify_one(); // Disconnect may already have dropped the middleware.
         let operation = a11_response(client.get(format!("{base}/api/v1/workspace/operations/{}", create["requestId"].as_str().unwrap())).bearer_auth(token), StatusCode::OK).await;
         assert_eq!(operation["outcome"]["session"]["target"], session["target"], "{operation}");
         eprintln!("A11 lost real TCP reply after completed201; operation lookup recovered target={}", session["target"]);
