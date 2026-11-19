@@ -50,6 +50,7 @@ const plist = (bundleId, executable) => `<?xml version="1.0" encoding="UTF-8"?>
 `;
 
 const productName = (runId = RUN) => `Ferryx QA ${runId}`;
+const linuxLibs = ['avcodec', 'avdevice', 'avfilter', 'avformat', 'avutil', 'swresample', 'swscale'].map((lib) => `lib${lib}.so.42`);
 
 function seedLinux(directory, names = ['A', 'B', 'C', 'bump'], aliases = {}) {
   for (const name of names) {
@@ -57,6 +58,7 @@ function seedLinux(directory, names = ['A', 'B', 'C', 'bump'], aliases = {}) {
     writeTree(directory, {
       [`artifacts/${name}/ferryx`]: `gui-${salt}`,
       [`artifacts/${name}/ferryx-cli`]: `cli-${salt}`,
+      ...Object.fromEntries(linuxLibs.map((lib) => [`artifacts/${name}/ffmpeg/${lib}`, `runtime-${lib}`])),
       // Incidental build metadata the executed package must not carry.
       [`artifacts/${name}/outer-entitlements.plist`]: `entitlements-${name}`,
     });
@@ -162,6 +164,21 @@ test('linux: seal then stage reproduces GUI and CLI bytes and derives run.mjs de
     assert.equal(existsSync(path.join(destination, 'artifacts', name, 'outer-entitlements.plist')), false);
   }
   assert.equal(staged.manifest.identity.head, id.head);
+});
+
+test('Linux runtime libraries travel with the staged GUI and missing or changed bytes are refused', async () => {
+  const source = tmp(), dest = ownedRoot(), id = identity();
+  seedLinux(source);
+  const set = await sealArtifactSet({ directory: source, identity: id });
+  const stage = (name) => stageArtifactSet({ directory: source, sha256: set.sha256, identity: id, destination: path.join(dest, name) });
+  const { artifacts } = await stage('valid');
+  const dll = 'libavcodec.so.42';
+  assert.equal(readFileSync(path.join(path.dirname(artifacts.A.guiExecutable), 'ffmpeg', dll), 'utf8'), `runtime-${dll}`);
+  const src = path.join(source, 'artifacts/A/ffmpeg', dll);
+  writeFileSync(src, `Runtime-${dll}`);
+  await assert.rejects(stage('tampered'), { code: 'ARTIFACT_SET_PAYLOAD' });
+  rmSync(src);
+  await assert.rejects(sealArtifactSet({ directory: source, identity: id }), { code: 'QA_LINUX_FFMPEG_RUNTIME' });
 });
 
 test('windows: DLLs and CLI are sealed and staged beside the no-bundle GUI', async () => {

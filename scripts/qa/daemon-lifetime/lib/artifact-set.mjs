@@ -34,6 +34,7 @@ import { HELPER_BUNDLE_ID, HELPER_BUNDLE_NAME } from '../../../macos-daemon-help
 import { LIBRARIES as FFMPEG_LIBRARIES } from '../../../stage-ffmpeg.mjs';
 import { GuardError, qaBundleIdentifier, qaProductName } from './guards.mjs';
 import { generationKey } from './wire.mjs';
+import { assertLinuxQaLibraries, isLinuxQaLibrary } from './linux-artifact-runtime.mjs';
 
 export const SCHEMA = 'ferryx-qa-artifact-set/v1';
 export const MANIFEST_NAME = 'artifact-manifest.json';
@@ -271,6 +272,11 @@ async function readDirReal(dir, label) {
 /** The fixed entries of one variant: everything else in the variant directory is build metadata. */
 function variantRoots({ names, name, identity }) {
   const { platform } = identity;
+  if (platform === 'linux') {
+    const roots = (name === 'baseline' ? ['ferryx'] : ['ferryx', 'ferryx-cli']).map((rel) => ({ rel, dir: false, allowLinks: false }));
+    if (!['v1bump', 'baseline'].includes(name) || names.includes('ffmpeg')) roots.push({ rel: 'ffmpeg', dir: true, allowLinks: false });
+    return roots;
+  }
   if (name === 'baseline') return [{ rel: exeName(platform), dir: false, allowLinks: false }];
   if (platform === 'mac') {
     return [
@@ -299,12 +305,16 @@ async function collectVariant({ dir, name, identity, mac }) {
   const names = await readDirReal(dir, `artifacts/${name}`);
   if (name === 'baseline') {
     const expected = exeName(platform);
-    if (names.length !== 1 || names[0] !== expected) {
+    const files = names.filter((entry) => platform !== 'linux' || entry !== 'ffmpeg');
+    if (files.length !== 1 || files[0] !== expected) {
       fail('ARTIFACT_SET_VARIANT', `artifacts/${name} must hold only ${expected}, found ${JSON.stringify(names)}`);
     }
   }
   const appRel = `${qaProductName(identity.runId)}.app`;
   const roots = variantRoots({ names, name, identity });
+  if (platform === 'linux' && roots.some((r) => r.rel === 'ffmpeg')) {
+    assertLinuxQaLibraries(await readDirReal(path.join(dir, 'ffmpeg'), `artifacts/${name}/ffmpeg`));
+  }
   for (const root of roots) {
     const st = await lstatOrNull(path.join(dir, root.rel));
     if (!st) fail('ARTIFACT_SET_VARIANT', `artifacts/${name}/${root.rel} is missing`);
@@ -449,6 +459,15 @@ function assertLinkInside({ rel, link, root }) {
 }
 
 function expectedEntryRoots({ platform, name, runId, entries }) {
+  if (platform === 'linux') {
+    const roots = name === 'baseline' ? ['ferryx'] : ['ferryx', 'ferryx-cli'];
+    if (!['v1bump', 'baseline'].includes(name) || entries.some((e) => e.path === 'ffmpeg')) {
+      const libs = entries.filter((e) => e.path.startsWith('ffmpeg/')).map((e) => e.path.slice(7));
+      assertLinuxQaLibraries(libs);
+      roots.push('ffmpeg');
+    }
+    return roots;
+  }
   if (name === 'baseline') return [exeName(platform)];
   if (platform === 'mac') return [`${qaProductName(runId)}.app`, 'ferryx-cli'];
   if (platform === 'windows') {
@@ -488,7 +507,8 @@ function validateEntries(entries, { platform, name, runId }) {
     } else {
       fail('ARTIFACT_SET_MANIFEST', `${rel} has unsupported type ${JSON.stringify(entry.type)}`);
     }
-    if (entry.type !== 'symlink' && platform !== 'mac' && entry.type !== 'file') {
+    const linuxRuntimeDir = platform === 'linux' && rel === 'ffmpeg' && entry.type === 'directory';
+    if (entry.type !== 'symlink' && platform !== 'mac' && entry.type !== 'file' && !linuxRuntimeDir) {
       fail('ARTIFACT_SET_MANIFEST', `${rel}: only regular files are sealed on ${platform}`);
     }
     seen.set(rel, entry);
@@ -511,7 +531,10 @@ function validateEntries(entries, { platform, name, runId }) {
       assertLinkInside({ rel, link: entry.link, root: `${qaProductName(runId)}.app` });
     }
   }
-  if (name === 'baseline' && (entries.length !== 1 || entries[0].type !== 'file')) {
+  if (platform === 'linux' && entries.some((e) => e.path.startsWith('ffmpeg/') && (!isLinuxQaLibrary(e.path.slice(7)) || e.type !== 'file'))) {
+    fail('ARTIFACT_SET_MANIFEST', `variants.${name}: invalid Linux runtime entry`);
+  }
+  if (name === 'baseline' && platform !== 'linux' && (entries.length !== 1 || entries[0].type !== 'file')) {
     fail('ARTIFACT_SET_MANIFEST', `artifacts/baseline must seal exactly one file`);
   }
   return entries.map((entry) => ({ ...entry })).sort(byPath);

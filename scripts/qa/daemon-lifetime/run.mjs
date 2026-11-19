@@ -29,6 +29,7 @@ import { newSummary, selectScenarios, settle, block, applyQ00Gate, computeExitCo
 import { hostFor, buildPlan, assertQaBuild, worktreePaths } from './lib/hosts.mjs';
 import { artifactIdentity, assertIdleArtifactRun, claimFreshDirectories, requireNativeArtifactHost, separateArtifactPaths, validateArtifactOptions } from './lib/artifact-mode.mjs';
 import { sealArtifactSet, stageArtifactSet } from './lib/artifact-set.mjs';
+import { stageLinuxQaLibraries } from './lib/linux-artifact-runtime.mjs';
 import { probeHooks, missingHooksFor, QA_FAULT_ENV, QA_FAULTS } from './lib/hooks.mjs';
 import { generationKey, assertDistinctKeys } from './lib/wire.mjs';
 import { startAgent, fetchHostFile } from './lib/remote.mjs';
@@ -712,6 +713,9 @@ async function buildVariants({ opts, host, agent, worktree, runId, runDir, local
     } else {
       art.daemonSource = art.guiExecutable;
     }
+    if (opts.buildOnly && host.platform === 'linux') {
+      await stageLinuxQaLibraries({ executable: art.guiExecutable, worktree: step.cwd, required: name !== 'v1bump' });
+    }
     art.sha256 = await agent.call('sha256', { file: art.daemonSource });
     keys[name] = generationKey(version, art.sha256);
     artifacts[name] = art;
@@ -738,7 +742,9 @@ async function buildArtifactSet({ opts, host, identity, directory, log }) {
     if (artifacts.baseline) {
       const baseline = path.join(directory, 'artifacts', 'baseline');
       mkdirSync(baseline, { mode: 0o700 });
-      await copyFile(artifacts.baseline.daemonExecutable, path.join(baseline, path.basename(artifacts.baseline.daemonExecutable)));
+      const executable = path.join(baseline, path.basename(artifacts.baseline.daemonExecutable));
+      await copyFile(artifacts.baseline.daemonExecutable, executable);
+      if (host.platform === 'linux') await stageLinuxQaLibraries({ executable, worktree: opts.baselineWorktree, required: false });
     }
     const after = await artifactIdentity({ ...opts, repo: REPO, runId });
     if (JSON.stringify(after) !== JSON.stringify(identity)) throw new GuardError('QA_ARTIFACT_REVISION', 'source checkout changed during build');

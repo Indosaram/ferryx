@@ -12,6 +12,8 @@ bun "$QA" --platform mac --run-id "$RUN" --build-only "$SET" \
 
 Record `runId` and `manifestSha256` from the **trusted producer's output**. Transfer `artifact-manifest.json` and the complete `artifacts/` directory together; preserve executable permissions, macOS bundle structure, and Windows DLLs. The producing checkout, OS, architecture, and optional historical revisions are part of the identity. `receipts/build.json` records build results, not scenario results. A source-tree hash, a release bundle or an older `build-summary.json` is not a substitute for the manifest and its independently recorded digest.
 
+Linux producers need `patchelf` and the FFmpeg SDK used by the build. They copy the versioned libraries into each linked executable's `ffmpeg/` directory and set relative lookup paths on those private copies before hashing. The consumer needs the normal platform libraries, but neither `patchelf` nor the builder's FFmpeg SDK.
+
 On the matching native target use the **same clean commit** and the baked `--run-id`. The scenario invocation does not install dependencies or call Cargo, even when verification fails. Pin the full `--v1-rev` for a set built with `--v1-worktree` (required by Q08b); `--baseline-worktree` and `--baseline-rev` work analogously for Q13. Omit these pairs when the set has no corresponding variant.
 
 ```sh
