@@ -2,6 +2,7 @@
 // and legacy single-job migration.
 
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { hjoin } from '../lib/hostpath.mjs';
 import { assertion, block } from '../lib/summary.mjs';
 import { data as D, isLive, liveSessions } from '../lib/wire.mjs';
@@ -14,13 +15,34 @@ import { startSshd, sshRestoreSession, recordSshHelper } from '../lib/sshd.mjs';
 import { typeVerified, renderEcho, renderConptyInput } from '../lib/typeverified.mjs';
 import { legacyLogFiles } from '../lib/jobs.mjs';
 import { ownsForeground } from '../lib/gui.mjs';
+import { qaBundleIdentifier } from '../lib/guards.mjs';
+import {
+  axFixtureScript, axDiagnostics, selectSupervisorSwitch, pressExpectation,
+  MAC_AX_SWITCH_UNCONFIRMED, MAC_AX_FIXTURE_FILE, MAC_AX_INSPECT_DEADLINE_MS, MAC_AX_STATE_DEADLINE_MS,
+} from '../lib/mac-ax.mjs';
 
 export const OPTOUT_FILE = 'daemon-supervisor.optout'; // supervisor.rs OPTOUT_FILE_NAME, in <FERRYX_DATA_DIR>/remote
 
+export function parseLaunchAgentPlist(text, expectedLabel) {
+  const raw = typeof text === 'string' ? text : '';
+  const present = raw.trim() !== '';
+  const invalid = { present, parsed: false, label: null, runAtLoad: null, keepAlive: null, complete: false };
+  if (!present) return invalid;
+  const decoded = spawnSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', '-'], { input: raw, encoding: 'utf8', timeout: 5000 });
+  if (decoded.error) throw decoded.error;
+  if (decoded.status !== 0) return invalid;
+  const plist = JSON.parse(decoded.stdout);
+  const label = typeof plist?.Label === 'string' ? plist.Label : null;
+  const runAtLoad = typeof plist?.RunAtLoad === 'boolean' ? plist.RunAtLoad : null;
+  const keepAlive = plist?.KeepAlive ?? null;
+  return { present, parsed: true, label, runAtLoad, keepAlive, complete: label === expectedLabel && Boolean(label) && runAtLoad !== null };
+}
+
 async function loginRegistration(ctx, key) {
   if (ctx.platform === 'mac') {
-    const plist = (await ctx.agent.call('readFile', { file: hjoin(ctx.layout.launchAgents, `${ctx.jobs.label(key)}.plist`) })) ?? '';
-    return { runAtLoad: /<key>RunAtLoad<\/key>\s*<true\/>/.test(plist), raw: plist };
+    const raw = (await ctx.agent.call('readFile', { file: hjoin(ctx.layout.launchAgents, `${ctx.jobs.label(key)}.plist`) })) ?? '';
+    const plist = parseLaunchAgentPlist(raw, ctx.jobs.label(key));
+    return { ...plist, raw };
   }
   if (ctx.platform === 'linux') {
     const job = await ctx.jobs.inspect(key);
@@ -31,6 +53,12 @@ async function loginRegistration(ctx, key) {
 }
 
 const autostarts = (reg) => reg.runAtLoad ?? reg.enabled ?? reg.logonTrigger;
+
+export function demonstrablyUnregistered(reg) {
+  if (autostarts(reg) !== false) return false;
+  if (reg?.complete !== undefined) return reg.complete === true && reg.keepAlive === false;
+  return true;
+}
 
 /**
  * Keyboard path to the General switch "Restart background service automatically"
@@ -217,11 +245,217 @@ async function toggleAutostartOffThroughSettings(ctx, optout, logFile, gui) {
   return { opened, marker, before, after, attempts, refused, guards };
 }
 
+/**
+ * macOS: press the General supervisor switch through accessibility, never through a guessed walk.
+ *
+ * Run 20261119t082333z (32b4d9a) opened Settings, proved the QA window held the foreground, and
+ * still left the opt-out marker absent with RunAtLoad true. Owning the window says nothing about
+ * which control received Space, and the Tab count beside it is a guess about a panel the product
+ * keeps changing. The switch has a stable identity instead (GeneralSection.tsx:490-491), so this
+ * path asks the accessibility API of the one recorded QA pid for that element and presses it:
+ *
+ *   1. the recorded pid must still resolve to the recorded QA executable, and the QA window must
+ *      prove the foreground (registry identity plus the driver's read-back, so a reused pid or a
+ *      background window cannot nominate a stranger's UI);
+ *   2. the AX tree must contain exactly one switch-shaped node carrying the supervisor identity - by
+ *      DOM id or by its accessible name, never by position - the walk must have covered the tree,
+ *      and the switch must read ON, because Q10 exists to opt OUT and pressing a switch that is
+ *      already OFF would turn the supervisor back on;
+ *   3. the fixture re-verifies that exact node against the same field-by-field expectation and only
+ *      then sends AXPress, so a tree that changed in between cannot redirect the press.
+ *
+ * No Tab, Space, click, chord or activation is sent on this path. Anything else - no match, several
+ * matches, a cut-off walk, a disabled or already-off switch, an AX error, a changed node - stops
+ * here with what was observed; there is no keyboard fallback on macOS, and nothing is written to
+ * hide a product failure. After the single press the switch's state and the product's own receipts
+ * (opt-out marker, login plist, owner pid/start time, launchd job) are read with bounded waits,
+ * because the webview applies the new state asynchronously and the daemon then rewrites the plist.
+ */
+async function pressSupervisorSwitchByAccessibility(ctx, { optout, gui, key }) {
+  const receipt = {
+    fixture: null, identity: null, ownership: null, attempts: [], selection: null, diagnostics: null,
+    press: null, stateAfter: null, marker: false, plist: null, owner: null, job: null,
+    refused: null, reason: null,
+  };
+  if (!gui?.pid) return { ...receipt, refused: MAC_AX_SWITCH_UNCONFIRMED, reason: 'no recorded QA GUI pid' };
+
+  // Identity first: a pid the registry no longer matches is somebody else's process by now.
+  const state = await ctx.agent.call('check', { pid: gui.pid });
+  const live = await ctx.agent.call('probe', { pid: gui.pid });
+  const identity = {
+    pid: gui.pid,
+    recorded: gui.executable ?? null,
+    liveExecutable: live?.executable ?? null,
+    startTime: live?.startTime ?? null,
+    recordedStartTime: gui.startTime ?? null,
+    registry: state,
+    bundle: qaBundleIdentifier(ctx.runId),
+  };
+  identity.ok = state === 'match' && Boolean(live) && String(live.executable) === String(identity.recorded);
+  receipt.identity = identity;
+  if (!identity.ok) {
+    return { ...receipt, refused: MAC_AX_SWITCH_UNCONFIRMED, reason: `the recorded QA GUI pid ${gui.pid} is ${state} and runs ${JSON.stringify(identity.liveExecutable)}, not ${JSON.stringify(identity.recorded)}` };
+  }
+
+  // The window must hold the foreground: the AX element is the QA app's own, but a background
+  // instance of the same build is still not the one this run is driving.
+  const own = await confirmInputOwnership(ctx, gui, 'ax-press');
+  receipt.ownership = { owned: own.owned, error: own.error, focus: summarizeFocus(own.focus) };
+  if (!own.owned) {
+    return { ...receipt, refused: OWNERSHIP_UNCONFIRMED, reason: 'gui.focus did not prove the recorded QA window holds the foreground' };
+  }
+
+  const file = hjoin(ctx.layout.root, MAC_AX_FIXTURE_FILE);
+  await ctx.agent.call('writeFile', { file, content: axFixtureScript() });
+  receipt.fixture = file;
+  receipt.plist = { before: await readLoginPlist(ctx, key) };
+  receipt.owner = { before: await ownerIdentity(ctx) };
+  receipt.job = { before: await ctx.jobs.inspect(key) };
+
+  const inspect = async () => {
+    let r;
+    try {
+      r = await ctx.agent.call('exec', {
+        command: '/usr/bin/osascript',
+        args: ['-l', 'JavaScript', file, 'inspect', String(gui.pid)],
+        deadlineMs: 60_000,
+      });
+    } catch (error) {
+      return { ok: false, reason: `osascript inspect failed: ${String(error?.message ?? error).slice(0, 300)}` };
+    }
+    if (r.status !== 0) return { ok: false, reason: `osascript exited ${r.status}: ${String(r.stderr || r.stdout).trim().slice(0, 400)}` };
+    try {
+      return JSON.parse(String(r.stdout).trim());
+    } catch {
+      return { ok: false, reason: `unparseable inspect output: ${String(r.stdout).trim().slice(0, 300)}` };
+    }
+  };
+  // Only a walk that says so itself is complete; a missing or unreadable answer stays incomplete and
+  // the selector then refuses. Nothing here turns "could not tell" into permission.
+  const coverageOf = (seen) => ({ complete: seen?.complete === true, readErrors: seen?.readErrors ?? null });
+  const decide = (seen) => selectSupervisorSwitch(seen.nodes ?? [], { traversal: coverageOf(seen) });
+
+  // The Settings receipt only proves cmd_daemon_supervisor_get answered; the webview still has to
+  // render the switch. Nothing is pressed until exactly one match exists, and the wait is bounded.
+  const deadline = Date.now() + MAC_AX_INSPECT_DEADLINE_MS;
+  let selection = null;
+  let seen = null;
+  for (;;) {
+    seen = await inspect();
+    receipt.attempts.push({ at: new Date().toISOString(), ok: seen.ok === true, count: seen.count ?? null, complete: seen.complete ?? null, reason: seen.reason ?? null });
+    if (!seen.ok) {
+      return { ...receipt, refused: MAC_AX_SWITCH_UNCONFIRMED, reason: seen.reason };
+    }
+    selection = decide(seen);
+    // Only "no candidate yet" can improve by waiting (the panel is still rendering). Ambiguity, a
+    // disabled or already-off switch, and an incomplete traversal all end the wait where they are.
+    const retryable = !selection.ok && (selection.candidates ?? []).length === 0 && seen.complete === true;
+    if (selection.ok || !retryable || Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  receipt.selection = {
+    ok: selection.ok, reason: selection.reason ?? null,
+    candidates: (selection.candidates ?? []).slice(0, 8),
+    walk: {
+      count: seen.count ?? null, maxDepth: seen.maxDepth ?? null, complete: seen.complete ?? null,
+      truncated: seen.truncated ?? null, depthLimited: seen.depthLimited ?? null, readErrors: seen.readErrors ?? null,
+    },
+  };
+  if (!selection.ok) {
+    receipt.diagnostics = axDiagnostics(seen);
+    return { ...receipt, refused: MAC_AX_SWITCH_UNCONFIRMED, reason: selection.reason };
+  }
+
+  const pressed = await ctx.agent.call('exec', {
+    command: '/usr/bin/osascript',
+    args: ['-l', 'JavaScript', file, 'press', String(gui.pid), JSON.stringify(pressExpectation(selection.match))],
+    deadlineMs: 60_000,
+  });
+  let answer = null;
+  try { answer = JSON.parse(String(pressed.stdout).trim()); } catch { answer = null; }
+  receipt.press = {
+    status: pressed.status,
+    ...(answer ?? { unparsed: String(pressed.stdout).trim().slice(0, 300), stderr: String(pressed.stderr).trim().slice(0, 300) }),
+  };
+  if (pressed.status !== 0 || !answer?.ok) {
+    return { ...receipt, refused: MAC_AX_SWITCH_UNCONFIRMED, reason: answer?.reason ?? `osascript press exited ${pressed.status}: ${String(pressed.stderr || pressed.stdout).trim().slice(0, 400)}` };
+  }
+
+  // The webview applies the result of cmd_daemon_supervisor_set_autostart asynchronously, so the
+  // switch is read again until it reads OFF (bounded) and the last observation is what is recorded.
+  receipt.stateAfter = await observeSwitchState(ctx, file, gui.pid);
+
+  // The marker is the product's own receipt; a press that returned ok without it is a product
+  // result, not an instrumentation gap, so it is left to the caller's assertion.
+  receipt.marker = (await ctx.agent.call('waitPath', { file: optout, deadlineMs: MAC_AX_STATE_DEADLINE_MS })) === true;
+  receipt.plist.after = await readLoginPlist(ctx, key);
+  receipt.owner.after = await ownerIdentity(ctx);
+  receipt.job.after = await ctx.jobs.inspect(key);
+  return receipt;
+}
+
+/** The macOS generation plist as read, raw included; null fields elsewhere never count as a state. */
+async function readLoginPlist(ctx, key) {
+  return loginRegistration(ctx, key);
+}
+
+/**
+ * Post-press state, observed rather than assumed: inspect again, run the same identity selector in
+ * read-only mode (`requireState: false`), and keep the last readable value. A bounded wait covers the
+ * round trip to the daemon and the webview's re-render; the final observation is returned whether or
+ * not it settled.
+ */
+async function observeSwitchState(ctx, file, pid) {
+  const observations = [];
+  const end = Date.now() + MAC_AX_STATE_DEADLINE_MS;
+  for (;;) {
+    const r = await ctx.agent.call('exec', {
+      command: '/usr/bin/osascript', args: ['-l', 'JavaScript', file, 'inspect', String(pid)], deadlineMs: 60_000,
+    }).catch((error) => ({ status: null, stdout: '', stderr: String(error?.message ?? error) }));
+    let seen = null;
+    try { seen = JSON.parse(String(r.stdout).trim()); } catch { seen = null; }
+    // The selector is the only reader of node state; it refuses an ambiguous or unreadable tree, so
+    // a value here is always the one switch the press targeted, not whichever node came first.
+    const stated = selectSupervisorSwitch(seen?.nodes ?? [], { requireState: false, traversal: { complete: seen?.complete === true } });
+    const value = stated.ok ? stated.match.state : null;
+    observations.push({ at: new Date().toISOString(), status: r.status, ok: seen?.ok === true, value, reason: stated.ok ? null : stated.reason, count: seen?.count ?? null });
+    if (value === false) return { value, settled: true, observations };
+    if (Date.now() >= end) return { value, settled: false, observations };
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+/**
+ * macOS Q10: open Settings with its shortcut (the only key sent, gated on a proven foreground) and
+ * press the supervisor switch through accessibility instead of walking Tab/Space into the panel.
+ *
+ * Nothing here guesses which control is focused: the switch is matched by identity and pressed at
+ * its reported path. Escape is not sent either - an overlay left over from a pairing scenario cannot
+ * intercept an AXPress, so dismissing it is unnecessary on this path.
+ */
+async function toggleAutostartOffOnMac(ctx, optout, logFile, gui, key) {
+  if (!ctx.mahord) throw new Error('the settings toggle needs MahoRD on remote hosts');
+  const guards = [];
+  const own = async (at) => {
+    const guard = await confirmInputOwnership(ctx, gui, at);
+    guards.push({ at, owned: guard.owned, error: guard.error, focus: summarizeFocus(guard.focus) });
+    return guard;
+  };
+  const opened = await openSettings(ctx, logFile, () => own('settings-open'));
+  if (!opened.opened) {
+    return { opened, marker: false, before: null, after: null, ax: null, refused: opened.refused ?? null, guards };
+  }
+  const ax = await pressSupervisorSwitchByAccessibility(ctx, { optout, gui, key });
+  // The guard the AX receipt took is part of the same ownership contract as the others.
+  if (ax.ownership) guards.push({ at: 'ax-press', owned: ax.ownership.owned, error: ax.ownership.error, focus: ax.ownership.focus });
+  return { opened, marker: ax.marker === true, before: null, after: null, ax, refused: ax.refused ?? null, guards };
+}
+
 /** remove_autostart runs right after the marker write in the same command: wait for its effect. */
 async function waitAutostartRemoved(ctx, key, deadlineMs = 30_000) {
   const end = Date.now() + deadlineMs;
   let reg = await loginRegistration(ctx, key);
-  while (autostarts(reg) !== false && Date.now() < end) {
+  while (!demonstrablyUnregistered(reg) && Date.now() < end) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     reg = await loginRegistration(ctx, key);
   }
@@ -246,34 +480,55 @@ export async function Q10(ctx, result) {
   // ensure_if_absent_with), which is what registers A. Before that, the last GUI of another build
   // (Q08b's v1bump) may legitimately hold the registration.
   const regBefore = await loginRegistration(ctx, key);
-  assertion(result, 'newest generation registered for login before opt-out', autostarts(regBefore) === true, regBefore.raw?.slice?.(0, 400) ?? regBefore.raw);
+  assertion(result, 'newest generation registered for login before opt-out', autostarts(regBefore) === true && (ctx.platform !== 'mac' || regBefore.complete === true), regBefore.raw?.slice?.(0, 400) ?? regBefore.raw);
   // The owner's own tree right before the toggle: Q00's watchdog was replaced long ago (run-int2-all Q10).
   const treeBefore = ctx.platform === 'windows' ? await ctx.jobs.windowsTree(ctx.stagedRoot, { ownerPid: owner.pid }) : null;
-  const toggle = await toggleAutostartOffThroughSettings(ctx, optout, guiLog, ctx.state.gui);
+  // macOS presses the switch through accessibility (see toggleAutostartOffOnMac); the keyboard walk
+  // stays for the platforms it was written and measured against, and the Windows tree assertion below
+  // still precedes the toggle on both paths.
+  const toggle = ctx.platform === 'mac'
+    ? await toggleAutostartOffOnMac(ctx, optout, guiLog, ctx.state.gui, key)
+    : await toggleAutostartOffThroughSettings(ctx, optout, guiLog, ctx.state.gui);
   if (toggle.before) await evidence(ctx, result, 'settings-before-space.png.b64', toggle.before.toString('base64'));
   if (toggle.after) await evidence(ctx, result, 'settings-after-space.png.b64', toggle.after.toString('base64'));
   // The refusal is proved, not inferred: no key reaches the desktop without a verified foreground,
   // so a Q10 that could not own the GUI records why and sends no Tab/Space walk into a stranger's
   // window. This is the Q10 half of the ownership contract Q11 got from run surv-mac-1117n.
   await evidence(ctx, result, 'input-ownership.json', { guards: toggle.guards ?? [], refused: toggle.refused ?? null });
+  // The macOS path's own receipt: what the recorded pid resolved to, which node was matched, how far
+  // the walk got, what the fixture re-verified, the switch state before and after the single press,
+  // and the raw login plist / owner / launchd job on both sides of it.
+  if (toggle.ax) await evidence(ctx, result, 'mac-ax.json', toggle.ax);
   if (toggle.refused) {
     // No chord was pressed and no walk was driven, so "Settings opened" is not a product fact here:
     // it is only recorded in the barrier detail, never as a failed assertion of the product.
     return block(result, toggle.refused, {
       scenario: 'Q10',
-      at: toggle.guards?.findLast?.((g) => !g.owned)?.at ?? null,
+      at: toggle.ax ? 'mac-ax' : toggle.guards?.findLast?.((g) => !g.owned)?.at ?? null,
       focus: toggle.guards?.findLast?.((g) => !g.owned) ?? null,
+      ax: toggle.ax ?? null,
       opened: toggle.opened,
       marker: toggle.marker,
-      detail: 'desktop input was withheld: gui.focus did not prove the recorded QA window holds the foreground',
+      detail: toggle.ax
+        ? `the supervisor switch was not identified or pressed through accessibility: ${toggle.ax.reason}`
+        : 'desktop input was withheld: gui.focus did not prove the recorded QA window holds the foreground',
     });
   }
   assertion(result, 'Settings opened (cmd_daemon_supervisor_get receipt) before the toggle', toggle.opened.opened, toggle.opened.attempts);
   assertion(result, 'settings toggle wrote the opt-out marker (product receipt)', toggle.marker === true, optout);
   const regAfter = toggle.marker ? await waitAutostartRemoved(ctx, key) : await loginRegistration(ctx, key);
   const ownerAfter = await ownerIdentity(ctx);
-  await evidence(ctx, result, 'toggle.json', { regBefore, regAfter, settled, opened: toggle.opened, marker: toggle.marker, owner, ownerAfter });
-  assertion(result, 'opt-out removed login autostart', autostarts(regAfter) === false, regAfter.raw?.slice?.(0, 400) ?? regAfter.raw);
+  // The macOS press receipt carries the same four observations it took around the press; they are
+  // repeated here so one file states the whole toggle without needing the AX file open beside it.
+  const axToggle = toggle.ax ? { plist: toggle.ax.plist, owner: toggle.ax.owner, job: toggle.ax.job, stateAfter: toggle.ax.stateAfter } : null;
+  await evidence(ctx, result, 'toggle.json', { regBefore, regAfter, settled, opened: toggle.opened, marker: toggle.marker, owner, ownerAfter, ax: axToggle });
+  assertion(result, 'opt-out removed login autostart', demonstrablyUnregistered(regAfter) === true, { runAtLoad: regAfter.runAtLoad ?? null, complete: regAfter.complete ?? null, enabled: regAfter.enabled ?? null, logonTrigger: regAfter.logonTrigger ?? null, raw: regAfter.raw?.slice?.(0, 400) ?? regAfter.raw });
+  if (ctx.platform === 'mac') {
+    // A missing, empty or malformed plist is not a demonstrated opt-out: the raw before/after bytes
+    // and their parse state are part of the macOS receipt either way.
+    assertion(result, 'mac login plist parsed on both sides of the toggle (an absent or malformed file proves nothing)', toggle.ax?.plist?.before?.complete === true && toggle.ax?.plist?.after?.complete === true, { before: toggle.ax?.plist?.before ?? null, after: toggle.ax?.plist?.after ?? null });
+    assertion(result, 'pressed switch reported OFF after the press (bounded observation)', toggle.ax?.stateAfter?.value === false, toggle.ax?.stateAfter ?? null);
+  }
   assertSameOwner(result, owner, ownerAfter, 'opt-out toggle never stops the running owner');
   if (ctx.platform === 'windows') {
     const tree = await ctx.jobs.windowsTree(ctx.stagedRoot, { ownerPid: owner.pid });
@@ -298,7 +553,8 @@ export async function Q10(ctx, result) {
   const row = (await ctx.agent.call('table')).find((r) => r.pid === fresh.pid);
   assertion(result, 'owner parent is not the GUI', row && row.ppid !== ctx.state.gui.pid, row);
   if (ctx.platform === 'mac') {
-    assertion(result, 'opted-out NotRegistered job: plist has RunAtLoad and KeepAlive false, bootstrap + plain kickstart started it (carry-over todo 10 N2)', /<key>RunAtLoad<\/key>\s*<false\/>/.test((await loginRegistration(ctx, key)).raw) && job.state === 'Running', job.state);
+    const plist = await loginRegistration(ctx, key);
+    assertion(result, 'opted-out NotRegistered job: plist has RunAtLoad and KeepAlive false, bootstrap + plain kickstart started it (carry-over todo 10 N2)', demonstrablyUnregistered(plist) && job.state === 'Running', { state: job.state, runAtLoad: plist.runAtLoad, keepAlive: plist.keepAlive, complete: plist.complete });
     ctx.carry.push({ item: 'todo 10 N2 / DoneClaim risk: bootstrap does not start a RunAtLoad=false KeepAlive=false plist; plain kickstart does', evidence: path.posix.join(ctx.evidenceDir, 'Q10-optout-launch.json') });
   }
   await ctx.agent.call('remove', { target: optout });
