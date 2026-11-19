@@ -471,18 +471,15 @@ fn is_severely_weak(password: &str, len: usize) -> bool {
         "master", "login", "iloveyou", "abc123",
     ];
 
-    for common in COMMON_PASSWORDS {
-        if lower == *common || lower.contains(common) {
-            return true;
-        }
-    }
+    let is_common = COMMON_PASSWORDS
+        .iter()
+        .copied()
+        .any(|common| lower == common || lower.contains(common));
 
     let first_char = password.chars().next();
-    if password.chars().all(|c| Some(c) == first_char) {
-        return true;
-    }
+    let is_repeated_char = password.chars().all(|c| Some(c) == first_char);
 
-    false
+    is_common || is_repeated_char
 }
 
 fn compute_standard_entropy(password: &str, len: usize) -> f64 {

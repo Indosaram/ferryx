@@ -33,16 +33,14 @@ pub fn create_punch_packet(
 }
 
 fn is_transient_reset(err: &std::io::Error) -> bool {
-    if err.kind() == ErrorKind::ConnectionReset {
-        return true;
-    }
+    let kind_reset = err.kind() == ErrorKind::ConnectionReset;
+
     #[cfg(windows)]
-    {
-        if err.raw_os_error() == Some(10054) {
-            return true;
-        }
-    }
-    false
+    let os_reset = err.raw_os_error() == Some(10054);
+    #[cfg(not(windows))]
+    let os_reset = false;
+
+    kind_reset || os_reset
 }
 
 pub async fn execute_nonce_punch(
