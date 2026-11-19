@@ -42,10 +42,8 @@ jobs:
     # Public repositories use this standard ARM64 runner without runner-minute charges.
     # Pin the OS; do not select a paid -xlarge runner or change the aarch64 target.
     runs-on: macos-15
-    # A cold standard ARM64 run needs ~30 minutes just to compile the Rust test
-    # targets, after ~10 minutes of setup/UI, before running the native suites.
-    # Keep a bounded deadline without cancelling healthy cold builds mid-test.
-    timeout-minutes: 90
+    # Allow a full hour for single-job test compilation, in addition to setup and test execution.
+    timeout-minutes: 110
     # Keep test compilation within the ephemeral runner's disk budget. Assertions remain on.
     env:
       CARGO_BUILD_JOBS: '1'
@@ -171,11 +169,11 @@ jobs:
       # completed compiler log. Both stages use precisely the same suite list.
       - name: Compile Rust test targets
         shell: bash
-        timeout-minutes: 42
+        timeout-minutes: 62
         env:
           TEST_SUITE: ${{ inputs.suite || 'full' }}
           CARGO_BUILD_TARGET: aarch64-apple-darwin
-        run: python3 scripts/ci-run-bounded.py --timeout-seconds 2400 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-compile.log" -- bash scripts/ci-native-tests.sh compile
+        run: python3 scripts/ci-run-bounded.py --timeout-seconds 3600 --log "$RUNNER_TEMP/ferryx-ci-logs/rust-compile.log" -- bash scripts/ci-native-tests.sh compile
 
       - name: Preserve successful native compilation if later tests fail
         # Keep the existing dependency cache scope; runtime fixture state is not cached.
