@@ -488,6 +488,19 @@ pub async fn settle(
     subject_ref: &str,
     outcome: Outcome,
 ) -> Result<Vec<String>, sqlx::Error> {
+    let ids = settle_rows(pool, subject_ref, outcome).await?;
+    observe(pool, &ids, outcome).await?;
+    Ok(ids)
+}
+
+/// [`settle`] without the crediting: closes the subject's open injections and returns the
+/// lesson ids it settled. A caller that settles two subjects of one outcome at once
+/// ([`goal_completed`], [`goal_failed`]) credits the union once instead of each subject.
+async fn settle_rows(
+    pool: &SqlitePool,
+    subject_ref: &str,
+    outcome: Outcome,
+) -> Result<Vec<String>, sqlx::Error> {
     let now = Utc::now().to_rfc3339();
     let mut tx = pool.begin_write().await?;
     let ids: Vec<String> = sqlx::query_scalar(
@@ -501,7 +514,6 @@ pub async fn settle(
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
-    observe(pool, &ids, outcome).await?;
     Ok(ids)
 }
 
@@ -509,9 +521,20 @@ pub async fn settle(
 ///
 /// A lesson can reach a turn without passing admission -- a correction selects it directly --
 /// so turn rows are the only place its outcome is visible. Crediting them keeps
-/// `helped`/`hurt` and promotion honest for those lessons; the goal rollup settles each
-/// `(goal, lesson)` pair once, so a lesson seen through both paths is not double-counted.
+/// `helped`/`hurt` and promotion honest for those lessons.
 pub async fn settle_turns(
+    pool: &SqlitePool,
+    turn_ref: &str,
+    outcome: Outcome,
+) -> Result<Vec<String>, sqlx::Error> {
+    let ids = settle_turn_rows(pool, turn_ref, outcome).await?;
+    observe(pool, &ids, outcome).await?;
+    Ok(ids)
+}
+
+/// [`settle_turns`] without the crediting: closes the turn's open injections and returns the
+/// lesson ids it settled.
+async fn settle_turn_rows(
     pool: &SqlitePool,
     turn_ref: &str,
     outcome: Outcome,
@@ -529,20 +552,20 @@ pub async fn settle_turns(
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;
-    observe(pool, &ids, outcome).await?;
     Ok(ids)
 }
 
-/// Closes earlier dispatch turns of the same goal without crediting their lessons.
+/// Closes earlier dispatch turns of the same goal without crediting their lessons, and
+/// settles the settling run's own turn. Returns the lessons that turn carried.
 async fn settle_goal_turns(
     pool: &SqlitePool,
     turn_ref: Option<&str>,
     outcome: Outcome,
-) -> Result<(), sqlx::Error> {
+) -> Result<Vec<String>, sqlx::Error> {
     let Some(turn_ref) = turn_ref else {
-        return Ok(());
+        return Ok(Vec::new());
     };
-    settle_turns(pool, turn_ref, outcome).await?;
+    let ids = settle_turn_rows(pool, turn_ref, outcome).await?;
     sqlx::query(
         "UPDATE lesson_turn_injections SET outcome = 'neutral', settled_at = ?
          WHERE settled_at IS NULL AND turn_ref IN (
@@ -555,18 +578,34 @@ async fn settle_goal_turns(
     .bind(turn_ref)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(ids)
 }
 
-/// A goal completed: its injected lessons helped.
+/// Credits each of `ids` once, keeping first-seen order. The goal rollup settles a
+/// `(goal, lesson)` pair and the settling turn settles the same pair: a lesson seen through
+/// both paths moved the same goal, so it counts once.
+fn credit_once(ids: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut credited: Vec<String> = Vec::new();
+    for id in ids {
+        if !credited.contains(&id) {
+            credited.push(id);
+        }
+    }
+    credited
+}
+
+/// A goal completed: its injected lessons helped, each lesson once whichever path -- the goal
+/// rollup or the settling turn -- recorded it.
 pub async fn goal_completed(
     pool: &SqlitePool,
     goal_id: &str,
     turn_ref: Option<&str>,
 ) -> Result<Vec<String>, sqlx::Error> {
-    let ids = settle(pool, &goal_subject(goal_id), Outcome::Helped).await?;
-    settle_goal_turns(pool, turn_ref, Outcome::Helped).await?;
-    Ok(ids)
+    let mut settled = settle_rows(pool, &goal_subject(goal_id), Outcome::Helped).await?;
+    settled.extend(settle_goal_turns(pool, turn_ref, Outcome::Helped).await?);
+    let credited = credit_once(settled);
+    observe(pool, &credited, Outcome::Helped).await?;
+    Ok(credited)
 }
 
 /// A goal ended without converging: its injected lessons hurt, and the judge is asked once
@@ -580,8 +619,9 @@ pub async fn goal_failed(
     turn_ref: Option<&str>,
 ) -> HubResult<Option<Lesson>> {
     let subject = goal_subject(goal_id);
-    settle(pool, &subject, Outcome::Hurt).await?;
-    settle_goal_turns(pool, turn_ref, Outcome::Hurt).await?;
+    let mut settled = settle_rows(pool, &subject, Outcome::Hurt).await?;
+    settled.extend(settle_goal_turns(pool, turn_ref, Outcome::Hurt).await?);
+    observe(pool, &credit_once(settled), Outcome::Hurt).await?;
     let project: Option<String> =
         sqlx::query_scalar("SELECT project_id FROM supervisor_goals WHERE goal_id = ?")
             .bind(goal_id)

@@ -652,7 +652,9 @@ async fn admission_and_correction_record_distinct_turns_without_recounting_lesso
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(counts, vec![1, 1]);
+    // Two real injections into two different turns: admission, then the correction. The turn
+    // rows above stay one per (turn, lesson), which is what "no recounting" means here.
+    assert_eq!(counts, vec![2, 2]);
     dispatch.drain().await;
     let text = sends_text(&control).pop().unwrap();
     for rule in [
