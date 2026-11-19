@@ -171,7 +171,11 @@ test('identity mismatch never signals and timeout retains exit uncertainty', asy
   const f = ownedFixture();
   f.probeIdentity.mockReturnValue({ alive: true, executable: '/foreign/program' });
   const pending = teardownOwnedChildren(f.ledger, { ...f, currentPlatform: 'linux' });
-  await vi.advanceTimersByTimeAsync(5000);
+  // Bun's vitest shim implements advanceTimersByTime but not advanceTimersByTimeAsync, so the
+  // awaited form threw "is not a function" before any assertion ran. The teardown deadline is a
+  // single one-shot timer and `pending` is awaited on the next line, so advancing synchronously
+  // fires the same callback and lets the same microtasks settle afterwards.
+  vi.advanceTimersByTime(5000);
   const result = await pending;
   expect(f.signalPid).not.toHaveBeenCalled();
   expect(result.allExited).toBe(false);

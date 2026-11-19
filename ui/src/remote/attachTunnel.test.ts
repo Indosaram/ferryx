@@ -385,8 +385,20 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
       }
       const message = await received;
 
-      // Then the payload is intact and was copied a bounded number of times, not once per chunk
-      expect(message).toEqual(payload);
+      // Then the payload is intact and was copied a bounded number of times, not once per chunk.
+      // Compare byte by byte rather than with `toEqual`: deep equality over a 1 MiB typed array
+      // costs seconds on a slow host (6.8s measured here for identical 1 MiB arrays), which made
+      // this file time out at 5000ms on slow machines while passing on fast ones. A plain scan is
+      // linear and still fails on any single differing byte, reporting where it diverged.
+      expect(message.length).toBe(payload.length);
+      let firstMismatch = -1;
+      for (let i = 0; i < payload.length; i++) {
+        if (message[i] !== payload[i]) {
+          firstMismatch = i;
+          break;
+        }
+      }
+      expect(firstMismatch).toBe(-1);
       expect(copied.bytes).toBeLessThan(payloadSize * 4);
     } finally {
       setSpy.mockRestore();

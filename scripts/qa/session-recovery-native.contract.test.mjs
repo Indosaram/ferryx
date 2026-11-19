@@ -96,7 +96,11 @@ test.each(['release', 'worktrees'])('bounds non-cooperative cleanup %s and prese
     const index = scheduled.mock.calls.findIndex(([, ms]) => ms === 15_000);
     expect(index).toBeGreaterThanOrEqual(0);
     expect(scheduled.mock.results[index].value.hasRef()).toBe(true);
-    await vi.advanceTimersByTimeAsync(15_000);
+    // Bun's vitest shim implements advanceTimersByTime but not advanceTimersByTimeAsync, so the
+    // awaited form threw "is not a function" and the test never reached its assertions. The
+    // deadline is a single one-shot timer, and the pending promise is awaited below, so
+    // advancing synchronously runs the same callbacks with the same microtasks drained after.
+    vi.advanceTimersByTime(15_000);
     const result = await pending;
     expect(result).toMatchObject({ status: 'failed', barrierCode: initiating.code, detail: initiating.message });
     expect(cleanupSignal.aborted).toBe(true);

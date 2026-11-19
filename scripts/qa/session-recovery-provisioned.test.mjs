@@ -156,7 +156,11 @@ test('cleanup refuses an owned PID whose executable changed', async () => {
   const signalPid = vi.fn();
   const pending = teardownOwnedChildren(ledger, { currentPlatform: 'linux', signalPid,
     probeIdentity: () => ({ alive: true, executable: '/foreign/app' }) });
-  await vi.advanceTimersByTimeAsync(5000);
+  // Bun's vitest shim implements advanceTimersByTime but not advanceTimersByTimeAsync, so the
+  // awaited form threw "is not a function" before any assertion ran. The teardown deadline is a
+  // single one-shot timer and `pending` is awaited on the next line, so advancing synchronously
+  // fires the same callback and lets the same microtasks settle afterwards.
+  vi.advanceTimersByTime(5000);
   const result = await pending;
   expect(signalPid).not.toHaveBeenCalled();
   expect(result).toMatchObject({ refused: true, allExited: false });
