@@ -51,6 +51,16 @@ pub(super) fn members(group: i32) -> io::Result<Vec<i32>> {
 }
 
 #[cfg(target_os = "linux")]
+/// A process that exits while `/proc` is being scanned is simply no longer a member: the
+/// kernel reports that either as a vanished directory (`ENOENT`) or, when the task is torn
+/// down between the directory read and the `stat` read, as `ESRCH`. Failing the inventory on
+/// either would turn a normal exit into a failed Git command.
+fn process_vanished(error: &io::Error) -> bool {
+    matches!(error.kind(), io::ErrorKind::NotFound)
+        || error.raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(target_os = "linux")]
 pub(super) fn members(group: i32) -> io::Result<Vec<i32>> {
     let mut result = Vec::new();
     // Linux exposes no group-specific inventory syscall. Inspect stat only;
@@ -66,7 +76,7 @@ pub(super) fn members(group: i32) -> io::Result<Vec<i32>> {
         };
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) if process_vanished(&e) => continue,
             Err(e) => return Err(e),
         };
         let fields: Vec<_> = stat
@@ -182,6 +192,19 @@ pub(super) fn wait(fd: OwnedFd, deadline: Instant) -> io::Result<()> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_member_that_exits_mid_scan_is_not_a_drain_failure() {
+        // `/proc/<pid>/stat` answers ESRCH when the task is torn down between the directory
+        // read and the stat read, and ENOENT once the directory entry is gone. Both mean the
+        // member simply left; treating either as an inventory failure failed the whole Git
+        // command with "IO error: No such process (os error 3)".
+        assert!(process_vanished(&io::Error::from_raw_os_error(libc::ESRCH)));
+        assert!(process_vanished(&io::Error::from(io::ErrorKind::NotFound)));
+        // A real inventory failure must still reach the caller.
+        assert!(!process_vanished(&io::Error::from_raw_os_error(libc::EACCES)));
+        assert!(!process_vanished(&io::Error::from_raw_os_error(libc::EMFILE)));
+    }
 
     #[test]
     fn pidfd_absence_is_not_a_drain_failure() {
