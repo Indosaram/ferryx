@@ -750,12 +750,14 @@ fn posix_upload_script_never_kills_live_daemon_and_defers_upgrade() {
     std::fs::create_dir_all(base.join("helper")).unwrap();
     let fake_helper = base.join("bin/ferryx-remote-helper");
 
-    std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Staged by a child process: `std::fs::copy` would leave a write descriptor
+    // that a parallel test's fork can inherit, and the exec below would then fail
+    // with ETXTBSY under thread contention.
+    crate::test_support::stage_executable(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../remote-helper/target/debug/ferryx-remote-helper"),
         &fake_helper,
-    )
-    .unwrap();
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

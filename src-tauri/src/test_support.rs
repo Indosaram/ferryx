@@ -29,6 +29,61 @@ fn cli_next_to_test(exe: &Path) -> Option<PathBuf> {
     Some(profile.join(format!("ferryx-cli{}", std::env::consts::EXE_SUFFIX)))
 }
 
+/// Stages an executable at `destination` without this process ever holding a
+/// write descriptor on it.
+///
+/// `std::fs::copy` creates the target in-process. It closes that descriptor
+/// before returning, but a parallel test's `fork` can inherit it while it is
+/// open; until the inheriting child execs, the inode has an open-for-write
+/// descriptor, and `exec(destination)` fails with `ETXTBSY` ("Text file busy",
+/// `ExecutableFileBusy`). The flake therefore tracks machine load and thread
+/// count rather than the code under test, and closing the descriptor on our
+/// side cannot fix it: the one that blocks the exec lives in another process.
+///
+/// A hard link reuses the source's already-closed inode and copies nothing.
+/// Cross-device staging (the usual case when `TMPDIR` is a tmpfs and the build
+/// tree is not) falls back to a child process that writes the bytes and exits
+/// before the destination is executed, so no concurrent fork of this process
+/// can inherit its descriptor.
+#[cfg(unix)]
+pub(crate) fn stage_executable(source: &Path, destination: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::fs::hard_link(source, destination).is_ok() {
+        return;
+    }
+
+    // `sh -c 'script' name "$1" "$2"`: `name` becomes $0 and the paths arrive as
+    // positional parameters, so nothing in them is parsed as shell syntax.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("cp \"$1\" \"$2\"")
+        .arg("stage-executable")
+        .arg(source)
+        .arg(destination)
+        .status()
+        .unwrap_or_else(|error| {
+            panic!(
+                "stage {} -> {}: spawn cp: {error}",
+                source.display(),
+                destination.display()
+            )
+        });
+    assert!(
+        status.success(),
+        "stage {} -> {}: cp exited with {status}",
+        source.display(),
+        destination.display()
+    );
+    let mode = std::fs::metadata(source)
+        .unwrap_or_else(|error| panic!("stat {}: {error}", source.display()))
+        .permissions()
+        .mode()
+        & 0o777;
+    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(mode))
+        .unwrap_or_else(|error| panic!("chmod {}: {error}", destination.display()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

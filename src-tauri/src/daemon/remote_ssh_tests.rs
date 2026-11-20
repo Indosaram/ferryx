@@ -873,7 +873,10 @@ fn stage_verified_helper_asset(exe_dir: &Path, target_triple: &str) -> PathBuf {
 
     let binary_path = staged_asset_path(exe_dir, target_triple);
     std::fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
-    std::fs::copy(&source, &binary_path).unwrap();
+    // Linked (or copied by a child) rather than copied in-process: this function
+    // execs the result below, and an inherited write descriptor from a parallel
+    // test's fork would turn that into an ETXTBSY failure.
+    crate::test_support::stage_executable(&source, &binary_path);
     std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     // The manifest is only honest if the staged file really is a current helper.
@@ -1049,13 +1052,15 @@ async fn remote_ssh_first_spawn_provisions_qualified_helper_automatically() {
     // The asset fixture must be adjacent to the executable, so this test binary
     // runs from a private copy inside its own temporary directory: the shared
     // `target/debug/deps/helpers` subtree (which may hold foreign artifacts) is
-    // never written to and never removed.
+    // never written to and never removed. The path stays under TMPDIR: staging
+    // this binary is hundreds of megabytes, which a quota'd `/tmp` cannot hold,
+    // and nothing here needs the short path that the helper's socket does.
     let assets = tempfile::Builder::new()
         .prefix("fx-provision-assets")
-        .tempdir_in("/tmp")
+        .tempdir()
         .unwrap();
     let child_binary = assets.path().join("ferryx-lib-provision-tests");
-    std::fs::copy(std::env::current_exe().unwrap(), &child_binary).unwrap();
+    crate::test_support::stage_executable(&std::env::current_exe().unwrap(), &child_binary);
     std::fs::set_permissions(&child_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
     let staged = stage_verified_helper_asset(assets.path(), &local_helper_target_triple());
     assert!(
