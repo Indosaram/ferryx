@@ -15,7 +15,7 @@ import { createGuiDriver, ownsForeground, clickReach } from './lib/gui.mjs';
 import { isolationLayout } from './lib/guards.mjs';
 import {
   confirmInputOwnership, openSettings, summarizeFocus, OWNERSHIP_UNCONFIRMED,
-  waitRestoredAttach, dismissSetupWizard, guiTempDir, SETTINGS_OPENED_RECEIPT,
+  waitRestoredAttach, dismissSetupWizard, guiTempDir, readyMacSshPane, SETTINGS_OPENED_RECEIPT,
 } from './scenarios/q10-q13.mjs';
 
 const RUN = '20261019t064512z';
@@ -23,6 +23,21 @@ const PANE = `q11-pane-${RUN}`;
 
 /** A gui.focus answer the harness must treat as ownership. */
 const OWNS = { focused: true, pid: 10, rect: { left: 100, top: 50, right: 1100, bottom: 850 } };
+
+test('an attached but covered macOS SSH pane needs a newer input receipt from that same pane', async () => {
+  const gate = (sequence, value, backend = 'ssh1') => ({ runId: 'gui', sequence, event: 'terminal.surface.input.gate.state', details: { paneIdentity: PANE, backendSessionId: backend, interactive: value, visible: value, surfaceVisible: true, isExited: false, suspended: false } });
+  const presented = { runId: 'gui', sequence: 3, event: 'terminal.surface.presented', details: { localSessionId: PANE, backendSessionId: 'ssh1' } };
+  for (const [owned, backend, state, sent] of [[false, 'ssh1', 'covered', 0], [true, 'other', 'covered', 1], [true, 'ssh1', 'ready', 1]]) {
+    const rows = [gate(1, true), gate(2, false), presented];
+    const keys = [];
+    const ctx = { layout: { root: '/qa' }, gui: { focus: async () => ({ focused: owned }) },
+      mahord: { key: async key => { keys.push(key); rows.push(gate(4, true, backend)); } },
+      agent: { call: async (method, args) => method === 'readFile' ? rows.map(r => JSON.stringify(r)).join('\n') : { matched: rows.slice(args.fromLine ?? 0).map(r=>JSON.stringify(r)).find(s=>new RegExp(args.pattern).test(s)) ?? null } } };
+    const result = await readyMacSshPane(ctx, { pid: 10 }, PANE, 'ssh1');
+    assert.equal(result.after.state, state);
+    assert.deepEqual(keys, sent ? ['Escape'] : []);
+  }
+});
 
 test('only an explicit focused:true is ownership; refusals, skips and malformed answers are not', () => {
   assert.equal(ownsForeground(OWNS), true);

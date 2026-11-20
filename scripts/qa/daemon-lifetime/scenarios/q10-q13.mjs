@@ -668,6 +668,38 @@ export function expectsSetupWizard(platform) {
 export function guiTempDir(layout) {
   return hjoin(layout.root, 'gui-tmp');
 }
+
+export async function readyMacSshPane(ctx, gui, pane, backend) {
+  const file = hjoin(guiTempDir(ctx.layout), 'ferryx-switch-debug.jsonl');
+  const latest = async () => {
+    const lines = ((await ctx.agent.call('readFile', { file })) ?? '').split(/\r?\n/).filter(Boolean);
+    let gate = null, presented = null;
+    for (const line of lines) {
+      let row;
+      try { row = JSON.parse(line); } catch (error) { if (error instanceof SyntaxError) return { state: 'unknown', lines: lines.length }; throw error; }
+      const d = row.details;
+      if (d?.backendSessionId !== backend) continue;
+      if (row.event === 'terminal.surface.presented' && d.localSessionId === pane) presented = row;
+      if (row.event === 'terminal.surface.input.gate.state' && d.paneIdentity === pane) gate = row;
+    }
+    let state = 'unknown';
+    if (presented?.runId && gate?.runId === presented.runId && gate.details.surfaceVisible === true && gate.details.isExited === false && gate.details.suspended === false) {
+      if (gate.details.interactive === true && gate.details.visible === true) state = 'ready';
+      if (gate.details.interactive === false && gate.details.visible === false) state = 'covered';
+    }
+    return { state, lines: lines.length, gateSequence: gate?.sequence ?? null, presentedSequence: presented?.sequence ?? null };
+  };
+  await ctx.agent.call('waitLog', { file, pattern: `"terminal\\.surface\\.presented"[^\\n]*"localSessionId":"${pane}"[^\\n]*"backendSessionId":"${backend}"`, deadlineMs: 15_000 });
+  const before = await latest();
+  if (before.state !== 'covered') return { before, after: before, escaped: false };
+  const focus = await confirmInputOwnership(ctx, gui, 'ssh-covered-pane');
+  if (!focus.owned) return { before, after: before, escaped: false, refused: OWNERSHIP_UNCONFIRMED };
+  const atPress = await latest();
+  if (atPress.state !== 'covered') return { before, after: atPress, escaped: false };
+  await ctx.mahord.key('Escape');
+  await ctx.agent.call('waitLog', { file, fromLine: atPress.lines, pattern: `"terminal\\.surface\\.input\\.gate\\.state"[^\\n]*"paneIdentity":"${pane}"[^\\n]*"backendSessionId":"${backend}"[^\\n]*"interactive":true`, deadlineMs: 10_000 });
+  return { before, after: await latest(), escaped: true };
+}
 export function wizardOpenPattern(pane) {
   return `"terminal\\.surface\\.skipped"[^\\n]*"localSessionId":"${pane}"[^\\n]*which=dialog:Welcome to Ferryx`;
 }
@@ -857,6 +889,11 @@ export async function Q11(ctx, result) {
   const op = `q11-${ctx.runId}`;
   const pane = `q11-pane-${ctx.runId}`;
   const guiEnv = { FERRYX_QA_OPERATION_ID: op };
+  if (ctx.platform === 'mac') {
+    await ctx.agent.call('mkdir', { dir: guiTempDir(ctx.layout), mode: 0o700 });
+    guiEnv.TMPDIR = guiTempDir(ctx.layout);
+    guiEnv.FERRYX_SWITCH_DEBUG = '1';
+  }
   if (expectsSetupWizard(ctx.platform)) {
     // Rust std::env::temp_dir (GetTempPath2) reads TMP, then TEMP: the GUI's switch-debug log lands here.
     await ctx.agent.call('mkdir', { dir: guiTempDir(ctx.layout) });
@@ -917,6 +954,13 @@ export async function Q11(ctx, result) {
   // typing - so ownership is proved first and nothing is sent without it. The modifier release is
   // itself a global key-up: on an unowned desktop it clears modifiers for a stranger, so it sits
   // inside the guard too, and its 'before-focus' position in the record is kept by name.
+  if (ctx.platform === 'mac') {
+    const input = await readyMacSshPane(ctx, ctx.state.gui, pane, sid);
+    await evidence(ctx, result, 'pane-input-ready.json', input);
+    if (input.refused || input.after.state !== 'ready') {
+      return block(result, input.refused ?? 'SSH_PANE_INPUT_NOT_READY', { pane, backend: sid, ...input });
+    }
+  }
   const guard = await confirmInputOwnership(ctx, ctx.state.gui, 'before-focus');
   const focused = summarizeFocus(guard.focus);
   if (!guard.owned) {

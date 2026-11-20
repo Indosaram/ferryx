@@ -81,6 +81,26 @@ test('run-int2-all Q08 A_B: the staged runtime is waited for, not read once righ
   assert.equal(existsSync(path.join(stagedRoot, '2026.1018.1-ef262e84')), false);
 });
 
+test('a published macOS helper is not ready for handover before its own GUI finishes staging', async () => {
+  const observed = Promise.withResolvers();
+  const armed = Promise.withResolvers();
+  const ctx = { platform: 'mac', stagedRoot: '/run/data/daemon-runtime', keys: { B: 'B' }, layout: { logs: '/run/logs' }, agent: { call: async (name, params) => {
+    if (name === 'waitPath' || name === 'exists') return true;
+    assert.equal(name, 'waitLog');
+    assert.equal(params.file, '/run/logs/gui-g2.log');
+    observed.resolve();
+    return armed.promise;
+  } } };
+  let ready = false;
+  const pending = stageGeneration(ctx, { name: 'B' }, { guiTag: 'g2' }).then(x => { ready = true; return x; });
+  await Promise.race([observed.promise, pending]);
+  assert.equal(ready, false);
+  armed.resolve({ matched: 'Daemon supervisor armed' });
+  assert.equal((await pending).present, true);
+  ctx.agent.call = async name => name === 'waitLog' ? { matched: null, timedOut: true } : true;
+  await assert.rejects(stageGeneration(ctx, { name: 'B' }, { guiTag: 'g2' }), /RequestUpgrade was not sent/);
+});
+
 test('fix 3: waitLog with fromLine ignores receipts written before the offset', async () => {
   const runDir = mkdtempSync(path.join(os.tmpdir(), 'q08-harness-'));
   const file = path.join(runDir, 'authority.jsonl');

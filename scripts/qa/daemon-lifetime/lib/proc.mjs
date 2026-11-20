@@ -118,12 +118,19 @@ export async function probeIdentity(pid, platform, { exec = run } = {}) {
     }
   }
   if (platform === 'mac') {
-    const r = await run('/bin/ps', ['-o', 'lstart=,comm=', '-p', String(pid)], { deadlineMs: 10_000 });
+    const getProcess = () => exec('/bin/ps', ['-o', 'lstart=,comm=', '-p', String(pid)], { deadlineMs: 10_000 });
+    const r = await getProcess();
     if (r.status !== 0 || !r.stdout.trim()) return null;
     const line = r.stdout.trim();
     const m = /^(\w{3} \w{3}\s+\d+ [\d:]+ \d{4})\s+(.*)$/.exec(line);
     if (!m) return null;
-    return { executable: m[2], startTime: m[1] };
+    if (m[2].startsWith('/')) return { executable: m[2], startTime: m[1] };
+    // sshd rewrites its process title. Do not authorize a signal using a path parsed from that title or an arbitrary mapped file.
+    const script = 'import ctypes,sys; b=ctypes.create_string_buffer(4096); n=ctypes.CDLL("/usr/lib/libproc.dylib").proc_pidpath(int(sys.argv[1]),b,len(b)); sys.stdout.buffer.write(b.value if n>0 else b"")';
+    const image = await exec('/usr/bin/python3', ['-I', '-c', script, String(pid)], { deadlineMs: 10_000 });
+    const again = await getProcess();
+    if (again.status !== 0 || again.stdout.trim() !== line || image.status !== 0 || !image.stdout.startsWith('/') || /[\r\n\0]/.test(image.stdout)) throw new Error(`macOS could not verify the live executable for pid ${pid}`);
+    return { executable: image.stdout, startTime: m[1] };
   }
   if (platform === 'windows') {
     const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', windowsProbeScript(pid)], { deadlineMs: 20_000 });

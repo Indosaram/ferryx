@@ -157,6 +157,29 @@ test('windows teardown: a recorded GUI whose pid was reused by another process i
   assert.deepEqual(sent, []);
 });
 
+test('mutable macOS listener titles never authorize a kill; only the kernel image and recorded start do', async () => {
+  const start = 'Thu Nov 19 12:30:39 2026';
+  let title = '/usr/sbin/sshd', image = '/usr/sbin/sshd';
+  const sent = [];
+  const exec = async (cmd, args) => {
+    assert.equal(args.at(-1), '42');
+    if (cmd === '/bin/ps') return { status: 0, stdout: `${start} ${title}\n` };
+    assert.equal(cmd, '/usr/bin/python3');
+    return { status: 0, stdout: image };
+  };
+  const r = new ProcessRegistry({ platform: 'mac', probe: pid => probeIdentity(pid, 'mac', { exec }), signal: async pid => sent.push(pid) });
+  await r.record(42, { role: 'sshd', executable: image });
+  title = 'sshd: /usr/sbin/sshd -D -e -f /qa/sshd_config [listener]';
+  image = '/tmp/other-program';
+  await assert.rejects(r.kill(42), /KILL_REFUSED/);
+  image = '';
+  await assert.rejects(r.kill(42));
+  assert.deepEqual(sent, []);
+  image = '/usr/sbin/sshd';
+  assert.equal(await r.kill(42), true);
+  assert.deepEqual(sent, [42]);
+});
+
 test('windows probe keeps the FILETIME start exact through script, JSON and parse (> 2^53)', async () => {
   const filetime = 134048390123456789n; // owner.json u64; Number(filetime) would round to ...800
   assert.notEqual(String(Number(filetime)), String(filetime));

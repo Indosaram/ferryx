@@ -168,13 +168,21 @@ export const STAGE_TIMEOUT_MS = 120_000;
  * watch, bounded). waitPath creates the watched file's parent, so it must never watch inside
  * <key>: an empty <key> dir would make the stager reuse it as an existing generation.
  */
-export async function stageGeneration(ctx, artifact, { deadlineMs = STAGE_TIMEOUT_MS } = {}) {
+export async function stageGeneration(ctx, artifact, { deadlineMs = STAGE_TIMEOUT_MS, guiTag = null } = {}) {
   // runtime_stage.rs:38 stages ferryx.exe on Windows; the .app layout is what launchd runs on mac.
   const exe = stagedExecutable(ctx, artifact.name);
   const generationDir = hjoin(ctx.stagedRoot, ctx.keys[artifact.name]);
   const startedAt = Date.now();
   const appeared = await ctx.agent.call('waitPath', { file: generationDir, deadlineMs });
-  return { exe, key: ctx.keys[artifact.name], present: appeared && await ctx.agent.call('exists', { file: exe }), waitedMs: Date.now() - startedAt };
+  const present = appeared && await ctx.agent.call('exists', { file: exe });
+  let setup = null;
+  if (ctx.platform === 'mac' && guiTag) {
+    // stage_from publishes the helper before stage_runtime finishes copying its dylibs. Only this GUI's setup receipt comes after both.
+    if (!present) throw new Error(`successor executable was not staged: ${exe}`);
+    setup = await ctx.agent.call('waitLog', { file: hjoin(ctx.layout.logs, `gui-${guiTag}.log`), pattern: 'Daemon supervisor armed', deadlineMs: Math.max(1, deadlineMs - (Date.now() - startedAt)) });
+    if (!setup.matched) throw new Error(`successor ${artifact.name} GUI ${guiTag} never finished staging; RequestUpgrade was not sent`);
+  }
+  return { exe, key: ctx.keys[artifact.name], present, setup, waitedMs: Date.now() - startedAt };
 }
 
 /**
@@ -210,7 +218,7 @@ export async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven 
   // Launching the new GUI stages its runtime; the new GUI itself never starts a second owner.
   await ctx.gui.quit(ctx.state.gui);
   ctx.state.gui = await ctx.gui.launch(artifact);
-  const staged = await stageGeneration(ctx, artifact);
+  const staged = await stageGeneration(ctx, artifact, { guiTag: guiDriven ? null : ctx.state.gui.tag });
   assertion(result, `${tag}: ${artifact.name} runtime staged`, staged.present, staged);
   const ctl = early ?? await controlConn(ctx);
   const hello = earlyHello ?? await ctl.hello();
@@ -225,9 +233,16 @@ export async function upgradeStep(ctx, result, artifact, pair, tag, { guiDriven 
     const accepted = await ctl.requestUpgrade(staged.exe, staged.key);
     assertion(result, `${tag}: RequestUpgrade accepted`, accepted?.ok === true && accepted.accepted === true, accepted);
   }
+  if (ctx.platform === 'mac') await evidence(ctx, result, `${tag}-candidate-launch.json`, await ctx.jobs.inspect(staged.key));
   const changed = await ownerChange;
   const succ = await ownerIdentity(ctx);
   await evidence(ctx, result, `${tag}-owners.json`, { pred, succ, seen: changed.seen });
+  if (ctx.platform === 'mac' && !changed.owner) {
+    const logDir = hjoin(ctx.layout.home, 'Library', 'Logs', 'Ferryx');
+    const stderr = await ctx.agent.call('readFile', { file: hjoin(logDir, 'daemon.stderr.log') });
+    const stdout = await ctx.agent.call('readFile', { file: hjoin(logDir, 'daemon.stdout.log') });
+    await evidence(ctx, result, `${tag}-candidate-timeout.json`, { job: await ctx.jobs.inspect(staged.key), stderr: stderr?.slice(-32768), stdout: stdout?.slice(-8192) });
+  }
   assertion(result, `${tag}: owner.json moved straight from predecessor to successor`, changed.owner && changed.seen.filter((p) => p !== pred.pid).length === 1, changed.seen);
   assertion(result, `${tag}: successor serves generation ${artifact.name}`, succ.hello?.generation_key === staged.key, succ.hello?.generation_key);
   // todo 8 receipts: the candidate's own stages through authority-adopted, sampled at each transition.
