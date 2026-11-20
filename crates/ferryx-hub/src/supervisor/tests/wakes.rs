@@ -1289,6 +1289,7 @@ async fn applied_state_events_are_pruned_only_past_retention() {
 struct FlakyJudge {
     failing: AtomicBool,
     calls: AtomicUsize,
+    clock: Arc<ManualClock>,
 }
 
 #[async_trait]
@@ -1296,6 +1297,8 @@ impl WakeJudge for FlakyJudge {
     async fn score(&self, _state: &str) -> Result<f64, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.failing.load(Ordering::SeqCst) {
+            // Simulate a provider that fails slowly, without any wall-clock sleep.
+            self.clock.set(self.clock.now() + secs(45));
             Err("judge offline".into())
         } else {
             Ok(0.9)
@@ -1304,49 +1307,90 @@ impl WakeJudge for FlakyJudge {
 }
 
 /// A failing judge is not asked on every rescan: the goal backs off 30s, then 60s, and the
-/// batch goes out once the judge answers.
+/// batch goes out once the judge answers. Reopen the database between failures to ensure
+/// retry deadlines and the count belong to persisted goal state, not the scheduler.
+/// Count the wait from the failure, not from the beginning of the slow provider call.
 #[tokio::test]
-async fn a_failing_judge_is_asked_again_only_after_a_doubling_backoff() {
-    let fixture = fixture().await;
+async fn a_failing_judge_keeps_doubling_backoff_across_restarts() {
+    let dir = temp_dir();
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let path = dir.join("hub.sqlite");
+    let fixture = fixture_on(file_pool(&path).await).await;
     let pool = &fixture.pool;
     let goal = admit(&fixture, "flaky").await;
     let request = start_run(pool, &goal, "run-1").await;
     settle_run(pool, &request, "run-1").await;
     let handler = Recorder::plain();
+    let clock = Arc::new(ManualClock(Mutex::new(epoch())));
     let judge = Arc::new(FlakyJudge {
         failing: AtomicBool::new(true),
         calls: AtomicUsize::new(0),
+        clock: Arc::clone(&clock),
     });
     let calls = || judge.calls.load(Ordering::SeqCst);
-    let scheduler = WakeScheduler::new(pool.clone(), handler.clone()).with_judge(judge.clone());
+    let scheduler = WakeScheduler::new(pool.clone(), handler.clone())
+        .with_judge(judge.clone())
+        .with_clock(clock.clone());
     scheduler.tick(epoch()).await.unwrap();
     assert_eq!(calls(), 0, "a settle is never judged");
 
     let t0 = epoch() + secs(100);
     report(pool, &goal, "rep-0", t0).await.unwrap();
-    let failed = scheduler.tick(t0 + secs(30)).await.unwrap();
+    clock.set(t0 + secs(30));
+    let failed = scheduler.tick(clock.now()).await.unwrap();
     assert_eq!(
         failed.deferred,
         vec![(goal.clone(), Deferral::JudgeUnavailable)]
     );
-    assert_eq!(failed.next_due, Some(t0 + secs(60)));
+    assert_eq!(failed.next_due, Some(t0 + secs(105)), "30s after failure");
     assert_eq!(calls(), 1);
-    let backing_off = scheduler.tick(t0 + secs(45)).await.unwrap();
+    drop(scheduler);
+    fixture.pool.close().await;
+    let pool = file_pool(&path).await;
+    let scheduler = WakeScheduler::new(pool.clone(), handler.clone())
+        .with_judge(judge.clone())
+        .with_clock(clock.clone());
+    clock.set(t0 + secs(90));
+    let backing_off = scheduler.tick(clock.now()).await.unwrap();
     assert_eq!(
         backing_off.deferred,
         vec![(goal.clone(), Deferral::JudgeUnavailable)]
     );
-    assert_eq!(backing_off.next_due, Some(t0 + secs(60)));
+    assert_eq!(backing_off.next_due, Some(t0 + secs(105)));
     assert_eq!(calls(), 1, "no call inside the backoff");
-    let again = scheduler.tick(t0 + secs(60)).await.unwrap();
+    clock.set(t0 + secs(105));
+    let again = scheduler.tick(clock.now()).await.unwrap();
     assert_eq!(calls(), 2);
-    assert_eq!(again.next_due, Some(t0 + secs(120)), "the backoff doubles");
+    assert_eq!(again.next_due, Some(t0 + secs(210)), "60s after failure");
+
+    drop(scheduler);
+    pool.close().await;
+    let pool = file_pool(&path).await;
+    let scheduler = WakeScheduler::new(pool.clone(), handler.clone())
+        .with_judge(judge.clone())
+        .with_clock(clock.clone());
+    clock.set(t0 + secs(180));
+    let during_second_backoff = scheduler.tick(clock.now()).await.unwrap();
+    assert_eq!(during_second_backoff.next_due, Some(t0 + secs(210)));
+    assert_eq!(calls(), 2, "the second deadline also survived reopening");
 
     judge.failing.store(false, Ordering::SeqCst);
-    let answered = scheduler.tick(t0 + secs(120)).await.unwrap();
+    clock.set(t0 + secs(210));
+    let answered = scheduler.tick(clock.now()).await.unwrap();
     assert_eq!(calls(), 3);
     assert_eq!(answered.delivered.len(), 1);
     assert_eq!(event_ids(&handler.last()), ["rep-0"]);
+    let reset: (i64, Option<i64>) = sqlx::query_as(
+        "SELECT wake_judge_failures, wake_judge_retry_at_ms FROM supervisor_goals WHERE goal_id = ?",
+    )
+    .bind(&goal)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reset, (0, None));
+    drop(scheduler);
+    pool.close().await;
+    tokio::fs::remove_dir_all(dir).await.unwrap();
 }
 
 /// The store pokes the daemon's scheduler when it commits an owner control: with an hour-long
