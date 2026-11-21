@@ -83,6 +83,8 @@ async function boot() {
       const stopDiscovery = startTailscaleDiscovery();
       import.meta.hot?.dispose(stopDiscovery);
     }
+    const { installDesktopLaneLifecycleTransport } = await import("./lib/desktopLaneLifecycle");
+    installDesktopLaneLifecycleTransport();
     const { default: App } = await import("./App");
     void bootTrace("app.imported");
     ReactDOM.createRoot(el).render(

@@ -176,6 +176,8 @@ enum Command {
     #[cfg(test)]
     HoldRecovery(oneshot::Sender<()>, oneshot::Receiver<()>),
     #[cfg(test)]
+    HoldNextRecovery(oneshot::Sender<()>, oneshot::Receiver<()>, oneshot::Sender<()>),
+    #[cfg(test)]
     RecoveryScheduled(oneshot::Sender<bool>),
     #[cfg(test)]
     SubscribeRecoveryEvents(oneshot::Sender<tokio::sync::broadcast::Receiver<RecoveryTestEvent>>),
@@ -769,6 +771,8 @@ impl Runtime {
             let (recovery_events, _) = tokio::sync::broadcast::channel(64);
             let mut recovery_at = proxy.can_recover().then(tokio::time::Instant::now);
             #[cfg(test)]
+            let mut next_recovery_hold = None;
+            #[cfg(test)]
             if recovery_at.is_some() { let _ = recovery_events.send(RecoveryTestEvent::Scheduled); }
             #[cfg(feature = "local-split-qa")]
             let mut cancellation_count = 0;
@@ -847,6 +851,7 @@ impl Runtime {
                             let _ = reply.send(result.map_err(|e| e.code));
                         }
                         Some(Command::Resize(g, cols, rows, reply)) => {
+                            if reply.is_closed() { continue; }
                             let gen = if g == 0 { proxy.controller().unwrap_or(Epoch(0)) } else { Epoch(g) };
                             let _ = reply.send(proxy.resize(gen, cols, rows).await.map_err(|e| e.code));
                         }
@@ -930,6 +935,11 @@ impl Runtime {
                             let _ = rx.await;
                         }
                         #[cfg(test)]
+                        Some(Command::HoldNextRecovery(entered, release, armed)) => {
+                            next_recovery_hold = Some((entered, release));
+                            let _ = armed.send(());
+                        }
+                        #[cfg(test)]
                         Some(Command::RecoveryScheduled(reply)) => { let _ = reply.send(recovery_at.is_some()); }
                         #[cfg(test)]
                         Some(Command::SubscribeRecoveryEvents(reply)) => {
@@ -987,6 +997,11 @@ impl Runtime {
                             let result = {
                                 let attempt = proxy.recover();
                                 tokio::pin!(attempt);
+                                #[cfg(test)]
+                                if let Some((entered, release)) = next_recovery_hold.take() {
+                                    let _ = entered.send(());
+                                    let _ = release.await;
+                                }
                                 loop {
                                     tokio::select! { biased;
                                         host = authority_changed(&mut authority) => {
@@ -1001,6 +1016,7 @@ impl Runtime {
                                                 let _ = reply.send(Err("PAIRED_NOT_SENT".into()));
                                             }
                                             Some(Command::Resize(generation, cols, rows, reply)) => {
+                                                if reply.is_closed() { continue; }
                                                 let valid = cols > 0 && rows > 0 && cols <= 1000 && rows <= 1000;
                                                 if valid && generation == 0 { geometry = Some((cols, rows)); }
                                                 let _ = reply.send(Err(if !valid { "INVALID_REQUEST" } else if generation != 0 { "STALE_GENERATION" } else { "PAIRED_NOT_SENT" }.into()));
@@ -1044,6 +1060,11 @@ impl Runtime {
                                             Some(Command::Block(started, gate)) => { let _ = started.send(()); let _ = gate.await; }
                                             #[cfg(test)]
                                             Some(Command::HoldRecovery(started, gate)) => { let _ = started.send(()); let _ = gate.await; }
+                                            #[cfg(test)]
+                                            Some(Command::HoldNextRecovery(entered, release, armed)) => {
+                                                next_recovery_hold = Some((entered, release));
+                                                let _ = armed.send(());
+                                            }
                                             #[cfg(test)]
                                             Some(Command::RecoveryScheduled(reply)) => { let _ = reply.send(recovery_at.is_some()); }
                                             #[cfg(test)]
@@ -1295,6 +1316,34 @@ impl Runtime {
         sender: mpsc::Sender<Command>,
         command: impl FnOnce(Reply) -> Command + Send + 'static,
     ) -> super::remote::RemoteOperation {
+        #[cfg(test)]
+        { Self::operation_on_sender_with_receipt(sender, command, None) }
+        #[cfg(not(test))]
+        { Self::operation_on_sender_with_receipt(sender, command) }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resize_with_enqueue_receipt(
+        &self,
+        id: &str,
+        generation: u64,
+        cols: u16,
+        rows: u16,
+    ) -> (super::remote::RemoteOperation, oneshot::Receiver<()>) {
+        let (enqueued, receipt) = oneshot::channel();
+        let operation = Self::operation_on_sender_with_receipt(
+            self.sender(id).expect("paired actor exists"),
+            move |reply| Command::Resize(generation, cols, rows, reply),
+            Some(enqueued),
+        );
+        (operation, receipt)
+    }
+
+    fn operation_on_sender_with_receipt(
+        sender: mpsc::Sender<Command>,
+        command: impl FnOnce(Reply) -> Command + Send + 'static,
+        #[cfg(test)] enqueued: Option<oneshot::Sender<()>>,
+    ) -> super::remote::RemoteOperation {
         Box::pin(async move {
             let submitted = Arc::new(AtomicBool::new(false));
             let result = tokio::time::timeout(Duration::from_secs(30), async {
@@ -1304,6 +1353,10 @@ impl Runtime {
                     .await
                     .map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?;
                 submitted.store(true, Ordering::Release);
+                #[cfg(test)]
+                if let Some(enqueued) = enqueued {
+                    let _ = enqueued.send(());
+                }
                 rx.await
                     .map_err(|_| "PAIRED_PROXY_UNAVAILABLE".to_string())?
             })
@@ -1335,6 +1388,17 @@ impl Runtime {
             tracing::error!(%error, "paired detach retained descriptor after persistence failure");
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_next_recovery(&self, id: &str) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, entry) = oneshot::channel();
+        let (release, resume) = oneshot::channel();
+        let (armed, ready) = oneshot::channel();
+        self.sender(id).expect("paired actor exists")
+            .send(Command::HoldNextRecovery(entered, resume, armed)).await.expect("actor accepts recovery hold");
+        ready.await.expect("recovery hold armed");
+        (entry, release)
     }
 
     #[cfg(test)]

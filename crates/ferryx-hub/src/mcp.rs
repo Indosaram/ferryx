@@ -117,6 +117,7 @@ pub(crate) fn tool_list() -> Vec<Value> {
             schema(
                 json!({"sessionId": session, "host": host,
                 "until": {"type": "string", "enum": ["working", "blocked", "idle", "prompt", "any"]},
+                "instance": {"type": "string", "description": "Observer epoch that issued the after cursor; without it the reply is a recovery snapshot"},
                 "after": {"type": "integer", "description": "Sequence cursor from a previous result"},
                 "revision": {"type": "string", "description": "Wait for a screen revision other than this"},
                 "timeoutMs": {"type": "integer"}}),
@@ -356,6 +357,7 @@ async fn call_tool(
                             .and_then(Value::as_str)
                             .unwrap_or("any")
                             .to_owned(),
+                        instance: args.get("instance").and_then(Value::as_str).map(str::to_owned),
                         after_revision: args
                             .get("revision")
                             .and_then(Value::as_str)
@@ -966,6 +968,82 @@ mod tests {
                 "{name} missing from {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn agents_wait_schema_declares_an_optional_instance_epoch() {
+        let tools = tool_list();
+        let wait = tools
+            .iter()
+            .find(|tool| tool["name"] == "agents.wait")
+            .expect("agents.wait");
+        let schema = &wait["inputSchema"];
+        assert_eq!(schema["properties"]["instance"]["type"], "string");
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(required, ["sessionId"], "every other argument stays optional");
+    }
+
+    #[tokio::test]
+    async fn agents_wait_passes_the_instance_and_cursor_through() {
+        let control = Arc::new(RecordingControl::default());
+        let context = McpContext {
+            control: control.clone(),
+            launcher: Arc::new(FixedLauncher::new("pane")),
+            pool: crate::storage::memory().await.unwrap(),
+            meta_session_id: "meta".into(),
+            tracker_token: "t".into(),
+            owner_route: None,
+        };
+        let wait = |arguments: Value| {
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"agents.wait","arguments": arguments}})
+        };
+        let resumed = dispatch(
+            &context,
+            &wait(json!({"sessionId": "pane-1", "until": "idle", "instance": "epoch-1",
+                "after": 7, "revision": "rev-2", "timeoutMs": 1500})),
+        )
+        .await;
+        assert!(resumed.get("error").is_none(), "{resumed}");
+        let bootstrap = dispatch(
+            &context,
+            &wait(json!({"sessionId": "pane-1", "until": "idle"})),
+        )
+        .await;
+        assert!(bootstrap.get("error").is_none(), "{bootstrap}");
+        assert_eq!(
+            control.ops(),
+            vec![
+                (
+                    None,
+                    AgentOp::Wait {
+                        session_id: "pane-1".into(),
+                        until: "idle".into(),
+                        instance: Some("epoch-1".into()),
+                        after_revision: Some("rev-2".into()),
+                        after: 7,
+                        timeout_ms: 1_500,
+                    }
+                ),
+                (
+                    None,
+                    AgentOp::Wait {
+                        session_id: "pane-1".into(),
+                        until: "idle".into(),
+                        instance: None,
+                        after_revision: None,
+                        after: 0,
+                        timeout_ms: 30_000,
+                    }
+                ),
+            ],
+            "the epoch reaches the operation, and a caller without one still waits"
+        );
     }
 
     #[tokio::test]

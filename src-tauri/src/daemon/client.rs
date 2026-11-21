@@ -49,6 +49,112 @@ const DAEMON_READY_TOKEN: &str = "FERRYX_DAEMON_READY";
 mod paired_host_compatibility_tests {
     use super::*;
     #[tokio::test]
+    async fn lifecycle_negotiates_before_sending_on_the_same_connection() {
+        for advertised in [None, Some(false), Some(true)] {
+            let root = tempfile::tempdir().expect("socket directory");
+            let socket = root.path().join("lifecycle.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).expect("bind peer");
+            let peer = async {
+                let (stream, _) = listener.accept().await.expect("connect");
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("handshake");
+                assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).expect("handshake request"), DaemonRequest::Handshake { .. }));
+                writer.write_all(format!("{{\"type\":\"handshakeOk\",\"version\":{DAEMON_PROTOCOL_VERSION},\"pid\":1,\"epoch\":1}}\n").as_bytes()).await.expect("handshake reply");
+                line.clear();
+                reader.read_line(&mut line).await.expect("capability query");
+                assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).expect("query"), DaemonRequest::GetCapabilities));
+                let response = match advertised {
+                    None => DaemonResponse::Error { message: "unknown request".into(), code: None, details: None },
+                    Some(supports) => DaemonResponse::CapabilitiesOk {
+                        capabilities: if supports { vec![crate::daemon::protocol::LANE_LIFECYCLE_CAPABILITY.into()] } else { Vec::new() },
+                    },
+                };
+                let mut bytes = serde_json::to_vec(&response).expect("serialize capabilities");
+                bytes.push(b'\n');
+                writer.write_all(&bytes).await.expect("capability reply");
+                line.clear();
+                let count = reader.read_line(&mut line).await.expect("next request or EOF");
+                if advertised == Some(true) {
+                    assert!(count > 0);
+                    assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).expect("lifecycle request"),
+                        DaemonRequest::LaneLifecycle { operation, body } if operation == "read" && body == json!({})));
+                    let mut bytes = serde_json::to_vec(&DaemonResponse::LaneLifecycleOk { status: 200, value: json!({"sections": [], "revision": 0}) }).expect("serialize reply");
+                    bytes.push(b'\n');
+                    writer.write_all(&bytes).await.expect("lifecycle reply");
+                } else {
+                    assert_eq!(count, 0, "predecessor must never deserialize an unknown operation");
+                }
+            };
+            let client = DaemonClient::new_with_socket(socket);
+            let action = client.lane_lifecycle("read".into(), json!({}));
+            let (_, result) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(peer, action) })
+                .await.expect("bounded event-driven exchange");
+            assert_eq!(result.expect("negotiation").is_some(), advertised == Some(true));
+            assert!(!client.upgrade_requested.load(Ordering::SeqCst));
+        }
+    }
+
+    /// A predecessor advertises `agentPromptV1` and still cannot decode the ambiguous-resolve
+    /// request: that older name must never stand in for the new capability. The unsupported peer
+    /// receives no enum frame at all, and the caller learns a typed refusal.
+    #[tokio::test]
+    async fn ambiguous_prompt_resolve_negotiates_its_own_capability_and_never_sends_to_a_predecessor() {
+        for (advertised, supported) in [
+            (vec!["agentPromptV1"], false),
+            (vec!["agentPromptV1", "agentPromptResolveAmbiguousV1"], true),
+        ] {
+            let root = tempfile::tempdir().expect("socket directory");
+            let socket = root.path().join("ambiguous.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).expect("bind peer");
+            let peer = async {
+                let (stream, _) = listener.accept().await.expect("connect");
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("handshake");
+                assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).expect("handshake request"), DaemonRequest::Handshake { .. }));
+                writer.write_all(format!("{{\"type\":\"handshakeOk\",\"version\":{DAEMON_PROTOCOL_VERSION},\"pid\":1,\"epoch\":1}}\n").as_bytes()).await.expect("handshake reply");
+                line.clear();
+                reader.read_line(&mut line).await.expect("capability query");
+                assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).expect("query"), DaemonRequest::GetCapabilities));
+                let response = DaemonResponse::CapabilitiesOk {
+                    capabilities: advertised.iter().map(|name| (*name).to_string()).collect(),
+                };
+                let mut bytes = serde_json::to_vec(&response).expect("serialize capabilities");
+                bytes.push(b'\n');
+                writer.write_all(&bytes).await.expect("capability reply");
+                line.clear();
+                let count = reader.read_line(&mut line).await.expect("next request or EOF");
+                if supported {
+                    assert!(count > 0, "the supporting peer must receive the request");
+                    assert!(matches!(serde_json::from_str::<DaemonRequest>(&line).expect("resolve request"),
+                        DaemonRequest::AgentPromptResolveAmbiguous { session_id, prompt_id, screen_revision }
+                            if session_id == "s-1" && prompt_id == "p-1" && screen_revision == "rev-1"));
+                    let mut bytes = serde_json::to_vec(&DaemonResponse::AgentPromptResolveAmbiguousOk).expect("serialize reply");
+                    bytes.push(b'\n');
+                    writer.write_all(&bytes).await.expect("resolve reply");
+                } else {
+                    assert_eq!(count, 0, "a predecessor advertising agentPromptV1 must never receive the enum frame");
+                }
+            };
+            let client = DaemonClient::new_with_socket(socket);
+            let action = client.agent_prompt_resolve_ambiguous("s-1".into(), "p-1".into(), "rev-1".into());
+            let (_, result) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(peer, action) })
+                .await.expect("bounded event-driven exchange");
+            match result {
+                Ok(()) => assert!(supported, "only the supporting peer resolves the prompt"),
+                Err(error) => {
+                    assert!(!supported, "the supporting peer must not be refused: {error:?}");
+                    assert_eq!(error.code, IpcErrorCode::UnsupportedCapability);
+                }
+            }
+            assert!(!client.upgrade_requested.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
     async fn old_daemon_unknown_capability_never_receives_upgrade_or_secret() {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("old.sock");
@@ -768,6 +874,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::ResourceUsage => "resourceUsage",
         DaemonRequest::AgentPromptGet { .. } => "agentPromptGet",
         DaemonRequest::AgentPromptAnswer { .. } => "agentPromptAnswer",
+        DaemonRequest::AgentPromptResolveAmbiguous { .. } => "agentPromptResolveAmbiguous",
         DaemonRequest::PairedHostList => "pairedHostList",
         DaemonRequest::PairedHostReachabilityList => "pairedHostReachabilityList",
         DaemonRequest::PairedHostRouteList => "pairedHostRouteList",
@@ -861,6 +968,7 @@ fn request_type_name(req: &DaemonRequest) -> &'static str {
         DaemonRequest::SupervisorMoveHere { .. } => "supervisorMoveHere",
         DaemonRequest::SupervisorRequestV1 { .. } => "supervisorRequestV1",
         DaemonRequest::SupervisorReadV1 { .. } => "supervisorReadV1",
+        DaemonRequest::LaneLifecycle { .. } => "laneLifecycle",
         DaemonRequest::SupervisorConverseV1 { .. } => "supervisorConverseV1",
         DaemonRequest::SupervisorSetup { .. } => "supervisorSetup",
         DaemonRequest::RemoteDesktopHostGet => "remoteDesktopHostGet",
@@ -3519,6 +3627,45 @@ impl DaemonClient {
         self.send_on_connection(&self.connection, req).await
     }
 
+    /// Negotiate on the very connection that sends the optional operation. A predecessor
+    /// may omit or refuse the capability query; it never receives an unknown enum variant.
+    /// No reconnect/retry after negotiation: a handover must negotiate with the new peer.
+    ///
+    /// The connection carrying the query is the connection that writes the request, so a
+    /// peer that answers with its real capability set is the peer the request reaches.
+    async fn negotiated_optional_request(
+        &self,
+        required: &str,
+        request: DaemonRequest,
+    ) -> Result<Option<DaemonResponse>, IpcError> {
+        let mut conn = self.connect_and_handshake().await?;
+        let query = DaemonRequest::GetCapabilities;
+        match conn.request(&query).await.map_err(|error| error.into_ipc_error(&query, false))? {
+            DaemonResponse::CapabilitiesOk { capabilities } => {
+                if !capabilities.iter().any(|c| c == required) {
+                    return Ok(None);
+                }
+            }
+            DaemonResponse::Error { .. } => return Ok(None),
+            _ => return Err(IpcError::internal("Unexpected daemon capabilities response")),
+        }
+        conn.request(&request).await
+            .map(Some)
+            .map_err(|error| error.into_ipc_error(&request, true))
+    }
+
+    pub async fn lane_lifecycle(
+        &self,
+        operation: String,
+        body: serde_json::Value,
+    ) -> Result<Option<DaemonResponse>, IpcError> {
+        self.negotiated_optional_request(
+            crate::daemon::protocol::LANE_LIFECYCLE_CAPABILITY,
+            DaemonRequest::LaneLifecycle { operation, body },
+        )
+        .await
+    }
+
     /// One request on its own fresh connection, dropped afterwards: a long reference-chat
     /// mutation never holds the shared general or interactive connection. A read that failed
     /// before any reply is retried once; a mutation that may have been delivered is not.
@@ -5238,6 +5385,35 @@ impl DaemonClient {
         };
         match self.send_request(request).await? {
             DaemonResponse::AgentPromptAnswerOk { receipt } => Ok(receipt),
+            other => Err(agent_prompt_failure(other)),
+        }
+    }
+
+    /// Resolves an ambiguous prompt, but only against a daemon that advertises
+    /// `agentPromptResolveAmbiguousV1`. A predecessor already advertises `agentPromptV1`, so
+    /// that older name does not imply this request decodes: the capability is negotiated on
+    /// the connection that would write it, and a peer without it receives no frame at all.
+    ///
+    /// A missing capability is refused as [`IpcErrorCode::UnsupportedCapability`], so the
+    /// caller learns the peer is older instead of getting a decode error from it. Nothing is
+    /// retried on another peer: the daemon that refused the name is the daemon this client
+    /// talks to, and a retry elsewhere could type into a different machine's pane.
+    pub async fn agent_prompt_resolve_ambiguous(
+        &self,
+        session_id: String,
+        prompt_id: String,
+        screen_revision: String,
+    ) -> Result<(), IpcError> {
+        let Some(response) = self.negotiated_optional_request(
+            crate::daemon::protocol::AGENT_PROMPT_RESOLVE_AMBIGUOUS_CAPABILITY,
+            DaemonRequest::AgentPromptResolveAmbiguous { session_id, prompt_id, screen_revision },
+        ).await? else {
+            return Err(IpcError::unsupported_capability(
+                "The running Ferryx daemon predates resolving an ambiguous agent prompt; it works after the daemon restarts",
+            ));
+        };
+        match response {
+            DaemonResponse::AgentPromptResolveAmbiguousOk => Ok(()),
             other => Err(agent_prompt_failure(other)),
         }
     }

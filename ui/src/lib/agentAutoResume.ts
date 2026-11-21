@@ -1,6 +1,6 @@
 import { getAgentReconnectAffordance } from "./agentResumeAffordance";
 import { loadGeneralSettings } from "./generalSettings";
-import { isStandbyBackendSessionId } from "./sessionLifecycle";
+import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON } from "./sessionLifecycle";
 import { isTerminalTab, type TerminalSession } from "./types";
 import type { WorkspaceState } from "../state/workspaceStore";
 
@@ -199,5 +199,79 @@ export function scheduleAgentAutoResume({
       clearTimeout(timeoutId);
       pendingTimeouts.delete(timeoutId);
     }
+  };
+}
+
+export type AgentAutoResumeWatcherOptions = {
+  /** Every project the window knows about, local, SSH and paired alike. */
+  listWorkspaceIds: () => readonly string[];
+  getState: (workspaceId: string) => WorkspaceState | null;
+  /** The mounted project's boot restore is resumed by `scheduleAgentAutoResume`. */
+  mountedWorkspaceId: () => string;
+  subscribe: (listener: () => void) => () => void;
+  reconnect: (workspaceId: string, sessionId: string) => Promise<unknown>;
+  staggerIntervalMs?: number;
+};
+
+/**
+ * Keeps every project's agent panes resumed, not only the project on screen: at startup it resumes
+ * the agents of projects that are not mounted, and afterwards any agent whose backend is confirmed
+ * gone (for example a remote session the host reports expired) as soon as that state lands.
+ * Each standby binding is tried once, and all resumes share one stagger timeline so a reboot does
+ * not start every agent at the same instant.
+ */
+export function startAgentAutoResumeWatcher({
+  listWorkspaceIds,
+  getState,
+  mountedWorkspaceId,
+  subscribe,
+  reconnect,
+  staggerIntervalMs = AUTO_RESUME_STAGGER_INTERVAL_MS,
+}: AgentAutoResumeWatcherOptions): () => void {
+  const attempted = new Set<string>();
+  const localTimeouts = new Set<ReturnType<typeof setTimeout>>();
+  let nextSlotAt = 0;
+  let stopped = false;
+  let firstScan = true;
+
+  const scan = () => {
+    if (stopped) return;
+    const mounted = mountedWorkspaceId();
+    for (const workspaceId of listWorkspaceIds()) {
+      const state = getState(workspaceId);
+      if (!state) continue;
+      for (const sessionId of collectAutoResumeCandidates(state)) {
+        // After startup only a confirmed remote loss is resumed: an agent the user quit locally
+        // must stay quit instead of coming back in a background tab.
+        if (!firstScan && state.sessions[sessionId]?.backendUnavailableReason !== REMOTE_SESSION_GONE_REASON) continue;
+        const key = `${workspaceId}\u0000${sessionId}\u0000${state.sessions[sessionId]?.backendSessionId ?? ""}`;
+        if (attempted.has(key)) continue;
+        attempted.add(key);
+        if (firstScan && workspaceId === mounted) continue;
+        const now = Date.now();
+        const delay = Math.max(0, nextSlotAt - now);
+        nextSlotAt = now + delay + staggerIntervalMs;
+        const timeoutId = setTimeout(() => {
+          localTimeouts.delete(timeoutId);
+          pendingTimeouts.delete(timeoutId);
+          if (!stopped) void reconnect(workspaceId, sessionId).catch(() => undefined);
+        }, delay);
+        localTimeouts.add(timeoutId);
+        pendingTimeouts.add(timeoutId);
+      }
+    }
+    firstScan = false;
+  };
+
+  const unsubscribe = subscribe(scan);
+  scan();
+  return () => {
+    stopped = true;
+    unsubscribe();
+    for (const timeoutId of localTimeouts) {
+      clearTimeout(timeoutId);
+      pendingTimeouts.delete(timeoutId);
+    }
+    localTimeouts.clear();
   };
 }

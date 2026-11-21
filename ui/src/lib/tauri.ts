@@ -1434,6 +1434,7 @@ export interface AgentPrompt {
   kind: AgentPromptKind;
   /** An option answer goes out only after a confirm. Absent from older daemons: treat as true. */
   needsConfirmation?: boolean;
+  answerStatus?: "outcomeUnknown";
 }
 
 /** Exactly one of an option's key or free text. */
@@ -1464,6 +1465,16 @@ export async function answerAgentPrompt(request: {
 }): Promise<DeliveryReceipt> {
   if (!isTauri()) throw toIpcError(new Error("Agent prompts are answered only in the desktop app"));
   return invokeCommand<DeliveryReceipt>("cmd_agent_prompt_answer", request);
+}
+
+export async function resolveAmbiguousAgentPrompt(request: {
+  sessionId: string;
+  promptId: string;
+  screenRevision: string;
+  dismiss: true;
+}): Promise<void> {
+  if (!isTauri()) throw toIpcError(new Error("Agent prompts are resolved only in the desktop app"));
+  return invokeCommand<void>("cmd_agent_prompt_resolve_ambiguous", request);
 }
 
 export interface AgentIntegrationStatus {

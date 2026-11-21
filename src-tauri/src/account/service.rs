@@ -382,6 +382,22 @@ pub async fn get_public_key(
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AccountIdentityResponse {
+    pub account_id: String,
+}
+
+pub async fn get_me(
+    State(state): State<Arc<AccountState>>,
+    headers: HeaderMap,
+) -> Result<Json<AccountIdentityResponse>, ApiError> {
+    run_account_blocking(move || {
+        let user = authenticate_user(&state, &headers)?;
+        Ok(AccountIdentityResponse { account_id: user.user_id })
+    }).await.map(Json)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountHealthResponse {
     pub ok: bool,
 }
@@ -1861,6 +1877,11 @@ pub fn router(state: Arc<AccountState>) -> Router {
         .route("/api/account/v1/login/request", post(login_request))
         .route("/api/account/v1/login/poll", post(login_poll))
         .route("/api/account/v1/health", get(health_check))
+        .route("/api/account/v1/me", get(get_me))
+        .route(
+            "/api/account/v1/continuity",
+            get(super::continuity::get).put(super::continuity::put),
+        )
         .route("/api/account/v1/login/consume", post(login_consume))
         .route("/api/account/v1/device/request", post(device_request))
         .route("/api/account/v1/device/poll", post(device_poll))

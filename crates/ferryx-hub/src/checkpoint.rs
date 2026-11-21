@@ -32,6 +32,10 @@ pub const CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES: u64 = 16 * 1024 * 1024;
 pub const CHECKPOINT_TOO_LARGE: &str = "CHECKPOINT_TOO_LARGE";
 /// Import refused: the target hub holds a different supervisor.
 pub const SUPERVISOR_IDENTITY_MISMATCH: &str = "SUPERVISOR_IDENTITY_MISMATCH";
+/// Import refused: the checkpoint's provider cannot rewind its conversation, so restoring the
+/// filesystem alone would leave the two out of step. Refused before anything is written.
+pub const CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED: &str =
+    "CHECKPOINT_PROVIDER_ROLLBACK_UNSUPPORTED";
 /// `held_detail` of a goal whose host has no mapping on the importing machine.
 pub const REMOTE_HOST_UNMAPPED: &str = "REMOTE_HOST_UNMAPPED";
 /// Manifest format version.
@@ -109,6 +113,24 @@ pub struct PairedHostMapping {
     pub machine_id: String,
 }
 
+/// The provider conversation a checkpoint's filesystem state belongs to.
+///
+/// **Diagnostics only.** Writing these coordinates down is not a claim that the conversation
+/// can be rewound: `rollback_conversation` is what the exporting side declared (T3's
+/// `agent_detect::adapter`), it is `false` for every shipped provider, and a restore reads it
+/// as evidence *against* restoring rather than for it. A field that implied rollback worked
+/// would be the one thing this type must never become.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCoordinates {
+    /// Manifest id (or alias) of the provider that owned the conversation.
+    pub id: String,
+    /// What the exporter declared for `rollbackConversation` at export time. Defaults to
+    /// `false`: an archive that does not say so cannot be read as promising anything.
+    #[serde(default)]
+    pub rollback_conversation: bool,
+}
+
 /// Writes `bytes` to `path` creating the file owner-only (0600 / private ACL).
 pub type PrivateFileWriter = Arc<dyn Fn(&Path, &[u8]) -> std::io::Result<()> + Send + Sync>;
 
@@ -139,6 +161,13 @@ pub struct CheckpointManifest {
     /// Source host id -> machine-scoped id written into the database copy.
     pub host_map: BTreeMap<String, String>,
     pub has_profile: bool,
+    /// Provider conversation coordinates, for diagnostics.
+    ///
+    /// `#[serde(default)]` is load-bearing: every archive written before this field existed
+    /// has no `provider` key, and without the default each one would fail to deserialize.
+    /// `format_version` stays the compatibility gate; this field is additive and optional.
+    #[serde(default)]
+    pub provider: Option<ProviderCoordinates>,
 }
 
 /// Inputs for [`export`].
@@ -153,6 +182,15 @@ pub struct ExportRequest {
     pub profile_omo_jsonc: Option<PathBuf>,
     /// `~/.omo/memory/agents`.
     pub memory_root: Option<PathBuf>,
+    /// Provider conversation coordinates recorded in the manifest, for diagnostics.
+    ///
+    /// This crate cannot fill this in: it has no `agent_detect` dependency and never learns
+    /// which agent runs the supervisor's turns, so [`ExportRequest::new`] leaves it `None` and
+    /// every caller that knows its provider sets it. The live writer is
+    /// `src-tauri/src/supervisor_checkpoint.rs::supervisor_conversation_provider`, called from
+    /// the checkpoint publisher; `None` is what a legacy archive carries and what a caller with
+    /// no provider knowledge would record, and a restore then has nothing to honour.
+    pub provider: Option<ProviderCoordinates>,
     pub output_path: PathBuf,
     /// Compressed size limit; [`CHECKPOINT_MAX_COMPRESSED_BYTES`] in production.
     pub budget_bytes: u64,
@@ -160,6 +198,9 @@ pub struct ExportRequest {
 }
 
 impl ExportRequest {
+    /// Every field defaults except the four given here. `provider` starts `None` because this
+    /// crate cannot know it; an exporter that does must set it before [`export`] (see
+    /// [`ExportRequest::provider`]).
     pub fn new(
         hub_dir: PathBuf,
         own_machine_id: String,
@@ -173,6 +214,7 @@ impl ExportRequest {
             env_file: None,
             profile_omo_jsonc: None,
             memory_root: None,
+            provider: None,
             output_path,
             budget_bytes: CHECKPOINT_MAX_COMPRESSED_BYTES,
             write_private,
@@ -322,6 +364,7 @@ async fn export_staged(
             excluded_tables: EXCLUDED_TABLES.iter().map(|t| (*t).to_owned()).collect(),
             host_map: map,
             has_profile: profile.is_some(),
+            provider: request.provider.clone(),
         };
         let manifest_json = serde_json::to_vec_pretty(&manifest)
             .map_err(|error| CheckpointError::Other(format!("manifest: {error}")))?;
@@ -354,6 +397,90 @@ async fn export_staged(
         })
     })
     .await
+}
+
+/// Reads only the manifest of `archive`, within [`CHECKPOINT_MAX_COMPRESSED_BYTES`] compressed
+/// and [`CHECKPOINT_MAX_ARCHIVE_BYTES`] decompressed. Writes nothing. Blocking.
+///
+/// `Ok(None)` means the archive carries no manifest entry, or one this build cannot parse. Both
+/// are left to [`crate::checkpoint_import`] to refuse as an invalid manifest, so a caller gating
+/// on provider capabilities never replaces a more specific error with its own. Only budget and
+/// io failures - which no later step would report differently - propagate.
+pub fn peek_manifest(archive: &Path) -> Result<Option<CheckpointManifest>, CheckpointError> {
+    let bytes = std::fs::metadata(archive)?.len();
+    if bytes > CHECKPOINT_MAX_COMPRESSED_BYTES {
+        return Err(CheckpointError::TooLarge {
+            bytes,
+            budget: CHECKPOINT_MAX_COMPRESSED_BYTES,
+        });
+    }
+    let compressed = std::fs::read(archive)?;
+    let mut raw: Option<Vec<u8>> = None;
+    visit_archive(&compressed, CHECKPOINT_MAX_ARCHIVE_BYTES, |name, entry| {
+        if name == ARCHIVE_MANIFEST {
+            let mut data = Vec::new();
+            Read::take(&mut *entry, CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES + 1)
+                .read_to_end(&mut data)?;
+            if data.len() as u64 > CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES {
+                return Err(CheckpointError::TooLarge {
+                    bytes: data.len() as u64,
+                    budget: CHECKPOINT_MAX_BUFFERED_ENTRY_BYTES,
+                });
+            }
+            raw = Some(data);
+        }
+        Ok(())
+    })?;
+    match raw {
+        // An unparseable manifest is `unpack`'s refusal to make, with its own stable code.
+        Some(raw) => Ok(serde_json::from_slice(&raw).ok()),
+        None => Ok(None),
+    }
+}
+
+/// Why a checkpoint's provider may not be restored. Data, not a formatted string: the importer
+/// turns it into its own typed error so callers branch on the code, never on message text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRollbackRefusal {
+    /// The provider id the archive recorded.
+    pub provider: String,
+}
+
+impl std::fmt::Display for ProviderRollbackRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "provider '{}' did not declare rollbackConversation when this checkpoint was written: \
+             restoring its filesystem alone would leave the conversation ahead of the tree",
+            self.provider
+        )
+    }
+}
+
+impl std::error::Error for ProviderRollbackRefusal {}
+
+/// The provider gate a restore runs before it writes anything.
+///
+/// The hub cannot consult live provider manifests (`ferryx-hub` does not depend on
+/// `agent_detect`), so it judges the only facts it can see: the ones the exporting machine
+/// wrote into the archive. A manifest that names a provider which did not declare
+/// `rollbackConversation` is refused, because restoring the filesystem without rewinding the
+/// conversation leaves the two permanently out of step and nothing downstream can repair it.
+///
+/// An archive that names no provider at all is *not* refused here: those are archives written
+/// before this field existed, and refusing them would break reading every pre-change checkpoint
+/// (the compatibility rule `format_version` exists to protect). The daemon-side check in
+/// `src-tauri/src/supervisor_move.rs` is what refuses a live restore, using the shipped
+/// manifests; this is the archive-side half of the same decision.
+pub fn refuse_unless_manifest_rollback(
+    manifest: &CheckpointManifest,
+) -> Result<(), ProviderRollbackRefusal> {
+    match &manifest.provider {
+        Some(provider) if !provider.rollback_conversation => Err(ProviderRollbackRefusal {
+            provider: provider.id.clone(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// `VACUUM INTO` a new owner-only file (SQLite keeps the mode of an existing empty file): the

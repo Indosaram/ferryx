@@ -13,6 +13,7 @@ import {
   postSupervisorRequest,
   hasSupervisorCapability,
   isSupervisorChangedFrame,
+  isResyncBoundaryFrame,
   getRemoteSetup,
   runRemoteSetup,
   setRemoteLanePaused,
@@ -117,6 +118,17 @@ describe("remote supervisor client", () => {
     expect(isSupervisorChangedFrame({ type: "supervisorChanged", payload: { sessionId: "s" } })).toBe(true);
     expect(isSupervisorChangedFrame({ type: "inventoryInvalidated" })).toBe(false);
     expect(isSupervisorChangedFrame("not json")).toBe(false);
+  });
+
+  it("reads only the subscribe, lag and restart boundaries as a resync", () => {
+    expect(isResyncBoundaryFrame({ type: "inventoryInvalidated", reason: "subscribe" })).toBe(true);
+    expect(isResyncBoundaryFrame({ type: "inventoryInvalidated", reason: "lag" })).toBe(true);
+    expect(isResyncBoundaryFrame('{"type":"inventoryInvalidated","reason":"restart"}')).toBe(true);
+    for (const reason of ["registration", "filesystem", "concurrentCommit", "ownerUnavailable"]) {
+      expect(isResyncBoundaryFrame({ type: "inventoryInvalidated", reason })).toBe(false);
+    }
+    expect(isResyncBoundaryFrame({ type: "inventoryInvalidated" })).toBe(false);
+    expect(isResyncBoundaryFrame({ type: "supervisorChanged", reason: "subscribe" })).toBe(false);
   });
 
   it("reports an older daemon's 404 route as unsupported", async () => {
@@ -235,6 +247,20 @@ describe("useRemoteSupervisor", () => {
     await waitFor(() => expect(result.current.machines[0]?.state).toBe("ok"));
     emit({ type: "inventoryInvalidated", reason: "subscribe", payload: {} });
     await waitFor(() => expect(fetchLike).toHaveBeenCalledTimes(2));
+  });
+
+  // The restart boundary is numbered at the persisted head, which this subscriber may already have
+  // seen: ignoring its reason leaves a pre-restart lane on screen.
+  it("refetches on the restart boundary a mounted subscriber receives", async () => {
+    const { machine, fetchLike, emit } = fakeMachine([
+      () => json(200, snapshotBody()),
+      () => json(200, snapshotBody({ lanes: [{ ...lane, paused: true }] })),
+    ]);
+    const { result } = renderHook(() => useRemoteSupervisor({ machines: [machine] }));
+    await waitFor(() => expect(result.current.machines[0]?.state).toBe("ok"));
+    emit({ type: "inventoryInvalidated", reason: "restart", sequence: "1", revision: "1", payload: {} });
+    await waitFor(() => expect(result.current.lanes[0]?.paused).toBe(true));
+    expect(fetchLike).toHaveBeenCalledTimes(2);
   });
 
   it("marks a machine without the capability unsupported and never fetches", async () => {

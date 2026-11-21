@@ -2,7 +2,8 @@ import type { ActivitySummary } from "../../lib/activity";
 import { workspaceName } from "../../lib/branchFilter";
 import { projectRootWorktree } from "../../lib/projectIdentity";
 import { groupProjects, type ProjectGroup } from "../../lib/projectGrouping";
-import type { WorktreeOrder } from "../../lib/sidebarPersistence";
+import type { LaneLifecycleState, LanePullRequestView, SidebarLaneLifecycle, WorktreeOrder } from "../../lib/sidebarPersistence";
+import { laneLifecycleKey, worktreeLifecycleIdentity } from "../../lib/sidebarPersistence";
 import type { RegisteredProject } from "../../lib/tauri";
 import { worktreeIdentity, type AgentOutcome, type AgentState, type Worktree } from "../../lib/types";
 import {
@@ -44,6 +45,19 @@ export type SidebarWorktreeNode = {
   /** Filesystem path on the owning machine; live signals are keyed by it. */
   path: string;
   worktreeSlug: string | null;
+  /**
+   * The server-owned lifecycle identity of this row (`w:<wsId>/<slug>` or `p:<ws>/<path>`).
+   * It is the join key between a rendered row and `lane_lifecycles`, so a pin, snooze, settle or
+   * archive survives an app restart instead of living in this window.
+   */
+  lifecycleKey: string;
+  /** The state the server reports, already resolved (`expired snooze` reads `active`). */
+  lifecycle: LaneLifecycleState | null;
+  lifecycleRevision?: number;
+  /** Absent on older published snapshots; no PR reserves no visual space. */
+  pullRequest?: LanePullRequestView | null;
+  /** The per-worktree pin set folded from `SET_TAB_PINNED`; empty when nothing is pinned. */
+  pinnedTabs: string[];
   label: string;
   hostLabel: string | null;
   stale: boolean;
@@ -81,11 +95,31 @@ export type SidebarModelInput = SidebarRowsInput & {
   readonly generatedAt: string;
   /** The daemon assigns the published revision; builders pass 0 unless they own one. */
   readonly revision?: number;
+  /**
+   * The pre-server order, still read from `localStorage` before the one-time import lands.
+   * Ignored for any workspace the server model already orders.
+   */
   readonly worktreeOrder: WorktreeOrder;
+  /**
+   * The server-owned order (`workspaceId -> lifecycle keys`). This is the authority: a workspace
+   * present here is ordered by it and `worktreeOrder` is never consulted for that workspace, so
+   * the two cannot fight. An absent map (a build with no hub) falls back to `worktreeOrder`.
+   */
+  readonly laneOrder?: Readonly<Record<string, readonly string[]>>;
+  /** Each row's server state and folded pin set, keyed by lifecycle key. */
+  readonly laneLifecycles?: Readonly<Record<string, SidebarLaneLifecycle>>;
   readonly collapsedGroupIds: ReadonlySet<string>;
   readonly advancedFeatures: boolean;
   readonly listingFailures: Readonly<Record<string, string>>;
 };
+
+/**
+ * A worktree row's lifecycle key, from the same function the model uses, so the drag handler and
+ * the builder cannot disagree about which row a key names.
+ */
+export function worktreeLifecycleKey(row: Worktree, workspaceId: string): string {
+  return worktreeLifecycleIdentity(row, workspaceId).worktreeKey;
+}
 
 function memberKind(project: RegisteredProject): SidebarMemberKind {
   if (project.target?.kind === "ssh") return "ssh";
@@ -94,11 +128,20 @@ function memberKind(project: RegisteredProject): SidebarMemberKind {
 
 function worktreeNode(groupId: string, row: Worktree, input: SidebarModelInput, label = worktreeLabel(row)): SidebarWorktreeNode {
   const workspaceId = row.workspaceId ?? groupId;
+  const identity = worktreeIdentity(row);
+  // A managed worktree keys on the branch's own workspace id, so the key does not depend on which
+  // project group happens to render the row; anything else keys on the row's workspace and path.
+  const lifecycleKey = worktreeLifecycleIdentity(row, groupId).worktreeKey;
+  const lifecycle = input.laneLifecycles?.[lifecycleKey];
   return {
     key: worktreeSortableId(groupId, row.path, row.workspaceId),
     workspaceId,
     path: row.path,
-    worktreeSlug: worktreeIdentity(row)?.slug ?? null,
+    worktreeSlug: identity?.slug ?? null,
+    lifecycleKey,
+    lifecycle: lifecycle?.state ?? null,
+    ...(lifecycle?.pullRequest ? { pullRequest: lifecycle.pullRequest } : {}),
+    pinnedTabs: [...(lifecycle?.pinnedTabs ?? [])],
     label,
     hostLabel: worktreeRowHost(row) ?? null,
     stale: Boolean(row.stale || row.freshness?.stale),
@@ -144,11 +187,46 @@ function projectNode(group: ProjectGroup, rows: readonly Worktree[], input: Side
   };
 }
 
+/**
+ * One project's rows in the server's section order.
+ *
+ * The server owns the order, so a workspace it orders is ordered ONLY by it: `worktreeOrder`
+ * (the pre-import `localStorage` copy) is not consulted again for that workspace, which is what
+ * stops the two from fighting. Rows the server has no lifecycle for follow in the stable local
+ * order `applyWorktreeOrder` already produced, so a fresh checkout appears at the end of the
+ * section instead of in an arbitrary place.
+ */
+function applyLaneOrder(
+  rows: readonly Worktree[],
+  workspaceId: string,
+  laneOrder: Readonly<Record<string, readonly string[]>> | undefined,
+): Worktree[] {
+  const keys = laneOrder?.[workspaceId];
+  if (!keys || keys.length === 0) return [...rows];
+  const rank = new Map(keys.map((key, index) => [key, index] as const));
+  const rowKey = (row: Worktree) => {
+    const identity = worktreeIdentity(row);
+    return laneLifecycleKey({
+      workspaceId: identity?.wsId ?? (row.workspaceId ?? workspaceId),
+      path: row.path,
+      worktreeSlug: identity?.slug ?? null,
+    });
+  };
+  return [...rows].sort(
+    (left, right) =>
+      (rank.get(rowKey(left)) ?? Number.MAX_SAFE_INTEGER) - (rank.get(rowKey(right)) ?? Number.MAX_SAFE_INTEGER),
+  );
+}
+
 /** The sidebar as the desktop renders it: groups, order, labels, rows and static states. */
 export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
   const groups = groupProjects(input.projects);
   const rowsByProject = applyWorktreeOrder(groupWorktreesByProject(input), input.worktreeOrder);
-  const projects = groups.map((group) => projectNode(group, rowsByProject.get(group.primaryProject.workspaceId) ?? [], input));
+  const projects = groups.map((group) => {
+    const workspaceId = group.primaryProject.workspaceId;
+    const rows = rowsByProject.get(workspaceId) ?? [];
+    return projectNode(group, applyLaneOrder(rows, workspaceId, input.laneOrder), input);
+  });
   return {
     schemaVersion: 1,
     revision: input.revision ?? 0,
@@ -161,10 +239,12 @@ export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
   };
 }
 
-/** Projects and rows left by the filter box, with forceExpanded set where a row matched. */
+/** Active rows; a search can still find settled rows to reopen them. */
 export function filterSidebarModel(model: SidebarModel, query: string) {
   return filterSidebarEntries(
-    model.projects.map((node) => ({ group: node, rows: node.worktrees })),
+    model.projects.map((node) => ({ group: node, rows: node.worktrees.filter((row) =>
+      row.lifecycle !== "settled" || query.trim() !== "",
+    ) })),
     query,
     { project: (node) => node.filterLabels, row: (row) => row.label },
   );

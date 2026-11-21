@@ -146,9 +146,17 @@ pub const CATALOG: &[Command] = &[
             sub!(
                 "wait",
                 &[SESSION],
-                &[required!("--until"), value!("--after"), value!("--revision"), value!("--timeout-ms"), HOST, JSON],
+                &[
+                    required!("--until"),
+                    value!("--instance"),
+                    value!("--after"),
+                    value!("--revision"),
+                    value!("--timeout-ms"),
+                    HOST,
+                    JSON,
+                ],
             ),
-            sub!("events", &[], &[value!("--after"), HOST, JSON]),
+            sub!("events", &[], &[value!("--instance"), value!("--after"), HOST, JSON]),
             sub!("ack", &[SESSION], &[HOST, JSON]),
             sub!(
                 "spawn",
@@ -605,17 +613,31 @@ mod tests {
     #[test]
     fn describe_agents_carries_args_flags_and_exit_codes() {
         let entry = describe_json("agents").unwrap();
-        let wait = entry["subcommands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|sub| sub["name"] == "wait")
-            .unwrap();
+        let subcommand = |name: &str| {
+            entry["subcommands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|sub| sub["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        let wait = subcommand("wait");
         assert_eq!(wait["args"][0], json!({ "name": "session", "type": "session-id", "required": true }));
         assert!(wait["flags"]
             .as_array()
             .unwrap()
             .contains(&json!({ "name": "--until", "takesValue": true, "required": true })));
+        let epoch = json!({ "name": "--instance", "takesValue": true, "required": false });
+        assert!(
+            wait["flags"].as_array().unwrap().contains(&epoch),
+            "wait must accept --instance: {wait}"
+        );
+        let events = subcommand("events");
+        assert!(
+            events["flags"].as_array().unwrap().contains(&epoch),
+            "events must accept --instance: {events}"
+        );
         assert_eq!(entry["exitCodes"].as_object().unwrap().len(), 5);
     }
 

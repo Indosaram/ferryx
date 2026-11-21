@@ -7,6 +7,8 @@ import {
 import { probeIdentity, windowsProbeScript } from './lib/proc.mjs';
 import { ownerStartMatches } from './scenarios/common.mjs';
 import { hostFor } from './lib/hosts.mjs';
+import { teardownRun } from './run.mjs';
+import { newSummary } from './lib/summary.mjs';
 import path from 'node:path';
 
 const RUN = '20261019t064512z';
@@ -138,7 +140,56 @@ test('ProcessRegistry kills only a recorded pid whose identity still matches', a
   assert.deepEqual(sent, [[10, 'SIGKILL']]);
 });
 
-test('windows teardown: a recorded GUI whose pid was reused by another process is gone, not refused, and never signalled (all3 g9 pid 7716)', async () => {
+test('mac teardown keeps a refused kill diagnosable: the pid is re-probed and its text mappings recorded', async () => {
+  const refused = [{ pid: 4242, role: 'daemon', reason: 'KILL_REFUSED' }];
+  const calls = [];
+  const agent = { call: async (method, params = {}) => {
+    calls.push([method, params]);
+    if (method === 'exec' && params.command === 'node') return { status: 0, stdout: '[]', stderr: '' };
+    if (method === 'exec') return { status: 0, stdout: '/tmp/qa/ferryx\n/usr/lib/libSystem.B.dylib\n', stderr: '' };
+    if (method === 'teardownRecorded') return { killed: [], refused, gone: [] };
+    if (method === 'probe') return { executable: '/tmp/qa/ferryx', startTime: 'Thu Nov 19 12:31:02 2026' };
+    if (method === 'removeSshHelperRoots') return { removed: [], kept: [] };
+    if (method === 'table') return [];
+    if (method === 'exists') return false;
+    return null;
+  } };
+  const summary = newSummary({ runId: '20261019t064512z', platform: 'mac', host: 'h' });
+  await teardownRun({
+    summary, agent, jobs: { listQaJobs: async () => [], remove: async () => {} }, host: { platform: 'mac' },
+    layout: { logs: '/qa/logs' }, runDirs: ['/qa/run'], qaRoots: ['/qa/run'], localEvidence: '/nonexistent-evidence', prodSnapshot: async () => null,
+  });
+  assert.deepEqual(summary.teardown.errors, []);
+  assert.equal(summary.teardown.refused.length, 1);
+  assert.deepEqual(summary.teardown.refused[0].observedAfterRefusal, { executable: '/tmp/qa/ferryx', startTime: 'Thu Nov 19 12:31:02 2026' });
+  assert.deepEqual(summary.teardown.refused[0].textMappings, { status: 0, stdout: '/tmp/qa/ferryx\n/usr/lib/libSystem.B.dylib\n', stderr: '' });
+  const probe = calls.find(([m]) => m === 'probe');
+  assert.deepEqual(probe, ['probe', { pid: 4242 }]);
+  const lsof = calls.find(([m, p]) => m === 'exec' && p.command === '/usr/sbin/lsof');
+  assert.deepEqual(lsof, ['exec', { command: '/usr/sbin/lsof', args: ['-nP', '-a', '-p', '4242', '-d', 'txt', '-Fn'], deadlineMs: 5000 }]);
+});
+
+test('a mac teardown refusal that cannot be probed is a teardown error, never a silent clean run', async () => {
+  const refused = [{ pid: 4243, role: 'gui-g1' }];
+  const agent = { call: async (method, params = {}) => {
+    if (method === 'exec' && params.command === 'node') return { status: 0, stdout: '[]', stderr: '' };
+    if (method === 'teardownRecorded') return { killed: [], refused };
+    if (method === 'probe') throw new Error('PID_GONE');
+    if (method === 'removeSshHelperRoots') return { removed: [], kept: [] };
+    if (method === 'table') return [];
+    if (method === 'exists') return false;
+    return null;
+  } };
+  const summary = newSummary({ runId: '20261019t064512z', platform: 'mac', host: 'h' });
+  await teardownRun({
+    summary, agent, jobs: { listQaJobs: async () => [], remove: async () => {} }, host: { platform: 'mac' },
+    layout: { logs: '/qa/logs' }, runDirs: ['/qa/run'], qaRoots: ['/qa/run'], localEvidence: '/nonexistent-evidence', prodSnapshot: async () => null,
+  });
+  assert.deepEqual(summary.teardown.errors, [{ step: 'kill-recorded', error: 'PID_GONE' }]);
+  assert.equal(summary.teardown.refused.length, 1);
+});
+
+test('windows teardown never probes or maps text for a refused kill', async () => {
   const gui = 'C:\\run\\artifacts\\A\\ferryx.exe';
   const table = new Map([[7716, { executable: gui, startTime: '134371448369187860' }]]);
   const sent = [];

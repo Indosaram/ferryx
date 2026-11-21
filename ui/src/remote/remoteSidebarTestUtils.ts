@@ -2,6 +2,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 
 import type { SidebarModel, SidebarProjectNode } from "../components/sidebar/sidebarModel";
+import { laneLifecycleKey } from "../lib/sidebarPersistence";
 
 export type FixtureWorktree = {
   readonly workspaceId: string;
@@ -37,6 +38,12 @@ export function sidebarModelFixture(
       workspaceId: row.workspaceId,
       path,
       worktreeSlug: row.slug,
+      // The server-owned lifecycle identity: the same shape `lanes::lifecycle::worktree_key`
+      // mints and validates, so a fixture row is what a real row is keyed by.
+      lifecycleKey: laneLifecycleKey({ workspaceId: row.workspaceId, path, worktreeSlug: row.slug }),
+      // A fixture row has no lifecycle yet, which is `active`: no pin, no snooze, not archived.
+      lifecycle: "active",
+      pinnedTabs: [],
       label: row.label ?? row.slug ?? row.projectLabel ?? row.workspaceId,
       hostLabel: null,
       stale: false,

@@ -857,10 +857,9 @@ async fn machine_session_capacity_limit_is_configurable() {
 // ---------------------------------------------------------------------------------------------
 // F1: desktop GUI session projection (project_desktop_gui_session).
 //
-// The projector resolves this machine's durable identity through canonical_identity_dir(), which
-// reads process environment (FERRYX_DATA_DIR, else HOME), and DaemonSessionService exposes no
-// injection seam for it. These cases therefore run in a child test process whose identity
-// environment points at a private fixture - the same shape as
+// The projector must use the gateway's identity even when the ambient default names a different
+// directory. These cases run in a child whose explicit auth path and environment both point
+// inside a private fixture - the same shape as
 // provider_resume_uses_only_remote_validated_identity - so the parent process never reads or
 // creates the real machine identity, and no process-global env is mutated. Every assertion runs
 // against the real projector, the real workspace registry/catalog and a real PTY; nothing is
@@ -1342,9 +1341,9 @@ async fn projector_desktop_gui_child_canonical_local_target() {
     assert_ne!(projected.target.machine_id, id);
     // The served identity is this machine's durable one, persisted inside the fixture, not
     // derived from the session id or a journal record.
-    let identity_path = crate::remote::auth::canonical_identity_dir()
-        .unwrap()
-        .join("identity.json");
+    let identity_dir = owner.remote_state().identity_dir.as_deref().unwrap();
+    assert_ne!(identity_dir, crate::remote::auth::canonical_identity_dir().unwrap());
+    let identity_path = identity_dir.join("identity.json");
     assert!(
         identity_path.starts_with(&root),
         "{identity_path:?} escaped the fixture"

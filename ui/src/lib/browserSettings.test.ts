@@ -26,16 +26,26 @@ beforeEach(() => {
 
 describe("named browser profiles on macOS", () => {
   let platformDescriptor: PropertyDescriptor | undefined;
+  let userAgentDescriptor: PropertyDescriptor | undefined;
 
   beforeEach(() => {
+    // browserNamedProfilesSupported() classifies the whole navigator, and jsdom's user agent
+    // interpolates the real process.platform, so platform alone does not make this host macOS.
     platformDescriptor = Object.getOwnPropertyDescriptor(navigator, "platform");
+    userAgentDescriptor = Object.getOwnPropertyDescriptor(navigator, "userAgent");
     Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+    });
   });
 
   afterEach(() => {
     setChromiumEngineAvailable(false);
     if (platformDescriptor) Object.defineProperty(navigator, "platform", platformDescriptor);
     else delete (navigator as unknown as Record<string, unknown>).platform;
+    if (userAgentDescriptor) Object.defineProperty(navigator, "userAgent", userAgentDescriptor);
+    else delete (navigator as unknown as Record<string, unknown>).userAgent;
   });
 
   it("hides named profiles until the Chromium engine is installed", () => {

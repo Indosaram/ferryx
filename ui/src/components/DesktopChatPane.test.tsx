@@ -54,6 +54,7 @@ function handlers(overrides: Partial<MockHandlers> = {}): MockHandlers {
     submit: vi.fn<DesktopChatHandlers["submit"]>(async () => ok(null)),
     stop: vi.fn<DesktopChatHandlers["stop"]>(async () => ok(null)),
     answer: vi.fn<DesktopChatHandlers["answer"]>(async () => ok(null)),
+    resolvePrompt: vi.fn<DesktopChatHandlers["resolvePrompt"]>(async () => ok(null)),
     ...overrides,
   };
 }

@@ -110,7 +110,7 @@ pub async fn respond_with_speaker(
     let inbound = voice_inbound(&session, speaker, transcript, message_id);
     let session_id = inbound_pane(&inbound, &ctx.profiles, &ctx.meta_session_id);
     let before = read_pane(ctx.control.as_ref(), &session_id).await;
-    let cursor = event_cursor(ctx.control.as_ref()).await;
+    let cursor = event_cursor(ctx.control.as_ref(), &session_id).await?;
     ensure_session(&ctx.pool, &session).await?;
     insert_message(
         &ctx.pool,
@@ -138,19 +138,27 @@ pub async fn respond_with_speaker(
         tracing::warn!(%error, "voice chat origin was not stored");
     }
     let before = before?;
-    let revision = (!before.revision.is_empty()).then(|| before.revision.clone());
-    ctx.control
-        .execute(
-            None,
-            AgentOp::Wait {
-                session_id: session_id.clone(),
-                until: "idle".into(),
-                after_revision: revision,
-                after: cursor,
-                timeout_ms: VOICE_TURN_TIMEOUT_MS,
-            },
-        )
-        .await?;
+    let revision = (!before.revision.is_empty())
+        .then(|| before.revision.clone())
+        .or(cursor.pane_revision);
+    let wait = AgentOp::Wait {
+        session_id: session_id.clone(),
+        until: "idle".into(),
+        instance: Some(cursor.instance),
+        after_revision: revision,
+        after: cursor.after,
+        timeout_ms: VOICE_TURN_TIMEOUT_MS,
+    };
+    let waited = ctx.control.execute(None, wait).await?;
+    // A gap here is not the idle reading this turn waited for: the log lost the cursor or the
+    // daemon restarted after the send. The transcript is already out, so the turn fails instead
+    // of sending it again.
+    if waited.get("gap").and_then(Value::as_bool) == Some(true) {
+        return Err(HubError::message(format!(
+            "pane {session_id} answered the voice turn's wait with a gap, so its idle reading \
+             cannot be ordered after the transcript already sent"
+        )));
+    }
     let after = read_pane(ctx.control.as_ref(), &session_id).await?;
     let parts = assistant_parts(&before, &after);
     if parts.is_empty() {
@@ -267,13 +275,49 @@ fn snapshot_of(value: &Value) -> PaneSnapshot {
     snapshot
 }
 
-async fn event_cursor(control: &dyn AgentControl) -> u64 {
-    control
-        .execute(None, AgentOp::Events { after: 0 })
+struct EventCursor {
+    instance: String,
+    after: u64,
+    pane_revision: Option<String>,
+}
+
+async fn event_cursor(control: &dyn AgentControl, session_id: &str) -> Result<EventCursor> {
+    let value = control
+        .execute(None, AgentOp::Events { instance: None, after: 0 })
         .await
-        .ok()
-        .and_then(|value| value.get("afterSequence").and_then(Value::as_u64))
-        .unwrap_or(0)
+        .map_err(|error| {
+            HubError::message(format!("could not establish agent event cursor: {error}"))
+        })?;
+    // A question about no epoch is always a gap, even on a log with no readings: the reply is the
+    // admission record, and its snapshot is the baseline the turn waits from.
+    let gap = value.get("gap").and_then(Value::as_bool) == Some(true);
+    let snapshot = value.get("snapshot").and_then(Value::as_array);
+    if gap && snapshot.is_none() {
+        return Err(HubError::message("an agent event cursor gap has no snapshot to resume from"));
+    }
+    let instance = value
+        .get("instance")
+        .and_then(Value::as_str)
+        .filter(|instance| !instance.is_empty())
+        .ok_or_else(|| HubError::message("agent event cursor has no epoch"))?
+        .to_owned();
+    let after = value
+        .get("afterSequence")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| HubError::message("agent event cursor has no sequence"))?;
+    let pane_revision = snapshot
+        .into_iter()
+        .flatten()
+        .find(|reading| reading.get("sessionId").and_then(Value::as_str) == Some(session_id))
+        .and_then(|reading| reading.get("screenRevision"))
+        .and_then(Value::as_str)
+        .filter(|revision| !revision.is_empty())
+        .map(str::to_owned);
+    Ok(EventCursor {
+        instance,
+        after,
+        pane_revision,
+    })
 }
 
 async fn ensure_session(pool: &SqlitePool, key: &SessionKey) -> Result<()> {
@@ -428,52 +472,319 @@ mod tests {
         assert_eq!(reply, "first\n\nsecond");
         assert!(!reply.contains("before"));
         let ops = control.ops.lock().expect("ops").clone();
-        let send = ops.iter().find_map(|op| match op {
-            AgentOp::Send {
-                session_id,
-                text,
-                request_id,
-            } => Some((session_id.clone(), text.clone(), request_id.clone())),
-            _ => None,
-        });
-        let (session_id, text, request_id) = send.expect("a send");
+        let sends: Vec<(String, String, String)> = ops
+            .iter()
+            .filter_map(|op| match op {
+                AgentOp::Send {
+                    session_id,
+                    text,
+                    request_id,
+                } => Some((session_id.clone(), text.clone(), request_id.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sends.len(), 1, "the transcript is sent exactly once");
+        let (session_id, text, request_id) = &sends[0];
         assert_eq!(session_id, "lane-pane");
         assert!(text.contains("[voice] hi"));
         assert!(text.contains("user=99"));
         assert!(request_id.contains("voice:"));
-        assert!(ops.iter().any(|op| matches!(
-            op,
+        let admission = ops.iter().find_map(|op| match op {
+            AgentOp::Events { instance, after } => Some((instance.clone(), *after)),
+            _ => None,
+        });
+        assert_eq!(admission, Some((None, 0)), "the turn asks for an epoch");
+        let wait = ops.iter().find_map(|op| match op {
             AgentOp::Wait {
                 until,
                 after,
+                instance,
                 after_revision,
                 ..
-            } if until == "idle" && *after == 5 && after_revision.as_deref() == Some("rev-1")
-        )));
+            } => Some((
+                until.as_str(),
+                *after,
+                instance.as_deref(),
+                after_revision.as_deref(),
+            )),
+            _ => None,
+        });
+        assert_eq!(wait, Some(("idle", 5, Some("voice-run-1"), Some("rev-1"))));
         assert!(ops.iter().all(|op| !matches!(
             op,
             AgentOp::Send { session_id, .. } if session_id == "meta"
         )));
     }
 
-    #[derive(Default)]
+    #[tokio::test]
+    async fn a_voice_turn_admits_an_epoch_that_has_no_readings_yet() {
+        let pool = crate::storage::memory().await.unwrap();
+        let control = Arc::new(ScriptedControl {
+            events: json!({
+                "gap": true,
+                "snapshot": [],
+                "afterSequence": 0,
+                "instance": "voice-run-1"
+            }),
+            ..Default::default()
+        });
+        let profiles =
+            ProfileRouter::from_json(r#"[{"channel":42,"pane_session_id":"lane-pane"}]"#);
+        let ctx = VoiceTurnContext {
+            pool,
+            profiles,
+            meta_session_id: "meta".into(),
+            control: control.clone(),
+        };
+        let voice_channel = 905_000_000 + u64::from(std::process::id());
+        bind(voice_channel, discord_text_session(7, "42"));
+        let reply = respond_with_speaker(&ctx, voice_channel, Some(99), "[voice] hi")
+            .await
+            .expect("an empty snapshot is still an admission");
+        assert_eq!(reply, "first\n\nsecond");
+        let ops = control.ops.lock().expect("ops").clone();
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, AgentOp::Send { .. }))
+                .count(),
+            1,
+            "the transcript is sent exactly once"
+        );
+        let wait = ops.iter().find_map(|op| match op {
+            AgentOp::Wait {
+                instance, after, ..
+            } => Some((instance.clone(), *after)),
+            _ => None,
+        });
+        assert_eq!(wait, Some((Some("voice-run-1".to_owned()), 0)));
+    }
+
+    #[tokio::test]
+    async fn a_voice_turn_fails_closed_without_an_event_epoch() {
+        let pool = crate::storage::memory().await.unwrap();
+        let control = Arc::new(ScriptedControl {
+            events: json!({ "ok": true, "afterSequence": 5 }),
+            ..Default::default()
+        });
+        let profiles =
+            ProfileRouter::from_json(r#"[{"channel":42,"pane_session_id":"lane-pane"}]"#);
+        let ctx = VoiceTurnContext {
+            pool,
+            profiles,
+            meta_session_id: "meta".into(),
+            control: control.clone(),
+        };
+        let voice_channel = 910_000_000 + u64::from(std::process::id());
+        bind(voice_channel, discord_text_session(7, "42"));
+        let error = respond_with_speaker(&ctx, voice_channel, Some(99), "[voice] hi")
+            .await
+            .expect_err("a sequence without its epoch is not a safe cursor");
+        assert!(error.to_string().contains("no epoch"), "{error}");
+        let ops = control.ops.lock().expect("ops");
+        assert!(ops.iter().any(|op| matches!(op, AgentOp::Events { .. })));
+        assert!(!ops.iter().any(|op| matches!(op, AgentOp::Send { .. })), "do not send after cursor admission fails");
+    }
+
+    #[tokio::test]
+    async fn a_voice_turn_fails_closed_without_an_event_sequence() {
+        let pool = crate::storage::memory().await.unwrap();
+        let control = Arc::new(ScriptedControl {
+            events: json!({ "gap": false, "events": [], "instance": "voice-run-1" }),
+            ..Default::default()
+        });
+        let profiles =
+            ProfileRouter::from_json(r#"[{"channel":42,"pane_session_id":"lane-pane"}]"#);
+        let ctx = VoiceTurnContext {
+            pool,
+            profiles,
+            meta_session_id: "meta".into(),
+            control: control.clone(),
+        };
+        let voice_channel = 915_000_000 + u64::from(std::process::id());
+        bind(voice_channel, discord_text_session(7, "42"));
+        respond_with_speaker(&ctx, voice_channel, Some(99), "[voice] hi")
+            .await
+            .expect_err("an epoch without a sequence is not a safe cursor");
+        let ops = control.ops.lock().expect("ops");
+        assert!(!ops.iter().any(|op| matches!(op, AgentOp::Send { .. })), "do not send");
+        assert!(!ops.iter().any(|op| matches!(op, AgentOp::Wait { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_voice_turn_fails_closed_on_a_gap_without_a_snapshot() {
+        let pool = crate::storage::memory().await.unwrap();
+        let control = Arc::new(ScriptedControl {
+            events: json!({ "gap": true, "afterSequence": 5, "instance": "voice-run-1" }),
+            ..Default::default()
+        });
+        let profiles =
+            ProfileRouter::from_json(r#"[{"channel":42,"pane_session_id":"lane-pane"}]"#);
+        let ctx = VoiceTurnContext {
+            pool,
+            profiles,
+            meta_session_id: "meta".into(),
+            control: control.clone(),
+        };
+        let voice_channel = 920_000_000 + u64::from(std::process::id());
+        bind(voice_channel, discord_text_session(7, "42"));
+        respond_with_speaker(&ctx, voice_channel, Some(99), "[voice] hi")
+            .await
+            .expect_err("a gap with nothing to resume from is not an admission");
+        let ops = control.ops.lock().expect("ops");
+        assert!(!ops.iter().any(|op| matches!(op, AgentOp::Send { .. })), "do not send");
+        assert!(!ops.iter().any(|op| matches!(op, AgentOp::Wait { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_wait_gap_after_the_send_fails_the_turn_without_resending() {
+        let pool = crate::storage::memory().await.unwrap();
+        let control = Arc::new(ScriptedControl {
+            wait: json!({
+                "gap": true,
+                "snapshot": [reading("lane-pane", "idle", "rev-2", 1)],
+                "afterSequence": 1,
+                "instance": "voice-run-2"
+            }),
+            ..Default::default()
+        });
+        let profiles =
+            ProfileRouter::from_json(r#"[{"channel":42,"pane_session_id":"lane-pane"}]"#);
+        let session = discord_text_session(7, "42");
+        let ctx = VoiceTurnContext {
+            pool: pool.clone(),
+            profiles,
+            meta_session_id: "meta".into(),
+            control: control.clone(),
+        };
+        let voice_channel = 925_000_000 + u64::from(std::process::id());
+        bind(voice_channel, session.clone());
+        respond_with_speaker(&ctx, voice_channel, Some(99), "[voice] hi")
+            .await
+            .expect_err("an idle reading of another epoch is not this turn's reply");
+        let ops = control.ops.lock().expect("ops");
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, AgentOp::Send { .. }))
+                .count(),
+            1,
+            "the transcript is not sent twice"
+        );
+        assert!(ops.iter().any(|op| matches!(op, AgentOp::Wait { .. })));
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, AgentOp::Read { .. }))
+                .count(),
+            1,
+            "the turn fails on the wait gap instead of reading a reply from the new epoch"
+        );
+        let roles: Vec<String> =
+            sqlx::query_scalar("SELECT role FROM messages WHERE session_key = ? ORDER BY sequence")
+                .bind(session.storage_key())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(roles, vec!["user".to_owned()], "a gap writes no reply");
+    }
+
+    #[tokio::test]
+    async fn a_voice_turn_takes_its_revision_baseline_from_the_admission_snapshot() {
+        let pool = crate::storage::memory().await.unwrap();
+        let control = Arc::new(ScriptedControl {
+            read_revision: None,
+            events: json!({
+                "gap": true,
+                "snapshot": [reading("lane-pane", "idle", "rev-9", 5)],
+                "afterSequence": 5,
+                "instance": "voice-run-1"
+            }),
+            ..Default::default()
+        });
+        let profiles =
+            ProfileRouter::from_json(r#"[{"channel":42,"pane_session_id":"lane-pane"}]"#);
+        let ctx = VoiceTurnContext {
+            pool,
+            profiles,
+            meta_session_id: "meta".into(),
+            control: control.clone(),
+        };
+        let voice_channel = 930_000_000 + u64::from(std::process::id());
+        bind(voice_channel, discord_text_session(7, "42"));
+        respond_with_speaker(&ctx, voice_channel, Some(99), "[voice] hi")
+            .await
+            .expect("a snapshot revision is a baseline even when the read carries none");
+        let ops = control.ops.lock().expect("ops").clone();
+        let wait = ops.iter().find_map(|op| match op {
+            AgentOp::Wait {
+                after_revision, ..
+            } => Some(after_revision.clone()),
+            _ => None,
+        });
+        assert_eq!(wait, Some(Some("rev-9".to_owned())));
+    }
+
+    fn reading(session_id: &str, state: &str, revision: &str, sequence: u64) -> Value {
+        json!({
+            "sessionId": session_id,
+            "state": state,
+            "stateSource": "screen",
+            "tier": "screen",
+            "promptId": null,
+            "kind": null,
+            "screenRevision": revision,
+            "stateSince": 0,
+            "screenChangedAt": 0,
+            "read": false,
+            "sequence": sequence
+        })
+    }
+
     struct ScriptedControl {
         ops: StdMutex<Vec<AgentOp>>,
         reads: AtomicUsize,
+        events: Value,
+        wait: Value,
+        read_revision: Option<&'static str>,
+    }
+
+    impl Default for ScriptedControl {
+        fn default() -> Self {
+            Self {
+                ops: StdMutex::new(Vec::new()),
+                reads: AtomicUsize::new(0),
+                events: json!({
+                    "gap": true,
+                    "snapshot": [reading("lane-pane", "idle", "rev-1", 5)],
+                    "afterSequence": 5,
+                    "instance": "voice-run-1"
+                }),
+                wait: json!({
+                    "gap": false,
+                    "observation": reading("lane-pane", "idle", "rev-2", 6),
+                    "afterSequence": 6,
+                    "instance": "voice-run-1"
+                }),
+                read_revision: Some("rev-1"),
+            }
+        }
     }
 
     #[async_trait]
     impl AgentControl for ScriptedControl {
         async fn execute(&self, _host_id: Option<&str>, op: AgentOp) -> Result<Value> {
             let read = matches!(op, AgentOp::Read { .. });
+            let events = matches!(op, AgentOp::Events { .. });
+            let wait = matches!(op, AgentOp::Wait { .. });
             self.ops.lock().expect("ops").push(op);
             if read {
                 let nth = self.reads.fetch_add(1, Ordering::SeqCst);
                 if nth == 0 {
+                    let Some(revision) = self.read_revision else {
+                        return Ok(json!({ "session": { "history": [] } }));
+                    };
                     return Ok(json!({
                         "session": {
-                            "screenRevision": "rev-1",
-                            "screen": { "text": "earlier line", "revision": "rev-1" },
+                            "screenRevision": revision,
+                            "screen": { "text": "earlier line", "revision": revision },
                             "history": ["earlier"]
                         }
                     }));
@@ -486,7 +797,13 @@ mod tests {
                     }
                 }));
             }
-            Ok(json!({ "ok": true, "afterSequence": 5 }))
+            if events {
+                return Ok(self.events.clone());
+            }
+            if wait {
+                return Ok(self.wait.clone());
+            }
+            Ok(json!({ "ok": true }))
         }
     }
 }

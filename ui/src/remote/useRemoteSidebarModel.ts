@@ -8,6 +8,9 @@ import type { AttentionBySessionId } from "../lib/attentionGroup";
 import { remoteSidebarSignals, type RemoteSidebarSelection, type RemoteSidebarSupervisor } from "./remoteSidebarLive";
 import { loadRemoteSidebar, SIDEBAR_OFFLINE, type RemoteSidebarResult, type SidebarFetch } from "./remoteSidebarSource";
 import type { RemoteSessionInventory } from "./remoteSessionInventory";
+import type { LaneLifecycleModel } from "../lib/sidebarPersistence";
+import { isResyncBoundaryFrame } from "./remoteSupervisor";
+import { applyLaneLifecycleModel, parsePanelFrame } from "./supervisorPanel/panelModel";
 
 export const SIDEBAR_CHANGED_FRAME = "sidebarChanged";
 
@@ -71,14 +74,15 @@ function frameOf(frame: unknown): Record<string, unknown> | null {
 }
 
 /**
- * The published model changes only with `sidebarChanged`; a fresh or lagged socket may have
- * missed one. A model rebuilt from the inventory also goes stale on any inventory change.
+ * The published model changes only with `sidebarChanged`; a fresh, lagged or restarted socket may
+ * have missed one, which the shared boundary decoder names. A model rebuilt from the inventory
+ * also goes stale on any inventory change.
  */
 function wantsRefetch(frame: unknown, source: SidebarModel["source"] | null): boolean {
   const event = frameOf(frame);
   if (event?.type === SIDEBAR_CHANGED_FRAME) return true;
   if (event?.type !== "inventoryInvalidated") return false;
-  return event.reason === "subscribe" || event.reason === "lag" || source === "inventory";
+  return isResyncBoundaryFrame(event) || source === "inventory";
 }
 
 function settle(previous: Settled | undefined, result: RemoteSidebarResult): Settled {
@@ -118,6 +122,7 @@ export function useRemoteSidebarModel({ machines, supervisors, attention }: Remo
       let alive = true;
       let inFlight = false;
       let again = false;
+      let lifecycle: LaneLifecycleModel | null = null;
       // A change during a fetch queues exactly one follow-up fetch instead of racing a second.
       const refetch = async () => {
         if (inFlight) {
@@ -138,13 +143,41 @@ export function useRemoteSidebarModel({ machines, supervisors, attention }: Remo
               result = { kind: "error", code: "LOAD_FAILED", message: err instanceof Error ? err.message : String(err) };
             }
             if (!alive) return;
-            setSettled((prev) => ({ ...prev, [machineId]: settle(prev[machineId], result) }));
+            const racedLifecycle = lifecycle;
+            setSettled((prev) => {
+              const next = settle(prev[machineId], result);
+              return { ...prev, [machineId]: next.model && racedLifecycle
+                ? { ...next, model: applyLaneLifecycleModel(next.model, racedLifecycle) }
+                : next };
+            });
           } while (again);
         } finally {
           inFlight = false;
         }
       };
       const unsubscribe = machine.subscribe((frame) => {
+        const event = parsePanelFrame(frame);
+        if (event?.type === "panel.lanes") {
+          const rows = new Map(lifecycle?.sections.flatMap((section) => section.rows.map((row) => [row.worktreeKey, row] as const)));
+          for (const section of event.model.sections) {
+            for (const row of section.rows) {
+              if ((row.revision ?? -Infinity) >= (rows.get(row.worktreeKey)?.revision ?? -Infinity)) rows.set(row.worktreeKey, row);
+            }
+          }
+          const sections = new Map<string, LaneLifecycleModel["sections"][number]>();
+          for (const row of rows.values()) {
+            if (!sections.has(row.workspaceId)) sections.set(row.workspaceId, { workspaceId: row.workspaceId, rows: [] });
+            sections.get(row.workspaceId)!.rows.push(row);
+          }
+          lifecycle = { sections: [...sections.values()], revision: event.model.revision };
+          setSettled((previous) => {
+            const current = previous[machineId];
+            return current?.model
+              ? { ...previous, [machineId]: { ...current, model: applyLaneLifecycleModel(current.model, event.model) } }
+              : previous;
+          });
+          return;
+        }
         if (wantsRefetch(frame, settledRef.current[machineId]?.model?.source ?? null)) void refetch();
       });
       void refetch();

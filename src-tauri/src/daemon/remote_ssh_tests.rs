@@ -183,6 +183,9 @@ async fn remote_persistence_migrates_out_of_volatile_runtime_dir() {
 #[path = "remote_ssh_gateway_qa.rs"]
 mod gateway_qa;
 
+#[path = "remote_ssh_machine_qa.rs"]
+mod machine_qa;
+
 /// Loopback `sshd` probing: macOS ships it at `/usr/sbin/sshd`, Linux
 /// distributions use `/usr/sbin`, `/usr/local/sbin`, or `/sbin`, so probe the
 /// known locations and fall back to PATH resolution.
@@ -292,6 +295,12 @@ async fn direct_ssh_real_transport_registration_and_pty() {
             "--nocapture",
         ])
         .env(CHILD, dir.path())
+        // The machine gateway resolves this machine's durable identity through
+        // `canonical_identity_dir()` while the daemon takes it from the injected auth path's
+        // parent, so both must name the same private directory or a machine admission fails
+        // `STALE_EPOCH`. Without this the child would read - and, on a clean host, create -
+        // the real `~/.ferryx/remote/identity.json`.
+        .env("FERRYX_DATA_DIR", dir.path().join("data"))
         // The daemon supervises its SSH transport by re-entering this test binary's ignored
         // `ssh_bridge_transport_supervisor_entry`; without the marker the bridge refuses to
         // supervise at all. The real app dispatches `--ferryx-ssh-supervisor` from its own
@@ -526,7 +535,10 @@ async fn exercise_child(root: &Path) {
     // registration exists, and no local placeholder is needed for either tab.
     let daemon = DaemonServer::new_with_paths(
         Some(root.join("gateway.json")),
-        Some(root.join("auth.json")),
+        // `<root>/data` is this child's `FERRYX_DATA_DIR`, so the auth store's parent is
+        // exactly the canonical identity directory. `isolated_dir` still comes from the
+        // gateway path's parent, keeping the persisted-session fixtures at `<root>`.
+        Some(root.join("data").join("remote").join("auth.json")),
     );
     phase!("Phase 4: Installing test helper");
     let _helper = install_test_helper(&host, root).await;
@@ -549,11 +561,14 @@ async fn exercise_child(root: &Path) {
         } else {
             None
         };
+        // The retained pane uses a distinctive desktop size so takeover and restart
+        // cannot pass merely because a fresh terminal defaults to 80x24.
+        let (cols, rows) = if request_id == "split-restore" { (101, 33) } else { (80, 24) };
         let id = daemon
             .handle_spawn(
                 request_id,
                 &response.workspace_id,
-                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: spawn_cwd, cols: 80, rows: 24, shell: None },
+                crate::daemon::session_service::SpawnOptions { worktree: None, cwd: spawn_cwd, cols, rows, shell: None },
                 Some(startup.clone()),
             )
             .await
@@ -704,8 +719,10 @@ async fn exercise_child(root: &Path) {
 
     phase!("Phase 8: Restart and session persistence restore");
     let retained = retained.unwrap();
+    machine_qa::exercise(&daemon, &retained, &host_store, false).await;
     let before = daemon.terminal_service.remote().details(&retained).unwrap();
     assert!(before.pid.is_some());
+    assert_eq!((before.descriptor.cols, before.descriptor.rows), (101, 33));
     let identity_path = daemon.remote_sessions_path.clone();
     phase!("Phase 8b: Persist starting");
     daemon
@@ -736,7 +753,7 @@ async fn exercise_child(root: &Path) {
     );
     let daemon = DaemonServer::new_with_paths(
         Some(root.join("gateway.json")),
-        Some(root.join("auth.json")),
+        Some(root.join("data").join("remote").join("auth.json")),
     );
     phase!("Phase 8e: Restore starting");
     daemon
@@ -757,6 +774,8 @@ async fn exercise_child(root: &Path) {
         before.descriptor.backend_session_id
     );
     assert!(daemon.terminal_service.get_session(&retained).is_none());
+    assert_eq!((after.descriptor.cols, after.descriptor.rows), (101, 33));
+    machine_qa::exercise(&daemon, &retained, &host_store, true).await;
     let (mut replay, mut output) = daemon.terminal_service.attach(&retained).unwrap();
     let expected = format!("^SSH-OK:{}", response.repo_root);
     tokio::time::timeout(Duration::from_secs(10), async {

@@ -1,3 +1,4 @@
+pub mod adapter;
 pub mod engine;
 pub mod manifest;
 pub mod matcher;
@@ -5,6 +6,10 @@ pub mod owner;
 pub mod registry;
 pub mod region;
 
+pub use adapter::{
+    provider_adapter, refuse_unless_rollback, refuse_unless_rollback_for, shipped_adapters,
+    ProviderAdapter, ProviderCapability, ProviderCapabilities, ProviderRefusal,
+};
 pub use engine::{default_engine, AgentActivity, Detection, DetectionEngine, SHIPPED_MANIFESTS};
 pub use owner::{classify_agent_process, owner_proof, Classified, OwnerProof};
 pub use manifest::{
@@ -314,6 +319,88 @@ all = [
                 assert!(rule.priority > 0);
             }
         }
+    }
+
+    // 7a. the defaulted capabilities field kept every shipped manifest parsing, and every one of
+    // them declares nothing: no manifest was edited, so none can claim a conversation rollback.
+    #[test]
+    fn test_shipped_manifests_parse_with_no_declared_capabilities() {
+        assert_eq!(SHIPPED_MANIFESTS.len(), 16, "all 16 manifests ship");
+        for manifest_raw in SHIPPED_MANIFESTS {
+            let manifest = load_manifest_from_str(manifest_raw).expect("manifest must parse");
+            assert_eq!(
+                manifest.capabilities,
+                crate::agent_detect::ProviderCapabilities::default(),
+                "{}: a manifest with no [capabilities] table declares nothing",
+                manifest.id
+            );
+            assert!(
+                !manifest.capabilities.rollback_conversation,
+                "{}: rollbackConversation must stay false until a provider can rewind",
+                manifest.id
+            );
+        }
+        let adapters = crate::agent_detect::shipped_adapters();
+        assert_eq!(adapters.len(), SHIPPED_MANIFESTS.len());
+        for adapter in adapters {
+            assert!(adapter.capabilities.declares_nothing(), "{}", adapter.id);
+            assert!(
+                crate::agent_detect::refuse_unless_rollback(adapter).is_err(),
+                "{}: a provider that declares nothing cannot be rolled back",
+                adapter.id
+            );
+        }
+    }
+
+    // 7b. a manifest opts in by declaring the table, and only the declared keys are true.
+    #[test]
+    fn test_a_manifest_may_declare_its_capabilities() {
+        let manifest_toml = r#"
+id = "declared"
+
+[capabilities]
+prompt = true
+rollbackConversation = true
+
+[[rules]]
+id = "idle_rule"
+state = "idle"
+priority = 10
+region = "whole_recent"
+contains = ["ready"]
+"#;
+        let manifest = load_manifest_from_str(manifest_toml).expect("manifest must parse");
+        assert!(manifest.capabilities.prompt);
+        assert!(manifest.capabilities.rollback_conversation);
+        assert!(!manifest.capabilities.answer, "an undeclared key stays false");
+        assert!(!manifest.capabilities.stop);
+        assert!(!manifest.capabilities.usage);
+        let adapter = crate::agent_detect::ProviderAdapter::from_manifest(&manifest);
+        assert!(crate::agent_detect::refuse_unless_rollback(&adapter).is_ok());
+        assert_eq!(
+            adapter.capabilities.declared(),
+            vec![
+                crate::agent_detect::ProviderCapability::Prompt,
+                crate::agent_detect::ProviderCapability::RollbackConversation,
+            ]
+        );
+    }
+
+    // 7c. an id no manifest answers to is refused rather than assumed capable.
+    #[test]
+    fn test_an_unknown_provider_is_refused() {
+        assert!(crate::agent_detect::provider_adapter("claude").is_some());
+        assert!(
+            crate::agent_detect::provider_adapter("claude-code").is_some(),
+            "an alias resolves to the same manifest"
+        );
+        assert!(crate::agent_detect::provider_adapter("no-such-agent").is_none());
+        assert_eq!(
+            crate::agent_detect::refuse_unless_rollback_for("no-such-agent"),
+            Err(crate::agent_detect::ProviderRefusal::UnknownProvider(
+                "no-such-agent".to_string()
+            ))
+        );
     }
 
     // 8. per-agent realistic screens: for omo, opencode, codex, claude, antigravity —

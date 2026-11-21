@@ -3,6 +3,8 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useS
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
 import { withTimeout } from "./lib/withTimeout";
+import { useDesktopContinuity } from "./lib/useDesktopContinuity";
+import { deriveContinuitySelection } from "./lib/continuitySelection";
 
 import { CommandPalette } from "./components/CommandPalette";
 import { BrowserAgentApprovalCard } from "./components/BrowserAgentApprovalCard";
@@ -181,17 +183,19 @@ import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegi
 import { previewRequestForSource } from "./lib/filePreviewTabRegistry";
 import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
-import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
-import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
+import { scheduleAgentAutoResume, startAgentAutoResumeWatcher } from "./lib/agentAutoResume";
+import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler, setSessionSleeping } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
 import { findSessionByBackendId, localBackendSessionId } from "./components/supervisorPanel/findSession";
 import { extractNormalizedProviderSession, getAgentReconnectAffordance, getContinuationAffordance, getInPlaceRestartStartup, isExitedContinuationSource } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
+import { startSshRecovery } from "./lib/sshRecovery";
+import { startParkedRemoteRecovery } from "./lib/parkedRemoteRecovery";
 import { reconnectLocalSession, replaceExitedShellSession, restartPaneSession } from "./lib/shellReplacement";
 import { initialGridFields, measureInitialGeometry } from "./lib/initialPtyGeometry";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
-import { workspaceReducer, requestLocalRecoveryAdmission, type LocalRecoveryAdmissionResult } from "./state/workspaceStore";
+import { workspaceReducer, requestLocalRecoveryAdmission, type LocalRecoveryAdmissionResult, type WorkspaceAction } from "./state/workspaceStore";
 import type { NotificationTarget, PersistedWorkspaceSession, SystemPermissionsStatus } from "./lib/types";
 import { staticTabLabel } from "./lib/tabTitle";
 import { subscribeNotificationActivations } from "./lib/notificationActivation";
@@ -203,6 +207,8 @@ import { assessClose, reassessConfirmedClose, type CloseTarget } from "./lib/clo
 import { switchDebug } from "./lib/switchDebug";
 import { useInactiveProjectWorktrees } from "./state/inactiveProjectWorktrees";
 import { useDesktopSidebarPublisher } from "./lib/desktopSidebarSync";
+import type { LaneLifecycleState, LanePullRequestView, SidebarLaneLifecycle } from "./lib/sidebarPersistence";
+import { worktreeLifecycleIdentity } from "./lib/sidebarPersistence";
 import {
   isTerminalTab,
   worktreeIdentity,
@@ -219,7 +225,7 @@ import { findDirectionalLeafId, type PaneFocusDirection } from "./state/paneGeom
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
-import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
+import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots, subscribeWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { createOwnedWorkspaceAccess } from "./state/workspaceOwnerAccess";
 import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { describeLadderRow, listShortcutWorktrees } from "./state/shortcutLadder";
@@ -227,7 +233,7 @@ import { useWorkspaceRuntime } from "./state/workspaceRuntime";
 import { layoutSyncHostTransport, useLayoutSync, usePairedLayoutAdapter } from "./state/useLayoutSync";
 import { publishPersistedLayouts } from "./state/layoutSync";
 import { listPairedProjectWorktrees } from "./state/pairedProjectWorktrees";
-import { getTabById, getTabLayoutById, getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, type WorkspaceState } from "./state/workspaceStore";
+import { getTabById, getTabLayoutById, getTabSessionIds, hasNavigableSession, selectGlobalUnreadBadgeCount, selectNotificationWorkspaceLabel, selectSessionActivity, selectWorktreeActivitySummaries, setLocalRecoveryPersistence, wakeLocalSessionRecovery, useWorkspaceStore, LANE_LIFECYCLE_UNDO_MS, type LaneLifecycleAction, type WorkspaceState } from "./state/workspaceStore";
 import { activityStateOfGroup, groupOf, type AttentionBySessionId } from "./lib/attentionGroup";
 
 export { ACTIVE_PROJECT_STORAGE_KEY, PROJECTS_STORAGE_KEY, SIDEBAR_OPEN_STORAGE_KEY };
@@ -495,6 +501,73 @@ function pairedHostMachineId(hostId: string): string {
   const marker = hostId.lastIndexOf("/host/");
   return marker < 0 ? hostId : decodeURIComponent(hostId.slice(marker + "/host/".length));
 }
+
+/**
+ * The server-owned sidebar order and per-row lifecycle state, shaped for `buildSidebarModel`.
+ *
+ * It is a pure derivation of the store (`laneOrder` / `laneLifecycle` / `lanePinnedTabs`), so the
+ * sidebar and the publisher cannot disagree about a row's state, and nothing here re-reads the
+ * server: `workspaceStore` owns that read and its 5 s undo window.
+ */
+function useLaneLifecycleModel(
+  order: Readonly<Record<string, readonly string[]>> | undefined,
+  lifecycle: Readonly<Record<string, LaneLifecycleState>> | undefined,
+  pinnedTabs: Readonly<Record<string, readonly string[]>> | undefined,
+  pullRequests: Readonly<Record<string, LanePullRequestView | null>> | undefined,
+): {
+  laneOrder: Record<string, string[]>;
+  laneLifecycles: Record<string, SidebarLaneLifecycle>;
+} {
+  return useMemo(() => {
+    const rows: Record<string, SidebarLaneLifecycle> = {};
+    for (const [key, state] of Object.entries(lifecycle ?? {})) {
+      const pins = pinnedTabs?.[key];
+      rows[key] = { state, ...(pins && pins.length > 0 ? { pinnedTabs: pins } : {}), pullRequest: pullRequests?.[key] ?? null };
+    }
+    const sections: Record<string, string[]> = {};
+    for (const [workspaceId, keys] of Object.entries(order ?? {})) {
+      if (keys.length > 0) sections[workspaceId] = [...keys];
+    }
+    return { laneOrder: sections, laneLifecycles: rows };
+  }, [order, lifecycle, pinnedTabs, pullRequests]);
+}
+
+/**
+ * Names the row a lifecycle action applies to and shows the undo affordance.
+ *
+ * The store holds the 5 s timer and auto-commits on expiry (`beginLaneLifecycle`); nothing here
+ * schedules anything. The toast's Undo is the ONLY caller of `cancelLaneLifecycle`, which clears
+ * that timer and removes the pending entry, so a cancel inside the window means the transport is
+ * never called and no row can have changed.
+ */
+function useLaneActionHandler(
+  projectWorkspaceId: string,
+  begin: (request: { worktreeKey: string; workspaceId: string; path: string; action: LaneLifecycleAction; until?: string | null }) => void,
+  cancel: (worktreeKey: string) => void,
+): (worktree: Worktree, action: LaneLifecycleAction) => void {
+  return useCallback((worktree: Worktree, action: LaneLifecycleAction) => {
+    if (!worktree.path) return;
+    const identity = worktreeIdentity(worktree);
+    const { workspaceId, worktreeKey } = worktreeLifecycleIdentity(worktree, projectWorkspaceId);
+    begin({ worktreeKey, workspaceId, path: worktree.path, action });
+    // The row's own name, without the sidebar's label helper: App already binds a local
+    // `worktreeLabel` (line ~783) and importing that name here would shadow it.
+    const name = identity?.slug ?? worktree.branch?.replace(/^refs\/heads\//, "") ?? worktree.path;
+    toast(`${LANE_ACTION_LABELS[action]} ${name}`, {
+      // Exactly the window the store holds, so the button is gone when the write lands.
+      duration: LANE_LIFECYCLE_UNDO_MS,
+      action: { label: "Undo", onClick: () => cancel(worktreeKey) },
+    });
+  }, [begin, cancel, projectWorkspaceId]);
+}
+
+const LANE_ACTION_LABELS: Record<LaneLifecycleAction, string> = {
+  pin: "Pinned",
+  settle: "Settled",
+  snooze: "Snoozed",
+  archive: "Archived",
+  activate: "Reactivated",
+};
 
 export function App() {
   useApplyAppearanceSettings();
@@ -1045,7 +1118,12 @@ function WorkspaceApp({
     ensureSessionBackends,
     dispatchWorkspaceAction,
     markBackendSessionUnavailable,
+    beginLaneLifecycle,
+    cancelLaneLifecycle,
+    refreshLaneLifecycles,
   } = useWorkspaceStore({ workspaceId: activeProject.workspaceId });
+  const { laneOrder, laneLifecycles } = useLaneLifecycleModel(state.laneOrder, state.laneLifecycle, state.lanePinnedTabs, state.lanePullRequests);
+  const handleLaneAction = useLaneActionHandler(activeProject.workspaceId, beginLaneLifecycle, cancelLaneLifecycle);
   useBrowserSessionHydration(state, activeProject.workspaceId);
 
   const stateRef = useRef(state);
@@ -2019,13 +2097,38 @@ function WorkspaceApp({
     [getOrCreateSshOwnerRetryOperation],
   );
 
+  // Only the mounted project has a live reducer; every other project lives in its snapshot. These
+  // route reads and writes to whichever of the two owns the project right now, so recovery can run
+  // for a project that is not on screen and keep working if the user switches to it mid-flight.
+  const ownedWorkspaceAccess = useCallback((workspaceId: string) => createOwnedWorkspaceAccess(workspaceId, {
+    isMounted: () => (stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId) === workspaceId,
+    getState: () => stateRef.current,
+    dispatch: dispatchWorkspaceAction,
+  }), [dispatchWorkspaceAction]);
+  const workspaceStateFor = useCallback(
+    (workspaceId: string): WorkspaceState | null => ownedWorkspaceAccess(workspaceId).getState(),
+    [ownedWorkspaceAccess],
+  );
+  const dispatchToWorkspace = useCallback(
+    (workspaceId: string, action: WorkspaceAction) => ownedWorkspaceAccess(workspaceId).dispatch(action),
+    [ownedWorkspaceAccess],
+  );
+
   const handleRefreshSessionIdentity = useCallback(
-    (sessionId: string, onResult: (result: LocalRecoveryAdmissionResult) => void): (() => void) => {
-      const project = activeProjectRef.current;
+    (
+      sessionId: string,
+      onResult: (result: LocalRecoveryAdmissionResult) => void,
+      /** A project other than the mounted one; only paired recovery supports it. */
+      targetWorkspaceId?: string,
+    ): (() => void) => {
+      const project = targetWorkspaceId
+        ? projectsRef.current.find((candidate) => candidate.workspaceId === targetWorkspaceId)
+        : activeProjectRef.current;
       if (!project) {
         onResult({ kind: "cancelled" }); return () => {};
       }
-      const session = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+      const sessionsOf = () => workspaceStateFor(project.workspaceId)?.sessions ?? {};
+      const session = sessionsOf()[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
 
       if (project.target?.kind === "pairedDaemon" || isPairedWorkspaceId(project.workspaceId)) {
         if (!session?.backendSessionId) {
@@ -2062,10 +2165,9 @@ function WorkspaceApp({
         };
 
         const checkCurrent = () => {
-          const currentProject = activeProjectRef.current;
-          const current = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+          const current = sessionsOf()[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
           return (
-            currentProject?.workspaceId === captured.workspaceId &&
+            projectsRef.current.some((candidate) => candidate.workspaceId === captured.workspaceId) &&
             current?.backendSessionId === captured.backendSessionId &&
             (current?.daemonEpoch ?? null) === captured.daemonEpoch &&
             (current?.incarnation ?? null) === captured.incarnation &&
@@ -2114,7 +2216,7 @@ function WorkspaceApp({
                 // the backend is gone, so the pane recovers like a local one instead of blocking.
                 if (admissionIdentity && (admissionIdentity.backendSessionId !== captured.backendSessionId ||
                     admissionIdentity.daemonEpoch !== captured.daemonEpoch || admissionIdentity.incarnation !== captured.incarnation)) return;
-                dispatchWorkspaceAction({ type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
+                dispatchToWorkspace(captured.workspaceId, { type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
                 settle({ kind: "exited" });
                 return;
               }
@@ -2126,10 +2228,10 @@ function WorkspaceApp({
                     admissionIdentity.daemonEpoch !== captured.daemonEpoch || admissionIdentity.incarnation !== captured.incarnation ||
                     (admissionIdentity.generation != null && (!Number.isSafeInteger(admissionIdentity.generation) ||
                       admissionIdentity.generation < 0 || status.generation < admissionIdentity.generation)))) return;
-                const current = stateRef.current;
-                const retained = current.sessions[sessionId];
-                if (!retained) return;
-                dispatchWorkspaceAction({ type: "RESTORE_WORKSPACE", state: { ...current, sessions: {
+                const current = workspaceStateFor(captured.workspaceId);
+                const retained = current?.sessions[sessionId];
+                if (!current || !retained) return;
+                dispatchToWorkspace(captured.workspaceId, { type: "RESTORE_WORKSPACE", state: { ...current, sessions: {
                   ...current.sessions, [sessionId]: { ...retained,
                     recoveryState: { phase: "blocked", reason }, backendUnavailableReason: reason,
                     remoteConnectionState: "disconnected", reconnectLifecycle: "failed",
@@ -2160,7 +2262,7 @@ function WorkspaceApp({
 
           const currentGeneration = status.generation;
           if (currentGeneration <= 0 || currentGeneration < (admissionIdentity.generation ?? 0)) return;
-          const current = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+          const current = sessionsOf()[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
           if (!current) return;
           settle({
             kind: "ready",
@@ -2206,7 +2308,7 @@ function WorkspaceApp({
           } else if (outcome.affirmativeExit) {
             // retry_owned matched the exact (backend, epoch, incarnation) tuple before reporting
             // exit: the remote process is gone. Recover the pane on the same host.
-            dispatchWorkspaceAction({ type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
+            dispatchToWorkspace(captured.workspaceId, { type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
             settle({ kind: "exited" });
           } else if (outcome.admitted) {
             admissionIdentity = outcome.actorIdentity ?? null;
@@ -2224,6 +2326,10 @@ function WorkspaceApp({
           live = false;
           cleanup();
         };
+      }
+
+      if (targetWorkspaceId) {
+        onResult({ kind: "cancelled" }); return () => {};
       }
 
       if (project.target?.kind === "ssh" || isRemoteWorkspaceId(project.workspaceId)) {
@@ -2261,7 +2367,7 @@ function WorkspaceApp({
 
       return requestLocalRecoveryAdmission(project.workspaceId, sessionId, true, onResult);
     },
-    [getOrCreateSshOwnerRetryOperation, dispatchWorkspaceAction],
+    [getOrCreateSshOwnerRetryOperation, dispatchToWorkspace, workspaceStateFor],
   );
 
   const activeAutoResumeCancelRef = useRef<(() => void) | null>(null);
@@ -2315,6 +2421,9 @@ function WorkspaceApp({
       workspaceId: activeProject.workspaceId,
       state: pending.state,
       recoveredFromHmr,
+      // An agent conversation is always resumed: the restore policy only decides when plain
+      // shells start, since a pane left on "Session disconnected" has to be reopened by hand.
+      ignorePolicy: true,
       reconnect: async (sessionId) => {
         // The app, not the user, initiated this resume; the working→idle blip it
         // produces when the agent lands back at its prompt is not user attention.
@@ -2331,6 +2440,84 @@ function WorkspaceApp({
       },
     });
   }, [activeProject.workspaceId, dispatchWorkspaceAction, ensureSessionBackends, handleReconnectAgentSession, pendingAgentAutoResume, recoveredFromHmr, registeredProjectId, reportRuntimeError]);
+
+  // Projects that are not on screen keep their state only as a snapshot, so the mounted store's
+  // resume above never reaches them. The watcher resumes every project's agents, local, SSH and
+  // paired: the unmounted ones at startup, and any remote agent whose host later reports its
+  // session gone. A reboot therefore brings every project back without opening each one.
+  const agentAutoResumeStartedRef = useRef(false);
+  const agentAutoResumeStopRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => agentAutoResumeStopRef.current?.(), []);
+  useEffect(() => {
+    if (agentAutoResumeStartedRef.current || recoveredFromHmr) return;
+    if (registeredProjectId !== activeProject.workspaceId || workspaceRestoreStatus !== "restored") return;
+    agentAutoResumeStartedRef.current = true;
+
+    const isMounted = (workspaceId: string) =>
+      (stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId) === workspaceId;
+    const stateOf = workspaceStateFor;
+    const dispatchTo = dispatchToWorkspace;
+
+    const stopParkedRemoteRecovery = startParkedRemoteRecovery({
+      projects: projectsRef.current,
+      isMounted,
+      getState: stateOf,
+      dispatch: dispatchTo,
+      subscribe: subscribeWorkspaceSnapshots,
+      startSsh: (workspaceId, sessions) => {
+        const recovery = startSshRecovery({
+          sessions,
+          dispatch: (action) => dispatchTo(workspaceId, action),
+          onError: (error) => console.error("Parked SSH session reconciliation failed:", error),
+        });
+        void recovery.ready.catch((error) => console.error("Parked SSH status subscription failed:", error));
+        return recovery.stop;
+      },
+      refreshPaired: (workspaceId, sessionId, onReady) =>
+        handleRefreshSessionIdentity(sessionId, (result) => {
+          if (result.kind === "ready") onReady(result.session);
+        }, workspaceId),
+    });
+
+    const stopWatcher = startAgentAutoResumeWatcher({
+      listWorkspaceIds: () => projectsRef.current.map((project) => project.workspaceId),
+      getState: stateOf,
+      mountedWorkspaceId: () => stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId,
+      subscribe: subscribeWorkspaceSnapshots,
+      reconnect: (workspaceId, sessionId) => {
+        const project = projectsRef.current.find((candidate) => candidate.workspaceId === workspaceId);
+        if (!project) return Promise.resolve();
+        dispatchTo(workspaceId, { type: "SUPPRESS_NEXT_ATTENTION", sessionId });
+        return reconnectAgentSession(
+          sessionId,
+          createAppReconnectDependencies({
+            getSessions: () => stateOf(workspaceId)?.sessions ?? {},
+            dispatch: (action) => dispatchTo(workspaceId, action),
+            persist: async (result, localSession) => {
+              const current = stateOf(workspaceId);
+              if (!current) return;
+              const nextState = workspaceReducer(current, {
+                type: "REBIND_SESSION_BACKEND",
+                sessionId: localSession.id,
+                backendSessionId: result.sessionId,
+                cwd: result.session.cwd ?? localSession.cwd,
+                daemonEpoch: result.daemonEpoch,
+                incarnation: result.session.incarnation ?? null,
+                clearAgent: false,
+              });
+              await persistSessionStrict(workspaceId, project.repoRoot, nextState);
+            },
+          }),
+        ).then(() => setSessionSleeping(sessionId, false));
+      },
+    });
+    agentAutoResumeStopRef.current = () => {
+      stopWatcher();
+      stopParkedRemoteRecovery();
+    };
+    // Started once per app launch, the first moment the mounted project has restored.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registeredProjectId, activeProject.workspaceId, workspaceRestoreStatus]);
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {
@@ -2427,6 +2614,8 @@ function WorkspaceApp({
     activityByWorktreePath: worktreeActivity,
     unreadWorktreePaths: state.unreadWorktreePaths,
     agents,
+    ...(laneOrder ? { laneOrder } : {}),
+    ...(laneLifecycles ? { laneLifecycles } : {}),
   });
   const [pendingClose, setPendingClose] = useState<{
     target: CloseTarget;
@@ -2458,6 +2647,33 @@ function WorkspaceApp({
     () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots(), attentionBySessionId),
     [activeProject.workspaceId, state, parkedActivityVersion, attentionBySessionId],
   );
+  const continuitySelection = useMemo(
+    () => deriveContinuitySelection(state, activeProject, focusedTerminalPayload),
+    [activeProject, state, focusedTerminalPayload],
+  );
+  // Read by the focus handler, which must compare against the committed selection without
+  // re-creating itself on every selection change.
+  const continuitySelectionRef = useRef(continuitySelection);
+  continuitySelectionRef.current = continuitySelection;
+  const recordContinuityIntent = useDesktopContinuity({
+    enabled: isNativeRuntime,
+    leader: isAppStateLeader(),
+    selection: continuitySelection,
+    /* Continuity is an account convenience layered over local work, so its failures are not
+       runtime errors: a signed-in machine that is offline, a relay that has not been upgraded,
+       and a rejected publication are all expected and must not raise a runtime error per click.
+       Losing the CAS race is already a normal outcome inside the publisher. */
+    onError: (error: unknown) => console.warn("[continuity] desktop selection publish failed", error),
+  });
+  const handleContinuityFocusPane = useCallback((tabId: string, leafId: string) => {
+    /* Focusing the pane that is already the committed selection is not a new intent: publishing
+       it again would start a GET and a PUT, bump the account revision, and make a phone
+       publication in flight lose its CAS for no change at all. */
+    if (continuitySelectionRef.current.tabId !== tabId || continuitySelectionRef.current.leafId !== leafId) {
+      recordContinuityIntent({ workspaceId: activeProjectRef.current.workspaceId, tabId, leafId });
+    }
+    focusPane(tabId, leafId);
+  }, [focusPane, recordContinuityIntent]);
   // Pane frames and tab dots draw the daemon's group for each pane's session (groupOf).
   const paneActivityBySessionId = useMemo(
     () => Object.keys(attentionBySessionId).length === 0
@@ -2570,6 +2786,11 @@ function WorkspaceApp({
     [],
   );
 
+  const handleExplicitSelectProject = useCallback((project: RegisteredProject) => {
+    recordContinuityIntent({ workspaceId: project.workspaceId });
+    handleSelectProject(project);
+  }, [handleSelectProject, recordContinuityIntent]);
+
   const handleReorderProjects = useCallback((orderedWorkspaceIds: string[]) => {
     setProjects((current) => {
       const byId = new Map(current.map((project) => [project.workspaceId, project]));
@@ -2671,9 +2892,11 @@ function WorkspaceApp({
       });
       if (owner && owner.workspaceId !== activeProjectRef.current.workspaceId) {
         handleSelectProject(owner);
+        recordContinuityIntent({ workspaceId: owner.workspaceId, worktreePath: worktree.path });
         setPendingWorktree(worktree);
         return;
       }
+      recordContinuityIntent({ workspaceId: activeProjectRef.current.workspaceId, worktreePath: worktree.path });
       if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().nativeStatus === "unavailable") {
         void pairedHostInventory.refresh();
         setPendingWorktree(worktree);
@@ -2688,7 +2911,7 @@ function WorkspaceApp({
       }
       runTabOperation(() => ensureTabForWorktree(worktree));
     },
-    [ensureTabForWorktree, handleSelectProject, runTabOperation],
+    [ensureTabForWorktree, handleSelectProject, runTabOperation, recordContinuityIntent],
   );
 
   useEffect(() => {
@@ -2740,6 +2963,7 @@ function WorkspaceApp({
       const currentState = stateRef.current;
       const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return;
+      recordContinuityIntent({ workspaceId: activeProjectRef.current.workspaceId, tabId });
       if (!isTerminalTab(tab)) {
         activateTab(tabId);
         return;
@@ -2757,7 +2981,7 @@ function WorkspaceApp({
         .then(() => activateTab(tabId))
         .catch(reportRuntimeError);
     },
-    [activateTab, ensureTabForWorktree, reportRuntimeError],
+    [activateTab, ensureTabForWorktree, reportRuntimeError, recordContinuityIntent],
   );
 
   const activateRemoteEntry = useCallback(
@@ -3520,9 +3744,9 @@ function WorkspaceApp({
       const activeLeafId = activeLayout.activeLeafId ?? leafIds[0];
       const currentIndex = Math.max(0, leafIds.indexOf(activeLeafId));
       const nextIndex = (currentIndex + offset + leafIds.length) % leafIds.length;
-      focusPane(activeTab.id, leafIds[nextIndex]);
+      handleContinuityFocusPane(activeTab.id, leafIds[nextIndex]);
     },
-    [focusPane],
+    [handleContinuityFocusPane],
   );
 
   const handleDirectionalPaneFocus = useCallback(
@@ -3535,9 +3759,9 @@ function WorkspaceApp({
       if (!activeLayout || activeLayout.root.type === "leaf") return;
       const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
       const targetLeafId = findDirectionalLeafId(activeLayout.root, activeLeafId, direction);
-      if (targetLeafId) focusPane(activeTab.id, targetLeafId);
+      if (targetLeafId) handleContinuityFocusPane(activeTab.id, targetLeafId);
     },
-    [focusPane],
+    [handleContinuityFocusPane],
   );
 
   const handleOpenTerminalSearch = useCallback(() => {
@@ -4839,7 +5063,11 @@ function WorkspaceApp({
           statuses={worktreeStatuses}
           unreadWorktreePaths={state.unreadWorktreePaths}
           activityByWorktreePath={worktreeActivity}
-          onSelectProject={handleSelectProject}
+          {...(laneOrder ? { laneOrder } : {})}
+          {...(laneLifecycles ? { laneLifecycles } : {})}
+          onLaneAction={handleLaneAction}
+          onRefreshLaneOrder={refreshLaneLifecycles}
+          onSelectProject={handleExplicitSelectProject}
           onReorderProjects={handleReorderProjects}
           onAddProject={handleOpenAddProject}
           onRemoveProject={setPendingProjectRemove}
@@ -4992,7 +5220,7 @@ function WorkspaceApp({
             onEqualizePaneRun={equalizePaneRun}
             onEqualizeGroupRun={equalizeTabGroupRun}
             onSwapPanes={swapPanes}
-            onFocusPane={focusPane}
+            onFocusPane={handleContinuityFocusPane}
             searchLeafId={searchLeafId}
             onCloseSearch={handleCloseSearch}
             onReconnectAgentSession={async (sessionId) => {

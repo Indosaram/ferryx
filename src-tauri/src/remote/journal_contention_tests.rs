@@ -184,6 +184,7 @@ async fn journal_writer_preserves_real_machine_socket_attachment() {
                     ready_output.extend_from_slice(terminal_bytes);
                     #[cfg(windows)]
                     {
+                        // Answer ConPTY through the same bytes a real socket client sees.
                         let dsr_count = ready_output
                             .windows(4)
                             .filter(|window| *window == b"\x1b[6n")

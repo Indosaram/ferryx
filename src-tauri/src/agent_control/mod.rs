@@ -19,6 +19,7 @@ pub mod delivery;
 pub mod events;
 pub mod fence;
 pub mod parent_watch;
+pub mod pending_input;
 pub mod policy;
 
 /// Capability string the daemon advertises in `GetCapabilities` for local agent control.
@@ -29,6 +30,7 @@ pub const AGENT_CONTROL_CAPABILITY: &str = "agentControlV1";
 /// A peer that only advertises [`AGENT_CONTROL_CAPABILITY`] keeps the original local
 /// list/read/send/answer/stop contract. Nothing here bumps the daemon protocol version.
 pub const AGENT_CONTROL_REMOTE_CAPABILITY: &str = "agentControlRemoteV1";
+pub const AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY: &str = "agentControlEpochCursorV1";
 
 /// Capability for [`AgentControlOp::Deliver`]: a send whose reply carries this machine's own
 /// causal start receipt. A paired host without it is never sent a supervisor dispatch.
@@ -133,6 +135,8 @@ pub enum AgentControlOp {
         session_id: String,
         until: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         after_revision: Option<String>,
         #[serde(default, skip_serializing_if = "is_zero_u64")]
         after: u64,
@@ -140,6 +144,8 @@ pub enum AgentControlOp {
     },
     /// Replay observer readings after `after`. A cursor that fell out of the log is a gap.
     Events {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance: Option<String>,
         #[serde(default, skip_serializing_if = "is_zero_u64")]
         after: u64,
     },
@@ -215,6 +221,9 @@ pub fn required_capability(op: &AgentControlOp, host_id: Option<&str>) -> &'stat
     }
     if matches!(op, AgentControlOp::Spawn { .. }) {
         return AGENT_CONTROL_SPAWN_CAPABILITY;
+    }
+    if matches!(op, AgentControlOp::Wait { .. } | AgentControlOp::Events { .. }) {
+        return AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY;
     }
     if host_id.is_some()
         || matches!(
@@ -340,7 +349,7 @@ pub fn exit_code_for(code: &str) -> i32 {
     }
 }
 
-pub const AGENTS_USAGE: &str = "usage: ferryx-cli agents list [--host <id>] [--json]\n       ferryx-cli agents read <session> [--host <id>] [--json]\n       ferryx-cli agents send <session> <text> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> | --options <n,m> | --text <t>) [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]\n       ferryx-cli agents events [--after <seq>] [--host <id>] [--json]\n       ferryx-cli agents ack <session> [--host <id>] [--json]\n       ferryx-cli agents spawn --agent <id> --cwd <dir> [--parent <session>] [--workspace <id>] [--name <n>] [--prompt <text>] [--command <cmd> [--arg <a>]...] [--request-id <id>] [--host <id>] [--json]";
+pub const AGENTS_USAGE: &str = "usage: ferryx-cli agents list [--host <id>] [--json]\n       ferryx-cli agents read <session> [--host <id>] [--json]\n       ferryx-cli agents send <session> <text> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> | --options <n,m> | --text <t>) [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]\n       ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--instance <id>] [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]\n       ferryx-cli agents events [--instance <id>] [--after <seq>] [--host <id>] [--json]\n       ferryx-cli agents ack <session> [--host <id>] [--json]\n       ferryx-cli agents spawn --agent <id> --cwd <dir> [--parent <session>] [--workspace <id>] [--name <n>] [--prompt <text>] [--command <cmd> [--arg <a>]...] [--request-id <id>] [--host <id>] [--json]";
 
 /// A CLI usage error: always exit 2, never contacts the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +443,7 @@ pub fn parse_agents_cli(args: &[String]) -> Result<ParsedAgents, UsageError> {
                     "--until must be working, blocked, idle, prompt or any".into(),
                 ));
             }
+            let instance = take_flag(&mut rest, "--instance")?;
             let after = match take_flag(&mut rest, "--after")? {
                 Some(value) => value
                     .parse::<u64>()
@@ -450,12 +460,14 @@ pub fn parse_agents_cli(args: &[String]) -> Result<ParsedAgents, UsageError> {
             AgentControlOp::Wait {
                 session_id: session_arg(&rest)?,
                 until,
+                instance,
                 after_revision,
                 after,
                 timeout_ms,
             }
         }
         "events" => {
+            let instance = take_flag(&mut rest, "--instance")?;
             let after = match take_flag(&mut rest, "--after")? {
                 Some(value) => value
                     .parse::<u64>()
@@ -465,7 +477,7 @@ pub fn parse_agents_cli(args: &[String]) -> Result<ParsedAgents, UsageError> {
             if !rest.is_empty() {
                 return Err(UsageError(AGENTS_USAGE.into()));
             }
-            AgentControlOp::Events { after }
+            AgentControlOp::Events { instance, after }
         }
         "spawn" => {
             let agent = take_flag(&mut rest, "--agent")?
@@ -852,6 +864,8 @@ mod tests {
             "s-1",
             "--until",
             "idle",
+            "--instance",
+            "epoch-1",
             "--after",
             "4",
             "--timeout-ms",
@@ -866,16 +880,17 @@ mod tests {
             AgentControlOp::Wait {
                 session_id: "s-1".into(),
                 until: "idle".into(),
+                instance: Some("epoch-1".into()),
                 after_revision: None,
                 after: 4,
                 timeout_ms: 1500
             }
         );
         assert_eq!(
-            parse_agents_cli(&argv(&["agents", "events", "--after", "9"]))
+            parse_agents_cli(&argv(&["agents", "events", "--instance", "epoch-1", "--after", "9"]))
                 .unwrap()
                 .op,
-            AgentControlOp::Events { after: 9 }
+            AgentControlOp::Events { instance: Some("epoch-1".into()), after: 9 }
         );
     }
 
@@ -896,6 +911,7 @@ mod tests {
                 &AgentControlOp::Wait {
                     session_id: "s-1".into(),
                     until: "idle".into(),
+                    instance: None,
                     after_revision: None,
                     after: 0,
                     timeout_ms: 1_000,
@@ -903,9 +919,13 @@ mod tests {
                 None,
             )
         ));
-        assert!(capability_advertised(
+        assert!(!capability_advertised(
             &[AGENT_CONTROL_REMOTE_CAPABILITY.to_string()],
-            required_capability(&AgentControlOp::Events { after: 0 }, None)
+            required_capability(&AgentControlOp::Events { instance: None, after: 0 }, None)
+        ));
+        assert!(capability_advertised(
+            &[AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY.to_string()],
+            required_capability(&AgentControlOp::Events { instance: None, after: 0 }, None)
         ));
     }
 

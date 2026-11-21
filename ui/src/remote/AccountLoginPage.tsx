@@ -121,7 +121,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
 
         if (res.status === "approved" && res.token) {
           stopPolling();
-          storeAccountSessionToken(res.token, origin);
+          storeAccountSessionToken(res.token, origin, res.accountId);
           onLoginSuccessRef.current(res.token, res.email ?? "");
         }
       } catch (err: unknown) {
@@ -177,7 +177,7 @@ export const AccountLoginPage: React.FC<AccountLoginPageProps> = ({
       resolveAccountOrigin(relayUrl)
         .then(async (origin) => ({ origin, res: await consumeLogin(origin, trimmedCode) }))
         .then(({ origin, res }) => {
-          storeAccountSessionToken(res.token, origin);
+          storeAccountSessionToken(res.token, origin, res.accountId);
           if (window.history && typeof window.history.replaceState === "function") {
             window.history.replaceState(null, "", window.location.pathname);
           }

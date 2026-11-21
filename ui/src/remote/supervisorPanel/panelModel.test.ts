@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { PanelSnapshot } from "../../lib/supervisorPanel/contract";
+import type { PanelEvent, PanelSnapshot } from "../../lib/supervisorPanel/contract";
 import { panelSnapshotFixture } from "../../lib/supervisorPanel/fixtures";
 import { applyPanelEvent as canonicalApplyPanelEvent } from "../../lib/supervisorPanel/model";
 import { applyPanelEvent, orderedOptions, panelSections, parsePanelFrame, statusLine } from "./panelModel";
@@ -64,6 +64,20 @@ describe("panelModel", () => {
     });
     expect(parsePanelFrame(JSON.stringify({ type: "supervisorChanged" }))).toBeNull();
     expect(parsePanelFrame("not json")).toBeNull();
+  });
+
+  // Deleting this test leaves the sibling wire contract and old/unknown-frame safety unguarded;
+  // a new frame could break the phone's fleet panel or accept an incomplete lifecycle model.
+  it("accepts lifecycle models without changing the fleet snapshot and ignores unknown or older shapes", () => {
+    const event: PanelEvent = { type: "panel.lanes", model: { sections: [], revision: 0 } };
+    expect(parsePanelFrame(JSON.stringify(event))).toEqual(event);
+    expect(applyPanelEvent(panelSnapshotFixture, event)).toBe(panelSnapshotFixture);
+    expect(parsePanelFrame({ type: "panel.lanes", rows: [] })).toBeNull();
+    expect(parsePanelFrame({ type: "panel.lanes", model: { sections: [null], revision: 0 } })).toBeNull();
+    expect(parsePanelFrame({ type: "panel.future", model: {} })).toBeNull();
+    expect(applyPanelEvent(panelSnapshotFixture, { type: "panel.future" } as unknown as PanelEvent)).toBe(panelSnapshotFixture);
+    const prs: PanelEvent = { type: "panel.prs", lane: { prs: [], outage: null, refreshedAtMs: 1 } };
+    expect(parsePanelFrame(prs)).toEqual(prs);
   });
 
   it("removes a resolved decision and moves a finished action from handling to the log", () => {

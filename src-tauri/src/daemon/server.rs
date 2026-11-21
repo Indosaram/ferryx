@@ -4353,6 +4353,8 @@ impl DaemonServer {
             .unwrap_or(1);
         let session_service = Arc::new(DaemonSessionService {
             epoch,
+            machine_identity_dir: auth_path.as_deref().and_then(std::path::Path::parent)
+                .map(std::path::Path::to_path_buf).or_else(crate::remote::auth::canonical_remote_dir),
             workspace_service,
             terminal_service: Arc::clone(&terminal_service),
             session_router: Arc::clone(&session_router),
@@ -7525,6 +7527,14 @@ impl DaemonServer {
                         Err(error) => crate::remote::server::agent_control_service::error_response(error),
                     }
                 }
+                Ok(DaemonRequest::AgentPromptResolveAmbiguous { session_id, prompt_id, screen_revision }) => {
+                    match crate::remote::server::agent_control_service::prompt_resolve_ambiguous(
+                        &self.remote_state, session_id, prompt_id, screen_revision,
+                    ).await {
+                        Ok(()) => DaemonResponse::AgentPromptResolveAmbiguousOk,
+                        Err(error) => crate::remote::server::agent_control_service::error_response(error),
+                    }
+                }
                 Ok(DaemonRequest::ReferenceChatIdentity) => DaemonResponse::ReferenceChatIdentityOk {
                     identity: crate::remote::server::desktop_reference_chat_identity(&self.remote_state),
                 },
@@ -8904,6 +8914,7 @@ impl DaemonServer {
                     capabilities.push("sessionOwnershipTransferV1".into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_REMOTE_CAPABILITY.into());
+                    capabilities.push(crate::agent_control::AGENT_CONTROL_EPOCH_CURSOR_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_RECEIPTS_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_ACK_CAPABILITY.into());
                     capabilities.push(crate::agent_control::AGENT_CONTROL_SPAWN_CAPABILITY.into());
@@ -8911,12 +8922,14 @@ impl DaemonServer {
                     capabilities.push(crate::hub_runtime::SUPERVISOR_GOAL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_REQUEST_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_READ_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::LANE_LIFECYCLE_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_CONVERSE_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_SETUP_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::PASTE_CANCEL_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_ENGINE_CAPABILITY.into());
                     capabilities.push(crate::hub_runtime::SUPERVISOR_CONTROL_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_PROMPT_CAPABILITY.into());
+                    capabilities.push(crate::daemon::protocol::AGENT_PROMPT_RESOLVE_AMBIGUOUS_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_LAUNCH_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::AGENT_MEMORY_BLOCK_CAPABILITY.into());
                     capabilities.push(crate::daemon::protocol::TERMINAL_CONTINUE_CAPABILITY.into());
@@ -9118,6 +9131,16 @@ impl DaemonServer {
                     };
                     match crate::hub_runtime::supervisor_request(self.remote_state(), caller, envelope).await {
                         Ok(receipt) => DaemonResponse::SupervisorRequestV1Ok { receipt },
+                        Err(failure) => DaemonResponse::Error {
+                            message: failure.message.clone(),
+                            code: Some(failure.code.clone()),
+                            details: Some(failure.to_json()),
+                        },
+                    }
+                }
+                Ok(DaemonRequest::LaneLifecycle { operation, body }) => {
+                    match crate::hub_runtime::lane_lifecycle(&operation, body).await {
+                        Ok((status, value)) => DaemonResponse::LaneLifecycleOk { status, value },
                         Err(failure) => DaemonResponse::Error {
                             message: failure.message.clone(),
                             code: Some(failure.code.clone()),
@@ -11065,7 +11088,7 @@ impl DaemonServer {
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     // Re-subscribe with sequence after last_seen_sequence to recover replay gap
-                    if let Some((mut att, history_ranges)) =
+                    if let Some((att, history_ranges)) =
                         hub.subscribe_with_sequence_ranges(&session_id, last_seen_sequence)
                     {
                         rx = att.receiver;
@@ -11085,7 +11108,7 @@ impl DaemonServer {
                             .map(|gap| gap.available_from_sequence)
                             .or(att.snapshot.history_start_sequence)
                             .unwrap_or_else(|| requested_after_sequence.saturating_add(1));
-                        let lag_history = Bytes::from(std::mem::take(&mut att.snapshot.history));
+                        let lag_history = Bytes::from(att.snapshot.history);
                         let segments = history_ranges
                             .iter()
                             .map(|r| HistorySegmentWire {
@@ -15522,6 +15545,69 @@ mod instance_lock_deadline_tests {
         );
         // Lock must have been dropped, so an immediate unarmed call succeeds.
         assert!(lock_file_with_optional_wait(&path, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn restored_remote_descriptor_is_the_desktop_baseline_after_restart() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = tempfile::tempdir().unwrap();
+        assert_eq!(server.session_service.desktop_geometry("restored-baseline-session"), None);
+        let descriptor = serde_json::json!({
+            "backendSessionId": "restored-baseline-session",
+            "target": {"hostId":"restored-host","ownerId":"owner","epoch":"1","backendSessionId":"restored-target"},
+            "config": {"host":{"id":"restored-host","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"default","projectPath":"/project","worktree":null,"agentIdentity":null},
+            "clientRequestId": "req-restored-baseline",
+            "remoteCursor": "1",
+            "cols": 132,
+            "rows": 43
+        });
+        let path = repo.path().join("remote_sessions.json");
+        let mut persisted = crate::session::PersistedWorkspaceSession { version: 3, ..Default::default() };
+        persisted.extra.insert("remoteSessions".into(), serde_json::json!([{"descriptor": descriptor, "metadata": null}]));
+        crate::session::save_session_to_path(&path, &persisted).unwrap();
+
+        server
+            .session_service
+            .restore_remote_sessions_at(path)
+            .await
+            .unwrap();
+        assert!(
+            server.terminal_service.remote().contains("restored-baseline-session"),
+            "the persisted descriptor must be restored"
+        );
+        assert_eq!(
+            server.session_service.desktop_geometry("restored-baseline-session"),
+            Some((132, 43)),
+            "a restart must adopt the persisted descriptor as the desktop baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn adopted_session_without_desktop_geometry_projects_the_hub_baseline_not_zero() {
+        let server = Arc::new(DaemonServer::new());
+        let session_id = "adopted-baseline-projection";
+        let _rx = server
+            .terminal_service
+            .output_hub()
+            .register_session(session_id);
+        server
+            .terminal_service
+            .output_hub()
+            .record_initial_size(session_id, 94, 31);
+
+        assert_eq!(
+            server.session_service.desktop_geometry(session_id),
+            None,
+            "precondition: adoption records no desktop geometry"
+        );
+
+        assert_eq!(
+            server
+                .session_service
+                .projection_geometry(session_id, (0, 0)),
+            (94, 31),
+            "an adopted session must not advertise the 0x0 spawn fingerprint"
+        );
     }
 
     #[tokio::test]

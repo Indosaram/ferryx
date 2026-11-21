@@ -41,6 +41,8 @@ pub mod inbox_prefilter;
 pub mod inbox_sources;
 pub mod inbox_watch;
 pub mod judge;
+pub mod lane_pr_sync;
+pub mod lane_settle;
 pub mod lanes;
 pub mod ledger;
 pub mod lifecycle;

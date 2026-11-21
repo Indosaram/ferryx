@@ -10,6 +10,10 @@ use super::vt_state::TerminalStateRecorder;
 use super::vt_stream::{Pending, Unit, UnitKind, VtUnitSplitter};
 
 pub const DEFAULT_TEXT_RETENTION_BYTES: usize = 512 * 1024;
+/// Line cap beside the byte caps: 512 KiB of one-character lines is hundreds of thousands of
+/// lines, and a reconstruction no one can read is not worth the memory. Lines are counted as
+/// newlines in retained text, so a pathological session is bounded by both budgets.
+pub const DEFAULT_TEXT_RETENTION_LINES: usize = 5_000;
 /// Images are charged separately so one screenshot cannot evict the text timeline.
 pub const IMAGE_RETENTION_RATIO: usize = 16;
 /// Ceiling for one retained transmission. A larger image is never partially retained:
@@ -65,29 +69,44 @@ struct Record {
     order: u64,
     sequence: u64,
     bytes: Vec<u8>,
+    /// Newlines in `bytes`, so the line budget is evicted without rescanning. Images never
+    /// carry lines: their own budget bounds them.
+    lines: usize,
     open: bool,
     image_group: Option<u64>,
 }
 pub struct RetainedHistory {
     budget: RetentionBudget,
+    max_text_lines: usize,
     splitter: VtUnitSplitter,
     evicted_state: TerminalStateRecorder,
     text: VecDeque<Record>,
     images: VecDeque<Record>,
     text_bytes: usize,
+    text_lines: usize,
+    head_evicted: bool,
     image_bytes: usize,
     units: Vec<Unit>,
 }
 
 impl RetainedHistory {
     pub fn new(budget: RetentionBudget) -> Self {
+        Self::with_text_line_cap(budget, DEFAULT_TEXT_RETENTION_LINES)
+    }
+
+    /// [`Self::new`] with the line cap chosen by the caller, so retention is bounded by the
+    /// newest `text_lines` lines as well as by the byte budgets.
+    pub fn with_text_line_cap(budget: RetentionBudget, text_lines: usize) -> Self {
         Self {
             splitter: VtUnitSplitter::new(budget.max_unit_bytes(), budget.text_block_bytes()),
             budget,
+            max_text_lines: text_lines,
             evicted_state: TerminalStateRecorder::new(),
             text: VecDeque::new(),
             images: VecDeque::new(),
             text_bytes: 0,
+            text_lines: 0,
+            head_evicted: false,
             image_bytes: 0,
             units: Vec::new(),
         }
@@ -137,14 +156,34 @@ impl RetainedHistory {
 
     /// Full protocol-safe reconstruction: state prelude, retained units in stream order,
     /// then the in-flight prefix. Replaying this into a fresh parser reproduces the pane.
+    ///
+    /// Two defects of a reconstructed head are repaired here, on the replay boundary:
+    ///
+    /// * an incomplete UTF-8 prefix left by an eviction cut at a non-character boundary is
+    ///   dropped rather than emitted as a replacement-character head, and
+    /// * device queries are stripped, because a parser that consumes this replay would answer
+    ///   them into the session's live input ([`strip_replay_queries`]).
+    ///
+    /// Only [`Self::replay`] cleans; the stored records stay byte-exact for callers that
+    /// address them by sequence.
     pub fn replay(&self) -> Vec<u8> {
         let prelude = self.state_prelude();
         let pending = self.pending();
-        let mut out = Vec::with_capacity(prelude.len() + self.len() + pending.bytes.len());
-        out.extend_from_slice(&prelude);
+        let mut body = Vec::with_capacity(self.len() + pending.bytes.len());
         for (_, bytes) in self.records_with_pending(&pending) {
-            out.extend_from_slice(bytes);
+            body.extend_from_slice(bytes);
         }
+        // The prelude re-establishes attributes and is never a query, so cleaning runs on the
+        // body alone and cannot disturb it. Cleaning here - at the replay boundary - leaves the
+        // stored records byte-exact for callers that address them by sequence.
+        let skip = if self.head_evicted { incomplete_utf8_head(&body) } else { 0 };
+        if skip > 0 {
+            body.drain(..skip);
+        }
+        strip_replay_queries(&mut body);
+        let mut out = Vec::with_capacity(prelude.len() + body.len());
+        out.extend_from_slice(&prelude);
+        out.extend_from_slice(&body);
         out
     }
 
@@ -194,6 +233,8 @@ impl RetainedHistory {
         self.text.clear();
         self.images.clear();
         self.text_bytes = 0;
+        self.text_lines = 0;
+        self.head_evicted = false;
         self.image_bytes = 0;
     }
 
@@ -226,6 +267,16 @@ impl RetainedHistory {
 
     pub fn text_bytes(&self) -> usize {
         self.text_bytes
+    }
+
+    /// Newlines currently retained in the text timeline.
+    pub fn text_lines(&self) -> usize {
+        self.text_lines
+    }
+
+    /// The line cap this history evicts against.
+    pub fn max_text_lines(&self) -> usize {
+        self.max_text_lines
     }
 
     pub fn image_bytes(&self) -> usize {
@@ -285,6 +336,7 @@ impl RetainedHistory {
                         order,
                         sequence,
                         bytes: unit.bytes[start..end].to_vec(),
+                        lines: 0,
                         open: false,
                         image_group: Some(unit.order),
                     });
@@ -292,7 +344,9 @@ impl RetainedHistory {
                 self.seal();
             }
             UnitKind::Text => {
+                let lines = unit.bytes.iter().filter(|byte| **byte == b'\n').count();
                 self.text_bytes += unit.bytes.len();
+                self.text_lines += lines;
                 let block_bytes = self.budget.text_block_bytes();
                 let coalesce = self
                     .text
@@ -303,6 +357,7 @@ impl RetainedHistory {
                 if coalesce {
                     if let Some(record) = self.text.back_mut() {
                         record.bytes.extend_from_slice(&unit.bytes);
+                        record.lines += lines;
                         return;
                     }
                 }
@@ -310,6 +365,7 @@ impl RetainedHistory {
                     order: unit.order,
                     sequence: unit.sequence,
                     bytes: unit.bytes,
+                    lines,
                     open: true,
                     image_group: None,
                 });
@@ -322,7 +378,22 @@ impl RetainedHistory {
             match self.text.pop_front() {
                 Some(record) => {
                     self.text_bytes -= record.bytes.len();
+                    self.text_lines -= record.lines;
                     self.evicted_state.observe(&record.bytes);
+                    self.head_evicted = true;
+                }
+                None => break,
+            }
+        }
+        // Line budget beside the byte budgets: whole front records leave, the same shape the
+        // byte loop uses, so a short-line flood cannot pin an unbounded number of lines.
+        while self.text_lines > self.max_text_lines {
+            match self.text.pop_front() {
+                Some(record) => {
+                    self.text_bytes -= record.bytes.len();
+                    self.text_lines -= record.lines;
+                    self.evicted_state.observe(&record.bytes);
+                    self.head_evicted = true;
                 }
                 None => break,
             }
@@ -343,6 +414,214 @@ impl RetainedHistory {
                 None => break,
             }
         }
+    }
+}
+
+/// Removes device queries from replayed bytes, in place.
+pub fn strip_replay_queries(bytes: &mut Vec<u8>) {
+    let spans = query_spans(bytes);
+    if spans.is_empty() {
+        return;
+    }
+    let removed: usize = spans.iter().map(|(start, end)| end - start).sum();
+    let mut out = Vec::with_capacity(bytes.len() - removed);
+    let mut cursor = 0;
+    for (start, end) in spans {
+        if start > cursor {
+            out.extend_from_slice(&bytes[cursor..start]);
+        }
+        cursor = end;
+    }
+    if cursor < bytes.len() {
+        out.extend_from_slice(&bytes[cursor..]);
+    }
+    *bytes = out;
+}
+
+/// Half-open `(start, end)` byte spans of the device queries in `bytes`, ascending.
+///
+/// Replay-only interrogation is suppressed, but cursor-position requests (`CSI 6 n` and
+/// `CSI ? 6 n`) must reach the terminal emulator: ConPTY can be waiting for that answer before
+/// the shell starts. Printed responses are program output and are never matched.
+///
+/// One unit at a time is enough because the splitter never splits a complete sequence across
+/// two text units: it flushes pending text when a string introducer begins, and emits a string
+/// only once its terminator has arrived. An unterminated sequence at the end is the in-flight
+/// prefix, which the live continuation completes, so it is left alone here.
+pub fn query_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            index += 1;
+            continue;
+        }
+        match bytes.get(index + 1) {
+            Some(b'[') => {
+                let start = index + 2;
+                let mut cursor = start;
+                while cursor < bytes.len() && !(0x40..=0x7e).contains(&bytes[cursor]) {
+                    cursor += 1;
+                }
+                let Some(&final_byte) = bytes.get(cursor) else { break };
+                let region = &bytes[start..cursor];
+                // Each arm matches the query but not the reply, because replies are a
+                // program's own output and stripping them would corrupt the picture: a DSR
+                // reply ends in `R`, a DA reply carries parameters before its `c`, a kitty
+                // flags reply carries the flags, a DECRQM reply ends in `y`.
+                let query = match final_byte {
+                    // Cursor-position requests must reach the terminal emulator: ConPTY
+                    // waits for its answer before starting the shell. Other DSR queries
+                    // are replay-only device interrogation and must not be re-echoed.
+                    b'n' => !matches!(region, b"6" | b"?6"),
+                    // DA: `ESC [ c`, `ESC [ > c`, `ESC [ = c` - a reply has parameters.
+                    b'c' => !region.iter().any(|byte| byte.is_ascii_digit()),
+                    // Kitty keyboard flags query is exactly `ESC [ ? u`.
+                    b'u' => region == b"?".as_slice(),
+                    // DECRQM: `$` only appears in the query, never in the `$y` reply.
+                    b'p' => region.contains(&b'$'),
+                    // XTVERSION: `ESC [ > 0 q`; DECLL `ESC [ 0 q` is not a query.
+                    b'q' => region.first() == Some(&b'>'),
+                    _ => false,
+                };
+                if query {
+                    spans.push((index, cursor + 1));
+                }
+                index = cursor + 1;
+            }
+            Some(b']' | b'P' | b'_' | b'^' | b'X') => {
+                let introducer = bytes[index + 1];
+                let start = index + 2;
+                let mut cursor = start;
+                let mut end = None;
+                while cursor < bytes.len() {
+                    // BEL terminates an OSC only; in DCS, APC, PM and SOS it is payload.
+                    if bytes[cursor] == 0x07 && introducer == b']' {
+                        end = Some(cursor + 1);
+                        break;
+                    }
+                    if bytes[cursor] == 0x1b && bytes.get(cursor + 1) == Some(&b'\\') {
+                        end = Some(cursor + 2);
+                        break;
+                    }
+                    cursor += 1;
+                }
+                let Some(end) = end else { break };
+                let payload = &bytes[start..cursor];
+                let query = match introducer {
+                    b']' => is_osc_query(payload),
+                    // DECRQSS and XTGETTCAP are queries; every other DCS passes through.
+                    b'P' => payload.starts_with(b"$q") || payload.starts_with(b"+q"),
+                    // APC, PM and SOS carry image payloads, never a query.
+                    _ => false,
+                };
+                if query {
+                    spans.push((index, end));
+                }
+                index = end;
+            }
+            Some(_) => index += 2,
+            None => break,
+        }
+    }
+    spans
+}
+
+/// Sequence resumes belong to an existing parser, even when the snapshot reports a gap.
+/// Only an explicitly full reconstruction can discard an evicted UTF-8 head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayCleanup {
+    Full { head_evicted: bool },
+    Delta,
+}
+
+impl ReplayCleanup {
+    pub(crate) fn for_request(after_sequence: Option<u64>, start_sequence: Option<u64>) -> Self {
+        match after_sequence {
+            Some(_) => Self::Delta,
+            None => Self::Full {
+                head_evicted: start_sequence.is_some_and(|sequence| sequence > 1),
+            },
+        }
+    }
+}
+
+/// Returns cleaned bytes and `(original_start, removed_len)` spans for offset remapping.
+pub(crate) fn clean_replay_bytes(
+    bytes: &[u8],
+    cleanup: ReplayCleanup,
+) -> (Vec<u8>, Vec<(usize, usize)>) {
+    // A resumed parser owns the preceding bytes, including partial UTF-8 and VT sequences.
+    if cleanup == ReplayCleanup::Delta {
+        return (bytes.to_vec(), Vec::new());
+    }
+    let head = if cleanup == (ReplayCleanup::Full { head_evicted: true }) {
+        incomplete_utf8_head(bytes)
+    } else {
+        0
+    };
+    let mut removed: Vec<(usize, usize)> = Vec::new();
+    if head > 0 {
+        removed.push((0, head));
+    }
+    let mut cleaned = bytes[head..].to_vec();
+    for (start, end) in query_spans(&cleaned) {
+        removed.push((head + start, end - start));
+    }
+    strip_replay_queries(&mut cleaned);
+    (cleaned, removed)
+}
+
+/// OSC payloads that ask the terminal a question and expect it to write an answer back.
+fn is_osc_query(payload: &[u8]) -> bool {
+    // Dynamic colours (10/11/12), palette (4), clipboard (52) and the OSC 7501 support query
+    // all put `?` in their parameters.
+    const PREFIXES: [&[u8]; 5] = [b"10;?", b"11;?", b"12;?", b"52;?", b"7501;?"];
+    PREFIXES.iter().any(|prefix| payload.starts_with(prefix))
+        || (payload.starts_with(b"4;") && payload.ends_with(b";?"))
+}
+
+/// Bytes to skip so a reconstruction does not start inside a multi-byte code point.
+///
+/// Eviction cuts the head at a record boundary, and a unit boundary is a flush or escape
+/// boundary rather than a character boundary, so the surviving head can open with the tail of a
+/// character whose lead byte was evicted. Two shapes are possible, and a replay must drop both:
+///
+/// * leading continuation bytes (`0b10xxxxxx`) with no lead byte, and
+/// * a lead byte whose continuations were cut off, which is a truncated sequence when the next
+///   byte is not a continuation or the buffer ends mid-sequence.
+///
+/// Returns 0 when the head starts on a character boundary, which is the usual case.
+pub fn incomplete_utf8_head(bytes: &[u8]) -> usize {
+    let Some(&first) = bytes.first() else { return 0 };
+    if first & 0xc0 == 0x80 {
+        // Orphaned continuation bytes: at most three, since a character is at most four bytes.
+        return bytes
+            .iter()
+            .take(3)
+            .take_while(|byte| **byte & 0xc0 == 0x80)
+            .count();
+    }
+    let expected = match first {
+        0x00..=0x7f => return 0,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        // A continuation-only or invalid lead byte: drop it, it cannot start a character.
+        _ => return 1,
+    };
+    let continuations = bytes
+        .iter()
+        .skip(1)
+        .take(expected - 1)
+        .take_while(|byte| **byte & 0xc0 == 0x80)
+        .count();
+    if continuations == expected - 1 {
+        // The character is complete; the head is on a boundary.
+        0
+    } else {
+        // Truncated sequence: the lead byte and whatever continuations survived are unusable.
+        1 + continuations
     }
 }
 
@@ -709,5 +988,146 @@ mod tests {
             "csi discard introducer must be preserved in replay, got: {:?}",
             replayed
         );
+    }
+
+    #[test]
+    fn line_cap_evicts_oldest_lines_while_the_byte_budget_is_unreached() {
+        // Given: a byte budget large enough for far more than the line cap, and one-character
+        // lines, which is exactly the shape a byte-only cap cannot bound.
+        let mut retained = RetainedHistory::with_text_line_cap(
+            RetentionBudget {
+                text_bytes: 1024 * 1024,
+                image_bytes: 4096,
+            },
+            10,
+        );
+
+        // When: 100 one-character lines arrive, nowhere near the byte budget.
+        for line in 0..100u32 {
+            retained.push(line as u64 + 1, format!("{}\r\n", (b'a' + (line % 26) as u8) as char).as_bytes());
+        }
+
+        // Then: retention holds the newest lines only, and the byte budget never bound it.
+        assert_eq!(retained.text_lines(), 10);
+        assert!(retained.text_bytes() < 100, "byte budget was never the binding constraint");
+        let replayed = retained.replay();
+        assert!(replayed.ends_with(b"v\r\n"), "newest line must survive: {:?}", String::from_utf8_lossy(&replayed));
+        assert!(!replayed.starts_with(b"a\r\n"), "oldest line must be evicted");
+    }
+
+    #[test]
+    fn line_cap_defaults_to_five_thousand_lines() {
+        assert_eq!(DEFAULT_TEXT_RETENTION_LINES, 5_000);
+        let retained = RetainedHistory::new(RetentionBudget::default());
+        assert_eq!(retained.max_text_lines(), DEFAULT_TEXT_RETENTION_LINES);
+    }
+
+    #[test]
+    fn byte_cap_still_evicts_when_the_line_cap_is_not_reached() {
+        // A byte cap must keep working: the line cap is an addition, not a replacement.
+        let mut retained = RetainedHistory::with_text_line_cap(
+            RetentionBudget {
+                text_bytes: 64,
+                image_bytes: 4096,
+            },
+            10_000,
+        );
+        for sequence in 0..20u64 {
+            retained.push(sequence + 1, b"0123456789\r\n");
+        }
+        assert!(retained.text_lines() < 20, "byte cap stopped evicting");
+        assert!(retained.text_bytes() <= 64);
+    }
+
+    #[test]
+    fn replay_strips_device_queries_but_keeps_printed_responses() {
+        // Given: history holding a cursor query, a device-attributes query and a colour query,
+        // plus a response a program printed itself.
+        let mut retained = RetainedHistory::new(RetentionBudget::default());
+        retained.push(1, b"prompt$ \x1b[6n\x1b[c\x1b]11;?\x07");
+        retained.push(2, b"\x1b[1;1Rvisible\r\n");
+
+        // Then: every query is gone, and the printed response stays.
+        let replayed = retained.replay();
+        assert!(replayed.windows(4).any(|w| w == b"\x1b[6n"), "emulator cursor query stripped");
+        assert!(!replayed.windows(3).any(|w| w == b"\x1b[c"), "device attributes query replayed");
+        assert!(!replayed.windows(6).any(|w| w == b"\x1b]11;?"), "colour query replayed");
+        assert!(replayed.windows(6).any(|w| w == b"\x1b[1;1R"), "printed response was stripped");
+        assert!(replayed.windows(7).any(|w| w == b"visible"));
+    }
+
+    #[test]
+    fn replay_cleanup_distinguishes_full_evicted_heads_from_sequence_resumes() {
+        let bytes = b"\x82\xac\x1b[5n\x1b[6n\x1b[?6n";
+        let delta = ReplayCleanup::for_request(Some(1), Some(2));
+        assert_eq!(delta, ReplayCleanup::Delta);
+        assert_eq!(clean_replay_bytes(bytes, delta), (bytes.to_vec(), Vec::new()));
+        let full = ReplayCleanup::for_request(None, Some(2));
+        assert_eq!(full, ReplayCleanup::Full { head_evicted: true });
+        assert_eq!(clean_replay_bytes(bytes, full).0, b"\x1b[6n\x1b[?6n");
+        assert_eq!(clean_replay_bytes(b"\xe2", ReplayCleanup::for_request(None, Some(1))).0, b"\xe2");
+    }
+
+    #[test]
+    fn replay_keeps_an_unterminated_in_flight_prefix_untouched() {
+        // A query cut off mid-sequence is the live continuation, not history: stripping it would
+        // make the next live chunk complete the wrong thing.
+        let mut retained = RetainedHistory::new(RetentionBudget::default());
+        retained.push(1, b"text\x1b[6");
+        assert_eq!(retained.replay(), b"text\x1b[6");
+    }
+
+    #[test]
+    fn replay_drops_an_incomplete_utf8_head_instead_of_mangling_it() {
+        // Given: the lead byte of a two-byte character sits in the oldest record and that record
+        // is evicted, so the surviving head opens on its orphaned continuation byte.
+        let mut retained = RetainedHistory::new(RetentionBudget {
+            text_bytes: 8,
+            image_bytes: 4096,
+        });
+        retained.push(1, b"\xc3\xa9");
+        retained.push(2, b"\xa9 tail\r\n");
+        assert!(retained.text_bytes() <= 8, "the eviction this test relies on did not happen");
+
+        // Then: the replay opens on the surviving character, not on a replacement glyph.
+        let replayed = retained.replay();
+        assert!(
+            !replayed.first().is_some_and(|byte| byte & 0xc0 == 0x80),
+            "replay opens on an orphaned continuation byte: {:?}",
+            replayed
+        );
+        assert!(replayed.windows(6).any(|w| w == b" tail\r"), "body damaged: {:?}", replayed);
+    }
+
+    #[test]
+    fn incomplete_utf8_head_only_skips_a_partial_character() {
+        assert_eq!(incomplete_utf8_head(b"plain ascii"), 0);
+        assert_eq!(incomplete_utf8_head("é".as_bytes()), 0, "complete 2-byte char");
+        assert_eq!(incomplete_utf8_head("€".as_bytes()), 0, "complete 3-byte char");
+        assert_eq!(incomplete_utf8_head("😀".as_bytes()), 0, "complete 4-byte char");
+        // Orphaned continuations, as left by a cut after the lead byte.
+        assert_eq!(incomplete_utf8_head(&[0xa9, b'o', b'k']), 1);
+        assert_eq!(incomplete_utf8_head(&[0x82, 0xac, b'o']), 2);
+        // A lead byte whose continuations were cut off.
+        assert_eq!(incomplete_utf8_head(&[0xe2, 0x82]), 2, "truncated 3-byte sequence");
+        assert_eq!(incomplete_utf8_head(&[0xf0]), 1, "lone 4-byte lead");
+    }
+
+    #[test]
+    fn replay_strips_a_query_at_the_very_start_of_history() {
+        // The strip must not depend on the query sitting mid-buffer.
+        let mut retained = RetainedHistory::with_text_line_cap(
+            RetentionBudget {
+                text_bytes: 4096,
+                image_bytes: 4096,
+            },
+            4,
+        );
+        retained.push(1, b"\x1b[6nold\r\n");
+        retained.push(2, b"kept\r\n");
+        retained.push(3, b"newest\r\n");
+        let replayed = retained.replay();
+        assert!(replayed.windows(4).any(|w| w == b"\x1b[6n"));
+        assert!(replayed.windows(7).any(|w| w == b"newest\r"));
     }
 }

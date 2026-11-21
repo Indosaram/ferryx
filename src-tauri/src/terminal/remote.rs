@@ -848,6 +848,13 @@ impl RemoteRuntime {
 
     /// Ranges variant of [`Self::attach_snapshot_with_generation`]: returns history segment
     /// byte offsets into the snapshot's flat history instead of materialized segment buffers.
+    ///
+    /// This is the replay a GUI consumes for a remote session, so it is cleaned before the
+    /// offsets are taken: full replay-only device interrogation is stripped, while cursor
+    /// requests still reach the terminal emulator. Only a full replay with an evicted head
+    /// drops incomplete UTF-8; sequence resumes are byte-exact.
+    /// Cleaning happens here rather than in the hub because the
+    /// hub's snapshot is also the byte-exact source other callers account for by sequence.
     pub fn attach_snapshot_with_generation_ranges(
         &self,
         id: &str,
@@ -863,12 +870,13 @@ impl RemoteRuntime {
         let e = self.entry(id)?;
         let s = e.state.lock();
         let generation = s.details.generation;
-        let (attachment, ranges) = self
+        let (mut attachment, ranges) = self
             .hub
             .subscribe_with_sequence_ranges(id, after_sequence)
             .ok_or_else(|| {
                 RemoteFailure::new(RemoteFailureKind::Missing, "Session not found in hub")
             })?;
+        let ranges = clean_replay(&mut attachment, ranges, after_sequence);
         Ok((attachment, ranges, generation))
     }
     fn launch(&self, entry: &Arc<Entry>, initial: Option<Arc<dyn Transport>>) {
@@ -1996,6 +2004,60 @@ async fn queue_worker(
     }
 }
 
+/// Cleans a remote replay in place and remaps the segment offsets onto the cleaned bytes.
+///
+/// Segments address the flat history by byte offset, so offsets and bytes must move together:
+/// removing bytes from the middle would otherwise leave a later segment pointing at the wrong
+/// place, and `feed_attachment_history` would resize the parser for one segment while feeding it
+/// another's bytes. `removed` is ascending and disjoint, so subtracting the bytes removed before
+/// an offset yields a monotone map that preserves the partition.
+pub(crate) fn clean_replay(
+    attachment: &mut crate::terminal::output_hub::SessionAttachment,
+    ranges: Vec<crate::terminal::output_hub::HistoryRange>,
+    after_sequence: Option<u64>,
+) -> Vec<crate::terminal::output_hub::HistoryRange> {
+    use crate::terminal::output_hub::{retained_history, HistoryRange};
+
+    let original = std::mem::take(&mut attachment.snapshot.history);
+    let cleanup = retained_history::ReplayCleanup::for_request(
+        after_sequence,
+        attachment.snapshot.history_start_sequence,
+    );
+    let (cleaned, removed) = retained_history::clean_replay_bytes(&original, cleanup);
+    if removed.is_empty() {
+        attachment.snapshot.history = original;
+        return ranges;
+    }
+    // Bytes removed strictly before `offset`; the part of a run `offset` falls inside also
+    // counts, because those bytes precede it in the cleaned buffer.
+    let shifted = |offset: usize| -> usize {
+        removed
+            .iter()
+            .map(|(start, len)| {
+                let end = start + len;
+                if offset >= end {
+                    *len
+                } else {
+                    offset.saturating_sub(*start)
+                }
+            })
+            .sum()
+    };
+    attachment.snapshot.history = cleaned;
+    ranges
+        .into_iter()
+        .map(|range| HistoryRange {
+            cols: range.cols,
+            rows: range.rows,
+            start: range.start - shifted(range.start),
+            // A segment wholly inside a removed run collapses to empty. Keeping it is
+            // deliberate: the hub emits empty ranges of its own to carry geometry, and
+            // dropping one here would change which size the parser ends at.
+            end: (range.end - shifted(range.end)).max(range.start - shifted(range.start)),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2680,5 +2742,75 @@ mod tests {
             guard1.terminate_and_wait();
             guard2.terminate_and_wait();
         }
+    }
+
+    #[test]
+    fn clean_replay_strips_queries_and_remaps_segment_offsets() {
+        use crate::terminal::output_hub::{HistoryRange, SessionAttachment};
+
+        // Given: a replay split into two segments where the first segment holds a complete query,
+        // so the bytes before the second segment's start shrink. The boundary is a unit boundary,
+        // which is what the hub's resize ledger produces - never the middle of a sequence.
+        let history = b"prompt \x1b[5nsecond-segment".to_vec();
+        let boundary = 7 + b"\x1b[5n".len();
+        let ranges = vec![
+            HistoryRange { cols: Some(80), rows: Some(24), start: 0, end: boundary },
+            HistoryRange { cols: Some(100), rows: Some(30), start: boundary, end: history.len() },
+        ];
+        let (tx, receiver) = tokio::sync::broadcast::channel(4);
+        drop(tx);
+        let mut attachment = SessionAttachment {
+            snapshot: crate::terminal::output_hub::AttachmentSnapshot {
+                session_id: "remap".into(),
+                history_start_sequence: Some(1),
+                history_end_sequence: Some(2),
+                history,
+                history_segments: Vec::new(),
+                gap: None,
+                history_incomplete: false,
+            },
+            receiver,
+        };
+
+        // When: the replay is cleaned.
+        let mapped = clean_replay(&mut attachment, ranges, None);
+
+        // Then: the query is gone and the second segment still starts exactly where its bytes do,
+        // so slicing the cleaned history by these offsets yields the original segment text.
+        assert!(!attachment.snapshot.history.windows(4).any(|w| w == b"\x1b[5n"));
+        let second = &attachment.snapshot.history[mapped[1].start..mapped[1].end];
+        assert_eq!(second, b"second-segment", "offsets point at the wrong bytes");
+        assert_eq!(&attachment.snapshot.history[mapped[0].start..mapped[0].end], b"prompt ");
+    }
+
+    #[test]
+    fn clean_replay_leaves_a_query_free_replay_byte_identical() {
+        use crate::terminal::output_hub::{HistoryRange, SessionAttachment};
+
+        let history = b"no queries here\r\n".to_vec();
+        let ranges = vec![HistoryRange {
+            cols: Some(80),
+            rows: Some(24),
+            start: 0,
+            end: history.len(),
+        }];
+        let (tx, receiver) = tokio::sync::broadcast::channel(4);
+        drop(tx);
+        let mut attachment = SessionAttachment {
+            snapshot: crate::terminal::output_hub::AttachmentSnapshot {
+                session_id: "clean".into(),
+                history_start_sequence: Some(1),
+                history_end_sequence: Some(1),
+                history: history.clone(),
+                history_segments: Vec::new(),
+                gap: None,
+                history_incomplete: false,
+            },
+            receiver,
+        };
+        let mapped = clean_replay(&mut attachment, ranges, None);
+        assert_eq!(attachment.snapshot.history, history);
+        assert_eq!(mapped[0].start, 0);
+        assert_eq!(mapped[0].end, history.len());
     }
 }

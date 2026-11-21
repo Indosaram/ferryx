@@ -87,6 +87,11 @@ type RemoteTerminalProps = {
    */
   readonly onAgentStateFrame?: (raw: string) => void;
   readonly followHostSize?: boolean;
+  /** Displace a foreign holder on the next dial only; reset after the attempt. */
+  readonly takeover?: boolean;
+  readonly onTakeoverConsumed?: () => void;
+  /** Shows the "Take it over" action when this device is refused by a foreign holder. */
+  readonly onTakeOver?: () => void;
   readonly showTitleBar?: boolean;
   readonly showKeyDock?: boolean;
   /** Dials a local transport instead of a gateway socket (desktop compatibility renderer). */
@@ -131,7 +136,11 @@ type TerminalOutcomeFrame = {
   generation: string | null;
   state: string;
   blockedReason: string | null;
+  /** Display-only detail from the gateway (e.g. the device holding the pane). */
+  blockedDetail?: string | null;
   exitCode: number | null;
+  upgradeRefusal?: boolean;
+  takeoverSupported?: boolean;
 };
 
 const MAX_GRID_COLS = 512;
@@ -139,6 +148,10 @@ const MAX_GRID_ROWS = 256;
 const HANDSHAKE_TIMEOUT_MS = 10000;
 const MAX_BACKOFF_DELAY_MS = 10000;
 const BASE_BACKOFF_DELAY_MS = 1000;
+const MAX_AUTO_RECONNECT_ATTEMPTS = 6;
+// Past the fast budget a pane keeps one redial in flight at a slow steady cadence. A fence race
+// is not a decision, so it must never leave the pane dead until someone finds the Retry button.
+const SLOW_REDIAL_DELAY_MS = 30000;
 
 const KEY_SEQUENCES = {
   tab: "\t",
@@ -351,6 +364,19 @@ function jamoCommitDelta(held: string, committed: string): string {
   return committed;
 }
 
+// The only input types with which a browser can report a composition's own text back to the field:
+// the spec's "part of an IME composition" type and the type engines use for the insertion that ends
+// one. An unspecified type is deliberately absent, because it is indistinguishable from ordinary
+// typing: the event carrying the text the user just typed and the event replaying a withdrawn
+// preedit look the same, and dropping the pair loses the user's text. So an unspecified type is
+// forwarded. Everything else - typing, paste, auto-correct and writing suggestions, transposition,
+// dictation, types that do not exist yet - is the user replacing or adding text of their own, so it
+// is never absorbed even when it repeats a withdrawn preedit exactly.
+const COMPOSITION_INPUT_TYPES = new Set([
+  "insertCompositionText",
+  "insertFromComposition",
+]);
+
 function terminalSocketUrl(
   sessionId: string,
   token: string,
@@ -446,12 +472,127 @@ function runStyle(
 const BLOCKED_REASON_COPY: Record<string, string> = {
   unauthorized: userFacingError({ code: "UNAUTHORIZED" }),
   permission_denied: "Your computer refused access to this terminal.",
+  STALE_EPOCH: userFacingError({ code: "STALE_EPOCH" }),
+  STALE_GENERATION: "This terminal's connection changed or is still recovering. Retry to reconnect. Unsent input was discarded.",
+  SESSION_EXPIRED: userFacingError({ code: "SESSION_EXPIRED" }),
+  SESSION_OWNERSHIP_CHANGED: userFacingError({ code: "SESSION_OWNERSHIP_CHANGED" }),
+  ADMISSION_CONFLICT: "This terminal refused the connection. Retry to request fresh access.",
 };
 
+export const CONTROL_CONFLICT_BODY = "This terminal is already in use.";
+
+// Server-required literal for an unnamed holder. A real device may be named exactly this, so it is
+// rendered as a name and never compared against to infer "unknown".
+export const CONTROL_CONFLICT_UNKNOWN_HOLDER = "another device";
+
+export const CONTROL_CONFLICT_TAKEOVER_HINT = "Take it over here, or close it there first.";
+
+export const CONTROL_CONFLICT_HANDOFF_HINT = "Close it on that device to continue here.";
+
+const MAX_HOLDER_UNITS = 80;
+
+type GraphemeSegmenter = new (
+  locales?: string,
+  options?: { granularity: string },
+) => { segment(input: string): Iterable<{ segment: string }> };
+
+// Grapheme boundaries, so a cut never leaves half a surrogate pair or an orphaned emoji modifier;
+// code points are the fallback where the platform has no Segmenter.
+function holderUnits(text: string): string[] {
+  const Segmenter = (Intl as unknown as { Segmenter?: GraphemeSegmenter }).Segmenter;
+  if (!Segmenter) return [...text];
+  try {
+    return Array.from(
+      new Segmenter(undefined, { granularity: "grapheme" }).segment(text),
+      (part) => part.segment,
+    );
+  } catch {
+    return [...text];
+  }
+}
+
+function truncateHolder(text: string): string {
+  const units = holderUnits(text);
+  let allowed = 0;
+  let length = 0;
+  for (const unit of units) {
+    if (length + unit.length > MAX_HOLDER_UNITS) break;
+    length += unit.length;
+    allowed += 1;
+  }
+  return trimDanglingJoiners(units.slice(0, allowed).join("")).trim();
+}
+
+// A cut between code points can land on a zero-width joiner or a variation selector, which draws
+// nothing and leaves an emoji sequence half-built. Those trailing joiners are dropped from the cut.
+function trimDanglingJoiners(text: string): string {
+  return text.replace(/[\u200d\ufe0e\ufe0f]+$/g, "");
+}
+
+// Zero-width joiners, variation selectors, and combining marks carry no glyph of their own: a name
+// built only from them would render as an empty holder. That is an unnamed holder, not a name.
+const INVISIBLE_HOLDER_ONLY = /^[\s\p{Cf}\p{Cc}\p{Mn}\p{Me}\ufe0e\ufe0f]*$/u;
+
+export function holderDisplayName(detail: string | null | undefined): string {
+  if (typeof detail !== "string") return "";
+  const sanitized = detail
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200c\u200e-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (INVISIBLE_HOLDER_ONLY.test(sanitized)) return "";
+  return truncateHolder(sanitized);
+}
+
+export function controlConflictCopy(
+  holder: string | null | undefined,
+  takeoverAvailable: boolean,
+): string {
+  return [
+    CONTROL_CONFLICT_BODY,
+    `Held by ${holderDisplayName(holder) || CONTROL_CONFLICT_UNKNOWN_HOLDER}.`,
+    takeoverAvailable ? CONTROL_CONFLICT_TAKEOVER_HINT : CONTROL_CONFLICT_HANDOFF_HINT,
+  ].join(" ");
+}
+
+/**
+ * Upgrade refusals that redialling cannot fix. Each one is a decision the gateway already
+ * made (occupied, expired, superseded), so the banner keeps the reason and the retry loop stops.
+ */
+const REFUSAL_REASONS = new Set([
+  "CONTROL_CONFLICT",
+  "STALE_EPOCH",
+  "SESSION_EXPIRED",
+  "SESSION_OWNERSHIP_CHANGED",
+]);
+
+/**
+ * A moved input generation is a fence race, not a decision: an SSH route reconnected (or the
+ * fence moved mid-admission) and the server refused every write under the retired generation.
+ * The client discards those bytes with the generation, so admission against the current
+ * generation is exactly the recovery — never a terminal refusal and never a takeover re-arm.
+ */
+const RE_ADMIT_REASONS = new Set([
+  "STALE_GENERATION",
+]);
+
 /** Plain sentence for a terminal outcome banner; wire states and reasons never reach the screen. */
-export function terminalOutcomeCopy(outcome: { readonly state: string; readonly blockedReason: string | null; readonly exitCode: number | null }): string {
+export function terminalOutcomeCopy(
+  outcome: {
+    readonly state: string;
+    readonly blockedReason: string | null;
+    readonly blockedDetail?: string | null;
+    readonly exitCode: number | null;
+  },
+  takeoverAvailable = false,
+): string {
   if (outcome.state === "blocked") {
-    return (outcome.blockedReason ? BLOCKED_REASON_COPY[outcome.blockedReason] : undefined) ?? "This terminal is blocked on your computer.";
+    if (outcome.blockedReason === "CONTROL_CONFLICT") {
+      return controlConflictCopy(outcome.blockedDetail, takeoverAvailable);
+    }
+    const base =
+      (outcome.blockedReason ? BLOCKED_REASON_COPY[outcome.blockedReason] : undefined) ??
+      "This terminal is blocked on your computer.";
+    return base;
   }
   if (outcome.state === "affirmative_exit") {
     return outcome.exitCode == null ? "This terminal has exited." : `This terminal has exited (code ${outcome.exitCode}).`;
@@ -577,6 +718,9 @@ export function RemoteTerminal({
   daemonEpoch,
   onAgentStateFrame,
   followHostSize = false,
+  takeover = false,
+  onTakeoverConsumed,
+  onTakeOver,
   showTitleBar = true,
   showKeyDock = true,
   createLocalSocket,
@@ -584,6 +728,16 @@ export function RemoteTerminal({
   const socketRef = useRef<WebSocket | WebSocketLike | null>(null);
   const dialEpochRef = useRef(0);
   const retryOwnerRef = useRef<() => void>(() => {});
+  // Displacement is one dial's worth of authority, never a standing preference. Armed by the
+  // prop reaching true and spent by the one attempt it arms: a later automatic reconnect goes
+  // through ordinary admission and is refused again while the other device still holds the pane.
+  // The parent clears its request only after the dial consumes it.
+  const takeoverBudgetRef = useRef(takeover);
+  const takeoverArmedRef = useRef(takeover);
+  if (takeover !== takeoverArmedRef.current) {
+    takeoverArmedRef.current = takeover;
+    if (takeover) takeoverBudgetRef.current = true;
+  }
   // The account tunnel dials the machine terminal protocol: PTY input is raw binary and
   // resize/signal/scroll are MachineTerminalControl frames fenced by the Epoch generation
   // (canonical decimal string) from `attached`. The legacy gateway keeps remoteStatus
@@ -595,6 +749,10 @@ export function RemoteTerminal({
   const inputSinkRef = useRef<HTMLTextAreaElement>(null);
   const isComposingRef = useRef(false);
   const pendingCompositionInputRef = useRef<string | null>(null);
+  // Text a cancelled composition withdrew, held for the insertion that may replay it. The replay
+  // can arrive in a later task than the cancel, so the hold is released only by the replay itself
+  // or by an action that takes the sink over (resetSinkState) - never by a timer or a turn.
+  const discardedCompositionRef = useRef<string | null>(null);
   const sinkEmittedCharsRef = useRef(0);
   const sinkValueRef = useRef("");
   // Text the IME has produced but the client has not sent: the sink's mutable tail, plus jamo handed
@@ -798,6 +956,8 @@ export function RemoteTerminal({
     setPendingInputBytes(0);
     setInputOverflow(false);
     setDroppedInputBytes(0);
+    setLineDraft("");
+    setDockModifiers(NO_DOCK_MODIFIERS);
   }, [sessionId, activeTabId]);
 
   useLayoutEffect(() => {
@@ -962,8 +1122,9 @@ export function RemoteTerminal({
     pendingMachineScrollRowsRef.current = 0;
 
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-        let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+    let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
     let backoffAttempt = 0;
+    let reconnectAttempts = 0;
     let disposed = false;
     let dialSequence = 0;
     let wakeMicrotask = false;
@@ -1048,17 +1209,57 @@ export function RemoteTerminal({
       }
     };
 
+    const discardPendingInput = () => {
+      resetSinkState();
+      isComposingRef.current = false;
+      pendingCompositionInputRef.current = null;
+      outboundBufferRef.current = [];
+      outboundBytesRef.current = 0;
+      setPendingInputBytes(0);
+      pendingMachineSignalRef.current = null;
+      pendingMachineScrollRowsRef.current = 0;
+      outcomeAckPending = false;
+    };
+
+    const stopRecovery = (blockedReason: string) => {
+      outcomeGatesRetry = true;
+      pendingCompletion = false;
+      identityConfirmed = false;
+      isTerminalReadyRef.current = false;
+      setConnected(false);
+      discardPendingInput();
+      attemptAbort?.abort();
+      clearReconnectTimer();
+      clearHandshakeTimer();
+      latestValidatedOutcome = {
+        type: "terminalOutcome",
+        target: { sessionId: socketRequest.sessionId, backendSessionId: socketRequest.sessionId,
+          daemonEpoch: daemonEpoch == null ? "" : String(daemonEpoch).trim() },
+        incarnation: currentIncarnation ?? "",
+        generation: null,
+        state: "blocked",
+        blockedReason,
+        exitCode: null,
+      };
+      setTerminalOutcome(latestValidatedOutcome);
+    };
+
     // Exponential backoff with jitter in (0.5, 1], so many clients dropped by one outage do not
     // redial in lockstep.
     const scheduleRedial = () => {
       if (outcomeGatesRetry) return;
+      // The budget decides the cadence, never whether recovery continues: a spent budget means
+      // one slow redial at a time instead of a blocked terminal.
+      const slow = reconnectAttempts >= MAX_AUTO_RECONNECT_ATTEMPTS;
       const cappedAttempt = Math.min(backoffAttempt, 10);
-      const delay = Math.min(MAX_BACKOFF_DELAY_MS, BASE_BACKOFF_DELAY_MS * Math.pow(2, cappedAttempt)) * (1 - 0.5 * Math.random());
+      const delay = slow
+        ? SLOW_REDIAL_DELAY_MS
+        : Math.min(MAX_BACKOFF_DELAY_MS, BASE_BACKOFF_DELAY_MS * Math.pow(2, cappedAttempt)) * (1 - 0.5 * Math.random());
       backoffAttempt += 1;
       clearReconnectTimer();
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        dial();
+        dial(true);
       }, delay);
     };
 
@@ -1080,6 +1281,7 @@ export function RemoteTerminal({
       outboundBufferRef.current = [];
       outboundBytesRef.current = 0;
       setPendingInputBytes(0);
+      discardPendingInput();
       if (latestValidatedOutcome?.state === "ready") {
         latestValidatedOutcome = null;
       }
@@ -1116,6 +1318,51 @@ export function RemoteTerminal({
         return;
       }
 
+      // A refused upgrade is a decision, not an outage: retrying the same way would be
+      // refused identically, so surface the reason and stop until the user acts. It is also
+      // not a transport failure — the parent must not tear the pane down over it.
+      const refusalCode = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+      const refusal = typeof refusalCode === "string" ? refusalCode : null;
+      // The fenced input this attempt carried is already discarded above and was never applied
+      // by the owner, so re-admission can be neither a duplicate write nor a repeated takeover.
+      // The reconnect budget, not a refusal banner, bounds how long it may continue.
+      if (refusal !== null && RE_ADMIT_REASONS.has(refusal)) {
+        if (!disposed && attemptSeq === dialSequence) scheduleRedial();
+        return;
+      }
+      if (refusal !== null && REFUSAL_REASONS.has(refusal)) {
+        outcomeGatesRetry = true;
+        const refusalDetailRaw = error && typeof error === "object" ? (error as { detail?: unknown }).detail : undefined;
+        const refusalDetail = typeof refusalDetailRaw === "string" && refusalDetailRaw.trim() !== "" ? refusalDetailRaw.trim() : null;
+        latestValidatedOutcome = {
+          type: "terminalOutcome",
+          target: {
+            sessionId: socketRequest.sessionId,
+            backendSessionId: socketRequest.sessionId,
+            daemonEpoch: daemonEpoch == null ? "" : String(daemonEpoch).trim(),
+          },
+          incarnation: currentIncarnation ?? "",
+          generation: null,
+          state: "blocked",
+          blockedReason: refusal,
+          blockedDetail: refusalDetail,
+          upgradeRefusal: true,
+          takeoverSupported: deniedStatus === 409 && typeof error === "object" && error !== null &&
+            "takeoverSupported" in error && error.takeoverSupported === true,
+          exitCode: null,
+        };
+        setTerminalOutcome(latestValidatedOutcome);
+        clearReconnectTimer();
+        return;
+      }
+
+      // An untyped HTTP conflict is still an admission decision, never an outage.
+      // In particular, an initial 409 must not start an endless retry loop or offer takeover.
+      if (deniedStatus === 409) {
+        stopRecovery("ADMISSION_CONFLICT");
+        return;
+      }
+
       if (onTransportFailure) {
         try {
           onTransportFailure();
@@ -1123,6 +1370,7 @@ export function RemoteTerminal({
           console.warn("Parent transport failure callback error", err);
         }
       }
+
       // If parent does not unmount/rebind (e.g. callback no-op, failed, or fallback already selected),
       // terminal ownership resumes and schedules the next retry.
       if (!disposed && attemptSeq === dialSequence) {
@@ -1131,11 +1379,21 @@ export function RemoteTerminal({
       }
     };
 
-    const dial = () => {
+    const dial = (automatic = false) => {
       cancelAttemptObservation();
       clearReconnectTimer();
       clearHandshakeTimer();
       if (disposed) return;
+      if (automatic) {
+        reconnectAttempts += 1;
+      }
+      isTerminalReadyRef.current = false;
+      setConnected(false);
+      generationRef.current = null;
+      machineGenerationRef.current = null;
+      lastSentGenerationRef.current = null;
+      lastSentMachineGenerationRef.current = null;
+      discardPendingInput();
       outcomeGatesRetry = false;
       setTerminalOutcome(null);
       if (latestValidatedOutcome?.state === "ready") {
@@ -1270,6 +1528,7 @@ export function RemoteTerminal({
                       clearHandshakeTimer();
                       isTerminalReadyRef.current = true;
                       backoffAttempt = 0;
+                      reconnectAttempts = 0;
                       setConnected(true);
                       flushOutboundBuffer();
                     }
@@ -1305,6 +1564,7 @@ export function RemoteTerminal({
                     clearHandshakeTimer();
                     isTerminalReadyRef.current = true;
                     backoffAttempt = 0;
+                    reconnectAttempts = 0;
                     setConnected(true);
                     flushOutboundBuffer();
                   }
@@ -1342,6 +1602,14 @@ export function RemoteTerminal({
                 // remoteStatus generation alone is NOT sufficient to establish presentation readiness.
                 return;
               }
+              if (machineTransport && parsed?.type === "error" && parsed.code === "STALE_GENERATION") {
+                failureHandled = true;
+                socketRef.current = null;
+                handleDialFailure({ code: "STALE_GENERATION", status: 409 }, sequence);
+                onSocketLifecycle?.(socketRequest.sessionId, "closed");
+                socket.close();
+                return;
+              }
               if (parsed?.type === "terminalOutcome") {
                 const outcome = parsed as TerminalOutcomeFrame;
                 const request = activeSocketRequestRef.current;
@@ -1359,8 +1627,8 @@ export function RemoteTerminal({
                   (outcome.generation === null || isMachineGeneration(outcome.generation)) &&
                   dialEpochRef.current === sequence
                 ) {
-                  latestValidatedOutcome = outcome;
-                  setTerminalOutcome(outcome);
+                  latestValidatedOutcome = { ...outcome, upgradeRefusal: false };
+                  setTerminalOutcome(latestValidatedOutcome);
                   currentIncarnation = outcome.incarnation;
                   outcomeGatesRetry = outcome.state === "blocked" || outcome.state === "affirmative_exit";
                   if (outcome.state === "affirmative_exit") {
@@ -1423,6 +1691,7 @@ export function RemoteTerminal({
                   clearHandshakeTimer();
                   isTerminalReadyRef.current = true;
                   backoffAttempt = 0;
+                  reconnectAttempts = 0;
                   setConnected(true);
                   machineGenerationRef.current = parsed.generation;
                   acknowledgeOutcome(socket, parsed.generation);
@@ -1454,6 +1723,7 @@ export function RemoteTerminal({
             }
             isTerminalReadyRef.current = true;
             backoffAttempt = 0;
+            reconnectAttempts = 0;
             setConnected(true);
             if (!createLocalSocket) {
               acknowledgeOutcome(socket, null);
@@ -1494,7 +1764,10 @@ export function RemoteTerminal({
         }
         // The machine tunnel renders the grid server-side (Ghostty mirror); geometry stays
         // server-owned, so cols/rows are never sent on this route.
-        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}?daemonEpoch=${encodeURIComponent(epoch)}&render=grid`;
+        const displace = takeoverBudgetRef.current;
+        takeoverBudgetRef.current = false;
+        if (displace) onTakeoverConsumed?.();
+        const pathAndQuery = `/api/v1/terminal/${encodeURIComponent(socketRequest.sessionId)}?daemonEpoch=${encodeURIComponent(epoch)}&render=grid${displace ? "&takeover=1" : ""}`;
         try {
           const socketOrPromise = createWebSocket(pathAndQuery);
           if (socketOrPromise instanceof Promise) {
@@ -1562,19 +1835,19 @@ export function RemoteTerminal({
 
     // Coming back online or to the foreground redials at once instead of sitting out the backoff.
     const recover = () => {
-      if (disposed) return;
-      if (outcomeGatesRetry) return;
+      if (disposed || outcomeGatesRetry || isTerminalReadyRef.current || wakeMicrotask) return;
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      // Online/visibility wake applies to pending handshake as well as backoff, without concurrent dials.
+      // A single foreground transition can emit both events, including during backoff.
+      wakeMicrotask = true;
+      queueMicrotask(() => { wakeMicrotask = false; });
+      if (reconnectAttempts >= MAX_AUTO_RECONNECT_ATTEMPTS) {
+        reconnectAttempts = 0;
+        backoffAttempt = 0;
+      }
       if (reconnectTimer !== null) {
         clearReconnectTimer();
-        dial();
-      } else if (!isTerminalReadyRef.current) {
-        if (wakeMicrotask) return;
-        wakeMicrotask = true;
-        queueMicrotask(() => {
-          wakeMicrotask = false;
-        });
+        dial(true);
+      } else {
 
         // Invalidate current dial sequence FIRST so any synchronous callbacks from close no-op
         cancelAttemptObservation();
@@ -1596,7 +1869,7 @@ export function RemoteTerminal({
           }
         }
 
-        dial();
+        dial(true);
       }
     };
 
@@ -1607,6 +1880,8 @@ export function RemoteTerminal({
         wakeMicrotask = false;
         if (disposed) return;
         outcomeGatesRetry = false;
+        reconnectAttempts = 0;
+        backoffAttempt = 0;
         latestValidatedOutcome = null;
         setTerminalOutcome(null);
         cancelAttemptObservation();
@@ -1849,8 +2124,14 @@ export function RemoteTerminal({
     syncPreedit();
   };
 
+  const clearDiscardedComposition = () => {
+    discardedCompositionRef.current = null;
+  };
+
   const resetSinkState = () => {
     heldJamoRef.current = "";
+    // A withdrawn preedit belonged to the surface that was on screen; whatever comes next is not it.
+    clearDiscardedComposition();
     resetSinkField();
   };
 
@@ -1910,6 +2191,7 @@ export function RemoteTerminal({
 
   const commitComposition = (data: string) => {
     isComposingRef.current = false;
+    clearDiscardedComposition();
     const sink = inputSinkRef.current;
     // Empty compositionend is cancellation, never a request to send preedit.
     pendingCompositionInputRef.current = data;
@@ -1918,7 +2200,9 @@ export function RemoteTerminal({
       : 0;
     const remainder = sink ? sink.value.slice(emitted) : "";
     if (data.length === 0) {
-      // Cancellation: the IME withdrew its own preedit.
+      // Cancellation: the IME withdrew its own preedit. The engine can still replay the insertion
+      // that carried it, so the withdrawn text is remembered to absorb that one event.
+      discardedCompositionRef.current = sink && sink.value.length > 0 ? sink.value : null;
       resetSinkField();
       return;
     }
@@ -1996,12 +2280,24 @@ export function RemoteTerminal({
       return;
     }
     const text = sink.value;
+    const inputType = typeof input.inputType === "string" ? input.inputType : "";
+    const withdrawn = discardedCompositionRef.current;
+    // The replay of a withdrawn preedit is the first ordinary insertion after the cancel, so one
+    // insertion settles the question either way: absorbing it here bounds the hold to that event
+    // even when no replay ever comes.
+    clearDiscardedComposition();
     const committed = pendingCompositionInputRef.current;
     pendingCompositionInputRef.current = null;
-    // WebKit/Chromium can deliver the final insertion after compositionend. Matching the text alone
-    // is deliberate: an insertion that reproduces exactly what was just committed is that commit's
-    // mirror whatever input type the engine reports (WebKit uses an empty or replacement type for
-    // some of them), and absorbing it twice would double the syllable.
+    // Only a composition's own insertion can be the withdrawn preedit coming back. Text the user
+    // inserted themselves - even the very text just withdrawn - must reach the PTY.
+    if (withdrawn !== null && text === withdrawn && COMPOSITION_INPUT_TYPES.has(inputType)) {
+      resetSinkField();
+      return;
+    }
+    // A commit is matched by text alone, not by input type like the cancelled hold above: the commit
+    // was already sent, so failing to absorb its mirror doubles the syllable, while the hold guards
+    // text that must never be sent at all. An engine's own replay of a commit is the likelier case
+    // on this path, and nothing else inserts exactly the text just committed.
     if (committed !== null && committed.length > 0 && text === committed) {
       // The mirror of a commit the client already holds; the held jamo run survives it.
       resetSinkField();
@@ -2077,6 +2373,14 @@ export function RemoteTerminal({
   const chip = "flex items-center gap-1.5 rounded-full border border-chat-border bg-chat-surface px-2 py-0.5 text-xs leading-tight";
   const iconButton = "flex size-7 shrink-0 items-center justify-center rounded-md text-chat-foreground-secondary transition-colors hover:text-chat-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [@media(pointer:coarse)]:size-11";
   const outcomeVisible = terminalOutcome?.state === "blocked" || terminalOutcome?.state === "affirmative_exit" || terminalOutcome?.generation === null;
+  // Only a real foreign holder refusal is displaceable; an expired epoch or a dead session
+  // needs a different recovery, so the takeover action never appears there.
+  const canTakeOver =
+    Boolean(onTakeOver) &&
+    machineTransport &&
+    terminalOutcome?.upgradeRefusal === true && terminalOutcome.takeoverSupported === true &&
+    terminalOutcome?.state === "blocked" &&
+    terminalOutcome.blockedReason === "CONTROL_CONFLICT";
 
   return (
     <div className={`flex min-h-0 flex-col overflow-hidden bg-terminal text-chat-foreground ${embedded ? "h-full flex-1" : "h-[100dvh]"}`}>
@@ -2286,7 +2590,7 @@ export function RemoteTerminal({
             >
               <span>
                 {terminalOutcome && (terminalOutcome.state === "blocked" || terminalOutcome.state === "affirmative_exit")
-                  ? terminalOutcomeCopy(terminalOutcome)
+                  ? terminalOutcomeCopy(terminalOutcome, canTakeOver)
                   : "We couldn't confirm whether this terminal recovered."}
               </span>
               <button
@@ -2296,6 +2600,16 @@ export function RemoteTerminal({
               >
                 Retry
               </button>
+              {canTakeOver ? (
+                <button
+                  type="button"
+                  data-testid="remote-terminal-takeover"
+                  onClick={() => onTakeOver?.()}
+                  className="min-h-11 rounded-md border border-chat-border px-5 text-sm font-medium text-chat-foreground transition-colors hover:bg-chat-surface/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Take it over here
+                </button>
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -2345,6 +2659,7 @@ export function RemoteTerminal({
           }}
           onCompositionStart={() => {
             pendingCompositionInputRef.current = null;
+            clearDiscardedComposition();
             isComposingRef.current = true;
           }}
           onCompositionUpdate={(event) => {
@@ -2352,6 +2667,7 @@ export function RemoteTerminal({
             syncPreedit();
           }}
           onCompositionEnd={(event) => {
+            if (!isComposingRef.current) return;
             commitComposition(event.data);
           }}
           onInput={handleSinkInput}
@@ -2360,6 +2676,7 @@ export function RemoteTerminal({
             // already committed are, so they are sent before the next surface (dock key, paste,
             // tab) takes over the sink.
             if (isComposingRef.current) {
+              clearDiscardedComposition();
               resetSinkField();
               emitSettled("");
             } else {

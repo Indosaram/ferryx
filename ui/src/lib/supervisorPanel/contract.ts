@@ -1,6 +1,7 @@
 // Frozen shared contract for the autonomous supervisor panel. Mirrors
 // crates/ferryx-hub/src/supervisor/panel_contract.rs (wire shape, camelCase).
 // Routes, commands and events: docs/plans/SUPERVISOR_PANEL_CONTRACT.md.
+import type { LaneLifecycleModel } from '../sidebarPersistence';
 
 /** `<hostId>:<backendSessionId>` */
 export type SessionRef = string;
@@ -213,7 +214,8 @@ export type PanelEvent =
   | { type: 'panel.action'; action: ActionEntry }
   | { type: 'panel.session'; session: FleetSession }
   | { type: 'panel.rules'; rules: StandingRule[] }
-  | { type: 'panel.prs'; lane: PrLane };
+  | { type: 'panel.prs'; lane: PrLane }
+  | { type: 'panel.lanes'; model: LaneLifecycleModel };
 
 /** Text sent to resume a session; null means unknown agent, escalate instead. */
 export function resumeText(agent: string): string | null {

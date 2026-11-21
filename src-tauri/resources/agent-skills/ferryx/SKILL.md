@@ -34,8 +34,8 @@ ferryx-cli agents read <session> [--host <id>] [--json]
 ferryx-cli agents send <session> <text> [--request-id <id>] [--host <id>] [--json]
 ferryx-cli agents answer <session> --prompt <id> --revision <rev> (--option <n> | --options <n,m> | --text <t>) [--request-id <id>] [--host <id>] [--json]
 ferryx-cli agents stop <session> [--request-id <id>] [--host <id>] [--json]
-ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]
-ferryx-cli agents events [--after <seq>] [--host <id>] [--json]
+ferryx-cli agents wait <session> --until <working|blocked|idle|prompt|any> [--instance <id>] [--after <seq>] [--revision <rev>] [--timeout-ms <ms>] [--host <id>] [--json]
+ferryx-cli agents events [--instance <id>] [--after <seq>] [--host <id>] [--json]
 ferryx-cli agents ack <session> [--host <id>] [--json]
 ferryx-cli agents spawn --agent <id> --cwd <dir> [--parent <session>] [--workspace <id>] [--name <n>] [--prompt <text>] [--command <cmd> [--arg <a>]...] [--request-id <id>] [--host <id>] [--json]
 ```
@@ -54,12 +54,20 @@ ferryx-cli agents spawn --agent <id> --cwd <dir> [--parent <session>] [--workspa
   indices for a multi-select prompt) or `--text <t>` (a typed answer).
 - `stop` interrupts the agent's current turn.
 - `wait` blocks until the session reaches the `--until` state (`prompt` means a prompt is
-  pending, `any` means any change). `--after <seq>` skips events you have already seen,
-  `--revision <rev>` skips a reading of a screen revision you already have. `--timeout-ms`
-  defaults to 30000 and is capped at 300000.
+  pending, `any` means any change). Every reply carries `instance` (the observer epoch its
+  sequences belong to), `afterSequence` (your next cursor) and either `observation` or, on a
+  gap, `snapshot`. `--after <seq>` skips events you have already seen; `--revision <rev>` is
+  the `screenRevision` you read and skips that reading, so you never wait on a screen you have
+  already seen. `--timeout-ms` defaults to 30000 and is capped at 300000.
+- Bootstrap without `--instance`: sequences of an unknown epoch cannot be ordered, so the reply
+  is `"gap":true` with a `snapshot` of every session's latest reading, returned at once instead
+  of blocking. That is recovery, not an error. Then resume with `--instance <instance> --after
+  <afterSequence>`, both taken from that same reply; only then does `wait` block.
 - `events` replays state changes after `--after <seq>` as `{"gap":false,"events":[...],
-  "afterSequence":N}`. Keep `afterSequence` as your next cursor. `"gap":true` means your cursor
-  fell out of the log: you get a `snapshot` of every session's latest reading instead.
+  "afterSequence":N,"instance":"..."}`. Keep `afterSequence` and `instance` from the same reply
+  as your next cursor and pass both back. `"gap":true` means your cursor fell out of the log or
+  belongs to another epoch: you get a `snapshot` of every session's latest reading instead, and
+  you resume from its `instance` and `afterSequence`.
 - `ack` marks the session's current prompt or finished turn as seen on every device. It never
   answers the prompt. Each event carries `read`; a new prompt or a new finished turn is unread
   again. SSH and remote-helper panes refuse it with `UNSUPPORTED`.

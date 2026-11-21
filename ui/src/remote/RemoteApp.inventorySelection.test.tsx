@@ -64,10 +64,12 @@ function respond(value: unknown, status = 200): TunnelResponse {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function rect(width: number, height: number): DOMRect {
@@ -457,6 +459,75 @@ describe("RemoteApp machine inventory selection", () => {
     clearStoredAccountSessionToken();
     localStorage.clear();
     remoteHostStore.reset();
+  });
+
+  it.each([
+    ["CONTINUITY_CONFLICT", 409, false],
+    ["OTHER_CONFLICT", 409, true],
+    ["CONTINUITY_UNSUPPORTED", 404, true],
+    ["CONTINUITY_WRITE_FAILED", 503, true],
+  ] as const)("keeps the attached phone after continuity publication fails with %s", async (code, status, shouldWarn) => {
+    vi.spyOn(accountSessionModule, "getAccountContinuity").mockResolvedValue(null);
+    const publication = deferred<accountSessionModule.AccountContinuityPointer>();
+    const write = vi.spyOn(accountSessionModule, "putAccountContinuity").mockReturnValue(publication.promise);
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const terminalReady = deferred<RecordingSocket>();
+    const harness = await mountAccountHarness([session(SID_SECOND, "shell")], {
+      request: () => undefined,
+      terminalReady: (socket) => terminalReady.resolve(socket),
+    });
+
+    /* The worktree row only opens the worktree; the session itself still has to be attached from
+       the strip, which is the path that renders the Session screen these assertions inspect. */
+    await openContextPicker();
+    const sessionTab = await waitFor(() => {
+      const found = sessionRow(SID_SECOND_ROW);
+      if (!found) throw new Error(`session row not rendered\n  timeline:\n    ${harness.timeline()}`);
+      return found;
+    });
+    const selected = r25State(() => screen.queryByTestId("remote-view-mode-terminal") !== null);
+    act(() => {
+      fireEvent.click(sessionTab);
+    });
+    await selected;
+    await act(async () => fireEvent.click(screen.getByTestId("remote-view-mode-terminal")));
+    const socket = await terminalReady.promise;
+    await act(async () => socket.onmessage?.({ data: JSON.stringify({
+      type: "attached", target: { machineId: MACHINE_ID, sessionId: SID_SECOND, daemonEpoch: EPOCH }, generation: "1",
+    }) }));
+    /* Two gestures, two publications: opening the worktree publishes the session it attached, and
+       picking that session from the strip publishes the explicit choice. The one whose failure the
+       assertions below inject is the last, and it must name the session this phone is attached to. */
+    const publishedTargets = write.mock.calls.map((call) => call[3]);
+    expect(publishedTargets.length).toBeGreaterThan(0);
+    expect(publishedTargets[publishedTargets.length - 1]).toMatchObject({ machineId: MACHINE_ID, sessionId: SID_SECOND });
+    const terminal = screen.getByTestId("remote-terminal-grid");
+    const paths = [...harness.terminalPaths()];
+    // The notice lives in the context picker; expose it before subscribing to its change.
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: /Change workspace context/i })));
+    const noticeBefore = screen.queryByTestId("remote-account-inventory-status")?.textContent ?? "";
+    const unsupported = code === "CONTINUITY_UNSUPPORTED";
+    const noticeChanged = unsupported ? null : r25State(() =>
+      (screen.queryByTestId("remote-account-inventory-status")?.textContent ?? "") !== noticeBefore);
+    warning.mockClear();
+
+    await act(async () => {
+      publication.reject(new accountSessionModule.AccountSessionError(code, "fixture error", status));
+    });
+    if (noticeChanged) await noticeChanged;
+    if (unsupported) {
+      expect(screen.queryByTestId("remote-account-inventory-status")?.textContent ?? "").toBe(noticeBefore);
+    }
+
+    expect(screen.getByTestId("remote-terminal-grid")).toBe(terminal);
+    expect(socket.readyState).toBe(RecordingSocket.OPEN);
+    expect(harness.terminalPaths()).toEqual(paths);
+    expect(harness.sessionCreatePosts()).toEqual([]);
+    if (shouldWarn) {
+      expect(warning).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ code, status }));
+    } else {
+      expect(warning).not.toHaveBeenCalled();
+    }
   });
 
   it.each([

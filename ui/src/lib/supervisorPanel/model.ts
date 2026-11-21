@@ -213,7 +213,11 @@ export function applyPanelEvent(
     case "panel.rules":
       return { ...snapshot, rules: event.rules };
     case "panel.prs":
-      // The PR lane is not part of the panel snapshot; its own view reads it.
+    case "panel.lanes":
+      // These have their own stores, outside the fleet panel snapshot.
+      return snapshot;
+    default:
+      // Older/newer peers can send sibling panel frames this build does not know.
       return snapshot;
   }
 }

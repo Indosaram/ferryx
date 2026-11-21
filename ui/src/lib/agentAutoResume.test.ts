@@ -5,7 +5,9 @@ import {
   collectAutoResumeCandidates,
   resetAgentAutoResumeGuard,
   scheduleAgentAutoResume,
+  startAgentAutoResumeWatcher,
 } from "./agentAutoResume";
+import { REMOTE_SESSION_GONE_REASON } from "./sessionLifecycle";
 import { resetGeneralSettings, saveGeneralSettings } from "./generalSettings";
 import type { WorkspaceState } from "../state/workspaceStore";
 import type { TerminalSession } from "./types";
@@ -288,6 +290,69 @@ describe("agentAutoResume", () => {
       scheduleAgentAutoResume({ workspaceId: "test-workspace", state, recoveredFromHmr: false, reconnect, ignorePolicy: true });
       await vi.advanceTimersByTimeAsync(1_000);
       expect(reconnect).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("startAgentAutoResumeWatcher", () => {
+    function harness(entries: Record<string, WorkspaceState>, mounted = "mounted") {
+      const listeners = new Set<() => void>();
+      const reconnect = vi.fn().mockResolvedValue(undefined);
+      const stop = startAgentAutoResumeWatcher({
+        listWorkspaceIds: () => Object.keys(entries),
+        getState: (workspaceId) => entries[workspaceId] ?? null,
+        mountedWorkspaceId: () => mounted,
+        subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+        reconnect,
+      });
+      const update = (workspaceId: string, state: WorkspaceState) => {
+        entries[workspaceId] = state;
+        for (const listener of listeners) listener();
+      };
+      return { reconnect, stop, update };
+    }
+
+    it("resumes every unmounted project's agents at startup on one stagger timeline, even under Lazy", async () => {
+      saveGeneralSettings({ sessionRestorePolicy: "lazy" });
+      const { reconnect } = harness({
+        mounted: createMockState({ workspaceId: "mounted", sessions: { "sess-1": agentSession("sess-1") } }),
+        "ssh:host": createMockState({ workspaceId: "ssh:host", sessions: { "sess-2": agentSession("sess-2") } }),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnect).toHaveBeenCalledTimes(1);
+      expect(reconnect).toHaveBeenCalledWith("ssh:host", "sess-2");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(reconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it("resumes a remote agent the host later reports gone, but never a locally quit agent", async () => {
+      const remote = createMockState({ workspaceId: "ssh:host", sessions: {} });
+      const { reconnect, update } = harness({ "ssh:host": remote });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnect).not.toHaveBeenCalled();
+
+      update("ssh:host", { ...remote, sessions: { "sess-1": agentSession("sess-1") } });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(reconnect).not.toHaveBeenCalled();
+
+      const gone = { ...agentSession("sess-2"), backendUnavailableReason: REMOTE_SESSION_GONE_REASON } as TerminalSession;
+      update("ssh:host", { ...remote, sessions: { "sess-2": gone } });
+      update("ssh:host", { ...remote, sessions: { "sess-2": gone } });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(reconnect).toHaveBeenCalledTimes(1);
+      expect(reconnect).toHaveBeenCalledWith("ssh:host", "sess-2");
+    });
+
+    it("stop cancels queued resumes and ignores later updates", async () => {
+      const entries = {
+        a: createMockState({ workspaceId: "a", sessions: { "sess-1": agentSession("sess-1") } }),
+        b: createMockState({ workspaceId: "b", sessions: { "sess-2": agentSession("sess-2") } }),
+      };
+      const { reconnect, stop } = harness(entries);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnect).toHaveBeenCalledTimes(1);
+      stop();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(reconnect).toHaveBeenCalledTimes(1);
     });
   });
 });

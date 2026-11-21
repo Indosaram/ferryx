@@ -485,6 +485,26 @@ describe("accountSession client module", () => {
     expect(res.transport).toBe(mockTunnelTransport);
   });
 
+  it("openTunnel does not put terminal admission flags on the opaque relay URL", async () => {
+    const spy = vi.spyOn(attachTunnelModule, "openAccountTunnel").mockResolvedValue({
+      transport: { fetchLike: vi.fn(), openWebSocket: vi.fn(), close: vi.fn() } as any,
+      close: vi.fn(),
+    });
+    const base = {
+      relayOrigin: origin,
+      machineId: "mach-uuid-1",
+      enrollmentEpoch: "2",
+      machineAttachPublicKey: "machine-attach-pub-key-1",
+      localKeyPair: { publicKey: "local-pub-32-bytes", privateKey: "local-priv-32-bytes" },
+      sessionId: "sess-alloc-123",
+    };
+
+    await openTunnel({ ...base });
+    expect(spy.mock.calls[0][0].socketUrl).toBe(
+      "wss://relay.example.com/tunnel/opaque/sess-alloc-123",
+    );
+  });
+
   it("redeemInTunnel sends POST /api/v1/pair/exchange inside tunnel and receives device token", async () => {
     const mockTransport = {
       fetchLike: vi.fn().mockImplementation((path: string, init?: any) => {

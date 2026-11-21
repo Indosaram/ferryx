@@ -639,25 +639,28 @@ impl ReferenceRouteFixture {
         // The attach's own replay is the pane's first word, and it is the only way to hear it:
         // this harness attaches after the fixture created the session, so anything the pane
         // emitted in between was published before any subscription existed, and a live-only
-        // reader can never be told about it. (On Windows that includes ConPTY's cursor query,
-        // which leaves the shell unstarted until it is answered; on any platform it includes the
-        // shell's own first output.) `output_hub::subscribe_with_sequence` takes the snapshot and
-        // the subscription in one critical section, so seeded from the snapshot the window below
-        // covers the pane from its first byte onward, in either order of the reader and this
-        // attach. That is why the window is seeded; it is not offered as the cause of a failure
-        // on any particular platform.
+        // reader can never be told about it. `output_hub::subscribe_with_sequence` takes the
+        // snapshot and the subscription in one critical section, so seeded from the snapshot the
+        // window below covers the pane from its first byte onward, in either order of the reader
+        // and this attach. That is why the window is seeded; it is not offered as the cause of a
+        // failure on any particular platform. Startup cursor queries remain in this replay
+        // because the terminal emulator must answer them.
         let mut seen: Vec<u8> = attachment.snapshot.history;
         let seeded = seen.len();
         let gap = attachment.snapshot.gap.is_some();
         let mut watch = attachment.receiver;
+        let mut query_window = seen.clone();
         let mut queries = 0usize;
         let mut answered = 0usize;
         let mut last_write_error: Option<String> = None;
-        // The replay is scanned BEFORE the wait for live output. On Windows the pane's cursor
-        // query arrives in this replay and the shell does not start until it is answered, so a
-        // detector that watched only live chunks would wait on a pane that is waiting on the
-        // answer. The live loop below repeats the same pass for anything that arrives later.
-        if let Some(error) = self.answer_cursor_queries(&seen, &mut queries, &mut answered).await {
+        // The query window is scanned BEFORE the wait for live output. On Windows the pane's
+        // cursor query may have arrived before this attach and the shell does not start until it
+        // is answered, so a detector that watched only live chunks would wait on a pane that is
+        // waiting on the answer. The live loop below repeats the same pass for anything later.
+        if let Some(error) = self
+            .answer_cursor_queries(&query_window, &mut queries, &mut answered)
+            .await
+        {
             last_write_error = Some(error);
         }
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -678,6 +681,7 @@ impl ReferenceRouteFixture {
                 match watch.recv().await {
                     Ok(chunk) => {
                         seen.extend_from_slice(&chunk.bytes);
+                        query_window.extend_from_slice(&chunk.bytes);
                         if seen
                             .windows(marker.len())
                             .any(|window| window == marker.as_bytes())
@@ -685,11 +689,12 @@ impl ReferenceRouteFixture {
                             return true;
                         }
                         // A shell that asks its terminal for the cursor before it starts is
-                        // answered here, and the same pass already ran over the replay. Whether
-                        // this host's pane asks is not assumed: the count and the dispatch are
-                        // reported in the failure below.
-                        if let Some(error) =
-                            self.answer_cursor_queries(&seen, &mut queries, &mut answered).await
+                        // answered here, and the same pass already ran over the window above.
+                        // Whether this host's pane asks is not assumed: the count and the
+                        // dispatch are reported in the failure below.
+                        if let Some(error) = self
+                            .answer_cursor_queries(&query_window, &mut queries, &mut answered)
+                            .await
                         {
                             last_write_error = Some(error);
                             return false;
@@ -4434,4 +4439,747 @@ fn error_message(body: &str) -> String {
         .ok()
         .and_then(|value| value["error"]["message"].as_str().map(str::to_string))
         .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------------------------
+// The phone answers on the daemon's durable answer journal
+// ---------------------------------------------------------------------------------------------
+
+/// One gateway whose answer journal IS the daemon journal of `root`, over a stub pane showing
+/// `screen`.
+///
+/// The journal is the daemon's own (`MachineOperationJournal` under the config root), so two calls
+/// with one `root` are two incarnations of one journal — the same restart the desktop's answer
+/// path is held to. Nothing here registers the pane with the session service: the stub backend is
+/// the pane, exactly as the durable-prompt tests in `agent_control_service` do it.
+async fn durable_phone_pane(
+    root: &std::path::Path,
+    history_home: &std::path::Path,
+    session_id: &str,
+    screen: &str,
+) -> (Arc<ScreenStubBackend>, Arc<RemoteGatewayState>, String) {
+    let root = root.to_path_buf();
+    let services = crate::ipc::run_blocking(move || {
+        let server = crate::daemon::server::DaemonServer::new_with_paths(
+            Some(root.join("config")),
+            Some(root.join("auth")),
+        );
+        Ok(server.remote_state().machine_services.clone().expect("daemon services"))
+    })
+    .await
+    .expect("daemon journal");
+    let backend = Arc::new(ScreenStubBackend {
+        session_id: session_id.to_string(),
+        // The geometry the durable prompt tests in `agent_control_service` read this fixture at:
+        // wide enough that no line of the card wraps, so both paths read the same card.
+        cols: 100,
+        rows: 30,
+        screen: screen.trim_end().replace('\n', "\r\n").into_bytes(),
+        writes: std::sync::Mutex::new(Vec::new()),
+        written: None,
+        on_screen: None,
+        on_write: None,
+        worktree: None,
+        screen_gate: None,
+        screen_seen: None,
+        fail_write: false,
+    });
+    let mut gateway = RemoteGatewayState::new_with_backend(
+        Arc::clone(&backend) as Arc<dyn crate::remote::backend::RemoteSessionBackend>,
+        crate::worktree::registry::WorkspaceRegistry::new(),
+    );
+    gateway.machine_services = Some(services);
+    // An isolated transcript root: the prompt detectors must never read this machine's own stores.
+    *gateway.agent_history_home.write() = Some(history_home.to_path_buf());
+    let state = Arc::new(gateway);
+    let pin = state
+        .auth_manager
+        .create_scoped_pairing_code(DevicePermission::Control, DeviceAccessScope::Machine)
+        .expect("control pin");
+    let (control, _) = state
+        .auth_manager
+        .exchange_pairing_code(&pin, session_id)
+        .expect("control token");
+    (backend, state, control)
+}
+
+/// The read query the phone sends for its pane's card.
+fn durable_prompt_query(state: &RemoteGatewayState, session_id: &str) -> String {
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    format!(
+        "hostId={}&ownerId={}&epoch={}&backendSessionId={}&registryId=claude",
+        reference_files::reference_host_id(),
+        state.reference_owner_id,
+        epoch,
+        session_id
+    )
+}
+
+/// The phone's answer envelope: the frozen target, and the card it answers.
+fn durable_answer_body(
+    state: &RemoteGatewayState,
+    session_id: &str,
+    request_id: &str,
+    prompt_id: &str,
+    revision: &str,
+) -> String {
+    durable_answer_body_for(state, session_id, Some("claude"), request_id, prompt_id, revision)
+}
+
+/// The phone's answer envelope, naming the reader the phone answers as only when it names one.
+/// `None` omits the `registryId` key and every provider-session hint, as an unaware client does.
+fn durable_answer_body_for(
+    state: &RemoteGatewayState,
+    session_id: &str,
+    registry_id: Option<&str>,
+    request_id: &str,
+    prompt_id: &str,
+    revision: &str,
+) -> String {
+    let epoch = state
+        .daemon_epoch
+        .load(std::sync::atomic::Ordering::Acquire)
+        .to_string();
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("requestId".into(), serde_json::json!(request_id));
+    envelope.insert(
+        "target".into(),
+        serde_json::json!({
+            "hostId": reference_files::reference_host_id(),
+            "ownerId": state.reference_owner_id,
+            "epoch": epoch,
+            "backendSessionId": session_id,
+        }),
+    );
+    envelope.insert(
+        "params".into(),
+        serde_json::json!({
+            "promptId": prompt_id,
+            "screenRevision": revision,
+            "answer": { "optionIndex": 0 },
+        }),
+    );
+    if let Some(registry_id) = registry_id {
+        envelope.insert("registryId".into(), serde_json::json!(registry_id));
+    }
+    serde_json::Value::Object(envelope).to_string()
+}
+
+/// The card this daemon's journal holds for `prompt_id`.
+fn journal_card(
+    state: &RemoteGatewayState,
+    prompt_id: &str,
+) -> crate::agent_control::pending_input::PendingInput {
+    crate::agent_control::pending_input::get(
+        &state
+            .machine_services
+            .as_ref()
+            .expect("daemon journal")
+            .workspaces
+            .journal,
+        prompt_id,
+    )
+    .expect("the journal is readable")
+    .expect("the card is recorded")
+}
+
+/// The phone reads a card and answers it through the route; the daemon is then restarted on the
+/// same private disk root, and the identical retry is answered from the journal: the FIRST
+/// receipt comes back, and not one key is typed into the pane.
+#[tokio::test]
+async fn a_phone_answer_replays_its_receipt_after_a_restart_and_types_nothing() {
+    let root = tempfile::tempdir().expect("root");
+    let home = tempfile::tempdir().expect("isolated transcript root");
+    let session_id = "reference_route_durable_phone_retry";
+    let screen = include_str!("fixtures/claude/prompt/approval-command.screen");
+    let prompt_path = format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/prompt");
+    let answer_path = format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/answer");
+
+    // Given: one gateway on `root`, reading the card its pane is showing.
+    let (typed, state, control) =
+        durable_phone_pane(root.path(), home.path(), session_id, screen).await;
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let (status, body) = server
+        .request(
+            "GET",
+            &format!("{prompt_path}?{}", durable_prompt_query(&state, session_id)),
+            Some(&control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "the card read: {body}");
+    let read: serde_json::Value = serde_json::from_str(&body).expect("prompt body");
+    let prompt_id = read["prompt"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the approval card is on the pane: {read}"))
+        .to_string();
+    let revision = read["screenRevision"].as_str().expect("a screen revision").to_string();
+
+    // The read itself is what makes the answer durable: the card is on the journal, open, bound to
+    // the screen the read reported, and with no attempt stamped by a read.
+    let recorded = journal_card(&state, &prompt_id);
+    assert!(recorded.is_open(), "a read leaves the card answerable");
+    assert_eq!(recorded.session_id, session_id);
+    assert_eq!(recorded.screen_revision, revision, "bound to the screen the read returned");
+    assert!(recorded.attempt.is_none(), "a read only records the card");
+
+    // When: the phone answers it.
+    let answer = durable_answer_body(&state, session_id, "phone-r1", &prompt_id, &revision);
+    let (status, answered) = server
+        .request("POST", &answer_path, Some(&control), Some(answer.as_str()))
+        .await;
+    assert_eq!(status, 200, "the answer is typed: {answered}");
+    let first: serde_json::Value = serde_json::from_str(&answered).expect("answer body");
+    assert_eq!(first["data"]["receipt"]["requestId"], "phone-r1", "{first}");
+    assert_eq!(first["data"]["receipt"]["stage"], "accepted", "{first}");
+    assert!(
+        !typed.writes.lock().expect("writes").is_empty(),
+        "the first answer types into the pane"
+    );
+
+    // Then: the daemon is restarted on the same root, and the same answer retried under a new id.
+    server.stop().await;
+    drop(state);
+    let (restarted, next, next_control) =
+        durable_phone_pane(root.path(), home.path(), session_id, screen).await;
+    let server = ReferenceRouteServer::start(Arc::clone(&next)).await;
+    let retry = durable_answer_body(&next, session_id, "phone-r2", &prompt_id, &revision);
+    let (status, retried) = server
+        .request("POST", &answer_path, Some(&next_control), Some(retry.as_str()))
+        .await;
+    assert_eq!(status, 200, "an identical retry is answered from the journal: {retried}");
+    let retried: serde_json::Value = serde_json::from_str(&retried).expect("answer body");
+
+    assert_eq!(
+        retried["data"]["receipt"]["requestId"], "phone-r1",
+        "the first attempt's id, not the retry's: {retried}"
+    );
+    assert_eq!(retried["data"], first["data"], "a retry replays the receipt the delivery produced");
+    assert!(
+        restarted.writes.lock().expect("writes").is_empty(),
+        "a replayed answer types nothing"
+    );
+    let settled = journal_card(&next, &prompt_id);
+    assert_eq!(
+        settled.resolution.and_then(|resolution| resolution.receipt).map(|receipt| receipt.request_id),
+        Some("phone-r1".to_string()),
+        "the journal still holds the receipt of the one delivery"
+    );
+    server.stop().await;
+}
+
+/// The phone's answer and the generic agent-control answer are one journal: the card the phone
+/// answered is replayed to the desktop's answer op with the phone's receipt, and nothing is typed
+/// a second time.
+#[tokio::test]
+async fn a_generic_answer_replays_the_phones_receipt_and_types_nothing() {
+    let root = tempfile::tempdir().expect("root");
+    let home = tempfile::tempdir().expect("isolated transcript root");
+    let session_id = "reference_route_durable_phone_cross_surface";
+    let screen = include_str!("fixtures/claude/prompt/approval-command.screen");
+
+    let (typed, state, control) =
+        durable_phone_pane(root.path(), home.path(), session_id, screen).await;
+    // No provider report here: the approval fixture is a screen-only card, and the detectors name
+    // `claude` from the screen alone, exactly as the durable-prompt tests in `agent_control_service`
+    // read it. Both surfaces therefore identify the pane by the same evidence.
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+    let (status, body) = server
+        .request(
+            "GET",
+            &format!(
+                "{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/prompt?{}",
+                durable_prompt_query(&state, session_id)
+            ),
+            Some(&control),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "the card read: {body}");
+    let read: serde_json::Value = serde_json::from_str(&body).expect("prompt body");
+    let prompt_id = read["prompt"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the approval card is on the pane: {read}"))
+        .to_string();
+    let revision = read["screenRevision"].as_str().expect("a screen revision").to_string();
+
+    let answer = durable_answer_body(&state, session_id, "phone-r1", &prompt_id, &revision);
+    let (status, answered) = server
+        .request(
+            "POST",
+            &format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/answer"),
+            Some(&control),
+            Some(answer.as_str()),
+        )
+        .await;
+    assert_eq!(status, 200, "the phone's answer is typed: {answered}");
+    let first: serde_json::Value = serde_json::from_str(&answered).expect("answer body");
+    let typed_by_phone = typed.writes.lock().expect("writes").len();
+    assert!(typed_by_phone > 0, "the phone's answer types into the pane");
+
+    // When: the desktop's generic answer op answers the same card, under its own request id.
+    let replayed = crate::remote::server::agent_control_service::handle(
+        &state,
+        crate::agent_control::AgentControlOp::Answer {
+            session_id: session_id.to_string(),
+            prompt_id: prompt_id.clone(),
+            screen_revision: revision.clone(),
+            answer: super::types::ReferencePromptAnswer {
+                option_index: Some(0),
+                option_indices: None,
+                custom_text: None,
+            },
+            request_id: Some("desktop-r1".into()),
+        },
+    )
+    .await
+    .expect("the desktop's answer is answered from the journal");
+
+    // Then: it gets the phone's receipt, and the pane is untouched.
+    assert_eq!(
+        replayed["receipt"]["requestId"], "phone-r1",
+        "the journal's receipt, not this caller's id: {replayed}"
+    );
+    assert_eq!(replayed["receipt"], first["data"]["receipt"], "{replayed}");
+    assert_eq!(
+        typed.writes.lock().expect("writes").len(),
+        typed_by_phone,
+        "a replayed answer types nothing"
+    );
+    server.stop().await;
+}
+
+/// Two open occurrences that both claim the same pane, card and revision are not something the
+/// read may guess between: the phone's GET refuses with a typed conflict before it records
+/// anything, and the answer that follows refuses too - no receipt, no key typed, and neither
+/// durable row created, closed or renumbered.
+#[tokio::test]
+async fn a_phone_read_and_answer_refuse_two_open_occurrences_of_one_card() {
+    let root = tempfile::tempdir().expect("root");
+    let home = tempfile::tempdir().expect("isolated transcript root");
+    let session_id = "reference_route_two_open_occurrences";
+    let screen = include_str!("fixtures/claude/prompt/approval-command.screen");
+    let prompt_path = format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/prompt");
+    let answer_path = format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/answer");
+
+    // Given: one pane whose screen the detector reads, and the revision that screen has.
+    let (typed, state, control) =
+        durable_phone_pane(root.path(), home.path(), session_id, screen).await;
+    let query = durable_prompt_query(&state, session_id);
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+
+    // The pane's own first read is what names the card and the screen revision the route binds to;
+    // asking it any other way would be a fixture guessing the digest the route computes.
+    let (status, body) = server
+        .request("GET", &format!("{prompt_path}?{query}"), Some(&control), None)
+        .await;
+    assert_eq!(status, 200, "one card reads cleanly: {body}");
+    let read: serde_json::Value = serde_json::from_str(&body).expect("prompt body");
+    let content = read["prompt"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the approval card is on the pane: {read}"))
+        .to_string();
+    let revision = read["screenRevision"].as_str().expect("a screen revision").to_string();
+
+    // A second occurrence of that same card, on that same pane and revision, is already durable and
+    // open: the next asking of it. Two rows now claim one pane, one content and one revision.
+    //
+    // The journal's transitions are blocking file I/O under a file lock, and this test runs on a
+    // tokio worker: the seed goes through `run_blocking`, the same way every production transition
+    // reaches the journal, instead of writing on the runtime thread.
+    let services = std::sync::Arc::clone(state.machine_services.as_ref().expect("daemon journal"));
+    let second = format!("{content}~1");
+    let seeded = {
+        let seeded_services = std::sync::Arc::clone(&services);
+        let second = second.clone();
+        let session = session_id.to_string();
+        let question = read["prompt"]["question"].as_str().unwrap_or_default().to_string();
+        let revision = revision.clone();
+        crate::ipc::run_blocking(move || {
+            crate::agent_control::pending_input::open_observed(
+                &seeded_services.workspaces.journal,
+                crate::agent_control::pending_input::NewPendingInput {
+                    prompt_id: second,
+                    session_id: session,
+                    screen_revision: revision,
+                    question,
+                    options: Vec::new(),
+                    kind: "approval".into(),
+                    needs_confirmation: false,
+                },
+                1_700_000_000,
+            )
+            .map_err(crate::ipc::error::IpcError::internal)
+        })
+        .await
+    };
+    seeded.expect("the second open occurrence is seeded");
+    let journal = &services.workspaces.journal;
+    let occurrences = [content.clone(), second.clone()];
+    let before: Vec<_> = occurrences.iter().map(|prompt_id| journal_card(&state, prompt_id)).collect();
+    assert!(
+        before.iter().all(|row| row.is_open()),
+        "both occurrences are open before the ambiguous read"
+    );
+    assert_eq!(before[0].screen_revision, revision, "{before:?}");
+    assert_eq!(before[1].screen_revision, revision, "{before:?}");
+
+    let typed_before = typed.writes.lock().expect("writes").len();
+
+    // When: the authenticated phone reads the card.
+    let (status, body) = server
+        .request("GET", &format!("{prompt_path}?{query}"), Some(&control), None)
+        .await;
+
+    // Then: the read refuses with a typed conflict instead of choosing an occurrence.
+    assert_eq!(status, 409, "an ambiguous card is a conflict, not a card: {body}");
+    assert_eq!(error_code(&body), "REQUEST_CONFLICT", "{body}");
+    assert_eq!(
+        typed.writes.lock().expect("writes").len(),
+        typed_before,
+        "a refused read types nothing into the pane"
+    );
+
+    // And: neither durable row was created, closed or renumbered by the refused read - the exact
+    // rows that were open before it are the rows that are open after it.
+    for (prompt_id, previous) in occurrences.iter().zip(&before) {
+        assert_eq!(&journal_card(&state, prompt_id), previous, "{prompt_id} is untouched by the read");
+    }
+
+    // When: the phone answers one of them anyway.
+    let answer = durable_answer_body(&state, session_id, "phone-ambiguous-r1", &content, &revision);
+    let (status, answered) = server
+        .request("POST", &answer_path, Some(&control), Some(answer.as_str()))
+        .await;
+
+    // Then: the answer refuses with the same typed conflict, and nothing reaches the pane.
+    assert_eq!(status, 409, "the answer to an ambiguous card is a conflict: {answered}");
+    assert_eq!(error_code(&answered), "REQUEST_CONFLICT", "{answered}");
+    assert_eq!(
+        typed.writes.lock().expect("writes").len(),
+        typed_before,
+        "a refused answer types nothing into the pane"
+    );
+
+    // And: both rows are still the rows that were open before the read - not merely open again,
+    // but unchanged field for field, so no attempt, receipt, revision or owner moved. The claim
+    // refused before it wrote anything, which is what leaves the rows byte-identical.
+    for (prompt_id, previous) in occurrences.iter().zip(&before) {
+        let row = journal_card(&state, prompt_id);
+        assert!(row.is_open(), "the refused answer leaves {prompt_id} open");
+        assert_eq!(&row, previous, "the refused answer leaves {prompt_id} exactly as it was");
+    }
+    let open = crate::agent_control::pending_input::unresolved_ambiguous_for_session(journal, session_id)
+        .expect("the journal is readable");
+    assert!(
+        open.is_none(),
+        "neither row is left in a crash window or as an unknown outcome: {open:?}"
+    );
+    server.stop().await;
+}
+
+/// The phone's FIRST answer to a card nothing has read yet: the reader is the one the phone named,
+/// on the pane's own OmO screen, and the answer is admitted from that same reader's reading of it.
+///
+/// This is the regression the reader identity was fixed for. Admission used to read the pane
+/// through the generic observer, which guesses the reader from the pane's reported agent: with no
+/// agent report published there is nothing to guess from, so a card the phone's own reader sees
+/// perfectly well was never recorded, and the strict claim then refused a valid answer as
+/// `Unrecorded` with nothing typed. The pane is a whole OmO form, which only a reader that supports
+/// OmO's arms can read (`detect_card`'s `omo` and `""` arms), so an unrelated detected family
+/// cannot stand in for the reader the phone named. No durable row exists when the answer arrives:
+/// the id and revision are the route's own snapshot of the screen, built here so that admission
+/// alone has to make the row.
+#[tokio::test]
+async fn a_phone_first_answer_is_admitted_by_the_reader_the_phone_named() {
+    let root = tempfile::tempdir().expect("root");
+    let home = tempfile::tempdir().expect("isolated transcript root");
+    let session_id = "reference_route_reader_identity";
+    // A whole OmO form: its question box names both questions of the call, the submit line says
+    // where they stand, and OmO's own footer sits under the hint. Nothing here is a Claude card,
+    // a Codex menu or any other family's screen, so only an OmO reader reads it.
+    let screen = include_str!("fixtures/prompt-omo/form-tabbed.screen");
+    let answer_path = format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/answer");
+
+    // Given: one pane showing that form, and the daemon's own journal behind it. No agent state
+    // is published for the pane, so nothing reports an agent to guess a reader from.
+    let (typed, state, control) = durable_phone_pane(root.path(), home.path(), session_id, screen).await;
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+
+    // And: the screen the route itself reconstructs from these same bytes, at the pane's geometry,
+    // is one its own detector reads as an OmO card under the reader the phone names.
+    let mut mirror = crate::remote::mirror::RemoteTerminalMirror::new(100, 30).expect("fixture mirror");
+    let segment = crate::terminal::HistorySegment {
+        cols: Some(100),
+        rows: Some(30),
+        bytes: screen.trim_end().replace('\n', "\r\n").into_bytes(),
+    };
+    let snapshot = super::screen::snapshot_reference_screen_segments(&mut mirror, Some(&[segment]))
+        .expect("the route's own screen snapshot");
+    assert!(snapshot.is_answerable(), "the fixture screen can carry an answer: {snapshot:?}");
+    let omo_card = super::prompts::detect_reference_prompt("omo", &snapshot.text)
+        .unwrap_or_else(|| panic!("the OmO form is a card for its own reader: {:?}", snapshot.text));
+    assert_eq!(omo_card.agent, "omo", "{omo_card:?}");
+    assert_eq!(omo_card.options.len(), 2, "the tabbed form shows both rows: {omo_card:?}");
+    // And: the test proves what it claims only if the reader the observer would guess is NOT the
+    // phone's own. Nothing published an agent for the pane, so the guess is the screen's report
+    // alone; if that were OmO's too, the old admission would have recorded this card by accident
+    // and the answer below would pass while proving nothing.
+    let detection = crate::agent_detect::default_engine().detect(
+        &crate::agent_detect::ScreenInput {
+            rows: snapshot.text.lines().map(str::to_string).collect(),
+            title: String::new(),
+        },
+        None,
+    );
+    let guessed = detection.as_ref().map(|found| found.manifest_id.as_str());
+    assert_ne!(
+        guessed,
+        Some("omo"),
+        "the observer's guess is not the phone's reader, or this case is vacuous"
+    );
+    // And: no other family's own reader claims this screen either. A family that nests OmO's arm
+    // still yields an OmO card, which is the phone's reader and not a substitute for it.
+    for other in ["claude", "codex", "omp", "pi"] {
+        let card = super::prompts::detect_reference_prompt(other, &snapshot.text);
+        assert!(
+            card.as_ref().is_none_or(|card| card.agent == "omo"),
+            "{other} reads no card of its own here: {card:?}"
+        );
+    }
+
+    // And: nothing is durable for it yet - this is the first answer, not a retry of a read, so
+    // admission alone has to make the row the claim then decides on.
+    let services = std::sync::Arc::clone(state.machine_services.as_ref().expect("daemon journal"));
+    assert!(
+        crate::agent_control::pending_input::get(&services.workspaces.journal, &omo_card.id)
+            .expect("the journal is readable")
+            .is_none(),
+        "the card is not recorded before its first answer"
+    );
+
+    // When: the phone answers the first visible option - Enter on the row the cursor is already on.
+    let answer = durable_answer_body_for(
+        &state,
+        session_id,
+        Some("omo"),
+        "phone-reader-r1",
+        &omo_card.id,
+        &snapshot.revision,
+    );
+    let (status, answered) = server
+        .request("POST", &answer_path, Some(&control), Some(answer.as_str()))
+        .await;
+
+    // Then: it is a real accepted answer, not a refusal that happened to type nothing.
+    assert_eq!(status, 200, "the phone's reader can answer the card it read: {answered}");
+    let answered: serde_json::Value = serde_json::from_str(&answered).expect("answer body");
+    assert_eq!(answered["data"]["receipt"]["requestId"], "phone-reader-r1", "{answered}");
+    assert_eq!(answered["data"]["receipt"]["stage"], "accepted", "{answered}");
+
+    // And: exactly one physical delivery - one Enter, the form's own plan for that option - so the
+    // answer typed once and was not a retry replaying an older receipt.
+    let writes = typed.writes.lock().expect("writes").clone();
+    assert_eq!(writes, vec![b"\r".to_vec()], "the option's one key reached the pane once");
+
+    // And: the row the answer made is bound to this pane and screen, and holds the receipt of that
+    // one delivery.
+    let settled = journal_card(&state, &omo_card.id);
+    assert_eq!(settled.session_id, session_id);
+    assert_eq!(settled.screen_revision, snapshot.revision, "bound to the screen that was read");
+    assert_eq!(
+        settled
+            .resolution
+            .and_then(|resolution| resolution.receipt)
+            .map(|receipt| receipt.request_id),
+        Some("phone-reader-r1".to_string()),
+        "the journal keeps the receipt of the delivery the reader's answer produced"
+    );
+    server.stop().await;
+}
+
+/// The phone's first POST to a pane herdr reads as `claude` - or as nothing at all, the same rule:
+/// what makes the form OmO's is the provider's own wait, not the form's text.
+///
+/// `omo_form_is_trusted` reads such a pane's form only while that pane is `blocked`, and the
+/// session service words a provider `blocked`/`waiting` as `waiting`, so the prompt-session adapter
+/// owes the detector that translation. Without it the same screen is nobody's card, admission
+/// records nothing, and the claim refuses the answer as `Unrecorded` with nothing typed. The
+/// refusal half proves a printed form is not enough; the acceptance half proves a real provider
+/// wait is, and that it carries through the route's own screen read, its own admission and its own
+/// one-Enter writer.
+#[tokio::test]
+async fn a_phone_first_answer_on_a_claude_pane_needs_the_provider_wait_not_the_printed_form() {
+    let root = tempfile::tempdir().expect("root");
+    let home = tempfile::tempdir().expect("isolated transcript root");
+    let session_id = "reference_route_provider_wait";
+    let screen = include_str!("fixtures/prompt-omo/form-tabbed.screen");
+    let answer_path = format!("{REFERENCE_CHAT_ROUTE_PREFIX}/{session_id}/answer");
+
+    let (typed, state, control) = durable_phone_pane(root.path(), home.path(), session_id, screen).await;
+    let server = ReferenceRouteServer::start(Arc::clone(&state)).await;
+
+    // And: the card is read at the pane's own 100x30 geometry, from the bytes the stub holds.
+    let mut mirror = crate::remote::mirror::RemoteTerminalMirror::new(100, 30).expect("fixture mirror");
+    let segment = crate::terminal::HistorySegment {
+        cols: Some(100),
+        rows: Some(30),
+        bytes: screen.trim_end().replace('\n', "\r\n").into_bytes(),
+    };
+    let snapshot = super::screen::snapshot_reference_screen_segments(&mut mirror, Some(&[segment]))
+        .expect("the route's own screen snapshot");
+    assert!(snapshot.is_answerable(), "the fixture screen can carry an answer: {snapshot:?}");
+    assert!(
+        crate::remote::reference_chat::prompt_omo::omo_form_on_screen(&snapshot.text),
+        "the fixture carries OmO's form marker: {:?}",
+        snapshot.text
+    );
+    for reader in ["claude", ""] {
+        let printed = super::prompts::detect_reference_prompt(reader, &snapshot.text);
+        assert!(
+            printed.is_none(),
+            "{reader:?} reads a printed form only once the provider waits: {printed:?}"
+        );
+    }
+    // And: the id the phone answers under is the one OmO's own reader computes for this screen, so
+    // both halves below answer one card rather than two.
+    let omo_card = super::prompts::detect_reference_prompt("omo", &snapshot.text)
+        .expect("OmO's own reader sees the form");
+    assert_eq!(omo_card.options.len(), 2, "{omo_card:?}");
+    // And: nothing durable exists for it. This is the first POST, not a retry of a read, so only
+    // admission can write the row the claim then decides on.
+    assert!(
+        crate::agent_control::pending_input::get(
+            &state.machine_services.as_ref().expect("daemon journal").workspaces.journal,
+            &omo_card.id,
+        )
+        .expect("the journal is readable")
+        .is_none(),
+        "the card is not recorded before its first answer"
+    );
+
+    // When: the phone sends that answer - the real envelope of a client that does not know the
+    // pane's agent, carrying no reader and no provider session at all - first while the pane
+    // publishes no state, then while it publishes a wait no program produced. Both words are the
+    // daemon's to classify, and neither is the program's own wait.
+    let observed = crate::daemon::protocol::AgentStateOrigin::ProcessObserved;
+    for (request_id, published) in [
+        ("phone-wait-r1", None),
+        ("phone-wait-daemon", Some(("waiting", observed))),
+    ] {
+        if let Some((word, origin)) = published {
+            state
+                .machine_services
+                .as_ref()
+                .expect("daemon journal")
+                .sessions
+                .publish_agent_state_for_test(crate::daemon::agent_state::AgentState {
+                    session_id: session_id.to_string(),
+                    state: word.into(),
+                    agent: None,
+                    provider_session: None,
+                    detail: None,
+                    origin,
+                    outcome: None,
+                    kind: None,
+                });
+        }
+        let answer = durable_answer_body_for(
+            &state,
+            session_id,
+            None,
+            request_id,
+            &omo_card.id,
+            &snapshot.revision,
+        );
+        let sent: serde_json::Value = serde_json::from_str(&answer).expect("the phone's envelope");
+        let mut keys: Vec<&str> =
+            sent.as_object().expect("an envelope object").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["params", "requestId", "target"],
+            "no reader and no provider hint: {sent}"
+        );
+        let (status, refused) = server
+            .request("POST", &answer_path, Some(&control), Some(answer.as_str()))
+            .await;
+
+        // Then: with no trusted status and no ask of the session's own, the claim refuses it, and
+        // the refusal is the claim's own: nothing was ever admitted to write against.
+        assert_eq!(status, 409, "{request_id} answers an untrusted form: {refused}");
+        assert_eq!(error_code(&refused), "REQUEST_CONFLICT", "{refused}");
+        assert!(
+            typed.writes.lock().expect("writes").is_empty(),
+            "{request_id} typed nothing into the pane"
+        );
+        assert!(
+            crate::agent_control::pending_input::get(
+                &state.machine_services.as_ref().expect("daemon journal").workspaces.journal,
+                &omo_card.id,
+            )
+            .expect("the journal is readable")
+            .is_none(),
+            "{request_id} wrote no durable row"
+        );
+    }
+
+    // When: the program in that pane reports its own wait, scoped to this session - the provider
+    // origin, the only evidence `omo_form_is_trusted` takes.
+    state
+        .machine_services
+        .as_ref()
+        .expect("daemon journal")
+        .sessions
+        .publish_agent_state_for_test(crate::daemon::agent_state::AgentState {
+            session_id: session_id.to_string(),
+            state: "blocked".into(),
+            agent: None,
+            provider_session: None,
+            detail: None,
+            origin: crate::daemon::protocol::AgentStateOrigin::Agent,
+            outcome: None,
+            kind: None,
+        });
+
+    // And: the same answer, under its own request id.
+    let answer = durable_answer_body_for(
+        &state,
+        session_id,
+        None,
+        "phone-wait-r2",
+        &omo_card.id,
+        &snapshot.revision,
+    );
+    let (status, answered) = server
+        .request("POST", &answer_path, Some(&control), Some(answer.as_str()))
+        .await;
+
+    // Then: it is a real accepted answer, and the provider's wait is what admitted it.
+    assert_eq!(status, 200, "the provider's own wait makes the form OmO's: {answered}");
+    let answered: serde_json::Value = serde_json::from_str(&answered).expect("answer body");
+    assert_eq!(answered["data"]["receipt"]["requestId"], "phone-wait-r2", "{answered}");
+    assert_eq!(answered["data"]["receipt"]["stage"], "accepted", "{answered}");
+
+    // And: exactly one physical delivery - the cursor row's own Enter, typed once.
+    let writes = typed.writes.lock().expect("writes").clone();
+    assert_eq!(writes, vec![b"\r".to_vec()], "the option's one key reached the pane once");
+
+    // And: the row the answer made is this pane's, bound to the screen that was read, and holds
+    // that one delivery's receipt.
+    let settled = journal_card(&state, &omo_card.id);
+    assert_eq!(settled.session_id, session_id);
+    assert_eq!(settled.screen_revision, snapshot.revision, "bound to the screen that was read");
+    assert_eq!(
+        settled
+            .resolution
+            .and_then(|resolution| resolution.receipt)
+            .map(|receipt| receipt.request_id),
+        Some("phone-wait-r2".to_string()),
+        "the journal keeps the receipt of the delivery the provider's wait admitted"
+    );
+    server.stop().await;
 }

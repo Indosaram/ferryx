@@ -31,17 +31,38 @@ if (!(window as any).__TAURI_EVENT_PLUGIN_INTERNALS__) {
   };
 }
 
+// This file exercises the macOS shortcut contract. Its detector reads navigator.platform and
+// navigator.userAgent together, and jsdom's user agent interpolates the real process.platform
+// ("win32" on a Windows runner), which the classifier tests before Mac - so platform alone left
+// the fixture split across hosts and Cmd chords stopped matching. process.platform is left alone
+// so the nested Windows cases keep their own override.
+const originalNavigatorPlatform = Object.getOwnPropertyDescriptor(globalThis.navigator, "platform");
+const originalNavigatorUserAgent = Object.getOwnPropertyDescriptor(globalThis.navigator, "userAgent");
 Object.defineProperty(globalThis.navigator, "platform", {
   configurable: true,
   value: "MacIntel",
+});
+Object.defineProperty(globalThis.navigator, "userAgent", {
+  configurable: true,
+  value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
 });
 
 const { readFileSync } = await import("node:fs");
 const { resolve } = await import("node:path");
 
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import("@testing-library/react");
-const { afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
+const { afterAll, afterEach, beforeEach, describe, expect, it, vi } = await import("vitest");
 await import("./test/setup");
+// Both are inherited accessors with no own property, so absence must restore by deletion.
+afterAll(() => {
+  for (const [key, descriptor] of [
+    ["platform", originalNavigatorPlatform],
+    ["userAgent", originalNavigatorUserAgent],
+  ] as const) {
+    if (descriptor) Object.defineProperty(globalThis.navigator, key, descriptor);
+    else Reflect.deleteProperty(globalThis.navigator, key);
+  }
+});
 import type { LayoutState, TabPaneLayout, Worktree } from "./lib/types";
 import type { TerminalActivity } from "./lib/activity";
 import { createLayoutState } from "./state/layout";
@@ -193,6 +214,7 @@ vi.mock("./lib/tauri", () => ({
   listExternalWorktrees: vi.fn(async () => []),
   discardWindowSession: vi.fn(async () => undefined),
   onWindowSessionsOrphaned: vi.fn(async () => () => undefined),
+  reportDesktopWindowFocus: vi.fn(async () => undefined),
   onSessionCorrupted: vi.fn(async () => () => undefined),
   onWindowSessionsAdopt: vi.fn(async () => () => undefined),
   takePendingWindowAdoptions: vi.fn(async () => []),
@@ -296,6 +318,11 @@ vi.mock("./lib/updater", async (importOriginal) => {
     },
   };
 });
+
+const parkedRemoteRecovery = vi.hoisted(() => ({ start: vi.fn((_options: unknown) => vi.fn()) }));
+vi.mock("./lib/parkedRemoteRecovery", () => ({
+  startParkedRemoteRecovery: (options: unknown) => parkedRemoteRecovery.start(options),
+}));
 
 const workspaceStoreModule = await import("./state/workspaceStore");
 const { AUTO_RESUME_STAGGER_INTERVAL_MS, MAX_AUTO_RESUME_CANDIDATES } = await import("./lib/agentAutoResume");
@@ -819,8 +846,10 @@ describe("App project workspace flow", () => {
       const browser = await import("./lib/browserTauri");
       const { BrowserPane } = await import("./components/BrowserPane");
       const platform = Object.getOwnPropertyDescriptor(navigator, "platform")!;
+      const userAgent = Object.getOwnPropertyDescriptor(navigator, "userAgent")!;
       const processPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
       Object.defineProperty(navigator, "platform", { configurable: true, value: "Win32" });
+      Object.defineProperty(navigator, "userAgent", { configurable: true, value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" });
       Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
       const back = vi.spyOn(browser, "goBackBrowser").mockResolvedValue();
       const forward = vi.spyOn(browser, "goForwardBrowser").mockResolvedValue();
@@ -891,6 +920,7 @@ describe("App project workspace flow", () => {
         cleanup();
         for (const spy of [back, forward, find, bounds, visibility, shortcut, download]) spy.mockRestore();
         Object.defineProperty(navigator, "platform", platform);
+        Object.defineProperty(navigator, "userAgent", userAgent);
         Object.defineProperty(process, "platform", processPlatform);
       }
     });
@@ -2668,6 +2698,40 @@ describe("App project workspace flow", () => {
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeInTheDocument();
   });
 
+  it("starts parked SSH and paired recovery once, after the mounted project restores", async () => {
+    const pairedId = `daemon:${"b".repeat(64)}`;
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
+      { workspaceId: "default", repoRoot: "/repo/main" },
+      { workspaceId: "ssh:parked-box", repoRoot: "/srv/box", target: { kind: "ssh", hostId: "box" } },
+      { workspaceId: pairedId, repoRoot: "/work/site", target: { kind: "pairedDaemon", hostId: "studio" }, remoteWorkspaceId: "site" },
+    ]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+    native.loadSession.mockResolvedValue(null);
+    native.listTerminalSessions.mockResolvedValue([]);
+    parkedRemoteRecovery.start.mockClear();
+
+    const view = render(<App />);
+    await waitFor(() => expect(parkedRemoteRecovery.start).toHaveBeenCalledTimes(1));
+    const options = parkedRemoteRecovery.start.mock.calls[0]?.[0] as {
+      projects: Array<{ workspaceId: string }>;
+      isMounted: (workspaceId: string) => boolean;
+      startSsh: unknown;
+      refreshPaired: unknown;
+    };
+    expect(options.projects.map((project) => project.workspaceId)).toEqual(["default", "ssh:parked-box", pairedId]);
+    expect(options.isMounted("default")).toBe(true);
+    expect(options.isMounted("ssh:parked-box")).toBe(false);
+    expect(typeof options.startSsh).toBe("function");
+    expect(typeof options.refreshPaired).toBe("function");
+
+    const stop = parkedRemoteRecovery.start.mock.results[0]?.value as ReturnType<typeof vi.fn>;
+    expect(stop).not.toHaveBeenCalled();
+    view.unmount();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(parkedRemoteRecovery.start).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps restored missing sessions in standby under the default Lazy policy", async () => {
     localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([{ workspaceId: "default", repoRoot: "/repo/main" }]));
     localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
@@ -3939,6 +4003,79 @@ describe("App project workspace flow", () => {
   });
 
   describe("Ferryx desktop focused-terminal publisher and remote selection listener", () => {
+    describe("continuity selection across a project switch", () => {
+      const load = () => import("./lib/continuitySelection");
+      const outgoingState = {
+        workspaceId: "project-1",
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        activeWorktreePath: "/repo/p1",
+        layout: {
+          activeTabId: "tab-old",
+          tabs: [{ id: "tab-old", label: "old", sessionId: "sess-old" }],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "sess-old": { id: "sess-old", backendSessionId: "backend-old", cwd: "/repo/p1", worktreePath: "/repo/p1" },
+        },
+        worktrees: [{ path: "/repo/p1", branch: "refs/heads/main" }],
+      } as any;
+      const incomingState = {
+        workspaceId: "project-2",
+        unreadTabIds: {},
+        unreadWorktreePaths: {},
+        activeWorktreePath: "/repo/p2",
+        layout: {
+          activeTabId: "tab-new",
+          tabs: [{ id: "tab-new", label: "new", sessionId: "sess-new" }],
+          layoutsByTabId: {},
+        },
+        sessions: {
+          "sess-new": { id: "sess-new", backendSessionId: "backend-new", cwd: "/repo/p2", worktreePath: "/repo/p2" },
+        },
+        worktrees: [{ path: "/repo/p2", branch: "refs/heads/main" }],
+      } as any;
+      const project1 = { workspaceId: "project-1", repoRoot: "/repo/p1", gitRoot: "/repo/p1" } as any;
+      const project2 = { workspaceId: "project-2", repoRoot: "/repo/p2", gitRoot: "/repo/p2" } as any;
+
+      it("labels a mismatched store with the mounted workspace and reports nothing publishable", async () => {
+        const { deriveContinuitySelection } = await load();
+        const selection = deriveContinuitySelection(outgoingState, project2, null);
+        expect(selection).toEqual({
+          workspaceId: "project-1",
+          tabId: null,
+          leafId: null,
+          worktreePath: null,
+          worktreeSlug: null,
+          sessionId: null,
+          local: false,
+        });
+        expect(selection.sessionId).not.toBe("backend-old");
+      });
+
+      it("publishes the incoming workspace session once the swapped state carries a tab", async () => {
+        const { deriveContinuitySelection } = await load();
+        const selection = deriveContinuitySelection(incomingState, project2, null);
+        expect(selection).toMatchObject({
+          workspaceId: "project-2",
+          tabId: "tab-new",
+          sessionId: "backend-new",
+          worktreePath: "/repo/p2",
+          local: true,
+        });
+      });
+
+      it("derives a normal selection for the active project's own state", async () => {
+        const { deriveContinuitySelection } = await load();
+        expect(deriveContinuitySelection(outgoingState, project1, null)).toMatchObject({
+          workspaceId: "project-1",
+          tabId: "tab-old",
+          sessionId: "backend-old",
+          local: true,
+        });
+      });
+    });
+
     it("derives focused terminal payload through focused group -> active tab -> active leaf -> session -> backendSessionId", async () => {
       const { deriveFocusedTerminal } = await import("./App");
       const sampleState: any = {

@@ -55,4 +55,17 @@ describe("userFacingError", () => {
     expect(userFacingCode(new Coded("RELAY_TIMEOUT", "allocation timed out"))).toBe("RELAY_TIMEOUT");
     expect(userFacingCode(new Coded("RELAY_UNREACHABLE", "could not reach the relay"))).toBe("RELAY_UNREACHABLE");
   });
+
+  it("keeps an occupancy refusal distinguishable from an expired session", () => {
+    // The tunnel surfaces the refusal body as the error code; both collapse to 409 on the
+    // wire, so only the code tells a user whether to take over or to reopen.
+    const conflict = new TunnelError("CONTROL_CONFLICT", "server returned status 409 (CONTROL_CONFLICT)", 409);
+    const expired = new TunnelError("SESSION_EXPIRED", "server returned status 409 (SESSION_EXPIRED)", 409);
+    expect(userFacingCode(conflict)).toBe("CONTROL_CONFLICT");
+    expect(userFacingCode(expired)).toBe("SESSION_EXPIRED");
+    expect(userFacingError(conflict)).toBe(
+      "This terminal is open on another device. Take it over here, or close it there first.",
+    );
+    expect(userFacingError(expired)).not.toBe(userFacingError(conflict));
+  });
 });

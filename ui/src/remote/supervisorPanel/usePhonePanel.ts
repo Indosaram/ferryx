@@ -1,7 +1,8 @@
 // The phone panel's data: GET /api/v1/supervisor/panel on the hub host, then `panel.*` owner
 // frames from that host's `/api/v1/events` (through the supervisor frame bus). It subscribes
-// before it fetches and never polls; a subscribe or lag boundary refetches once. Actions are
-// direct hub routes (answer, pause, converse); each refetches on success so the card leaves.
+// before it fetches and never polls; a subscribe, lag or restart boundary refetches once.
+// Actions are direct hub routes (answer, pause, converse); each refetches on success so the
+// card leaves.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { parseConverseReply, type PanelActionResult, type PanelActions } from "../../lib/supervisorPanel/actions";
@@ -9,7 +10,7 @@ import type { PanelSnapshot, PrLane } from "../../lib/supervisorPanel/contract";
 import { parseTranscriptPage, type TranscriptPageLoader } from "../../lib/supervisorPanel/transcript";
 import { useTranscript, type TranscriptSource } from "../../lib/supervisorPanel/useTranscript";
 import type { SupervisorFrameBus } from "../home/machineSupervisorSources";
-import { isSupervisorChangedFrame, type SupervisorFetch } from "../remoteSupervisor";
+import { isResyncBoundaryFrame, isSupervisorChangedFrame, type SupervisorFetch } from "../remoteSupervisor";
 import { applyPanelEvent, parsePanelFrame } from "./panelModel";
 
 export type { PanelActionResult };
@@ -67,13 +68,6 @@ export async function fetchPanel(fetchLike: SupervisorFetch): Promise<PanelState
   if (!isSnapshot(data)) return { kind: "error", message: "Couldn't read the supervisor panel." };
   const record = data as unknown as Partial<PanelSnapshot>;
   return { kind: "ready", snapshot: { ...data, rules: record.rules ?? [], paused: record.paused === true, setupRequired: record.setupRequired === true } };
-}
-
-function isResyncFrame(frame: unknown): boolean {
-  const value = typeof frame === "string" ? decode(frame) : frame;
-  if (!value || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
-  return record.type === "inventoryInvalidated" && (record.reason === "subscribe" || record.reason === "lag");
 }
 
 function jsonPost(body: unknown) {
@@ -164,7 +158,7 @@ export function usePhonePanel(input: {
     }
     const unsubscribe = bus.subscribe(hostId, (frame) => {
       if (isSupervisorChangedFrame(frame)) void refreshTranscript();
-      if (isResyncFrame(frame)) {
+      if (isResyncBoundaryFrame(frame)) {
         void refresh();
         return;
       }
@@ -175,6 +169,9 @@ export function usePhonePanel(input: {
         setPrLane(event.lane);
         return;
       }
+      // Sidebar lifecycle rows are applied by useRemoteSidebarModel, not this fleet snapshot.
+      // In particular, they must not invalidate the phone's in-flight initial panel read.
+      if (event.type === "panel.lanes") return;
       seqRef.current += 1;
       setState((previous) => (previous.kind === "ready" ? { kind: "ready", snapshot: applyPanelEvent(previous.snapshot, event) } : previous));
     });

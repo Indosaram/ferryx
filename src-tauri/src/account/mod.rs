@@ -1,4 +1,5 @@
 pub mod billing;
+pub mod continuity;
 pub mod deletion;
 pub mod enroll_client;
 pub mod install_keys;
@@ -13,3 +14,6 @@ pub mod supervisor_lease;
 
 #[cfg(test)]
 mod onboarding_tests;
+
+#[cfg(test)]
+mod identity_tests;

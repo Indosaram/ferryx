@@ -75,6 +75,10 @@ pub fn router(pool: SqlitePool, web_root: PathBuf) -> Router {
         .route("/api/logs", get(logs))
         .route("/api/logs/ws", get(logs_ws))
         .nest("/api/agent", crate::agent_api::router(pool.clone()))
+        // The server-owned sidebar order and its lifecycle writes (T5). Nested with no pool of its
+        // own: its handlers take `State<HttpState>`, the state this router already carries, exactly
+        // as every other surface mounted here does.
+        .nest("/api/lanes/lifecycle", crate::lanes::lifecycle_api::router())
         .fallback(static_or_missing)
         .layer(axum::middleware::from_fn(api::validate_host_and_origin))
         .with_state(HttpState { pool, web_root })
