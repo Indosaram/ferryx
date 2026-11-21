@@ -7,8 +7,10 @@ import type { UpdateStatus } from "../lib/updater";
 const checkForUpdate = vi.fn(async () => {});
 const downloadAndInstallUpdate = vi.fn(async () => {});
 const cancelUpdateDownload = vi.fn(async () => {});
+const applyStagedUpdate = vi.fn(async () => {});
 const relaunchApp = vi.fn(async () => {});
 const getCurrentVersion = vi.fn(async () => "2026.08.25");
+let backgroundDownloadEnabled = false;
 
 let currentStatus: UpdateStatus = { state: "idle" };
 const listeners = new Set<(status: UpdateStatus) => void>();
@@ -30,8 +32,14 @@ vi.mock("../lib/updater", async (importOriginal) => {
     checkForUpdate: () => checkForUpdate(),
     downloadAndInstallUpdate: () => downloadAndInstallUpdate(),
     cancelUpdateDownload: () => cancelUpdateDownload(),
+    applyStagedUpdate: () => applyStagedUpdate(),
     relaunchApp: () => relaunchApp(),
     getCurrentVersion: () => getCurrentVersion(),
+    getBackgroundUpdateDownload: () => backgroundDownloadEnabled,
+    setBackgroundUpdateDownload: (enabled: boolean) => {
+      backgroundDownloadEnabled = enabled;
+    },
+    stageAvailableUpdate: vi.fn(async () => {}),
   };
 });
 
@@ -58,8 +66,10 @@ describe("Settings > General software update control", () => {
     checkForUpdate.mockClear();
     downloadAndInstallUpdate.mockClear();
     cancelUpdateDownload.mockClear();
+    applyStagedUpdate.mockClear();
     relaunchApp.mockClear();
     getCurrentVersion.mockClear();
+    backgroundDownloadEnabled = false;
   });
 
   it("shows running version, renders two update buttons when idle, and checks for updates on demand", async () => {
@@ -239,5 +249,38 @@ describe("Settings > General software update control", () => {
     const status = await screen.findByTestId("settings-update-status");
     expect(status).toHaveTextContent(/network unreachable/i);
     expect(status).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("persists the background download switch without starting a download itself", async () => {
+    await renderGeneralSection();
+    await screen.findByRole("button", { name: /check for updates/i });
+
+    const toggle = screen.getByRole("switch", { name: "Download updates in background" });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+
+    expect(toggle).toBeChecked();
+    expect(downloadAndInstallUpdate).not.toHaveBeenCalled();
+  });
+
+  it("offers Restart to update once the download is staged and installs on click", async () => {
+    await renderGeneralSection();
+    await screen.findByRole("button", { name: /check for updates/i });
+
+    act(() => emit({ state: "staged", version: "2026.08.26.1", downloadProgress: 1 }));
+
+    const card = getSoftwareUpdateCard();
+    expect(within(card).getAllByRole("button")).toHaveLength(2);
+    expect(within(card).queryByRole("button", { name: /install and relaunch/i })).toBeNull();
+    expect(within(card).getByRole("button", { name: /check for updates/i })).toBeDisabled();
+    expect(screen.getByTestId("settings-update-status")).toHaveTextContent(
+      /Version 2026\.08\.26\.1 is downloaded and ready to restart\./,
+    );
+
+    fireEvent.click(within(card).getByRole("button", { name: "Restart to update" }));
+
+    expect(applyStagedUpdate).toHaveBeenCalledTimes(1);
+    expect(downloadAndInstallUpdate).not.toHaveBeenCalled();
+    expect(relaunchApp).not.toHaveBeenCalled();
   });
 });

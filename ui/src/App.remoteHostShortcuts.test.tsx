@@ -95,6 +95,22 @@ vi.mock("./remote/RemoteApp", () => ({
 vi.mock("./lib/updater", () => ({
   startUpdatePolling: () => undefined,
   registerWindowCloseGuard: () => () => undefined,
+  // The settings dialog is lazy-loaded from App, and its General section imports these; a mock
+  // without them fails the dynamic import instead of the assertion under test.
+  applyStagedUpdate: async () => undefined,
+  checkForUpdate: async () => undefined,
+  downloadAndInstallUpdate: async () => undefined,
+  getBackgroundUpdateDownload: () => false,
+  getCurrentVersion: async () => null,
+  getUpdateChannel: () => "stable",
+  getUpdateStatus: () => ({ state: "idle" }),
+  setBackgroundUpdateDownload: () => undefined,
+  setUpdateChannel: async () => undefined,
+  stageAvailableUpdate: async () => undefined,
+  subscribeUpdateStatus: () => () => undefined,
+  updatesManagedExternally: async () => false,
+  cancelUpdateDownload: async () => undefined,
+  relaunchApp: async () => undefined,
 }));
 
 vi.mock("./lib/updateToast", () => ({
