@@ -56,6 +56,10 @@ pub struct TerminalService {
     paired: Arc<super::paired_runtime::Runtime>,
     lifecycle: Arc<Mutex<SessionLifecycleRegistry>>,
     pastes: Arc<PasteRegistry>,
+    /// The keeper path, absent until the daemon installs one. Every keeper branch below is a
+    /// lookup on this, so a build with no keeper keeps exactly the direct-ownership behaviour.
+    #[cfg(unix)]
+    keeper: Arc<parking_lot::RwLock<Option<Arc<crate::daemon::keeper_session::KeeperRuntime>>>>,
 }
 
 /// How long `cancel_paste` waits for the chunk in flight to stop at its next await point.
@@ -219,6 +223,8 @@ impl TerminalService {
             output_hub,
             lifecycle: Arc::new(Mutex::new(SessionLifecycleRegistry::default())),
             pastes: Arc::new(PasteRegistry::default()),
+            #[cfg(unix)]
+            keeper: Arc::new(parking_lot::RwLock::new(None)),
         };
         // The daemon owns the PTYs and their output hub, so the private QA
         // channel is installed here as well; without the runner env this is a
@@ -232,6 +238,183 @@ impl TerminalService {
 
     pub fn paired(&self) -> &Arc<super::paired_runtime::Runtime> {
         &self.paired
+    }
+
+    /// Installs the keeper path. From here on, a new local session goes to the keeper when the
+    /// durable flag routes it there, and every keeper-owned session's I/O is dispatched to it.
+    #[cfg(unix)]
+    pub fn install_keeper(&self, keeper: Arc<crate::daemon::keeper_session::KeeperRuntime>) {
+        self.pty_manager.set_keeper(Arc::clone(&keeper));
+        *self.keeper.write() = Some(keeper);
+    }
+
+    #[cfg(unix)]
+    pub fn keeper(&self) -> Option<Arc<crate::daemon::keeper_session::KeeperRuntime>> {
+        self.keeper.read().clone()
+    }
+
+    /// Serialized terminal state for `session_id`, the bytes a checkpoint commits.
+    ///
+    /// The keeper never parses these: a checkpoint is VT state only this process can derive, so the
+    /// producer reads the hub and serializes. `None` for a session the hub has not seen yet, which
+    /// makes the caller skip the checkpoint rather than commit an empty one.
+    #[cfg(unix)]
+    pub fn checkpoint_bytes(&self, session_id: &str) -> Option<Vec<u8>> {
+        let snapshot = self.output_hub.export_session_state(session_id)?;
+        match serde_json::to_vec(&snapshot) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                tracing::warn!(session_id, %error, "terminal state did not serialize for a checkpoint");
+                None
+            }
+        }
+    }
+
+    /// [`Self::checkpoint_bytes`] paired with the exact output offset the state it returns covers:
+    /// `(serialized state, published_bytes)`, both read under one hub lock.
+    ///
+    /// A keeper commits a checkpoint at this offset and may then truncate its replay buffer up to
+    /// it. The pair must therefore be one observation: the hub applies chunks on another thread, so
+    /// a state read and a separately read offset can disagree, and committing the larger number
+    /// would truncate replay past bytes the state never applied.
+    #[cfg(unix)]
+    pub fn checkpoint_snapshot(&self, session_id: &str) -> Option<(Vec<u8>, u64)> {
+        let (snapshot, applied_offset) = self
+            .output_hub
+            .export_session_state_with_offset(session_id)?;
+        match serde_json::to_vec(&snapshot) {
+            Ok(bytes) => Some((bytes, applied_offset)),
+            Err(error) => {
+                tracing::warn!(session_id, %error, "terminal state did not serialize for a checkpoint");
+                None
+            }
+        }
+    }
+
+    /// Applies a checkpoint's bytes to a recovered session, replacing whatever the hub held.
+    #[cfg(unix)]
+    pub fn restore_checkpoint(&self, session_id: &str, bytes: &[u8]) {
+        let snapshot = match serde_json::from_slice(bytes) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(session_id, %error, "a checkpoint did not deserialize; keeping the hub state");
+                return;
+            }
+        };
+        if let Err(error) = self.output_hub.import_session_state(session_id, snapshot) {
+            tracing::warn!(session_id, %error, "a checkpoint was refused by the hub on restore");
+        }
+    }
+
+    /// Drains a reattached keeper session's bytes into the hub.
+    ///
+    /// A recovered session already has hub state (from its checkpoint or the same daemon's earlier
+    /// registration), so an existing hub must not be registered again: doing so would reset the
+    /// sequence the keeper has been numbering against and misattribute every later byte.
+    ///
+    /// A session the keeper holds with **no** committed checkpoint is the other case, and it is the
+    /// one that used to be lost: nothing in this process had ever seen it, so there was no hub entry
+    /// at all -- `attach_with_sequence_ranges` then answered `SessionNotFound` for a session the
+    /// keeper was serving, and every replayed byte was dropped by `publish_with_replies`, which
+    /// returns `None` for a session with no hub. Registering here is safe precisely because there is
+    /// no earlier sequence to preserve, and the geometry comes from the keeper's own record for the
+    /// child so the mirror starts at the real size instead of a guess.
+    #[cfg(unix)]
+    pub fn pump_keeper_output(
+        &self,
+        session_id: &str,
+        mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+        history_starts_midstream: bool,
+    ) {
+        self.lifecycle.lock().mark_running(session_id.to_string());
+        let mut registered = false;
+        if !self.output_hub.has_session(session_id) {
+            // The size the keeper recorded when it spawned the child, so a reattached session's
+            // mirror starts at the geometry the program is actually drawing for; a record that is
+            // absent or empty falls back to the 80x24 registration default.
+            let (cols, rows) = self.keeper_geometry(session_id).unwrap_or((80, 24));
+            let _raw_rx = self.output_hub.register_session(session_id);
+            drop(_raw_rx);
+            self.output_hub.record_initial_size(session_id, cols, rows);
+            registered = true;
+        }
+        if registered && history_starts_midstream {
+            // Marked on the hub this call just registered and before any subscriber can take it. A
+            // hub that already held bytes keeps its own floor: its history has a beginning, and
+            // telling a reader otherwise would report a hole that is not there.
+            self.output_hub.mark_history_gap(session_id);
+        }
+        let output_hub = Arc::clone(&self.output_hub);
+        let lifecycle = Arc::clone(&self.lifecycle);
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            while let Some(chunk) = rx.recv().await {
+                let read_unix_micros = crate::terminal::metrics::take_pty_read_timestamp(
+                    &session_id,
+                    chunk.len(),
+                );
+                output_hub.publish_with_read_timestamp(&session_id, chunk, read_unix_micros);
+            }
+            end_output(&output_hub, &session_id);
+            let mut registry = lifecycle.lock();
+            if registry.state(&session_id) != Some(SessionProcessState::Hibernated) {
+                registry.remove(&session_id);
+            }
+        });
+    }
+
+    /// Whether `session_id` is served by the keeper rather than by a master this process holds.
+    #[cfg(unix)]
+    fn keeper_owns(&self, session_id: &str) -> bool {
+        self.keeper
+            .read()
+            .as_ref()
+            .is_some_and(|keeper| keeper.owns(session_id))
+    }
+
+    /// Whether a request for `session_id` belongs to this process because the keeper serves it.
+    ///
+    /// Distinct from [`Self::keeper_owns`], which is the I/O dispatch test, because the two answer
+    /// different questions in a review: `keeper_owns` asks "where do these bytes go", this asks "is
+    /// this session one of mine". The routing test cannot use `get_session`, which reads only the
+    /// direct `PtySession` map: a keeper-routed spawn returns before a `PtySession` is inserted
+    /// (`terminal/pty.rs:729-750`), so the lookup is false for a session this daemon is serving.
+    pub(crate) fn keeper_serves(&self, session_id: &str) -> bool {
+        #[cfg(unix)]
+        {
+            self.keeper_owns(session_id)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = session_id;
+            false
+        }
+    }
+
+    /// The geometry the keeper recorded for a session when it spawned the child.
+    ///
+    /// The keeper's live status carries no size, so the durable ownership record is the only source
+    /// a reattached session has. `None` when this daemon holds no keeper, the table is unreadable, or
+    /// the record was written before sizes were recorded -- all cases where the caller's default is
+    /// the honest answer.
+    pub(crate) fn keeper_geometry(&self, session_id: &str) -> Option<(u16, u16)> {
+        #[cfg(unix)]
+        {
+            self.keeper()?
+                .ownership()
+                .store()
+                .load()
+                .ok()?
+                .sessions
+                .get(session_id)
+                .map(|record| (record.cols, record.rows))
+                .filter(|(cols, rows)| *cols > 0 && *rows > 0)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = session_id;
+            None
+        }
     }
 
     pub(crate) fn set_paired_agent_sink(&self, sink: Arc<dyn super::remote::AgentStateSink>) {
@@ -269,6 +452,17 @@ impl TerminalService {
                 .write(id, generation, data)
                 .map_err(|e| PtyError::Other(e.to_string()))?;
             return Ok(Box::pin(async move { pending.await.map_err(PtyError::RemoteInput) }));
+        }
+        // A keeper-owned session has no master here, so the write is the keeper's. It is a socket
+        // round trip rather than a queue push, so it stays in this synchronous position where the
+        // direct arm below also resolves its session: an unknown id still fails at call time with
+        // `SessionNotFound` instead of on await.
+        #[cfg(unix)]
+        if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(id)) {
+            keeper
+                .write_input(id, &data)
+                .map_err(|error| PtyError::Other(error.to_string()))?;
+            return Ok(Box::pin(async { Ok(()) }));
         }
         // Resolve session synchronously so missing IDs fail immediately with SessionNotFound.
         let session = self
@@ -315,6 +509,15 @@ impl TerminalService {
     /// chunk or cancellation, including after eviction, expiry, or daemon handover.
     pub fn begin_paste(&self, id: &str) -> Result<String, PtyError> {
         if self.pty_manager.get_session(id).is_none() {
+            // A keeper-owned session exists but has no local paste stream: `write_local_paste_chunk`
+            // writes through a `PtySession`'s cancellable path, and the keeper socket offers no
+            // equivalent. Saying "not found" for a session the keeper is serving would be false, so
+            // the boundary is named instead.
+            if self.keeper_serves(id) {
+                return Err(PtyError::Other(
+                    "Pastes are not supported for keeper-owned sessions".into(),
+                ));
+            }
             return Err(PtyError::SessionNotFound(id.to_string()));
         }
         self.pastes.begin(id)
@@ -337,7 +540,15 @@ impl TerminalService {
                 let session = self
                     .pty_manager
                     .get_session(id)
-                    .ok_or_else(|| PasteChunkError::Failed(PtyError::SessionNotFound(id.to_string())))?;
+                    .ok_or_else(|| {
+                        if self.keeper_serves(id) {
+                            PasteChunkError::Failed(PtyError::Other(
+                                "Pastes are not supported for keeper-owned sessions".into(),
+                            ))
+                        } else {
+                            PasteChunkError::Failed(PtyError::SessionNotFound(id.to_string()))
+                        }
+                    })?;
                 return self.write_local_paste_chunk(&session, id, paste_id, &data, final_chunk).await;
             }
         }
@@ -650,6 +861,27 @@ impl TerminalService {
         });
     }
 
+    /// Records that output for `session_id` was lost, so a later attach is told the history has a
+    /// hole instead of being served a silent, seamless-looking splice.
+    ///
+    /// The gap is published on the same sequence axis as real output: the seam chunk carries the
+    /// [`crate::terminal::output_hub::ReplayGap`] and the screen mirror shows the seam text, so a
+    /// client that receives it resyncs rather than assuming it missed nothing. Nothing is recorded
+    /// for a session the hub has never seen, and the caller gets `false`.
+    pub fn mark_replay_gap(&self, session_id: &str) -> bool {
+        self.output_hub.publish_gap(session_id).is_some()
+    }
+
+    /// Records that a recovered session's history begins **mid-stream**, so a later attach is told
+    /// its first byte is not the session's first byte.
+    ///
+    /// Unlike [`Self::mark_replay_gap`] this publishes no seam: the missed prefix was never in this
+    /// hub, so there is no splice to show a reader, and inserting seam text would shift every later
+    /// byte off the keeper offset axis a checkpoint is named against.
+    pub fn mark_history_gap(&self, session_id: &str) -> bool {
+        self.output_hub.mark_history_gap(session_id)
+    }
+
     pub fn attach(
         &self,
         session_id: &str,
@@ -742,6 +974,12 @@ impl TerminalService {
                 "Remote input requires write_input_operation and a generation".into(),
             ));
         }
+        #[cfg(unix)]
+        if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(session_id)) {
+            return keeper
+                .write_input(session_id, data)
+                .map_err(|error| PtyError::Other(error.to_string()));
+        }
         self.pty_manager.write_input(session_id, data)
     }
 
@@ -750,6 +988,14 @@ impl TerminalService {
             return Err(PtyError::Other(
                 "Paired resize requires a controller generation".into(),
             ));
+        }
+        #[cfg(unix)]
+        if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(session_id)) {
+            keeper
+                .resize(session_id, cols, rows)
+                .map_err(|error| PtyError::Other(error.to_string()))?;
+            self.output_hub.record_resize(session_id, cols, rows);
+            return Ok(());
         }
         self.pty_manager.resize(session_id, cols, rows)?;
         // Single choke point for ALL resize callers (daemon request arm, remote gateway):
@@ -764,6 +1010,12 @@ impl TerminalService {
             return Err(PtyError::Other(
                 "Paired signal requires a controller generation".into(),
             ));
+        }
+        #[cfg(unix)]
+        if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(session_id)) {
+            return keeper
+                .signal(session_id, signal)
+                .map_err(|error| PtyError::Other(error.to_string()));
         }
         self.pty_manager.signal(session_id, signal)
     }
@@ -801,6 +1053,15 @@ impl TerminalService {
                 .await
                 .map_err(|e| PtyError::Other(e.to_string()));
         }
+        #[cfg(unix)]
+        if let Some(keeper) = self.keeper().filter(|_| self.keeper_owns(session_id)) {
+            keeper
+                .close(session_id)
+                .map_err(|error| PtyError::Other(error.to_string()))?;
+            self.output_hub.remove_session(session_id);
+            self.lifecycle.lock().remove(session_id);
+            return Ok(());
+        }
         let result = self.pty_manager.close_session(session_id).await;
         if result.is_ok() {
             self.output_hub.remove_session(session_id);
@@ -813,6 +1074,15 @@ impl TerminalService {
         if self.remote.contains(session_id) || super::paired_runtime::Runtime::owns(session_id) {
             return Err(PtyError::Other(
                 "Session hibernation is supported only for local PTYs".into(),
+            ));
+        }
+        // Refused before anything is mutated: the code below marks the session hibernated and drops
+        // its hub entry, and the `pty_manager.close_session` that follows can only fail for a
+        // keeper-owned session (no master here) -- which would leave a live keeper session with no
+        // hub and a hibernated lifecycle record, invisible to attach for the rest of its life.
+        if self.keeper_serves(session_id) {
+            return Err(PtyError::Other(
+                "Session hibernation is not supported for keeper-owned sessions".into(),
             ));
         }
         self.pastes.forget_session(session_id);
@@ -837,6 +1107,11 @@ impl TerminalService {
         if self.remote.contains(session_id) || super::paired_runtime::Runtime::owns(session_id) {
             return Err(PtyError::Other(
                 "Session suspend is supported only for local PTYs".into(),
+            ));
+        }
+        if self.keeper_serves(session_id) {
+            return Err(PtyError::Other(
+                "Session suspend is not supported for keeper-owned sessions".into(),
             ));
         }
         let session = self.get_session(session_id)
@@ -886,6 +1161,11 @@ impl TerminalService {
                 "Session resume is supported only for local PTYs".into(),
             ));
         }
+        if self.keeper_serves(session_id) {
+            return Err(PtyError::Other(
+                "Session resume is not supported for keeper-owned sessions".into(),
+            ));
+        }
         let manager = self.pty_manager.clone();
         let id = session_id.to_owned();
         crate::ipc::run_blocking(move || manager.signal(&id, TerminalSignal::Continue)
@@ -912,6 +1192,10 @@ impl TerminalService {
 
     pub fn list_sessions(&self) -> Vec<String> {
         let mut sessions = self.pty_manager.list_sessions();
+        #[cfg(unix)]
+        if let Some(keeper) = self.keeper() {
+            sessions.extend(keeper.owned_sessions());
+        }
         sessions.extend(self.remote.list());
         sessions.extend(self.paired.list());
         sessions
@@ -945,8 +1229,26 @@ impl TerminalService {
                 live.connected,
             ));
         }
+        #[cfg(unix)]
+        if let Some(keeper) = self.keeper() {
+            for status in keeper.statuses() {
+                out.push(local_live_info(
+                    status.session_id,
+                    Some(status.pid),
+                    keeper_start_time_ms(status.process_start_time),
+                    true,
+                ));
+            }
+        }
         out
     }
+}
+
+/// A keeper status reports the child's start time in epoch microseconds; `local_child_start_time` is
+/// epoch milliseconds, so the conversion happens here, at the keeper boundary.
+#[cfg(unix)]
+pub(crate) fn keeper_start_time_ms(start_time_us: Option<u64>) -> Option<u64> {
+    start_time_us.map(|micros| micros / 1000)
 }
 
 pub(crate) fn local_live_info(
@@ -1230,6 +1532,57 @@ mod live_session_tests {
         let connected = remote_live_info("r".into(), RemoteConnectionState::Connected, Some(RemotePid(77)));
         assert!(connected.connected && connected.reader_open);
         assert_eq!(connected.kind, LiveSessionKind::Ssh);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_keeper_status_start_time_reaches_the_wire_in_milliseconds() {
+        // The keeper answers in epoch microseconds; the wire field is epoch milliseconds.
+        let info = local_live_info(
+            "k".into(),
+            Some(10),
+            keeper_start_time_ms(Some(1_700_000_000_000_123)),
+            false,
+        );
+        assert_eq!(info.local_child_start_time, Some(1_700_000_000_000));
+        assert_eq!(keeper_start_time_ms(None), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod keeper_install_tests {
+    use super::*;
+    use crate::daemon::keeper_session::{
+        CheckpointCadence, KeeperOwnership, KeeperRuntime, KeeperSessionHost, OwnershipStore,
+    };
+
+    fn keeper_runtime(dir: &std::path::Path) -> Arc<KeeperRuntime> {
+        let ownership = Arc::new(KeeperOwnership::new(
+            OwnershipStore::at(dir.join("pty-ownership.json")),
+            CheckpointCadence::default(),
+        ));
+        Arc::new(KeeperRuntime::new(KeeperSessionHost::new(dir), ownership))
+    }
+
+    #[test]
+    fn a_service_without_an_installed_keeper_owns_every_session_directly() {
+        let service = TerminalService::default();
+        assert!(service.keeper().is_none());
+        assert!(!service.keeper_owns("any-session"));
+        assert!(service.list_sessions().is_empty());
+        assert!(service.describe_live_sessions().is_empty());
+    }
+
+    #[test]
+    fn an_installed_keeper_claims_only_the_sessions_it_holds() {
+        let dir = tempfile::tempdir().expect("isolated runtime directory");
+        let service = TerminalService::default();
+        service.install_keeper(keeper_runtime(dir.path()));
+
+        assert!(service.keeper().is_some());
+        assert!(!service.keeper_owns("unstarted-session"));
+        assert!(!service.list_sessions().contains(&"unstarted-session".to_string()));
+        assert!(service.describe_live_sessions().is_empty());
     }
 }
 

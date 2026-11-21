@@ -83,6 +83,12 @@ pub(crate) const HANDOVER_BUSY: &str = "HANDOVER_BUSY";
 /// successor (todo 8): the successor is that session's only owner.
 pub(crate) const SESSION_NOT_OWNED: &str = "SESSION_NOT_OWNED";
 
+/// Typed event name of the warning a decision record emits when its successor identity or its
+/// session inventory is unpopulated (plan Phase 4). The absence is deliberate (see
+/// `DecisionAccounting`), so the warning reports a record that a reader could misread as "never
+/// committed", never a failed handover.
+pub(crate) const DECISION_ACCOUNTING_UNPOPULATED: &str = "handover.decision_accounting_unpopulated";
+
 /// True when `message` is the retryable spawn-gate refusal. Only this module produces the
 /// token, so the check cannot misclassify another handover failure.
 pub(crate) fn is_spawn_gate_busy(message: &str) -> bool {
@@ -543,6 +549,22 @@ pub(crate) fn live_session_counts(terminals: &Arc<TerminalService>) -> (u32, u32
             Some(local_live_info(id, session.pid(), None, session.is_reader_finished()))
         })
         .collect();
+    // A keeper-owned session is a live local session: the keeper holds the master, so its reader is
+    // open even though this process holds no PTY for it. Counting only the PTY registry here would
+    // let a draining predecessor believe it is empty while a session it must keep serving lives.
+    #[cfg(unix)]
+    if let Some(keeper) = terminals.keeper() {
+        use crate::terminal::keeper_start_time_ms;
+        sessions.extend(keeper.statuses().into_iter().map(|status| {
+            // The keeper reports epoch microseconds; this field is epoch milliseconds.
+            local_live_info(
+                status.session_id,
+                Some(status.pid),
+                keeper_start_time_ms(status.process_start_time),
+                false,
+            )
+        }));
+    }
     sessions.extend(terminals.remote().list().into_iter().filter_map(|id| {
         let details = terminals.remote().details(&id)?;
         Some(remote_live_info(id, details.state, details.pid))
@@ -1271,7 +1293,9 @@ impl HandoverManager {
     }
 
     fn record_decision(&self, committed: bool) -> Result<(), String> {
-        use super::handover_transaction::{HandoverState, HandoverTransaction};
+        use super::handover_transaction::{
+            HandoverState, HandoverTransaction, SessionInventoryEntry,
+        };
         let Some(legacy) = self.legacy_socket_path.read().clone() else { return Ok(()); };
         if let Some(decision) = Self::recorded_decision(&legacy)? {
             return if decision == if committed { HandoverState::Retired } else { HandoverState::Active } {
@@ -1283,8 +1307,33 @@ impl HandoverManager {
         let identity = legacy.to_string_lossy().into_owned();
         let mut transaction = HandoverTransaction::new_simple(&identity, &identity,
             std::process::id(), 0, 0, 0, &identity);
+        // The sessions this decision is about are known here; the successor's identity is not:
+        // the candidate never tells the predecessor its pid or epoch, and the transfer frames
+        // (not this record) carry what moved. Populate what is real and declare exactly what is
+        // not, so a zero `successorPid` is never read as "never committed" and a populated
+        // inventory is never declared absent.
+        let mut inventory: Vec<String> = self.transferred_locals();
+        inventory.sort();
+        transaction.session_inventory = inventory
+            .into_iter()
+            .map(SessionInventoryEntry::pty)
+            .collect();
+        let accounting = Self::accounting_declaration(&transaction);
+        transaction.decision_accounting = accounting;
         transaction.state = if committed { HandoverState::Retired } else { HandoverState::Active };
         transaction.rollback_reason = (!committed).then(|| "predecessor abort decision".into());
+        if let (Some(field), Some(accounting)) =
+            (Self::unpopulated_accounting(&transaction), accounting)
+        {
+            tracing::warn!(
+                event = DECISION_ACCOUNTING_UNPOPULATED,
+                field,
+                committed,
+                accounting = accounting.as_str(),
+                sessions = transaction.session_inventory.len(),
+                "Handover decision record written with accounting that is unpopulated by construction; a zero successorPid or an empty inventory is not evidence of a missing commit"
+            );
+        }
         // The commit decision freezes the lease client (it renewed until here and sends nothing
         // after) and hands its lease to the successor in the same durable record.
         let lease = if committed { self.supervisor_lease.read().clone() } else { None };
@@ -1305,6 +1354,34 @@ impl HandoverManager {
     /// its hub stands down at the lease deadline rather than risk two holders of one fence.
     fn decision_missing(recorded: &Result<Option<super::handover_transaction::HandoverState>, String>) -> bool {
         matches!(recorded, Ok(None))
+    }
+
+    /// The accounting field a decision record leaves unpopulated by construction, `None` when it
+    /// carries every field. This is what the typed warning names, and what keeps "unpopulated"
+    /// distinguishable from "not committed".
+    pub(crate) fn unpopulated_accounting(
+        transaction: &super::handover_transaction::HandoverTransaction,
+    ) -> Option<&'static str> {
+        if transaction.successor_pid == 0 { Some("successorPid") }
+        else if transaction.successor_epoch == 0 { Some("successorEpoch") }
+        else if transaction.session_inventory.is_empty() { Some("sessionInventory") }
+        else { None }
+    }
+
+    /// The declaration that truthfully describes this record, derived from the record itself: it
+    /// names only the fields that are really absent, and `None` when nothing is. A populated
+    /// inventory is therefore never declared unused, and a fully accounted record declares nothing.
+    pub(crate) fn accounting_declaration(
+        transaction: &super::handover_transaction::HandoverTransaction,
+    ) -> Option<super::handover_transaction::DecisionAccounting> {
+        use super::handover_transaction::DecisionAccounting;
+        let identity_unused = transaction.successor_pid == 0 || transaction.successor_epoch == 0;
+        match (identity_unused, transaction.session_inventory.is_empty()) {
+            (true, false) => Some(DecisionAccounting::SuccessorIdentityUnused),
+            (false, true) => Some(DecisionAccounting::SessionInventoryUnused),
+            (true, true) => Some(DecisionAccounting::SuccessorIdentityAndInventoryUnused),
+            (false, false) => None,
+        }
     }
 
     fn write_decision(

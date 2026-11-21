@@ -875,6 +875,7 @@ impl SessionRouter {
 
     pub fn is_local_session(&self, session_id: &str) -> bool {
         self.terminal_service.get_session(session_id).is_some()
+            || self.terminal_service.keeper_serves(session_id)
             || self.terminal_service.remote().contains(session_id)
             || (crate::terminal::paired_runtime::Runtime::owns(session_id)
                 && self.find_legacy_peer_for_session(session_id).is_none())
@@ -888,6 +889,7 @@ impl SessionRouter {
     /// this daemon owns to a dead peer socket fails every request for it.
     pub fn find_legacy_peer_for_session(&self, session_id: &str) -> Option<Arc<LegacyPeer>> {
         if self.terminal_service.get_session(session_id).is_some()
+            || self.terminal_service.keeper_serves(session_id)
             || self.terminal_service.remote().contains(session_id)
         {
             return None;
@@ -1050,16 +1052,38 @@ impl RemoteSessionBackend for SessionRouter {
                 });
             }
             if self.is_local_session(&session_id) {
-                let session = self
-                    .terminal_service
-                    .get_session(&session_id)
-                    .ok_or_else(|| format!("Session '{session_id}' not found"))?;
-                let (cols, rows) = session.get_size();
-                let running = matches!(
-                    session.state(),
-                    PtySessionState::Running | PtySessionState::Starting
-                );
-                let worktree_path = session.worktree_path();
+                let session = self.terminal_service.get_session(&session_id);
+                // A keeper-owned session has no `PtySession` here, so its size comes from the
+                // keeper's record for the child rather than from a master this process does not
+                // hold. Answering "not found" for one would contradict `is_local_session` above.
+                let (cols, rows, running, worktree_path) = match session.as_ref() {
+                    Some(session) => (
+                        session.get_size().0,
+                        session.get_size().1,
+                        matches!(session.state(), PtySessionState::Running | PtySessionState::Starting),
+                        session.worktree_path(),
+                    ),
+                    // Only the keeper is described this way. Any other id that reached this arm
+                    // without a `PtySession` has nothing this daemon can vouch for, and keeping the
+                    // old answer for it means this change alters nothing but keeper sessions.
+                    None if self.terminal_service.keeper_serves(&session_id) => {
+                        // Disk read (the keeper's durable table), so it goes through a blocking
+                        // worker rather than stalling the runtime on a describe.
+                        let service = Arc::clone(&self.terminal_service);
+                        let lookup = session_id.clone();
+                        let geometry = crate::ipc::run_blocking(move || {
+                            Ok::<_, crate::ipc::IpcError>(service.keeper_geometry(&lookup))
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or((80, 24));
+                        // The keeper tracks neither a cwd nor a hibernated state for this daemon, and
+                        // a session it holds is by construction live.
+                        (geometry.0, geometry.1, true, None)
+                    }
+                    None => return Err(format!("Session '{session_id}' not found")),
+                };
                 let workspace_id = self
                     .workspace_ids
                     .read()

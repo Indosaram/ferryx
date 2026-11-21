@@ -3,6 +3,7 @@
 
 use super::error::IpcError;
 use crate::daemon::client::DaemonClient;
+use crate::daemon::crash_supervisor::RestartLog;
 use crate::daemon::update_pending::RestartOutcome;
 use serde::Serialize;
 use std::sync::Arc;
@@ -26,6 +27,24 @@ pub async fn cmd_daemon_update_pending_status(
         live_sessions: pending.live_sessions,
         retire_requested: pending.retire_requested,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonSupervisionStatus {
+    pub banner: Option<String>,
+}
+
+/// The newest crash-supervisor refusal from `daemon-crash.log`. Not routed through the daemon: the
+/// daemon is down exactly when this is needed.
+#[tauri::command]
+pub async fn cmd_daemon_supervision_status() -> Result<DaemonSupervisionStatus, IpcError> {
+    crate::ipc::run_blocking(|| {
+        Ok(DaemonSupervisionStatus {
+            banner: RestartLog::for_runtime().and_then(|log| log.latest_banner()),
+        })
+    })
+    .await
 }
 
 /// Sends control Shutdown { confirm_live_sessions } exactly once, after the user confirmed n.

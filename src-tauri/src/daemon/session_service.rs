@@ -3617,7 +3617,8 @@ impl DaemonSessionService {
                 || details.failure.as_ref().is_some_and(|failure|
                     failure.kind == crate::terminal::remote::RemoteFailureKind::Transport);
         }
-        self.terminal_service
+        if self
+            .terminal_service
             .get_session(session_id)
             .is_some_and(|session| {
                 matches!(
@@ -3625,6 +3626,14 @@ impl DaemonSessionService {
                     PtySessionState::Starting | PtySessionState::Running
                 )
             })
+        {
+            return true;
+        }
+        // A keeper-routed session has no `PtySession` here, so the lookup above is false for a
+        // session this daemon is serving. Without this arm `prune_dead_spawn_ownership` -- which
+        // runs on every spawn -- reads that false as "dead" and releases the session's metadata,
+        // spawn-cache entry and provider claim while the keeper is still running the child.
+        self.terminal_service.keeper_serves(session_id)
     }
 
     pub(super) fn release_session_ownership(&self, session_id: &str) {
@@ -3842,6 +3851,15 @@ impl DaemonSessionService {
             }
         }
         let Some(pty_session) = self.terminal_service.get_session(session_id) else {
+            // A keeper-routed session has no `PtySession` in this daemon's map, so the fallback is
+            // the only place it can be described. Keeping it below the direct lookup means a session
+            // this daemon really holds is never described from the keeper's coarser record.
+            #[cfg(unix)]
+            if let Some(keeper) = self.terminal_service.keeper() {
+                if let Some(status) = keeper.statuses().into_iter().find(|s| s.session_id == session_id) {
+                    return keeper_describe_ok(self, session_id, &status);
+                }
+            }
             return DaemonResponse::Error {
                 message: format!("Session '{session_id}' not found"),
                 code: Some("SESSION_NOT_FOUND".to_string()),
@@ -3953,6 +3971,84 @@ impl DaemonSessionService {
                 generation: None,
             },
         }
+    }
+}
+
+/// Describes a session this daemon routes to the keeper rather than one whose PTY master it holds.
+///
+/// A keeper-routed spawn returns from `terminal/pty.rs:729-750` before any `PtySession` is created or
+/// inserted (`:870-872`), so `TerminalService::get_session` -- which reads only that map
+/// (`pty.rs:1354`) -- cannot see the session. That made every keeper-owned session invisible to
+/// `handle_describe_session`, and because the daemon's own spawn reply is built from that describe
+/// (`server.rs:7670-7679`), a healthy keeper-routed spawn was answered `Session '<id>' not found`
+/// with no code, which a client cannot tell from a session that never existed.
+///
+/// The identity (pid and epoch) comes from the keeper's own status record for the session, because
+/// the keeper holds the master; geometry and cwd come from the metadata the spawn already recorded
+/// under this id, so both are reported exactly as for a direct session rather than guessed from the
+/// daemon's view.
+#[cfg(unix)]
+fn keeper_describe_ok(
+    service: &DaemonSessionService,
+    session_id: &str,
+    status: &crate::daemon::keeper_session::KeeperSessionStatus,
+) -> DaemonResponse {
+    let meta = service.session_metadata.read().get(session_id).cloned();
+    let (workspace_id, worktree, cwd, cols, rows) = match meta {
+        Some(meta) => {
+            let fingerprint = meta.spawn_fingerprint;
+            let cwd = serveable_local_cwd(&meta.cwd, fingerprint.cwd);
+            (
+                Some(meta.workspace_id),
+                meta.worktree,
+                cwd,
+                fingerprint.cols,
+                fingerprint.rows,
+            )
+        }
+        // A keeper session always has metadata: the spawn that created it wrote one under the same
+        // id. This arm only keeps the function total for a session whose record was pruned.
+        None => (None, None, None, 80, 24),
+    };
+    let (start_sequence, end_sequence) = service
+        .terminal_service
+        .output_hub()
+        .session_sequence_range(session_id)
+        .unwrap_or((None, None));
+    let incarnation = format!("keeper:{}", status.pid);
+    let recovery_authority = Some(super::protocol::RecoveryAuthorityEvidence {
+        status: "running".to_string(),
+        exit_code: None,
+        exit_reason: None,
+        incarnation: Some(incarnation.clone()),
+        daemon_epoch: None,
+        is_paired_proxy: Some(false),
+    });
+    DaemonResponse::DescribeSessionOk {
+        daemon_epoch: None,
+        session: DaemonSessionDetails {
+            session_id: session_id.to_string(),
+            workspace_id,
+            worktree,
+            cwd,
+            cols,
+            rows,
+            running: true,
+            start_sequence,
+            end_sequence,
+            last_output_age_ms: None,
+            suspended: false,
+            // The keeper holds the master, so this daemon cannot observe the reader or the kernel
+            // stop state. Reported as unobserved rather than guessed false.
+            reader_paused: None,
+            kernel_stopped: None,
+            registry_suspended: None,
+            suspension_source: None,
+            incarnation: Some(incarnation),
+            recovery_authority,
+            is_paired_proxy: Some(false),
+            generation: Some(status.epoch.to_string()),
+        },
     }
 }
 

@@ -2071,6 +2071,7 @@ pub fn create_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         ipc::agent_integration::cmd_daemon_supervisor_set,
         ipc::daemon_update::cmd_daemon_update_pending_status,
         ipc::daemon_update::cmd_daemon_restart_previous_terminals,
+        ipc::daemon_update::cmd_daemon_supervision_status,
         ipc::agent_integration::cmd_agent_integration_set,
         ipc::agent_integration::cmd_agent_integration_remove_local,
         ipc::supervisor::cmd_supervisor_snapshot,

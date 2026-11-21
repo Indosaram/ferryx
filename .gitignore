@@ -5,6 +5,14 @@ src-tauri/target/
 Cargo.lock
 !/src-tauri/Cargo.lock
 !/crates/ferryx-rd/Cargo.lock
+!/crates/ferryx-ptykeeper/Cargo.lock
+
+# Keeper release state: the ledger is tracked deliberately, but the in-flight publish intent and
+# the atomic-write temp files are per-machine and must never be committed (see
+# docs/releases/LOCAL_RELEASE_RUNBOOK.md, "Keeper rollback floor").
+packaging/keeper/releases.json.pending
+packaging/keeper/.*.tmp
+packaging/keeper/releases.json.lock/
 
 # Node
 node_modules/

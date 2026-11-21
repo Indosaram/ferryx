@@ -402,6 +402,51 @@ printed in `survival-report.md`, and `publish` appends the report to `RELEASE_NO
 appear in the GitHub release body. Until todo 17 lands `footprint.json`, use
 `--survival-waiver "footprint pending todo 17"`.
 
+### 4c. Crash symbolication gate
+
+The daemon crash report cannot name a crash site unless the shipped binary's dSYM was archived
+under the same build UUID, and nothing proves that until a real crash of the release binary is
+symbolicated. Run the acceptance harness on `macbook` against the built artifacts, after
+`build --host macbook` and before `assemble`:
+
+```bash
+# The shipped bytes, exactly as packed: the harness refuses /Applications/... and must not be
+# pointed at the live install.
+QA_APP="$RUN/.dsym-acceptance/Ferryx.app"
+mkdir -p "$RUN/.dsym-acceptance" && tar -xzf "$RUN/artifacts/darwin/Ferryx.app.tar.gz" -C "$RUN/.dsym-acceptance"
+
+bun scripts/qa/dsym-symbolication-acceptance.mjs \
+  --binary "$QA_APP/Contents/MacOS/ferryx" \
+  --dsym "$RUN/dsyms" \
+  --out "$RUN/symbolication" --json | tee "$RUN/symbolication.json"
+```
+
+It runs the binary's own `daemon crash-report` collector, forces a `SIGSEGV` in a daemon started
+under an isolated runtime (`FERRYX_RUNTIME_DIR`, `FERRYX_DATA_DIR`, `FERRYX_SESSION_DIR` and `HOME`
+all point inside the run's temp root; no OS job is installed), then does two things:
+
+- **positive run** -- symbolizes the forced crash with the archived dSYM via `symbolicatecrash`
+  and requires at least one **named frame belonging to the binary itself**. A named
+  `libsystem_*` frame does not count, and `???` or `ferryx +<offset>` counts as anonymous.
+- **negative run** -- symbolizes the same crash with a deliberately mismatched dSYM and requires
+  the gate to reject it with `DSYM_UUID_MISMATCH` **and** to name no frame. A gate that only
+  reports `DSYM_MISSING`, or one that resolves a name from the wrong dSYM, fails.
+
+Exit codes: `0` accepted, `1` rejected (the dSYM gate refused, or symbolication named no frame), `2`
+usage or unsafe target (the harness refuses `/Applications/...`, so it can never crash the live
+install), `3` host gap (no `symbolicatecrash`, no report from ReportCrash, or the daemon never
+announced `FERRYX_DAEMON_READY`). A `3` on `macbook` means the host cannot prove the release, so
+it blocks publication the same way a `1` does. Result files `report.json`,
+`positive-symbolicated.txt` and `mismatch-symbolicated.txt` land in `--out` and are attached to
+the release evidence.
+
+`release-local publish` enforces this evidence: it reads `$RUN/symbolication/report.json`, requires
+`verdict: "PASS"` with every named check true, a non-zero named-frame count, the negative run
+refused with `DSYM_UUID_MISMATCH` naming nothing, and the report's binary UUIDs to match
+`$RUN/dsyms/manifest.json`. A missing report is a refusal, not a skip, and unlike the survival gate
+there is no waiver. Run `release-local symbolication-gate --run "$RUN"` to check it before you
+attempt publication; the same gate runs inside `publish` before the first network call.
+
 ### 5. Draft review, publication approval, and remote verification
 
 Before any network mutation, create and push the reviewed tag by an explicit operator action and
@@ -629,6 +674,145 @@ spctl --assess --type execute -vv "$HELPER"
 All four must exit 0, and both `spctl` results must report `source=Notarized Developer ID`. A
 missing helper bundle, a helper that fails verification, or a helper Gatekeeper rejects blocks
 the release: the app could not stage a daemon runtime on users' machines.
+
+### PTY keeper payload and the rollback floor
+
+Every macOS release also ships the PTY keeper at
+`Contents/Resources/keeper/ferryx-ptykeeper`, built from `crates/ferryx-ptykeeper` by
+`scripts/lib/keeper-bundle.mjs` and asserted present on the built bundle before anything is
+signed, archived or notarized. A release that cannot show the keeper fails. The generation
+directory name is the **app version**, not the keeper crate version
+(`keeper_generation_version()` in `src-tauri/src/daemon/keeper_launchd.rs`); a constant crate
+version would collide with the previous release's directory and trip the daemon's
+immutable-bytes refusal on every upgrade. `keeper.json` beside the binary records the app
+version, the crate version, protocol major/minor and the sha256 of the shipped bytes.
+
+The keeper's dSYM is archived and UUID-gated with the other shipped binaries, so a SIGSEGV in
+the process that owns every PTY master can be symbolicated.
+
+#### The archive is the authority for the keeper
+
+`scripts/assert-updater-archive-layout.mjs` runs on the packed `Ferryx.app.tar.gz` before
+`latest.json` is published, and refuses the archive unless all of these hold. Each one closes a way
+the keeper can ship present-but-unusable:
+
+- `keeper.json.sha256` equals the sha256 of the archived `ferryx-ptykeeper` member. `target/` and
+  the build tree are not evidence for this: they hold pre-strip, pre-sign bytes.
+- the archived member has an execute bit. An archive that stores it `0644` produces a generation
+  directory that exists and cannot exec.
+- `keeper.json.version` equals the archive's own `Info.plist` `CFBundleShortVersionString`, because
+  the generation directory is `~/.ferryx/keeper/<version>/`.
+- `keeper.json.protocolMajor` is `1` (`KEEPER_PROTOCOL_MAJOR`). Compatibility is additive-only
+  within a major; a payload from another major installs and then fails every frame.
+- per architecture, the keeper's `LC_BUILD_VERSION`/`LC_VERSION_MIN_MACOSX` minimum is no newer than
+  the daemon slice of the same architecture. The comparison is against the daemon binary, **not**
+  against `LSMinimumSystemVersion`: arm64 legitimately declares `11.0` while the app still supports
+  `10.15` through its x86_64 slice, so a flat comparison would refuse every correct universal build.
+- `Contents/Resources/keeper/latest.json` exists and states `keeper.oldestSafeRollbackVersion`, and
+  that floor's version is this archive's generation.
+
+The Mach-O reader is `scripts/lib/keeper-macho.mjs` (pure JS, both header forms), so this needs no
+Xcode and no `otool`. The full check — including the seal comparison that no single artifact can
+answer — is `.omo/evidence/keeper-shipping/GATE-PROCEDURE.md`.
+
+The checker judges the shape of an archive that carries a keeper; it does not by itself demand one.
+The demand comes from `requireKeeper: true` on both macOS build paths, which refuses to seal a bundle
+with no payload, and from `refreshBundleSidecars` refusing a keeper binary that has no `keeper.json`
+beside it. Those two are what make the list above unavoidable rather than merely available.
+
+#### The keeper job must be independent of the app
+
+The plan requires the keeper to be its own launchd service, executable from **outside** the app
+bundle, so replacing the app cannot take the process that owns every PTY master down with it. The
+daemon renders that plist at install time (`keeper_launchd::generate_keeper_launchd_plist`); the
+packaging side judges a real install's capture:
+
+```bash
+plutil -convert xml1 -o - "$HOME/Library/LaunchAgents/com.ferryx.ptykeeper.plist" > /tmp/keeper-job.xml
+```
+
+`scripts/lib/keeper-launchd-job.mjs` reads that capture without `plutil` and refuses a job whose
+label is the daemon's (`com.ferryx.daemon`) or the QA label (`com.ferryx.qa.ptykeeper`), whose
+`ProgramArguments[0]` is a path inside `Ferryx.app` or a previous generation rather than
+`~/.ferryx/keeper/<version>/ferryx-ptykeeper`, that carries any argument at all, that restarts on a
+clean exit (`KeepAlive.SuccessfulExit` must be false, or a second keeper that found the lock held
+would fight the running one), that drops `AbandonProcessGroup` (launchd would signal the PTY
+children), or that shares the daemon's `daemon.stdout.log`/`daemon.stderr.log` names. A capture that
+cannot be read fails closed. `scripts/release-keeper-launchd.test.mjs` also diffs the module's
+renderer against the Rust `format!` literal, so the two cannot drift apart silently.
+
+`keeper.oldestSafeRollbackVersion` in `latest.json` (and `compatibility`/`sessionKeeper` in
+`provenance.json`) comes from the checked-in ledger `packaging/keeper/releases.json`
+(`scripts/lib/release-keeper.mjs`). The floor is the ledger's **oldest** entry, so the ledger must
+record every keeper release. If it does not, the ledger stays empty and each release publishes
+itself as the floor, so the floor advances on every cut and a user can never roll back even one
+version.
+
+### Publish ordering is crash-safe
+
+`publish` records the keeper **before** the release goes public, not after. The two systems cannot
+be updated atomically, so the ordering decides what a crash in between leaves behind:
+
+- Append before undraft (what `publish` now does): a crash leaves a ledger entry for a release that
+  may still be a draft. The floor stays pinned, and the leftover intent file makes the gap visible.
+- Append after undraft (the old behaviour): a crash leaves a **public** release whose append was
+  never written. That tag's floor is then derived by fallback and the floor silently walks forward,
+  unfixable afterwards because its `latest.json` is already covered by its own `SHA256SUMS`.
+
+Two files are involved, both beside the ledger:
+
+- `packaging/keeper/releases.json` — tracked, the source of the floor.
+- `packaging/keeper/releases.json.pending` — untracked, present only while a publish is in flight.
+  It is written before the ledger and deleted only after the undraft is confirmed.
+
+The ledger write is atomic (temp file, `fsync`, rename, directory `fsync`), so a crash mid-write
+leaves either the old bytes or the new bytes — never a truncated file that would parse as an empty
+ledger and re-floor the release.
+
+### If a publish is interrupted
+
+`assemble` refuses with `KEEPER_PUBLISH_UNFINISHED` while an intent file exists, because the next
+floor must not be derived from a release that may never have shipped. Resolve it with:
+
+```bash
+bun scripts/release-local.mjs reconcile
+```
+
+`reconcile` asks GitHub for the tagged release's state and then acts; it never publishes and never
+pushes a tag.
+
+| GitHub state | `reconcile` action |
+|---|---|
+| public | keeps the ledger entry (it shipped), clears the intent |
+| still a draft | withdraws the premature ledger entry, clears the intent — re-run `publish` |
+| tag absent | same as draft |
+| unreachable / ambiguous | throws `KEEPER_RECONCILE_UNKNOWN`, changes nothing |
+
+After a successful reconcile, commit the ledger before the next cut.
+
+### Operator step (required every keeper release)
+
+`publish` writes the working tree only; the coordinator never commits for you. **Commit
+`packaging/keeper/releases.json` after every keeper publish.** `assemble` refuses with
+`KEEPER_LEDGER_UNCOMMITTED` when the ledger records a release that is not committed at `HEAD`,
+because a floor the next clone cannot reproduce will silently walk forward.
+
+```bash
+git add packaging/keeper/releases.json
+git commit -m "chore(release): record keeper generation <version>"
+```
+
+An empty ledger (the first keeper release) is accepted since there is no floor to lose yet, but the
+file must exist on disk. Do not commit a `.pending` file; it is ignored and must stay local.
+
+Rollback enforcement runs on macOS: `ferryx-cli service rollback <version>` calls
+`rollback::run_rollback`, which calls `decide_rollback`, which delegates to
+`keeper_launchd::rollback_gate` on that target. Two refusals come out of it, and both read the
+floor this pipeline publishes: a target below `oldestSafeRollbackVersion` is `BelowFloor`, and a
+target that ships no keeper is refused while any keeper-owned session is live. Every other target
+re-implements the same two rules inline. So a floor written here is enforced — but only on macOS,
+and only against a manifest the executable can find beside itself
+(`Contents/Resources/latest.json` or `Contents/Resources/keeper/latest.json`).
 
 ## Mobile (Android/iOS)
 

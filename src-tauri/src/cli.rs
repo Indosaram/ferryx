@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 pub mod agent_hook;
 pub mod api_catalog;
+pub mod crash_report;
 pub mod file_cp;
 pub mod billing;
 pub mod direct_trust;
@@ -25,6 +26,8 @@ pub enum LaunchMode {
     Daemon,
     /// `--daemon-supervisor`: the Windows watchdog the per-user scheduled task runs.
     DaemonSupervisor,
+    /// `--daemon-crash-supervisor`: the abnormal-exit supervisor the macOS launchd job runs.
+    DaemonCrashSupervisor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2640,7 +2643,7 @@ pub const UP_EXIT_PLAN_LIMIT: i32 = 6;
 const UP_USAGE: &str = "usage: ferryx-cli up [--key-stdin | --key-env] [--email <hint>] [--origin <url>] [--name <name>] [--no-service] [--json]\n  The install key is read from stdin (--key-stdin) or FERRYX_INSTALL_KEY (--key-env, or implicitly when set); it is never accepted as an argument.\n  Without a key, an approval request is created and its URL and code are printed to stderr.";
 
 const SERVICE_USAGE: &str =
-    "usage: ferryx-cli service <install|status|uninstall> [--json]";
+    "usage: ferryx-cli service <install|status|uninstall|rollback <version>> [--json]";
 
 /// The `ferryx-cli --version` output line.
 pub fn cli_version_line() -> String {
@@ -3396,17 +3399,32 @@ pub fn up_cli_main(args: &[String]) -> i32 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceCliAction {
     Install,
     Status,
     Uninstall,
+    Rollback { version: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceCliCommand {
     pub action: ServiceCliAction,
     pub json: bool,
+}
+
+fn rollback_target_version(operand: Option<&str>) -> Result<String, UpCliError> {
+    match operand {
+        Some(version) if !version.is_empty() && !version.starts_with('-') => Ok(version.to_string()),
+        Some(other) => Err(UpCliError::usage(
+            "CLI_USAGE",
+            format!("service rollback needs a target version, not `{other}`\n{SERVICE_USAGE}"),
+        )),
+        None => Err(UpCliError::usage(
+            "CLI_USAGE",
+            format!("service rollback needs a target version\n{SERVICE_USAGE}"),
+        )),
+    }
 }
 
 pub fn parse_service_cli<I, T>(args: I) -> Result<ServiceCliCommand, UpCliError>
@@ -3421,14 +3439,18 @@ where
     if args.get(1).is_none_or(|arg| arg != "service") {
         return Err(UpCliError::usage("CLI_USAGE", SERVICE_USAGE));
     }
-    let action = match args.get(2).map(String::as_str) {
-        Some("install") => ServiceCliAction::Install,
-        Some("status") => ServiceCliAction::Status,
-        Some("uninstall") => ServiceCliAction::Uninstall,
+    let (action, flag_start) = match args.get(2).map(String::as_str) {
+        Some("install") => (ServiceCliAction::Install, 3),
+        Some("status") => (ServiceCliAction::Status, 3),
+        Some("uninstall") => (ServiceCliAction::Uninstall, 3),
+        Some("rollback") => {
+            let version = rollback_target_version(args.get(3).map(String::as_str))?;
+            (ServiceCliAction::Rollback { version }, 4)
+        }
         _ => return Err(UpCliError::usage("CLI_USAGE", SERVICE_USAGE)),
     };
     let mut json = false;
-    for arg in &args[3..] {
+    for arg in args.iter().skip(flag_start) {
         match arg.as_str() {
             "--json" => json = true,
             other => {
@@ -3719,13 +3741,60 @@ pub fn render_service_report(report: &ServiceReport) -> String {
     text
 }
 
+pub const SERVICE_ROLLBACK_REFUSED: &str = "ROLLBACK_REFUSED";
+
+/// `service rollback <version>`: the real production gate.
+///
+/// A refusal is a typed error carrying the daemon's own code (for example
+/// `KEEPER_ROLLBACK_REFUSED` with the live keeper-owned count in the message), and it changed
+/// nothing. A success reports which generation now holds the login launch; it never starts, stops or
+/// restarts a daemon, so a running daemon keeps serving every session it already owns.
+fn rollback_service(version: &str) -> Result<ServiceReport, UpCliError> {
+    let executable = std::env::current_exe()
+        .map_err(|error| UpCliError::other("CLI_RUNTIME_FAILED", format!("cannot resolve the current executable: {error}")))?;
+    match crate::daemon::rollback::run_rollback(version, None, &executable) {
+        Ok((decision, changed)) => Ok(ServiceReport {
+            supervised: true,
+            backend: native_service_backend(),
+            installed: true,
+            linger: None,
+            pid: None,
+            reason: Some(format!(
+                "rolled the daemon back to {} (keeper-capable: {}, keeper sessions: {}); {}; the\x20
+                 next daemon start uses the target build and any running daemon was left serving",
+                decision.target_version,
+                decision.supports_keeper,
+                decision.keeper_owned,
+                if changed {
+                    "the login launch moved to that generation"
+                } else {
+                    "the login launch already named that generation"
+                }
+            )),
+        }),
+        Err(refusal) => Err(UpCliError::other(
+            refusal.code(),
+            format!(
+                "{}
+{SERVICE_ROLLBACK_REFUSED}: nothing was changed and any running daemon keeps its\x20
+                 current build",
+                refusal
+            ),
+        )),
+    }
+}
+
 pub fn run_service_cli(command: &ServiceCliCommand) -> Result<ServiceReport, UpCliError> {
+    if let ServiceCliAction::Rollback { version } = &command.action {
+        return rollback_service(version);
+    }
     let runtime = account_cli_runtime()
         .map_err(|error| UpCliError::other("CLI_RUNTIME_FAILED", error.message))?;
-    match command.action {
+    match &command.action {
         ServiceCliAction::Install => Ok(install_service(&runtime)),
         ServiceCliAction::Status => Ok(service_status(&runtime)),
         ServiceCliAction::Uninstall => uninstall_service(&runtime),
+        ServiceCliAction::Rollback { .. } => unreachable!("rollback returns before the runtime"),
     }
 }
 
@@ -4358,6 +4427,9 @@ where
     T: AsRef<str>,
 {
     for arg in args {
+        if arg.as_ref() == crate::daemon::crash_supervisor::SUPERVISOR_ARG {
+            return LaunchMode::DaemonCrashSupervisor;
+        }
         if arg.as_ref() == crate::daemon::supervisor_windows::SUPERVISOR_ARG {
             return LaunchMode::DaemonSupervisor;
         }
@@ -4409,6 +4481,74 @@ pub fn run_daemon_supervisor(args: &[String]) -> i32 {
     {
         eprintln!("Ferryx daemon supervisor error: the watchdog only runs on Windows");
         2
+    }
+}
+
+/// Runs the `--daemon-crash-supervisor` abnormal-exit supervisor and returns its exit code.
+///
+/// This is what the launchd job runs (see [`crate::daemon::launchd::generate_launchd_plist`]), so
+/// supervision has exactly one owner: replacing the app re-issues the same job and cannot start a
+/// second supervisor.
+///
+/// It always exits 0, including past the restart limit, without a live keeper, and when the daemon
+/// cannot be started. The job's `KeepAlive { SuccessfulExit = false }` relaunches a non-zero exit,
+/// so a non-zero code here would turn every one of those decisions into the crash loop the limit
+/// exists to prevent. A malformed command line is the one exception (2): it is a build defect, not
+/// a supervision decision.
+pub fn run_daemon_crash_supervisor(args: &[String]) -> i32 {
+    use crate::daemon::crash_supervisor;
+
+    if args
+        .iter()
+        .skip(1)
+        .any(|arg| arg != crash_supervisor::SUPERVISOR_ARG)
+    {
+        eprintln!(
+            "Ferryx daemon supervisor error: {} takes no arguments",
+            crash_supervisor::SUPERVISOR_ARG
+        );
+        return 2;
+    }
+    #[cfg(unix)]
+    {
+        let Some(log) = crash_supervisor::RestartLog::for_runtime() else {
+            eprintln!("Ferryx daemon supervisor error: no private daemon log directory");
+            return 0;
+        };
+        let mut host = match crash_supervisor::ProcessHost::for_runtime() {
+            Ok(host) => host,
+            Err(error) => {
+                let _ = log.record_banner(&format!("The daemon was not started: {error}"));
+                eprintln!("Ferryx daemon supervisor error: {error}");
+                return 0;
+            }
+        };
+        let keeper = crash_supervisor::KeeperSocketProbe::for_runtime();
+        let stop = crash_supervisor::run_supervision(
+            &mut host,
+            &crash_supervisor::Supervision {
+                log: &log,
+                policy: crash_supervisor::RestartPolicy::for_runtime(),
+                keeper: &keeper,
+            },
+        );
+        eprintln!("Ferryx daemon supervisor stopped: {stop:?}");
+        if let crash_supervisor::StopReason::SpawnFailed(detail)
+        | crash_supervisor::StopReason::WaitFailed(detail) = &stop
+        {
+            let _ = log.record_banner(&format!("The daemon was not started: {detail}"));
+        }
+        0
+    }
+    #[cfg(not(unix))]
+    {
+        // Supervision is a macOS responsibility until the keeper ships on other targets; the
+        // Windows watchdog (`--daemon-supervisor`) stays the only supervisor there.
+        eprintln!(
+            "Ferryx daemon supervisor error: {} is macOS-only",
+            crash_supervisor::SUPERVISOR_ARG
+        );
+        0
     }
 }
 
@@ -5209,13 +5349,47 @@ mod tests {
             parse_service_cli(["ferryx-cli", "service", "uninstall"]).expect("uninstall").action,
             ServiceCliAction::Uninstall
         );
+        assert_eq!(
+            parse_service_cli(["ferryx-cli", "service", "rollback", "2026.1116.1", "--json"])
+                .expect("rollback"),
+            ServiceCliCommand {
+                action: ServiceCliAction::Rollback {
+                    version: "2026.1116.1".to_string()
+                },
+                json: true
+            }
+        );
+        assert!(
+            !parse_service_cli(["ferryx-cli", "service", "rollback", "2026.1116.1"])
+                .expect("rollback")
+                .json
+        );
         for args in [
             vec!["ferryx-cli", "service"],
             vec!["ferryx-cli", "service", "restart"],
             vec!["ferryx-cli", "service", "status", "--force"],
+            vec!["ferryx-cli", "service", "rollback"],
+            vec!["ferryx-cli", "service", "rollback", "--json"],
+            vec!["ferryx-cli", "service", "rollback", "2026.1116.1", "--force"],
         ] {
             assert_eq!(parse_service_cli(&args).unwrap_err().exit_code, UP_EXIT_USAGE, "{args:?}");
         }
+    }
+
+    #[test]
+    fn service_rollback_refuses_instead_of_claiming_a_rollback() {
+        let command = parse_service_cli(["ferryx-cli", "service", "rollback", "2026.1116.1"])
+            .expect("rollback parses");
+        let error = run_service_cli(&command).expect_err("rollback must not report success");
+        // A debug build is a dev runtime, so `run_rollback` refuses at its runtime guard before it
+        // ever reads the target version; that guard is the contract this test can pin.
+        assert_eq!(error.code, crate::daemon::rollback::ROLLBACK_UNSUPPORTED_RUNTIME);
+        assert_eq!(error.exit_code, UP_EXIT_OTHER);
+        assert!(
+            error.message.contains("nothing was changed"),
+            "a refusal must state that nothing was changed: {}",
+            error.message
+        );
     }
 
     #[test]
@@ -5543,6 +5717,23 @@ mod tests {
         assert_eq!(parse_launch_mode(&args), LaunchMode::DaemonSupervisor);
         let malformed = vec!["ferryx".to_string(), "--daemon-supervisor".to_string(), "--bogus".to_string()];
         assert_eq!(run_daemon_supervisor(&malformed), 2);
+    }
+
+    /// The launchd job names `--daemon-crash-supervisor`, so that argument must select the
+    /// supervisor and never the daemon launch mode.
+    #[test]
+    fn test_parse_launch_mode_detects_the_crash_supervisor_flag() {
+        let args = vec![
+            "ferryx".to_string(),
+            crate::daemon::crash_supervisor::SUPERVISOR_ARG.to_string(),
+        ];
+        assert_eq!(parse_launch_mode(&args), LaunchMode::DaemonCrashSupervisor);
+        let malformed = vec![
+            "ferryx".to_string(),
+            crate::daemon::crash_supervisor::SUPERVISOR_ARG.to_string(),
+            "--bogus".to_string(),
+        ];
+        assert_eq!(run_daemon_crash_supervisor(&malformed), 2);
     }
 
     #[test]

@@ -117,6 +117,12 @@ pub fn agent_management_supported_for(dev_runtime: bool, isolated_runtime: bool)
 
 /// Renders the LaunchAgent that owns one daemon generation's lifetime.
 ///
+/// `ProgramArguments` name the crash supervisor ([`crate::daemon::crash_supervisor`]), never
+/// `--daemon` directly: supervision belongs to the job, so replacing or relaunching the app can
+/// only re-issue a start of the same job and never create a second supervisor. The argument comes
+/// from [`crate::daemon::crash_supervisor::SUPERVISOR_ARG`] rather than a literal, so the plist and
+/// the mode `cli` parses cannot drift apart.
+///
 /// `RunAtLoad` (true only for the newest generation) starts it at login;
 /// `KeepAlive { SuccessfulExit = false }` restarts only abnormal deaths, leaving the daemon's
 /// deliberate `exit(0)` paths (handover commit, idle binary swap, duplicate endpoint) alone.
@@ -135,6 +141,7 @@ pub fn generate_launchd_plist(
     let stdout_path = log_dir.join("daemon.stdout.log");
     let stderr_path = log_dir.join("daemon.stderr.log");
     let run_at_load = if run_at_load { "<true/>" } else { "<false/>" };
+    let supervisor_arg = crate::daemon::crash_supervisor::SUPERVISOR_ARG;
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -145,7 +152,7 @@ pub fn generate_launchd_plist(
     <key>ProgramArguments</key>
     <array>
         <string>{executable_path}</string>
-        <string>--daemon</string>
+        <string>{supervisor_arg}</string>
     </array>
     <key>RunAtLoad</key>
     {run_at_load}
@@ -173,6 +180,109 @@ pub fn generate_launchd_plist(
         stdout_path.display(),
         stderr_path.display()
     )
+}
+
+/// The `Label` of a rendered job plist, or `None` when it has none.
+pub fn plist_label(content: &str) -> Option<String> {
+    let after = &content[content.find("<key>Label</key>")?..];
+    let start = after.find("<string>")? + "<string>".len();
+    let len = after[start..].find("</string>")?;
+    Some(after[start..start + len].to_string())
+}
+
+/// Every `ProgramArguments` entry of a rendered job plist, in order, or `None` when the plist has
+/// no such array.
+///
+/// Public and pure so a test - including one in `tests/` - can read the chain a job really carries
+/// instead of asserting on a substring of the whole document. The chain is what makes the job the
+/// owner of supervision: its first entry is the executable launchd runs, and the second must be
+/// [`crate::daemon::crash_supervisor::SUPERVISOR_ARG`], never `--daemon`.
+pub fn plist_program_arguments(content: &str) -> Option<Vec<String>> {
+    let after_key = &content[content.find("<key>ProgramArguments</key>")?..];
+    let array_start = after_key.find("<array>")? + "<array>".len();
+    let array_end = after_key[array_start..].find("</array>")? + array_start;
+    let mut arguments = Vec::new();
+    let mut rest = &after_key[array_start..array_end];
+    while let Some(open) = rest.find("<string>") {
+        let start = open + "<string>".len();
+        let len = rest[start..].find("</string>")?;
+        arguments.push(rest[start..start + len].to_string());
+        rest = &rest[start + len + "</string>".len()..];
+    }
+    Some(arguments)
+}
+
+/// The chain one job plist would run, starting at its executable: the arguments after the program.
+///
+/// A rollback rewrites the plist through the same [`generate_launchd_plist`], so a rolled-back
+/// generation inherits the supervisor chain automatically; this function is what lets a test pin
+/// that instead of trusting the call graph.
+pub fn supervisor_chain_from_plist(content: &str) -> Option<Vec<String>> {
+    let arguments = plist_program_arguments(content)?;
+    Some(arguments.into_iter().skip(1).collect())
+}
+
+/// Every argument launchd reports for a running job, from `launchctl print` output: the program
+/// first, then its arguments, or `None` when the output carries no `arguments = {` block.
+pub fn launchctl_print_arguments(print: &str) -> Option<Vec<String>> {
+    let after = &print[print.find("arguments = {")? + "arguments = {".len()..];
+    let end = after.find('}')?;
+    let mut arguments = Vec::new();
+    for line in after[..end].lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // `launchctl print` writes one argument per line without quotes; some versions quote an
+        // argument that contains a space. Both shapes are accepted, and only a quoted argument
+        // needs unescaping.
+        let argument = match line.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+            Some(quoted) => quoted.replace("\\\"", "\""),
+            None => line.to_string(),
+        };
+        arguments.push(argument);
+    }
+    Some(arguments)
+}
+
+/// The chain launchd is really running for a job: every argument after the program, so the shape
+/// matches [`supervisor_chain_from_plist`] and the two are directly comparable.
+///
+/// This is the only reading that proves what launchd registered, as opposed to what a plist on disk
+/// asks for: a job bootstrapped from an older plist keeps that plist's arguments in memory until it
+/// is booted out, so a passing plist check alone says nothing about the running chain.
+pub fn supervisor_chain_from_print(print: &str) -> Option<Vec<String>> {
+    let arguments = launchctl_print_arguments(print)?;
+    Some(arguments.into_iter().skip(1).collect())
+}
+
+/// The program launchd is really running for a job, from `launchctl print` output.
+pub fn launchctl_print_program(print: &str) -> Option<String> {
+    launchctl_print_arguments(print)?.into_iter().next()
+}
+
+/// The pid launchd reports for a running job, from `launchctl print` output.
+pub fn launchctl_job_pid(print: &str) -> Option<u32> {
+    print
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("pid = "))
+        .and_then(|pid| pid.trim().parse().ok())
+}
+
+/// The isolation variables a job must carry so the process it starts serves the *runtime the plist
+/// was written for* rather than the user's. Same keys, same order as
+/// [`generation::QA_JOB_ENV`], which both job generators already use.
+pub const JOB_ENV_KEYS: [&str; 4] = generation::QA_JOB_ENV;
+
+/// Inserts an `EnvironmentVariables` dict into a rendered plist; an empty list returns the plist
+/// unchanged, so a production job still carries no `EnvironmentVariables` key at all.
+///
+/// Public because a plist that names an isolated runtime must also *forward* it: a launchd job
+/// inherits no shell environment, so a job without these entries would start a daemon on the user's
+/// real runtime whatever the harness set in its own process.
+pub fn with_job_environment(plist: String, environment: &[(String, String)]) -> String {
+    generation::with_environment(plist, environment)
 }
 
 /// Writes the legacy single-job plist only when its content differs, and reports whether it was
@@ -749,7 +859,11 @@ mod tests {
         let plist = generate_launchd_plist(PLIST_LABEL, "/opt/ferryx/bin/ferryx", log_dir, true);
         assert!(plist.contains(&format!("<string>{PLIST_LABEL}</string>")));
         assert!(plist.contains("<string>/opt/ferryx/bin/ferryx</string>"));
-        assert!(plist.contains("<string>--daemon</string>"));
+        assert!(plist.contains("<string>--daemon-crash-supervisor</string>"));
+        assert!(
+            !plist.contains("<string>--daemon</string>"),
+            "the job must own the supervisor, not the daemon: {plist}"
+        );
         assert!(plist.contains("<key>KeepAlive</key>"));
     }
 
@@ -1406,6 +1520,132 @@ mod tests {
         assert!(
             err.contains("launchctl unload failed"),
             "Error message should indicate launchctl unload failed: {err}"
+        );
+    }
+
+    /// The job's chain is the supervisor, never a bare daemon: this is the ownership claim the plan
+    /// makes, and it is read from the rendered document rather than assumed from the call site.
+    #[test]
+    fn the_generated_job_runs_the_supervisor_and_never_a_bare_daemon() {
+        let log_dir = Path::new("/Users/someone/Library/Logs/Ferryx");
+        let plist = generate_launchd_plist(PLIST_LABEL, "/opt/ferryx/bin/ferryx", log_dir, true);
+
+        assert_eq!(
+            plist_program_arguments(&plist),
+            Some(vec![
+                "/opt/ferryx/bin/ferryx".to_string(),
+                crate::daemon::crash_supervisor::SUPERVISOR_ARG.to_string()
+            ]),
+            "the job runs the executable with exactly the supervisor argument:\n{plist}"
+        );
+        assert_eq!(
+            supervisor_chain_from_plist(&plist),
+            Some(vec![crate::daemon::crash_supervisor::SUPERVISOR_ARG.to_string()]),
+            "the chain is the supervisor and nothing else:\n{plist}"
+        );
+        assert_eq!(
+            plist_program_arguments(&plist).unwrap().len(),
+            2,
+            "a third argument would let the job decide something the supervisor owns"
+        );
+    }
+
+    /// `launchctl print` is the only reading that proves what launchd registered: a job bootstrapped
+    /// from an older plist keeps that plist's arguments in memory, so the plist on disk can be right
+    /// while the running chain is wrong.
+    #[test]
+    fn the_running_chain_and_pid_are_read_back_from_launchctl_print() {
+        // The real shape: one unquoted argument per line.
+        let print = "gui/501/com.ferryx.qa.daemon.2026.1013.2-0a1b2c3d = {\n\tactive count = 1\n\tpath = /Users/someone/Library/LaunchAgents/com.ferryx.qa.daemon.plist\n\targuments = {\n\t\t/opt/ferryx/bin/ferryx\n\t\t--daemon-crash-supervisor\n\t}\n\tpid = 43392\n}\n";
+        assert_eq!(
+            supervisor_chain_from_print(print),
+            Some(vec!["--daemon-crash-supervisor".to_string()]),
+            "the running chain must be read from launchd, not from the plist"
+        );
+        assert_eq!(launchctl_job_pid(print), Some(43392));
+        assert_eq!(
+            launchctl_print_program(print).as_deref(),
+            Some("/opt/ferryx/bin/ferryx"),
+            "the program launchd reports must be read from launchd, not assumed"
+        );
+        assert_eq!(
+            plist_label(&generate_launchd_plist(
+                PLIST_LABEL,
+                "/opt/ferryx/bin/ferryx",
+                Path::new("/Users/someone/Library/Logs/Ferryx"),
+                true
+            )),
+            Some(PLIST_LABEL.to_string())
+        );
+        assert_eq!(plist_label("no label here"), None);
+
+        // A quoted argument is still one argument, not two.
+        let quoted = "arguments = {\n\t\"/opt/ferry x/bin/ferryx\"\n\t\"--daemon-crash-supervisor\"\n}\n";
+        assert_eq!(
+            supervisor_chain_from_print(quoted),
+            Some(vec!["--daemon-crash-supervisor".to_string()])
+        );
+        assert_eq!(
+            plist_program_arguments(&generate_launchd_plist(
+                PLIST_LABEL,
+                "/opt/ferryx/bin/ferryx",
+                Path::new("/Users/someone/Library/Logs/Ferryx"),
+                true
+            ))
+            .map(|arguments| arguments.len()),
+            Some(2)
+        );
+    }
+
+    /// A chain that is *only* a bare daemon must be visible as such, so the harness can fail on it
+    /// instead of asserting a substring that both shapes happen to contain.
+    #[test]
+    fn a_bare_daemon_chain_is_distinguishable_from_a_supervised_one() {
+        let print = "gui/501/label = {\n\targuments = {\n\t\t/opt/ferryx/bin/ferryx\n\t\t--daemon\n\t}\n}\n";
+        let chain = supervisor_chain_from_print(print).expect("a chain");
+        assert_eq!(chain, vec!["--daemon".to_string()]);
+        assert!(
+            !chain.iter().any(|argument| argument
+                == crate::daemon::crash_supervisor::SUPERVISOR_ARG),
+            "a daemon-only chain must not pass a supervisor-chain assertion"
+        );
+        assert_eq!(launchctl_job_pid(print), None, "an idle job reports no pid");
+        assert_eq!(supervisor_chain_from_print("no arguments here"), None);
+        assert_eq!(plist_program_arguments("no plist here"), None);
+    }
+
+    /// A job written for an isolated runtime must forward that runtime: launchd hands a job no shell
+    /// environment, so without these entries the daemon serves the user's real runtime.
+    #[test]
+    fn a_job_environment_is_inserted_before_run_at_load_and_never_for_an_empty_list() {
+        let log_dir = Path::new("/Users/someone/Library/Logs/Ferryx");
+        let plist = generate_launchd_plist(PLIST_LABEL, "/opt/ferryx/bin/ferryx", log_dir, true);
+        assert!(
+            !plist.contains("EnvironmentVariables"),
+            "a production job carries no environment at all"
+        );
+        assert_eq!(
+            with_job_environment(plist.clone(), &[]),
+            plist,
+            "an empty list must leave the plist byte-identical"
+        );
+
+        let isolation = vec![(
+            "FERRYX_RUNTIME_DIR".to_string(),
+            "/tmp/fx-a/runtime".to_string(),
+        )];
+        let with_env = with_job_environment(plist, &isolation);
+        let env_at = with_env.find("<key>EnvironmentVariables</key>").expect("an env dict");
+        let run_at = with_env.find("<key>RunAtLoad</key>").expect("RunAtLoad");
+        assert!(env_at < run_at, "the dict must land before RunAtLoad");
+        assert!(
+            with_env.contains("<string>/tmp/fx-a/runtime</string>"),
+            "the forwarded value must be the runtime the job was written for:\n{with_env}"
+        );
+        assert_eq!(
+            supervisor_chain_from_plist(&with_env),
+            Some(vec![crate::daemon::crash_supervisor::SUPERVISOR_ARG.to_string()]),
+            "forwarding an environment must not change the chain:\n{with_env}"
         );
     }
 }

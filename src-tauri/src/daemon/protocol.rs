@@ -11,10 +11,25 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-#[cfg(not(feature = "qa-protocol-bump"))]
+#[cfg(not(any(feature = "qa-protocol-bump", feature = "qa-protocol-next")))]
 pub const DAEMON_PROTOCOL_VERSION: u32 = 6;
 /// QA build only (feature qa-protocol-bump): a future protocol, to test the mismatch path.
-#[cfg(feature = "qa-protocol-bump")]
+#[cfg(all(feature = "qa-protocol-bump", not(feature = "qa-protocol-next")))]
+pub const DAEMON_PROTOCOL_VERSION: u32 = 7;
+/// QA build only (feature qa-protocol-next): the *next* protocol revision, from this same source,
+/// with nothing else enabled.
+///
+/// The Phase 3 `mixed-generation-replacement-and-crash` case needs two real daemon builds that
+/// answer a handshake with different revisions, and `qa-protocol-bump` cannot supply the second one:
+/// it implies `local-split-qa`, which also changes QA-barrier behaviour, the launchd job environment,
+/// the gateway port and the owner probe. This feature moves the single constant that case measures,
+/// so a `qa-protocol-next` build differs from a default build in the protocol revision and nothing
+/// else. Neither default nor release builds enable it, and it implies no other feature.
+///
+/// The arms keep bare integer literals and the default arm stays first: `scripts/qa/lib/phase3-source-facts.mjs`
+/// and `scripts/qa/win-daemon-e2e.mjs` read this constant with a digits-only regex and take the first
+/// match as the revision a normal build speaks.
+#[cfg(feature = "qa-protocol-next")]
 pub const DAEMON_PROTOCOL_VERSION: u32 = 7;
 pub const LOCAL_SPLIT_LIFECYCLE_CAPABILITY: &str = "localSplitLifecycleV1";
 /// Advertised in `GetCapabilities` by a daemon that serves `PasteWrite`/`CancelPaste`.

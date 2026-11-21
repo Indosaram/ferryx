@@ -517,6 +517,42 @@ pub struct HandoverTransaction {
     /// handed over", and an absent lease is not written, so older readers see the same record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervisor_lease: Option<SupervisorLeaseTransfer>,
+    /// Declares that this record's successor identity and session inventory are unpopulated
+    /// **by construction**, so no reader may infer "never committed" from `successorPid == 0`
+    /// or an empty `sessionInventory` (plan Phase 4). Optional with a serde default: a record
+    /// without it (an older peer) reads as undeclared, and an absent declaration is not
+    /// written, so older readers see the same record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_accounting: Option<DecisionAccounting>,
+}
+
+/// Which fields of a decision record are unpopulated by construction. The predecessor never learns
+/// the candidate's pid or epoch, so the successor identity is always absent there; the inventory
+/// names the sessions the decision is about and is populated when an exported set exists. Each
+/// variant names exactly what is missing, so `successorPid == 0` stays distinguishable from an
+/// empty inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionAccounting {
+    /// Successor pid and epoch are absent; the inventory is populated.
+    SuccessorIdentityUnused,
+    /// The inventory is absent; the successor identity is present.
+    SessionInventoryUnused,
+    /// Both are absent: a decision written with no exported session to name.
+    SuccessorIdentityAndInventoryUnused,
+}
+
+impl DecisionAccounting {
+    /// The name this declaration reports under in logs and handover diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SuccessorIdentityUnused => "successor_identity_unused",
+            Self::SessionInventoryUnused => "session_inventory_unused",
+            Self::SuccessorIdentityAndInventoryUnused => {
+                "successor_identity_and_inventory_unused"
+            }
+        }
+    }
 }
 
 /// The predecessor's held supervisor lease at handover commit: the machine identity and fence
@@ -567,6 +603,7 @@ impl HandoverTransaction {
             rollback_reason: None,
             result: None,
             supervisor_lease: None,
+            decision_accounting: None,
         }
     }
 
@@ -669,6 +706,12 @@ impl HandoverTransaction {
 
     pub fn rollback_reason(&self) -> Option<&str> {
         self.rollback_reason.as_deref()
+    }
+
+    /// The record's own declaration that its successor identity and inventory are unpopulated
+    /// by construction; `None` for a record that makes no such declaration.
+    pub fn decision_accounting(&self) -> Option<DecisionAccounting> {
+        self.decision_accounting
     }
 
     /// Computes or retrieves the cached transaction execution result.

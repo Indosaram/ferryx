@@ -18,6 +18,12 @@ use uuid::Uuid;
 
 pub(crate) const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const READER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// The bounded wait a handover export applies for the reader to reach its park. Only a reader that
+/// has been woken and scheduled can satisfy it, so the bound is generous enough for a loaded host;
+/// the park itself is immediate once the reader runs, because `pause_reader` wakes its `poll` rather
+/// than waiting for the child to print something. Missing it means a read is still in flight and the
+/// export refuses rather than let that read consume output the successor owns.
+const EXPORT_READER_PARK_TIMEOUT: Duration = Duration::from_secs(2);
 /// How many bounded reader waits one close can apply: stage 1, which lets the stream end the reader,
 /// the stage-2 cancellation fallback, and the bounded join that follows them.
 const READER_WAIT_STAGES: u32 = 3;
@@ -74,6 +80,26 @@ fn close_fence_for(grace: Duration) -> Duration {
         + REAP_POLL_INTERVAL * 2
         + READER_WAIT_POLL_INTERVAL * 2
         + CLOSE_FENCE_SCHEDULING_SLACK
+}
+
+/// Runs one durable admission write without stalling an async worker.
+///
+/// A reserve, a bind and an abandon each append a frame and `fsync` it, and this spawn path is
+/// reached from an async handler, so running one directly would block a Tokio worker for the
+/// length of a disk sync. On the multi-thread runtime the executor is told to hand that worker off
+/// first; on a current-thread runtime there is no other worker to hand off to, so the write runs
+/// inline rather than panicking. The production spawn path already runs inside `run_blocking`, so
+/// there it is a plain call either way.
+///
+/// This bounds the executor stall to one append, not the whole spawn: making the spawn fully async
+/// is the caller's shape (`session_service`), not this one.
+fn run_admission_io<T>(operation: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+        handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+    }) {
+        return tokio::task::block_in_place(operation);
+    }
+    operation()
 }
 
 /// Decides a UTF-8 `LANG` override for PTY children whose inherited environment selects
@@ -322,6 +348,10 @@ pub struct PtyManager {
     cwd_probe_permits: Arc<parking_lot::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>>,
     pty_system: Arc<Mutex<Box<dyn PtySystem + Send>>>,
     output_hub: Arc<RwLock<Option<Arc<TerminalOutputHub>>>>,
+    /// The keeper runtime, installed by the daemon at startup. Absent means every pane is
+    /// direct-owned, which is the behaviour of a build with no keeper at all.
+    #[cfg(unix)]
+    keeper: Arc<RwLock<Option<Arc<crate::daemon::keeper_session::KeeperRuntime>>>>,
     /// Whether new panes get the agent-state endpoint in their environment.
     agent_integration: Arc<crate::daemon::agent_extension::AgentIntegration>,
     #[cfg(unix)]
@@ -343,6 +373,8 @@ impl PtyManager {
             cwd_probe_permits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             pty_system: Arc::new(Mutex::new(native_pty_system())),
             output_hub: Arc::new(RwLock::new(None)),
+            #[cfg(unix)]
+            keeper: Arc::new(RwLock::new(None)),
             agent_integration: Arc::new(crate::daemon::agent_extension::AgentIntegration::in_memory(
                 true,
             )),
@@ -378,6 +410,16 @@ impl PtyManager {
 
     pub fn output_hub(&self) -> Option<Arc<TerminalOutputHub>> {
         self.output_hub.read().clone()
+    }
+
+    #[cfg(unix)]
+    pub fn set_keeper(&self, keeper: Arc<crate::daemon::keeper_session::KeeperRuntime>) {
+        *self.keeper.write() = Some(keeper);
+    }
+
+    #[cfg(unix)]
+    pub fn keeper(&self) -> Option<Arc<crate::daemon::keeper_session::KeeperRuntime>> {
+        self.keeper.read().clone()
     }
 
     pub fn spawn(
@@ -506,7 +548,7 @@ impl PtyManager {
     fn spawn_with_path_policy(
         &self,
         session_id: String,
-        mut cmd: CommandBuilder,
+        cmd: CommandBuilder,
         cols: u16,
         rows: u16,
         worktree_path: Option<std::path::PathBuf>,
@@ -517,6 +559,90 @@ impl PtyManager {
                 "PTY session '{session_id}' already exists"
             )));
         }
+        // Admission is decided before a master is opened or a child is spawned: a session the
+        // scrollback budget cannot cover is refused outright, never admitted with a silent
+        // zero-history allotment. The error is typed (`SESSION_CAPACITY_EXHAUSTED`) and names
+        // the limit, so callers branch on the variant instead of matching its message.
+        //
+        // The logical spawn request id is minted here, once per spawn, and made durable inside the
+        // reservation: a retry that names the same session reuses the id the log already holds (a
+        // fresh id on every attempt is exactly what stops the keeper's request-id tombstone from
+        // retiring a duplicate `SPAWN`), and the keeper dispatch below presents that same id.
+        let hub = self.output_hub.read().clone();
+        let request_id = hub
+            .as_ref()
+            .and_then(|hub| hub.admission_request_id(&session_id))
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        if let Some(hub) = hub.as_ref() {
+            // The reserve appends and syncs a frame, so it never runs on an async worker.
+            run_admission_io(|| hub.admit_durably_with_request(&session_id, Some(&request_id)))
+                .map_err(PtyError::from_admission_refusal)?;
+        }
+        let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = self.spawn_with_path_policy_inner(
+            session_id.clone(),
+            cmd,
+            cols,
+            rows,
+            worktree_path,
+            path_policy,
+            std::sync::Arc::clone(&dispatched),
+            request_id,
+        );
+        let Some(hub) = hub else {
+            return result;
+        };
+        match (&result, dispatched.load(std::sync::atomic::Ordering::Acquire)) {
+            (Ok(_), _) => {
+                if let Some(ledger) = hub.admission() {
+                    // Acknowledged: no unanswered request remains for this key.
+                    if let Err(error) = run_admission_io(|| ledger.bind(&session_id)) {
+                        tracing::warn!(%session_id, %error, "admission slot could not be bound");
+                    }
+                }
+            }
+            (Err(_), false) => {
+                // Nothing dispatched: no delayed duplicate can fork, so the slot is provably dead.
+                if let Some(ledger) = hub.admission() {
+                    let _ = run_admission_io(|| {
+                        ledger.abandon_before_dispatch(&session_id, "spawn failed before dispatch")
+                    });
+                }
+                // Releasing the budget can also release the durable slot, so it is I/O too.
+                run_admission_io(|| hub.release_budget_session(&session_id));
+            }
+            (Err(error), true) => {
+                // May still fork, so the charge stays: a leak costs capacity, a release would
+                // break the hard limit.
+                tracing::warn!(
+                    %session_id,
+                    %error,
+                    "spawn failed after dispatch; the admission slot stays charged until the \
+                     keeper can prove the request is dead"
+                );
+            }
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_path_policy_inner(
+        &self,
+        session_id: String,
+        mut cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        worktree_path: Option<std::path::PathBuf>,
+        path_policy: SpawnPathPolicy,
+        dispatched: Arc<std::sync::atomic::AtomicBool>,
+        // The logical spawn id, already durable in the reservation when a ledger exists. Passed in
+        // rather than minted here so the keeper sees the same id the log holds.
+        request_id: String,
+    ) -> Result<mpsc::Receiver<Vec<u8>>, PtyError> {
+        #[cfg(not(unix))]
+        let _ = &request_id;
+        #[cfg(not(unix))]
+        let _ = &dispatched;
         let incarnation = Uuid::new_v4().to_string();
         #[cfg(all(feature = "local-split-qa", feature = "native-terminal"))]
         let create_mutation_id = super::qa_liveness::record_local_pty_create_request(&session_id, &incarnation);
@@ -601,6 +727,35 @@ impl PtyManager {
             cmd.env("TERM_PROGRAM", "ghostty");
         }
 
+        // Reaching here means `cmd` already carries every variable a direct PTY would receive
+        // (incarnation, agent endpoint, TERM, locale, PATH), so a keeper spawn runs byte-identical
+        // argv/env/cwd. The receiver it returns has the same shape, which keeps `register_output`
+        // unchanged.
+        #[cfg(unix)]
+        if let Some(keeper) = self.keeper() {
+            if keeper.ownership().routes_new_sessions_to_keeper() {
+                let spec = crate::daemon::keeper_session::KeeperSpawnSpec::from_command_with_request_id(
+                    session_id.clone(),
+                    &cmd,
+                    cols,
+                    rows,
+                    request_id,
+                );
+                // From here the request can reach the keeper, so a failure may still fork.
+                dispatched.store(true, std::sync::atomic::Ordering::Release);
+                let (record, rx) = keeper
+                    .spawn(&spec)
+                    .map_err(|error| PtyError::SpawnError(error.to_string()))?;
+                tracing::debug!(
+                    session_id = %record.session_id,
+                    pid = record.pid,
+                    epoch = record.epoch,
+                    "spawned a keeper-owned session"
+                );
+                return Ok(rx);
+            }
+        }
+
         let pty_size = PtySize {
             rows,
             cols,
@@ -608,6 +763,8 @@ impl PtyManager {
             pixel_height: 0,
         };
 
+        // The command is fully prepared above: this is the one place where a keeper-spawned child
+        // gets byte-identical argv/env/cwd to the one a direct PTY would have run.
         let pair = {
             let pty_system = self.pty_system.lock();
             pty_system
@@ -1272,18 +1429,41 @@ impl PtyManager {
         let session = self
             .get_session(session_id)
             .ok_or_else(|| PtyError::SessionNotFound(session_id.to_string()))?;
-        // Pausing stops the predecessor from consuming output (the reader loop honours
-        // `pause_requested` at the top of each iteration) WITHOUT setting `reader_finished`,
-        // so the lifecycle watcher does not close a session the successor now owns.
-        // Previously, `stop_reader` was called here, which only set `reader_finished = true`
-        // without stopping the spawn_blocking reader task; the lifecycle watcher observed
-        // `is_reader_finished()` and called `close_session`, sending SIGTERM/SIGKILL to the
-        // transferred child process.
-        // Only pause once the export has actually succeeded, so a failure leaves the session
-        // untouched and the predecessor keeps serving it.
-        let export = session.export_for_transfer_with_hub(hub)?;
+        // Pausing stops the predecessor from consuming output WITHOUT setting `reader_finished`, so
+        // the lifecycle watcher does not close a session the successor now owns.
+        //
+        // The ORDER here is the whole point. Pausing used to happen after the export, and a pause
+        // that only sets a flag does not stop a read that is already in flight: on unix the master
+        // is `O_NONBLOCK` (all duplicates share one open file description), so the reader waits in
+        // `poll`, and the flag was observed only after the next output arrived. After a handover the
+        // first thing the child prints is the echo of the successor's own first input, so the
+        // predecessor's pending read completed with exactly those bytes and forwarded them to its
+        // own hub - where no client is subscribed any more - while the successor's read of the same
+        // master never saw them. The write returned OK, and its echo was gone.
+        //
+        // So: pause FIRST, wait (bounded) for the reader to actually park, and only then duplicate
+        // the master for transfer. A reader that is parked - or already finished - has no read in
+        // flight, which is the property the handover needs. `pause_reader` writes the reader's wake
+        // byte so the wait ends at once instead of on the child's next output.
         session.pause_reader();
-        Ok(export)
+        if !session.await_reader_parked(EXPORT_READER_PARK_TIMEOUT) {
+            // A read may still be in flight, so handing the master over would lose the next bytes
+            // the child prints. Resume and refuse instead: the predecessor keeps serving the session
+            // and the handover reports it as not transferred.
+            session.resume_reader();
+            return Err(PtyError::Other(format!(
+                "PTY session '{session_id}' reader did not park for handover; source retained"
+            )));
+        }
+        match session.export_for_transfer_with_hub(hub) {
+            Ok(export) => Ok(export),
+            // A failed export leaves the session untouched and the predecessor keeps serving it, so
+            // give the reader back rather than leaving it parked for a handover that did not happen.
+            Err(error) => {
+                session.resume_reader();
+                Err(error)
+            }
+        }
     }
 
     /// Resumes readers for all registered sessions that were paused.
@@ -1864,6 +2044,159 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(paused, "the reader never parked after the export and the input");
+
+        drop(export);
+        let _ = manager.close_session(&session_id).await;
+    }
+
+    /// A reader blocked in its output send must not make the export refuse.
+    ///
+    /// The regression this guards: `export_session` waits for the reader to reach its PARK, and a
+    /// reader that the child has filled the output channel under cannot reach it - the pause check is
+    /// at the top of the loop and this reader is inside `blocking_send`, holding a chunk it has
+    /// ALREADY taken off the master. Keying the refusal on the park alone therefore refused a
+    /// handover that was perfectly safe: the predecessor had no read in flight, so nothing it could
+    /// do would consume the successor's bytes. Worse, it was a live regression - this exact fixture is
+    /// what `a_pause_release_is_not_readable_as_the_readers_end` builds, and that test started failing
+    /// with "reader did not park for handover; source retained".
+    ///
+    /// The distinction the export needs is phase, not park: a reader in `before-send` has already
+    /// completed its `read` and is stalled in `blocking_send` on a full channel, so it cannot issue
+    /// another one; a reader in `before-read` may be inside the syscall, and one that is `starting`
+    /// has not yet run the check that keeps it from issuing one. `after-read` and `after-send` are
+    /// left out on purpose - they are microsecond transitions that reach the park on their own, so
+    /// waiting for the park is both cheap and a stronger proof than inferring it from a snapshot. So
+    /// the assertion is that the export RETURNS, and that it returns for the phase reason rather than
+    /// because the reader happened to park: `is_reader_paused` is asserted false, or the park would
+    /// have satisfied the wait and this test would pass without exercising the phase check at all.
+    #[tokio::test]
+    async fn an_export_succeeds_while_the_reader_is_blocked_in_its_send() {
+        let manager = PtyManager::new();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "exec yes"]);
+        let (session_id, mut rx) = manager.spawn(cmd, 80, 24).expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        // `yes` fills the output channel and nothing receives from it, so the reader ends up blocked
+        // in its send with the next chunk in hand. Only a receive frees a slot, so once the channel is
+        // full and the reader is in its send it stays there: it can reach neither its pause point nor
+        // its own end, which is what makes the export below a deterministic experiment rather than a
+        // race against the reader's scheduling.
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        while !(rx.len() == rx.max_capacity() && session.reader_phase() == "before-send") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the reader never blocked in its send on a full output channel"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // The export must complete: a send-blocked reader holds a chunk it already read, and the
+        // pause it has not reached is exactly why it cannot issue another read.
+        let export = manager
+            .export_session(&session_id)
+            .expect("export succeeds while the reader is held in its send");
+        assert!(
+            !session.is_reader_paused(),
+            "the fixture did not start from a send-blocked reader, so the park check could have \
+             satisfied the export instead of the phase check this test is about"
+        );
+        assert_eq!(
+            session.reader_phase(),
+            "before-send",
+            "the reader must still be held in its send when the export returns"
+        );
+
+        drop(export);
+        // The channel has to be drained for the held send to complete, so the close can end the
+        // reader; otherwise this test would leave a blocking thread parked on a full channel.
+        let drained = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let _ = manager.close_session(&session_id).await;
+        let _ = tokio::time::timeout(LOAD_TOLERANT_BOUND, drained).await;
+    }
+
+    /// A handover must not consume output the successor owns.
+    ///
+    /// The regression this guards: after a graceful replacement the successor adopts the session,
+    /// attach/history/live output all work, the first input write returns OK - and its echo never
+    /// arrives. The predecessor's reader was left with a read in flight (a pause that only set a flag
+    /// cannot recall one), so it completed with the next bytes the child printed - the echo of the
+    /// successor's own write - and forwarded them to a hub no client is subscribed to. The successor
+    /// reads the same master through its own duplicate and never sees them.
+    ///
+    /// The assertion is on the bytes, not on timing: after the export has returned, the test writes
+    /// to the master through a FRESH duplicate and reads the echo from another fresh duplicate. If
+    /// the paused predecessor reader still had a read in flight it consumes the echo, and the reads
+    /// below find nothing. A predecessor that is parked has no read, so the echo is still there for
+    /// the successor's duplicate to read.
+    #[tokio::test]
+    async fn an_exported_reader_leaves_the_successors_output_on_the_master() {
+        let manager = PtyManager::new();
+        // `cat` is chosen deliberately: it prints nothing until it is given input, so a predecessor
+        // reader that has not been woken is provably sitting in `poll`, and `is_reader_paused()`
+        // below is a deterministic witness of the export instead of a race with a shell prompt.
+        let (session_id, _rx) = manager
+            .spawn(CommandBuilder::new("/bin/cat"), 80, 24)
+            .expect("spawn PTY session");
+        let session = manager.get_session(&session_id).expect("session registered");
+
+        let export = manager.export_session(&session_id).expect("export succeeds");
+        assert!(
+            session.is_reader_paused(),
+            "export must return only once the predecessor reader is parked"
+        );
+
+        // A duplicate of the master standing in for the successor, taken from the exported fd, and a
+        // separate one for writing, so neither end of this probe is the session's own reader.
+        use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd};
+        let master = export.master_fd.as_raw_fd();
+        let dup = |fd: BorrowedFd<'_>| -> std::fs::File {
+            let dup = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+            assert!(dup >= 0, "dup the master: {}", std::io::Error::last_os_error());
+            unsafe { std::fs::File::from_raw_fd(dup) }
+        };
+        let mut writer = dup(unsafe { BorrowedFd::borrow_raw(master) });
+        let mut reader = dup(unsafe { BorrowedFd::borrow_raw(master) });
+
+        // The tty echoes what it is given and `cat` copies it, so this marker can only come back
+        // from the child through the master.
+        const MARKER: &[u8] = b"PREDECESSOR_LOST_THIS\n";
+        std::io::Write::write_all(&mut writer, MARKER).expect("write to the master");
+
+        // The echo is the child's output, so it is awaited on a state that arrives or never does.
+        // Reading with a bounded poll on this duplicate is that wait: nothing else consumes these
+        // bytes, so an arrival is conclusive and a timeout is a loss, not a slow host.
+        let want = &MARKER[..MARKER.len() - 1];
+        let deadline = tokio::time::Instant::now() + LOAD_TOLERANT_BOUND;
+        let mut seen = Vec::new();
+        while tokio::time::Instant::now() < deadline {
+            let mut pending = [libc::pollfd {
+                fd: reader.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }];
+            let ready = unsafe { libc::poll(pending.as_mut_ptr(), 1, 50) };
+            if ready <= 0 {
+                continue;
+            }
+            let mut buf = [0u8; 256];
+            match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => seen.extend_from_slice(&buf[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => panic!("read the echo: {error}"),
+            }
+            if seen.windows(want.len()).any(|window| window == want) {
+                break;
+            }
+        }
+        assert!(
+            seen.windows(want.len()).any(|window| window == want),
+            "the paused predecessor reader consumed the successor's output; \
+             the successor's duplicate saw only {:?}",
+            String::from_utf8_lossy(&seen)
+        );
 
         drop(export);
         let _ = manager.close_session(&session_id).await;
@@ -3349,5 +3682,39 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "closing an idle bash took {elapsed:?}; it must not wait out the TERM grace"
         );
+    }
+
+    /// The budget is a gate, not a report: a create past the configured limit is refused with the
+    /// typed error *before* a master is opened or a child is forked, so a refusal can never leave an
+    /// unaccounted process behind. The limit here is `budget / floor == 1`, and the one slot is
+    /// already held, so the very next spawn must be refused.
+    #[test]
+    fn a_spawn_past_the_budget_is_refused_before_a_child_exists() {
+        let hub = Arc::new(TerminalOutputHub::for_daemon_with_budget(
+            1024 * 1024,
+            1024 * 1024,
+        ));
+        let manager = PtyManager::new().with_output_hub(Arc::clone(&hub));
+        hub.admit_session("the-only-slot").expect("one session fits");
+
+        let error = match manager.spawn(CommandBuilder::new("/bin/sh"), 80, 24) {
+            Ok((session_id, _rx)) => {
+                panic!("the spawn must be refused, but it created session {session_id}")
+            }
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                PtyError::SessionCapacityExhausted {
+                    limit: 1,
+                    // A pattern takes the literal pair, not the `1024 * 1024` expression.
+                    budget_bytes: 1_048_576,
+                    min_session_bytes: 1_048_576,
+                }
+            ),
+            "the refusal must carry the configured pair: {error:?}"
+        );
+        assert_eq!(manager.session_count(), 0, "a refused spawn registers no session");
     }
 }

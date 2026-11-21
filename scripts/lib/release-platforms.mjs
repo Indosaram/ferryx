@@ -12,12 +12,33 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { runHostScript, runProcess, quoteSh, quotePowerShell } from "./release-hosts.mjs";
 import { verifyMinisign } from "./minisign-verify.mjs";
+import {
+  assertDsymGate,
+  isFile,
+  produceDsymFromSlices,
+  strippedForShipping,
+} from "./release-dsym.mjs";
+import { readTarGzMember } from "./dsym-symbolication.mjs";
+import {
+  assertKeeperInApp,
+  buildKeeperUniversal,
+  installKeeperIntoApp,
+  KEEPER_BINARY_NAME,
+  KEEPER_MANIFEST_NAME,
+  KEEPER_RESOURCE_DIR,
+  keeperExpectations,
+  refreshKeeperDigest,
+} from "./keeper-bundle.mjs";
+import {
+  assertKeeperRollbackManifest,
+  writeKeeperRollbackManifest,
+} from "./keeper-rollback-manifest.mjs";
 import {
   assembleDaemonHelper,
   codesignArgs,
@@ -981,6 +1002,95 @@ export function refreshBundledHelperManifest(appPath) {
   return changed;
 }
 
+/**
+ * Re-derives, from the bytes as they now stand, the in-bundle documents that describe payload files.
+ *
+ * Both documents live under `Contents/Resources` and both describe a file that code signing has just
+ * rewritten:
+ *
+ *  * `helpers/manifest.json` carries each helper's sha256 and byte length (measured: aarch64
+ *    1590640 -> 1599648 when the signature blob is appended). `helper_assets::resolve_helper_asset`
+ *    compares the bundled bytes against those values, so a stale entry makes every SSH spawn fail
+ *    with helper_asset_length_mismatch.
+ *  * `keeper/keeper.json` carries the keeper's sha256 and byte count, which
+ *    `keeper_startup::payload_digest` verifies before a generation is installed. A stale digest
+ *    there fails `run_keeper_install_pass`, and the boot path only logs it as a warning
+ *    (`server.rs`: "keeper startup pass did not complete"), so the shipped app would run with no
+ *    keeper at all while looking healthy.
+ *
+ * The position matters in both directions. This runs after the last signature that rewrites a
+ * payload file, and before the outer app is sealed, because both documents sit inside the bundle's
+ * sealed resource envelope: rewriting them after the outer `codesign` would invalidate the seal.
+ * Keeping the call inside `finalizeMacosBundle` is what makes that order impossible for a call site
+ * to get wrong -- callers previously re-derived the keeper digest themselves, and finalize then
+ * re-signed the keeper, so the digest described bytes that never shipped.
+ */
+function refreshBundleSidecars(appPath, { requireKeeper = false } = {}) {
+  const helperChanges = refreshBundledHelperManifest(appPath);
+  const keeperResourceDir = join(appPath, "Contents", "Resources", KEEPER_RESOURCE_DIR);
+  const hasBinary = existsSync(join(keeperResourceDir, KEEPER_BINARY_NAME));
+  const hasManifest = existsSync(join(keeperResourceDir, KEEPER_MANIFEST_NAME));
+
+  // Both halves must be present or neither. The two states that used to slip through:
+  //
+  //  * `keeper.json` without the binary -- `refreshKeeperDigest` already refuses that pairing, so it
+  //    failed here rather than shipping.
+  //  * the binary without `keeper.json` -- silent. The keeper would ship with no digest for
+  //    `keeper_startup::payload_digest` to check, no dSYM pairing in the archive manifest, and no
+  //    version for the rollback floor to agree with, and nothing in the pipeline would notice. That
+  //    is a keeper-less install pass wearing a keeper payload's shape, so it is refused here.
+  if (hasBinary && !hasManifest) {
+    throw new Error(
+      `bundle ${appPath} carries Contents/Resources/${KEEPER_RESOURCE_DIR}/${KEEPER_BINARY_NAME} but no ${KEEPER_MANIFEST_NAME} beside it: ` +
+        "the keeper would ship without a recorded digest, version or protocol, and keeper_startup would install nothing",
+    );
+  }
+  if (requireKeeper && !hasManifest) {
+    throw new Error(
+      `bundle ${appPath} carries no Contents/Resources/${KEEPER_RESOURCE_DIR}/${KEEPER_MANIFEST_NAME} and requireKeeper was set: ` +
+        "this path installs a keeper, so sealing the bundle without one would ship a daemon that cannot supervise a PTY",
+    );
+  }
+  return {
+    helperChanges,
+    keeper: hasManifest ? refreshKeeperDigest({ resourceDir: keeperResourceDir }) : null,
+  };
+}
+
+/** The keeper binary's path inside the updater archive, whose root member is `Ferryx.app`. */
+export const UPDATER_KEEPER_MEMBER = `Ferryx.app/Contents/Resources/${KEEPER_RESOURCE_DIR}/${KEEPER_BINARY_NAME}`;
+
+/**
+ * Proves the finished updater archive carries exactly the keeper bytes the sealed bundle described.
+ *
+ * `finalizeMacosBundle` re-derives `keeper.json` from the signed bytes, so the bundle's own claim is
+ * true at the moment it is sealed. The archive is a second, later copy of those bytes: `tar` runs
+ * after stapling and any pass over the bundle in between could rewrite the keeper again. Comparing
+ * the archive member's hash with the sealed digest is the only check made against the file users
+ * actually download, and it fails closed -- an absent README-style "warning" is exactly how a
+ * keeper-less install pass ships silently today.
+ */
+export function verifyShippedKeeperDigest({ archivePath, expectedSha256, memberPath = UPDATER_KEEPER_MEMBER }) {
+  if (typeof expectedSha256 !== "string" || expectedSha256 === "") {
+    throw new Error(
+      `refusing to accept ${archivePath}: no sealed keeper digest was supplied, so the archive's keeper cannot be tied to the signed bundle`,
+    );
+  }
+  const member = readTarGzMember({ bytes: readFileSync(archivePath), memberPath });
+  if (member === null) {
+    throw new Error(
+      `updater archive ${archivePath} carries no ${memberPath}; the daemon installs a keeper from that exact member, so the app would ship without one`,
+    );
+  }
+  if (member.sha256 !== expectedSha256) {
+    throw new Error(
+      `updater archive ${archivePath} carries ${memberPath} hashing to ${member.sha256}, but the sealed bundle recorded ${expectedSha256}: ` +
+        "the keeper was rewritten after its manifest was written, and keeper_startup::payload_digest would refuse the generation",
+    );
+  }
+  return { memberPath, sha256: member.sha256 };
+}
+
 export function finalizeMacosBundle({
   appPath,
   dmgPath = null,
@@ -989,13 +1099,16 @@ export function finalizeMacosBundle({
   notaryProfile = null,
   approveNotarization = false,
   entitlements = null,
+  requireKeeper = false,
   exec = macExec,
 }) {
   const recordedEntitlements = entitlements === null ? null : readFileSync(entitlements, "utf8");
   const bundleEntitlements = recordedEntitlements && recordedEntitlements.trim() !== "" ? entitlements : null;
 
   // Re-sign every Mach-O binary (including embedded helpers) with hardened
-  // runtime and a secure timestamp, then the nested bundles, then seal the app.
+  // runtime and a secure timestamp, then the nested bundles. The outer app is
+  // sealed only after the sidecar documents have been corrected for the bytes
+  // those signatures produced (see below).
   if (signingIdentity) {
     const findOut = exec("find", [appPath, "-type", "f"]).stdout;
     for (const itemPath of findOut.trim().split("\n")) {
@@ -1008,6 +1121,15 @@ export function finalizeMacosBundle({
     for (const bundlePath of nestedHelperBundles(appPath)) {
       exec("codesign", [...codesignArgs(signingIdentity, bundleEntitlements), bundlePath]);
     }
+  }
+
+  // Every signature above appended a blob to the files it sealed, so the documents that describe
+  // those bytes are now stale. They are inside the app's sealed resource envelope, so they must be
+  // rewritten here -- after signing, before the outer seal. `finalizeMacosBundle` owns this step so
+  // no call site can re-derive a digest before the signature that invalidates it.
+  const sidecars = refreshBundleSidecars(appPath, { requireKeeper });
+
+  if (signingIdentity) {
     exec("codesign", [...codesignArgs(signingIdentity, bundleEntitlements), appPath]);
   }
 
@@ -1031,11 +1153,11 @@ export function finalizeMacosBundle({
     }
   }
 
-  // Signing rewrites each helper's code-signature blob, which changes its file length (measured:
-  // aarch64 1590640 -> 1599648) and its sha256. helper_assets::resolve_helper_asset compares the
-  // bundled bytes against manifest.json byteLength/sha256, so a stale manifest makes every SSH
-  // spawn fail with helper_asset_length_mismatch. Re-derive the manifest from the signed bytes.
-  refreshBundledHelperManifest(appPath);
+  // Read the sealed payload back: nothing may have rewritten the keeper after its digest was
+  // re-derived above, and this refuses a bundle whose manifest disagrees with the bytes inside it.
+  // `requireKeeper` turns "a keeper is optional here" into "this bundle must carry one", so the two
+  // macOS release paths cannot seal a keeper-less app even if the install step is skipped.
+  if (sidecars.keeper !== null || requireKeeper) assertKeeperInApp({ appPath });
 
   const notarizations = [];
   if (approveNotarization && notaryProfile) {
@@ -1082,7 +1204,13 @@ export function finalizeMacosBundle({
     }
   }
 
-  return { appPath, dmgPath, notarizations };
+  return {
+    appPath,
+    dmgPath,
+    notarizations,
+    keeper: sidecars.keeper,
+    helperManifestChanges: sidecars.helperChanges,
+  };
 }
 
 /**
@@ -1385,6 +1513,11 @@ export async function buildHost({
         ...process.env,
         CARGO_TARGET_DIR: cargoTargetDir,
         SOURCE_DATE_EPOCH: String(plan.sourceDateEpoch),
+        // Phase 0: `profile.release` strips symbols and compiles without debug info, which leaves
+        // dsymutil nothing to extract and makes every crash report unsymbolicatable. Emit line
+        // tables, archive the dSYM, then strip the shipped Mach-O files once the UUID gate passed.
+        CARGO_PROFILE_RELEASE_STRIP: "none",
+        CARGO_PROFILE_RELEASE_DEBUG: "1",
       };
       const ffmpeg = prepareMacosFfmpeg({
         sourceDir: isolatedSource,
@@ -1521,6 +1654,85 @@ export async function buildHost({
         payloadDir: join(isolatedSource, FFMPEG_PAYLOAD_REL, "universal-apple-darwin"),
       });
 
+      // 2a. Keeper payload. The plan ships supervised restart and the PTY keeper in ONE release and
+      // states "the build asserts the keeper binary is present in the bundle", so the keeper is
+      // built here, placed inside the app, and asserted on the bytes that ship -- before the dSYM
+      // archive and before anything is signed or notarized. A release that cannot show the keeper
+      // in its bundle therefore cannot be produced, which is what removes the keeper-less
+      // supervisor hazard structurally instead of by sequencing releases.
+      const keeperDir = join(runDir, "keeper");
+      buildKeeperUniversal({
+        sourceDir: isolatedSource,
+        targetDir: cargoTargetDir,
+        destDir: keeperDir,
+        triples: ["aarch64-apple-darwin", "x86_64-apple-darwin"],
+        appVersion: plan.appVersion,
+        env: buildEnv,
+        sourceDateEpoch: plan.sourceDateEpoch,
+      });
+      const keeperResourceDir = installKeeperIntoApp({ appPath, stagedDir: keeperDir });
+      execFileSync("chmod", ["755", join(keeperResourceDir, "ferryx-ptykeeper")], { stdio: "pipe" });
+      // Both expectations, from the tree this bundle was built from: the generation name (app
+      // version) and the keeper crate version. Passing only the former skips the crate-version
+      // comparison inside `assertKeeperBundled`, so a keeper built from a different source tree
+      // than the daemon beside it would ship without the release noticing.
+      assertKeeperInApp({ appPath, ...keeperExpectations({ sourceDir: isolatedSource, appVersion: plan.appVersion }) });
+      // 2a-ii. The rollback floor the daemon reads at `Contents/Resources/keeper/latest.json`
+      // (`daemon::rollback::shipped_manifest_path`). Nothing else in this pipeline emits that file:
+      // the updater `latest.json` is published to the release page, never copied into the bundle,
+      // so without this every rollback on a shipped build answers
+      // KEEPER_ROLLBACK_FLOOR_UNVERIFIED. Derived from the same ledger the published manifest uses,
+      // written beside the keeper payload just asserted, and re-checked here -- all before the dSYM
+      // archive and before anything is signed, so the floor is sealed into the notarized bytes.
+      writeKeeperRollbackManifest({
+        appPath,
+        appVersion: plan.appVersion,
+        sourceDir: isolatedSource,
+      });
+      assertKeeperRollbackManifest({ appPath, appVersion: plan.appVersion, sourceDir: isolatedSource });
+
+      // 2b. Phase 0 dSYM gate, on the bytes that will ship. `profile.release` strips symbols and
+      // compiles without debug info, which leaves dsymutil nothing to extract and makes every
+      // `ferryx +<offset>` crash frame permanently anonymous -- the 2026-11-15 SIGSEGV named no
+      // function for exactly this reason. The build above therefore links with
+      // CARGO_PROFILE_RELEASE_DEBUG=1 and CARGO_PROFILE_RELEASE_STRIP=none: archive the dSYM keyed
+      // by the BUILT binary's UUID here, strip the shipped copies, then assert a dSYM with that same
+      // UUID and a non-empty function table exists. A dSYM from a different link fails the release
+      // instead of silently symbolicate nothing. Must precede finalizeMacosBundle, which seals the
+      // exact bytes that are notarized.
+      const dsymDir = join(runDir, "dsyms");
+      // One dSYM per shipped executable. The debug maps live in the per-architecture binaries rustc
+      // linked (rustc packs `<binary>.dSYM` beside each), not in the lipo'd universal file, so the
+      // bundle is built from the slices and covers both UUIDs in one archive entry.
+      const shipped = [
+        { name: "ferryx", slices: [join(aarch64Rel, "ferryx"), join(x86Rel, "ferryx")], binary: join(appPath, "Contents", "MacOS", "ferryx") },
+        { name: "ferryx-cli", slices: [join(aarch64Rel, "ferryx-cli"), join(x86Rel, "ferryx-cli")], binary: join(universalRel, "ferryx-cli") },
+        { name: "ferryx-rd-client", slices: [join(aarch64Rel, "ferryx-rd-client"), join(x86Rel, "ferryx-rd-client")], binary: join(universalRel, "ferryx-rd-client") },
+        // The keeper is a shipped executable too: a SIGSEGV in the process that owns every PTY
+        // master is the other crash Phase 0 must be able to symbolicate.
+        { name: "ferryx-ptykeeper", slices: [join(cargoTargetDir, "aarch64-apple-darwin", "release", "ferryx-ptykeeper"), join(cargoTargetDir, "x86_64-apple-darwin", "release", "ferryx-ptykeeper")], binary: join(keeperResourceDir, "ferryx-ptykeeper") },
+      ].filter((entry) => isFile(entry.binary));
+      const archived = shipped.map((entry) => {
+        const slices = entry.slices.filter((slice) => isFile(slice));
+        const outPath = join(dsymDir, `${entry.name}.dSYM`);
+        const produced = produceDsymFromSlices({ slices: slices.length > 0 ? slices : [entry.binary], outPath });
+        return { ...entry, ...produced };
+      });
+      for (const entry of shipped) strippedForShipping(entry.binary);
+      // `strip` rewrites the Mach-O, so any earlier signature on a standalone copy is now stale;
+      // re-sign after stripping and before the copies leave this block. The app's own binary is
+      // re-signed by finalizeMacosBundle below.
+      if (hostConfig.signingIdentity) {
+        for (const entry of shipped) {
+          if (entry.binary.startsWith(`${appPath}${sep}`)) continue;
+          execFileSync("codesign", ["--force", "--options", "runtime", "--sign", hostConfig.signingIdentity, entry.binary], {
+            stdio: "pipe",
+          });
+        }
+      }
+      const dsymGate = shipped.map((entry) => assertDsymGate({ binaryPath: entry.binary, dsymDir }));
+      const relative = (path) => (path.startsWith(`${runDir}/`) ? path.slice(runDir.length + 1) : path);
+
       // 3-4. Re-sign all Mach-O binaries, notarize/staple the app, then rebuild
       // and notarize the DMG from that final signed + stapled app.
       // The daemon helper bundle is assembled first so it is signed inside-out
@@ -1539,7 +1751,12 @@ export async function buildHost({
         }
       }
 
-      finalizeMacosBundle({
+      // Sealing re-signs the keeper, which rewrites its bytes; the digest `keeper.json` advertises is
+      // therefore re-derived inside this call, from the signed bytes, and returned here as the only
+      // value that describes what ships. Recording a digest before this point (as the pipeline used
+      // to) would publish `keeper.json` and the archive manifest describing a file that no longer
+      // exists by the time the app is installed.
+      const sealed = finalizeMacosBundle({
         appPath,
         dmgPath,
         workspaceDir,
@@ -1547,7 +1764,61 @@ export async function buildHost({
         notaryProfile: hostConfig.notaryProfile ?? null,
         approveNotarization,
         entitlements: outerEntitlements,
+        // The keeper was installed into this bundle above and will be shipped in its archive, so
+        // sealing without one is a defect rather than a bundle shape: this path cannot produce a
+        // keeper-less app even if the install step silently did nothing.
+        requireKeeper: true,
       });
+
+      // 4a. dSYM archive manifest, written from the sealed keeper so the archive and the bundle state
+      // one generation and one digest. The UUIDs are unchanged by signing (signing appends a
+      // signature blob; LC_UUID is untouched), and the gate above already proved they match the
+      // built bytes, so the manifest can be finalized after sealing without weakening that check.
+      const shippedKeeper = sealed.keeper;
+      writeFileSync(
+        join(dsymDir, "manifest.json"),
+        `${JSON.stringify(
+          {
+            schema: "ferryx-dsym-archive/v1",
+            runId: plan.runId,
+            tag: plan.tag,
+            appVersion: plan.appVersion,
+            createdAt: new Date().toISOString(),
+            binaries: archived.map((entry) => ({
+              binary: entry.binary,
+              uuids: entry.uuids,
+              functions: entry.functions,
+              dsym: relative(entry.bundle),
+            })),
+            gate: dsymGate.map((entry) => ({ binary: entry.binaryPath, uuids: entry.binaryUuids, dsyms: entry.bundles.map((bundle) => relative(bundle.path)) })),
+            // What the daemon pairs a crash report against when it looks up a keeper frame, and
+            // what the release gate reads to confirm the shipped keeper has a debug map at all.
+            // The UUIDs come from the archive entry built above, so the keeper block and the
+            // `binaries` entry cannot disagree about which dSYM describes the shipped keeper.
+            keeper: shippedKeeper
+              ? {
+                  version: shippedKeeper.version,
+                  protocolMajor: shippedKeeper.protocolMajor,
+                  protocolMinor: shippedKeeper.protocolMinor,
+                  binary: relative(join(keeperResourceDir, "ferryx-ptykeeper")),
+                  uuids: archived.find((entry) => entry.name === "ferryx-ptykeeper")?.uuids ?? [],
+                  sha256: shippedKeeper.sha256,
+                }
+              : null,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      // The archive ships in the release run directory beside artifacts/, not inside it: the
+      // receipt contract enumerates artifact kinds, and a dSYM tarball is diagnostics for the
+      // release, not an installable. `ferryx daemon crash-report` finds it once unpacked under
+      // <data>/dsyms or ~/ferryx-releases/dsyms.
+      execFileSync(
+        "tar",
+        ["--no-xattrs", "-czf", join(runDir, "Ferryx-universal.dSYM.tar.gz"), "-C", dsymDir, "."],
+        { env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: "pipe" },
+      );
 
       // 5. Create updater tar from verified (and stapled) .app, excluding AppleDouble
       const updaterTarPath = join(artifactsOutDir, "Ferryx.app.tar.gz");
@@ -1559,6 +1830,12 @@ export async function buildHost({
           stdio: "pipe",
         },
       );
+      // The archive is the copy users download. Hash the keeper member out of it and require the
+      // sealed digest, so "the bundle said so" is not the only evidence and any rewrite between
+      // sealing and packing fails the build instead of shipping.
+      if (shippedKeeper) {
+        verifyShippedKeeperDigest({ archivePath: updaterTarPath, expectedSha256: shippedKeeper.sha256 });
+      }
       if (dmgPath && existsSync(dmgPath)) {
         execFileSync("cp", [dmgPath, join(artifactsOutDir, "Ferryx_universal.dmg")]);
       }

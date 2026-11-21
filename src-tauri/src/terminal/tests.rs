@@ -904,3 +904,105 @@ fn writing_to_an_unknown_session_still_fails_synchronously() {
         "expected PtyError::SessionNotFound(\"nope\"), got: {err:?}"
     );
 }
+
+#[test]
+fn mark_replay_gap_records_the_hole_an_attach_must_see() {
+    let service = TerminalService::default();
+    let _output = service.output_hub().register_session("gapgy");
+    service.output_hub().publish("gapgy", b"before\r\n".to_vec());
+
+    assert!(service.mark_replay_gap("gapgy"));
+
+    // A pane that believed it had everything up to sequence 1 is told the history has a hole and
+    // where output resumes, rather than being served a seamless-looking splice.
+    let attachment = service
+        .attach_with_sequence("gapgy", Some(1))
+        .expect("attach after the gap");
+    assert!(attachment.snapshot.history_incomplete);
+    let gap = attachment
+        .snapshot
+        .gap
+        .expect("a stale attach is told where output resumes");
+    assert!(gap.available_from_sequence > gap.requested_after_sequence);
+
+    // The seam is visible in the replayed history, not just in the structured field.
+    assert!(
+        attachment
+            .snapshot
+            .history
+            .windows(9)
+            .any(|window| window == b"[Ferryx: "),
+        "the replay carries the gap seam text"
+    );
+
+    // A full replay carries the seam too, flagged so the pane knows the history is incomplete.
+    let full = service
+        .attach_with_sequence("gapgy", None)
+        .expect("full replay");
+    assert!(full.snapshot.history_incomplete);
+    assert!(full.snapshot.history.windows(9).any(|window| window == b"[Ferryx: "));
+}
+
+#[test]
+fn mark_replay_gap_reports_nothing_for_a_session_the_hub_never_saw() {
+    let service = TerminalService::default();
+    assert!(
+        !service.mark_replay_gap("never-registered"),
+        "an unknown session has no sequence axis to place a gap on"
+    );
+}
+
+/// A checkpoint's offset must cover the bytes its state applied. The pair is read under one hub
+/// lock, so no publish can land between them: publishing again moves both, and the state always
+/// contains at least everything the offset claims.
+#[cfg(unix)]
+#[test]
+fn checkpoint_snapshot_pairs_the_state_with_the_offset_it_covers() {
+    let service = TerminalService::default();
+    let _output = service.output_hub().register_session("checkpointed");
+
+    // Nothing published yet: the state covers offset 0, and it is a real state, not `None`.
+    let (bytes, offset) = service
+        .checkpoint_snapshot("checkpointed")
+        .expect("a registered session has a checkpoint");
+    assert_eq!(offset, 0, "an empty session covers no bytes");
+    let snapshot: crate::terminal::output_hub::SessionHubSnapshot =
+        serde_json::from_slice(&bytes).expect("the checkpoint deserializes");
+    assert!(snapshot.chunks.is_empty());
+
+    service
+        .output_hub()
+        .publish("checkpointed", b"hello\r\n".to_vec());
+    let (bytes, offset) = service
+        .checkpoint_snapshot("checkpointed")
+        .expect("a checkpoint after output");
+    assert_eq!(offset, 7, "the offset counts published bytes");
+    let snapshot: crate::terminal::output_hub::SessionHubSnapshot =
+        serde_json::from_slice(&bytes).expect("the checkpoint deserializes");
+    let retained: usize = snapshot.chunks.iter().map(|chunk| chunk.bytes.len()).sum();
+    assert_eq!(
+        retained as u64, offset,
+        "the state's bytes are exactly the range the offset claims"
+    );
+
+    // A gap publishes no output bytes, so the offset must not move: committing a checkpoint at a
+    // moved offset would truncate replay past bytes the state never applied. The seam text is in
+    // the state, which is why the assertion is "at least" and not "exactly".
+    assert!(service.mark_replay_gap("checkpointed"));
+    let (bytes, after_gap) = service
+        .checkpoint_snapshot("checkpointed")
+        .expect("a checkpoint after a gap");
+    assert_eq!(after_gap, offset, "a gap publishes no output bytes");
+    let snapshot: crate::terminal::output_hub::SessionHubSnapshot =
+        serde_json::from_slice(&bytes).expect("the checkpoint deserializes");
+    let retained: usize = snapshot.chunks.iter().map(|chunk| chunk.bytes.len()).sum();
+    assert!(
+        retained as u64 >= after_gap,
+        "the state covers at least the bytes the offset claims"
+    );
+
+    assert!(
+        service.checkpoint_snapshot("never-registered").is_none(),
+        "a session the hub never saw has no state to commit"
+    );
+}

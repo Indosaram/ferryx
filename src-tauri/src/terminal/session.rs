@@ -493,9 +493,10 @@ pub(crate) struct PtySessionConfig {
 
 }
 
-/// Where a PTY reader thread currently is. Diagnostic only: written by the reader loop and read
-/// by tests and failure messages; it changes no behavior. A parked thread reports the phase it was
-/// entering when it stopped, which is what locates a stall the boolean `reader_finished` cannot.
+/// Where a PTY reader thread currently is. Written by the reader loop and read by the handover
+/// export (`reader_holds_no_live_read`), by tests and by failure messages. A parked thread reports
+/// the phase it was entering when it stopped, which is what locates a stall the boolean
+/// `reader_finished` cannot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PtyReaderPhase {
     Starting,
@@ -518,7 +519,6 @@ impl PtyReaderPhase {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn from_raw(raw: u64) -> Self {
         match raw {
             1 => PtyReaderPhase::BeforeRead,
@@ -577,8 +577,12 @@ pub struct PtySession {
     /// blocking read. Deliberately separate from `reader_finished`, which means "the reader thread
     /// has returned" and is consumed by the lifecycle watcher.
     reader_stop_requested: Arc<AtomicBool>,
-    /// The reader's own phase, diagnostics only (see `PtyReaderPhase`).
-    #[cfg(test)]
+    /// The reader's own phase (see `PtyReaderPhase`).
+    ///
+    /// Written by the reader on every transition and read by `reader_holds_no_live_read`, which is
+    /// how a handover export learns that a reader blocked in its output send is not reading the
+    /// master - the one fact the park flag cannot publish, because a send-blocked reader never
+    /// reaches the park point. Also read by tests and failure messages.
     reader_phase: Arc<AtomicU64>,
     reaped: Arc<AtomicBool>,
     /// Epoch millis of the last PTY output chunk read from the child (0 = none).
@@ -676,6 +680,28 @@ impl Drop for PtyInputWriter {
             if eot != 0 {
                 let _ = self.file.write_all(&[b'\n', eot]);
             }
+        }
+    }
+}
+
+/// Drain the one wake byte `request_reader_stop`/`pause_reader` write, without blocking.
+///
+/// The byte's only job is to end the reader's `poll`; the loop then re-reads its flags. It must be
+/// removed here rather than left in the socket: the reader survives a pause, and a socket that stays
+/// readable would make every subsequent `poll` return instantly, spinning the reader at full speed
+/// until the next read drained the PTY.
+#[cfg(unix)]
+fn drain_reader_wake(wake: Option<&mut std::os::unix::net::UnixStream>) {
+    let Some(wake) = wake else { return };
+    let mut drained = [0u8; 64];
+    loop {
+        match std::io::Read::read(wake, &mut drained) {
+            Ok(0) => return,
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            // Empty is the normal case (a spurious readiness), and the read end is non-blocking, so
+            // `WouldBlock` means exactly that.
+            Err(_) => return,
         }
     }
 }
@@ -848,7 +874,14 @@ impl PtySession {
         #[cfg(unix)]
         let (reader_wake_read, reader_wake) = match std::os::unix::net::UnixStream::pair() {
             // Non-blocking write end: a wake that finds the buffer full has nothing left to add.
-            Ok((read, write)) => (Some(read), write.set_nonblocking(true).ok().map(|()| write)),
+            // The read end is non-blocking too, so the READER can drain its own byte: a pause now
+            // wakes the reader and lets it park and later resume, and a byte left in the socket
+            // would keep the fd readable forever, turning every later poll into an instant return
+            // and the reader into a full-speed spin.
+            Ok((read, write)) => {
+                let _ = read.set_nonblocking(true);
+                (Some(read), write.set_nonblocking(true).ok().map(|()| write))
+            }
             Err(error) => {
                 tracing::warn!(%error, "PTY reader wake socketpair unavailable; stop waits for output");
                 (None, None)
@@ -876,6 +909,9 @@ impl PtySession {
         let reader_phase_task = Arc::clone(&reader_phase);
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
+            // Taken by value so the poll arm can drain it; the wake end exists only on unix.
+            #[cfg(unix)]
+            let mut reader_wake_read = reader_wake_read;
             let mut buf = [0u8; 16 * 1024];
             loop {
                 // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
@@ -888,6 +924,10 @@ impl PtySession {
                 if !stopping && pause_requested_task.load(Ordering::Acquire) {
                     let mut park = reader_park_task.0.lock();
                     reader_paused_task.store(true, Ordering::Release);
+                    // Published under the park mutex and announced, so an export waiting on
+                    // `await_reader_parked` observes the park instead of missing a wake that landed
+                    // before it started waiting.
+                    reader_park_task.1.notify_all();
                     while pause_requested_task.load(Ordering::Acquire)
                         && !pause_released_task.load(Ordering::Acquire)
                     {
@@ -925,7 +965,9 @@ impl PtySession {
                         // requested DURING the read is precisely what made it return, so the snapshot
                         // is stale here and trusting it would issue one more read. The drain is
                         // unaffected - a read that still has buffered bytes returns Ok, not this - and
-                        // a genuine EINTR with no stop still retries.
+                        // a genuine EINTR with no stop still retries. A pause requested during the
+                        // read parks at the top of the next iteration rather than issuing another
+                        // read, which is what keeps it from consuming the successor's output.
                         if reader_stop_requested_task.load(Ordering::Acquire) {
                             break;
                         }
@@ -939,8 +981,10 @@ impl PtySession {
                         if reader_stop_requested_task.load(Ordering::Acquire) {
                             break;
                         }
-                        // The wake end is polled beside the PTY so `request_reader_stop` can end this
-                        // wait; its byte is never consumed because the loop ends on the next pass.
+                        // The wake end is polled beside the PTY so `request_reader_stop` (and now
+                        // `pause_reader`) can end this wait; the reader drains the byte below, since
+                        // after a pause it goes on living and a byte left in the socket would make
+                        // every later poll return instantly.
                         // A negative fd (no socketpair) is ignored by poll.
                         let wake_fd = reader_wake_read.as_ref().map_or(-1, |wake| wake.as_raw_fd());
                         let mut poll = [libc::pollfd {
@@ -955,6 +999,7 @@ impl PtySession {
                             tracing::info!(session_id = %metrics_session_id, error = %std::io::Error::last_os_error(), "PTY reader ended: poll failed");
                             break;
                         }
+                        drain_reader_wake(reader_wake_read.as_mut());
                     }
                     Err(error) => {
                         tracing::info!(session_id = %metrics_session_id, %error, "PTY reader ended: read failed");
@@ -989,7 +1034,6 @@ impl PtySession {
             reader_finished,
             reader_finished_notify,
             reader_stop_requested,
-            #[cfg(test)]
             reader_phase,
             last_output_at,
             reaped: Arc::new(AtomicBool::new(false)),
@@ -1225,8 +1269,86 @@ impl PtySession {
             .or(pid)
     }
 
+    /// Park this session's reader, so it stops consuming the master before a successor owns it.
+    ///
+    /// The flag alone is only half of it. On unix the master is `O_NONBLOCK` (every duplicate of it
+    /// shares one open file description, so `F_SETFL` on one dup is seen by all), which means the
+    /// reader does not block inside `read` - it gets `EAGAIN` and waits inside `poll`, with `-1` as
+    /// the timeout. A reader parked in `poll` does not observe `pause_requested` until the child
+    /// happens to print, and after a handover the next thing the child prints is the echo of the
+    /// successor's own first write. Writing the wake byte ends that wait immediately, so the loop
+    /// reaches its top-of-iteration check and parks without reading.
+    ///
+    /// This is the unix equivalent of the interrupt handle, not a substitute for one: unix has none
+    /// (`MasterPty::interrupt_handle` returns `None` here; only the ConPTY master implements it),
+    /// and this is the same wake socketpair `request_reader_stop` already uses - both callers write
+    /// the same byte and the reader re-reads its flags. The adopted reader keeps its wake in
+    /// `relinquish_wake`, so both slots are tried, exactly as `release_paused_reader` does.
     pub fn pause_reader(&self) {
         self.pause_requested.store(true, Ordering::Release);
+        #[cfg(unix)]
+        if let Some(wake) = self.relinquish_wake.as_ref().or(self.reader_wake.as_ref()) {
+            match std::io::Write::write_all(&mut &*wake, &[1]) {
+                Ok(()) => {}
+                // A full buffer means a wake is already pending, so the reader cannot miss this one.
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => tracing::warn!(%error, "failed to wake PTY reader for pause"),
+            }
+        }
+    }
+
+    /// Wait, bounded, for the reader to stop being able to consume the master.
+    ///
+    /// `true` when the reader has parked, when it has already returned, and when it is in a phase
+    /// that provably holds no read (see `reader_holds_no_live_read`). A requested STOP is
+    /// deliberately not accepted here - the flag says the loop will end, not that the read it may be
+    /// inside has returned, and a read in flight is exactly what must not exist when the master is
+    /// handed over.
+    ///
+    /// The wait is on the reader's own park condvar, not a poll: the reader publishes
+    /// `reader_paused` under this mutex and notifies, so a park that lands just before this call is
+    /// still observed (no missed wake) and the export returns the moment the reader parks instead of
+    /// sleeping out an interval.
+    pub fn await_reader_parked(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut park = self.reader_park.0.lock();
+        loop {
+            if self.reader_paused.load(Ordering::Acquire)
+                || self.reader_finished.load(Ordering::Acquire)
+                || self.reader_holds_no_live_read()
+            {
+                return true;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            // Timing out is not a verdict: the loop re-reads the flags and decides on them, so a
+            // park that lands between the notify and this wait still ends the wait correctly.
+            let _ = self.reader_park.1.wait_for(&mut park, deadline - now);
+        }
+    }
+
+    /// True while the reader is provably stalled holding a chunk it already took off the master.
+    ///
+    /// `before-send` is the only phase that qualifies, and it is a BLOCKED state rather than a
+    /// transient one: the reader has completed its `read`, has the bytes in hand, and is inside
+    /// `blocking_send` on a full output channel. It needs a receiver to free a slot before it can
+    /// make any progress, so it cannot issue another read while it sits there - which is exactly the
+    /// property the handover needs, and exactly the property the park flag cannot publish, because
+    /// the pause check is at the top of the loop and this reader never reaches it.
+    ///
+    /// `after-read` and `after-send` deliberately do NOT qualify even though they also hold an
+    /// already-read chunk. They are microsecond-long transitions, not stalls: a reader in either is
+    /// about to reach the loop's pause check and park there, so waiting for the park costs nothing
+    /// and asks the reader to prove it, instead of inferring it from a snapshot that may already be
+    /// stale by the time the export acts on it. `starting` and `before-read` do not qualify for the
+    /// stronger reason: a `before-read` reader may be inside the read syscall right now.
+    fn reader_holds_no_live_read(&self) -> bool {
+        matches!(
+            PtyReaderPhase::from_raw(self.reader_phase.load(Ordering::Acquire)),
+            PtyReaderPhase::BeforeSend
+        )
     }
 
     /// Lets this session go without ending the shell another daemon still serves: the writer
@@ -2270,6 +2392,9 @@ impl PtySession {
         let metrics_session_id = snapshot.session_id.clone();
         let (wake_read, wake_write) = std::os::unix::net::UnixStream::pair()
             .map_err(|error| PtyError::IoError(error.to_string()))?;
+        // Non-blocking read end: the reader drains its own wake byte, so a paused-then-resumed or
+        // relinquished adopted reader never spins on a socket that stays readable forever.
+        let _ = wake_read.set_nonblocking(true);
         let reader_finished = Arc::new(AtomicBool::new(false));
         let reader_finished_task = Arc::clone(&reader_finished);
         let reader_finished_notify = Arc::new(tokio::sync::Notify::new());
@@ -2292,6 +2417,7 @@ impl PtySession {
 
         let reader_task = tokio::task::spawn_blocking(move || {
             let mut reader = reader;
+            let mut wake_read = wake_read;
             let mut buf = [0u8; 16 * 1024];
             loop {
                 // A requested stop ends the loop once the pipe has nothing left to deliver. It is a
@@ -2304,6 +2430,10 @@ impl PtySession {
                 if !stopping && pause_requested_task.load(Ordering::Acquire) {
                     let mut park = reader_park_task.0.lock();
                     reader_paused_task.store(true, Ordering::Release);
+                    // Published under the park mutex and announced, so an export waiting on
+                    // `await_reader_parked` observes the park instead of missing a wake that landed
+                    // before it started waiting.
+                    reader_park_task.1.notify_all();
                     while pause_requested_task.load(Ordering::Acquire)
                         && !pause_released_task.load(Ordering::Acquire)
                     {
@@ -2338,7 +2468,9 @@ impl PtySession {
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
                         // Re-read the flag rather than the snapshot taken before this read: a stop
-                        // requested during the read is what made it return.
+                        // requested during the read is what made it return. A pause requested
+                        // during the read parks at the top of the next iteration instead of issuing
+                        // another read on the master the successor may already own.
                         if reader_stop_requested_task.load(Ordering::Acquire) {
                             break;
                         }
@@ -2357,6 +2489,7 @@ impl PtySession {
                             tracing::info!(session_id = %metrics_session_id, error = %std::io::Error::last_os_error(), "adopted PTY reader ended: poll failed");
                             break;
                         }
+                        drain_reader_wake(Some(&mut wake_read));
                     }
                     Err(error) => {
                         tracing::info!(session_id = %metrics_session_id, %error, "adopted PTY reader ended: read failed");
@@ -2398,7 +2531,6 @@ impl PtySession {
             reader_finished,
             reader_finished_notify,
             reader_stop_requested,
-            #[cfg(test)]
             reader_phase,
             last_output_at,
             reaped: Arc::new(AtomicBool::new(false)),

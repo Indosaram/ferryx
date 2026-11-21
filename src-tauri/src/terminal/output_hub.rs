@@ -5,6 +5,9 @@ use std::sync::{Arc, Weak};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+use super::scrollback_budget::{Eviction, ScrollbackBudget};
+use super::PtyError;
+
 const DEFAULT_BUFFER_CAPACITY: usize = 512 * 1024; // 512 KiB
 // Sequence-channel lag/backlog bound: 64 chunks x 64 KiB = ~4 MiB worst-case backlog vs
 // the 512 KiB ring = 8 chunks, still 8x headroom over ring coverage. A smaller bound only
@@ -24,6 +27,99 @@ fn resets_whole_screen(bytes: &[u8]) -> bool {
     RESETS
         .iter()
         .any(|reset| bytes.windows(reset.len()).any(|window| window == *reset))
+}
+
+/// Compact wire form for the opaque byte payloads a checkpoint carries.
+///
+/// A checkpoint blob is `serde_json` of [`SessionHubSnapshot`], which holds the retained ring:
+/// 512 KiB of terminal output per session. Serde's default `Vec<u8>`/`Arc<[u8]>` representation is
+/// a JSON **number array** (`[27,91,51,...]`), which writes every byte as one to three decimal
+/// digits plus a comma -- around 3.6x the bytes on this repo's data, built one `serde_json` number
+/// at a time. The keeper never parses a checkpoint (it stores the blob and hands it back
+/// verbatim), so both ends of that cost are the daemon's: the producer serializes the whole ring
+/// every checkpoint, and a recovery deserializes it. Every such transient is large and short
+/// lived, which is the shape that makes a process's footprint oscillate while its steady-state
+/// size is flat.
+///
+/// The wire form is therefore base64 text, matching every other opaque field on these wires
+/// (`daemon::protocol::base64_serde`, `screen_mirror::ScreenSeed`). Measured on a 512 KiB ring:
+/// 699 KB encoded (1.334x) against 1.87 MB for the number array (3.56x).
+/// [`base64::display::Base64Display`] streams the encoding straight into the serializer, so a
+/// checkpoint's cost is the output buffer itself, with no per-chunk copy on the way.
+///
+/// Decoding accepts **both** forms. The keeper holds a checkpoint across a daemon restart and
+/// returns it verbatim, so a successor daemon of this generation can be handed a blob a
+/// predecessor of the previous generation produced; refusing the number array would strand that
+/// recovery point. The array arm is read-only legacy and nothing writes it any more.
+pub(crate) mod compact_bytes {
+    use base64::display::Base64Display;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+    use serde::de::{self, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    /// Streams the base64 text into the serializer: no intermediate `String` per field.
+    fn write<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&Base64Display::new(bytes, &STANDARD))
+    }
+
+    /// base64 text, or the legacy JSON number array.
+    fn read<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        struct BytesVisitor;
+
+        impl<'de> Visitor<'de> for BytesVisitor {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("base64 text or a JSON array of byte values")
+            }
+
+            /// Ahead of the array arm and reached from both borrowed and owned input, since serde's
+            /// default `visit_borrowed_str` forwards here.
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Vec<u8>, E> {
+                STANDARD.decode(value.as_bytes()).map_err(E::custom)
+            }
+
+            /// The pre-base64 wire form, still produced by a keeper holding an older generation's
+            /// checkpoint. The size hint is capped so a malformed frame cannot make this reserve an
+            /// arbitrary amount up front; a genuinely longer array still decodes, it just grows.
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+                let hint = seq.size_hint().unwrap_or(0).min(MAX_BYTES_HINT);
+                let mut bytes = Vec::with_capacity(hint);
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                Ok(bytes)
+            }
+        }
+
+        deserializer.deserialize_any(BytesVisitor)
+    }
+
+    /// Only a pre-allocation hint; a larger array still decodes, it just grows on the way.
+    const MAX_BYTES_HINT: usize = 1024 * 1024;
+
+    /// For [`super::OutputChunk::bytes`], which is shared so the buffer, the sequence broadcast and
+    /// the raw broadcast all point at one allocation.
+    pub(crate) mod as_arc {
+        use super::{read, write};
+        use serde::{Deserializer, Serializer};
+        use std::sync::Arc;
+
+        pub(crate) fn serialize<S: Serializer>(
+            bytes: &Arc<[u8]>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            write(bytes, serializer)
+        }
+
+        pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Arc<[u8]>, D::Error> {
+            read(deserializer).map(Arc::from)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +167,10 @@ pub struct OutputChunk {
     /// Shared, immutable chunk payload. Storing the bytes behind an `Arc` lets the buffer,
     /// the sequence broadcast, and the raw broadcast share a single allocation instead of
     /// deep-copying a 64 KiB `Vec<u8>` for every subscriber on each publish.
+    ///
+    /// Serialized as base64 text, not a JSON number array: this is the field that made a 512 KiB
+    /// checkpoint ring encode to several times its size every minute (see `compact_bytes`).
+    #[serde(with = "compact_bytes::as_arc")]
     pub bytes: Arc<[u8]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_read_unix_micros: Option<u64>,
@@ -887,10 +987,28 @@ pub struct TerminalOutputHub {
     transport_owners: Arc<RwLock<std::collections::HashSet<String>>>,
     exits: Arc<parking_lot::Mutex<HashMap<String, ExitStatusSlot>>>,
     capacity: usize,
+    /// The retention this hub configured for one session. Every session keeps this exact split
+    /// unless the daemon-wide budget below is tighter, so a hub without a budget behaves
+    /// byte-for-byte as it did before Phase 1.
     retention: retained_history::RetentionBudget,
+    /// The daemon-wide retained-scrollback budget, when this hub enforces one.
+    ///
+    /// `None` is not an unbounded path: such a hub still bounds every session at `retention`, it
+    /// simply does not divide one aggregate budget across sessions. Only the daemon opts in
+    /// ([`Self::for_daemon`]); tests, replay-only hubs and paired proxies keep their configured
+    /// retention so introducing the budget cannot change their footprint.
+    budget: Arc<parking_lot::Mutex<Option<ScrollbackBudget>>>,
+    /// Receives `scrollback_budget_exhausted` events; nothing is emitted while no one listens.
+    budget_events: broadcast::Sender<Eviction>,
     /// Receives program status summary changes; installed by the daemon at startup.
     program_status_publisher:
         Arc<RwLock<Option<Arc<dyn super::program_status_ingest::ProgramStatusPublisher>>>>,
+    /// The durable admission charge. Absent leaves the ceiling as the only bound, as before.
+    admission: Arc<parking_lot::Mutex<Option<Arc<super::admission_store::AdmissionLedger>>>>,
+    /// Why admission is refused outright, when it is. Set when the durable log could not be opened
+    /// or reconciled: the true reservation count is then unknown, so admitting would mean guessing
+    /// it, and a guess is what the hard limit exists to prevent.
+    admission_refusal: Arc<parking_lot::Mutex<Option<super::admission_store::StoreError>>>,
 }
 
 impl Default for TerminalOutputHub {
@@ -913,13 +1031,440 @@ impl TerminalOutputHub {
         capacity: usize,
         retention: retained_history::RetentionBudget,
     ) -> Self {
+        Self::with_budget(capacity, retention, None)
+    }
+
+    /// The daemon's production hub: every session shares one configured `SCROLLBACK_BUDGET_BYTES`
+    /// of retained scrollback, so the per-session ceiling is `SCROLLBACK_BUDGET_BYTES / live
+    /// sessions` and the session beyond `budget / MIN_SESSION_HISTORY_BYTES` is refused with a
+    /// typed `SESSION_CAPACITY_EXHAUSTED`. This is the one hub the daemon builds for all its PTYs.
+    ///
+    /// The pair is read through [`super::preferences::configured_scrollback_budget`], so a
+    /// reduced-budget deployment gets a proportionally lower admission limit instead of the
+    /// compiled-in constant. An unusable pair falls back to the defaults there, so a typo cannot
+    /// produce an undefined state.
+    pub fn for_daemon() -> Self {
+        let (budget_bytes, min_session_bytes) = super::preferences::configured_scrollback_budget();
+        Self::for_daemon_with_budget(budget_bytes, min_session_bytes)
+    }
+
+    /// [`Self::for_daemon`] with the pair supplied, for the tests and for a caller that already
+    /// validated the configuration. The pair is validated again here: a hub built with a budget at
+    /// or below libghostty's default would silently restore the pruning `lifecycle.rs` removed.
+    pub fn for_daemon_with_budget(budget_bytes: usize, min_session_bytes: usize) -> Self {
+        let (budget_bytes, min_session_bytes) =
+            super::preferences::validated_scrollback_budget(budget_bytes, min_session_bytes);
+        Self::with_budget(
+            DEFAULT_BUFFER_CAPACITY,
+            retained_history::RetentionBudget::from_total(budget_bytes),
+            Some(ScrollbackBudget::new_with_floor(budget_bytes, min_session_bytes)),
+        )
+    }
+
+    /// A hub that enforces `budget` across its sessions, with `retention` as the per-session split
+    /// and the prior bound. Used by the budget-pressure tests and by any fork that configures its
+    /// own budget.
+    pub fn new_with_budget(
+        capacity: usize,
+        retention: retained_history::RetentionBudget,
+        budget: ScrollbackBudget,
+    ) -> Self {
+        Self::with_budget(capacity, retention, Some(budget))
+    }
+
+    fn with_budget(
+        capacity: usize,
+        retention: retained_history::RetentionBudget,
+        budget: Option<ScrollbackBudget>,
+    ) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             transport_owners: Arc::new(RwLock::new(std::collections::HashSet::new())),
             exits: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             capacity,
             retention,
+            budget: Arc::new(parking_lot::Mutex::new(budget)),
+            budget_events: broadcast::channel(64).0,
             program_status_publisher: Arc::new(RwLock::new(None)),
+            admission: Arc::new(parking_lot::Mutex::new(None)),
+            admission_refusal: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    /// The retention budget that gives a session `ceiling` bytes of retained history.
+    ///
+    /// When the ceiling covers what this hub already configured, the configured split is kept
+    /// verbatim: the budget is a bound, not a re-shaping, so an existing hub's retention (and the
+    /// tests that pin it) is untouched. Only a tighter ceiling re-splits text and images.
+    fn retention_for(&self, ceiling: usize) -> retained_history::RetentionBudget {
+        if ceiling >= self.configured_retention_bytes() {
+            self.retention
+        } else {
+            retained_history::RetentionBudget::from_total(ceiling)
+        }
+    }
+
+    fn configured_retention_bytes(&self) -> usize {
+        self.retention
+            .text_bytes
+            .saturating_add(self.retention.image_bytes)
+    }
+
+    /// True when the budget, not the pre-existing configuration, is the binding constraint. Used
+    /// to leave the screen mirror on its line cap whenever the budget does not bind.
+    fn budget_binds(&self, ceiling: usize) -> bool {
+        ceiling < self.configured_retention_bytes()
+    }
+
+    /// Runs `f` against the ledger if this hub enforces one.
+    fn with_ledger<R>(&self, f: impl FnOnce(&mut ScrollbackBudget) -> R) -> Option<R> {
+        self.budget.lock().as_mut().map(f)
+    }
+
+    /// Admits `session_id` to the daemon-wide scrollback budget or refuses it with the typed
+    /// `SESSION_CAPACITY_EXHAUSTED` error naming the limit. Idempotent for a live session.
+    /// Admission shares the budget with one more session, so the trims that follow are applied
+    /// and announced here rather than on the next write.
+    pub fn admit_session(&self, session_id: &str) -> Result<(), PtyError> {
+        match self.with_ledger(|budget| budget.admit(session_id)) {
+            Some(result) => result?,
+            None => return Ok(()),
+        }
+        self.reapply_ceilings();
+        self.enforce_budget();
+        Ok(())
+    }
+
+    /// Installs the durable charge this hub consults before admitting a new session.
+    ///
+    /// Installing a usable ledger also clears the refusal: the startup pass that retries after a
+    /// repaired log must not keep refusing creates because of the earlier failure.
+    pub fn install_admission(&self, ledger: Arc<super::admission_store::AdmissionLedger>) {
+        *self.admission.lock() = Some(ledger);
+        *self.admission_refusal.lock() = None;
+    }
+
+    /// Refuses every further admission because the durable log cannot be trusted.
+    ///
+    /// This is the fail-closed arm of startup: a corrupt or unwritable log hides an unknown number
+    /// of reservations, so no create is admitted at all. Running sessions keep being served; only
+    /// new ones are refused, and they are refused with the typed store error rather than a
+    /// transient-capacity one, because retrying will not help.
+    pub fn refuse_admission(&self, error: super::admission_store::StoreError) {
+        tracing::error!(%error, "admission is refused: the durable reservation log is unusable");
+        *self.admission.lock() = None;
+        *self.admission_refusal.lock() = Some(error);
+    }
+
+    /// Why admission is currently refused, if it is.
+    pub fn admission_refusal(&self) -> Option<super::admission_store::StoreError> {
+        self.admission_refusal.lock().clone()
+    }
+
+    /// Opens the durable reservation log at `path` and installs it, or refuses every further
+    /// admission when it cannot be read.
+    ///
+    /// This is the startup gate: it runs before any spawn can be accepted, so a reservation left
+    /// by the daemon that died stays charged. A corrupt log returns the typed store error and
+    /// leaves the hub refusing creates; it is never replaced by an empty ledger, because an empty
+    /// ledger would claim the count is zero.
+    ///
+    /// Blocking: performs synchronous disk I/O. Callers on an async runtime must run it through
+    /// `run_blocking` / `spawn_blocking` or a dedicated thread.
+    pub fn open_durable_admission(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Arc<super::admission_store::AdmissionLedger>, super::admission_store::StoreError>
+    {
+        match super::admission_store::open_admission(path) {
+            Ok(ledger) => {
+                self.install_admission(Arc::clone(&ledger));
+                Ok(ledger)
+            }
+            Err(error) => {
+                self.refuse_admission(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    pub fn admission(&self) -> Option<Arc<super::admission_store::AdmissionLedger>> {
+        self.admission.lock().clone()
+    }
+
+    /// The ceiling a durable reservation is charged against: exactly the budget this hub admits
+    /// against, so the disk record and the in-memory bound can never name different limits.
+    pub fn admission_ceiling(&self) -> Option<super::admission_store::AdmissionCeiling> {
+        self.with_ledger(|budget| super::admission_store::AdmissionCeiling::from_budget(budget))
+    }
+
+    /// The configured budget bytes, for the startup log. `None` on a hub that enforces no budget.
+    pub fn budget_bytes(&self) -> Option<usize> {
+        self.with_ledger(|budget| budget.budget_bytes())
+    }
+
+    /// The configured per-session floor, for the startup log. `None` on a hub with no budget.
+    pub fn min_session_bytes(&self) -> Option<usize> {
+        self.with_ledger(|budget| budget.min_session_bytes())
+    }
+
+    /// Charges a durable slot and then the in-memory budget, in that order: the disk write is what
+    /// survives a crash, so it happens before anything else can observe the session.
+    ///
+    /// A store that cannot be written refuses admission outright. Continuing would mean admitting
+    /// against an unknown reservation count, and a crash there could leave a child this daemon has
+    /// no record of.
+    pub fn admit_durably(
+        &self,
+        session_id: &str,
+    ) -> Result<super::admission_store::ReservationOutcome, super::admission_store::AdmissionRefusal>
+    {
+        self.admit_durably_with_request(session_id, None)
+    }
+
+    /// [`Self::admit_durably`] recording `request_id` inside the reservation, so the keeper-client
+    /// retry path can present the same logical spawn id after a crash instead of minting a new one.
+    /// The id is durable before this returns `Ok`, i.e. before any `SPAWN` may leave the process.
+    pub fn admit_durably_with_request(
+        &self,
+        session_id: &str,
+        request_id: Option<&str>,
+    ) -> Result<super::admission_store::ReservationOutcome, super::admission_store::AdmissionRefusal>
+    {
+        if let Some(refusal) = self.admission_refusal() {
+            return Err(super::admission_store::AdmissionRefusal::StoreUnusable(refusal));
+        }
+        let Some(ledger) = self.admission() else {
+            self.admit_session(session_id)
+                .map_err(super::admission_store::AdmissionRefusal::Capacity)?;
+            return Ok(super::admission_store::ReservationOutcome::Reserved);
+        };
+        let Some(ceiling) = self.admission_ceiling() else {
+            self.admit_session(session_id)
+                .map_err(super::admission_store::AdmissionRefusal::Capacity)?;
+            return Ok(super::admission_store::ReservationOutcome::Reserved);
+        };
+        let outcome = ledger.reserve_with_request(session_id, request_id, ceiling)?;
+        if let Err(error) = self.admit_session(session_id) {
+            // The in-memory ceiling is the tighter one, and nothing has been dispatched, so the
+            // durable charge is provably dead and must not be left behind.
+            let _ = ledger.abandon_before_dispatch(session_id, "refused by the in-memory ceiling");
+            return Err(super::admission_store::AdmissionRefusal::Capacity(error));
+        }
+        Ok(outcome)
+    }
+
+    /// The logical spawn request id durably recorded for `session_id`, for a keeper retry.
+    ///
+    /// A retry must present this exact id: the keeper retires a duplicate `SPAWN` by request id,
+    /// so a fresh id turns "retry of spawn A" into "new spawn A" and can fork a second child once
+    /// the first session is gone. `None` means no durable id exists (a direct PTY, or a hub with
+    /// no ledger), and the caller then mints one for a new logical spawn.
+    pub fn admission_request_id(&self, session_id: &str) -> Option<String> {
+        self.admission()?.request_id_for(session_id)
+    }
+
+    /// Counts the sessions startup recovered from the keeper. Never refused, never counted twice.
+    pub fn note_recovered_sessions(
+        &self,
+        session_ids: &[String],
+    ) -> Result<super::admission_store::RecoveredAccounting, super::admission_store::StoreError> {
+        let Some(ledger) = self.admission() else {
+            let mut counted = 0;
+            for session_id in session_ids {
+                self.track_budget_session(session_id);
+                counted += 1;
+            }
+            return Ok(super::admission_store::RecoveredAccounting {
+                counted,
+                bound_reservations: 0,
+            });
+        };
+        let accounting = ledger.note_recovered_sessions(session_ids)?;
+        for session_id in session_ids {
+            self.track_budget_session(session_id);
+        }
+        Ok(accounting)
+    }
+
+    /// Adds a session this hub did not admit through [`Self::admit_session`] (an adopted
+    /// handover session, or one registered before its spawn gate ran). Accounting must cover it;
+    /// the same trims follow because the ceiling changed.
+    pub fn track_budget_session(&self, session_id: &str) {
+        if self.with_ledger(|budget| budget.track(session_id)).is_none() {
+            return;
+        }
+        self.reapply_ceilings();
+        self.enforce_budget();
+    }
+
+    /// Drops a session from the budget, which raises every survivor's ceiling again.
+    pub fn release_budget_session(&self, session_id: &str) {
+        if self.with_ledger(|budget| budget.release(session_id)).is_none() {
+            return;
+        }
+        self.reapply_ceilings();
+        if let Some(ledger) = self.admission() {
+            // The ledger releases only a bound slot: an unacknowledged reservation may still fork.
+            if let Err(error) = ledger.end_session(session_id) {
+                tracing::warn!(%session_id, %error, "admission slot could not be released");
+            }
+        }
+    }
+
+    /// The user looked at this session: it is marked active, so only an older active session is
+    /// evicted before it, and it is the last candidate of all.
+    pub fn note_session_focus(&self, session_id: &str) {
+        let _ = self.with_ledger(|budget| budget.note_focus(session_id));
+    }
+
+    pub fn note_session_blur(&self, session_id: &str) {
+        let _ = self.with_ledger(|budget| budget.note_blur(session_id));
+    }
+
+    pub fn subscribe_budget_events(&self) -> broadcast::Receiver<Eviction> {
+        self.budget_events.subscribe()
+    }
+
+    /// Trims forced so far, the deterministic signal the budget-pressure tests assert on.
+    pub fn eviction_count(&self) -> u64 {
+        self.with_ledger(|budget| budget.eviction_count()).unwrap_or(0)
+    }
+
+    /// Retained bytes this session holds right now, text plus images plus the unit still being
+    /// assembled.
+    pub fn retained_bytes(&self, session_id: &str) -> usize {
+        let Some(session_hub) = self.sessions.read().get(session_id).cloned() else {
+            return 0;
+        };
+        let hub = session_hub.read();
+        hub.buffer.retained.retained_bytes()
+    }
+
+    /// Retained bytes this session is allowed to hold right now: its share of the budget, or the
+    /// hub's configured retention when this hub does not enforce one.
+    pub fn session_ceiling_bytes(&self) -> usize {
+        self.with_ledger(|budget| budget.ceiling_bytes())
+            .unwrap_or_else(|| self.configured_retention_bytes())
+    }
+
+    /// Gives every session the budget its current ceiling allows, and never lowers one:
+    /// lowering is [`Self::enforce_budget`]'s job, so exactly one path evicts and exactly one path
+    /// counts and announces the trim. A raise cannot evict, so this is safe to run on the
+    /// add/remove path where the shared ceiling moves.
+    fn reapply_ceilings(&self) {
+        let Some(ceiling) = self.with_ledger(|budget| budget.ceiling_bytes()) else {
+            return;
+        };
+        let (retention, mirror_limit) = self.retention_and_mirror_limit(ceiling);
+        let sessions: Vec<Arc<RwLock<SessionHub>>> =
+            self.sessions.read().values().cloned().collect();
+        for session_hub in sessions {
+            let mut hub = session_hub.write();
+            let current = hub.buffer.retained.budget();
+            let current_total = current.text_bytes.saturating_add(current.image_bytes);
+            if current_total < retention.text_bytes.saturating_add(retention.image_bytes) {
+                hub.buffer.retained.set_budget(retention);
+            }
+            // The parser's ceiling follows the share in both directions. A shrinking share has to
+            // reach the screen here even when no retained-history trim is needed: the mirror holds
+            // lines outside that ledger, so an older, larger limit would leave the session's real
+            // memory above its share with no trim to show for it.
+            if let Some(screen) = hub.screen.as_ref() {
+                let mut screen = screen.lock();
+                if screen.scrollback_limit_bytes() != Some(mirror_limit) {
+                    screen.set_scrollback_limit_bytes(mirror_limit);
+                }
+            }
+        }
+    }
+
+    /// The byte ceiling the session's screen mirror enforces for `ceiling`. When the budget does not
+    /// bind, the mirror keeps the creation-time ceiling rather than an unset (unlimited) limit, so a
+    /// hub without a binding budget behaves exactly as it did before the budget existed.
+    fn mirror_limit_bytes(&self, ceiling: usize) -> usize {
+        if self.budget_binds(ceiling) {
+            ceiling
+        } else {
+            super::NATIVE_SCROLLBACK_CEILING_BYTES
+        }
+    }
+
+    /// Both halves of a session's share for one ceiling: the retention budget its ring gets and the
+    /// byte limit its screen mirror gets. They are derived together because every caller that
+    /// resizes a session's share must move both; a share applied to only one of them leaves the
+    /// session's real memory above its ceiling with no trim to show for it.
+    fn retention_and_mirror_limit(
+        &self,
+        ceiling: usize,
+    ) -> (retained_history::RetentionBudget, usize) {
+        (self.retention_for(ceiling), self.mirror_limit_bytes(ceiling))
+    }
+
+    /// Records the session's retained history and applies whatever trims the budget requires.
+    /// Called after every published chunk, with no hub lock held.
+    fn account_retained_history(&self, session_id: &str) {
+        let retained = self.retained_bytes(session_id);
+        if self
+            .with_ledger(|budget| budget.note_retained(session_id, retained))
+            .is_none()
+        {
+            return;
+        }
+        self.enforce_budget();
+    }
+
+    /// Drives the budget's trim plan to completion, applying each trim to the session's retained
+    /// history and announcing it as `scrollback_budget_exhausted`. Never holds the budget lock
+    /// across a session lock: the plan is taken, then applied.
+    fn enforce_budget(&self) {
+        let mut stuck = std::collections::HashSet::new();
+        loop {
+            let Some(trim) = self
+                .with_ledger(|budget| budget.next_trim_excluding(&stuck))
+                .flatten()
+            else {
+                return;
+            };
+            let Some(session_hub) = self.sessions.read().get(&trim.session_id).cloned() else {
+                // Not registered in this hub yet: nothing to trim, and the ceiling it will be
+                // built with is already recorded. Retiring it keeps the loop from spinning.
+                stuck.insert(trim.session_id);
+                continue;
+            };
+            let retained_after = {
+                let mut hub = session_hub.write();
+                let (retention, mirror_limit) =
+                    self.retention_and_mirror_limit(trim.target_bytes);
+                hub.buffer.retained.set_budget(retention);
+                if let Some(screen) = hub.screen.as_ref() {
+                    screen
+                        .lock()
+                        .set_scrollback_limit_bytes(mirror_limit);
+                }
+                hub.buffer.retained.retained_bytes()
+            };
+            let eviction = match self.with_ledger(|budget| {
+                budget.record_trim(&trim.session_id, trim.target_bytes, retained_after)
+            }) {
+                Some(eviction) => eviction,
+                None => return,
+            };
+            if eviction.released_bytes == 0 {
+                // This session's whole retained history is the unit it is assembling right now:
+                // nothing more can go. Its ceiling stays in force for the next write, and the
+                // remaining sessions are still brought down.
+                stuck.insert(trim.session_id);
+                continue;
+            }
+            tracing::warn!(
+                session_id = %eviction.session_id,
+                ceiling_bytes = eviction.ceiling_bytes,
+                released_bytes = eviction.released_bytes,
+                eviction_count = eviction.eviction_count,
+                "scrollback_budget_exhausted"
+            );
+            let _ = self.budget_events.send(eviction);
         }
     }
 
@@ -1069,10 +1614,18 @@ impl TerminalOutputHub {
     ) {
         let (tx, rx) = broadcast::channel(BROADCAST_CAPACITY);
         let (raw_tx, raw_rx) = broadcast::channel(RAW_BROADCAST_CAPACITY);
+        // Tracked before the ceiling is read so the new session's own share already accounts for
+        // it; a session registered without passing the spawn gate (an adopted handover session,
+        // a paired proxy) is still covered, or its history would be unbounded.
+        let _ = self.with_ledger(|budget| budget.track(session_id));
+        let ceiling = self.session_ceiling_bytes();
+        let (retention, mirror_limit) = self.retention_and_mirror_limit(ceiling);
         let hub = SessionHub {
             exit_status: self.exit_status(session_id).unwrap_or_else(|| self.begin_exit_status(session_id)),
             machine_senders: Vec::new(),
-            buffer: BoundedBuffer::with_retention(self.capacity, self.retention),
+            // The session's share of the daemon budget, not the hub-wide ring capacity: the
+            // ceiling is recomputed on every session add/remove.
+            buffer: BoundedBuffer::with_retention(self.capacity, retention),
             sender: tx,
             raw_sender: raw_tx,
             resize_ledger: Vec::new(),
@@ -1084,8 +1637,16 @@ impl TerminalOutputHub {
             screen: super::screen_mirror::ScreenMirror::new(80, 24).map(parking_lot::Mutex::new),
         };
         let hub = Arc::new(RwLock::new(hub));
+        {
+            let registered = hub.read();
+            if let Some(screen) = registered.screen.as_ref() {
+                screen.lock().set_scrollback_limit_bytes(mirror_limit);
+            }
+        }
         spawn_screen_compression(&hub);
         self.sessions.write().insert(session_id.to_string(), hub);
+        // Survivors whose ceiling the new session just lowered are brought down now.
+        self.enforce_budget();
         (raw_rx, rx)
     }
 
@@ -1206,6 +1767,8 @@ impl TerminalOutputHub {
             chunk.sequence,
             Arc::clone(&chunk.bytes),
         );
+        // Charged after every lock is released: the budget may trim this or another session.
+        self.account_retained_history(session_id);
 
         Some((chunk, ingest.replies))
     }
@@ -1285,6 +1848,8 @@ impl TerminalOutputHub {
         hub.subscribed = true;
         let ended = hub.ended;
         drop(hub);
+        // The pane in view is the last eviction candidate, so subscribing is a focus event.
+        self.note_session_focus(session_id);
         if ended {
             self.remove_ended_session(session_id);
         }
@@ -1355,6 +1920,8 @@ impl TerminalOutputHub {
         };
         let ended = hub.ended;
         drop(hub);
+        // The pane in view is the last eviction candidate, so subscribing is a focus event.
+        self.note_session_focus(session_id);
         if ended {
             self.remove_ended_session(session_id);
         }
@@ -1392,10 +1959,45 @@ impl TerminalOutputHub {
         Some((attachment, ranges))
     }
 
+    /// The per-session recovery ring's byte capacity.
+    ///
+    /// This is the most history one attach can be served as a single chunk: [`BoundedBuffer`]
+    /// evicts whatever pushes the total past it. A recovery that has to rebuild a session's history
+    /// from the keeper reads this many trailing bytes and no more, so the first chunk it publishes
+    /// is already the whole tail a reader needs instead of a prefix that only becomes the history
+    /// once the last page lands.
+    pub fn session_ring_capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Records that the history this hub holds begins **mid-stream**, without publishing a seam.
+    ///
+    /// [`Self::publish_gap`] marks a hole that opens inside a live stream: it pushes seam text so a
+    /// reader sees where output was lost. A recovery hole is the other shape -- the bytes before
+    /// the recovered tail were never in this hub at all -- so there is no splice to announce, and
+    /// pushing seam bytes here would shift every later hub byte off the keeper's offset axis by the
+    /// seam's length, which is exactly the axis a checkpoint offset is derived from. The floor and
+    /// the incomplete flag carry the same information without moving it.
+    pub fn mark_history_gap(&self, session_id: &str) -> bool {
+        let Some(session_hub) = self.sessions.read().get(session_id).cloned() else {
+            return false;
+        };
+        let mut hub = session_hub.write();
+        let floor = hub.buffer.next_sequence().max(1);
+        hub.buffer.gap_floor = floor;
+        hub.replay_gap = Some(ReplayGap {
+            requested_after_sequence: floor.saturating_sub(1),
+            available_from_sequence: floor,
+        });
+        hub.history_incomplete = true;
+        true
+    }
+
     pub fn remove_session(&self, session_id: &str) {
         self.sessions.write().remove(session_id);
         self.exits.lock().remove(session_id);
         self.transport_owners.write().remove(session_id);
+        self.release_budget_session(session_id);
     }
 
     pub fn has_session(&self, session_id: &str) -> bool {
@@ -1429,6 +2031,8 @@ impl TerminalOutputHub {
             drop(sessions);
             self.exits.lock().remove(session_id);
             self.transport_owners.write().remove(session_id);
+            // The session is gone, so its share of the budget goes back to the survivors.
+            self.release_budget_session(session_id);
         }
     }
 
@@ -1466,6 +2070,23 @@ impl TerminalOutputHub {
     }
 
     pub fn export_session_state(&self, session_id: &str) -> Option<SessionHubSnapshot> {
+        let (snapshot, _published_bytes) = self.export_session_state_with_offset(session_id)?;
+        Some(snapshot)
+    }
+
+    /// [`Self::export_session_state`] plus the cumulative published-byte counter, both read under
+    /// the same `SessionHub` lock so the state and the offset are one atomic observation.
+    ///
+    /// The counter is the number of output bytes this hub has published for the session, not a
+    /// chunk or sequence count. It is never larger than what the snapshot contains: a gap seam adds
+    /// text to the state without moving the counter ([`Self::publish_gap`]), so the state covers at
+    /// least `[0, published_bytes)`. A caller that commits a checkpoint against a larger number
+    /// truncates replay past bytes the state never applied; reading the counter in a second call has
+    /// the same hole, because the hub applies chunks on another thread.
+    pub fn export_session_state_with_offset(
+        &self,
+        session_id: &str,
+    ) -> Option<(SessionHubSnapshot, u64)> {
         let session_hub = {
             let sessions = self.sessions.read();
             sessions.get(session_id).cloned()
@@ -1473,7 +2094,7 @@ impl TerminalOutputHub {
         let hub = session_hub.read();
         let mut snapshot = hub.export_state();
         snapshot.transport_owner = self.transport_owner(session_id);
-        Some(snapshot)
+        Some((snapshot, hub.published_bytes))
     }
 
     pub fn import_session_state(
@@ -1543,6 +2164,11 @@ impl TerminalOutputHub {
         } else {
             self.transport_owners.write().remove(session_id);
         }
+
+        // The imported history is the predecessor's and had no ceiling here yet: the session is
+        // live in this daemon now, so it takes a share of the budget like any other. Without this
+        // a restored session's retained bytes would sit outside every bound.
+        self.track_budget_session(session_id);
 
         Ok(())
     }
@@ -2821,6 +3447,37 @@ mod tests {
     }
 
     #[test]
+    fn a_recovered_midstream_history_is_flagged_without_moving_the_sequence_axis() {
+        // A recovery that read only the tail of a longer log begins mid-stream. An attach must be
+        // able to say so, but the hub's own sequence numbers are the axis a checkpoint offset is
+        // derived from, so the flag is carried on the floor and the incomplete bit -- never as
+        // seam bytes, which would shift every later hub byte off the keeper's offsets.
+        let hub = TerminalOutputHub::default();
+        hub.register_session("recovered");
+        assert!(hub.mark_history_gap("recovered"));
+
+        let attachment = hub
+            .subscribe_with_sequence("recovered", Some(0))
+            .expect("attachment");
+        assert!(
+            attachment.snapshot.gap.is_some(),
+            "an attach below the recovered floor is told the history begins mid-stream"
+        );
+        assert!(
+            !attachment.snapshot.history_incomplete || attachment.snapshot.gap.is_some(),
+            "a reader is never told the history is whole while a prefix is missing"
+        );
+
+        // The axis is untouched: the first real byte is still sequence 1, which is what a keeper
+        // offset of `head - tail` maps onto. Seam bytes would have consumed a sequence number.
+        let chunk = hub.publish("recovered", b"tail".to_vec()).expect("published");
+        assert_eq!(chunk.sequence, 1, "marking the gap must not consume a sequence number");
+
+        // A session the hub never saw cannot be marked: there is no floor to set.
+        assert!(!hub.mark_history_gap("never-seen"));
+    }
+
+    #[test]
     fn test_publish_clears_replay_gap_and_does_not_pollute_none_subscribers() {
         let hub = TerminalOutputHub::new(1024);
         hub.register_session("gap-clear-test");
@@ -2917,5 +3574,560 @@ mod tests {
             .await
             .expect("the driver must exit once the hub is gone")
             .expect("driver task");
+    }
+
+    // ---- Scrollback budget: deterministic pressure, no clock involved ----
+
+    /// A hub whose budget is small enough to be exhausted by a few writes, so the tests assert
+    /// on the eviction counter instead of waiting for anything.
+    fn budgeted_hub(budget_bytes: usize, min_session_bytes: usize) -> TerminalOutputHub {
+        TerminalOutputHub::new_with_budget(
+            64 * 1024,
+            retained_history::RetentionBudget::from_total(budget_bytes),
+            ScrollbackBudget::new_with_floor(budget_bytes, min_session_bytes),
+        )
+    }
+
+    /// Publishes 64 KiB chunks until the session's retained history reaches its ceiling.
+    fn fill_to_ceiling(hub: &TerminalOutputHub, session_id: &str) {
+        let ceiling = hub.session_ceiling_bytes();
+        let payload = vec![b'h'; 64 * 1024];
+        let mut written = 0;
+        while written + payload.len() <= ceiling {
+            hub.publish(session_id, payload.clone());
+            written += payload.len();
+        }
+    }
+
+    #[test]
+    fn a_session_beyond_the_admission_limit_is_refused_with_the_typed_error() {
+        // 1 MiB budget / 256 KiB floor = 4 sessions, and the fifth is refused by name.
+        let hub = budgeted_hub(1024 * 1024, 256 * 1024);
+        for index in 0..4 {
+            hub.admit_session(&format!("s{index}")).expect("admit within limit");
+        }
+        let error = hub.admit_session("s4").expect_err("session 5 is refused");
+        assert!(
+            matches!(error, crate::terminal::PtyError::SessionCapacityExhausted { limit: 4, .. }),
+            "expected a typed capacity refusal, got: {error:?}"
+        );
+        // The refusal names the limit in its message, so a log reader never has to guess.
+        assert!(error.to_string().contains("SESSION_CAPACITY_EXHAUSTED"));
+        assert!(error.to_string().contains("4 concurrent sessions"));
+        // Nothing was admitted, and nothing was silently given zero history.
+        assert_eq!(hub.session_ceiling_bytes(), 256 * 1024);
+    }
+
+    #[test]
+    fn admission_pressure_emits_scrollback_budget_exhausted_and_trims_inactive_first() {
+        // Two sessions share 4 MiB (2 MiB each); a third lowers both to 1.33 MiB.
+        let hub = budgeted_hub(4 * 1024 * 1024, 512 * 1024);
+        hub.admit_session("inactive").expect("admit");
+        hub.register_session("inactive");
+        hub.admit_session("active").expect("admit");
+        hub.register_session("active");
+        assert_eq!(hub.session_ceiling_bytes(), 2 * 1024 * 1024);
+
+        hub.note_session_focus("inactive");
+        hub.note_session_focus("active");
+        hub.note_session_blur("inactive");
+
+        fill_to_ceiling(&hub, "inactive");
+        fill_to_ceiling(&hub, "active");
+        assert_eq!(hub.eviction_count(), 0, "nothing is over budget yet");
+
+        let mut events = hub.subscribe_budget_events();
+        let before = hub.eviction_count();
+        hub.admit_session("focused").expect("admit");
+        hub.register_session("focused");
+        hub.note_session_focus("focused");
+
+        assert!(hub.eviction_count() > before, "the lowered ceiling must force trims");
+        // The inactive pane is the first candidate; the focused pane is never first.
+        let first = events.try_recv().expect("scrollback_budget_exhausted event");
+        assert_eq!(first.session_id, "inactive");
+        assert_eq!(first.ceiling_bytes, 4 * 1024 * 1024 / 3);
+        assert!(first.released_bytes > 0);
+        assert!(first.eviction_count >= 1);
+        assert_ne!(first.session_id, "focused", "the focused pane is evicted last");
+    }
+
+    #[test]
+    fn a_sole_focused_session_is_trimmed_to_its_own_ceiling_not_left_unbounded() {
+        // One session alone owns the whole budget; its retained history still stops there.
+        let hub = budgeted_hub(1024 * 1024, 256 * 1024);
+        hub.admit_session("only").expect("admit");
+        hub.register_session("only");
+        hub.note_session_focus("only");
+        assert_eq!(hub.session_ceiling_bytes(), 1024 * 1024);
+
+        // The focused pane writes far past every bound it could hope for. Its own ceiling is what
+        // stops it, and the recording is what proves it: no unbounded path is left behind.
+        for _ in 0..40 {
+            hub.publish("only", vec![b'o'; 64 * 1024]);
+        }
+        assert!(
+            hub.retained_bytes("only") <= 1024 * 1024,
+            "retained {} exceeds the focused pane's own ceiling",
+            hub.retained_bytes("only")
+        );
+        assert_eq!(hub.session_ceiling_bytes(), 1024 * 1024);
+    }
+
+    #[test]
+    fn floor_exhaustion_keeps_the_next_write_at_the_focused_panes_own_ceiling() {
+        // 3 sessions x 1 MiB share = the whole budget, so every pane's ceiling is the floor.
+        let hub = budgeted_hub(3 * 1024 * 1024, 1024 * 1024);
+        for session in ["a", "b", "c"] {
+            hub.admit_session(session).expect("admit");
+            hub.register_session(session);
+        }
+        let ceiling = hub.session_ceiling_bytes();
+        assert_eq!(ceiling, 1024 * 1024);
+        hub.note_session_focus("c");
+
+        for session in ["a", "b"] {
+            fill_to_ceiling(&hub, session);
+        }
+        assert_eq!(hub.eviction_count(), 0, "at the floor nothing needs to go yet");
+
+        // The focused pane writes past every bound it could hope for and is still held to its own
+        // ceiling: the floor is what stops it, for the focused pane exactly as for the others.
+        for _ in 0..40 {
+            hub.publish("c", vec![b'c'; 64 * 1024]);
+        }
+        assert!(hub.retained_bytes("c") <= ceiling);
+        assert!(hub.retained_bytes("a") <= ceiling);
+        assert!(hub.retained_bytes("b") <= ceiling);
+    }
+
+    #[test]
+    fn lowering_a_session_to_the_floor_evicts_and_is_counted() {
+        // Three panes, each filled to the 2 MiB share the ceiling gives them. A fourth lowers
+        // every share to 1.5 MiB, and the trims that forces are what the counter reports.
+        let hub = budgeted_hub(6 * 1024 * 1024, 1024 * 1024);
+        for session in ["a", "b", "c"] {
+            hub.admit_session(session).expect("admit");
+            hub.register_session(session);
+        }
+        assert_eq!(hub.session_ceiling_bytes(), 6 * 1024 * 1024 / 3);
+        for session in ["a", "b", "c"] {
+            fill_to_ceiling(&hub, session);
+        }
+        assert_eq!(hub.eviction_count(), 0, "nothing is over its share yet");
+
+        let mut events = hub.subscribe_budget_events();
+        hub.admit_session("d").expect("admit");
+        hub.register_session("d");
+
+        assert_eq!(hub.session_ceiling_bytes(), 6 * 1024 * 1024 / 4);
+        assert_eq!(hub.eviction_count(), 3, "every survivor above the new share is trimmed");
+        let first = events.try_recv().expect("scrollback_budget_exhausted event");
+        assert_eq!(first.session_id, "a", "the least recently focused survivor gives first");
+        assert!(first.released_bytes > 0);
+        for session in ["a", "b", "c"] {
+            assert!(hub.retained_bytes(session) <= hub.session_ceiling_bytes());
+        }
+    }
+
+    #[test]
+    fn removing_a_session_raises_every_survivors_ceiling_again() {
+        let hub = budgeted_hub(2 * 1024 * 1024, 512 * 1024);
+        hub.admit_session("a").expect("admit");
+        hub.admit_session("b").expect("admit");
+        assert_eq!(hub.session_ceiling_bytes(), 1024 * 1024);
+        hub.release_budget_session("b");
+        assert_eq!(hub.session_ceiling_bytes(), 2 * 1024 * 1024);
+    }
+
+    // ---- Production budget and durable admission ----
+
+    #[test]
+    fn the_daemon_budget_pair_sets_the_ceiling_and_the_admission_limit() {
+        // 1 MiB across sessions with a 256 KiB floor: four sessions, the fifth is refused.
+        let hub = TerminalOutputHub::for_daemon_with_budget(1024 * 1024, 256 * 1024);
+        assert_eq!(hub.budget_bytes(), Some(1024 * 1024));
+        assert_eq!(hub.min_session_bytes(), Some(256 * 1024));
+        assert_eq!(
+            hub.admission_ceiling(),
+            Some(crate::terminal::admission_store::AdmissionCeiling {
+                limit: 4,
+                budget_bytes: 1024 * 1024,
+                min_session_bytes: 256 * 1024,
+            })
+        );
+
+        for index in 0..4 {
+            hub.admit_session(&format!("s{index}")).expect("admit within limit");
+        }
+        assert_eq!(hub.session_ceiling_bytes(), 256 * 1024);
+        let error = hub.admit_session("s4").expect_err("the fifth is refused");
+        assert!(
+            matches!(
+                error,
+                crate::terminal::PtyError::SessionCapacityExhausted {
+                    limit: 4,
+                    // A pattern takes the literal pair, not the `1024 * 1024` expression.
+                    budget_bytes: 1_048_576,
+                    min_session_bytes: 262_144,
+                }
+            ),
+            "the refusal carries the configured pair, not the compiled-in one: {error:?}"
+        );
+    }
+
+    #[test]
+    fn an_unusable_budget_pair_falls_back_to_the_compiled_in_default() {
+        // A zero budget, a floor at libghostty's own default, and a floor above the budget are
+        // all unusable; none may produce a hub that prunes or refuses everything.
+        let defaults = (
+            crate::terminal::preferences::DEFAULT_SCROLLBACK_BUDGET_BYTES,
+            crate::terminal::preferences::MIN_SESSION_HISTORY_BYTES,
+        );
+        for (budget, min) in [
+            (0usize, 256 * 1024usize),
+            (1024 * 1024, 0),
+            (1024 * 1024, crate::terminal::preferences::LIBGHOSTTY_DEFAULT_SCROLLBACK_BYTES),
+            (1024 * 1024, 1024 * 1024 + 1),
+        ] {
+            let hub = TerminalOutputHub::for_daemon_with_budget(budget, min);
+            assert_eq!(
+                (hub.budget_bytes(), hub.min_session_bytes()),
+                (Some(defaults.0), Some(defaults.1)),
+                "({budget}, {min}) must fall back to the defaults"
+            );
+        }
+    }
+
+    #[test]
+    fn a_budget_pair_at_its_own_floor_is_usable_and_admits_one_session() {
+        // `min == budget` is not a typo the fallback covers: it is a deployment that wants exactly
+        // one full-budget pane. Only a floor *above* the budget is unusable.
+        let hub = TerminalOutputHub::for_daemon_with_budget(1024 * 1024, 1024 * 1024);
+        assert_eq!(hub.budget_bytes(), Some(1024 * 1024));
+        assert_eq!(hub.min_session_bytes(), Some(1024 * 1024));
+        assert_eq!(hub.admission_ceiling().map(|ceiling| ceiling.limit), Some(1));
+    }
+
+    #[test]
+    fn the_daemon_hub_agrees_with_the_configured_pair() {
+        // No environment mutation: this asserts the two agree for whatever is configured here.
+        let (budget, min) = crate::terminal::preferences::configured_scrollback_budget();
+        let hub = TerminalOutputHub::for_daemon();
+        assert_eq!(hub.budget_bytes(), Some(budget));
+        assert_eq!(hub.min_session_bytes(), Some(min));
+        assert_eq!(
+            hub.admission_ceiling().map(|ceiling| ceiling.limit),
+            Some((budget / min.max(1)).max(1)),
+            "the admission limit must follow the configured budget"
+        );
+    }
+
+    #[test]
+    fn a_hub_without_a_budget_reports_no_ceiling_and_admits_everything() {
+        let hub = TerminalOutputHub::new(1024);
+        assert_eq!(hub.budget_bytes(), None);
+        assert_eq!(hub.min_session_bytes(), None);
+        assert_eq!(hub.admission_ceiling(), None);
+        for index in 0..64 {
+            hub.admit_session(&format!("s{index}")).expect("no budget, no limit");
+        }
+    }
+
+    #[test]
+    fn a_corrupt_log_leaves_the_hub_refusing_creates() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = crate::terminal::admission_store::admission_path_for(dir.path());
+        std::fs::write(&path, b"not a reservation log at all").expect("damage");
+
+        let hub = TerminalOutputHub::for_daemon_with_budget(4 * 1024 * 1024, 1024 * 1024);
+        let error = hub.open_durable_admission(&path).expect_err("must fail closed");
+        assert!(matches!(
+            error,
+            crate::terminal::admission_store::StoreError::BadMagic
+        ));
+        assert_eq!(hub.admission_refusal(), Some(error));
+        assert!(hub.admission().is_none(), "no empty ledger may stand in for it");
+
+        let refusal = hub
+            .admit_durably("pane-a")
+            .expect_err("creates are refused while the log is unusable");
+        assert!(
+            matches!(refusal, crate::terminal::admission_store::AdmissionRefusal::StoreUnusable(_)),
+            "the refusal names the store, not a transient capacity limit: {refusal:?}"
+        );
+        assert!(matches!(
+            crate::terminal::PtyError::from_admission_refusal(refusal),
+            crate::terminal::PtyError::AdmissionStoreUnusable(_)
+        ));
+    }
+
+    #[test]
+    fn an_answered_reservation_survives_a_restart_and_an_unanswered_one_stays_charged() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = crate::terminal::admission_store::admission_path_for(dir.path());
+
+        let first = TerminalOutputHub::for_daemon_with_budget(4 * 1024 * 1024, 1024 * 1024);
+        first.open_durable_admission(&path).expect("open");
+        first
+            .admit_durably_with_request("pane-acked", Some("spawn-acked"))
+            .expect("reserve");
+        first
+            .admit_durably_with_request("pane-lost", Some("spawn-lost"))
+            .expect("reserve");
+        // The acknowledged spawn is bound; the other keeps no acknowledgement, as a crash mid-spawn
+        // would leave it.
+        first.admission().expect("ledger").bind("pane-acked").expect("bind");
+        drop(first);
+
+        let restarted = TerminalOutputHub::for_daemon_with_budget(4 * 1024 * 1024, 1024 * 1024);
+        let ledger = restarted.open_durable_admission(&path).expect("reopen");
+        assert_eq!(ledger.charged(), 2, "both records occupy a slot");
+        assert_eq!(ledger.pending(), 1, "only the unanswered one may still fork");
+        assert_eq!(
+            restarted.admission_request_id("pane-lost").as_deref(),
+            Some("spawn-lost"),
+            "the retry after the restart presents the id the first attempt recorded"
+        );
+        assert_eq!(
+            restarted.admission_request_id("pane-acked"),
+            None,
+            "an acknowledged spawn has no retry to protect"
+        );
+    }
+
+    #[test]
+    fn recovered_sessions_are_charged_once_and_never_against_the_ceiling() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = crate::terminal::admission_store::admission_path_for(dir.path());
+        // Two sessions' worth of admission limit, so recovering three proves the ceiling is not
+        // consulted; a restart must not deny the panes that are already running.
+        let hub = TerminalOutputHub::for_daemon_with_budget(2 * 1024 * 1024, 1024 * 1024);
+        hub.open_durable_admission(&path).expect("open");
+        assert_eq!(hub.admission_ceiling().map(|ceiling| ceiling.limit), Some(2));
+        let recovered = vec![
+            "pane-a".to_string(),
+            "pane-b".to_string(),
+            "pane-c".to_string(),
+        ];
+
+        let accounting = hub.note_recovered_sessions(&recovered).expect("recover");
+        assert_eq!(accounting.counted, 3, "recovery is not an admission");
+        assert_eq!(hub.admission().expect("ledger").charged(), 3);
+        // Recovered panes join the budget, so each share is now below the floor and the floor is
+        // what bounds the retained history: the ceiling never falls under it.
+        assert_eq!(hub.session_ceiling_bytes(), 1024 * 1024);
+
+        // A new create is refused: the recovered panes fill the configured limit.
+        let refusal = hub.admit_durably("pane-d").expect_err("the limit is full");
+        assert!(matches!(
+            refusal,
+            crate::terminal::admission_store::AdmissionRefusal::Capacity(_)
+        ));
+
+        // A second pass over the same list (a retried startup) charges nothing new.
+        let again = hub.note_recovered_sessions(&recovered).expect("recover again");
+        assert_eq!(again.counted, 0);
+        assert_eq!(hub.admission().expect("ledger").charged(), 3);
+    }
+
+    #[test]
+    fn a_create_refused_by_the_in_memory_ceiling_abandons_its_durable_record() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = crate::terminal::admission_store::admission_path_for(dir.path());
+        let hub = TerminalOutputHub::for_daemon_with_budget(2 * 1024 * 1024, 1024 * 1024);
+        let ledger = hub.open_durable_admission(&path).expect("open");
+        // Fill the budget without a durable charge, so the durable limit still has room and the
+        // in-memory one is what refuses: that is the only shape that reaches the abandon arm.
+        hub.track_budget_session("budget-only-0");
+        hub.track_budget_session("budget-only-1");
+        assert_eq!(ledger.charged(), 0);
+
+        let refusal = hub.admit_durably("pane-a").expect_err("the budget is full");
+        assert!(matches!(
+            refusal,
+            crate::terminal::admission_store::AdmissionRefusal::Capacity(_)
+        ));
+        assert!(
+            !ledger.is_charged("pane-a"),
+            "nothing was dispatched, so the record it wrote is provably dead"
+        );
+        assert_eq!(
+            ledger.store().state_of("pane-a"),
+            Some(crate::terminal::admission_store::ReservationState::Abandoned {
+                detail: "refused by the in-memory ceiling".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_create_refused_by_the_durable_ceiling_writes_no_record() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = crate::terminal::admission_store::admission_path_for(dir.path());
+        let hub = TerminalOutputHub::for_daemon_with_budget(2 * 1024 * 1024, 1024 * 1024);
+        let ledger = hub.open_durable_admission(&path).expect("open");
+
+        // Two sessions fill the budget; the third is refused, and nothing about it is recorded.
+        hub.admit_durably("pane-a").expect("first");
+        hub.admit_durably("pane-b").expect("second");
+        let refusal = hub.admit_durably("pane-c").expect_err("third is refused");
+        assert!(matches!(
+            refusal,
+            crate::terminal::admission_store::AdmissionRefusal::Capacity(_)
+        ));
+        assert!(!ledger.is_charged("pane-c"), "a refused create is charged nothing");
+        assert_eq!(ledger.charged(), 2);
+        assert_eq!(ledger.store().state_of("pane-c"), None);
+    }
+
+    #[test]
+    fn a_retried_spawn_reuses_its_durable_request_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = crate::terminal::admission_store::admission_path_for(dir.path());
+        let hub = TerminalOutputHub::for_daemon_with_budget(4 * 1024 * 1024, 1024 * 1024);
+        hub.open_durable_admission(&path).expect("open");
+        hub.admit_durably_with_request("pane-a", Some("spawn-1"))
+            .expect("reserve");
+        assert_eq!(hub.admission_request_id("pane-a").as_deref(), Some("spawn-1"));
+
+        // The retry reads the id back rather than minting a new one.
+        let retry_id = hub
+            .admission_request_id("pane-a")
+            .expect("the retry must reuse this id");
+        hub.admit_durably_with_request("pane-a", Some(&retry_id))
+            .expect("retry");
+        assert_eq!(hub.admission_request_id("pane-a").as_deref(), Some("spawn-1"));
+        assert_eq!(hub.admission().expect("ledger").charged(), 1);
+    }
+
+    #[test]
+    fn a_hub_without_a_ledger_records_no_request_id_and_still_admits() {
+        let hub = TerminalOutputHub::new(1024);
+        hub.admit_durably_with_request("pane-a", Some("spawn-1"))
+            .expect("a replay-only hub has nothing to persist");
+        assert_eq!(hub.admission_request_id("pane-a"), None);
+    }
+
+    /// Every byte value, so a codec that mangles NULs, quotes, backslashes or high bytes fails.
+    fn opaque_payload(len: usize) -> Vec<u8> {
+        (0..len).map(|index| (index % 251) as u8).collect()
+    }
+
+    fn snapshot_with_payload(payload: Vec<u8>) -> SessionHubSnapshot {
+        SessionHubSnapshot {
+            capacity: 512 * 1024,
+            chunks: vec![
+                OutputChunk {
+                    sequence: 1,
+                    bytes: Arc::from(opaque_payload(payload.len() / 2)),
+                    metrics_read_unix_micros: None,
+                    replay_gap: None,
+                },
+                OutputChunk {
+                    sequence: 2,
+                    bytes: Arc::from(payload),
+                    metrics_read_unix_micros: Some(7),
+                    replay_gap: Some(ReplayGap {
+                        requested_after_sequence: 3,
+                        available_from_sequence: 5,
+                    }),
+                },
+            ],
+            next_sequence: 3,
+            bracketed_paste_enabled: true,
+            resize_ledger: vec![ResizePoint { sequence: 2, cols: 120, rows: 40 }],
+            replay_gap: None,
+            gap_floor: 0,
+            transport_owner: true,
+            retained_state: None,
+            screen_seed: Some(super::super::screen_mirror::ScreenSeed {
+                cols: 120,
+                rows: 40,
+                bytes: opaque_payload(4096),
+            }),
+            history_incomplete: false,
+        }
+    }
+
+    /// A checkpoint's byte fields must survive a round trip unchanged. This is the whole contract
+    /// the keeper relies on: it stores the blob and hands it back verbatim.
+    #[test]
+    fn checkpoint_snapshot_round_trips_every_byte_field() {
+        let snapshot = snapshot_with_payload(opaque_payload(64 * 1024));
+        let encoded = serde_json::to_vec(&snapshot).expect("checkpoint serializes");
+        let decoded: SessionHubSnapshot =
+            serde_json::from_slice(&encoded).expect("checkpoint deserializes");
+        assert_eq!(decoded, snapshot);
+    }
+
+    /// A predecessor daemon of the previous generation wrote `Vec<u8>` as a JSON number array, and
+    /// the keeper can hand that blob to this generation's successor. It must still restore.
+    ///
+    /// `screenSeed` is base64 in the fixture on purpose: that field was already base64 before this
+    /// change, so the ring chunks are the fields that had a number-array form to still accept.
+    #[test]
+    fn checkpoint_snapshot_still_decodes_the_legacy_number_array_form() {
+        let legacy = serde_json::json!({
+            "capacity": 1024,
+            "chunks": [
+                { "sequence": 1, "bytes": [104, 105, 0, 255] },
+            ],
+            "next_sequence": 2,
+            "bracketed_paste_enabled": false,
+            "resize_ledger": [],
+            "replay_gap": null,
+            "gap_floor": 0,
+            "transport_owner": false,
+            "retained_state": null,
+            "screen_seed": { "cols": 80, "rows": 24, "bytes": "G1tI" },
+            "history_incomplete": false,
+        });
+        let decoded: SessionHubSnapshot =
+            serde_json::from_value(legacy).expect("a legacy checkpoint still decodes");
+        assert_eq!(&decoded.chunks[0].bytes[..], &b"hi\x00\xff"[..]);
+        assert_eq!(decoded.screen_seed.expect("seed").bytes, b"\x1b[H".to_vec());
+    }
+
+    /// The size bound: a 512 KiB ring -- the retained ceiling -- must encode to well under 1.4x.
+    /// The number-array form was ~4x, and that transient is what this encoding exists to remove.
+    #[test]
+    fn a_512_kib_checkpoint_ring_encodes_to_under_1_4x() {
+        let ring = 512 * 1024;
+        let snapshot = SessionHubSnapshot {
+            capacity: ring,
+            chunks: vec![OutputChunk {
+                sequence: 1,
+                bytes: Arc::from(opaque_payload(ring)),
+                metrics_read_unix_micros: None,
+                replay_gap: None,
+            }],
+            next_sequence: 2,
+            bracketed_paste_enabled: false,
+            resize_ledger: Vec::new(),
+            replay_gap: None,
+            gap_floor: 0,
+            transport_owner: false,
+            retained_state: None,
+            screen_seed: None,
+            history_incomplete: false,
+        };
+
+        let encoded = serde_json::to_vec(&snapshot).expect("checkpoint serializes");
+        let boundary = ring * 14 / 10;
+        assert!(
+            encoded.len() < boundary,
+            "a {ring}-byte ring encoded to {} bytes, at or past the {boundary}-byte boundary: \
+             the byte fields are back to a JSON number array",
+            encoded.len()
+        );
+
+        // And the legacy form really is far larger, so this bound is not vacuous.
+        let legacy = serde_json::to_vec(&opaque_payload(ring)).expect("the legacy form serializes");
+        assert!(
+            legacy.len() > 3 * ring,
+            "the number-array form this replaces was {} bytes for {ring} bytes of output, which \
+             is the ~4x blowup the compact encoding removes",
+            legacy.len()
+        );
     }
 }

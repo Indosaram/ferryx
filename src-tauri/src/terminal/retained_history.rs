@@ -30,6 +30,19 @@ impl RetentionBudget {
         }
     }
 
+    /// Splits one total ceiling between text and images in the same ratio as
+    /// [`Self::from_text_capacity`], so the session's retained bytes (`text + images`) stay
+    /// within `total_bytes`. Used where the ceiling is a share of the daemon-wide budget rather
+    /// than a text capacity.
+    pub fn from_total(total_bytes: usize) -> Self {
+        let divisor = IMAGE_RETENTION_RATIO + 1;
+        let image_bytes = total_bytes / divisor;
+        Self {
+            text_bytes: total_bytes - image_bytes,
+            image_bytes,
+        }
+    }
+
     fn max_unit_bytes(&self) -> usize {
         self.image_bytes
             .max(self.text_bytes)
@@ -82,6 +95,23 @@ impl RetainedHistory {
 
     pub fn budget(&self) -> RetentionBudget {
         self.budget
+    }
+
+    /// Replaces the budget and evicts immediately to fit it, preserving the text/image ratio.
+    /// The splitter keeps the unit sizes it was built with: its pending bytes must not be
+    /// reclassified mid-unit on a budget change, and shrinking only lowers the coalescing
+    /// granularity of records retained afterwards.
+    pub fn set_budget(&mut self, budget: RetentionBudget) {
+        if budget == self.budget {
+            return;
+        }
+        self.budget = budget;
+        self.evict();
+    }
+
+    /// Re-bounds the text budget, keeping [`IMAGE_RETENTION_RATIO`] for images, and evicts to fit.
+    pub fn set_text_budget(&mut self, text_bytes: usize) {
+        self.set_budget(RetentionBudget::from_text_capacity(text_bytes));
     }
 
     /// Trailing prefix (plus any parser resync bytes) of output whose terminator has not
@@ -173,6 +203,25 @@ impl RetainedHistory {
 
     pub fn len(&self) -> usize {
         self.text_bytes + self.image_bytes
+    }
+
+    /// Retained bytes plus the unit still being assembled. The in-flight prefix is real memory the
+    /// session holds, so the budget charges it: otherwise a stream without terminators could sit
+    /// just under any ceiling with an uncharged group behind it.
+    ///
+    /// At rest this equals [`Self::len`], because the splitter flushes its text buffer whenever a
+    /// push ends in the ground state - which is every push a well-behaved program produces after a
+    /// completed sequence. A push that ends mid-control-sequence or mid-string leaves that prefix
+    /// in flight, and it cannot be evicted: it is the unit being assembled, not a retained record.
+    /// The prefix is bounded by the splitter's `max_unit_bytes`, which is
+    /// `max(text, image).clamp(64, MAX_RETAINED_GROUP_BYTES)` - at most `16/17` of a session
+    /// ceiling derived by [`RetentionBudget::from_total`]. So a session's retained bytes stay at
+    /// or below its ceiling at rest, and stay below twice its ceiling in the worst case where one
+    /// unterminated unit is outstanding. The aggregate is therefore inside the daemon budget in
+    /// the state every published-then-idle session is in, which is the state the footprint is
+    /// measured in; the outstanding unit is transient and bounded per session.
+    pub fn retained_bytes(&self) -> usize {
+        self.len() + self.splitter.pending().bytes.len()
     }
 
     pub fn text_bytes(&self) -> usize {

@@ -297,6 +297,23 @@ impl ScreenMirror {
         self.mark_activity();
     }
 
+    /// Bounds the mirror's own scrollback by the session's share of the daemon budget. The line
+    /// cap from [`Self::new`] still applies: the smaller of the two governs.
+    ///
+    /// Deliberately not activity. A limit is a bound, not content: changing it prunes history, it
+    /// produces nothing to compress, so arming the idle delay here would schedule a pass over an
+    /// empty mirror. At registration it did worse than that - every fresh session carried a
+    /// deadline before its first byte - so only output, a resize and a seed read restart the delay.
+    pub fn set_scrollback_limit_bytes(&mut self, limit_bytes: usize) {
+        if let Err(error) = self.terminal.set_scrollback_limit_bytes(Some(limit_bytes)) {
+            tracing::warn!(%error, limit_bytes, "screen mirror scrollback byte limit rejected");
+        }
+    }
+
+    pub fn scrollback_limit_bytes(&self) -> Option<usize> {
+        self.terminal.scrollback_limit_bytes().ok().flatten()
+    }
+
     fn mark_activity(&mut self) {
         self.compression.mark_activity(Instant::now());
         self.activity.notify_one();

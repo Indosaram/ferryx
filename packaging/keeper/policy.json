@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "retainedGenerations": 3,
+  "protocolMajor": 1,
+  "installLayout": "~/.ferryx/keeper/<version>/ferryx-ptykeeper",
+  "bundleSeedPath": "Contents/Resources/keeper/ferryx-ptykeeper",
+  "rules": {
+    "generationName": "the release app version, three numeric components",
+    "immutable": "a generation directory is never replaced; different bytes under an existing version are a typed refusal",
+    "retention": "the newest 3 generations are kept",
+    "occupiedGenerations": "never deleted, even outside the retention window",
+    "programmedGenerations": "never deleted while a launchd plist points at them",
+    "replacedKeeper": "never; the job is not repointed while the programmed generation owns sessions"
+  },
+  "rollback": {
+    "manifestKey": "keeper.oldestSafeRollbackVersion",
+    "floorSource": "packaging/keeper/releases.json, the first keeper-capable release",
+    "enforcedBy": "src-tauri/src/daemon/keeper_launchd.rs::rollback_gate",
+    "refusedWhile": "any keeper-owned session exists and the target build cannot service keeper-owned sessions",
+    "typedErrors": [
+      "KEEPER_ROLLBACK_REFUSED naming the live keeper-owned session count",
+      "KEEPER_ROLLBACK_BELOW_FLOOR",
+      "KEEPER_OWNERSHIP_UNKNOWN"
+    ]
+  },
+  "archive": {
+    "checkedBy": "scripts/assert-updater-archive-layout.mjs, on the packed updater archive before latest.json is published",
+    "authority": "the archive member, never target/ or the build tree; those hold pre-strip, pre-sign bytes",
+    "rules": {
+      "digest": "keeper.json.sha256 equals the sha256 of the archived ferryx-ptykeeper member",
+      "executable": "the archived member has an execute bit; mode 644 yields a generation directory that exists and cannot exec",
+      "generation": "keeper.json.version equals the archive's Info.plist CFBundleShortVersionString",
+      "protocol": "keeper.json.protocolMajor equals 1; compatibility is additive-only within a major",
+      "runtimeFloor": "per architecture, the keeper slice's minimum macOS is no newer than the daemon slice of the same architecture",
+      "floorDocument": "Contents/Resources/keeper/latest.json exists, states keeper.oldestSafeRollbackVersion, and names this generation"
+    },
+    "runtimeFloorWhyPerArch": "arm64 legitimately declares 11.0 while the app still supports 10.15 through its x86_64 slice, so a comparison against LSMinimumSystemVersion would refuse every correct universal build; the question is whether a machine that can run this daemon can run this keeper",
+    "runtimeFloorReader": "scripts/lib/keeper-macho.mjs (pure JS, LC_BUILD_VERSION and LC_VERSION_MIN_MACOSX), so the check needs no Xcode and no otool"
+  },
+  "launchdIndependence": {
+    "requires": "the keeper job is its own LaunchAgent whose executable lives outside the app bundle, so replacing the app cannot take the process that owns every PTY master down with it",
+    "verifiedBy": "scripts/lib/keeper-launchd-job.mjs against a captured plist (plutil -convert xml1 -o - ~/Library/LaunchAgents/com.ferryx.ptykeeper.plist)",
+    "refuses": [
+      "the daemon label com.ferryx.daemon, or the QA label com.ferryx.qa.ptykeeper in a shipped job",
+      "a ProgramArguments[0] inside Ferryx.app, or one naming a previous generation",
+      "any argument at all; the endpoint is derived from the runtime, and --socket/--daemon* are not keeper modes",
+      "KeepAlive.SuccessfulExit other than false, or a missing AbandonProcessGroup",
+      "a missing SoftResourceLimits.NumberOfFiles of 4096, or log paths that are not keeper.stdout.log/keeper.stderr.log"
+    ],
+    "antiDrift": "scripts/release-keeper-launchd.test.mjs diffs the module's renderer against the Rust format! literal in keeper_launchd.rs"
+  }
+}
