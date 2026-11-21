@@ -77,7 +77,14 @@ fn script(messages: &[&str], approval: bool) -> Script {
         messages: messages.iter().map(|m| (*m).to_owned()).collect(),
         approval,
         live: false,
+        silent_prompt: false,
     }
+}
+
+/// A peer that accepts the connection and never answers the prompt: the hub's ACK window
+/// expires with no frame of any kind, which is the ACK-timeout outcome under test.
+fn silent_script() -> Script {
+    Script { messages: Vec::new(), approval: false, live: false, silent_prompt: true }
 }
 
 fn calls_of(calls: &Calls, method: &str) -> Vec<Value> {
@@ -918,9 +925,9 @@ async fn e2e_a_supervised_owner_dm_posts_no_status_line_and_never_reaches_omo() 
 
 /// Drives the real turn surface (`run_session_turn` -> mhc RPC -> retry -> notice path) with a
 /// short ACK window. The JSONL peer acknowledges the prompt within the window, so the final
-/// result is the answer and no ACK-timeout notice row or outbox notice may exist.
-/// Limitation: `rpc_mock` cannot withhold the first attempt's ACK, so this does not exercise
-/// a missed first ACK followed by a recovering retry.
+/// result is the answer and no ACK-timeout notice row or outbox notice may exist. The missed-ACK
+/// half of the contract is exercised by the `ack_timeout` tests below, which drive the same
+/// surface against a peer that never answers the prompt.
 #[tokio::test]
 async fn e2e_an_acknowledged_turn_queues_no_ack_failure_notice() {
     let (omo_url, _log) = serve(script(&["done"], false)).await;
@@ -941,4 +948,130 @@ async fn e2e_an_acknowledged_turn_queues_no_ack_failure_notice() {
     let resumes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lane_events WHERE kind='owner_reply_failed'")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(resumes, 0);
+}
+
+async fn outbox_texts(pool: &sqlx::SqlitePool) -> Vec<String> {
+    sqlx::query_scalar("SELECT text FROM chat_outbox ORDER BY id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn ack_notice_states(pool: &sqlx::SqlitePool) -> Vec<String> {
+    sqlx::query_scalar("SELECT state FROM turn_failure_notices ORDER BY created_at")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// The owner-turn lanes only: a failed turn may reach the resume lane or, for an ambiguous
+/// outcome, the record-only lane. Other lane writers never run in these tests.
+async fn owner_turn_lanes(pool: &sqlx::SqlitePool) -> Vec<(String, String, String)> {
+    sqlx::query_as(
+        "SELECT kind, COALESCE(lane_key, ''), COALESCE(source_event_id, '') FROM lane_events
+         WHERE kind IN ('owner_reply_failed', 'owner_turn_ambiguous') ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// A turn whose ACK window expires with no evidence of any kind is the one failure the hub
+/// repairs by itself: it is queued on the resume lane, so the owner is told nothing at all.
+#[tokio::test]
+async fn an_ack_timeout_the_hub_can_resume_queues_no_owner_notice() {
+    let (omo_url, _log) = serve(silent_script()).await;
+    let mut config = config(omo_url);
+    config.omo.ack_window = std::time::Duration::from_millis(200);
+    let pool = crate::storage::memory().await.unwrap();
+    let (base, _calls) = serve_scripted("UBOT", Vec::new()).await;
+    let reply = with_test_api(base, "xoxb-test".into(), async {
+        FULL_ACCESS_TEST
+            .scope(true, run_session_turn(&config, &pool, slack_turn("deploy it")))
+            .await
+    })
+    .await;
+    assert_eq!(reply, None);
+    assert_eq!(
+        owner_turn_lanes(&pool).await,
+        vec![("owner_reply_failed".to_owned(), String::new(), "owner-turn:100.1".to_owned())]
+    );
+    assert_eq!(ack_notice_states(&pool).await, Vec::<String>::new());
+    assert_eq!(outbox_texts(&pool).await, Vec::<String>::new());
+}
+
+/// The resume itself failed: no lane is left, so the owner gets exactly one plain notice, with
+/// no internal name in it, and never a second one for the same owner turn.
+#[tokio::test]
+async fn a_resume_that_times_out_again_notices_the_owner_exactly_once() {
+    let (omo_url, _log) = serve(silent_script()).await;
+    let mut config = config(omo_url);
+    config.omo.ack_window = std::time::Duration::from_millis(200);
+    let pool = crate::storage::memory().await.unwrap();
+    let (base, _calls) = serve_scripted("UBOT", Vec::new()).await;
+    // The real resume turn: the lane dispatcher builds it from the event body, so it carries
+    // the marker and the owner turn id, and has no Slack ts of its own.
+    let resume = SessionTurn {
+        status_ts: None,
+        text: format!(
+            "{} [owner_turn=100.1] The hub could not answer the message below. Answer it now in this conversation. Message: deploy it",
+            super::slack_turn::RESUME_MARKER
+        ),
+        ..slack_turn("deploy it")
+    };
+    let (first, second) = with_test_api(base, "xoxb-test".into(), async {
+        FULL_ACCESS_TEST
+            .scope(true, async {
+                let first = run_session_turn(&config, &pool, resume.clone()).await;
+                let second = run_session_turn(&config, &pool, resume).await;
+                (first, second)
+            })
+            .await
+    })
+    .await;
+    assert_eq!(first, None);
+    assert_eq!(second, None);
+    assert_eq!(owner_turn_lanes(&pool).await, Vec::<(String, String, String)>::new());
+    assert_eq!(ack_notice_states(&pool).await, vec!["queued".to_owned()]);
+    let texts = outbox_texts(&pool).await;
+    assert_eq!(texts.len(), 1);
+    for internal in ["ack_timeout", "mhc", "owner_reply_failed", "owner_turn", "TIMEOUT"] {
+        assert!(!texts[0].contains(internal), "the notice names internals: {}", texts[0]);
+    }
+}
+
+/// A dashboard turn has no Slack channel to notice and no stable owner turn id: its failure
+/// stays in its own transcript and never becomes a chat outbox message or a resume lane.
+#[tokio::test]
+async fn a_dashboard_turn_that_times_out_queues_no_owner_notice() {
+    let (omo_url, _log) = serve(silent_script()).await;
+    let mut config = config(omo_url);
+    config.omo.ack_window = std::time::Duration::from_millis(200);
+    let pool = crate::storage::memory().await.unwrap();
+    let (base, _calls) = serve_scripted("UBOT", Vec::new()).await;
+    let web = SessionKey::new("web", None::<String>, "dash-1", None::<String>, "dashboard");
+    let reply = with_test_api(base, "xoxb-test".into(), async {
+        FULL_ACCESS_TEST
+            .scope(
+                true,
+                run_dashboard_turn(&config, &pool, web.clone(), "deploy it".into()),
+            )
+            .await
+    })
+    .await;
+    assert_eq!(reply, None);
+    assert_eq!(outbox_texts(&pool).await, Vec::<String>::new());
+    assert_eq!(ack_notice_states(&pool).await, Vec::<String>::new());
+    assert_eq!(owner_turn_lanes(&pool).await, Vec::<(String, String, String)>::new());
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE session_key = ? AND role = 'assistant' ORDER BY sequence",
+    )
+    .bind(web.storage_key())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    for internal in ["ack_timeout", "mhc", "owner_turn", "TIMEOUT"] {
+        assert!(!stored[0].contains(internal), "the notice names internals: {}", stored[0]);
+    }
 }

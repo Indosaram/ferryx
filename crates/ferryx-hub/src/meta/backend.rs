@@ -135,6 +135,7 @@ mod tests {
             messages: vec![decision_json.into()],
             approval: false,
             live: false,
+            silent_prompt: false,
         })
         .await;
         let model = RpcModel::new(url);

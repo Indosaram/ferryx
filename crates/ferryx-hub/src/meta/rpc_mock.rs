@@ -34,6 +34,9 @@ pub(crate) struct Script {
     pub messages: Vec<String>,
     pub approval: bool,
     pub live: bool,
+    /// Emit no `response` frame for the prompt at all: the peer stays connected and silent, so
+    /// the hub's ACK window expires with no evidence of any kind about the run.
+    pub silent_prompt: bool,
 }
 
 /// Acknowledged logging is test instrumentation; RPC uses stdin/stdout exclusively.
@@ -84,7 +87,8 @@ pub(crate) async fn serve(script: Script) -> (String, MockLog) {
     )
     .unwrap();
     let settings = json!({"port": port, "messages": script.messages,
-        "approval": script.approval, "live": script.live, "sessionFile": session_file, "sessionId": session_id});
+        "approval": script.approval, "live": script.live, "sessionFile": session_file, "sessionId": session_id,
+        "silentPrompt": script.silent_prompt});
     let source = format!(
         "#!/usr/bin/env python3\nimport json, socket, sys\ncfg = json.loads({:?})\n",
         settings.to_string()
@@ -121,6 +125,9 @@ for line in sys.stdin:
     response = {'type':'response', 'id':frame.get('id'), 'command':kind, 'success':True}
     if kind == 'get_state':
         response['data'] = {'sessionId':cfg['sessionId'], 'sessionFile':cfg['sessionFile']}
+    if kind == 'prompt' and cfg['silentPrompt']:
+        # Accept nothing: no prompt response, no run frame. The hub sees a silent peer.
+        continue
     emit(response)
     if kind == 'prompt' and cfg['messages'] == ['__provider503__']:
         emit({'type':'agent_start'})

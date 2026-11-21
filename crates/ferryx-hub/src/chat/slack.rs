@@ -2300,6 +2300,7 @@ mod tests {
             messages: vec!["확인하겠습니다.".into(), "항목 3개를 수정했습니다.".into()],
             approval: true,
             live: false,
+            silent_prompt: false,
         }).await;
         let config: &'static SlackTurnConfig = Box::leak(Box::new(SlackTurnConfig {
             omo: OmoClientConfig::new(binary),

@@ -109,8 +109,6 @@ pub fn classify_attempt(result: &Result<TurnOutcome>) -> AttemptOutcome {
 }
 /// Dedup tag for an ACK-timeout notice.
 pub const ACK_TIMEOUT_DEDUP_TAG: &str = "ack_timeout";
-/// Notice text for an ACK timeout; the underlying cause is not known.
-pub const ACK_TIMEOUT_NOTICE_TEXT: &str = "acknowledgement not received; underlying cause unknown";
 
 /// Parses `FERRYX_HUB_ACK_WINDOW_MS`: absent, empty, unparseable, zero or negative values give
 /// the default; values above 180000 ms are capped there.
