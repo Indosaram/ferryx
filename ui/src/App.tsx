@@ -220,6 +220,7 @@ import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
 import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
+import { createOwnedWorkspaceAccess } from "./state/workspaceOwnerAccess";
 import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { describeLadderRow, listShortcutWorktrees } from "./state/shortcutLadder";
 import { useWorkspaceRuntime } from "./state/workspaceRuntime";
@@ -1676,17 +1677,25 @@ function WorkspaceApp({
 
   const handleReconnectAgentSession = useCallback(
     (sessionId: string, options?: { silent?: boolean }) => {
+      const ownerWorkspaceId = activeProject.workspaceId;
+      const ownerRepoRoot = activeProject.repoRoot;
+      const owner = createOwnedWorkspaceAccess(ownerWorkspaceId, {
+        isMounted: () => (stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId) === ownerWorkspaceId,
+        getState: () => stateRef.current,
+        dispatch: dispatchWorkspaceAction,
+      });
       return reconnectAgentSession(
         sessionId,
         createAppReconnectDependencies({
           getSessions: () => {
-            const current = stateRef.current.sessions;
+            const current = owner.getState()?.sessions ?? {};
             if (current[sessionId]) return current;
             return { ...lastRestoredSessionsRef.current, ...current };
           },
-          dispatch: dispatchWorkspaceAction,
+          dispatch: owner.dispatch,
           persist: async (result, localSession) => {
-            const current = stateRef.current;
+            const current = owner.getState();
+            if (!current) throw new Error("Reconnect workspace is unavailable");
             const nextState = workspaceReducer(current, {
               type: "REBIND_SESSION_BACKEND",
               sessionId: localSession.id,
@@ -1696,7 +1705,7 @@ function WorkspaceApp({
               incarnation: result.session.incarnation ?? null,
               clearAgent: false,
             });
-            await persistSessionStrict(activeProject.workspaceId, activeProject.repoRoot, nextState);
+            await persistSessionStrict(ownerWorkspaceId, ownerRepoRoot, nextState);
           },
         }),
       ).catch((error) => {
