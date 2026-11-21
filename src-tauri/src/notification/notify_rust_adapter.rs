@@ -10,8 +10,13 @@
 //!
 //! The waiter runs on its own `std::thread`, never a Tokio worker, so blocking
 //! on the D-Bus/WinRT response cannot starve the async runtime. The thread's
-//! lifetime is bounded by the notification: `wait_for_response` returns on
+//! lifetime is bounded by the notification: the platform wait returns on
 //! activation, dismissal, or timeout/close.
+//!
+//! On Linux a newer notification for the same pane replaces the old banner
+//! instead of stacking a second one: the waiter registry signals the previous
+//! waiter, which closes its own banner over D-Bus and routes nothing. Windows
+//! toasts cannot be withdrawn; see [`withdraw_routed_notification`].
 
 use super::activation::{route_activation, ActivationAction, NotificationActivations};
 use super::model::{
@@ -20,8 +25,24 @@ use super::model::{
 use notify_rust::{Notification, NotificationResponse};
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+#[path = "waiter_registry.rs"]
+mod waiter_registry;
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
+
 /// Canonical default-action identifier registered on every routed notification.
 const DEFAULT_ACTION_ID: &str = "default";
+
+/// Process-wide registry of live Linux click waiters.
+///
+/// One registry per process, so a dispatch for a pane can withdraw the banner a
+/// previous dispatch left waiting for that same pane.
+#[cfg(target_os = "linux")]
+fn linux_registry() -> &'static waiter_registry::WaiterRegistry {
+    static REGISTRY: OnceLock<waiter_registry::WaiterRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(waiter_registry::WaiterRegistry::new)
+}
 
 /// Sound name that asks Windows for the platform default alert.
 ///
@@ -144,35 +165,125 @@ pub fn submit_with_click_routing(
         return Ok(());
     };
 
-    std::thread::Builder::new()
+    // Register the Linux waiter *before* the thread starts: an immediate
+    // withdrawal (a newer banner for the same pane, or a closed pane) must find
+    // the slot already in place, or it would race the thread's startup.
+    #[cfg(target_os = "linux")]
+    let (key, token, cancel_rx) = {
+        let key = (target.workspace_id.clone(), target.session_id.clone());
+        let (token, cancel_rx) = linux_registry().register(key.clone());
+        (key, token, cancel_rx)
+    };
+
+    #[cfg(target_os = "linux")]
+    let spawned = std::thread::Builder::new()
+        .name("ferryx-notify-click".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    // Nothing can wait without a runtime; release the slot so a
+                    // later withdrawal is not a no-op on a dead registration.
+                    linux_registry().finish_token(&key, token);
+                    tracing::error!("notification click waiter runtime failed: {error}");
+                    return;
+                }
+            };
+            // Both futures hold a shared borrow of the handle rather than the
+            // handle itself: the platform wait only needs `&self`, and the
+            // response is borrowed for its callback only, so the classified
+            // action is copied out and never outlives the reference.
+            let wait_handle = &handle;
+            let close_handle = &handle;
+            let wait_fut = async move {
+                let mut captured = None;
+                wait_handle
+                    .wait_for_action_async(|response| {
+                        captured = Some(classify_action(response));
+                    })
+                    .await;
+                captured
+            };
+            let close_fut = move || async move {
+                close_handle.close_async().await;
+            };
+            let outcome = runtime.block_on(waiter_registry::drive_cancellable_waiter(
+                linux_registry(),
+                key.clone(),
+                token,
+                wait_fut,
+                close_fut,
+                cancel_rx,
+            ));
+            // A withdrawn waiter has already closed its own banner and routes
+            // nothing; only a surviving default activation is routable.
+            if let waiter_registry::WaiterOutcome::Action(Some(action)) = outcome {
+                route_action(action, &target, activations.as_ref());
+            }
+        });
+
+    #[cfg(target_os = "windows")]
+    let spawned = std::thread::Builder::new()
         .name("ferryx-notify-click".into())
         .spawn(move || {
             if let Err(error) = handle.wait_for_response(move |response: &NotificationResponse| {
-                route_response(response, target, activations.as_ref());
+                route_action(classify_action(response), &target, activations.as_ref());
             }) {
                 tracing::error!("notification click response failed: {error}");
             }
-        })
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        });
+
+    spawned.map(|_| ()).map_err(|error| error.to_string())
+}
+
+/// Withdraw the routed notification banner for `target`, if one is live.
+///
+/// The waiter for that pane stops waiting, closes its own banner, and routes no
+/// activation, so a superseded notification can never steal focus later.
+pub fn withdraw_routed_notification(target: &NotificationTarget) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_registry().withdraw(&(target.workspace_id.clone(), target.session_id.clone()));
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // A Windows toast cannot be withdrawn from here: the toast needs a
+        // registered AppUserModelID, which this repo does not install yet, and
+        // `notify-rust`'s Windows `NotificationHandle` exposes neither `close()`
+        // nor `id()`, so there is no handle to address the live toast with. The
+        // waiter therefore ends when the user acts or the toast expires.
+        let _ = target;
+        Ok(())
+    }
 }
 
 /// Apply the shared default-vs-dismiss policy to a `notify-rust` response.
 ///
-/// The target is already typed here (it was carried in-process, not through the
-/// OS payload), so this decides only whether the response is a default
-/// activation and, if so, enqueues. Returns `true` iff a target was enqueued.
-fn route_response(
-    response: &NotificationResponse,
-    target: NotificationTarget,
-    activations: &NotificationActivations,
-) -> bool {
-    let action = match response {
+/// The response is borrowed for the platform callback only, so the decision is
+/// copied out here rather than the reference being kept alive.
+fn classify_action(response: &NotificationResponse) -> ActivationAction {
+    match response {
         NotificationResponse::Default => ActivationAction::Default,
         NotificationResponse::Action(id) if id == DEFAULT_ACTION_ID => ActivationAction::Default,
         // Named non-default actions, inline replies, and closes never route.
         _ => ActivationAction::Dismiss,
-    };
+    }
+}
+
+/// Route an already classified action for `target` through the shared seam.
+///
+/// The target is typed here (it was carried in-process, not through the OS
+/// payload), so it only has to be re-encoded for the queue. Returns `true` iff a
+/// target was enqueued.
+fn route_action(
+    action: ActivationAction,
+    target: &NotificationTarget,
+    activations: &NotificationActivations,
+) -> bool {
     let json = serde_json::json!({
         "workspaceId": target.workspace_id, "sessionId": target.session_id,
     })
@@ -192,12 +303,20 @@ mod tests {
         }
     }
 
+    fn route_response(
+        response: &NotificationResponse,
+        target: &NotificationTarget,
+        activations: &NotificationActivations,
+    ) -> bool {
+        route_action(classify_action(response), target, activations)
+    }
+
     #[test]
     fn default_response_routes_the_target() {
         let queue = NotificationActivations::new();
         assert!(route_response(
             &NotificationResponse::Default,
-            target(),
+            &target(),
             &queue
         ));
         assert_eq!(queue.drain().len(), 1);
@@ -208,7 +327,7 @@ mod tests {
         let queue = NotificationActivations::new();
         assert!(route_response(
             &NotificationResponse::Action(DEFAULT_ACTION_ID.into()),
-            target(),
+            &target(),
             &queue
         ));
         assert_eq!(queue.drain().len(), 1);
@@ -219,12 +338,12 @@ mod tests {
         let queue = NotificationActivations::new();
         assert!(!route_response(
             &NotificationResponse::Closed(CloseReason::Dismissed),
-            target(),
+            &target(),
             &queue
         ));
         assert!(!route_response(
             &NotificationResponse::Action("some-other".into()),
-            target(),
+            &target(),
             &queue
         ));
         assert_eq!(queue.len(), 0);
