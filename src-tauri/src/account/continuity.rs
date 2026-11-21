@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 use super::service::{authenticate_user, parse_json, run_account_blocking, AccountState, ApiError};
 use super::store::{now_secs, store_sqlite};
 
+/// Each continuity field is accepted up to 4096 bytes, and a request carries four of them, so
+/// the router-wide 4 KiB body limit would refuse as `413` what this handler types as
+/// `400 INVALID_CONTINUITY`. The route therefore raises the limit enough for the field checks
+/// to be the thing that decides validity, while still bounding the read.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContinuityPointer {

@@ -163,7 +163,16 @@ async fn invalid_targets_and_revision_do_not_mutate() {
     oversized_slug["worktreeSlug"] = json!("x".repeat(4097));
     let invalid = serde_json::from_value::<PutContinuity>(oversized_slug.clone()).unwrap();
     assert_eq!(invalid.validate().unwrap_err().code, "INVALID_CONTINUITY");
-    assert_eq!(fx.request(Some(&token), Some(oversized_slug)).await.0, 413);
+    // Four fields may each be 4096 bytes, so the route's own limit lets this reach the handler:
+    // the field rule, not the router-wide 4 KiB default, decides validity.
+    let (status, refusal) = fx.request(Some(&token), Some(oversized_slug)).await;
+    assert_eq!(status, 400, "{refusal}");
+    assert_eq!(refusal["code"], "INVALID_CONTINUITY", "{refusal}");
+    // A field as large as the whole cap cannot fit in a body capped there, so the route's own
+    // limit - not the field rule - is still what answers past it.
+    let mut over_limit = selection(0, "s");
+    over_limit["worktreeSlug"] = json!("x".repeat(MAX_BODY_BYTES));
+    assert_eq!(fx.request(Some(&token), Some(over_limit)).await.0, 413);
     assert_eq!(fx.request(Some(&token), None).await, (200, Value::Null));
     for body in [partial, empty, empty_slug, selection(-1, "s"), json!({}), unknown] {
         assert_eq!(fx.request(Some(&token), Some(body)).await.0, 400);
