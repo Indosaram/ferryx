@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Ferryx supervisor visibility</title>
+<style>
+:root{--background:#23262d;--card:#171717;--accent:#404040;--terminal:#282c34;--terminal-divider:#5c6068;--sb:#2a2a2a;--sb-accent:#353535;--popover:#171717;
+--foreground:#fafafa;--muted-foreground:#a1a1a1;--sb-border:rgba(255,255,255,.0706);--ring:#737373;
+--working:#60a5fa;--warning:#fbbf24;--success:#86efac;--idle:#737373;--sbw:236px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--background);color:var(--foreground);font:12px/1.35 "Geist",ui-sans-serif,-apple-system,system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:20px 24px}
+button{all:unset;box-sizing:border-box;cursor:default}
+button:focus-visible{outline:1px solid var(--ring)}
+svg.i{flex-shrink:0;display:block;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.mono{font-family:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+/* page chrome (presentation only) */
+.top{display:flex;align-items:baseline;gap:14px;margin-bottom:12px}
+.top h1{font-size:14px;font-weight:600}
+.top p{color:var(--muted-foreground)}
+.ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:14px}
+.ctl .lb{color:var(--muted-foreground);margin:0 2px 0 8px}.ctl .lb:first-child{margin-left:0}
+.ctl button{padding:4px 10px;border-radius:6px;background:var(--card);color:var(--muted-foreground);font-size:11px}
+.ctl button[aria-pressed=true]{background:var(--accent);color:var(--foreground)}
+.stage{display:flex;gap:28px;align-items:flex-start}
+/* app window */
+.win{width:1080px;height:640px;display:flex;border-radius:10px;overflow:hidden;box-shadow:0 0 0 1px var(--sb-border),0 18px 50px rgba(0,0,0,.45);flex:none}
+/* ---------- sidebar (DESIGN.md §4) ---------- */
+.sb{width:var(--sbw);background:var(--sb);display:flex;flex-direction:column;flex:none;min-width:0}
+.titlebar{height:36px;display:flex;align-items:center;padding:0 8px;gap:2px;flex:none}
+.lights{display:flex;gap:7px;width:70px}.lights i{width:11px;height:11px;border-radius:50%;background:var(--accent)}
+.ib{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:5px;color:var(--muted-foreground)}
+.seg{margin:0 8px 6px;display:flex;background:var(--card);border-radius:6px;padding:2px;gap:2px;flex:none}
+.seg button{flex:1;min-width:0;display:flex;align-items:center;justify-content:center;gap:4px;height:22px;border-radius:4px;font-size:11px;color:var(--muted-foreground);white-space:nowrap}
+.seg button[aria-selected=true]{background:var(--sb-accent);color:var(--foreground)}
+.seg .n{color:var(--warning)}
+.seg .sv-ind{color:var(--foreground)}
+.filter{margin:0 8px 2px;height:26px;display:flex;align-items:center;gap:6px;padding:0 8px;border-radius:6px;background:rgba(255,255,255,.04);color:var(--muted-foreground);flex:none}
+.filter span{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.kbd{font:10px ui-monospace,monospace;color:var(--muted-foreground)}
+.sh{height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 14px 0 14px;font-size:11px;font-weight:500;color:var(--muted-foreground);flex:none}
+.view{flex:1;min-height:0;overflow:hidden;display:none;flex-direction:column}
+.view.on{display:flex}
+.tree{padding:0 8px 8px}
+.proj{display:flex;align-items:center;gap:6px;height:28px;border-radius:6px;padding-right:6px;color:rgba(250,250,250,.65)}
+.chev{width:16px;display:flex;justify-content:center;color:var(--muted-foreground)}
+.chev.open svg{transform:rotate(90deg)}
+.nm{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.kids{position:relative;margin-left:13px;padding:1px 0 3px}
+.kids:before{content:"";position:absolute;left:0;top:2px;bottom:5px;width:1px;background:var(--sb-border)}
+.wt{position:relative;display:flex;align-items:center;gap:8px;height:28px;margin-left:8px;padding:0 6px 0 10px;border-radius:6px;font-weight:600;color:rgba(250,250,250,.88)}
+.wt[aria-current=true]{background:var(--sb-accent);color:var(--foreground)}
+.wt .rl{position:absolute;left:-8px;top:5px;bottom:5px;width:1px}
+.wt[aria-current=true] .rl{background:var(--ring)}
+/* the single state slot (SidebarStateSlot) */
+.slot{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;font-size:10px;line-height:1;color:var(--muted-foreground);font-weight:400;white-space:nowrap}
+.slot.sv{color:var(--foreground)}
+.dot{width:7px;height:7px;border-radius:50%;flex:none}
+.dot.working{background:var(--working)}.dot.waiting{background:var(--warning)}.dot.done{background:var(--success)}.dot.unread{background:var(--foreground)}.dot.idle{background:var(--idle)}
+.footer{display:flex;align-items:center;gap:4px;height:36px;padding:0 6px 0 8px;border-top:1px solid var(--sb-border);flex:none}
+.footer .st{margin-right:auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding-left:2px;font-size:10px;color:var(--muted-foreground)}
+/* Inbox view */
+.irow{margin:0 8px 2px;padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:4px}
+.irow.on{background:var(--sb-accent)}
+.irow .h{display:flex;align-items:center;gap:6px;font-weight:600;min-width:0}
+.irow .t{font-size:10px;color:var(--muted-foreground);font-weight:400;flex:none}
+.irow .b{font-size:11px;color:var(--muted-foreground);line-height:1.45}
+.irow .b code{font:10.5px ui-monospace,monospace;color:var(--foreground)}
+.why{display:flex;align-items:flex-start;gap:5px;font-size:10.5px;color:var(--muted-foreground);line-height:1.4}
+.why svg{margin-top:1px}
+.acts{display:flex;gap:6px;margin-top:3px;flex-wrap:wrap}
+.btn{height:24px;padding:0 9px;border-radius:5px;background:var(--accent);color:var(--foreground);font-size:11px;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.btn.pri{background:var(--foreground);color:var(--card)}
+.btn.ghost{background:transparent;color:var(--muted-foreground)}
+/* Supervisor view */
+.svhead{margin:2px 8px 6px;padding:8px;border-radius:6px;background:var(--card);display:flex;flex-direction:column;gap:6px;flex:none}
+.svhead .r1{display:flex;align-items:center;gap:6px;font-weight:600}
+.svhead .r1 .slot{margin-left:auto}
+.svhead .r2{font-size:11px;color:var(--muted-foreground);line-height:1.45}
+.svhead .r2 b{color:var(--foreground);font-weight:500}
+.svlist{padding:0 8px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+.svi{border-radius:6px;padding:4px 0 6px}
+.svi.on{background:var(--sb-accent)}
+.svi .wt{margin-left:0;padding-left:8px;background:none}
+.svi dl{display:grid;grid-template-columns:34px 1fr;gap:2px 6px;padding:0 8px;font-size:11px;line-height:1.4}
+.svi dt{color:var(--muted-foreground);font-size:10px;padding-top:1px}
+.svi dd{color:rgba(250,250,250,.88);min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.log{padding:2px 8px 0;display:flex;flex-direction:column}
+.ev{display:grid;grid-template-columns:36px 44px 1fr;gap:6px;padding:3px 8px;font-size:11px;color:var(--muted-foreground);align-items:baseline}
+.ev .tm{font:10px ui-monospace,monospace}
+.ev .op{font:10px ui-monospace,monospace;color:var(--foreground)}
+.ev span:last-child{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.empty{padding:16px 16px;color:var(--muted-foreground);font-size:11px;line-height:1.5;display:flex;flex-direction:column;gap:10px}
+.empty b{color:var(--foreground);font-weight:600;font-size:12px}
+.note{padding:8px 16px 10px;font-size:10px;color:var(--muted-foreground);line-height:1.45;margin-top:auto}
+/* ---------- main ---------- */
+.main{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--terminal)}
+.tabs{height:32px;display:flex;align-items:stretch;background:var(--card);flex:none}
+.tab{display:flex;align-items:center;gap:6px;padding:0 10px;color:var(--muted-foreground);font-size:12px;white-space:nowrap}
+.tab.on{background:var(--accent);color:var(--foreground)}
+.tab .sv-ind{color:var(--foreground)}
+.logo{width:16px;height:16px;border-radius:4px;display:grid;place-items:center;font-size:9px;font-weight:700;flex:none}
+.l-claude{background:#d97757;color:#1a0f0a}.l-codex{background:#e5e5e5;color:#111}.l-sup{background:transparent;color:var(--foreground)}
+.add{display:flex;align-items:center;padding:0 9px;color:var(--muted-foreground)}
+.split{flex:1;min-height:0;display:grid;grid-template-columns:1.15fr 1px 1fr}
+.vdiv,.hdiv{background:var(--terminal-divider)}
+.col{display:grid;grid-template-rows:1fr 1px 1fr;min-height:0}
+.pane{display:flex;flex-direction:column;min-height:0;min-width:0}
+/* pane bar: present only on supervised panes; sits ABOVE the terminal, never over it */
+.pbar{height:26px;flex:none;display:flex;align-items:center;gap:8px;padding:0 6px 0 10px;background:var(--card);font-size:11px;color:var(--muted-foreground);white-space:nowrap;min-width:0}
+.pbar .lead{display:flex;align-items:center;gap:6px;flex:none}
+.pbar .msg{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.pbar .msg q{quotes:none;color:var(--foreground);font:11px "Geist Mono",ui-monospace,monospace}
+.pbar .when{flex:none}
+.pbar .btn{height:20px;font-size:10.5px;padding:0 8px}
+.pbar.acting{background:var(--accent);color:var(--foreground)}
+.pbar.acting .lead{color:var(--foreground)}
+.pbar.acting .btn{background:var(--card)}
+.term{flex:1;min-height:0;overflow:hidden;padding:8px 14px;font:12px/1.6 "Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;color:#d4d4d4;white-space:pre-wrap}
+.dim{color:#7f848e}.g{color:#98c379}.b{color:#61afef}.y{color:#e5c07b}
+.caret{display:inline-block;width:7px;height:14px;background:#d4d4d4;vertical-align:-2px}
+/* state switches: toggled inline by the script */
+/* legend */
+.legend{flex:1;min-width:0;max-width:380px;display:flex;flex-direction:column;gap:14px;color:var(--muted-foreground);line-height:1.55}
+.legend h2{font-size:12px;color:var(--foreground);font-weight:600;margin-bottom:2px}
+.legend b{color:var(--foreground);font-weight:600}
+.legend ul{padding-left:16px}
+.legend code{font:11px ui-monospace,monospace;color:var(--foreground)}
+</style></head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="eye" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="1"/><path d="M18.9 12.4a1 1 0 0 0 0-.8 7.6 7.6 0 0 0-13.8 0 1 1 0 0 0 0 .8 7.6 7.6 0 0 0 13.8 0"/></symbol>
+<symbol id="pause" viewBox="0 0 24 24"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+<symbol id="play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+<symbol id="kbd" viewBox="0 0 24 24"><path d="M10 8h.01"/><path d="M12 12h.01"/><path d="M14 8h.01"/><path d="M16 12h.01"/><path d="M18 8h.01"/><path d="M6 8h.01"/><path d="M7 16h10"/><path d="M8 12h.01"/><rect width="20" height="16" x="2" y="4" rx="2"/></symbol>
+<symbol id="term" viewBox="0 0 24 24"><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
+<symbol id="side" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></symbol>
+<symbol id="plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+<symbol id="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+<symbol id="cfg" viewBox="0 0 24 24"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></symbol>
+<symbol id="hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0v0"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></symbol>
+</defs></svg>
+
+<div class="top"><h1>Supervisor visibility</h1><p>Static mockup on ui/DESIGN.md tokens and the sidebar IA. Switch state and sidebar view below.</p></div>
+<div class="ctl" role="group">
+  <span class="lb">State</span>
+  <button data-set-s="watching">Watching</button>
+  <button data-set-s="acting">Supervisor typing</button>
+  <button data-set-s="held">You type, it holds</button>
+  <button data-set-s="handoff">Handed to you</button>
+  <button data-set-s="paused">Paused</button>
+  <button data-set-s="empty">Nothing supervised</button>
+  <span class="lb">Sidebar</span>
+  <button data-set-v="worktrees">Worktrees</button>
+  <button data-set-v="inbox">Inbox</button>
+  <button data-set-v="supervisor">Supervisor</button>
+  <span class="lb">Width</span>
+  <button data-set-w="236">236</button>
+  <button data-set-w="220">220 floor</button>
+</div>
+
+<div class="stage">
+<div class="win" id="win">
+  <aside class="sb" aria-label="Sidebar">
+    <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div>
+      <span class="ib"><svg class="i" width="14" height="14"><use href="#side"/></svg></span>
+      <span class="ib" style="margin-left:auto"><svg class="i" width="14" height="14"><use href="#plus"/></svg></span></div>
+    <div class="seg" role="tablist">
+      <button role="tab" data-tab="worktrees">Worktrees</button>
+      <button role="tab" data-tab="inbox">Inbox<span class="n" data-when="handoff">1</span></button>
+      <button role="tab" data-tab="supervisor">Supervisor</button>
+    </div>
+
+    <!-- Worktrees -->
+    <div class="view" data-view="worktrees">
+      <div class="filter"><svg class="i" width="12" height="12"><use href="#search"/></svg><span>Filter worktrees</span><span class="kbd">⌘P</span></div>
+      <div class="sh"><span>Projects</span><span>3</span></div>
+      <div class="tree">
+        <div class="proj"><span class="chev open"><svg class="i" width="12" height="12"><use href="#chev"/></svg></span><svg class="i" width="14" height="14" style="color:var(--muted-foreground)"><use href="#folder"/></svg><span class="nm" style="color:var(--foreground)">ferryx</span></div>
+        <div class="kids">
+          <div class="wt" aria-current="true" data-row="main"><span class="rl"></span><span class="nm">main</span>
+            <span class="slot" data-slot data-when="watching paused empty"><span>running</span><span class="dot working"></span></span>
+            <span class="slot sv" data-slot data-when="acting"><svg class="i" width="11" height="11"><use href="#eye"/></svg><span>supervisor typing</span></span>
+            <span class="slot" data-slot data-when="held"><svg class="i" width="11" height="11"><use href="#eye"/></svg><span>holding</span></span>
+            <span class="slot" data-slot data-when="handoff"><span>running</span><span class="dot working"></span></span>
+          </div>
+          <div class="wt" data-row="agent-ui"><span class="rl"></span><span class="nm">agent-ui</span>
+            <span class="slot" data-slot data-when="watching acting held paused empty"><span>running</span><span class="dot working"></span></span>
+            <span class="slot" data-slot data-when="handoff"><span>needs input</span><span class="dot waiting"></span></span>
+          </div>
+          <div class="wt" data-row="relay"><span class="rl"></span><span class="nm">relay-keepalive</span></div>
+        </div>
+        <div class="proj"><span class="chev"><svg class="i" width="12" height="12"><use href="#chev"/></svg></span><svg class="i" width="14" height="14" style="color:var(--muted-foreground)"><use href="#folder"/></svg><span class="nm">piratetalk</span><span class="slot" data-slot aria-label="unread"><span class="dot unread"></span></span></div>
+        <div class="proj"><span class="chev"><svg class="i" width="12" height="12"><use href="#chev"/></svg></span><svg class="i" width="14" height="14" style="color:var(--muted-foreground)"><use href="#folder"/></svg><span class="nm">site</span></div>
+      </div>
+    </div>
+
+    <!-- Inbox -->
+    <div class="view" data-view="inbox">
+      <div class="sh"><span>Needs you</span><span data-when="handoff">1</span><span data-when="watching acting held paused empty">0</span></div>
+      <div class="irow on" data-when="handoff">
+        <div class="h"><span class="logo l-codex">X</span><span class="nm">agent-ui</span><span class="t">now</span></div>
+        <div class="b">codex wants to run <code>git push origin agent-ui</code></div>
+        <div class="why"><svg class="i" width="11" height="11"><use href="#eye"/></svg><span>Supervisor left this to you: the push leaves this machine.</span></div>
+        <div class="acts"><button class="btn pri">Allow once</button><button class="btn">Deny</button><button class="btn ghost">Open pane</button></div>
+      </div>
+      <div class="irow">
+        <div class="h"><span class="logo l-claude">C</span><span class="nm">main</span><span class="t">6m</span></div>
+        <div class="b">claude finished: settle gate waits for the claim marker</div>
+      </div>
+    </div>
+
+    <!-- Supervisor -->
+    <div class="view" data-view="supervisor">
+      <div data-when="watching acting held handoff paused" style="display:contents">
+      <div class="svhead">
+        <div class="r1"><svg class="i" width="13" height="13"><use href="#eye"/></svg><span>Supervisor</span>
+          <span class="slot" data-when="watching"><span>watching 2</span></span>
+          <span class="slot sv" data-when="acting"><span>typing in main</span></span>
+          <span class="slot" data-when="held"><span>holding for you</span></span>
+          <span class="slot" data-when="handoff"><span>waiting on you</span><span class="dot waiting"></span></span>
+          <span class="slot" data-when="paused"><span>paused</span></span>
+        </div>
+        <div class="r2" data-when="watching acting held handoff">Acts only in the worktrees below. It holds a message while you type and for 3s after.</div>
+        <div class="r2" data-when="paused"><b>Paused.</b> It still reads panes but sends nothing until you resume.</div>
+        <div class="acts">
+          <button class="btn" data-when="watching acting held handoff"><svg class="i" width="11" height="11"><use href="#pause"/></svg>Pause</button>
+          <button class="btn pri" data-when="paused"><svg class="i" width="11" height="11"><use href="#play"/></svg>Resume</button>
+          <button class="btn ghost">Open its pane</button>
+        </div>
+      </div>
+      <div class="sh"><span>Supervising</span><span>2</span></div>
+      <div class="svlist">
+        <div class="svi on">
+          <div class="wt"><span class="nm">ferryx / main</span>
+            <span class="slot" data-when="watching paused handoff"><span>watching</span></span>
+            <span class="slot sv" data-when="acting"><span>typing</span></span>
+            <span class="slot" data-when="held"><span>holding 1</span></span></div>
+          <dl><dt>Goal</dt><dd>Get ferryx-hub tests green</dd><dt>Next</dt><dd data-when="watching acting paused handoff">Wait for cargo test, then fix failures</dd><dd data-when="held">Send “also run clippy” once you stop</dd></dl>
+        </div>
+        <div class="svi">
+          <div class="wt"><span class="nm">ferryx / agent-ui</span>
+            <span class="slot" data-when="watching acting held paused"><span>watching</span></span>
+            <span class="slot" data-when="handoff"><span>asked you</span><span class="dot waiting"></span></span></div>
+          <dl><dt>Goal</dt><dd>Ship the tab-bar status glyph</dd><dt>Next</dt><dd data-when="watching acting held paused">Answer routine edit prompts</dd><dd data-when="handoff">Wait for your push decision</dd></dl>
+        </div>
+      </div>
+      <div class="sh" style="margin-top:4px"><span>Recent</span><span class="kbd">audit</span></div>
+      <div class="log">
+        <div class="ev" data-when="acting"><span class="tm">12:04</span><span class="op">send</span><span>main · “Run cargo test -p ferryx-hub…”</span></div>
+        <div class="ev" data-when="held"><span class="tm">12:05</span><span class="op">held</span><span>main · you are typing</span></div>
+        <div class="ev" data-when="handoff"><span class="tm">12:06</span><span class="op">inbox</span><span>agent-ui · push needs you</span></div>
+        <div class="ev"><span class="tm">12:01</span><span class="op">answer</span><span>agent-ui · allow edit, option 1</span></div>
+        <div class="ev"><span class="tm">11:58</span><span class="op">wait</span><span>main · until idle</span></div>
+        <div class="ev"><span class="tm">11:52</span><span class="op">stop</span><span>main · looping on lint</span></div>
+      </div>
+      <div class="note">Closing its pane does not stop it. The supervisor runs headless; the pane is only a view.</div>
+      </div>
+      <div class="empty" data-when="empty">
+        <b>Nothing is supervised</b>
+        <span>Pick a worktree and the supervisor will watch its agent panes, answer routine prompts and send follow-ups. Anything risky comes to your Inbox.</span>
+        <div class="acts"><button class="btn pri">Supervise ferryx / main</button><button class="btn ghost">Choose…</button></div>
+      </div>
+    </div>
+
+    <div class="footer"><span class="st" data-when="watching acting held paused empty">2 running</span><span class="st" data-when="handoff">1 running · 1 needs input</span>
+      <span class="ib"><svg class="i" width="13" height="13"><use href="#cfg"/></svg></span></div>
+  </aside>
+
+  <section class="main">
+    <div class="tabs">
+      <div class="tab on"><span class="logo l-claude">C</span>claude<svg class="i sv-ind" width="11" height="11" data-when="acting"><use href="#eye"/></svg><span class="dot working"></span></div>
+      <div class="tab"><span class="logo l-codex">X</span>codex<span class="dot working" data-when="watching acting held paused empty"></span><span class="dot waiting" data-when="handoff"></span></div>
+      <div class="tab"><svg class="i" width="14" height="14"><use href="#term"/></svg>zsh</div>
+      <div class="add"><svg class="i" width="13" height="13"><use href="#plus"/></svg></div>
+    </div>
+    <div class="split">
+      <div class="pane" id="pane-claude">
+        <div class="pbar" data-when="watching handoff" data-pbar><span class="lead"><svg class="i" width="12" height="12"><use href="#eye"/></svg>Supervised</span><span class="msg">Goal: get ferryx-hub tests green</span><button class="btn ghost">Pause here</button></div>
+        <div class="pbar acting" data-when="acting" data-pbar><span class="lead"><svg class="i" width="12" height="12"><use href="#eye"/></svg>Supervisor typed</span><span class="msg"><q>Run cargo test -p ferryx-hub and fix the failures</q></span><span class="when">2s ago</span><button class="btn">Take over</button></div>
+        <div class="pbar" data-when="held" data-pbar><span class="lead"><svg class="i" width="12" height="12"><use href="#kbd"/></svg>You're typing</span><span class="msg">Supervisor holds 1 message · sends 3s after you stop</span><button class="btn ghost">Discard it</button></div>
+        <div class="pbar" data-when="paused" data-pbar><span class="lead"><svg class="i" width="12" height="12"><use href="#pause"/></svg>Supervision paused</span><span class="msg"></span><button class="btn ghost">Resume</button></div>
+        <div class="term" id="term-claude"><span class="dim">╭─ Claude Code ─────────────────────────╮</span>
+<span class="g">✓</span> Edited crates/ferryx-hub/src/lanes/settle.rs
+<span class="g">✓</span> Edited crates/ferryx-hub/src/chat/turn_status.rs
+
+<span class="dim">⏺</span> The settle gate now waits for the claim marker.
+
+&gt; Run cargo test -p ferryx-hub and fix the failures
+
+<span class="b">⏺</span> Bash(cargo test -p ferryx-hub)
+  <span class="dim">⎿  Running 412 tests …</span>
+
+<span class="y">✻</span> Thinking… <span class="dim">(esc to interrupt)</span>
+<span class="dim">╰───────────────────────────────────────╯</span>
+&gt; <span data-when="held">also check clippy</span><span class="caret"></span></div>
+      </div>
+      <div class="vdiv"></div>
+      <div class="col">
+        <div class="pane">
+          <div class="pbar" data-when="watching acting held" data-pbar><span class="lead"><svg class="i" width="12" height="12"><use href="#eye"/></svg>Supervised</span><span class="msg">Goal: ship the tab-bar status glyph</span><button class="btn ghost">Pause here</button></div>
+          <div class="pbar" data-when="handoff" data-pbar><span class="lead"><svg class="i" width="12" height="12"><use href="#hand"/></svg>Left to you</span><span class="msg">push leaves this machine</span><button class="btn">Open in Inbox</button></div>
+          <div class="pbar" data-when="paused" data-pbar><span class="lead"><svg class="i" width="12" height="12"><use href="#pause"/></svg>Supervision paused</span><span class="msg"></span></div>
+          <div class="term"><span class="dim">codex · gpt-5.6</span>
+
+<span class="b">•</span> Updated ui/src/components/TabBar.tsx
+<span class="b">•</span> Ran bun run --cwd ui test <span class="g">(214 passed)</span>
+<span data-when="handoff">
+<span class="y">Allow command?</span> git push origin agent-ui
+  <span class="dim">1. Yes  2. Yes, always  3. No</span></span></div>
+        </div>
+        <div class="hdiv"></div>
+        <div class="pane"><div class="term"><span class="g">indo@mac</span> <span class="b">relay-keepalive</span> % git status
+nothing to commit, working tree clean
+<span class="g">indo@mac</span> <span class="b">relay-keepalive</span> % <span class="caret"></span></div></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="legend">
+  <div><h2>Three rules</h2>
+  <ul>
+    <li><b>Where it watches</b> shows inside the pane, not in the sidebar tree. A supervised pane gets a 26px bar above the terminal. Unsupervised panes (zsh here) have none. The bar appears or goes away only when you supervise a worktree or stop, so the terminal resizes only at those moments.</li>
+    <li><b>When it acts</b> is the loudest moment. The same bar switches to the active fill and shows the exact text it sent with <b>Take over</b>. For those seconds the worktree row's one state slot reads <code>supervisor typing</code> in foreground, and the tab adds the eye.</li>
+    <li><b>What it is doing overall</b> lives in its own sidebar tab, <b>Supervisor</b>: goal and next step per worktree, the audit log (<code>send / answer / wait / stop</code>), and Pause.</li>
+  </ul></div>
+  <div><h2>States</h2>
+  <ul>
+    <li><b>Watching</b>: the rows stay as they are. The only signal is the bar in the pane.</li>
+    <li><b>You type</b>: it holds its message until 3s after your last key (<code>HUMAN_TYPING_WINDOW_MS</code>). The bar says so, and you can discard the held message.</li>
+    <li><b>Handed to you</b>: it goes through the existing Inbox count and row, plus one line saying why it was left to you.</li>
+    <li><b>Paused</b>: every bar says paused, and so does the Supervisor tab.</li>
+    <li><b>Nothing supervised</b>: no bars at all. The Supervisor tab offers one action to start.</li>
+  </ul></div>
+  <div><h2>Contract</h2>
+  <ul>
+    <li>Only tokens from ui/DESIGN.md. No new hue, no state borders. Selection and acting are both a fill.</li>
+    <li>Sidebar rows keep one slot. Priority: needs input &gt; supervisor typing &gt; running &gt; unread.</li>
+    <li>Status dots stay agent state only.</li>
+  </ul></div>
+</div>
+</div>
+<script>
+const q=new URLSearchParams(location.search);
+const state={s:q.get('s')||'acting',v:q.get('v')||'worktrees',w:q.get('w')||'236'};
+function apply(){
+  document.querySelectorAll('[data-when]').forEach(el=>{const on=el.dataset.when.split(' ').includes(state.s);el.style.display=on?'':'none';});
+  document.querySelectorAll('.view').forEach(el=>el.classList.toggle('on',el.dataset.view===state.v));
+  document.querySelectorAll('[data-tab]').forEach(el=>el.setAttribute('aria-selected',el.dataset.tab===state.v));
+  document.documentElement.style.setProperty('--sbw',state.w+'px');
+  // empty: no supervised panes
+  document.querySelectorAll('[data-set-s]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.setS===state.s));
+  document.querySelectorAll('[data-set-v]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.setV===state.v));
+  document.querySelectorAll('[data-set-w]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.setW===state.w));
+}
+document.querySelectorAll('[data-set-s]').forEach(b=>b.onclick=()=>{state.s=b.dataset.setS;apply()});
+document.querySelectorAll('[data-set-v]').forEach(b=>b.onclick=()=>{state.v=b.dataset.setV;apply()});
+document.querySelectorAll('[data-set-w]').forEach(b=>b.onclick=()=>{state.w=b.dataset.setW;apply()});
+document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{state.v=b.dataset.tab;apply()});
+apply();
+</script>
+</body></html>
+
