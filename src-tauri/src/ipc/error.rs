@@ -73,6 +73,11 @@ pub enum IpcErrorCode {
     BrowserScreenshotFailed,
     PtyCreationError,
     PtySpawnError,
+    /// The daemon-wide scrollback budget admits no further session. details: { limit,
+    /// budgetBytes, minSessionHistoryBytes }. Never a silent zero-history allotment.
+    SessionCapacityExhausted,
+    /// The durable admission log cannot be trusted, so no session was admitted. details: { detail }.
+    AdmissionStoreUnusable,
     PtyIoError,
     PtyResizeError,
     PtyKillError,
@@ -222,6 +227,8 @@ impl IpcErrorCode {
             "INTERNAL_ERROR" => Self::InternalError,
             "UNSUPPORTED" => Self::Unsupported,
             "SESSION_ID_CONFLICT" => Self::SessionIdConflict,
+            "SESSION_CAPACITY_EXHAUSTED" => Self::SessionCapacityExhausted,
+            "ADMISSION_STORE_UNUSABLE" => Self::AdmissionStoreUnusable,
             "INVALID_ARGUMENT" => Self::InvalidArgument,
             "IO_ERROR" => Self::IoError,
             "PARSE_ERROR" => Self::ParseError,
@@ -480,6 +487,21 @@ impl From<PtyError> for IpcError {
                 "partial": bytes_written > 0,
             }));
         }
+        // The pane the user asked for was refused, not a transport failure: it keeps its own code
+        // so the UI can say why, with the limit in details. The message is the PTY error's own, so
+        // the code and the sentence a log reader greps for cannot drift apart.
+        if let PtyError::SessionCapacityExhausted { limit, budget_bytes, min_session_bytes } = &error {
+            return Self::new(IpcErrorCode::SessionCapacityExhausted, error.to_string())
+                .with_details(json!({
+                    "limit": limit,
+                    "budgetBytes": budget_bytes,
+                    "minSessionHistoryBytes": min_session_bytes,
+                }));
+        }
+        if let PtyError::AdmissionStoreUnusable(detail) = &error {
+            return Self::new(IpcErrorCode::AdmissionStoreUnusable, error.to_string())
+                .with_details(json!({ "detail": detail }));
+        }
         let code = match error {
             PtyError::SessionNotFound(_) => IpcErrorCode::SessionNotFound,
             PtyError::PtyCreationError(_) => IpcErrorCode::PtyCreationError,
@@ -488,6 +510,8 @@ impl From<PtyError> for IpcError {
             PtyError::ResizeError(_) => IpcErrorCode::PtyResizeError,
             PtyError::KillError(_) => IpcErrorCode::PtyKillError,
             PtyError::ChannelError(_) => IpcErrorCode::ChannelError,
+            PtyError::SessionCapacityExhausted { .. } => IpcErrorCode::SessionCapacityExhausted,
+            PtyError::AdmissionStoreUnusable(_) => IpcErrorCode::AdmissionStoreUnusable,
             PtyError::Other(_) | PtyError::RemoteInput(_) => IpcErrorCode::InternalError,
         };
         Self::new(code, error.to_string())
@@ -619,6 +643,8 @@ mod tests {
             (IpcErrorCode::SpawnAttemptTimeout, "SPAWN_ATTEMPT_TIMEOUT"),
             (IpcErrorCode::SpawnCancelled, "SPAWN_CANCELLED"),
             (IpcErrorCode::SessionIdConflict, "SESSION_ID_CONFLICT"),
+            (IpcErrorCode::SessionCapacityExhausted, "SESSION_CAPACITY_EXHAUSTED"),
+            (IpcErrorCode::AdmissionStoreUnusable, "ADMISSION_STORE_UNUSABLE"),
             (IpcErrorCode::DaemonRetiring, "DAEMON_RETIRING"),
             (IpcErrorCode::DaemonUpdatePending, "DAEMON_UPDATE_PENDING"),
             (IpcErrorCode::DaemonBusy, "DAEMON_BUSY"),

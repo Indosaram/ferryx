@@ -10,6 +10,67 @@ pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = "monospace";
 pub const DEFAULT_MACOS_OPTION_AS_ALT: bool = false;
 pub const DEFAULT_TERMINAL_FONT_SIZE: f32 = 13.0;
 pub const DEFAULT_SCROLLBACK_LINES: usize = 50_000;
+/// Daemon-wide retained-scrollback budget. Covers retained scrollback only: live screens,
+/// graphics, replay logs, queues and snapshots are bounded independently so a moved allocation
+/// cannot hide inside this number.
+pub const DEFAULT_SCROLLBACK_BUDGET_BYTES: usize = 1536 * 1024 * 1024; // 1.5 GiB
+/// Smallest retained history a session may be trimmed to. Also the admission unit: the daemon
+/// admits `budget / MIN_SESSION_HISTORY_BYTES` sessions (192 at the default budget) instead of
+/// ever admitting one with a silent zero-history allotment.
+pub const MIN_SESSION_HISTORY_BYTES: usize = 8 * 1024 * 1024;
+/// libghostty-vt's own `max_scrollback_bytes` default (~10 KiB, ~300-500 lines). `lifecycle.rs`
+/// sets that option from the budget instead of unsetting it; every per-session byte ceiling the
+/// budget derives must stay above this value, or the pruning that motivated the change returns.
+pub const LIBGHOSTTY_DEFAULT_SCROLLBACK_BYTES: usize = 10_000;
+/// Sessions the default budget admits: `floor(DEFAULT_SCROLLBACK_BUDGET_BYTES /
+/// MIN_SESSION_HISTORY_BYTES)` = 192. It is derived, not configured separately, so changing the
+/// budget changes the limit coherently; a deployment with a smaller budget gets a proportionally
+/// lower limit rather than an undefined state.
+pub const MAX_CONCURRENT_SESSIONS: usize =
+    DEFAULT_SCROLLBACK_BUDGET_BYTES / MIN_SESSION_HISTORY_BYTES;
+const _: () = assert!(MAX_CONCURRENT_SESSIONS > 0);
+const _: () = assert!(MIN_SESSION_HISTORY_BYTES > LIBGHOSTTY_DEFAULT_SCROLLBACK_BYTES);
+/// Deployment override for [`DEFAULT_SCROLLBACK_BUDGET_BYTES`]. A reduced-budget deployment gets
+/// a proportionally lower admission limit instead of over-committing; the value is validated, never
+/// trusted, so a typo cannot produce an undefined state.
+pub const SCROLLBACK_BUDGET_ENV: &str = "FERRYX_SCROLLBACK_BUDGET_BYTES";
+/// Deployment override for [`MIN_SESSION_HISTORY_BYTES`]. Must stay strictly above libghostty's own
+/// default, or the premature pruning this budget replaced comes back.
+pub const MIN_SESSION_HISTORY_ENV: &str = "FERRYX_MIN_SESSION_HISTORY_BYTES";
+
+/// The budget/minimum pair for `raw` overrides, falling back to the defaults whenever the pair is
+/// unusable: unparsable, zero, a minimum at or below libghostty's default, or a minimum larger than
+/// the budget. Pure so the deterministic tests never touch the process environment.
+pub fn scrollback_budget_from(raw: (Option<&str>, Option<&str>)) -> (usize, usize) {
+    let budget = raw
+        .0
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_SCROLLBACK_BUDGET_BYTES);
+    let min = raw
+        .1
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(MIN_SESSION_HISTORY_BYTES);
+    validated_scrollback_budget(budget, min)
+}
+
+/// [`scrollback_budget_from`]'s validation for an already-parsed pair, so a caller that holds the
+/// numbers (a `for_daemon_with_budget` test, a fork of the daemon) gets the same fallback instead
+/// of a second copy of the rule. Unusable means: a zero budget, a minimum at or below libghostty's
+/// own default, or a minimum larger than the budget.
+pub fn validated_scrollback_budget(budget: usize, min: usize) -> (usize, usize) {
+    if budget == 0 || min <= LIBGHOSTTY_DEFAULT_SCROLLBACK_BYTES || min > budget {
+        return (DEFAULT_SCROLLBACK_BUDGET_BYTES, MIN_SESSION_HISTORY_BYTES);
+    }
+    (budget, min)
+}
+
+/// The configured `(budget_bytes, min_session_bytes)`. Both values are configuration, so the
+/// admission limit `budget / min` moves with them without a rebuild.
+pub fn configured_scrollback_budget() -> (usize, usize) {
+    let budget = env::var(SCROLLBACK_BUDGET_ENV).ok();
+    let min = env::var(MIN_SESSION_HISTORY_ENV).ok();
+    scrollback_budget_from((budget.as_deref(), min.as_deref()))
+}
 /// Same key and default as Ghostty 1.4 `scrollback-compression`.
 pub const DEFAULT_SCROLLBACK_COMPRESSION: bool = true;
 
@@ -1401,6 +1462,92 @@ scrollback-limit-lines = 25000
         let saved = parse_ghostty_config("scrollback-limit = 10000\n").expect("parse config");
         let imported_saved = TerminalPreferences::imported(saved, PathBuf::from("/tmp/config"));
         assert_eq!(imported_saved.scrollback, 10000, "an explicit 10000 survives the default change");
+    }
+
+    #[test]
+    fn scrollback_budget_env_strings_are_validated_and_fall_back() {
+        let defaults = (DEFAULT_SCROLLBACK_BUDGET_BYTES, MIN_SESSION_HISTORY_BYTES);
+
+        // Both overrides well formed: used verbatim, and the admission limit follows them.
+        assert_eq!(
+            scrollback_budget_from((Some("268435456"), Some("33554432"))),
+            (256 * 1024 * 1024, 32 * 1024 * 1024)
+        );
+
+        // Unusable pairs: a zero budget, a floor at or below libghostty's default, and a floor
+        // above the budget.
+        for (raw, expected) in [
+            // A zero budget is never a budget.
+            ((Some("0"), Some("33554432")), defaults),
+            // A floor at the libghostty default restores the pruning the budget exists to stop.
+            ((Some("268435456"), Some("10000")), defaults),
+            // A floor larger than the budget admits nothing.
+            ((Some("268435456"), Some("536870912")), defaults),
+        ] {
+            assert_eq!(
+                scrollback_budget_from(raw),
+                expected,
+                "{raw:?} is unusable and must fall back"
+            );
+        }
+
+        // A side that does not parse (or is blank) keeps the compiled-in default for that side
+        // only; the pair is then judged as a whole.
+        assert_eq!(
+            scrollback_budget_from((Some("not-a-number"), Some("33554432"))),
+            (DEFAULT_SCROLLBACK_BUDGET_BYTES, 32 * 1024 * 1024)
+        );
+        assert_eq!(
+            scrollback_budget_from((Some("268435456"), Some("  "))),
+            (256 * 1024 * 1024, MIN_SESSION_HISTORY_BYTES)
+        );
+        // A negative budget does not parse as `usize`, so it is the default rather than zero.
+        assert_eq!(
+            scrollback_budget_from((Some("-1"), Some("33554432"))),
+            (DEFAULT_SCROLLBACK_BUDGET_BYTES, 32 * 1024 * 1024)
+        );
+
+        // An absent override keeps the compiled-in default for that side only.
+        assert_eq!(
+            scrollback_budget_from((Some("268435456"), None)),
+            (256 * 1024 * 1024, MIN_SESSION_HISTORY_BYTES)
+        );
+        assert_eq!(
+            scrollback_budget_from((None, Some("33554432"))),
+            (DEFAULT_SCROLLBACK_BUDGET_BYTES, 32 * 1024 * 1024)
+        );
+        assert_eq!(scrollback_budget_from((None, None)), defaults);
+    }
+
+    #[test]
+    fn validated_scrollback_budget_applies_the_same_rule_as_the_env_parser() {
+        // The parsed-pair entry point and the env parser must never disagree: a hub built through
+        // one and a log line printed through the other would otherwise name different limits.
+        let defaults = (DEFAULT_SCROLLBACK_BUDGET_BYTES, MIN_SESSION_HISTORY_BYTES);
+        assert_eq!(validated_scrollback_budget(0, MIN_SESSION_HISTORY_BYTES), defaults);
+        assert_eq!(
+            validated_scrollback_budget(
+                DEFAULT_SCROLLBACK_BUDGET_BYTES,
+                LIBGHOSTTY_DEFAULT_SCROLLBACK_BYTES
+            ),
+            defaults
+        );
+        assert_eq!(
+            validated_scrollback_budget(MIN_SESSION_HISTORY_BYTES, MIN_SESSION_HISTORY_BYTES + 1),
+            defaults,
+            "a floor above the budget is unusable"
+        );
+
+        // Usable pairs are kept exactly, including the tightest legal one.
+        let tight = (MIN_SESSION_HISTORY_BYTES + 1, MIN_SESSION_HISTORY_BYTES + 1);
+        assert_eq!(validated_scrollback_budget(tight.0, tight.1), tight);
+        let deployment = (256usize * 1024 * 1024, 32usize * 1024 * 1024);
+        let budget_text = deployment.0.to_string();
+        let min_text = deployment.1.to_string();
+        assert_eq!(
+            scrollback_budget_from((Some(budget_text.as_str()), Some(min_text.as_str()))),
+            validated_scrollback_budget(deployment.0, deployment.1)
+        );
     }
 }
 

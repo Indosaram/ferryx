@@ -24,9 +24,19 @@ import {
   requiredKinds,
   VALID_HOSTS,
 } from "./lib/release-contract.mjs";
+import { KEEPER_MANIFEST_KEY, keeperManifest, readKeeperLedger } from "./lib/release-keeper.mjs";
 
 const EXPECTED_RECEIPT_FILENAMES = Object.freeze(
   new Set(["build-receipt-macbook.json", "build-receipt-omaki.json", "build-receipt-maho-win.json"]),
+);
+
+/** The checked-in keeper ledger that supplies the oldest safe rollback version. */
+const DEFAULT_KEEPER_LEDGER_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "packaging",
+  "keeper",
+  "releases.json",
 );
 
 /**
@@ -80,6 +90,7 @@ function loadDefaultPublicKey() {
  * @param {string} options.artifactsDir
  * @param {string} options.outDir
  * @param {string} [options.publicKey]
+ * @param {string} [options.keeperLedgerPath] checked-in keeper ledger that supplies the rollback floor
  * @returns {{ outDir: string, plan: object, receipts: object[], manifest: object, files: string[] }}
  */
 export function assembleRelease(options) {
@@ -87,7 +98,15 @@ export function assembleRelease(options) {
     throw new Error("assembleRelease options must be an object");
   }
 
-  const { planPath, receiptsDir, artifactsDir, outDir, publicKey, spawnProcess = spawnSync } = options;
+  const {
+    planPath,
+    receiptsDir,
+    artifactsDir,
+    outDir,
+    publicKey,
+    keeperLedgerPath = DEFAULT_KEEPER_LEDGER_PATH,
+    spawnProcess = spawnSync,
+  } = options;
 
   if (!planPath || typeof planPath !== "string") {
     throw new Error("Missing required option: planPath");
@@ -310,6 +329,10 @@ export function assembleRelease(options) {
     notes: `Ferryx ${plan.appVersion}`,
     pub_date: new Date(pubDateEpoch).toISOString(),
     platforms,
+    [KEEPER_MANIFEST_KEY]: keeperManifest({
+      appVersion: plan.appVersion,
+      ledger: readKeeperLedger(keeperLedgerPath),
+    }),
   };
 
   // 6. Staging and atomic output publication

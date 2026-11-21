@@ -153,12 +153,19 @@ pub fn create_native_terminal(
 
     // By default, libghostty-vt sets max_scrollback_bytes to 10,000 (~10 KiB),
     // which prematurely prunes scrollback after only ~300-500 lines.
-    // Unset the byte limit so the line limit governs scrollback retention.
+    // This daemon therefore never leaves the byte option at that default and never
+    // leaves it unset either: an unset byte limit is what let 71 sessions reach a measured
+    // 6.6 GiB peak. `terminal::NATIVE_SCROLLBACK_CEILING_BYTES`
+    // supplies the cap instead, and every per-session ceiling derived from it is kept
+    // strictly above the 10 KiB default so the pruning that motivated this stays gone.
+    // The output hub narrows this to the session's own share of the daemon-wide
+    // scrollback budget once the session is registered.
+    let scrollback_bytes = crate::terminal::NATIVE_SCROLLBACK_CEILING_BYTES;
     let reg_bytes = unsafe {
         ghostty_terminal_set(
             non_null.as_ptr(),
             GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
-            std::ptr::null(),
+            &scrollback_bytes as *const usize as *const c_void,
         )
     };
     if let Err(e) = NativeTerminalError::from_c_result(reg_bytes, "set(OPT_SCROLLBACK_MAX_BYTES)") {

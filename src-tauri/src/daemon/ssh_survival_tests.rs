@@ -512,7 +512,15 @@ async fn ssh_daemon_restart_restores_identity_without_local_pty() {
 #[tokio::test]
 async fn ssh_agent_screen_is_readable_once_retention_evicts_the_gap_seam() {
     let dir = tempfile::tempdir().unwrap();
-    let server = DaemonServer::new_with_paths(Some(dir.path().join("config")), Some(dir.path().join("auth")));
+    // A lone pane's ceiling is the whole daemon budget, so the budget is pinned here: the output
+    // below must really pass this session's retention, not a compiled-in constant.
+    let bounded_hub = Arc::new(TerminalOutputHub::for_daemon_with_budget(1024 * 1024, 256 * 1024));
+    let terminals = Arc::new(TerminalService::new(Arc::new(PtyManager::new()), bounded_hub));
+    let server = DaemonServer::new_with_terminal_service(
+        Some(dir.path().join("config")),
+        Some(dir.path().join("auth")),
+        Some(terminals),
+    );
     let descriptor: crate::terminal::remote::RemoteSessionDescriptor = serde_json::from_value(serde_json::json!({
         "backendSessionId":"inline-agent-pane", "target":{"hostId":"host","ownerId":"owner","epoch":"1","backendSessionId":"inline-agent-target"},
         "config":{"host":{"id":"host","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"ssh:abcd","projectPath":"/project","worktree":null,"agentIdentity":null},
@@ -538,7 +546,7 @@ async fn ssh_agent_screen_is_readable_once_retention_evicts_the_gap_seam() {
 
     // Inline redraws only (erase line, never erase display), well past the retention budget.
     let line = format!("\x1b[2K{}\r\n", "x".repeat(96));
-    for _ in 0..(2 * crate::terminal::output_hub::retained_history::DEFAULT_TEXT_RETENTION_BYTES / line.len()) {
+    for _ in 0..(2 * hub.session_ceiling_bytes() / line.len()) {
         hub.publish("inline-agent-pane", line.clone().into_bytes());
     }
     hub.publish("inline-agent-pane", b"\x1b[2Kagent ready>".to_vec());

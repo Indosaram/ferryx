@@ -4295,7 +4295,10 @@ impl DaemonServer {
         let pty_manager = Arc::new(
             PtyManager::new().with_agent_integration(Arc::clone(&agent_integration)),
         );
-        let output_hub = Arc::new(TerminalOutputHub::default());
+        // One hub for every PTY this daemon owns: the sessions share a single retained-scrollback
+        // budget, so the per-session ceiling is `SCROLLBACK_BUDGET_BYTES / live sessions` and
+        // session 193 is refused with `SESSION_CAPACITY_EXHAUSTED` instead of over-committing.
+        let output_hub = Arc::new(TerminalOutputHub::for_daemon());
         let terminal_service = terminal_service.unwrap_or_else(|| Arc::new(TerminalService::new(
             Arc::clone(&pty_manager),
             Arc::clone(&output_hub),
@@ -6821,6 +6824,164 @@ impl DaemonServer {
         // not wait for it.
         Arc::clone(&self).spawn_owner_publication(admission_paths);
 
+        // Durable admission opens before a single listener exists: the data listener, the
+        // one-release legacy listener and the control endpoint all start accepting below, and a
+        // reservation left in the log by a daemon that died mid-spawn must already be charged when
+        // the first create can arrive. A log that cannot be read is never replaced by an empty one
+        // -- an empty ledger would claim the count is zero -- so the hub is left refusing every
+        // create with `ADMISSION_STORE_UNUSABLE` while the sessions already running keep being
+        // served.
+        //
+        // Disk I/O, so it runs on a blocking worker.
+        let admission_path = crate::terminal::admission_store::admission_path_for(&runtime_dir);
+        let admission_log = admission_path.display().to_string();
+        let opening_hub = Arc::clone(self.terminal_service.output_hub());
+        let opened = crate::ipc::run_blocking(move || {
+            Ok(opening_hub.open_durable_admission(&admission_path))
+        })
+        .await;
+        let hub = Arc::clone(self.terminal_service.output_hub());
+        match opened {
+            Ok(Ok(ledger)) => tracing::info!(
+                path = %admission_log,
+                budget_bytes = ?hub.budget_bytes(),
+                min_session_bytes = ?hub.min_session_bytes(),
+                admission_limit = ?hub.admission_ceiling().map(|ceiling| ceiling.limit),
+                charged = ledger.charged(),
+                pending = ledger.pending(),
+                "durable admission opened"
+            ),
+            Ok(Err(error)) => tracing::error!(
+                path = %admission_log,
+                %error,
+                "ADMISSION_STORE_UNUSABLE: the durable reservation log cannot be read; every \
+                 create will be refused while the running sessions keep being served"
+            ),
+            // The blocking worker itself failed. That is not a reason to abort a boot that can
+            // still serve its running sessions, but it does mean the charge was never
+            // reconstructed, so admission is refused exactly as for a corrupt log.
+            Err(error) => {
+                tracing::error!(
+                    path = %admission_log,
+                    %error,
+                    "ADMISSION_STORE_UNUSABLE: the durable reservation log could not be opened \
+                     off the runtime; every create will be refused"
+                );
+                hub.refuse_admission(
+                    crate::terminal::admission_store::StoreError::Io {
+                        op: "run_blocking",
+                        message: error.to_string(),
+                    },
+                );
+            }
+        }
+
+        // Keeper startup fills these in on a platform that has a keeper; elsewhere they stay
+        // empty and only the local PTYs are reconciled below.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut recovered_keeper_sessions: Vec<String> = Vec::new();
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut vanished_keeper_sessions: Vec<String> = Vec::new();
+
+        // Keeper startup runs on a blocking worker because it touches the filesystem, and it is
+        // finished before readiness: a client released by the readiness signal can spawn a pane
+        // immediately, and whether that pane goes to the keeper is decided by the ownership table
+        // this pass reconciles.
+        #[cfg(target_os = "macos")]
+        {
+            let terminal_service = Arc::clone(&self.terminal_service);
+            let discovery = crate::ipc::run_blocking(move || {
+                crate::daemon::keeper_startup::start_production(Arc::clone(&terminal_service))
+                    .map_err(crate::ipc::IpcError::internal)
+            })
+            .await;
+            match discovery {
+                Ok(report) => {
+                    recovered_keeper_sessions = report.sessions.clone();
+                    vanished_keeper_sessions = report.vanished.clone();
+                    tracing::info!(
+                        generation = ?report.generation,
+                        installed = report.installed,
+                        keeper_live = report.keeper_live,
+                        sessions = report.sessions.len(),
+                        vanished = report.vanished.len(),
+                        "keeper startup pass finished"
+                    )
+                }
+                Err(error) => tracing::warn!(%error, "keeper startup pass did not complete"),
+            }
+        }
+
+        // Sessions this boot inherited are already running, so charging them must not consult the
+        // ceiling: recovery is not a new admission. This runs after the keeper pass because the
+        // keeper's sessions are only known once it has answered, and still before a listener can
+        // accept a create, so no spawn can observe a half-reconciled charge. Counting is
+        // set-based, so a session that a previous boot already charged is not charged twice, and a
+        // session that is both keeper-owned and locally listed is counted once.
+        //
+        // The keeper pass also flips its routing flag (`activate_new_sessions`) before this runs.
+        // That is safe only because no listener exists yet: activation changes where a *future*
+        // create goes, and a create can only arrive once the data listener, the legacy listener or
+        // the control endpoint below starts accepting, all of which happen after this block. The
+        // pass itself spawns nothing, so nothing is admitted between activation and this charge.
+        //
+        // The call is made even when the log is unusable: the budget accounting is independent of
+        // the ledger, and skipping it would leave recovered panes outside the budget entirely. It
+        // writes nothing when there is no ledger, so it cannot claim a durable charge that does
+        // not exist.
+        let mut recovered = self.terminal_service.list_sessions();
+        recovered.extend(recovered_keeper_sessions);
+        recovered.sort();
+        recovered.dedup();
+        let durable_reconcile = hub.admission_refusal().is_none();
+        let reconcile_hub = Arc::clone(&hub);
+        match crate::ipc::run_blocking(move || Ok(reconcile_hub.note_recovered_sessions(&recovered)))
+            .await
+        {
+            Ok(Ok(accounting)) => tracing::info!(
+                counted = accounting.counted,
+                bound_reservations = accounting.bound_reservations,
+                durable = durable_reconcile,
+                "durable admission reconciled against the live sessions"
+            ),
+            Ok(Err(error)) => tracing::error!(
+                %error,
+                "ADMISSION_STORE_UNUSABLE: recovered sessions could not be charged; every create \
+                 will be refused"
+            ),
+            Err(error) => tracing::error!(%error, "recovered sessions could not be charged"),
+        }
+
+        // A session the durable table expected and the keeper no longer holds is gone. Its
+        // reservation is `Bound`, which proves the spawn was acknowledged, so no delayed request
+        // can still fork and the slot is safe to release -- leaving it charged would leak
+        // capacity for the life of every future boot. Still-reserved entries are not released:
+        // for those the request may yet land.
+        if !vanished_keeper_sessions.is_empty() {
+            let vanished_count = vanished_keeper_sessions.len();
+            let release_hub = Arc::clone(&hub);
+            let _ = crate::ipc::run_blocking(move || {
+                let Some(ledger) = release_hub.admission() else {
+                    return Ok(());
+                };
+                for session_id in &vanished_keeper_sessions {
+                    if let Err(error) = ledger.end_session(session_id) {
+                        tracing::warn!(
+                            %session_id,
+                            %error,
+                            "a vanished session's admission slot could not be released"
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .await;
+            tracing::info!(
+                vanished = vanished_count,
+                "released admission slots for sessions the keeper no longer holds"
+            );
+        }
+
         // Clean up stale socket only after lock acquisition and safe ownership check.
         if !adopted_authority {
             remove_stale_socket_after_lock(&socket_path)?;
@@ -8249,13 +8410,36 @@ impl DaemonServer {
                                         available_from_sequence: attachment.snapshot.history_start_sequence.unwrap_or(1),
                                     });
                                 }
-                                let (pty_cols, pty_rows) = self
+                                let (pty_cols, pty_rows) = match self
                                     .terminal_service
                                     .get_session(&session_id)
                                     .map(|s| s.get_size())
                                     .or_else(|| self.terminal_service.remote().details(&session_id).map(|d| (d.descriptor.cols, d.descriptor.rows)))
-                                    .map(|(c, r)| (Some(c), Some(r)))
-                                    .unwrap_or((None, None));
+                                {
+                                    Some((cols, rows)) => (Some(cols), Some(rows)),
+                                    // A keeper-owned session has no master here, so its size is the
+                                    // one the keeper recorded for the child. Reporting nothing would
+                                    // make this answer disagree with `describeSession` for the same
+                                    // session, which now reports the keeper's geometry.
+                                    None => {
+                                        let keeper_geometry = if self.terminal_service.keeper_serves(&session_id) {
+                                            let service = Arc::clone(&self.terminal_service);
+                                            let lookup = session_id.clone();
+                                            crate::ipc::run_blocking(move || {
+                                                Ok::<_, crate::ipc::IpcError>(service.keeper_geometry(&lookup))
+                                            })
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                        } else {
+                                            None
+                                        };
+                                        match keeper_geometry {
+                                            Some((cols, rows)) => (Some(cols), Some(rows)),
+                                            None => (None, None),
+                                        }
+                                    }
+                                };
                                 let hub = Arc::clone(self.terminal_service.output_hub());
                                 let history_flat = Bytes::from(std::mem::take(&mut attachment.snapshot.history));
                                 let history_segments = history_ranges
@@ -10959,6 +11143,10 @@ impl DaemonServer {
 #[cfg(all(test, unix))]
 #[path = "ssh_survival_tests.rs"]
 mod ssh_survival_tests;
+
+#[cfg(all(test, unix))]
+#[path = "handover_accounting_tests.rs"]
+mod handover_accounting_tests;
 
 #[cfg(all(test, unix))]
 #[path = "remote_ssh_tests.rs"]

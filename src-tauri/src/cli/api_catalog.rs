@@ -19,6 +19,7 @@ pub const CLI_GROUPS: &[&str] = &[
     "open",
     "up",
     "service",
+    "daemon",
     "account",
     "browser",
     "pair",
@@ -278,6 +279,21 @@ pub const CATALOG: &[Command] = &[
         output: "text or json (--json)",
         subcommands: &[sub!("install", &[], &[JSON]), sub!("status", &[], &[JSON]), sub!("uninstall", &[], &[JSON])],
         exit_codes: &[("0", "ok"), ("1", "failure (including install not completed)"), ("2", "usage error")],
+    },
+    Command {
+        name: "daemon",
+        summary: "Collect daemon crash evidence: the newest .ips, the dSYM carrying its UUID, and the daemon log",
+        output: "text, or json (--json)",
+        subcommands: &[sub!(
+            "crash-report",
+            &[],
+            &[value!("--ips"), value!("--dsym"), value!("--out"), JSON],
+        )],
+        exit_codes: &[
+            ("0", "ok (a bundle is written even when no dSYM matched)"),
+            ("1", "failure: no data dir, unreadable crash report, unwritable output"),
+            ("2", "usage error"),
+        ],
     },
     Command {
         name: "account",

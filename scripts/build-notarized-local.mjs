@@ -43,6 +43,18 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { evaluateVersionProgression, VERSION_REUSE_OVERRIDE_ENV } from "./install-macos-app.mjs";
+import {
+  assertKeeperInApp,
+  buildKeeperUniversal,
+  installKeeperIntoApp,
+  keeperExpectations,
+} from "./lib/keeper-bundle.mjs";
+import {
+  assertKeeperRollbackManifest,
+  writeKeeperRollbackManifest,
+} from "./lib/keeper-rollback-manifest.mjs";
+import { assertDsymGate, isFile, produceDsymFromSlices, strippedForShipping } from "./lib/release-dsym.mjs";
+import { buildDsymArchiveManifest, writeDsymArchiveManifest } from "./lib/release-symbolication.mjs";
 
 export const DEFAULT_SIGNING_IDENTITY = "Developer ID Application: Indo Yoon (5DUM8WPB4C)";
 export const INSTALLED_APP = "/Applications/Ferryx.app";
@@ -191,6 +203,7 @@ export async function finalizeLocally({
   ffmpegPayload,
   signingIdentity,
   notaryProfile = NOTARY_PROFILE,
+  requireKeeper = false,
   runDir,
   run,
   log = console.log,
@@ -271,6 +284,9 @@ export async function finalizeLocally({
       notaryProfile,
       approveNotarization: true,
       entitlements,
+      // The keeper was installed into this bundle in step 3 and ships in it; a seal without one
+      // would produce the keeper-less supervisor both macOS release paths exist to forbid.
+      requireKeeper,
       exec,
     });
   } catch (error) {
@@ -283,7 +299,14 @@ export async function finalizeLocally({
     throw new Error(`spctl did not approve: ${spctl.out.trim()}`);
   }
 
-  return { appPath, helperPath: helper.helperPath, notarizations: outcome.notarizations };
+  return {
+    appPath,
+    helperPath: helper.helperPath,
+    notarizations: outcome.notarizations,
+    // Re-derived by finalizeMacosBundle from the SEALED bytes, so this is the only keeper digest
+    // that describes what ships; the dSYM archive manifest records it.
+    keeper: outcome.keeper ?? null,
+  };
 }
 
 /**
@@ -427,6 +450,11 @@ async function buildMain({ cli, signingIdentity, repoDir, spawn, env, log, print
       TAURI_SIGNING_PRIVATE_KEY: updaterKey,
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: updaterPassword ?? "",
       CARGO_TARGET_DIR: targetDir,
+      // Phase 0: `profile.release` strips symbols and compiles without debug info, which leaves
+      // dsymutil nothing to extract and makes every crash report unsymbolicatable. Emit line
+      // tables, archive the dSYM, then strip the shipped Mach-O files once the UUID gate passed.
+      CARGO_PROFILE_RELEASE_STRIP: "none",
+      CARGO_PROFILE_RELEASE_DEBUG: "1",
     },
   );
   if (build.exit !== 0) {
@@ -437,11 +465,77 @@ async function buildMain({ cli, signingIdentity, repoDir, spawn, env, log, print
   if (!existsSync(appPath)) {
     throw new Error(`bundle not found at ${appPath}`);
   }
+
+  // 3. Keeper payload, before the dSYM gate and before anything seals the app. The daemon
+  // supervises keeper-owned PTY sessions, so a local notarized build that ships without the keeper
+  // is the same keeper-less supervisor the release path refuses; both paths assert it on the built
+  // bundle. The keeper is built for the host triple, the one this build just compiled.
+  const appVersion = JSON.parse(
+    readFileSync(path.join(worktree, "src-tauri", "tauri.conf.json"), "utf8"),
+  ).version;
+  const keeperDir = path.join(runDir, "keeper");
+  // The keeper is compiled for the architecture this build targeted, which is the host's.
+  const hostTriple = FFMPEG_TARGET;
+  buildKeeperUniversal({
+    sourceDir: worktree,
+    targetDir,
+    destDir: keeperDir,
+    triples: [hostTriple],
+    appVersion,
+    // Same Phase 0 settings as the app build: without line tables dsymutil has nothing to extract
+    // and the keeper would ship with no dSYM, which the gate below would then refuse.
+    env: { ...env, CARGO_PROFILE_RELEASE_STRIP: "none", CARGO_PROFILE_RELEASE_DEBUG: "1" },
+  });
+  const keeperResourceDir = installKeeperIntoApp({ appPath, stagedDir: keeperDir });
+  // Both expectations, not just the generation name: the bundle is built from this worktree, so the
+  // crate version its manifest records must be the one this source tree builds.
+  const keeper = assertKeeperInApp({ appPath, ...keeperExpectations({ sourceDir: worktree, appVersion }) });
+  // The rollback floor, from the ledger in the worktree being bundled. Written after the keeper
+  // payload exists and asserted against that same ledger, before the dSYM gate and before
+  // finalizeMacosBundle seals the bytes. Without it every rollback on this build would refuse with
+  // KEEPER_ROLLBACK_FLOOR_UNVERIFIED, because the updater's latest.json is never bundled.
+  writeKeeperRollbackManifest({ appPath, appVersion, sourceDir: worktree });
+  assertKeeperRollbackManifest({ appPath, appVersion, sourceDir: worktree });
+  log(`keeper: ${keeper.manifest.version} (protocol ${keeper.manifest.protocolMajor}.${keeper.manifest.protocolMinor})`);
+
+  // 3a. Phase 0 dSYM gate on the built binaries, before anything seals them. The dSYM must carry
+  // the SAME UUID as the bytes that ship, or a `ferryx +<offset>` frame can never be named; a dSYM
+  // from a different link fails this build instead of being archived and silently useless.
+  const dsymDir = path.join(runDir, "dsyms");
+  // dsymutil writes `-o` but does not create its parent, and runDir is only created inside
+  // finalizeLocally, which runs after this gate.
+  mkdirSync(dsymDir, { recursive: true });
+  const shippedBinary = path.join(appPath, "Contents", "MacOS", "ferryx");
+  // The app binary this build produced, before the bundler copied it into the app.
+  const builtApp = path.join(targetDir, "release", "ferryx");
+  const keeperBinary = path.join(keeperResourceDir, "ferryx-ptykeeper");
+  const keeperSlice = path.join(targetDir, hostTriple, "release", "ferryx-ptykeeper");
+  const ferryxDsym = produceDsymFromSlices({
+    slices: isFile(builtApp) ? [builtApp] : [shippedBinary],
+    outPath: path.join(dsymDir, "ferryx.dSYM"),
+  });
+  // The keeper ships inside the app, so its dSYM must be archived too: a SIGSEGV in the process that
+  // owns every PTY master is the crash this build most needs to name.
+  const keeperDsym = produceDsymFromSlices({
+    slices: isFile(keeperSlice) ? [keeperSlice] : [keeperBinary],
+    outPath: path.join(dsymDir, "ferryx-ptykeeper.dSYM"),
+  });
+  // `strip` rewrites the Mach-O, so it runs after the dSYM was produced from it and before sealing.
+  strippedForShipping(shippedBinary);
+  const dsymGate = assertDsymGate({ binaryPath: shippedBinary, dsymDir });
+  strippedForShipping(keeperBinary);
+  const keeperDsymGate = assertDsymGate({ binaryPath: keeperBinary, dsymDir });
+  log(`dSYM: ${dsymGate.binaryUuids.join(", ")} archived under ${dsymDir}`);
+  log(`dSYM: keeper ${keeperDsymGate.binaryUuids.join(", ")} archived under ${dsymDir}`);
+
   const outcome = await finalizeLocally({
     appPath,
     ffmpegPayload: path.join(worktree, "src-tauri/resources/ffmpeg/payload", FFMPEG_TARGET),
     signingIdentity,
     notaryProfile: NOTARY_PROFILE,
+    // The keeper was installed into this bundle above; a seal without one would produce the
+    // keeper-less supervisor both macOS release paths exist to forbid.
+    requireKeeper: true,
     runDir,
     run,
     log,
@@ -453,6 +547,51 @@ async function buildMain({ cli, signingIdentity, repoDir, spawn, env, log, print
   log(`NOTARIZED_BUNDLE:${outcome.appPath}`);
   log(`DAEMON_HELPER:${outcome.helperPath}`);
   log(`notary submissions: ${JSON.stringify(outcome.notarizations)}`);
+
+  // 4a. The dSYM archive manifest, from the keeper digest finalizeMacosBundle re-derived on the
+  // SEALED bundle. Sealing re-signs the keeper, so a digest taken before finalize would describe
+  // bytes that code signing then rewrote.
+  const shippedKeeper = outcome.keeper;
+  writeDsymArchiveManifest(
+    dsymDir,
+    buildDsymArchiveManifest({
+      runDir,
+      appVersion,
+      binaries: [
+        { binary: shippedBinary, bundle: ferryxDsym.bundle, uuids: ferryxDsym.uuids, functions: ferryxDsym.functions },
+        { binary: keeperBinary, bundle: keeperDsym.bundle, uuids: keeperDsym.uuids, functions: keeperDsym.functions },
+      ],
+      gates: [
+        { ...dsymGate, binaryPath: shippedBinary },
+        { ...keeperDsymGate, binaryPath: keeperBinary },
+      ],
+      keeper: shippedKeeper
+        ? {
+            version: shippedKeeper.version,
+            protocolMajor: shippedKeeper.protocolMajor,
+            protocolMinor: shippedKeeper.protocolMinor,
+            binary: keeperBinary,
+            // The keeper's own build UUIDs, so a crash report that names a keeper frame can be
+            // paired with the archived dSYM without re-reading the archive. `ferryx daemon
+            // crash-report` looks for the generation, then the UUID; recording both here is what
+            // makes a keeper frame nameable months later.
+            uuids: keeperDsym.uuids,
+            sha256: shippedKeeper.sha256,
+          }
+        : null,
+    }),
+  );
+  log(`dSYM: manifest ${path.join(dsymDir, "manifest.json")}`);
+  // The archive ships beside the app, not inside it: `ferryx daemon crash-report` looks for a
+  // `dsyms/` directory under the data dir, and the dSYM is diagnostics for the release rather than
+  // an installable. `--no-xattrs` plus `COPYFILE_DISABLE` keep AppleDouble entries out, matching
+  // what the release path writes.
+  const dsymArchive = path.join(runDir, "Ferryx-universal.dSYM.tar.gz");
+  const tar = run("tar", ["--no-xattrs", "-czf", dsymArchive, "-C", dsymDir, "."], { COPYFILE_DISABLE: "1" });
+  if (tar.exit !== 0) {
+    throw new Error(`dSYM archive failed: ${tar.out.slice(-1500).trim() || `exit ${tar.exit}`}`);
+  }
+  log(`dSYM: archive ${dsymArchive}`);
   return 0;
 }
 

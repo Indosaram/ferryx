@@ -35,6 +35,7 @@ pub const GHOSTTY_TERMINAL_DATA_COLOR_PALETTE: c_int = 21;
 pub const GHOSTTY_TERMINAL_DATA_SELECTION: c_int = 31;
 pub const GHOSTTY_TERMINAL_DATA_MODE: c_int = 37;
 pub const GHOSTTY_TERMINAL_DATA_MEMORY_USAGE: c_int = 42;
+pub const GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_BYTES: c_int = 34;
 
 // GhosttyTerminalCompressionMode / GhosttyTerminalCompressionResult matching
 // `ghostty/vt/terminal.h`. FULL mode is deliberately not mirrored: it scans all scrollback

@@ -1,0 +1,31 @@
+[package]
+name = "ferryx-ptykeeper"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "FFI-free PTY keeper: owns portable_pty masters and serves a versioned UDS protocol so Ferryx sessions survive daemon death"
+license = "MIT"
+publish = false
+
+[lib]
+name = "ferryx_ptykeeper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ferryx-ptykeeper"
+path = "src/main.rs"
+
+[dependencies]
+portable-pty = { version = "0.9", path = "../../src-tauri/vendor/portable-pty" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[workspace]

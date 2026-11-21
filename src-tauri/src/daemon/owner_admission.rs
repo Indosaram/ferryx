@@ -716,9 +716,15 @@ fn probe_endpoint(socket: &Path) -> Result<Endpoint, String> {
                 .ok_or_else(|| format!("Failed to probe {}: {error}", socket.display()))
         }
     };
-    stream
-        .set_read_timeout(Some(ENDPOINT_FRAME_WAIT))
-        .map_err(|error| format!("Failed to arm endpoint probe: {error}"))?;
+    // A daemon that exits between the connect and this call leaves a hung-up peer, on which Darwin
+    // refuses the timeout with `EINVAL` (Linux accepts it). Skipping the moot bound there lets the
+    // read below report the hang-up as `Answers` - the owner did answer - instead of turning it into
+    // an arming error that would read as an unclassifiable owner.
+    if let Err(error) = stream.set_read_timeout(Some(ENDPOINT_FRAME_WAIT)) {
+        if !super::refused_timeout_on_hung_up_peer(&stream, &error) {
+            return Err(format!("Failed to arm endpoint probe: {error}"));
+        }
+    }
     let mut byte = [0u8; 1];
     Ok(frame_or_silence(stream.read(&mut byte)))
 }

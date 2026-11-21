@@ -22,6 +22,8 @@ import {
   finalizeMacosBundle,
   machoEntitlements,
   BUN_ENTITLEMENTS,
+  UPDATER_KEEPER_MEMBER,
+  verifyShippedKeeperDigest,
   verifyMacosFfmpegBundle,
 } from "./lib/release-platforms.mjs";
 import { parseReceipt } from "./lib/release-contract.mjs";
@@ -1727,6 +1729,234 @@ test("verifyMacosFfmpegBundle: fails closed on missing dylib, absolute install n
     assert.throws(() => verifyMacosFfmpegBundle({ appPath, payloadDir, exec: otool({ dep: "/usr/lib/libSystem.B.dylib" }) }), /does not link FFmpeg/);
     rmSync(join(appPath, "Contents", "Frameworks", "libavutil.61.dylib"));
     assert.throws(() => verifyMacosFfmpegBundle({ appPath, payloadDir, exec: otool() }), /missing from the app bundle/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The keeper payload as the build installs it, before anything signs it.
+ *
+ * `keeper.json` records the digest of the bytes on disk at install time. Code signing then appends a
+ * signature blob, so the recorded digest describes a file that no longer exists unless something
+ * re-derives it -- which is the defect these cases pin.
+ */
+function installKeeperPayload(appPath, payload = "keeper-unsigned") {
+  const keeperDir = join(appPath, "Contents", "Resources", "keeper");
+  mkdirSync(keeperDir, { recursive: true });
+  const binary = join(keeperDir, "ferryx-ptykeeper");
+  writeFileSync(binary, payload);
+  chmodSync(binary, 0o755);
+  writeFileSync(
+    join(keeperDir, "keeper.json"),
+    `${JSON.stringify(
+      {
+        schema: "ferryx-keeper-bundle/v1",
+        version: "2026.1116.1",
+        crateVersion: "0.1.0",
+        binary: "ferryx-ptykeeper",
+        protocolMajor: 1,
+        protocolMinor: 0,
+        sha256: createHash("sha256").update(payload).digest("hex"),
+        bytes: Buffer.byteLength(payload),
+        architectures: ["aarch64", "x86_64"],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return { keeperDir, binary, manifest: join(keeperDir, "keeper.json") };
+}
+
+test("finalizeMacosBundle: re-derives keeper.json from the bytes code signing produced", () => {
+  // The keeper is a loose Mach-O under Contents/Resources/keeper, so the signing loop rewrites it.
+  // A digest taken before that loop (the pre-fix order) leaves keeper.json describing bytes that
+  // never ship, and keeper_startup::payload_digest then refuses the generation -- which the boot
+  // path downgrades to a warning, so the app runs with no keeper at all.
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-keeper-digest-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    const payload = installKeeperPayload(fixture.appPath);
+
+    const sealed = finalizeMacosBundle({
+      appPath: fixture.appPath,
+      dmgPath: null,
+      workspaceDir: fixture.workspaceDir,
+      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
+      exec: fixture.exec,
+    });
+
+    const signedBytes = readFileSync(payload.binary);
+    assert.notEqual(
+      createHash("sha256").update(signedBytes).digest("hex"),
+      createHash("sha256").update("keeper-unsigned").digest("hex"),
+      "fixture precondition: model codesign appended a signature blob to the keeper",
+    );
+    const recorded = JSON.parse(readFileSync(payload.manifest, "utf8"));
+    const actual = createHash("sha256").update(signedBytes).digest("hex");
+    assert.equal(recorded.sha256, actual, "keeper.json describes the signed bytes in the bundle");
+    assert.equal(recorded.bytes, signedBytes.length, "keeper.json byte count describes the signed bytes");
+    assert.equal(sealed.keeper.sha256, actual, "the returned digest is the sealed one, for the archive manifest");
+    // Everything else the manifest states must survive the refresh: it is the same generation.
+    assert.equal(recorded.version, "2026.1116.1");
+    assert.equal(recorded.protocolMajor, 1);
+    assert.equal(recorded.crateVersion, "0.1.0");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: no signature runs after the keeper digest is re-derived", () => {
+  // The invariant that makes the digest true: the last byte-affecting operation on the keeper
+  // precedes the last digest computation. Observed directly -- when the outer app is sealed, the
+  // manifest on disk must already describe the keeper's current bytes, and no later codesign may
+  // target the keeper again.
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-keeper-order-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    const payload = installKeeperPayload(fixture.appPath);
+    const digestAtSeal = [];
+    const keeperSigns = [];
+    const exec = (command, args, opts) => {
+      const target = args[args.length - 1];
+      if (command === "codesign" && args[0] === "--force" && target === fixture.appPath) {
+        const recorded = JSON.parse(readFileSync(payload.manifest, "utf8")).sha256;
+        const current = createHash("sha256").update(readFileSync(payload.binary)).digest("hex");
+        digestAtSeal.push({ recorded, current });
+      }
+      if (command === "codesign" && args[0] === "--force" && target === payload.binary) keeperSigns.push(target);
+      return fixture.exec(command, args, opts);
+    };
+
+    finalizeMacosBundle({
+      appPath: fixture.appPath,
+      dmgPath: null,
+      workspaceDir: fixture.workspaceDir,
+      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      notaryProfile: "FerryxNotary",
+      approveNotarization: true,
+      exec,
+    });
+
+    assert.equal(keeperSigns.length, 1, "the keeper is signed exactly once, by the loose-Mach-O pass");
+    assert.equal(digestAtSeal.length, 1, "the outer app is sealed once");
+    assert.equal(
+      digestAtSeal[0].recorded,
+      digestAtSeal[0].current,
+      "keeper.json already describes the signed bytes when the outer bundle is sealed",
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("verifyShippedKeeperDigest: fails closed unless the archive's own keeper bytes match the sealed digest", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-updater-keeper-digest-"));
+  try {
+    const keeperDir = join(tmp, "stage", "Ferryx.app", "Contents", "Resources", "keeper");
+    mkdirSync(keeperDir, { recursive: true });
+    writeFileSync(join(keeperDir, "ferryx-ptykeeper"), "keeper-signed-bytes");
+    const archivePath = join(tmp, "Ferryx.app.tar.gz");
+    execFileSync("tar", ["--no-xattrs", "-czf", archivePath, "-C", join(tmp, "stage"), "Ferryx.app"], {
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+    });
+
+    const sealed = createHash("sha256").update("keeper-signed-bytes").digest("hex");
+    assert.deepEqual(verifyShippedKeeperDigest({ archivePath, expectedSha256: sealed }), {
+      memberPath: UPDATER_KEEPER_MEMBER,
+      sha256: sealed,
+    });
+
+    // The stale digest a pre-seal refresh would record: the archive carries different bytes.
+    assert.throws(
+      () => verifyShippedKeeperDigest({ archivePath, expectedSha256: "0".repeat(64) }),
+      /keeper was rewritten after its manifest was written/,
+    );
+    // A caller that has no sealed digest must not be able to pass.
+    assert.throws(() => verifyShippedKeeperDigest({ archivePath, expectedSha256: "" }), /no sealed keeper digest/);
+    // An archive without the keeper member is refused rather than treated as keeper-free.
+    assert.throws(
+      () => verifyShippedKeeperDigest({ archivePath, expectedSha256: sealed, memberPath: "Ferryx.app/Contents/Resources/keeper/absent" }),
+      /carries no Ferryx\.app\/Contents\/Resources\/keeper\/absent/,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: refuses a bundle carrying the keeper binary with no keeper.json", () => {
+  // The half-install that used to ship silently: a binary dropped into Contents/Resources/keeper
+  // without its manifest. `payload_digest` needs the manifest, the archive manifest needs the
+  // version, and the rollback floor needs the version too -- so the only step that looked at this
+  // bundle would have sealed it and passed. It must fail here instead.
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-keeper-half-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    const keeperDir = join(fixture.appPath, "Contents", "Resources", "keeper");
+    mkdirSync(keeperDir, { recursive: true });
+    writeFileSync(join(keeperDir, "ferryx-ptykeeper"), "keeper-bytes");
+
+    assert.throws(
+      () =>
+        finalizeMacosBundle({
+          appPath: fixture.appPath,
+          dmgPath: null,
+          workspaceDir: fixture.workspaceDir,
+          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          notaryProfile: "FerryxNotary",
+          approveNotarization: true,
+          exec: fixture.exec,
+        }),
+      /carries .*ferryx-ptykeeper but no keeper\.json beside it/,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: requireKeeper refuses to seal a bundle with no keeper payload", () => {
+  // Both macOS release paths install a keeper and then seal. `requireKeeper` makes that a property
+  // of the seal rather than a property of the step before it, so a silently-skipped install cannot
+  // produce the keeper-less supervisor the whole payload exists to prevent.
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-keeper-required-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    assert.throws(
+      () =>
+        finalizeMacosBundle({
+          appPath: fixture.appPath,
+          dmgPath: null,
+          workspaceDir: fixture.workspaceDir,
+          signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+          notaryProfile: "FerryxNotary",
+          approveNotarization: true,
+          requireKeeper: true,
+          exec: fixture.exec,
+        }),
+      /carries no Contents\/Resources\/keeper\/keeper\.json and requireKeeper was set/,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("finalizeMacosBundle: a bundle with no keeper at all still seals when a keeper is not required", () => {
+  // The daemon-lifetime QA harness builds ad-hoc bundles without a keeper; `requireKeeper` must stay
+  // opt-in or that path breaks for a reason unrelated to what it tests.
+  const tmp = mkdtempSync(join(tmpdir(), "ferryx-keeper-optional-"));
+  try {
+    const fixture = createMacFinalizeFixture(tmp);
+    const outcome = finalizeMacosBundle({
+      appPath: fixture.appPath,
+      dmgPath: null,
+      workspaceDir: fixture.workspaceDir,
+      signingIdentity: "Developer ID Application: Indo Yoon (5DUM8WPB4C)",
+      approveNotarization: false,
+      exec: fixture.exec,
+    });
+    assert.equal(outcome.keeper, null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

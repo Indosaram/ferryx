@@ -375,12 +375,18 @@ async fn journal_mutation_revocation_retains_admission_until_worker_drains() {
     contention(true, true, false).await;
 }
 
-#[tokio::test]
+// These two drive a real 40s/35s production deadline and wait on a client task that lives on the
+// test's own runtime. On a single-threaded runtime that task makes progress only while this test
+// thread is scheduled, so under a full parallel suite a descheduled thread stalls the request and
+// the wait expires without the gateway having done anything wrong. Two worker threads keep the
+// client task and the timer driver running off a different thread than the one awaiting them; the
+// bound on each wait is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn journal_read_deadline_retains_admission_until_worker_drains() {
     contention(false, false, true).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn journal_mutation_deadline_retains_admission_until_worker_drains() {
     contention(true, false, true).await;
 }
@@ -412,6 +418,19 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
         service.project_reads.clone()
     };
     let capacity = slots.available_permits();
+    // The gateway stamps its admission deadline when a request is *admitted*
+    // (`workspace_api::admit`: 40s for a mutation, 35s for a read), which under a loaded suite can
+    // be arbitrarily later than this harness sending it. Every wait below is therefore measured
+    // from the event it waits for plus slack, never from an earlier wall-clock point, so a busy
+    // runner delays an observation instead of failing it. The production deadline stays the only
+    // clock the assertions read.
+    let deadline_bound = Duration::from_secs(if mutation { 40 } else { 35 });
+    let event_bound = deadline_bound + Duration::from_secs(60);
+    // The writer is held from the persist probe until after the deadline response is observed, so
+    // its patience must exceed that whole chain (`event_bound` plus one deadline window) or this
+    // thread panics first and hides which assertion actually failed. Kept explicit rather than
+    // multiplied so the bound stays readable against the waits it has to outlive.
+    let hold_bound = event_bound + deadline_bound + Duration::from_secs(60);
     let auth_state = state.clone();
     let (held_tx, held_rx) = tokio::sync::oneshot::channel();
     let (read_tx, read_rx) = tokio::sync::oneshot::channel();
@@ -423,11 +442,11 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
         "persist" => {
             if let Some(tx) = held_tx.lock().unwrap().take() {
                 tx.send(()).unwrap();
-                release_rx
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(60))
-                    .unwrap();
+                // The writer only has to stay held until the request has been observed; it is not
+                // the subject of any assertion. Panicking here on a late release reports a
+                // scheduling delay as a writer failure and hides which assertion actually broke, so
+                // the fixture releases and lets the real status/permit assertions speak.
+                let _ = release_rx.lock().unwrap().recv_timeout(hold_bound);
             }
         }
         phase if phase == if mutation { "reconcile" } else { "sessions" } => {
@@ -475,13 +494,15 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
     });
     let client = reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(50))
+        // Above `hold_bound`, so reqwest never aborts a request the test is still waiting on: the
+        // outcome must be the gateway's own response, or the assertions read the wrong failure.
+        .timeout(hold_bound + Duration::from_secs(30))
         .build()
         .unwrap();
     let mut list = None;
     let mut revoked_response = None;
     let outcome = std::panic::AssertUnwindSafe(async {
-        tokio::time::timeout(Duration::from_secs(10), held_rx).await.unwrap().unwrap();
+        tokio::time::timeout(event_bound, held_rx).await.unwrap().unwrap();
         // When an authenticated HTTP request reaches that held journal lock.
         let url = format!("http://{address}/api/v1/sessions");
         let call = if mutation {
@@ -494,7 +515,12 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
         } else { client.get(url) }.bearer_auth(&token);
         let started = std::time::Instant::now();
         list = Some(tokio::spawn(async move { call.send().await }));
-        tokio::time::timeout(Duration::from_secs(10), read_rx).await.unwrap().unwrap();
+        tokio::time::timeout(event_bound, read_rx).await.unwrap().unwrap();
+        // The journal probe fires once the request has been admitted and reached the held lock, so
+        // this instant is the admission the gateway stamps its deadline from (`workspace_api::admit`
+        // runs before the request body reaches the journal). Anchoring the deadline window here keeps
+        // the wait measured from the event it depends on, not from `started`.
+        let admitted = std::time::Instant::now();
         // Then the gateway's single executor must still serve independent HTTP.
         // The watchdog runs on a different runtime, so a blocked gateway cannot
         // prevent this bounded latency assertion from firing.
@@ -507,8 +533,21 @@ async fn contention(mutation: bool, revoke: bool, expire: bool) {
                 .await.unwrap().then_some(()).unwrap();
         }
         if revoke || expire {
-            let response = tokio::time::timeout(Duration::from_secs(if expire { 45 } else { 2 }), list.as_mut().unwrap())
-                .await.unwrap().unwrap().unwrap();
+            // A revoked request is answered from the revocation watch rather than from a deadline,
+            // and the revoke is already complete here, so its 2s window keeps its original
+            // meaning: it fails fast when revocation stops waking the gateway. Only the expired
+            // request waits out the production deadline, and that wait is anchored at `admitted`
+            // because a busy runner can delay admission later than this harness sending.
+            let response = if expire {
+                tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(admitted + deadline_bound + Duration::from_secs(60)),
+                    list.as_mut().unwrap(),
+                )
+                .await
+            } else {
+                tokio::time::timeout(Duration::from_secs(2), list.as_mut().unwrap()).await
+            }
+            .unwrap().unwrap().unwrap();
             list.take();
             assert_eq!(response.status().as_u16(), if revoke { 401 } else { 504 });
             if expire {

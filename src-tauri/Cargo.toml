@@ -83,6 +83,12 @@ local-split-qa = []
 # Todo 9 QA only: a genuinely incompatible daemon (DAEMON_PROTOCOL_VERSION 6) used as the old owner
 # against a normal build, so the update-pending path is exercised against a real process.
 qa-protocol-bump = ["local-split-qa"]
+# Phase 3 QA only: the same build with the *next* daemon protocol revision (DAEMON_PROTOCOL_VERSION
+# 7), used as the newer generation in the Phase 3 mixed-generation replacement case. It implies no
+# feature on purpose: `qa-protocol-bump` also turns on `local-split-qa`, which changes QA-barrier,
+# launchd-job, gateway-port and owner-probe behaviour, so a pair of those builds would differ in much
+# more than the protocol revision the case measures. Never enabled in a default or release build.
+qa-protocol-next = []
 # Native GPU presentation is optional; real libghostty-vt parsing is always built.
 apple-web-browser-entitlement = []
 native-terminal = [

@@ -5,26 +5,33 @@
 #   scripts/pick-build-host.sh --release <host>   # release when the build ends, pass or fail
 # A claim is ignored once its lease expired or its owner pid exited.
 set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/lib/build-host-claims.sh" || { echo "picker: claim library missing: $HERE/lib/build-host-claims.sh" >&2; exit 2; }
 MIN_FREE_GB=${MIN_FREE_GB:-8}
 MIN_DISK_GB=${MIN_DISK_GB:-15}
 MAX_LOAD_PER_CORE=${MAX_LOAD_PER_CORE:-0.5}
 tmo() { local t=$1; shift; perl -e 'alarm shift; exec @ARGV' "$t" "$@"; }
-LOCKDIR=/tmp/ferryx-build-host-locks; mkdir -p "$LOCKDIR"
+LOCKDIR=$(fx_lockdir); mkdir -p "$LOCKDIR" || { echo "picker: cannot create lock dir $LOCKDIR" >&2; exit 2; }
 HOSTS_FILE=${FERRYX_BUILD_HOSTS_FILE:-$HOME/.config/ferryx/build-hosts}
 
 if [ "${1:-}" = "--release" ]; then
   [ -n "${2:-}" ] || { echo "usage: $0 --release <host>" >&2; exit 2; }
-  rm -f "$LOCKDIR/$2"; exit 0
+  fx_valid_host "$2" || { echo "picker: cannot release '$2': not a usable host name" >&2; exit 2; }
+  rc=0; fx_claim_release "$2" "${FERRYX_BUILD_OWNER_PID:-}" || rc=$?
+  case "$rc" in
+    0) exit 0 ;;
+    5) echo "picker: refusing to release $2: the claim is live and this is not its owner" >&2; exit 5 ;;
+    *) echo "picker: cannot release '$2': the claim could not be removed" >&2; exit 1 ;;
+  esac
 fi
 OWNER=${FERRYX_BUILD_OWNER_PID:-}
+case "$OWNER" in ''|*[!0-9]*) OWNER="" ;; esac
+[ "${OWNER:-0}" -gt 0 ] 2>/dev/null || OWNER=""
 CLAIM_TTL=${FERRYX_BUILD_CLAIM_TTL:-7200}
-claimed() {  # lock file holds "pid <pid>" or "until <epoch>"
-  local kind val; [ -f "$1" ] || return 1; read -r kind val < "$1" || return 1
-  case "$kind" in
-    pid) kill -0 "$val" 2>/dev/null ;;
-    until) [ "$(date +%s)" -lt "$val" ] ;;
-    *) return 1 ;;
-  esac
+case "$CLAIM_TTL" in ''|*[!0-9]*) CLAIM_TTL=7200 ;; esac
+claimed() {
+  case $(fx_claim_state "$1") in live|malformed) return 0 ;; esac
+  return 1
 }
 
 PROBE_UNIX='c=$(nproc 2>/dev/null || sysctl -n hw.ncpu); l=$(uptime | sed "s/.*load average[s]*: *//; s/[ ,].*//"); 
@@ -118,5 +125,11 @@ Ask the user before spending on either.
 MSG
   exit 3
 fi
-if [ -n "$OWNER" ]; then echo "pid $OWNER" > "$LOCKDIR/$best"; else echo "until $(( $(date +%s) + CLAIM_TTL ))" > "$LOCKDIR/$best"; fi
+if [ -n "$OWNER" ]; then payload="pid $OWNER"; else payload="until $(( $(date +%s) + CLAIM_TTL ))"; fi
+fx_claim_acquire "$best" "$payload"; arc=$?
+case "$arc" in
+  0) ;;
+  2) echo "$best: claim taken by another session; retry" >&2; exit 3 ;;
+  *) echo "$best: cannot write a claim in $LOCKDIR" >&2; exit 2 ;;
+esac
 echo "$best"

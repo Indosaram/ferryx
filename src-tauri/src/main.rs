@@ -56,6 +56,15 @@ fn main() {
             std::process::exit(2);
         }
     }
+    // `ferryx daemon crash-report`: collects crash evidence only. It never starts, stops, or
+    // signals a daemon, so it cannot disturb live PTY sessions. Dispatch is on the full
+    // subcommand name, not the `daemon` group: an SSH helper re-execs this same executable with
+    // `daemon --root <dir> --host-id <id>` and must keep reaching that handler.
+    if args.get(1).is_some_and(|arg| arg == "daemon")
+        && args.get(2).is_some_and(|arg| arg == "crash-report")
+    {
+        std::process::exit(ferryx_lib::cli::crash_report::run_daemon_cli(&args));
+    }
     // `ferryx hub migrate|stop|start`, as documented in docs/hub-cutover.md. Without this the
     // GUI binary treats `hub` as a launch and opens a window instead of migrating.
     if args.get(1).is_some_and(|arg| arg == "hub") {
@@ -168,5 +177,8 @@ fn main() {
             ferryx_lib::run();
         }
         LaunchMode::DaemonSupervisor => std::process::exit(run_daemon_supervisor(&args)),
+        LaunchMode::DaemonCrashSupervisor => {
+            std::process::exit(ferryx_lib::cli::run_daemon_crash_supervisor(&args))
+        }
     }
 }

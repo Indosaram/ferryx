@@ -225,7 +225,10 @@ pub(crate) fn report_failure(error: &anyhow::Error) {
     let _ = stderr.flush();
 }
 
-fn open_log() -> io::Result<(std::fs::File, std::path::PathBuf)> {
+/// The private daemon log directory (`~/.ferryx/logs`), created 0700 when it is missing. The
+/// daemon log and the crash supervisor's restart log both live here, so an incident reads as one
+/// directory.
+pub(crate) fn logs_dir() -> io::Result<std::path::PathBuf> {
     use std::path::PathBuf;
     let base = std::env::var_os("FERRYX_DATA_DIR")
         .map(PathBuf::from)
@@ -265,6 +268,12 @@ fn open_log() -> io::Result<(std::fs::File, std::path::PathBuf)> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     }
+    Ok(dir)
+}
+
+/// Opens `daemon.log` in [`logs_dir`], creating it 0600 and refusing a symlink or non-file.
+fn open_log() -> io::Result<(std::fs::File, std::path::PathBuf)> {
+    let dir = logs_dir()?;
     let mut options = std::fs::OpenOptions::new();
     options.create(true).read(true).write(true);
     #[cfg(unix)]

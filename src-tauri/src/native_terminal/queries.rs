@@ -9,14 +9,15 @@ use super::error::NativeTerminalError;
 use super::sys::ffi::ghostty_terminal_get;
 use super::sys::types::{
     GhosttyColorRgb, GhosttyString, GhosttyTerminalImpl, GhosttyTerminalModeConfig,
-    GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND,
+    GHOSTTY_NO_VALUE, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND,
     GHOSTTY_TERMINAL_DATA_COLOR_CURSOR,
     GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND, GHOSTTY_TERMINAL_DATA_COLOR_PALETTE,
     GHOSTTY_TERMINAL_DATA_COLS, GHOSTTY_TERMINAL_DATA_CURSOR_PENDING_WRAP,
     GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE, GHOSTTY_TERMINAL_DATA_CURSOR_X,
     GHOSTTY_TERMINAL_DATA_CURSOR_Y, GHOSTTY_TERMINAL_DATA_MODE,
     GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING,
-    GHOSTTY_TERMINAL_DATA_ROWS, GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, GHOSTTY_TERMINAL_DATA_TITLE,
+    GHOSTTY_TERMINAL_DATA_ROWS, GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_BYTES,
+    GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS, GHOSTTY_TERMINAL_DATA_TITLE,
     GHOSTTY_TERMINAL_DATA_TOTAL_ROWS, GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
 };
 
@@ -84,6 +85,24 @@ pub fn query_scrollback_rows(
         GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS,
         "ghostty_terminal_get(ScrollbackRows)",
     )
+}
+
+pub fn query_scrollback_max_bytes(
+    handle: NonNull<GhosttyTerminalImpl>,
+) -> Result<Option<usize>, NativeTerminalError> {
+    let mut value = 0usize;
+    let result = unsafe {
+        ghostty_terminal_get(
+            handle.as_ptr(),
+            GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_BYTES,
+            &mut value as *mut usize as *mut c_void,
+        )
+    };
+    if result == GHOSTTY_NO_VALUE {
+        return Ok(None);
+    }
+    NativeTerminalError::from_c_result(result, "ghostty_terminal_get(ScrollbackMaxBytes)")?;
+    Ok(Some(value))
 }
 
 pub fn query_mouse_tracking_enabled(

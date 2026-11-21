@@ -252,7 +252,7 @@ export function generateSboms({ sourceRepo, commitSha, outDir, env = process.env
  * Builds the provenance manifest: commit, plan toolchains, and per host the recorded
  * toolchain versions and the assets it built.
  */
-export function buildProvenance({ plan, state = {}, receipts, sbomTools }) {
+export function buildProvenance({ plan, state = {}, receipts, sbomTools, keeper = null }) {
   return {
     schemaVersion: 1,
     repo: plan.repo,
@@ -263,6 +263,24 @@ export function buildProvenance({ plan, state = {}, receipts, sbomTools }) {
     sourceDateEpoch: plan.sourceDateEpoch,
     ghosttyPin: state.ghosttyPin ?? null,
     plannedToolchains: plan.toolchains,
+    // Supervised PTY sessions outlive the daemon that created them, so a release records which
+    // keeper generation it ships and the oldest version a user may roll back to while keeper-owned
+    // sessions exist. A pre-keeper daemon can neither discover nor service such a session, so
+    // rolling back past that floor strands live terminals. This manifest states the floor; the
+    // running daemon is what refuses the rollback.
+    compatibility: {
+      oldestSafeRollbackVersion: keeper?.oldestSafeRollbackVersion ?? null,
+      retainedGenerations: keeper?.retainedGenerations ?? null,
+    },
+    sessionKeeper: keeper
+      ? {
+          version: keeper.version,
+          protocolMajor: keeper.protocolMajor,
+          protocolMinor: keeper.protocolMinor,
+          binary: keeper.binary,
+          sha256: keeper.sha256,
+        }
+      : null,
     builds: [...receipts]
       .sort((a, b) => a.host.localeCompare(b.host))
       .map((receipt) => ({
@@ -298,6 +316,7 @@ export function attachReleaseProvenance({
   env = process.env,
   minisignBin,
   sbomGenerator = generateSboms,
+  keeper = null,
 }) {
   const { secretKey, password } = signingKeyFromEnv(env);
   const sbomTools = sbomGenerator({ sourceRepo, commitSha: plan.commitSha, outDir: publishDir, env });
@@ -306,7 +325,7 @@ export function attachReleaseProvenance({
   }
   writeFileSync(
     join(publishDir, PROVENANCE_NAME),
-    JSON.stringify(buildProvenance({ plan, state, receipts, sbomTools }), null, 2) + "\n",
+    JSON.stringify(buildProvenance({ plan, state, receipts, sbomTools, keeper }), null, 2) + "\n",
   );
   writeChecksums(publishDir);
   signChecksums({

@@ -524,6 +524,12 @@ impl NativeTerminal {
         NativeTerminalError::from_c_result(result, "ghostty_terminal_set(ScrollbackMaxBytes)")
     }
 
+    /// `None` means unlimited. A set limit can read back above the requested value: libghostty-vt
+    /// never caps below one page of history.
+    pub fn scrollback_limit_bytes(&self) -> Result<Option<usize>, NativeTerminalError> {
+        super::queries::query_scrollback_max_bytes(self.handle)
+    }
+
     /// Returns the OSC 8 hyperlink URI of the cell at viewport coordinates (col, row), if any.
     pub fn hyperlink_uri_at(
         &self,
