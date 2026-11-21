@@ -319,6 +319,11 @@ vi.mock("./lib/updater", async (importOriginal) => {
   };
 });
 
+const parkedRemoteRecovery = vi.hoisted(() => ({ start: vi.fn((_options: unknown) => vi.fn()) }));
+vi.mock("./lib/parkedRemoteRecovery", () => ({
+  startParkedRemoteRecovery: (options: unknown) => parkedRemoteRecovery.start(options),
+}));
+
 const workspaceStoreModule = await import("./state/workspaceStore");
 const { AUTO_RESUME_STAGGER_INTERVAL_MS, MAX_AUTO_RESUME_CANDIDATES } = await import("./lib/agentAutoResume");
 let storeSpy: any;
@@ -2691,6 +2696,40 @@ describe("App project workspace flow", () => {
     render(<App />);
     expect(screen.queryByTestId("mock-sidebar")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show sidebar" })).toBeInTheDocument();
+  });
+
+  it("starts parked SSH and paired recovery once, after the mounted project restores", async () => {
+    const pairedId = `daemon:${"b".repeat(64)}`;
+    localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify([
+      { workspaceId: "default", repoRoot: "/repo/main" },
+      { workspaceId: "ssh:parked-box", repoRoot: "/srv/box", target: { kind: "ssh", hostId: "box" } },
+      { workspaceId: pairedId, repoRoot: "/work/site", target: { kind: "pairedDaemon", hostId: "studio" }, remoteWorkspaceId: "site" },
+    ]));
+    localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, "default");
+    native.registerProject.mockResolvedValue({ workspaceId: "default", repoRoot: "/repo/main" });
+    native.loadSession.mockResolvedValue(null);
+    native.listTerminalSessions.mockResolvedValue([]);
+    parkedRemoteRecovery.start.mockClear();
+
+    const view = render(<App />);
+    await waitFor(() => expect(parkedRemoteRecovery.start).toHaveBeenCalledTimes(1));
+    const options = parkedRemoteRecovery.start.mock.calls[0]?.[0] as {
+      projects: Array<{ workspaceId: string }>;
+      isMounted: (workspaceId: string) => boolean;
+      startSsh: unknown;
+      refreshPaired: unknown;
+    };
+    expect(options.projects.map((project) => project.workspaceId)).toEqual(["default", "ssh:parked-box", pairedId]);
+    expect(options.isMounted("default")).toBe(true);
+    expect(options.isMounted("ssh:parked-box")).toBe(false);
+    expect(typeof options.startSsh).toBe("function");
+    expect(typeof options.refreshPaired).toBe("function");
+
+    const stop = parkedRemoteRecovery.start.mock.results[0]?.value as ReturnType<typeof vi.fn>;
+    expect(stop).not.toHaveBeenCalled();
+    view.unmount();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(parkedRemoteRecovery.start).toHaveBeenCalledTimes(1);
   });
 
   it("keeps restored missing sessions in standby under the default Lazy policy", async () => {

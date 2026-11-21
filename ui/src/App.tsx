@@ -183,17 +183,19 @@ import { isPairedWorkspaceId, isRemoteWorkspaceId, registerRemoteProject, toRegi
 import { previewRequestForSource } from "./lib/filePreviewTabRegistry";
 import { healMissingSshRegistrations } from "./lib/sshRegistrationHeal";
 import { hasValidProjectTarget, projectRootWorktree, sshProjectWorktrees } from "./lib/projectIdentity";
-import { scheduleAgentAutoResume } from "./lib/agentAutoResume";
-import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler } from "./lib/sessionLifecycle";
+import { scheduleAgentAutoResume, startAgentAutoResumeWatcher } from "./lib/agentAutoResume";
+import { isStandbyBackendSessionId, REMOTE_SESSION_GONE_REASON, setSessionRebindHandler, setSessionSleeping } from "./lib/sessionLifecycle";
 import { flashPane } from "./lib/paneFlash";
 import { findSessionByBackendId, localBackendSessionId } from "./components/supervisorPanel/findSession";
 import { extractNormalizedProviderSession, getAgentReconnectAffordance, getContinuationAffordance, getInPlaceRestartStartup, isExitedContinuationSource } from "./lib/agentResumeAffordance";
 import { persistActiveProjectId, persistProjects, persistSidebarOpen } from "./lib/appShellPersistence";
 import { createAppReconnectDependencies } from "./lib/appReconnectDependencies";
+import { startSshRecovery } from "./lib/sshRecovery";
+import { startParkedRemoteRecovery } from "./lib/parkedRemoteRecovery";
 import { reconnectLocalSession, replaceExitedShellSession, restartPaneSession } from "./lib/shellReplacement";
 import { initialGridFields, measureInitialGeometry } from "./lib/initialPtyGeometry";
 import { enqueueStrictPersistence } from "./lib/persistenceQueue";
-import { workspaceReducer, requestLocalRecoveryAdmission, type LocalRecoveryAdmissionResult } from "./state/workspaceStore";
+import { workspaceReducer, requestLocalRecoveryAdmission, type LocalRecoveryAdmissionResult, type WorkspaceAction } from "./state/workspaceStore";
 import type { NotificationTarget, PersistedWorkspaceSession, SystemPermissionsStatus } from "./lib/types";
 import { staticTabLabel } from "./lib/tabTitle";
 import { subscribeNotificationActivations } from "./lib/notificationActivation";
@@ -223,7 +225,7 @@ import { findDirectionalLeafId, type PaneFocusDirection } from "./state/paneGeom
 import { useBrowserSessionHydration } from "./state/browserSessionHydration";
 import { preloadWorkspaceSnapshots, useWorkspaceRestore } from "./state/workspaceRestore";
 import { clearHmrWorkspaceState, getHmrWorkspaceState } from "./state/hmrWorkspaceState";
-import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
+import { clearWorkspaceSnapshot, getWorkspaceSnapshot, listWorkspaceSnapshots, subscribeWorkspaceSnapshots } from "./state/workspaceSnapshotCache";
 import { createOwnedWorkspaceAccess } from "./state/workspaceOwnerAccess";
 import { emptySidebarWorkspaceIds } from "./state/sidebarWorkspaceState";
 import { describeLadderRow, listShortcutWorktrees } from "./state/shortcutLadder";
@@ -2095,13 +2097,38 @@ function WorkspaceApp({
     [getOrCreateSshOwnerRetryOperation],
   );
 
+  // Only the mounted project has a live reducer; every other project lives in its snapshot. These
+  // route reads and writes to whichever of the two owns the project right now, so recovery can run
+  // for a project that is not on screen and keep working if the user switches to it mid-flight.
+  const ownedWorkspaceAccess = useCallback((workspaceId: string) => createOwnedWorkspaceAccess(workspaceId, {
+    isMounted: () => (stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId) === workspaceId,
+    getState: () => stateRef.current,
+    dispatch: dispatchWorkspaceAction,
+  }), [dispatchWorkspaceAction]);
+  const workspaceStateFor = useCallback(
+    (workspaceId: string): WorkspaceState | null => ownedWorkspaceAccess(workspaceId).getState(),
+    [ownedWorkspaceAccess],
+  );
+  const dispatchToWorkspace = useCallback(
+    (workspaceId: string, action: WorkspaceAction) => ownedWorkspaceAccess(workspaceId).dispatch(action),
+    [ownedWorkspaceAccess],
+  );
+
   const handleRefreshSessionIdentity = useCallback(
-    (sessionId: string, onResult: (result: LocalRecoveryAdmissionResult) => void): (() => void) => {
-      const project = activeProjectRef.current;
+    (
+      sessionId: string,
+      onResult: (result: LocalRecoveryAdmissionResult) => void,
+      /** A project other than the mounted one; only paired recovery supports it. */
+      targetWorkspaceId?: string,
+    ): (() => void) => {
+      const project = targetWorkspaceId
+        ? projectsRef.current.find((candidate) => candidate.workspaceId === targetWorkspaceId)
+        : activeProjectRef.current;
       if (!project) {
         onResult({ kind: "cancelled" }); return () => {};
       }
-      const session = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+      const sessionsOf = () => workspaceStateFor(project.workspaceId)?.sessions ?? {};
+      const session = sessionsOf()[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
 
       if (project.target?.kind === "pairedDaemon" || isPairedWorkspaceId(project.workspaceId)) {
         if (!session?.backendSessionId) {
@@ -2138,10 +2165,9 @@ function WorkspaceApp({
         };
 
         const checkCurrent = () => {
-          const currentProject = activeProjectRef.current;
-          const current = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+          const current = sessionsOf()[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
           return (
-            currentProject?.workspaceId === captured.workspaceId &&
+            projectsRef.current.some((candidate) => candidate.workspaceId === captured.workspaceId) &&
             current?.backendSessionId === captured.backendSessionId &&
             (current?.daemonEpoch ?? null) === captured.daemonEpoch &&
             (current?.incarnation ?? null) === captured.incarnation &&
@@ -2190,7 +2216,7 @@ function WorkspaceApp({
                 // the backend is gone, so the pane recovers like a local one instead of blocking.
                 if (admissionIdentity && (admissionIdentity.backendSessionId !== captured.backendSessionId ||
                     admissionIdentity.daemonEpoch !== captured.daemonEpoch || admissionIdentity.incarnation !== captured.incarnation)) return;
-                dispatchWorkspaceAction({ type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
+                dispatchToWorkspace(captured.workspaceId, { type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
                 settle({ kind: "exited" });
                 return;
               }
@@ -2202,10 +2228,10 @@ function WorkspaceApp({
                     admissionIdentity.daemonEpoch !== captured.daemonEpoch || admissionIdentity.incarnation !== captured.incarnation ||
                     (admissionIdentity.generation != null && (!Number.isSafeInteger(admissionIdentity.generation) ||
                       admissionIdentity.generation < 0 || status.generation < admissionIdentity.generation)))) return;
-                const current = stateRef.current;
-                const retained = current.sessions[sessionId];
-                if (!retained) return;
-                dispatchWorkspaceAction({ type: "RESTORE_WORKSPACE", state: { ...current, sessions: {
+                const current = workspaceStateFor(captured.workspaceId);
+                const retained = current?.sessions[sessionId];
+                if (!current || !retained) return;
+                dispatchToWorkspace(captured.workspaceId, { type: "RESTORE_WORKSPACE", state: { ...current, sessions: {
                   ...current.sessions, [sessionId]: { ...retained,
                     recoveryState: { phase: "blocked", reason }, backendUnavailableReason: reason,
                     remoteConnectionState: "disconnected", reconnectLifecycle: "failed",
@@ -2236,7 +2262,7 @@ function WorkspaceApp({
 
           const currentGeneration = status.generation;
           if (currentGeneration <= 0 || currentGeneration < (admissionIdentity.generation ?? 0)) return;
-          const current = stateRef.current.sessions[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
+          const current = sessionsOf()[sessionId] ?? lastRestoredSessionsRef.current[sessionId];
           if (!current) return;
           settle({
             kind: "ready",
@@ -2282,7 +2308,7 @@ function WorkspaceApp({
           } else if (outcome.affirmativeExit) {
             // retry_owned matched the exact (backend, epoch, incarnation) tuple before reporting
             // exit: the remote process is gone. Recover the pane on the same host.
-            dispatchWorkspaceAction({ type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
+            dispatchToWorkspace(captured.workspaceId, { type: "REMOTE_SESSION_GONE", sessionId, backendSessionId: captured.backendSessionId });
             settle({ kind: "exited" });
           } else if (outcome.admitted) {
             admissionIdentity = outcome.actorIdentity ?? null;
@@ -2300,6 +2326,10 @@ function WorkspaceApp({
           live = false;
           cleanup();
         };
+      }
+
+      if (targetWorkspaceId) {
+        onResult({ kind: "cancelled" }); return () => {};
       }
 
       if (project.target?.kind === "ssh" || isRemoteWorkspaceId(project.workspaceId)) {
@@ -2337,7 +2367,7 @@ function WorkspaceApp({
 
       return requestLocalRecoveryAdmission(project.workspaceId, sessionId, true, onResult);
     },
-    [getOrCreateSshOwnerRetryOperation, dispatchWorkspaceAction],
+    [getOrCreateSshOwnerRetryOperation, dispatchToWorkspace, workspaceStateFor],
   );
 
   const activeAutoResumeCancelRef = useRef<(() => void) | null>(null);
@@ -2391,6 +2421,9 @@ function WorkspaceApp({
       workspaceId: activeProject.workspaceId,
       state: pending.state,
       recoveredFromHmr,
+      // An agent conversation is always resumed: the restore policy only decides when plain
+      // shells start, since a pane left on "Session disconnected" has to be reopened by hand.
+      ignorePolicy: true,
       reconnect: async (sessionId) => {
         // The app, not the user, initiated this resume; the working→idle blip it
         // produces when the agent lands back at its prompt is not user attention.
@@ -2407,6 +2440,84 @@ function WorkspaceApp({
       },
     });
   }, [activeProject.workspaceId, dispatchWorkspaceAction, ensureSessionBackends, handleReconnectAgentSession, pendingAgentAutoResume, recoveredFromHmr, registeredProjectId, reportRuntimeError]);
+
+  // Projects that are not on screen keep their state only as a snapshot, so the mounted store's
+  // resume above never reaches them. The watcher resumes every project's agents, local, SSH and
+  // paired: the unmounted ones at startup, and any remote agent whose host later reports its
+  // session gone. A reboot therefore brings every project back without opening each one.
+  const agentAutoResumeStartedRef = useRef(false);
+  const agentAutoResumeStopRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => agentAutoResumeStopRef.current?.(), []);
+  useEffect(() => {
+    if (agentAutoResumeStartedRef.current || recoveredFromHmr) return;
+    if (registeredProjectId !== activeProject.workspaceId || workspaceRestoreStatus !== "restored") return;
+    agentAutoResumeStartedRef.current = true;
+
+    const isMounted = (workspaceId: string) =>
+      (stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId) === workspaceId;
+    const stateOf = workspaceStateFor;
+    const dispatchTo = dispatchToWorkspace;
+
+    const stopParkedRemoteRecovery = startParkedRemoteRecovery({
+      projects: projectsRef.current,
+      isMounted,
+      getState: stateOf,
+      dispatch: dispatchTo,
+      subscribe: subscribeWorkspaceSnapshots,
+      startSsh: (workspaceId, sessions) => {
+        const recovery = startSshRecovery({
+          sessions,
+          dispatch: (action) => dispatchTo(workspaceId, action),
+          onError: (error) => console.error("Parked SSH session reconciliation failed:", error),
+        });
+        void recovery.ready.catch((error) => console.error("Parked SSH status subscription failed:", error));
+        return recovery.stop;
+      },
+      refreshPaired: (workspaceId, sessionId, onReady) =>
+        handleRefreshSessionIdentity(sessionId, (result) => {
+          if (result.kind === "ready") onReady(result.session);
+        }, workspaceId),
+    });
+
+    const stopWatcher = startAgentAutoResumeWatcher({
+      listWorkspaceIds: () => projectsRef.current.map((project) => project.workspaceId),
+      getState: stateOf,
+      mountedWorkspaceId: () => stateRef.current.workspaceId ?? activeProjectRef.current.workspaceId,
+      subscribe: subscribeWorkspaceSnapshots,
+      reconnect: (workspaceId, sessionId) => {
+        const project = projectsRef.current.find((candidate) => candidate.workspaceId === workspaceId);
+        if (!project) return Promise.resolve();
+        dispatchTo(workspaceId, { type: "SUPPRESS_NEXT_ATTENTION", sessionId });
+        return reconnectAgentSession(
+          sessionId,
+          createAppReconnectDependencies({
+            getSessions: () => stateOf(workspaceId)?.sessions ?? {},
+            dispatch: (action) => dispatchTo(workspaceId, action),
+            persist: async (result, localSession) => {
+              const current = stateOf(workspaceId);
+              if (!current) return;
+              const nextState = workspaceReducer(current, {
+                type: "REBIND_SESSION_BACKEND",
+                sessionId: localSession.id,
+                backendSessionId: result.sessionId,
+                cwd: result.session.cwd ?? localSession.cwd,
+                daemonEpoch: result.daemonEpoch,
+                incarnation: result.session.incarnation ?? null,
+                clearAgent: false,
+              });
+              await persistSessionStrict(workspaceId, project.repoRoot, nextState);
+            },
+          }),
+        ).then(() => setSessionSleeping(sessionId, false));
+      },
+    });
+    agentAutoResumeStopRef.current = () => {
+      stopWatcher();
+      stopParkedRemoteRecovery();
+    };
+    // Started once per app launch, the first moment the mounted project has restored.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registeredProjectId, activeProject.workspaceId, workspaceRestoreStatus]);
 
   useEffect(() => {
     const unregister = registerWindowCloseGuard(async () => {

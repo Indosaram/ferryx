@@ -444,7 +444,7 @@ export function GeneralSection() {
           </SettingRow>
           <SettingRow
             label="Session Restore Policy"
-            description="Choose how terminal and agent processes are restored after Ferryx restarts. Lazy is recommended for lower memory use."
+            description="Choose when plain terminal shells are restarted after Ferryx restarts. Lazy is recommended for lower memory use. Agent conversations in every project always resume automatically."
           >
             <Select
               value={settings.sessionRestorePolicy}
