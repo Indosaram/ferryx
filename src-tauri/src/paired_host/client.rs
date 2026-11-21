@@ -1748,7 +1748,7 @@ impl MachineClient {
             .map(str::to_owned);
         // A layout compare-and-set answers its stale base with 409 and the stored document;
         // that body is the caller's result, so it is decoded like a success.
-        if !status.is_success() && !(route.conflict_is_answer && status.as_u16() == 409) {
+        if !(status.is_success() || (route.conflict_is_answer && status.as_u16() == 409)) {
             return Err(map_operation_http_error(status, content_type.as_ref(), None, &response.body));
         }
         if status.as_u16() == 409 {
@@ -1831,7 +1831,7 @@ impl MachineClient {
                         if bytes.len()+chunk.len()>limit { return Err(ClientError::local("PAYLOAD_TOO_LARGE")); } bytes.extend_from_slice(&chunk);
                     } Ok(bytes)
                 }).await.map_err(|_| ClientError::local("TIMEOUT"))??;
-                if !status.is_success() && !(route.conflict_is_answer && status.as_u16() == 409) {
+                if !(status.is_success() || (route.conflict_is_answer && status.as_u16() == 409)) {
                     return Err(map_operation_http_error(status, content_type.as_ref(), relay_stage, &bytes));
                 }
                 if status.as_u16() == 409 {
