@@ -7,12 +7,14 @@ import {
 } from "./notificationCoordinator";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "./notificationSettings";
 import type { NotificationSettings } from "./notificationSettings";
+import type { DispatchNotificationResult } from "./types";
 
 vi.mock("./tauri", () => ({
-  dispatchNotification: vi.fn(() => Promise.resolve()),
-  playNotificationSound: vi.fn(() => Promise.resolve()),
+  dispatchNotification: vi.fn(() => Promise.resolve({ submitted: true })),
+  playNotificationSound: vi.fn(() => Promise.resolve({ played: true })),
   requestNotificationPermission: vi.fn(() => Promise.resolve({ granted: false })),
   getNotificationPermissionStatus: vi.fn(() => Promise.resolve({ authorization: "denied" })),
+  withdrawNotification: vi.fn(() => Promise.resolve()),
 }));
 
 const {
@@ -20,11 +22,18 @@ const {
   playNotificationSound,
   requestNotificationPermission,
   getNotificationPermissionStatus,
+  withdrawNotification,
 } = await import("./tauri");
 const dispatchMock = vi.mocked(dispatchNotification);
 const soundMock = vi.mocked(playNotificationSound);
 const requestMock = vi.mocked(requestNotificationPermission);
 const statusMock = vi.mocked(getNotificationPermissionStatus);
+const withdrawMock = vi.mocked(withdrawNotification);
+
+/** Drains the microtask queue: every coordinator step is promise-chained, never timer-driven. */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 24; i += 1) await Promise.resolve();
+}
 
 function settings(overrides: Partial<NotificationSettings> = {}): NotificationSettings {
   return { ...DEFAULT_NOTIFICATION_SETTINGS, ...overrides };
@@ -45,10 +54,13 @@ function coordinator(options: NotificationCoordinatorOptions = {}) {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(1_000_000));
-  dispatchMock.mockClear();
-  soundMock.mockClear();
-  requestMock.mockClear();
-  statusMock.mockClear();
+  // Reset, not clear: a lingering `mockImplementation`/`mockResolvedValue` from an earlier test
+  // would otherwise outlive it, so a later permission prompt hangs on a promise nobody resolves.
+  dispatchMock.mockReset().mockResolvedValue({ submitted: true });
+  soundMock.mockReset().mockResolvedValue({ played: true });
+  requestMock.mockReset().mockResolvedValue({ granted: false });
+  statusMock.mockReset().mockResolvedValue({ authorization: "denied" });
+  withdrawMock.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -903,5 +915,115 @@ describe("multi-window notification ownership gate", () => {
 
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(soundMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("banner withdrawal on leaving attention", () => {
+  const target = { workspaceId: "ws-1", sessionId: "sess-1" };
+
+  function attention(groups: { previousGroup: "needsYou" | "unread" | "working" | "seen"; group: "needsYou" | "unread" | "working" | "seen" }) {
+    return { ...target, previousState: "waiting", nextState: groups.group, ...groups };
+  }
+
+  it.each(["working", "seen"] as const)(
+    "withdraws the banner when a pane leaves needsYou for %s, after the dispatch it recalls",
+    async (group) => {
+      const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+      instance.handleAgentStateChange(attention({ previousGroup: "working", group: "needsYou" }));
+      instance.handleAgentStateChange(attention({ previousGroup: "needsYou", group }));
+      await flush();
+
+      expect(withdrawMock).toHaveBeenCalledWith(target);
+      expect(withdrawMock.mock.invocationCallOrder[0]).toBeGreaterThan(
+        dispatchMock.mock.invocationCallOrder[0],
+      );
+    },
+  );
+
+  it.each([
+    { previousGroup: "working", group: "working" },
+    { previousGroup: "needsYou", group: "needsYou" },
+  ] as const)("withdraws nothing when the pane stays in $previousGroup -> $group", async (groups) => {
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+    instance.handleAgentStateChange(attention(groups));
+    await flush();
+
+    expect(withdrawMock).not.toHaveBeenCalled();
+  });
+
+  it("cancels the permission retry when the pane is left while the prompt is open", async () => {
+    let resolveRequest: (value: { granted: boolean }) => void = () => {};
+    requestMock.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveRequest = resolve;
+      }),
+    );
+    dispatchMock.mockResolvedValueOnce({ submitted: false, reason: "permission-required" });
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+    instance.handleAgentStateChange(attention({ previousGroup: "working", group: "needsYou" }));
+    await flush();
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(requestMock).toHaveBeenCalledTimes(1);
+
+    instance.withdrawForSession(target.workspaceId, target.sessionId);
+    resolveRequest({ granted: true });
+    await flush();
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(withdrawMock).toHaveBeenCalledWith(target);
+  });
+
+  it("still recalls the banner from a coordinator that dispatched nothing", async () => {
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+    instance.withdrawForSession(target.workspaceId, target.sessionId);
+    await flush();
+    expect(withdrawMock).toHaveBeenCalledWith(target);
+
+    instance.handleAgentStateChange(attention({ previousGroup: "working", group: "needsYou" }));
+    await flush();
+    expect(dispatchMock).toHaveBeenCalledWith(expect.objectContaining({ target }));
+  });
+
+  it("reports a rejected withdrawal through onError with no unhandled rejection", async () => {
+    const onError = vi.fn();
+    withdrawMock.mockRejectedValueOnce(new Error("withdraw failed"));
+    const { instance } = coordinator({ onError });
+
+    instance.withdrawForSession(target.workspaceId, target.sessionId);
+    await flush();
+
+    // onError firing IS the proof the chain absorbed it: a rejection nothing caught would never
+    // reach the callback, and vitest fails this file on any unhandled rejection.
+    expect(onError).toHaveBeenCalledWith(expect.any(Error), "dispatch");
+    expect(String(onError.mock.calls[0]?.[0])).toContain("withdraw failed");
+  });
+
+  it("sends the new dispatch instead of a stale withdrawal when attention returns mid-flight", async () => {
+    let resolveFirstDispatch: (value: DispatchNotificationResult) => void = () => {};
+    dispatchMock.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveFirstDispatch = resolve;
+      }),
+    );
+    const { instance } = coordinator({ getSettings: () => settings({ agentTaskComplete: true }) });
+
+    // needsYou (#1) dispatches in this turn and then stays in flight while attention leaves and
+    // returns: the recall must not overtake #2, and #2 must wait behind its own recall.
+    instance.handleAgentStateChange(attention({ previousGroup: "working", group: "needsYou" }));
+    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    instance.handleAgentStateChange(attention({ previousGroup: "needsYou", group: "working" }));
+    instance.handleAgentStateChange(attention({ previousGroup: "working", group: "needsYou" }));
+
+    resolveFirstDispatch({ submitted: true });
+    await flush();
+
+    expect(dispatchMock).toHaveBeenCalledTimes(2);
+    expect(dispatchMock.mock.calls[1][0]).toMatchObject({ target });
+    // #2 superseded the banner #1 raised, so recalling it would delete the live one.
+    expect(withdrawMock).not.toHaveBeenCalled();
   });
 });

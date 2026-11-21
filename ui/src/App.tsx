@@ -1078,6 +1078,7 @@ function WorkspaceApp({
     markWorktreeUnread,
     subscribeTerminalBell,
     subscribeActivityNotification,
+    subscribeSessionActivitySeen,
     parkedActivityVersion,
     openTab,
     createBrowserTab,
@@ -1190,6 +1191,16 @@ function WorkspaceApp({
       ownsSession: true,
     });
   }), [subscribeActivityNotification]);
+
+  useEffect(
+    () =>
+      subscribeSessionActivitySeen
+        ? subscribeSessionActivitySeen((event) => {
+            coordinatorRef.current?.withdrawForSession(event.workspaceId, event.sessionId);
+          })
+        : undefined,
+    [subscribeSessionActivitySeen],
+  );
 
   // The supervisor snapshot feeds the setup banner and the panes' supervision; start it once.
   useEffect(() => { void startSupervisorFeed(); }, []);

@@ -297,6 +297,7 @@ vi.mock("./lib/tauri", () => ({
   onWorktreeChanged: vi.fn(async () => () => {}),
   onNotificationActivated: native.onNotificationActivated,
   takeNotificationActivations: native.takeNotificationActivations,
+  withdrawNotification: vi.fn(async () => undefined),
   bootTrace: vi.fn(async () => undefined),
   toIpcError: (error: unknown) => error,
   isStructuredIpcError: (_error: unknown) => false,
