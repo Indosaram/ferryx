@@ -659,6 +659,131 @@ describe("always-follow desktop focus", () => {
     });
   }
 
+  it.each([[false, 200], [true, 200], [false, 503], [true, 503], [false, "pending"]] as const)("keeps the exact restored session and follows the first desktop change (retry: %s, baseline: %s)", async (retry, baselineStatus) => {
+    let available = !retry;
+    let sawRefusal!: () => void;
+    const refused = new Promise<void>((resolve) => { sawRefusal = resolve; });
+    let sawStateRequest!: () => void;
+    const stateRequested = new Promise<void>((resolve) => { sawStateRequest = resolve; });
+    const createConnection = accountSessionModule.createAccountConnection;
+    const connections = vi.spyOn(accountSessionModule, "createAccountConnection").mockImplementation((params) =>
+      createConnection({ ...params, httpTransport: { ...params.httpTransport, fetchLike: (path, init) => {
+        // Discovery succeeds. Only the acquired connection's exact-session lookup is unavailable.
+        if (!available && path === "/api/v1/sessions") return Promise.resolve(respond(null, 503));
+        if (deferStateResponse && path === "/api/v1/workspace/state") sawStateRequest();
+        return params.httpTransport.fetchLike(path, init);
+      } } }));
+    vi.spyOn(console, "warn").mockImplementation((message) => { if (message === "Selection failed") sawRefusal(); });
+    vi.spyOn(accountSessionModule, "getAccountContinuity").mockResolvedValue({
+      machineId: MACHINE_ID, workspaceId: "ws-ferryx", worktreeSlug: "main",
+      sessionId: SID_SECOND, revision: 4, updatedAt: 1,
+    });
+    armState(focusOn(SID_FIRST));
+    deferStateResponse = !retry;
+    await mountAccountApp();
+    if (retry) {
+      await act(async () => { await refused; });
+      expect(accountSessionModule.getAccountPreferredSessionId(window.location.origin, MACHINE_ID, "ws-ferryx", "main")).toBeNull();
+      deferStateResponse = true;
+      available = true;
+      await act(async () => { window.dispatchEvent(new Event("online")); });
+    }
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+    await waitFor(() => expect(marked(sessionRow(SID_SECOND))).toBe(true));
+    const socket = await eventsSocket();
+    await stateRequested;
+    const baseline = stateBody;
+    const pendingReads = stateDeferreds.splice(0);
+    expect(pendingReads.length).toBeGreaterThan(0);
+    deferStateResponse = false;
+    if (baselineStatus !== "pending") {
+      await act(async () => { for (const pending of pendingReads) pending.resolve(respond(baseline, baselineStatus)); });
+    }
+    expect(marked(sessionRow(SID_SECOND))).toBe(true);
+    expect(terminalPaths().some((path) => path.includes(SID_FIRST))).toBe(false);
+    armState(focusOn(SID_DESKTOP));
+    await act(async () => { socket.onmessage?.({ data: focusChanged() }); });
+    expect(marked(sessionRow(SID_DESKTOP))).toBe(true);
+    if (baselineStatus === "pending") {
+      // The old focus arrives only after the new focus was actually applied to the phone.
+      await act(async () => { for (const pending of pendingReads) pending.resolve(respond(baseline)); });
+      expect(marked(sessionRow(SID_DESKTOP))).toBe(true);
+      expect(terminalPaths().some((path) => path.includes(SID_FIRST))).toBe(false);
+    }
+    expect(connections).toHaveBeenCalledTimes(1);
+    expect(postSelectPaths()).toHaveLength(0);
+  });
+
+  it.each(["unchanged", "changed while offline", "failed apply"] as const)("reconciles desktop focus when replacing the same machine tunnel: %s", async (scenario) => {
+    vi.spyOn(accountSessionModule, "getAccountContinuity").mockResolvedValue({
+      machineId: MACHINE_ID, workspaceId: "ws-ferryx", worktreeSlug: "main",
+      sessionId: SID_SECOND, revision: 4, updatedAt: 1,
+    });
+    let firstClosed = false;
+    let connections = 0;
+    let followListings = 0;
+    let rejectApply = false;
+    let sawFailedApply!: () => void;
+    const failedApply = new Promise<void>((resolve) => { sawFailedApply = resolve; });
+    let initialRead!: () => void;
+    let replacementRead!: () => void;
+    const initialRequested = new Promise<void>((resolve) => { initialRead = resolve; });
+    const replacementRequested = new Promise<void>((resolve) => { replacementRead = resolve; });
+    const create = accountSessionModule.createAccountConnection;
+    vi.spyOn(accountSessionModule, "createAccountConnection").mockImplementation((params) => {
+      const first = ++connections === 1;
+      return create({ ...params, httpTransport: {
+        ...params.httpTransport,
+        get isClosed() { return (first && firstClosed) || params.httpTransport.isClosed === true; },
+        fetchLike(path, init) {
+          if (path === "/api/v1/workspace/state") (first ? initialRead : replacementRead)();
+          // The first listing validates the focus event; the next one applies the exact selection.
+          if (first && rejectApply && path === "/api/v1/sessions" && ++followListings === 2) {
+            sawFailedApply();
+            return Promise.resolve(respond(null, 503));
+          }
+          return params.httpTransport.fetchLike(path, init);
+        },
+      } });
+    });
+    armState(focusOn(SID_FIRST));
+    deferStateResponse = true;
+    await mountAccountApp();
+    fireEvent.click(await screen.findByTestId("remote-view-mode-terminal"));
+    await initialRequested;
+    await act(async () => {
+      deferStateResponse = false;
+      for (const pending of stateDeferreds.splice(0)) pending.resolve(respond(stateBody));
+    });
+    expect(marked(sessionRow(SID_SECOND))).toBe(true);
+
+    if (scenario === "failed apply") {
+      const socket = await eventsSocket();
+      armState(focusOn(SID_DESKTOP));
+      rejectApply = true;
+      await act(async () => { socket.onmessage?.({ data: focusChanged() }); });
+      await failedApply;
+      rejectApply = false;
+      expect(accountSessionModule.getAccountPreferredSessionId(window.location.origin, MACHINE_ID, "ws-ferryx", "main")).toBe(SID_SECOND);
+    }
+    firstClosed = true;
+    const changed = scenario !== "unchanged";
+    armState(focusOn(changed ? SID_DESKTOP : SID_FIRST));
+    deferStateResponse = true;
+    await act(async () => { window.dispatchEvent(new Event("online")); });
+    await replacementRequested;
+    await act(async () => {
+      deferStateResponse = false;
+      for (const pending of stateDeferreds.splice(0)) pending.resolve(respond(stateBody));
+    });
+    expect(connections).toBe(2);
+    expect(marked(sessionRow(changed ? SID_DESKTOP : SID_SECOND))).toBe(true);
+    expect(accountSessionModule.getAccountPreferredSessionId(window.location.origin, MACHINE_ID, "ws-ferryx", "main"))
+      .toBe(changed ? SID_DESKTOP : SID_SECOND);
+    expect(terminalPaths().some((path) => path.includes(SID_FIRST))).toBe(false);
+    expect(postSelectPaths()).toHaveLength(0);
+  });
+
   it("replaces a manual pick when the desktop publishes a new focus, without selecting desktop focus", async () => {
     armState(focusOn(SID_FIRST));
     await mountAccountApp();

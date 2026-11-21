@@ -3,6 +3,8 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useS
 
 import { STARTUP_TIMEOUT_MS } from "./lib/startupTimeout";
 import { withTimeout } from "./lib/withTimeout";
+import { useDesktopContinuity } from "./lib/useDesktopContinuity";
+import { deriveContinuitySelection } from "./lib/continuitySelection";
 
 import { CommandPalette } from "./components/CommandPalette";
 import { BrowserAgentApprovalCard } from "./components/BrowserAgentApprovalCard";
@@ -2415,6 +2417,33 @@ function WorkspaceApp({
     () => deriveFocusedTerminal(activeProject.workspaceId, state, listWorkspaceSnapshots(), attentionBySessionId),
     [activeProject.workspaceId, state, parkedActivityVersion, attentionBySessionId],
   );
+  const continuitySelection = useMemo(
+    () => deriveContinuitySelection(state, activeProject, focusedTerminalPayload),
+    [activeProject, state, focusedTerminalPayload],
+  );
+  // Read by the focus handler, which must compare against the committed selection without
+  // re-creating itself on every selection change.
+  const continuitySelectionRef = useRef(continuitySelection);
+  continuitySelectionRef.current = continuitySelection;
+  const recordContinuityIntent = useDesktopContinuity({
+    enabled: isNativeRuntime,
+    leader: isAppStateLeader(),
+    selection: continuitySelection,
+    /* Continuity is an account convenience layered over local work, so its failures are not
+       runtime errors: a signed-in machine that is offline, a relay that has not been upgraded,
+       and a rejected publication are all expected and must not raise a runtime error per click.
+       Losing the CAS race is already a normal outcome inside the publisher. */
+    onError: (error: unknown) => console.warn("[continuity] desktop selection publish failed", error),
+  });
+  const handleContinuityFocusPane = useCallback((tabId: string, leafId: string) => {
+    /* Focusing the pane that is already the committed selection is not a new intent: publishing
+       it again would start a GET and a PUT, bump the account revision, and make a phone
+       publication in flight lose its CAS for no change at all. */
+    if (continuitySelectionRef.current.tabId !== tabId || continuitySelectionRef.current.leafId !== leafId) {
+      recordContinuityIntent({ workspaceId: activeProjectRef.current.workspaceId, tabId, leafId });
+    }
+    focusPane(tabId, leafId);
+  }, [focusPane, recordContinuityIntent]);
   // Pane frames and tab dots draw the daemon's group for each pane's session (groupOf).
   const paneActivityBySessionId = useMemo(
     () => Object.keys(attentionBySessionId).length === 0
@@ -2527,6 +2556,11 @@ function WorkspaceApp({
     [],
   );
 
+  const handleExplicitSelectProject = useCallback((project: RegisteredProject) => {
+    recordContinuityIntent({ workspaceId: project.workspaceId });
+    handleSelectProject(project);
+  }, [handleSelectProject, recordContinuityIntent]);
+
   const handleReorderProjects = useCallback((orderedWorkspaceIds: string[]) => {
     setProjects((current) => {
       const byId = new Map(current.map((project) => [project.workspaceId, project]));
@@ -2628,9 +2662,11 @@ function WorkspaceApp({
       });
       if (owner && owner.workspaceId !== activeProjectRef.current.workspaceId) {
         handleSelectProject(owner);
+        recordContinuityIntent({ workspaceId: owner.workspaceId, worktreePath: worktree.path });
         setPendingWorktree(worktree);
         return;
       }
+      recordContinuityIntent({ workspaceId: activeProjectRef.current.workspaceId, worktreePath: worktree.path });
       if (activeProjectRef.current.target?.kind === "pairedDaemon" && remoteHostStore.getState().nativeStatus === "unavailable") {
         void pairedHostInventory.refresh();
         setPendingWorktree(worktree);
@@ -2645,7 +2681,7 @@ function WorkspaceApp({
       }
       runTabOperation(() => ensureTabForWorktree(worktree));
     },
-    [ensureTabForWorktree, handleSelectProject, runTabOperation],
+    [ensureTabForWorktree, handleSelectProject, runTabOperation, recordContinuityIntent],
   );
 
   useEffect(() => {
@@ -2697,6 +2733,7 @@ function WorkspaceApp({
       const currentState = stateRef.current;
       const tab = currentState.layout.tabs.find((candidate) => candidate.id === tabId);
       if (!tab) return;
+      recordContinuityIntent({ workspaceId: activeProjectRef.current.workspaceId, tabId });
       if (!isTerminalTab(tab)) {
         activateTab(tabId);
         return;
@@ -2714,7 +2751,7 @@ function WorkspaceApp({
         .then(() => activateTab(tabId))
         .catch(reportRuntimeError);
     },
-    [activateTab, ensureTabForWorktree, reportRuntimeError],
+    [activateTab, ensureTabForWorktree, reportRuntimeError, recordContinuityIntent],
   );
 
   const activateRemoteEntry = useCallback(
@@ -3477,9 +3514,9 @@ function WorkspaceApp({
       const activeLeafId = activeLayout.activeLeafId ?? leafIds[0];
       const currentIndex = Math.max(0, leafIds.indexOf(activeLeafId));
       const nextIndex = (currentIndex + offset + leafIds.length) % leafIds.length;
-      focusPane(activeTab.id, leafIds[nextIndex]);
+      handleContinuityFocusPane(activeTab.id, leafIds[nextIndex]);
     },
-    [focusPane],
+    [handleContinuityFocusPane],
   );
 
   const handleDirectionalPaneFocus = useCallback(
@@ -3492,9 +3529,9 @@ function WorkspaceApp({
       if (!activeLayout || activeLayout.root.type === "leaf") return;
       const activeLeafId = activeLayout.activeLeafId ?? collectLeafIds(activeLayout.root)[0];
       const targetLeafId = findDirectionalLeafId(activeLayout.root, activeLeafId, direction);
-      if (targetLeafId) focusPane(activeTab.id, targetLeafId);
+      if (targetLeafId) handleContinuityFocusPane(activeTab.id, targetLeafId);
     },
-    [focusPane],
+    [handleContinuityFocusPane],
   );
 
   const handleOpenTerminalSearch = useCallback(() => {
@@ -4791,7 +4828,7 @@ function WorkspaceApp({
           statuses={worktreeStatuses}
           unreadWorktreePaths={state.unreadWorktreePaths}
           activityByWorktreePath={worktreeActivity}
-          onSelectProject={handleSelectProject}
+          onSelectProject={handleExplicitSelectProject}
           onReorderProjects={handleReorderProjects}
           onAddProject={handleOpenAddProject}
           onRemoveProject={setPendingProjectRemove}
@@ -4945,7 +4982,7 @@ function WorkspaceApp({
             onEqualizePaneRun={equalizePaneRun}
             onEqualizeGroupRun={equalizeTabGroupRun}
             onSwapPanes={swapPanes}
-            onFocusPane={focusPane}
+            onFocusPane={handleContinuityFocusPane}
             searchLeafId={searchLeafId}
             onCloseSearch={handleCloseSearch}
             onReconnectAgentSession={async (sessionId) => {

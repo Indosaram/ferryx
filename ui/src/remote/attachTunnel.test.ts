@@ -13,6 +13,8 @@ import {
   DEFAULT_TUNNEL_REQUEST_TIMEOUT_MS,
   MAX_TUNNEL_RESPONSE_HEADER_BYTES,
   MAX_TUNNEL_RESPONSE_BODY_BYTES,
+  MAX_ATTACH_REFUSAL_DETAIL_CHARS,
+  sanitizeAttachRefusalDetail,
   type TunnelByteStream,
   type TunnelWebSocket,
 } from "./attachTunnel";
@@ -257,6 +259,131 @@ describe("attachTunnel HTTP/1.1 transport", () => {
 });
 
 describe("attachTunnel RFC 6455 WebSocket transport", () => {
+  it.each(["CONTROL_CONFLICT", "CONTROL_CONFLICT\nPhone", "SESSION_EXPIRED", "STALE_GENERATION"])("preserves upgrade refusal code and optional holder: %s", async (body) => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const requestWritten = stream.waitForWrites(1);
+    const result = transport.openWebSocket("/api/v1/terminal/held")
+      .then(() => null, (error: unknown) => error);
+    await requestWritten;
+    stream.pushIncoming(`HTTP/1.1 409 Conflict\r\nContent-Length: ${new TextEncoder().encode(body).length}\r\n\r\n${body}`);
+    const error = await result;
+    expect(error).toBeInstanceOf(TunnelError);
+    expect(error).toMatchObject({ code: body.split("\n")[0], status: 409 });
+    expect((error as TunnelError).detail).toBe(body.split("\n")[1]);
+    expect((error as TunnelError).takeoverSupported).toBe(false);
+    transport.close();
+  });
+
+  it.each([
+    ["terminal escape", "Phone\u001b[31mred\u001b[0m"],
+    ["embedded NUL", "Ph\u0000one"],
+    ["carriage return", "Phone\r\nFAKE_CODE"],
+    ["bidi override", "\u202ePhone\u202c"],
+    ["line separator", "Phone\u2028Tablet"],
+  ])("keeps a hostile holder %s out of the error message", async (_label, name) => {
+    // Given a refusal whose second line is an untrusted registered device name
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const body = `CONTROL_CONFLICT\n${name}`;
+    const requestWritten = stream.waitForWrites(1);
+    const result = transport.openWebSocket("/api/v1/terminal/held")
+      .then(() => null, (error: unknown) => error);
+    await requestWritten;
+    stream.pushIncoming(`HTTP/1.1 409 Conflict\r\nContent-Length: ${new TextEncoder().encode(body).length}\r\n\r\n${body}`);
+
+    // Then the typed code and status still carry the refusal, but the message is fixed text
+    const error = (await result) as TunnelError;
+    expect(error).toBeInstanceOf(TunnelError);
+    expect(error.code).toBe("CONTROL_CONFLICT");
+    expect(error.status).toBe(409);
+    expect(error.message).toBe("CONTROL_CONFLICT: server returned status 409 (CONTROL_CONFLICT)");
+    expect(error.message).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e]/);
+
+    // And the display copy is folded to one sanitized line
+    expect(error.detail).toBe(sanitizeAttachRefusalDetail(name));
+    expect(error.detail).not.toBe("");
+    expect(error.detail).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e]/);
+    transport.close();
+  });
+
+  it.each([true, false, undefined, "true"])("recognizes only an explicitly supported takeover (%s)", async (takeover) => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const written = stream.waitForWrites(1);
+    const reply = transport.openWebSocket("/api/v1/terminal/held").catch((err: unknown) => err);
+    await written;
+    expect(new TextDecoder().decode(concatAll(stream.written))).toContain("X-Ferryx-Refusal-Format: json\r\n");
+    const body = JSON.stringify({ code: "CONTROL_CONFLICT", message: "untrusted prose", details: { holder: "Phone\u202e", takeover } });
+    stream.pushIncoming(`HTTP/1.1 409 Conflict\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${new TextEncoder().encode(body).length}\r\n\r\n${body}`);
+    const error = await reply;
+    expect(error).toBeInstanceOf(TunnelError);
+    expect(error).toMatchObject({ code: "CONTROL_CONFLICT", status: 409, detail: "Phone", takeoverSupported: takeover === true });
+    transport.close();
+  });
+
+  it("does not infer occupancy from display text in a JSON refusal", async () => {
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const written = stream.waitForWrites(1);
+    const reply = transport.openWebSocket("/api/v1/terminal/held").catch((err: unknown) => err);
+    await written;
+    const body = JSON.stringify({ message: "CONTROL_CONFLICT", details: { holder: "Phone" } });
+    stream.pushIncoming(`HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`);
+    expect(await reply).toMatchObject({ code: "WEBSOCKET_UPGRADE_FAILED", status: 409 });
+    transport.close();
+  });
+
+  it("caps refusal detail so a huge body cannot become a huge holder name", async () => {
+    const name = "A".repeat(50_000);
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const body = `CONTROL_CONFLICT\n${name}`;
+    const requestWritten = stream.waitForWrites(1);
+    const result = transport.openWebSocket("/api/v1/terminal/held")
+      .then(() => null, (error: unknown) => error);
+    await requestWritten;
+    stream.pushIncoming(`HTTP/1.1 409 Conflict\r\nContent-Length: ${new TextEncoder().encode(body).length}\r\n\r\n${body}`);
+    const error = (await result) as TunnelError;
+    expect(error.code).toBe("CONTROL_CONFLICT");
+    expect(error.detail).toHaveLength(MAX_ATTACH_REFUSAL_DETAIL_CHARS);
+    transport.close();
+  });
+
+  it("takes the refusal code from the first line only, never from injected detail", async () => {
+    // A name that forges a code line leaves a well-formed body of three lines...
+    const body = "CONTROL_CONFLICT\nEvil\nSESSION_EXPIRED";
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const requestWritten = stream.waitForWrites(1);
+    const result = transport.openWebSocket("/api/v1/terminal/held")
+      .then(() => null, (error: unknown) => error);
+    await requestWritten;
+    stream.pushIncoming(`HTTP/1.1 409 Conflict\r\nContent-Length: ${new TextEncoder().encode(body).length}\r\n\r\n${body}`);
+
+    // ...and the decision still reads CONTROL_CONFLICT, with the forgery demoted to display text
+    const error = (await result) as TunnelError;
+    expect(error.code).toBe("CONTROL_CONFLICT");
+    expect(error.detail).toBe("Evil SESSION_EXPIRED");
+    expect(error.message).not.toContain("SESSION_EXPIRED");
+    transport.close();
+  });
+
+  it("keeps a code-only refusal without a detail", async () => {
+    const body = "CONTROL_CONFLICT";
+    const stream = new ScriptedByteStream();
+    const transport = createTunnelTransport(stream);
+    const requestWritten = stream.waitForWrites(1);
+    const result = transport.openWebSocket("/api/v1/terminal/held")
+      .then(() => null, (error: unknown) => error);
+    await requestWritten;
+    stream.pushIncoming(`HTTP/1.1 409 Conflict\r\nContent-Length: ${new TextEncoder().encode(body).length}\r\n\r\n${body}`);
+    const error = (await result) as TunnelError;
+    expect(error.code).toBe("CONTROL_CONFLICT");
+    expect(error.detail).toBeUndefined();
+    transport.close();
+  });
+
   it("carries Upgrade, Sec-WebSocket-Key, and Sec-WebSocket-Version in handshake", async () => {
     // Given a transport
     const stream = new ScriptedByteStream();
@@ -363,7 +490,7 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
     header[1] = 127;
     new DataView(header.buffer).setBigUint64(2, BigInt(payloadSize), false);
     const frame = concatAll([header, payload]);
-    const chunkSize = frame.length / 64;
+    const chunkSize = Math.ceil(frame.length / 64);
     const received = new Promise<Uint8Array>((resolve) => {
       ws.onmessage = (event) => resolve(event.data as Uint8Array);
     });
@@ -381,12 +508,12 @@ describe("attachTunnel RFC 6455 WebSocket transport", () => {
       // When the chunks arrive one by one
       for (let at = 0; at < frame.length; at += chunkSize) {
         stream.pushIncoming(frame.slice(at, Math.min(frame.length, at + chunkSize)));
-        await Promise.resolve();
       }
       const message = await received;
 
       // Then the payload is intact and was copied a bounded number of times, not once per chunk
-      expect(message).toEqual(payload);
+      expect(message.byteLength).toBe(payload.byteLength);
+      expect(Buffer.compare(Buffer.from(message), Buffer.from(payload))).toBe(0);
       expect(copied.bytes).toBeLessThan(payloadSize * 4);
     } finally {
       setSpy.mockRestore();

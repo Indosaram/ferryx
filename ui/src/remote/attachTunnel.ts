@@ -110,15 +110,34 @@ export interface TunnelErrorEvent {
   message?: string;
 }
 
+export const MAX_ATTACH_REFUSAL_DETAIL_CHARS = 120;
+
+/**
+ * Folds untrusted refusal text into one bounded display line: C0/C1 controls, bidi overrides and
+ * isolates, zero-width characters and line breaks become spaces, whitespace collapses, and the
+ * result is cut on a code-point boundary. The refusal code is matched on the raw first line
+ * instead, so a hostile holder name can only lose its own characters here.
+ */
+export function sanitizeAttachRefusalDetail(raw: string): string {
+  const collapsed = raw
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200c\u200e-\u200f\u202a-\u202e\u2060-\u206f\ufeff]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return Array.from(collapsed).slice(0, MAX_ATTACH_REFUSAL_DETAIL_CHARS).join("").trim();
+}
+
 /** Structured tunnel failure: callers branch on `code` (and `status` for an HTTP upgrade refusal). */
 export class TunnelError extends Error {
   readonly code: string;
   readonly status?: number;
-  constructor(code: string, message: string, status?: number) {
+  /** Server-supplied display text (e.g. the device holding a terminal). Never identity proof. */
+  readonly detail?: string;
+  constructor(code: string, message: string, status?: number, detail?: string, readonly takeoverSupported = false) {
     super(`${code}: ${message}`);
     this.name = "TunnelError";
     this.code = code;
     this.status = status;
+    this.detail = detail;
   }
 }
 
@@ -681,6 +700,44 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
     return { status, headers, body };
   }
 
+  /**
+   * Reads the refusal body of a failed upgrade. The gateway answers an occupancy or epoch
+   * refusal before upgrading, so the typed code exists only there; without it the UI cannot
+   * tell "someone else holds this terminal" from "your session expired", which are opposite
+   * user actions. New gateways return typed JSON for occupancy; older ones put the code on
+   * the first line. In both formats the holder is untrusted display text, never authority.
+   */
+  async function readUpgradeRefusal(
+    status: number,
+    resHeaders: Record<string, string>,
+  ): Promise<{ code: string | null; detail?: string; takeoverSupported?: boolean }> {
+    let refusal = "";
+    try {
+      const body = await parseBody(status, resHeaders);
+      refusal = new TextDecoder("utf-8").decode(body);
+    } catch {
+      // An unreadable body must not mask the status.
+      return { code: null };
+    }
+    if (resHeaders["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() === "application/json") {
+      let value: unknown;
+      try { value = JSON.parse(refusal); } catch { return { code: null }; }
+      if (status !== 409 || !value || typeof value !== "object" ||
+        !("code" in value) || value.code !== "CONTROL_CONFLICT") return { code: null };
+      const details = "details" in value ? value.details : null;
+      const holder = details && typeof details === "object" && "holder" in details ? details.holder : null;
+      const detail = typeof holder === "string" ? sanitizeAttachRefusalDetail(holder) : "";
+      const takeoverSupported = !!details && typeof details === "object" &&
+        "takeover" in details && details.takeover === true;
+      return { code: value.code, ...(detail ? { detail } : {}), takeoverSupported };
+    }
+    const [firstLine, ...detailLines] = refusal.trimStart().split("\n");
+    const code = (firstLine ?? "").trim();
+    if (!/^[A-Z][A-Z0-9_]{2,63}$/.test(code)) return { code: null };
+    const detail = sanitizeAttachRefusalDetail(detailLines.join(" "));
+    return detail ? { code, detail } : { code };
+  }
+
   async function doOpenWebSocket(
     pathAndQuery: string,
     headers?: Record<string, string>,
@@ -702,6 +759,10 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
     reqStr += "Connection: Upgrade\r\n";
     reqStr += `Sec-WebSocket-Key: ${secWebSocketKey}\r\n`;
     reqStr += "Sec-WebSocket-Version: 13\r\n";
+    if (pathAndQuery.startsWith("/api/v1/terminal/") &&
+      !Object.keys(callerHeaders).some((name) => name.toLowerCase() === "x-ferryx-refusal-format")) {
+      reqStr += "X-Ferryx-Refusal-Format: json\r\n";
+    }
 
     for (const [k, v] of Object.entries(callerHeaders)) {
       const lk = k.toLowerCase();
@@ -722,6 +783,12 @@ export function createTunnelTransport(stream: TunnelByteStream): TunnelTransport
 
     const { status, headers: resHeaders } = await parseHeaders();
     if (status !== 101) {
+      const { code, detail, takeoverSupported } = await readUpgradeRefusal(status, resHeaders);
+      if (code !== null) {
+        // The message stays fixed text: `detail` is a server-supplied name, and an Error message
+        // reaches consoles and generic error surfaces that never sanitize it.
+        throw new TunnelError(code, `server returned status ${status} (${code})`, status, detail, takeoverSupported);
+      }
       throw new TunnelError("WEBSOCKET_UPGRADE_FAILED", `server returned status ${status}`, status);
     }
 

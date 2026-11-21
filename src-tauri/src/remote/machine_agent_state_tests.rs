@@ -716,6 +716,214 @@ async fn loopback_fleet_lists_a_live_host_a_failure_and_a_stale_cache() {
     outcome.unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paired_machine_input_is_fenced_by_the_admitted_host_controller() {
+    use futures_util::FutureExt;
+
+    async fn assert_host_size(
+        sessions: &crate::daemon::session_service::DaemonSessionService,
+        id: &str,
+        generation: u64,
+        hub: &TerminalOutputHub,
+        host_id: &str,
+        expected: &[u8],
+    ) {
+        let (_, mut output) = hub.subscribe(host_id).unwrap();
+        sessions.write_machine_input(id, generation, b"stty size\n").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut bytes = Vec::new();
+            loop {
+                bytes.extend_from_slice(&output.recv().await.unwrap());
+                if bytes.windows(expected.len()).any(|window| window == expected) { break; }
+            }
+        }).await.expect("host PTY must report the expected geometry");
+    }
+
+    async fn output_barrier(
+        sessions: &crate::daemon::session_service::DaemonSessionService,
+        id: &str,
+        generation: u64,
+        hub: &TerminalOutputHub,
+        host_id: &str,
+    ) {
+        let (_, mut output) = hub.subscribe(host_id).unwrap();
+        let marker = uuid::Uuid::new_v4().simple().to_string();
+        let (left, right) = marker.split_at(16);
+        sessions.write_machine_input(id, generation,
+            format!("printf '%s%s\\n' '{left}' '{right}'\n").as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut bytes = Vec::new();
+            loop {
+                bytes.extend_from_slice(&output.recv().await.unwrap());
+                if bytes.windows(marker.len()).any(|window| window == marker.as_bytes()) {
+                    break;
+                }
+            }
+        }).await.expect("host shell must execute the accepted input");
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("input-workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let fixture = Fixture::new(root.path()).await.unwrap();
+    let desktop = crate::remote::server::machine_input_fixture::Fixture::new().await;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let mut shell = portable_pty::CommandBuilder::new("/bin/sh");
+        shell.args(["-s"]);
+        shell.env_remove("ENV");
+        shell.env_remove("BASH_ENV");
+        fixture.host.session_service().set_test_shell_command(shell);
+        let host = fixture.pair().await.unwrap();
+        let workspace_id = register_workspace(&fixture.host_state, &workspace).await.unwrap();
+        let client = MachineClient::new();
+        let response = client.execute(&fixture.paired_service, OperationRequest {
+            host_id: host.host_id.clone(),
+            generation: host.generation,
+            operation: Operation::CreateSession { request: m::CreateSessionRequest {
+                request_id: uuid::Uuid::new_v4().to_string(), workspace_id,
+                worktree: None, cols: 80, rows: 24, inherit_from_session_id: None,
+                cwd_relative: None, startup: m::Startup::Shell,
+            } },
+        }).await.unwrap();
+        let OperationResult::CreateSession(session) = response.result else {
+            panic!("expected created host session");
+        };
+        let descriptor = Descriptor {
+            host_id: host.host_id, generation: host.generation,
+            target: session.target.clone(), after_sequence: None,
+        };
+        let terminal = desktop.owner.terminal_service();
+        let sessions = &desktop.state.machine_services.as_ref().unwrap().sessions;
+        let mut proxy = Proxy::new(descriptor.clone(), terminal.output_hub().clone()).unwrap();
+        let id = proxy.id().to_owned();
+        assert_eq!(terminal.paired().install(proxy).unwrap(), id);
+        let unattached = sessions.machine_input_generation(&id);
+        assert_eq!(unattached, 0);
+        assert_eq!(terminal.paired().recovery_outcome(&id).unwrap().generation, None);
+        terminal.paired().detach(&id).await.unwrap();
+
+        proxy = Proxy::new(descriptor.clone(), terminal.output_hub().clone()).unwrap();
+        proxy.reattach(&client, &fixture.paired_service).await.unwrap();
+        let first = proxy.controller().unwrap().0;
+        terminal.paired().install(proxy).unwrap();
+        assert_eq!(terminal.paired().recovery_outcome(&id).unwrap().generation, Some(first));
+        assert_eq!(sessions.machine_input_generation(&id), first);
+        assert_ne!(first, 0);
+        let lease = {
+            let mut controllers = sessions.machine_controllers.lock().await;
+            crate::daemon::session_service::DaemonSessionService::acquire_machine_controller(
+                &mut controllers, &id, "machine-socket",
+            ).unwrap()
+        };
+        let host_terminal = fixture.host.terminal_service();
+        output_barrier(sessions, &id, first, host_terminal.output_hub(), &session.target.session_id).await;
+        terminal.paired().detach(&id).await.unwrap();
+        let mut proxy = Proxy::new(descriptor.clone(), terminal.output_hub().clone()).unwrap();
+        proxy.reattach(&client, &fixture.paired_service).await.unwrap();
+        let second = proxy.controller().unwrap().0;
+        assert!(second > first);
+        terminal.paired().install(proxy).unwrap();
+        assert_eq!(terminal.paired().recovery_outcome(&id).unwrap().generation, Some(second));
+        assert_eq!(sessions.machine_input_generation(&id), second);
+        assert_ne!(second, 0);
+
+        let forbidden = workspace.join("stale-input-executed");
+        let stale = format!("printf stale > '{}'\n", forbidden.display());
+        for generation in [unattached, first] {
+            let error = sessions.write_machine_input(&id, generation, stale.as_bytes()).await.unwrap_err();
+            assert!(error.contains("STALE_GENERATION"), "{error}");
+        }
+        output_barrier(sessions, &id, second, host_terminal.output_hub(), &session.target.session_id).await;
+        assert!(!forbidden.exists());
+        let controllers = sessions.machine_controllers.lock().await;
+        assert_eq!(controllers[&id].generation, lease.generation);
+        assert_eq!(controllers[&id].device, "machine-socket");
+        assert!(!*lease.cancelled.borrow());
+        drop(controllers);
+
+        let source = desktop.create().await;
+        sessions.retain_paired_metadata_for_test(source["target"]["sessionId"].as_str().unwrap(), &id);
+        sessions.record_desktop_geometry(&id, 80, 24);
+        drop(lease);
+        let mut paired = source.clone();
+        paired["target"]["sessionId"] = id.clone().into();
+        {
+            let mut controllers = sessions.machine_controllers.lock().await;
+            controllers.remove(&id);
+        }
+        let mut phone = desktop.attach(&paired).await;
+        let generation = sessions.machine_controllers.lock().await[&id].generation;
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        phone.send(Message::Text(serde_json::json!({
+            "type":"resize", "generation":generation.to_string(), "cols":110, "rows":40,
+        }).to_string().into())).await.unwrap();
+        phone.send(Message::Text(r#"{"type":"ping"}"#.into())).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Message::Text(text) = phone.next().await.unwrap().unwrap() {
+                    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    assert_ne!(value["type"], "error", "{value}");
+                    if value["type"] == "pong" { break; }
+                }
+            }
+        }).await.unwrap();
+        assert_host_size(sessions, &id, second, host_terminal.output_hub(), &session.target.session_id, b"40 110").await;
+        let (entered, release, finished) = crate::remote::server::machine_teardown_probe::register(&format!("restore:{id}"));
+        phone.send(Message::Close(None)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), entered).await.unwrap().unwrap();
+        terminal.paired().detach(&id).await.unwrap();
+        let mut recovering = Proxy::new(descriptor.clone(), terminal.output_hub().clone()).unwrap();
+        recovering.set_recovery(fixture.paired_service.clone());
+        recovering.recovery_failed(&crate::paired_host::client::ClientError::local("PERMISSION_DENIED"));
+        terminal.paired().install(recovering).unwrap();
+        assert_eq!(sessions.resize_machine_input(&id, 0, 120, 50).await.unwrap_err(), "SESSION_INPUT_UNAVAILABLE");
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), finished).await.unwrap().unwrap();
+        let (blocked_tx, blocked_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        terminal.paired().block_actor(&id, blocked_tx, resume_rx);
+        tokio::time::timeout(Duration::from_secs(3), blocked_rx).await.unwrap().unwrap();
+        let (mut cancelled_restore, enqueued) = terminal.paired().resize_with_enqueue_receipt(&id, 0, 200, 60);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                result = &mut cancelled_restore => panic!("blocked actor completed resize: {result:?}"),
+                receipt = enqueued => receipt.expect("resize entered actor queue"),
+            }
+        }).await.unwrap();
+        drop(cancelled_restore);
+        resume_tx.send(()).unwrap();
+        let (recovery_entered, recovery_release) = tokio::time::timeout(
+            Duration::from_secs(3), terminal.paired().hold_next_recovery(&id),
+        ).await.unwrap();
+        let mut recovery = terminal.paired().subscribe_recovery_outcome(&id).unwrap();
+        terminal.paired().get_or_rearm(descriptor, terminal.output_hub().clone(), fixture.paired_service.clone()).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), recovery_entered).await.unwrap().unwrap();
+        let (mut cancelled_recovery_resize, enqueued) = terminal.paired().resize_with_enqueue_receipt(&id, 0, 210, 65);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                result = &mut cancelled_recovery_resize => panic!("held recovery completed resize: {result:?}"),
+                receipt = enqueued => receipt.expect("resize queued during recovery hold"),
+            }
+        }).await.unwrap();
+        drop(cancelled_recovery_resize);
+        recovery_release.send(()).unwrap();
+        let recovered = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let outcome = recovery.borrow_and_update().clone();
+                if outcome.state == "proxy_attached" { break outcome.generation.unwrap(); }
+                recovery.changed().await.unwrap();
+            }
+        }).await.unwrap();
+        assert_host_size(sessions, &id, recovered, host_terminal.output_hub(), &session.target.session_id, b"24 80").await;
+        terminal.paired().detach(&id).await.unwrap();
+    }).catch_unwind().await;
+    desktop.cleanup().await;
+    fixture.close().await;
+    if let Err(panic) = outcome { std::panic::resume_unwind(panic); }
+}
+
 struct LiveAndFakeHosts<'a> {
     live_host: String,
     generation: crate::scoped_contracts::Epoch,

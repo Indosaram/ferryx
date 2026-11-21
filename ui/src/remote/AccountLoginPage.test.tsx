@@ -312,7 +312,7 @@ describe("AccountLoginPage", () => {
         await vi.advanceTimersByTimeAsync(2000);
       });
       expect(pollSpy).toHaveBeenCalledTimes(2);
-      expect(storeSpy).toHaveBeenCalledWith("tok-remote-1", relayUrl);
+      expect(storeSpy).toHaveBeenCalledWith("tok-remote-1", relayUrl, undefined);
       expect(onLoginSuccess).toHaveBeenCalledWith("tok-remote-1", "user@example.com");
 
       await act(async () => {
@@ -447,7 +447,7 @@ describe("AccountLoginPage", () => {
         await vi.advanceTimersByTimeAsync(2000);
       });
       expect(pollSpy).toHaveBeenCalledTimes(2);
-      expect(storeSpy).toHaveBeenCalledWith("tok-magic-auto", relayUrl);
+      expect(storeSpy).toHaveBeenCalledWith("tok-magic-auto", relayUrl, undefined);
       expect(onLoginSuccess).toHaveBeenCalledWith("tok-magic-auto", "magic-user@example.com");
     });
   });

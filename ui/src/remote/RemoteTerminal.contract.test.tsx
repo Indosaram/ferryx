@@ -2,10 +2,16 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { RemoteTerminal } from "./RemoteTerminal";
+import {
+  RemoteTerminal,
+  controlConflictCopy,
+  terminalOutcomeCopy,
+} from "./RemoteTerminal";
+import { TunnelError } from "./attachTunnel";
 import { registerRelayE2E } from "./relayE2E";
 import { REMOTE_TERMINAL_FRAME_PREFIX, REMOTE_TERMINAL_FRAME_TERMINATOR } from "./remoteTerminalFrames";
 import { FALLBACK_PREFERENCES } from "../lib/terminalSettings";
+import { REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY } from "../lib/storageKeys";
 
 class MockWebSocket {
   static readonly OPEN = 1;
@@ -94,6 +100,86 @@ function socket(): MockWebSocket {
   return value;
 }
 
+const realSetTimeout: typeof setTimeout = globalThis.setTimeout;
+const realClearTimeout: typeof clearTimeout = globalThis.clearTimeout;
+
+// Deadlines opened by a test that failed before awaiting them would otherwise leave a 5s timer and
+// a body-wide observer alive past the test, so every probe is cancellable from afterEach.
+const liveProbes = new Set<() => void>();
+
+function abortLiveProbes() {
+  for (const abort of [...liveProbes]) abort();
+  liveProbes.clear();
+}
+
+function withDeadline<T>(signal: Promise<T>, label: string, cleanup?: () => void): Promise<T> {
+  const result = new Promise<T>((resolve, reject) => {
+    let timer: ReturnType<typeof realSetTimeout> | undefined;
+    let settled = false;
+    const abort = () => settle(() => reject(new Error(`${label}_ABORTED`)));
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      liveProbes.delete(abort);
+      if (timer !== undefined) realClearTimeout(timer);
+      timer = undefined;
+      finish();
+      cleanup?.();
+    };
+    liveProbes.add(abort);
+    timer = realSetTimeout(() => settle(() => reject(new Error(`${label}_DEADLINE`))), 5000);
+    signal.then(
+      (value) => settle(() => resolve(value)),
+      (error) => settle(() => reject(error)),
+    );
+  });
+  // An aborted probe was never awaited: keep its rejection from surfacing as unhandled.
+  result.catch(() => {});
+  return result;
+}
+
+function deferredDials() {
+  const pending: ((error: unknown) => void)[] = [];
+  const createWebSocket = vi.fn(() => new Promise<never>((_, reject) => { pending.push(reject); }));
+  return {
+    createWebSocket,
+    get dialed() {
+      return createWebSocket.mock.calls.length;
+    },
+    fail(error: unknown) {
+      const reject = pending.shift();
+      if (!reject) throw new Error("NO_PENDING_DIAL");
+      reject(error);
+    },
+  };
+}
+
+function outcomeBannerText(): string | null {
+  const span = document.querySelector('[data-testid="remote-terminal-outcome"] span');
+  return span?.textContent ?? null;
+}
+
+function outcomeShown(): Promise<string> {
+  const immediate = outcomeBannerText();
+  if (immediate != null) return Promise.resolve(immediate);
+  let observer: MutationObserver | null = null;
+  const shown = new Promise<string>((resolve) => {
+    const attached = new MutationObserver(() => {
+      const text = outcomeBannerText();
+      if (text == null) return;
+      attached.disconnect();
+      resolve(text);
+    });
+    observer = attached;
+    attached.observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+  return withDeadline(shown, "OUTCOME_BANNER", () => {
+    observer?.disconnect();
+    observer = null;
+  });
+}
+
+
 function surface(): HTMLElement {
   return screen.getByTestId("remote-terminal-grid");
 }
@@ -156,6 +242,9 @@ function establishReady(ws = socket()) {
 
 describe("remote terminal grid contract", () => {
   beforeEach(() => {
+    // The input mode persists per origin; a "line" left behind by an earlier test hides the dock's
+    // navigation row and the input-mode toggle, so every contract test starts in direct input.
+    localStorage.removeItem(REMOTE_TERMINAL_INPUT_MODE_STORAGE_KEY);
     // Pin jitter to zero so backoff tests stay deterministic (jitter = 1 - 0.5 * 0 = 1).
     vi.spyOn(Math, "random").mockReturnValue(0);
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
@@ -166,6 +255,7 @@ describe("remote terminal grid contract", () => {
   });
 
   afterEach(() => {
+    abortLiveProbes();
     cleanup();
     MockWebSocket.latest = null;
     MockWebSocket.instances = [];
@@ -321,6 +411,203 @@ describe("remote terminal grid contract", () => {
     expect(MockWebSocket.instances).toHaveLength(1);
     expect(connectionStatus()).not.toHaveTextContent("Live");
     expect(screen.getByTestId("remote-terminal-outcome")).toBeInTheDocument();
+  });
+
+  it("stops redialling and shows the reason when the upgrade is refused", async () => {
+    vi.useFakeTimers();
+    const refusal = new TunnelError("CONTROL_CONFLICT", "server returned status 409 (CONTROL_CONFLICT)", 409, undefined, true);
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onTransportFailure = vi.fn();
+    const onTakeOver = vi.fn();
+    const dial = deferredDials();
+
+    render(
+      <RemoteTerminal
+        sessionId="busy"
+        token="token"
+        daemonEpoch="epoch"
+        createWebSocket={dial.createWebSocket}
+        isAccountSession
+        onTakeOver={onTakeOver}
+        onTransportFailure={onTransportFailure}
+      />,
+    );
+    const banner = outcomeShown();
+    expect(dial.dialed).toBe(1);
+    await act(async () => { dial.fail(refusal); });
+    // The refusal is a decision, not an outage: banner with the real reason, no redial storm.
+    expect(await banner).toBe(controlConflictCopy(null, true));
+    expect(screen.getByTestId("remote-terminal-takeover")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("remote-terminal-takeover"));
+    expect(onTakeOver).toHaveBeenCalledTimes(1);
+    const conflictBanner = screen.getByTestId("remote-terminal-outcome").textContent;
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(60000);
+    });
+    expect(dial.createWebSocket).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("remote-terminal-outcome").textContent).toBe(conflictBanner);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(onTransportFailure).not.toHaveBeenCalled();
+    // This route hands the socket in directly, so no WebSocket is constructed at all.
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it.each([undefined, "UNKNOWN_CONFLICT"])("never automatically retries an initial untyped 409 (%s)", async (code) => {
+    vi.useFakeTimers();
+    const onTransportFailure = vi.fn();
+    const createWebSocket = vi.fn(() => { throw { status: 409, code }; });
+    render(<RemoteTerminal sessionId="initial-conflict" token="unused" daemonEpoch="1"
+      isAccountSession createWebSocket={createWebSocket} onTakeOver={vi.fn()}
+      onTransportFailure={onTransportFailure} />);
+
+    expect(createWebSocket).toHaveBeenCalledTimes(1);
+    expect(connectionStatus()).toHaveTextContent("Blocked");
+    expect(screen.queryByTestId("remote-terminal-takeover")).toBeNull();
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(60000);
+    });
+    expect(createWebSocket).toHaveBeenCalledTimes(1);
+    expect(onTransportFailure).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
+    expect(createWebSocket).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("auto reconnects after transport loss without replaying takeover, queued bytes, or IME input", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const paths: string[] = [];
+    const onTakeoverConsumed = vi.fn();
+    const createWebSocket = vi.fn((path: string) => {
+      paths.push(path);
+      return new MockWebSocket("mock://bounded-reconnect");
+    });
+    render(<RemoteTerminal sessionId="reconnect-safe" token="unused" daemonEpoch="1"
+      isAccountSession createWebSocket={createWebSocket} takeover
+      onTakeoverConsumed={onTakeoverConsumed} />);
+    const first = socket();
+    await first.waitForHandlers();
+    const attach = (ws: MockWebSocket, generation: string) => {
+      act(() => ws.onmessage?.({ data: JSON.stringify({ type: "attached", generation,
+        target: { sessionId: "reconnect-safe", daemonEpoch: "1" } }) }));
+    };
+    attach(first, "1");
+    first.send.mockClear();
+    first.readyState = 0;
+    fireEvent.paste(surface(), { clipboardData: { getData: () => "stale-command" } });
+    const sink = screen.getByTestId("remote-terminal-input-sink");
+    fireEvent.compositionStart(sink);
+    fireEvent.input(sink, { target: { value: "held-ime" }, isComposing: true });
+    expect(screen.getByTestId("remote-terminal-buffered-indicator")).toBeInTheDocument();
+
+    const created = MockWebSocket.nextCreation();
+    act(() => first.onclose?.());
+    expect(sink).toHaveValue("");
+    expect(screen.queryByTestId("remote-terminal-buffered-indicator")).toBeNull();
+    fireEvent.keyDown(surface(), { key: "x" });
+    act(() => vi.advanceTimersByTime(1000));
+    const second = await created;
+    await second.waitForHandlers();
+    expect(paths[0]).toContain("takeover=1");
+    expect(paths[1]).not.toContain("takeover=1");
+    expect(onTakeoverConsumed).toHaveBeenCalledTimes(1);
+    attach(second, "2");
+    expect(connectionStatus()).toHaveTextContent("Live");
+    fireEvent.compositionEnd(sink, { data: "held-ime" });
+    expect(second.send.mock.calls.map(([payload]) => typeof payload === "string" ? JSON.parse(payload).type : "input"))
+      .toEqual(["acknowledgeAgentOutcome", "resize"]);
+    second.send.mockClear();
+    fireEvent.keyDown(surface(), { key: "y" });
+    expect(second.send).toHaveBeenCalledWith(new TextEncoder().encode("y"));
+    act(() => first.onmessage?.({ data: JSON.stringify({ type: "attached", generation: "1",
+      target: { sessionId: "reconnect-safe", daemonEpoch: "1" } }) }));
+    expect(second.send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["CONTROL_CONFLICT", "control_conflict", "SESSION_EXPIRED"])("never offers takeover for a legacy wire outcome: %s", async (blockedReason) => {
+    vi.useFakeTimers();
+    mockLegacyTicketFetch();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const onTakeOver = vi.fn();
+
+    const displaced = MockWebSocket.nextCreation();
+    render(
+      <RemoteTerminal sessionId="held" token="token" daemonEpoch="epoch" onTakeOver={onTakeOver} />,
+    );
+    const ws = await displaced;
+    await ws.waitForHandlers();
+    establishReady(ws);
+    act(() => ws.onmessage?.({ data: JSON.stringify({ type: "terminalOutcome",
+      target: { sessionId: "held", backendSessionId: "held", daemonEpoch: "epoch" },
+      incarnation: "owner", generation: null, state: "blocked", blockedReason, exitCode: null }) }));
+
+    expect(screen.getByTestId("remote-terminal-outcome")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal-takeover")).toBeNull();
+    expect(onTakeOver).not.toHaveBeenCalled();
+  });
+
+  it.each(["STALE_EPOCH", "SESSION_EXPIRED", "SESSION_OWNERSHIP_CHANGED"])("does not offer takeover for account upgrade refusal %s", async (code) => {
+    const dial = deferredDials();
+    render(<RemoteTerminal sessionId="stale" token="token" daemonEpoch="epoch"
+      isAccountSession createWebSocket={dial.createWebSocket} onTakeOver={vi.fn()} />);
+    const banner = outcomeShown();
+    expect(dial.dialed).toBe(1);
+    await act(async () => { dial.fail(new TunnelError(code, "refused", 409)); });
+    expect(screen.queryByTestId("remote-terminal-takeover")).toBeNull();
+    expect(await banner)
+      .toBe(terminalOutcomeCopy({ state: "blocked", blockedReason: code, exitCode: null }, false));
+  });
+
+  it.each([null, 42, {}, "\u202e\u0000\n", "Phone\n\u202e\u001b[31m", "x".repeat(300)])("bounds and sanitizes untrusted holder detail %j", async (detail) => {
+    const dial = deferredDials();
+    render(<RemoteTerminal sessionId="held" token="token" daemonEpoch="epoch"
+      isAccountSession createWebSocket={dial.createWebSocket} onTakeOver={vi.fn()} />);
+    const banner = outcomeShown();
+    await act(async () => { dial.fail({ code: "CONTROL_CONFLICT", status: 409, detail, takeoverSupported: true }); });
+    const bannerText = await banner;
+    expect(bannerText).toBe(controlConflictCopy(
+      typeof detail === "string" ? detail : null,
+      true,
+    ));
+    expect(bannerText).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e]/);
+    expect(screen.getByTestId("remote-terminal-takeover")).toBeInTheDocument();
+  });
+
+  it("shows the holder without offering takeover when its owner did not advertise support", async () => {
+    const dial = deferredDials();
+    render(<RemoteTerminal sessionId="held" token="token" daemonEpoch="epoch"
+      isAccountSession createWebSocket={dial.createWebSocket} onTakeOver={vi.fn()} />);
+    const banner = outcomeShown();
+    await act(async () => { dial.fail(new TunnelError("CONTROL_CONFLICT", "refused", 409, "Older desktop")); });
+    expect(await banner).toBe(controlConflictCopy("Older desktop", false));
+    expect(screen.queryByTestId("remote-terminal-takeover")).toBeNull();
+  });
+
+  it("names the real holder and never promises takeover when the action is absent", async () => {
+    const named = deferredDials();
+    const first = render(<RemoteTerminal sessionId="named" token="token" daemonEpoch="epoch"
+      isAccountSession createWebSocket={named.createWebSocket} onTakeOver={vi.fn()} />);
+    const namedBanner = outcomeShown();
+    await act(async () => { named.fail(new TunnelError("CONTROL_CONFLICT", "refused", 409, "Pixel 9 Pro", true)); });
+    expect(await namedBanner)
+      .toBe(controlConflictCopy("Pixel 9 Pro", true));
+    expect(screen.getByTestId("remote-terminal-takeover")).toBeInTheDocument();
+    first.unmount();
+
+    const fixed = deferredDials();
+    render(<RemoteTerminal sessionId="named-fixed" token="token" daemonEpoch="epoch"
+      isAccountSession createWebSocket={fixed.createWebSocket} />);
+    const fixedBanner = outcomeShown();
+    await act(async () => { fixed.fail(new TunnelError("CONTROL_CONFLICT", "refused", 409, "Pixel 9 Pro", true)); });
+    expect(await fixedBanner)
+      .toBe(controlConflictCopy("Pixel 9 Pro", false));
+    expect(screen.queryByTestId("remote-terminal-takeover")).toBeNull();
   });
 
   it("observes ready only after a full legacy grid despite an earlier ready outcome", async () => {
@@ -493,6 +780,214 @@ describe("remote terminal grid contract", () => {
     expect(capturedPath).toBe(
       "/api/v1/terminal/session-account-123?daemonEpoch=1790310731270&render=grid",
     );
+  });
+
+  it("retains a displaced controller's typed blocked outcome without automatic redial", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("__task9Wire", {});
+    const ws = new MockWebSocket("mock://socket");
+    const createWebSocket = vi.fn(() => ws);
+    const onTransportFailure = vi.fn();
+    const onTakeOver = vi.fn();
+    render(<RemoteTerminal sessionId="displaced" token="token" daemonEpoch="epoch"
+      isAccountSession createWebSocket={createWebSocket}
+      onTransportFailure={onTransportFailure} onTakeOver={onTakeOver} />);
+    act(() => {
+      ws.onopen?.();
+      ws.onmessage?.({ data: JSON.stringify({ type: "attached", generation: "1",
+        target: { sessionId: "displaced", daemonEpoch: "epoch" } }) });
+    });
+    expect(connectionStatus()).toHaveTextContent("Live");
+    act(() => {
+      ws.onmessage?.({ data: JSON.stringify({ type: "terminalOutcome",
+        target: { sessionId: "displaced", backendSessionId: "displaced", daemonEpoch: "epoch" },
+        incarnation: "1", generation: "1", state: "blocked",
+        blockedReason: "SESSION_OWNERSHIP_CHANGED", exitCode: null }) });
+      ws.onclose?.();
+    });
+    expect(screen.getByTestId("remote-terminal-outcome")).toBeInTheDocument();
+    expect(screen.queryByTestId("remote-terminal-takeover")).toBeNull();
+    const qa = window.__ferryxRecoveryQA;
+    if (!qa) throw new Error("Expected QA owner facade");
+    expect(qa.snapshot({ sessionId: "displaced", daemonEpoch: "epoch" })).toMatchObject({
+      outcome: "blocked", pendingTimers: 0, inFlight: false,
+    });
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
+    expect(createWebSocket).toHaveBeenCalledTimes(1);
+    expect(onTransportFailure).not.toHaveBeenCalled();
+    expect(onTakeOver).not.toHaveBeenCalled();
+    expect(screen.getByTestId("remote-terminal-outcome")).toBeInTheDocument();
+    expect(qa.snapshot({ sessionId: "displaced", daemonEpoch: "epoch" })).toMatchObject({
+      outcome: "blocked", pendingTimers: 0, inFlight: false,
+    });
+  });
+
+  it.each(["upgrade", "socket"]) ("re-admits after a %s stale-generation refusal instead of refusing the terminal", async (source) => {
+    // Given: an automatic reconnect that carried input under a generation the server fenced off.
+    vi.useFakeTimers();
+    const sockets: MockWebSocket[] = [];
+    const paths: string[] = [];
+    const firstDial: { fail: ((error: unknown) => void) | null } = { fail: null };
+    const createWebSocket = vi.fn((path: string) => {
+      paths.push(path);
+      if (source === "upgrade" && paths.length === 1) {
+        return new Promise<never>((_, reject) => { firstDial.fail = reject; });
+      }
+      const next = new SynchronousCloseWebSocket("mock://socket");
+      sockets.push(next);
+      return next;
+    });
+    const onTransportFailure = vi.fn();
+    const onTakeOver = vi.fn();
+    render(<RemoteTerminal sessionId="recovering" token="token" daemonEpoch="42"
+      isAccountSession createWebSocket={createWebSocket} takeover
+      onTakeOver={onTakeOver} onTransportFailure={onTransportFailure} />);
+    expect(createWebSocket).toHaveBeenCalledTimes(1);
+
+    if (source === "socket") {
+      // Given instead: the refusal arrives as an error frame on the admitted socket.
+      await sockets[0].waitForHandlers();
+      fireEvent.keyDown(surface(), { key: "q" });
+      expect(sockets[0].send).not.toHaveBeenCalled();
+      act(() => sockets[0].onmessage?.({ data: JSON.stringify({ type: "error", code: "STALE_GENERATION" }) }));
+      expect(sockets[0].close).toHaveBeenCalledTimes(1);
+    } else {
+      await act(async () => { firstDial.fail?.(new TunnelError("STALE_GENERATION", "refused", 409)); });
+    }
+
+    // Then: no refusal banner and no takeover — the discarded input is the whole loss — and
+    // the ordinary bounded reconnect re-admits without any user action.
+    expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
+    expect(screen.queryByTestId("remote-terminal-takeover")).toBeNull();
+    const readmitted = MockWebSocket.nextCreation();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(createWebSocket).toHaveBeenCalledTimes(2);
+    expect(paths[0]).toContain("takeover=1");
+    expect(paths[1]).not.toContain("takeover=1");
+    const fresh = await withDeadline(readmitted, "RE_ADMITTED_SOCKET");
+    await fresh.waitForHandlers();
+    expect(onTransportFailure).not.toHaveBeenCalled();
+    expect(onTakeOver).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
+
+    // The readmitted socket fences on the current generation and types into it normally.
+    fresh.send.mockClear();
+    act(() => fresh.onmessage?.({ data: JSON.stringify({
+      type: "attached", generation: "2", target: { sessionId: "recovering", daemonEpoch: "42" },
+    }) }));
+    expect(connectionStatus()).toHaveTextContent("Live");
+    fireEvent.keyDown(surface(), { key: "x" });
+    expect(fresh.send).toHaveBeenCalledWith(new TextEncoder().encode("x"));
+  });
+
+  it("keeps re-admitting a stale-generation fence at a slow cadence instead of dying", async () => {
+    // Given: a machine that keeps fencing the pane's admission. Re-admission is not a decision,
+    // so the budget may slow it down but must never leave the pane blocked: a fence race that
+    // outlives the budget still recovers on its own once the route settles.
+    vi.useFakeTimers();
+    const paths: string[] = [];
+    const dial = deferredDials();
+    const createWebSocket = vi.fn((path: string) => {
+      paths.push(path);
+      return dial.createWebSocket();
+    });
+    const onTransportFailure = vi.fn();
+    const onTakeOver = vi.fn();
+    render(<RemoteTerminal sessionId="fenced" token="token" daemonEpoch="7"
+      isAccountSession createWebSocket={createWebSocket} takeover
+      onTakeOver={onTakeOver} onTransportFailure={onTransportFailure} />);
+    expect(dial.dialed).toBe(1);
+    await act(async () => { dial.fail(new TunnelError("STALE_GENERATION", "refused", 409)); });
+
+    let expected = 1;
+    for (const delay of [1000, 2000, 4000, 8000, 10000, 10000]) {
+      // Nothing is dialed before the delay elapses, then exactly one re-admission is.
+      await act(async () => { await vi.advanceTimersByTimeAsync(delay - 1); });
+      expect(dial.dialed).toBe(expected);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expected += 1;
+      expect(dial.dialed).toBe(expected);
+      await act(async () => { dial.fail(new TunnelError("STALE_GENERATION", "refused", 409)); });
+    }
+    expect(dial.dialed).toBe(7);
+
+    // The spent budget slows the cadence instead of ending it: one redial is always in flight,
+    // the pane never shows a blocked outcome, and the takeover flag stays spent so re-admission
+    // never becomes a second steal of the session.
+    expect(outcomeBannerText()).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByTestId("remote-terminal-takeover")).toBeNull();
+    expect(vi.getTimerCount()).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000 - 1); });
+    expect(dial.dialed).toBe(7);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(dial.dialed).toBe(8);
+    await act(async () => { dial.fail(new TunnelError("STALE_GENERATION", "refused", 409)); });
+    expect(vi.getTimerCount()).toBe(1);
+    expect(outcomeBannerText()).toBeNull();
+    expect(onTransportFailure).not.toHaveBeenCalled();
+    expect(onTakeOver).not.toHaveBeenCalled();
+    expect(paths[0]).toContain("takeover=1");
+    expect(paths.slice(1).every((path) => !path.includes("takeover=1"))).toBe(true);
+  });
+
+  it("spends the takeover flag on the dial it arms and never repeats it", () => {
+    vi.useFakeTimers();
+    const onTakeoverConsumed = vi.fn();
+    const paths: string[] = [];
+    const sockets: MockWebSocket[] = [];
+    const createWebSocket = vi.fn((pathAndQuery: string) => {
+      paths.push(pathAndQuery);
+      const socket = new MockWebSocket("mock://socket");
+      sockets.push(socket);
+      return socket;
+    });
+
+    const view = render(
+      <RemoteTerminal
+        sessionId="session-takeover"
+        token="token-unused"
+        isAccountSession={true}
+        daemonEpoch="1790310731270"
+        createWebSocket={createWebSocket}
+        takeover
+        onTakeoverConsumed={onTakeoverConsumed}
+        onTakeOver={() => {}}
+      />,
+    );
+
+    expect(createWebSocket).toHaveBeenCalledTimes(1);
+    expect(paths[0]).toContain("takeover=1");
+    expect(onTakeoverConsumed).toHaveBeenCalledTimes(1);
+
+    // Displacement is one dial's authority: a reconnect must not silently steal the pane back.
+    act(() => { sockets[0].onclose?.(); });
+    act(() => { vi.advanceTimersByTime(1500); });
+    expect(createWebSocket).toHaveBeenCalledTimes(2);
+    expect(paths[1]).not.toContain("takeover=1");
+
+    // A re-render that keeps the prop true must not reload the authority either.
+    view.rerender(
+      <RemoteTerminal
+        sessionId="session-takeover"
+        token="token-unused"
+        isAccountSession={true}
+        daemonEpoch="1790310731270"
+        createWebSocket={createWebSocket}
+        takeover
+        onTakeoverConsumed={onTakeoverConsumed}
+        onTakeOver={() => {}}
+      />,
+    );
+    act(() => { sockets[1].onclose?.(); });
+    act(() => { vi.advanceTimersByTime(6000); });
+    expect(createWebSocket).toHaveBeenCalledTimes(3);
+    expect(paths[2]).not.toContain("takeover=1");
+    expect(onTakeoverConsumed).toHaveBeenCalledTimes(1);
   });
 
   it("reports failure and avoids sending an empty or guessed value when daemonEpoch is genuinely unknown in account mode", async () => {
@@ -822,45 +1317,88 @@ describe("remote terminal grid contract", () => {
     expect(MockWebSocket.instances).toHaveLength(2);
   });
 
-  it("caps backoff delay at 10s and continues retrying indefinitely", () => {
+  it("caps fast backoff at 10s, then keeps retrying once every 30s", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", MockWebSocket);
 
     render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
 
-    // 1st close -> 1s
-    act(() => { MockWebSocket.instances[0].onclose?.(); });
-    act(() => { vi.advanceTimersByTime(1000); });
-    expect(MockWebSocket.instances).toHaveLength(2);
+    for (const [index, delay] of [1000, 2000, 4000, 8000, 10000, 10000].entries()) {
+      const current = socket();
+      await current.waitForHandlers();
+      const created = MockWebSocket.nextCreation();
+      act(() => current.onclose?.());
+      act(() => vi.advanceTimersByTime(delay - 1));
+      expect(MockWebSocket.instances).toHaveLength(index + 1);
+      act(() => vi.advanceTimersByTime(1));
+      const next = await created;
+      await next.waitForHandlers();
+      expect(MockWebSocket.instances).toHaveLength(index + 2);
+    }
 
-    // 2nd close -> 2s
-    act(() => { MockWebSocket.instances[1].onclose?.(); });
-    act(() => { vi.advanceTimersByTime(2000); });
-    expect(MockWebSocket.instances).toHaveLength(3);
+    // A prolonged outage never strands a foreground phone: after the fast episode
+    // each failed dial schedules exactly one successor on the 30-second cadence.
+    for (const expected of [8, 9]) {
+      const created = MockWebSocket.nextCreation();
+      act(() => socket().onclose?.());
+      expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
+      act(() => vi.advanceTimersByTime(29_999));
+      expect(MockWebSocket.instances).toHaveLength(expected - 1);
+      act(() => vi.advanceTimersByTime(1));
+      await (await created).waitForHandlers();
+      expect(MockWebSocket.instances).toHaveLength(expected);
+    }
+  });
 
-    // 3rd close -> 4s
-    act(() => { MockWebSocket.instances[2].onclose?.(); });
-    act(() => { vi.advanceTimersByTime(4000); });
-    expect(MockWebSocket.instances).toHaveLength(4);
+  it("restarts one bounded episode when connectivity returns after the reconnect budget is spent", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", MockWebSocket);
 
-    // 4th close -> 8s
-    act(() => { MockWebSocket.instances[3].onclose?.(); });
-    act(() => { vi.advanceTimersByTime(8000); });
-    expect(MockWebSocket.instances).toHaveLength(5);
+    render(<RemoteTerminal sessionId="session-wake" token="token-abc" />);
 
-    // 5th close -> 10s (capped)
-    act(() => { MockWebSocket.instances[4].onclose?.(); });
-    act(() => { vi.advanceTimersByTime(9999); });
-    expect(MockWebSocket.instances).toHaveLength(5);
-    act(() => { vi.advanceTimersByTime(1); });
-    expect(MockWebSocket.instances).toHaveLength(6);
-
-    // 6th close -> 10s (still capped)
-    act(() => { MockWebSocket.instances[5].onclose?.(); });
-    act(() => { vi.advanceTimersByTime(9999); });
-    expect(MockWebSocket.instances).toHaveLength(6);
-    act(() => { vi.advanceTimersByTime(1); });
+    for (const delay of [1000, 2000, 4000, 8000, 10000, 10000]) {
+      const current = socket();
+      await current.waitForHandlers();
+      const created = MockWebSocket.nextCreation();
+      act(() => current.onclose?.());
+      act(() => vi.advanceTimersByTime(delay));
+      await (await created).waitForHandlers();
+    }
+    act(() => socket().onclose?.());
+    expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
     expect(MockWebSocket.instances).toHaveLength(7);
+
+    // Exhaustion is a spent budget, not a verdict: coming back online is new evidence that the
+    // outage may be over, so it opens exactly one fresh episode instead of leaving recovery dead
+    // until the user finds the Retry button. Both listeners fire on one transition, so it must
+    // still produce a single dial.
+    const rewoken = MockWebSocket.nextCreation();
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    const fresh = await rewoken;
+    await fresh.waitForHandlers();
+    expect(MockWebSocket.instances).toHaveLength(8);
+    expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
+
+    // The fresh episode has its own budget: the first failure dials again after the base delay.
+    act(() => fresh.onclose?.());
+    act(() => vi.advanceTimersByTime(1000));
+    expect(MockWebSocket.instances).toHaveLength(9);
+
+    // A live terminal again is unaffected by any of this.
+    const live = socket();
+    await live.waitForHandlers();
+    act(() => {
+      live.onmessage?.({ data: JSON.stringify({ type: "grid", cols: 80, rows: 20, cursor: hiddenCursor, lines: [] }) });
+    });
+    expect(connectionStatus()).toHaveTextContent("Live");
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(MockWebSocket.instances).toHaveLength(9);
   });
 
   it("reattaches to the newly focused session and ignores callbacks from the old socket", async () => {
@@ -1016,6 +1554,148 @@ describe("remote terminal grid contract", () => {
     expect(socket().send).toHaveBeenNthCalledWith(1, new TextEncoder().encode("가"));
     expect(socket().send).toHaveBeenNthCalledWith(2, new TextEncoder().encode("나"));
     expect(sink).toHaveValue("");
+  });
+
+  it.each([
+    { label: "insertFromComposition", inputType: "insertFromComposition" },
+    { label: "insertCompositionText", inputType: "insertCompositionText" },
+  ])(
+    "absorbs a cancelled composition's replay reported as $label after the microtask checkpoint",
+    async ({ inputType }) => {
+      vi.stubGlobal("WebSocket", MockWebSocket);
+      render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+      establishReady();
+      const sink = screen.getByTestId("remote-terminal-input-sink");
+
+      // Given: the IME cancels its own preedit and the engine replays the withdrawn insertion.
+      fireEvent.compositionStart(sink);
+      fireEvent.compositionUpdate(sink, { data: "かな" });
+      fireEvent.input(sink, { target: { value: "かな" }, isComposing: true });
+      fireEvent.compositionEnd(sink, { data: "" });
+
+      // When: the cancel's own turn and its microtasks finish before the replay arrives.
+      await act(async () => {});
+      fireEvent.input(sink, { target: { value: "かな" }, inputType });
+
+      // Then: withdrawn text is never written to the PTY, and the sink stays pristine.
+      expect(socket().send).not.toHaveBeenCalled();
+      expect(sink).toHaveValue("");
+      expect(screen.queryByTestId("remote-terminal-preedit")).toBeNull();
+    },
+  );
+
+  it("still sends a fresh insertion after a cancelled composition", () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    establishReady();
+    const sink = screen.getByTestId("remote-terminal-input-sink");
+    fireEvent.compositionStart(sink);
+    fireEvent.input(sink, { target: { value: "かな" }, isComposing: true });
+    fireEvent.compositionEnd(sink, { data: "" });
+    fireEvent.input(sink, { target: { value: "かな" }, inputType: "insertFromComposition" });
+
+    // When: the next keystroke inserts different text, it is not a mirror of the cancellation.
+    fireEvent.input(sink, { target: { value: "x" } });
+
+    // Then: it reaches the PTY exactly once.
+    expect(socket().send).toHaveBeenCalledTimes(1);
+    expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("x"));
+  });
+
+  it.each([
+    { label: "typing", inputType: "insertText" },
+    { label: "auto-correct or a writing suggestion", inputType: "insertReplacementText" },
+    { label: "pasted text", inputType: "insertFromPaste" },
+    { label: "transposition", inputType: "insertTranspose" },
+    // An unspecified type cannot be told apart from ordinary typing, so absorbing it would risk
+    // dropping the user's own text; the real value is the PTY write, not the mirror's silence.
+    { label: "an insertion with no input type", inputType: "" },
+  ])(
+    "sends text the user inserted as $label even when it repeats a cancelled composition's text",
+    async ({ inputType }) => {
+      vi.stubGlobal("WebSocket", MockWebSocket);
+      render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+      establishReady();
+      const sink = screen.getByTestId("remote-terminal-input-sink");
+
+      // Given: a cancelled composition left its withdrawn preedit behind and the turn has ended.
+      fireEvent.compositionStart(sink);
+      fireEvent.input(sink, { target: { value: "かな" }, isComposing: true });
+      fireEvent.compositionEnd(sink, { data: "" });
+      await act(async () => {});
+
+      // When: the user inserts exactly that text themselves, reported as a non-composition type.
+      fireEvent.input(sink, { target: { value: "かな" }, inputType });
+
+      // Then: their text reaches the PTY instead of being taken for the withdrawn preedit.
+      expect(socket().send).toHaveBeenCalledTimes(1);
+      expect(socket().send).toHaveBeenCalledWith(new TextEncoder().encode("かな"));
+    },
+  );
+
+  it("sends text typed after a key released a cancelled composition's hold", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    establishReady();
+    const sink = screen.getByTestId("remote-terminal-input-sink");
+
+    fireEvent.compositionStart(sink);
+    fireEvent.input(sink, { target: { value: "かな" }, isComposing: true });
+    fireEvent.compositionEnd(sink, { data: "" });
+    await act(async () => {});
+
+    // When: the user acts on the terminal itself, the withdrawn preedit is no longer in play, so
+    // even an insertion the engine reports as a composition's own is text typed afterwards.
+    fireEvent.keyDown(surface(), { key: "Enter" });
+    fireEvent.input(sink, { target: { value: "かな" }, inputType: "insertFromComposition" });
+
+    // Then: the key and the typing both reach the PTY, in that order.
+    expect(socket().send.mock.calls).toEqual([
+      [new TextEncoder().encode("\r")],
+      [new TextEncoder().encode("かな")],
+    ]);
+  });
+
+  it("keeps an unsent line draft and latched dock modifier across an automatic reconnect", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    establishReady();
+
+    fireEvent.click(screen.getByTestId("remote-terminal-input-mode-toggle"));
+    const lineInput = screen.getByTestId("remote-terminal-line-input") as HTMLTextAreaElement;
+    fireEvent.change(lineInput, { target: { value: "git push --dry-run" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ctrl" }));
+    expect(lineInput.value).toBe("git push --dry-run");
+    expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("data-state", "oneshot");
+
+    // When: the connection drops and the terminal redials on its own.
+    act(() => socket().onclose?.());
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000); });
+    expect(MockWebSocket.instances.length).toBeGreaterThan(1);
+
+    // Then: what the user had typed and latched is still there to send.
+    expect((screen.getByTestId("remote-terminal-line-input") as HTMLTextAreaElement).value)
+      .toBe("git push --dry-run");
+    expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("data-state", "oneshot");
+  });
+
+  it("drops the line draft and dock modifier when the session changes", async () => {
+    vi.stubGlobal("WebSocket", MockWebSocket);
+    const view = render(<RemoteTerminal sessionId="session-123" token="token-abc" />);
+    establishReady();
+    fireEvent.click(screen.getByTestId("remote-terminal-input-mode-toggle"));
+    fireEvent.change(screen.getByTestId("remote-terminal-line-input"), {
+      target: { value: "git push --dry-run" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ctrl" }));
+
+    // When: the pane is rebound to another session, the draft belongs to the old one.
+    view.rerender(<RemoteTerminal sessionId="session-456" token="token-abc" />);
+
+    // Then: the new session starts with an empty line and no latched modifier.
+    expect((screen.getByTestId("remote-terminal-line-input") as HTMLTextAreaElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "Ctrl" })).toHaveAttribute("data-state", "off");
   });
 
   it("renders and clears a local preedit overlay while composing", () => {
@@ -2685,36 +3365,44 @@ describe("remote terminal grid contract", () => {
       expect(ws.send).toHaveBeenCalled();
     });
 
-    it("executes deterministic fake-clock backoff over >20 failure cycles saturating at 10s cap", async () => {
+    it("counts foreground wake dials against one recovery budget, then reopens it once on the next wake", async () => {
       vi.useFakeTimers();
-      vi.spyOn(Math, "random").mockReturnValue(0); // delay = min(10000, 1000 * 2^attempt)
       const { sockets } = renderMachineTerminal("epoch-1");
       expect(sockets).toHaveLength(1);
 
-      // Run 25 consecutive failure cycles
-      for (let cycle = 0; cycle < 25; cycle++) {
+      for (let cycle = 0; cycle < 6; cycle++) {
         const currentWs = sockets[sockets.length - 1];
         await currentWs.waitForHandlers();
-        // Simulate socket failure
+        const created = MockWebSocket.nextCreation();
         act(() => {
           currentWs.onerror?.(new Event("error"));
           currentWs.onclose?.(new CloseEvent("close"));
         });
-        // The backoff delay should be at most 10,000ms
         await act(async () => {
-          await vi.advanceTimersByTimeAsync(10000);
+          window.dispatchEvent(new Event("online"));
         });
+        await (await created).waitForHandlers();
         expect(sockets.length).toBe(cycle + 2);
       }
 
-      // On the 26th socket, valid attached frame arrives
+      // Foreground-triggered dials spend the fast budget too. Once it is exhausted,
+      // stay retryable, but do not make another connection before the slow deadline.
       const finalWs = sockets[sockets.length - 1];
       await finalWs.waitForHandlers();
-      act(() => {
-        finalWs.onopen?.();
-        finalWs.onmessage?.({ data: attachedFrame("100") });
+      act(() => finalWs.onerror?.(new Event("error")));
+      expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
+      act(() => vi.advanceTimersByTime(29_999));
+      expect(sockets).toHaveLength(7);
+
+      // One connectivity transition reopens exactly one bounded episode, not an unbounded loop.
+      const reopened = MockWebSocket.nextCreation();
+      await act(async () => {
+        window.dispatchEvent(new Event("online"));
+        document.dispatchEvent(new Event("visibilitychange"));
       });
-      expect(connectionStatus()).toHaveTextContent("Live");
+      await (await reopened).waitForHandlers();
+      expect(sockets).toHaveLength(8);
+      expect(screen.queryByTestId("remote-terminal-outcome")).toBeNull();
     });
 
     it("resumes terminal recovery ownership when parent fallback is a no-op or fails", async () => {

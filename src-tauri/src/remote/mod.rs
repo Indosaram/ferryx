@@ -96,6 +96,14 @@ mod machine_agent_state_tests;
 #[path = "machine_grid_tests.rs"]
 mod machine_grid_tests;
 
+#[cfg(test)]
+#[path = "holder_label_http_tests.rs"]
+mod holder_label_http_tests;
+
+#[cfg(test)]
+#[path = "machine_grant_admission_tests.rs"]
+pub(crate) mod machine_grant_admission_tests;
+
 // Portable counterpart to `dag_paired_tests` (which needs a Unix listener): the
 // paired DAG stream is exercised through `MachineClient::attach_dag`.
 #[cfg(test)]

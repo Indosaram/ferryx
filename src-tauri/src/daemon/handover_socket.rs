@@ -1100,6 +1100,7 @@ mod tests {
             next_sequence: 13,
             bracketed_paste_enabled: false,
             resize_ledger: Vec::new(),
+            initial_size: None,
             replay_gap: None,
             gap_floor: 0,
             transport_owner: false,

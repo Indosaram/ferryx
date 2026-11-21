@@ -54,6 +54,22 @@ mod session_metadata_provider;
 
 const SPAWN_REQUEST_TTL: Duration = Duration::from_secs(30);
 
+/// Whether a remote (SSH) transport state still names a live target.
+///
+/// `Connected` is live, and `Reconnecting` is the same target between redials: the helper keeps
+/// the session and its output, only the link is being re-established. `Disconnected` has lost the
+/// transport and `Expired` has ended the target, so neither may admit input. `None` means this
+/// session has no SSH transport at all, so the predicate has no opinion about it.
+fn ssh_transport_is_live(state: Option<crate::terminal::remote::RemoteConnectionState>) -> bool {
+    matches!(
+        state,
+        Some(
+            crate::terminal::remote::RemoteConnectionState::Connected
+                | crate::terminal::remote::RemoteConnectionState::Reconnecting
+        )
+    )
+}
+
 #[cfg(test)]
 #[path = "session_service_machine_tests.rs"]
 mod machine_tests;
@@ -480,6 +496,14 @@ impl Drop for RemoteSnapshotFileLock {
 pub(crate) struct MachineController {
     pub device: String,
     pub generation: u64,
+    pub geometry_fence: Arc<tokio::sync::Mutex<()>>,
+    /// Set when this session's PTY has been moved off the desktop baseline and
+    /// therefore owes a restore at teardown. It is carried across a takeover
+    /// because the debt belongs to the session's geometry, not to the socket
+    /// that created it: a holder that resizes and is then displaced never
+    /// restores (it is no longer current), so a successor that never resizes
+    /// would otherwise inherit an unrestored PTY and no record of it.
+    pub resized: Arc<std::sync::atomic::AtomicBool>,
     pub cancelled: tokio::sync::watch::Sender<bool>,
     pub disconnected: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
@@ -489,6 +513,8 @@ impl From<&str> for MachineController {
         Self {
             device: device.into(),
             generation: 0,
+            geometry_fence: Arc::new(tokio::sync::Mutex::new(())),
+            resized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancelled: tokio::sync::watch::channel(false).0,
             disconnected: Arc::new(Mutex::new(None)),
         }
@@ -510,6 +536,7 @@ impl MachineController {
 pub(crate) struct MachineSocketLease {
     pub generation: u64,
     pub cancelled: tokio::sync::watch::Receiver<bool>,
+    pub resized: Arc<std::sync::atomic::AtomicBool>,
     disconnected: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
 
@@ -523,6 +550,7 @@ impl Drop for MachineSocketLease {
 /// Holds no server/gateway or AppHandle. Handover is weak to avoid a callback cycle.
 pub struct DaemonSessionService {
     pub(super) epoch: u64,
+    pub(super) machine_identity_dir: Option<PathBuf>,
     pub(crate) workspace_service: Arc<DaemonWorkspaceService>,
     pub(super) terminal_service: Arc<TerminalService>,
     pub(super) session_router: Arc<super::proxy::SessionRouter>,
@@ -855,6 +883,11 @@ impl DaemonSessionService {
     }
 
     pub fn record_desktop_geometry(&self, session_id: &str, cols: u16, rows: u16) {
+        // Restore refuses a zero dimension, so recording one advertises a baseline
+        // teardown can never apply.
+        if cols == 0 || rows == 0 {
+            return;
+        }
         self.desktop_geometries
             .lock()
             .insert(session_id.to_string(), (cols, rows));
@@ -862,6 +895,15 @@ impl DaemonSessionService {
 
     pub fn desktop_geometry(&self, session_id: &str) -> Option<(u16, u16)> {
         self.desktop_geometries.lock().get(session_id).copied()
+    }
+
+    /// The same source order teardown restoration uses, so an inventory row can never
+    /// advertise a geometry that a later restore would disagree with. The spawn
+    /// fingerprint is last and may legitimately be `0x0` for an adopted session.
+    pub(crate) fn projection_geometry(&self, session_id: &str, fingerprint: (u16, u16)) -> (u16, u16) {
+        self.desktop_geometry(session_id)
+            .or_else(|| self.terminal_service.output_hub().initial_size(session_id))
+            .unwrap_or(fingerprint)
     }
 
     fn refuse_unsafe_continue(&self, startup: Option<&TerminalStartup>) -> Result<(), SpawnError> {
@@ -1134,7 +1176,14 @@ impl DaemonSessionService {
             if session.target != *target {
                 return Err("STALE_EPOCH".into());
             }
-            if !session.running {
+            // The projector reports `running` only while an SSH transport is `Connected`, so a
+            // redialing session looks dead to it. Treating that as SESSION_EXPIRED refused every
+            // phone attach that landed inside a reconnect window, even though this daemon still
+            // owned the target and was actively re-establishing it. Ask the transport first.
+            if !session.running
+                && !self.machine_target_recovering(&target.session_id)
+                && !super::super::terminal::paired_runtime::Runtime::owns(&target.session_id)
+            {
                 return Err("SESSION_EXPIRED".into());
             }
             return Ok(session);
@@ -1172,13 +1221,66 @@ impl DaemonSessionService {
         Ok(session)
     }
 
+    /// A projection that is not `running` is only expired when no transport still owns the
+    /// target. SSH keeps its entry across a redial, so admission must read that state rather than
+    /// the projection's connected-only flag.
+    fn machine_target_recovering(&self, session_id: &str) -> bool {
+        ssh_transport_is_live(
+            self.terminal_service
+                .remote()
+                .details(session_id)
+                .map(|details| details.state),
+        )
+    }
+
     pub(crate) fn acquire_machine_controller(
         controllers: &mut HashMap<String, MachineController>,
         id: &str,
         device: &str,
     ) -> Result<MachineSocketLease, String> {
+        Self::acquire_machine_controller_with(controllers, id, device, false)
+    }
+
+    /// True when `device` would be refused because a *different* device is holding `id`.
+    /// One predicate for both the refusal and the holder lookup, so the name reported to the
+    /// user can never disagree with the decision that refused them.
+    fn controller_conflict(
+        controllers: &HashMap<String, MachineController>,
+        id: &str,
+        device: &str,
+        takeover: bool,
+    ) -> bool {
+        controllers
+            .get(id)
+            .is_some_and(|previous| previous.device != device && previous.reserved() && !takeover)
+    }
+
+    /// The device id currently holding `id`, when `device` would be refused. Display only:
+    /// it is resolved to a name for the refusal message, never used as an authorization proof.
+    pub(crate) fn machine_controller_holder(
+        controllers: &HashMap<String, MachineController>,
+        id: &str,
+        device: &str,
+        takeover: bool,
+    ) -> Option<String> {
+        if !Self::controller_conflict(controllers, id, device, takeover) {
+            return None;
+        }
+        controllers.get(id).map(|holder| holder.device.clone())
+    }
+
+    /// `takeover` displaces a *reserved* foreign holder instead of refusing. It is a
+    /// single-attempt authorization from the caller, never a stored preference: a
+    /// reconnect that does not repeat the flag goes through ordinary admission and
+    /// gets `CONTROL_CONFLICT` again while the new holder is still connected.
+    pub(crate) fn acquire_machine_controller_with(
+        controllers: &mut HashMap<String, MachineController>,
+        id: &str,
+        device: &str,
+        takeover: bool,
+    ) -> Result<MachineSocketLease, String> {
         let generation = if let Some(previous) = controllers.get(id) {
-            if previous.device != device && previous.reserved() {
+            if Self::controller_conflict(controllers, id, device, takeover) {
                 return Err("CONTROL_CONFLICT".into());
             }
             previous
@@ -1190,9 +1292,16 @@ impl DaemonSessionService {
         };
         let (cancelled, receiver) = tokio::sync::watch::channel(false);
         let disconnected = Arc::new(Mutex::new(None));
+        let resized = controllers.get(id)
+            .map(|previous| previous.resized.clone())
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
         let entry = MachineController {
             device: device.into(),
             generation,
+            geometry_fence: controllers.get(id)
+                .map(|previous| previous.geometry_fence.clone())
+                .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(()))),
+            resized: resized.clone(),
             cancelled,
             disconnected: disconnected.clone(),
         };
@@ -1202,6 +1311,7 @@ impl DaemonSessionService {
         Ok(MachineSocketLease {
             generation,
             cancelled: receiver,
+            resized,
             disconnected,
         })
     }
@@ -1225,8 +1335,8 @@ impl DaemonSessionService {
         // This daemon's own durable identity, read the way the IPC and gateway paths read
         // it. A session id or an arbitrary journal record is not an identity: a machine
         // answer has to name the machine that serves it.
-        let machine_id = crate::remote::auth::canonical_identity_dir()
-            .and_then(|dir| crate::remote::auth::load_or_generate_machine_identity(&dir))
+        let dir = self.machine_identity_dir.as_deref().ok_or("MACHINE_SERVICE_UNAVAILABLE")?;
+        let machine_id = crate::remote::auth::load_or_generate_machine_identity(dir)
             .map(|identity| identity.machine_id)
             .map_err(|_| "MACHINE_SERVICE_UNAVAILABLE")?;
         let target = crate::remote::machine_protocol::RemoteTerminalTarget {
@@ -1255,6 +1365,33 @@ impl DaemonSessionService {
         let start_sequence = crate::scoped_contracts::Epoch(start.unwrap_or(0));
         let end_sequence = crate::scoped_contracts::Epoch(end.unwrap_or(0));
 
+        // Retained paired output and recovery outcomes remain readable after exit or
+        // loss of control. Projection is not input authority; input has its own fence.
+        if super::super::terminal::paired_runtime::Runtime::owns(session_id) {
+            let outcome = self.terminal_service.paired().recovery_outcome(session_id)
+                .ok_or("SESSION_NOT_FOUND")?;
+            let (cols, rows) = self.projection_geometry(
+                session_id,
+                (meta.spawn_fingerprint.cols, meta.spawn_fingerprint.rows),
+            );
+            return Ok(crate::remote::machine_protocol::Session {
+                title: None,
+                agent_type,
+                target,
+                workspace_id: meta.workspace_id.clone(),
+                worktree,
+                cwd: meta.cwd.to_string_lossy().into_owned(),
+                cols,
+                rows,
+                running: outcome.state == "proxy_attached",
+                provider_session,
+                start_sequence,
+                end_sequence,
+                pid: self.terminal_service.paired().live_state(session_id)
+                    .and_then(|live| live.remote_pid),
+            });
+        }
+
         if crate::ssh::projects::is_remote(&meta.workspace_id)
             || meta.workspace_id.starts_with("ssh:")
             || meta.workspace_id.contains("::")
@@ -1276,8 +1413,7 @@ impl DaemonSessionService {
                 cwd: details.descriptor.config.project_path.clone(),
                 cols: details.descriptor.cols,
                 rows: details.descriptor.rows,
-                running: details.state
-                    == crate::terminal::remote::RemoteConnectionState::Connected,
+                running: ssh_transport_is_live(Some(details.state)),
                 provider_session,
                 start_sequence,
                 end_sequence,
@@ -1377,6 +1513,112 @@ impl DaemonSessionService {
 
     pub(crate) fn machine_pty(&self, id: &str) -> Option<Arc<crate::terminal::PtySession>> {
         self.terminal_service.get_session(id)
+    }
+
+    /// True when this daemon can drive the session even though no local `PtySession`
+    /// backs it: an SSH-backed remote session or a paired daemon session.
+    pub(crate) fn owns_machine_session(&self, id: &str) -> bool {
+        self.terminal_service.remote().contains(id)
+            || self.terminal_service.paired().contains(id)
+    }
+
+    /// Bind the socket to the backend transport at admission, never to whichever
+    /// SSH or paired connection happens to be current when a later keystroke arrives.
+    pub(crate) fn machine_input_generation(&self, id: &str) -> u64 {
+        if super::super::terminal::paired_runtime::Runtime::owns(id) {
+            return self.terminal_service.paired().recovery_outcome(id)
+                .and_then(|outcome| outcome.generation).unwrap_or(0);
+        }
+        self.terminal_service.remote().settled_details(id)
+            .map(|details| details.generation).unwrap_or(0)
+    }
+
+    pub(crate) async fn write_machine_input(&self, id: &str, generation: u64, data: &[u8]) -> Result<(), String> {
+        // Zero is the paired runtime's desktop "current controller" shorthand, not
+        // an admitted machine transport. Never let an unattached socket use it to
+        // follow a later reconnect. Nonzero generations are fenced by the proxy.
+        self.validate_machine_input_generation(id, generation)?;
+        self.validate_session_ssh_target(id)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.terminal_service
+            .write_input_operation(id, generation, data.to_vec())
+            .map_err(|error| error.to_string())?
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn validate_machine_input_generation(&self, id: &str, generation: u64) -> Result<(), String> {
+        if super::super::terminal::paired_runtime::Runtime::owns(id) {
+            let ready = self.terminal_service.paired().recovery_outcome(id)
+                .is_some_and(|outcome| outcome.state == "proxy_attached" && outcome.generation == Some(generation));
+            if self.machine_input_generation(id) != generation {
+                return Err("STALE_GENERATION".into());
+            }
+            if !ready {
+                return Err("SESSION_INPUT_UNAVAILABLE".into());
+            }
+            if generation == 0 {
+                return Err("STALE_GENERATION".into());
+            }
+        }
+        if self.machine_input_generation(id) != generation {
+            return Err("STALE_GENERATION".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn subscribe_machine_input_recovery(&self, id: &str) -> Option<tokio::sync::watch::Receiver<crate::terminal::paired_runtime::PairedRecoveryOutcome>> {
+        self.terminal_service.paired().subscribe_recovery_outcome(id)
+    }
+
+    pub(crate) async fn resize_machine_input(&self, id: &str, generation: u64, cols: u16, rows: u16) -> Result<(), String> {
+        self.validate_machine_input_generation(id, generation)?;
+        self.terminal_service.resize_operation(id, generation, cols, rows)
+            .map_err(|error| error.to_string())?.await.map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn interrupt_machine_input(&self, id: &str, generation: u64) -> Result<(), String> {
+        self.validate_machine_input_generation(id, generation)?;
+        if super::super::terminal::paired_runtime::Runtime::owns(id) {
+            return self.terminal_service.paired().interrupt(id, generation)
+                .map_err(|error| error.to_string())?.await.map_err(|error| error.to_string());
+        }
+        if self.terminal_service.remote().contains(id) {
+            // The remote PTY owns ISIG; never try to signal a nonexistent local PTY.
+            return self.write_machine_input(id, generation, b"\x03").await;
+        }
+        self.terminal_service.signal(id, crate::terminal::TerminalSignal::Interrupt)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Exit observation for the machine wire, resolved per session owner.
+    /// `None` means process state is unknown or the session is absent. SSH
+    /// disconnection and expiry do not independently prove remote process exit.
+    pub(crate) fn machine_exit_status(&self, id: &str) -> Option<crate::terminal::PtySessionState> {
+        if let Some(pty) = self.machine_pty(id) {
+            return Some(pty.state());
+        }
+        if let Some(outcome) = self.terminal_service.paired().recovery_outcome(id) {
+            // Only these two states prove a process fact; `blocked` and
+            // `owner_unavailable` leave it possibly alive behind lost authority.
+            return match outcome.state.as_str() {
+                "affirmative_exit" => {
+                    Some(crate::terminal::PtySessionState::Exited { code: outcome.exit_code })
+                }
+                "proxy_attached" => Some(crate::terminal::PtySessionState::Running),
+                _ => None,
+            };
+        }
+        let details = self.terminal_service.remote().settled_details(id)?;
+        match details.state {
+            crate::terminal::remote::RemoteConnectionState::Connected
+            | crate::terminal::remote::RemoteConnectionState::Reconnecting => {
+                Some(crate::terminal::PtySessionState::Running)
+            }
+            crate::terminal::remote::RemoteConnectionState::Disconnected
+            | crate::terminal::remote::RemoteConnectionState::Expired => None,
+        }
     }
 
     pub async fn wait_machine_lifecycle(&self, id: &str) -> Result<(), String> {
@@ -2009,11 +2251,18 @@ impl DaemonSessionService {
             if let Some(meta) = record.metadata {
                 self.session_metadata.write().insert(id.clone(), meta);
             }
+            let (restore_cols, restore_rows) = (record.descriptor.cols, record.descriptor.rows);
             if let Err(error) = self.terminal_service.remote().restore(record.descriptor) {
                 tracing::warn!(%id, %error, "Skipping failed remote session restore");
                 self.session_router.remove_workspace(&id);
                 self.session_metadata.write().remove(&id);
                 continue;
+            }
+            // Recorded only after a successful restore: a failed one leaves no session behind,
+            // and a geometry entry for it would leak and give a stale baseline if the id is
+            // ever reused.
+            if restore_cols > 0 && restore_rows > 0 {
+                self.record_desktop_geometry(&id, restore_cols, restore_rows);
             }
             self.watch_remote_session(&id)?;
             self.watch_agent_session(&id);
@@ -2488,6 +2737,10 @@ impl DaemonSessionService {
             .await
             .map_err(|error| SpawnError::Other(error.to_string()))?;
         let id = descriptor.backend_session_id.clone();
+        // The spawn size is the desktop baseline until a desktop resize replaces it. Without
+        // it a phone resize has nothing to restore to when the desktop never resized, and
+        // teardown silently leaves the pane at the phone's geometry.
+        self.record_desktop_geometry(&id, descriptor.cols, descriptor.rows);
         self.session_metadata.write().insert(
             id.clone(),
             StoredSessionMeta {
@@ -3336,6 +3589,13 @@ impl DaemonSessionService {
                 let handover_manager = handover_manager.clone();
                 let terminal_service = Arc::clone(&terminal_service);
                 let exited_pty = terminal_service.get_session(&session_id);
+                desktop_geometries.lock().insert(
+                    session_id.clone(),
+                    exited_pty
+                        .as_ref()
+                        .map(|pty| pty.get_size())
+                        .unwrap_or((cols, rows)),
+                );
                 let lifecycle_workspaces = workspace_service.clone();
                 let durable_exit = durable.clone();
                 let metadata_target = durable.as_ref().map(|record| record.session.target.clone());
@@ -3546,7 +3806,7 @@ impl DaemonSessionService {
         spawn_result
     }
 
-    pub(super) async fn validate_session_ssh_target(
+    pub(crate) async fn validate_session_ssh_target(
         &self,
         session_id: &str,
     ) -> Result<(), crate::ipc::IpcError> {
@@ -3662,7 +3922,8 @@ impl DaemonSessionService {
             .session_metadata
             .read()
             .keys()
-            .filter(|session_id| !self.session_is_live(session_id))
+            .filter(|session_id| !self.session_is_live(session_id)
+                && self.terminal_service.paired().recovery_outcome(session_id).is_none())
             .cloned()
             .collect();
         for session_id in dead_sessions {
@@ -3675,6 +3936,22 @@ impl DaemonSessionService {
         self.provider_session_claims
             .lock()
             .retain(|_, session_id| self.session_is_live(session_id));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retain_paired_metadata_for_test(&self, source: &str, id: &str) {
+        let mut metadata = self.session_metadata.write();
+        let mut meta = metadata.get(source).expect("source session metadata").clone();
+        meta.machine_session = None;
+        meta.provider_claim = None;
+        metadata.insert(id.into(), meta);
+        drop(metadata);
+        self.prune_dead_spawn_ownership(Instant::now());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prune_paired_metadata_for_test(&self) {
+        self.prune_dead_spawn_ownership(Instant::now());
     }
 
     #[cfg(all(test, unix))]
@@ -3959,6 +4236,40 @@ impl DaemonSessionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn paired_metadata_retention_ends_on_real_close_and_never_retains_an_unbacked_id() {
+        use futures_util::FutureExt;
+        use crate::remote::server::machine_input_fixture::Fixture;
+        let fixture = Fixture::new().await;
+        let result = std::panic::AssertUnwindSafe(async {
+            let source = fixture.create().await;
+            let service = fixture.owner.session_service();
+            let terminal = fixture.owner.terminal_service();
+            let mut proxy = Proxy::new(Descriptor {
+                host_id: "https://metadata.invalid".into(), generation: Epoch(1),
+                target: RemoteTerminalTarget {
+                    machine_id: "metadata".into(), daemon_epoch: Epoch(1),
+                    session_id: uuid::Uuid::new_v4().to_string(),
+                }, after_sequence: None,
+            }, terminal.output_hub().clone()).unwrap();
+            proxy.recovery_failed(&crate::paired_host::client::ClientError::local("PERMISSION_DENIED"));
+            let id = terminal.paired().install(proxy).unwrap();
+            let source_id = source["target"]["sessionId"].as_str().unwrap();
+            service.retain_paired_metadata_for_test(source_id, &id);
+            service.record_desktop_geometry(&id, 80, 24);
+            assert!(service.session_metadata.read().contains_key(&id));
+            let unbacked = "daemon-session:unbacked";
+            service.retain_paired_metadata_for_test(source_id, unbacked);
+            assert!(!service.session_metadata.read().contains_key(unbacked));
+            service.handle_close(&id).await.unwrap();
+            assert!(terminal.paired().recovery_outcome(&id).is_none());
+            assert!(!service.session_metadata.read().contains_key(&id));
+            assert!(service.desktop_geometry(&id).is_none());
+        }).catch_unwind().await;
+        fixture.cleanup().await;
+        if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    }
 
     #[test]
     fn spawn_failures_are_classified_not_all_invalid() {

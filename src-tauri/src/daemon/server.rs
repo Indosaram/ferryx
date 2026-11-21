@@ -4234,6 +4234,8 @@ impl DaemonServer {
             .unwrap_or(1);
         let session_service = Arc::new(DaemonSessionService {
             epoch,
+            machine_identity_dir: auth_path.as_deref().and_then(std::path::Path::parent)
+                .map(std::path::Path::to_path_buf).or_else(crate::remote::auth::canonical_remote_dir),
             workspace_service,
             terminal_service: Arc::clone(&terminal_service),
             session_router: Arc::clone(&session_router),
@@ -15000,6 +15002,69 @@ mod instance_lock_deadline_tests {
         );
         // Lock must have been dropped, so an immediate unarmed call succeeds.
         assert!(lock_file_with_optional_wait(&path, None).is_ok());
+    }
+
+    #[tokio::test]
+    async fn restored_remote_descriptor_is_the_desktop_baseline_after_restart() {
+        let server = Arc::new(DaemonServer::new());
+        let repo = tempfile::tempdir().unwrap();
+        assert_eq!(server.session_service.desktop_geometry("restored-baseline-session"), None);
+        let descriptor = serde_json::json!({
+            "backendSessionId": "restored-baseline-session",
+            "target": {"hostId":"restored-host","ownerId":"owner","epoch":"1","backendSessionId":"restored-target"},
+            "config": {"host":{"id":"restored-host","label":"host","hostname":"127.0.0.1","port":1,"source":"manual","authMethod":"agent"},"environment":{"platform":"posix","executor":"sh","version":"test","home":"/tmp","temp":"/tmp","git":true},"helper":{"executable":"/helper","root":"/root"},"projectId":"default","projectPath":"/project","worktree":null,"agentIdentity":null},
+            "clientRequestId": "req-restored-baseline",
+            "remoteCursor": "1",
+            "cols": 132,
+            "rows": 43
+        });
+        let path = repo.path().join("remote_sessions.json");
+        let mut persisted = crate::session::PersistedWorkspaceSession { version: 3, ..Default::default() };
+        persisted.extra.insert("remoteSessions".into(), serde_json::json!([{"descriptor": descriptor, "metadata": null}]));
+        crate::session::save_session_to_path(&path, &persisted).unwrap();
+
+        server
+            .session_service
+            .restore_remote_sessions_at(path)
+            .await
+            .unwrap();
+        assert!(
+            server.terminal_service.remote().contains("restored-baseline-session"),
+            "the persisted descriptor must be restored"
+        );
+        assert_eq!(
+            server.session_service.desktop_geometry("restored-baseline-session"),
+            Some((132, 43)),
+            "a restart must adopt the persisted descriptor as the desktop baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn adopted_session_without_desktop_geometry_projects_the_hub_baseline_not_zero() {
+        let server = Arc::new(DaemonServer::new());
+        let session_id = "adopted-baseline-projection";
+        let _rx = server
+            .terminal_service
+            .output_hub()
+            .register_session(session_id);
+        server
+            .terminal_service
+            .output_hub()
+            .record_initial_size(session_id, 94, 31);
+
+        assert_eq!(
+            server.session_service.desktop_geometry(session_id),
+            None,
+            "precondition: adoption records no desktop geometry"
+        );
+
+        assert_eq!(
+            server
+                .session_service
+                .projection_geometry(session_id, (0, 0)),
+            (94, 31),
+            "an adopted session must not advertise the 0x0 spawn fingerprint"
+        );
     }
 
     #[tokio::test]

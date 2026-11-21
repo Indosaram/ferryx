@@ -1880,7 +1880,19 @@ describe("RemoteApp - Account Session Phone Flow", () => {
       publicKey: "phone-initiator-pub-key-base64",
       privateKey: "phone-initiator-priv-key-base64",
     });
-    const storedSessionIds = () => Object.keys(localStorage).map((key) => localStorage.getItem(key));
+    // Account cache entries carry an envelope ({"accountCacheIntent":1,"id":"…","value":"…"}),
+    // so the stored session under test is the unwrapped payload rather than the raw JSON text.
+    const storedSessionIds = () => Object.keys(localStorage).map((key) => {
+      const raw = localStorage.getItem(key);
+      if (raw === null) return null;
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed?.accountCacheIntent === 1 && typeof parsed.value === "string") return parsed.value;
+      } catch {
+        /* not an envelope */
+      }
+      return raw;
+    });
     const pickMain = async () => {
       const picker = await openWorkspacePicker();
       return await waitFor(() => {
@@ -1999,7 +2011,19 @@ describe("RemoteApp - Account Session Phone Flow", () => {
     });
     const preferredSessionIds = () => Object.keys(localStorage)
       .filter((key) => key.includes("preferred_session"))
-      .map((key) => localStorage.getItem(key));
+      // Preferred sessions are stored inside the account cache envelope
+      // ({"accountCacheIntent":1,"id":"…","value":"…"}), so the asserted value is the payload.
+      .map((key) => {
+        const raw = localStorage.getItem(key);
+        if (raw === null) return null;
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed?.accountCacheIntent === 1 && typeof parsed.value === "string") return parsed.value;
+        } catch {
+          /* not an envelope */
+        }
+        return raw;
+      });
     const terminalPathsFor = (sessionId: string) => openedPaths.filter((path) => path.startsWith(`/api/v1/terminal/${sessionId}`));
     const eventsSocket = () => {
       const sockets = MockTestWebSocket.instances.filter((socket) => socket.url.startsWith("/api/v1/events"));

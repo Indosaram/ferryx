@@ -9,6 +9,12 @@ mod sockets;
 #[path = "resize_security_tests.rs"]
 mod resize;
 
+#[path = "ssh_exposure_security_tests.rs"]
+mod ssh_exposure;
+
+#[path = "continuity_security_tests.rs"]
+mod continuity;
+
 struct SecurityServer {
     addr: std::net::SocketAddr,
     tasks: tokio::task::JoinSet<()>,

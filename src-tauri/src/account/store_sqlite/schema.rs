@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use rusqlite::Connection;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 /// Schema version written by the original table set, before the onboarding migration.
 const BASE_SCHEMA_VERSION: u32 = 1;
@@ -14,6 +14,8 @@ const ONBOARDING_SCHEMA_VERSION: u32 = 2;
 
 /// Schema version written by the supervisor lease migration.
 const SUPERVISOR_LEASE_SCHEMA_VERSION: u32 = 3;
+
+const CONTINUITY_SCHEMA_VERSION: u32 = 4;
 
 /// Dedicated lock file that serializes database initialization inside an account dir.
 pub const INIT_LOCK_FILENAME: &str = "account-store.init.lock";
@@ -92,8 +94,8 @@ pub fn configure_connection(conn: &Connection) -> Result<(), String> {
 }
 
 /// Creates or upgrades the schema. `read_only` is true on a warm standby (`standby.readonly`):
-/// a replica restored from the primary must not be rewritten by this process, so the v3 step is
-/// skipped there and lease readers report the missing tables as `LEASE_UNSUPPORTED`.
+/// a replica restored from the primary must not be rewritten by this process, so v3 and v4 are
+/// skipped there. Lease readers report `LEASE_UNSUPPORTED`; continuity readers return no pointer.
 pub fn init_schema(conn: &mut Connection, read_only: bool) -> Result<(), String> {
     let user_version: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -264,6 +266,9 @@ pub fn init_schema(conn: &mut Connection, read_only: bool) -> Result<(), String>
     if user_version < SUPERVISOR_LEASE_SCHEMA_VERSION && !read_only {
         migrate_to_v3(conn)?;
     }
+    if user_version < CONTINUITY_SCHEMA_VERSION && !read_only {
+        migrate_to_v4(conn)?;
+    }
 
     Ok(())
 }
@@ -362,6 +367,33 @@ fn migrate_to_v3(conn: &mut Connection) -> Result<(), String> {
         .map_err(|error| format!("Failed to commit v3 supervisor lease migration: {error}"))
 }
 
+/// Target columns are nullable so clearing preserves the revision high-water mark.
+fn migrate_to_v4(conn: &mut Connection) -> Result<(), String> {
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("Failed to begin v4 migration transaction: {error}"))?;
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS continuity_pointers (
+            user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+            machine_id TEXT,
+            workspace_id TEXT,
+            worktree_slug TEXT,
+            session_id TEXT,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            updated_at INTEGER NOT NULL,
+            CHECK ((machine_id IS NULL AND workspace_id IS NULL AND worktree_slug IS NULL AND session_id IS NULL)
+                OR (machine_id IS NOT NULL AND workspace_id IS NOT NULL AND session_id IS NOT NULL))
+        );
+        "#,
+    )
+    .map_err(|error| format!("Failed to apply v4 continuity migration: {error}"))?;
+    tx.pragma_update(None, "user_version", CONTINUITY_SCHEMA_VERSION)
+        .map_err(|error| format!("Failed to set user_version to {CONTINUITY_SCHEMA_VERSION}: {error}"))?;
+    tx.commit()
+        .map_err(|error| format!("Failed to commit v4 continuity migration: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +409,52 @@ mod tests {
 
     /// Bound for every wait in these tests: event waits only, never sleeps or polling.
     const WAIT_LIMIT: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn continuity_migration_from_fresh_v1_v2_and_v3_preserves_users() {
+        for version in 0..=3 {
+            let mut conn = Connection::open_in_memory().unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            if version > 0 {
+                conn.execute_batch(
+                    "CREATE TABLE users (user_id TEXT PRIMARY KEY, email TEXT NOT NULL, created_at INTEGER NOT NULL);
+                     CREATE TABLE enrollment_codes (code_hash TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        account_origin TEXT NOT NULL, expires_at INTEGER NOT NULL);
+                     INSERT INTO users VALUES ('u', 'u@test.local', 1);
+                     PRAGMA user_version = 1;",
+                ).unwrap();
+                if version >= 2 {
+                    migrate_to_v2(&mut conn).unwrap();
+                }
+                if version >= 3 {
+                    migrate_to_v3(&mut conn).unwrap();
+                }
+            }
+            init_schema(&mut conn, false).unwrap();
+            init_schema(&mut conn, false).unwrap();
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0)).unwrap(), 4);
+            assert_eq!(conn.query_row("SELECT count(*) FROM continuity_pointers", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+            let expected_users = if version == 0 { 0 } else { 1 };
+            assert_eq!(conn.query_row("SELECT count(*) FROM users", [], |row| row.get::<_, i64>(0)).unwrap(), expected_users);
+        }
+    }
+
+    #[test]
+    fn continuity_migration_is_skipped_on_v2_and_v3_standby() {
+        for version in [2, 3] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            init_schema(&mut conn, true).unwrap();
+            if version == 3 {
+                migrate_to_v3(&mut conn).unwrap();
+            }
+            init_schema(&mut conn, true).unwrap();
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0)).unwrap(), version);
+            assert!(!super::super::codec::table_exists(&conn, "continuity_pointers").unwrap());
+            init_schema(&mut conn, false).unwrap();
+            assert!(super::super::codec::table_exists(&conn, "continuity_pointers").unwrap());
+        }
+    }
 
     fn run_probe(lock_path: &Path, want: &str) -> String {
         let exe = std::env::current_exe().expect("test binary path");

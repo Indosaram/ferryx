@@ -87,7 +87,14 @@ async fn desktop_gui_session_inventory_and_attach_validation() {
     assert_eq!(found.workspace_id, request.workspace_id);
     assert!(found.running);
     assert_eq!(found.target.daemon_epoch, epoch);
-    assert_eq!(found.target.machine_id, crate::remote::auth::load_or_generate_machine_identity(&crate::remote::auth::canonical_identity_dir().unwrap()).unwrap().machine_id);
+    // The HTTP gateway and the session inventory must agree on the fixture's identity,
+    // even when the ambient user data directory belongs to a different machine.
+    let identity_dir = root.path().to_path_buf();
+    let expected_machine = crate::ipc::run_blocking(move || {
+        crate::remote::auth::load_or_generate_machine_identity(&identity_dir)
+            .map(|identity| identity.machine_id).map_err(crate::ipc::IpcError::internal)
+    }).await.unwrap();
+    assert_eq!(found.target.machine_id, expected_machine);
     assert_eq!(found.cwd, ".");
 
     // 2. validate_machine_target succeeds for exact target
