@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { makeRunId, tauriQaConfig, isolationLayout, isolationEnv, assertIsolatedEnv, forbiddenRoots, assertQaExecutable, qaSupervisorName, GuardError } from './lib/guards.mjs';
 import { newSummary, selectScenarios, settle, block, applyQ00Gate, computeExitCode, validateSummary, scenarioById } from './lib/summary.mjs';
 import { hostFor, buildPlan, assertQaBuild, worktreePaths } from './lib/hosts.mjs';
-import { artifactIdentity, assertIdleArtifactRun, claimFreshDirectories, requireNativeArtifactHost, separateArtifactPaths, validateArtifactOptions } from './lib/artifact-mode.mjs';
+import { artifactIdentity, assertIdleArtifactRun, claimFreshDirectories, requireNativeArtifactHost, resolveProductRoot, separateArtifactPaths, validateArtifactOptions } from './lib/artifact-mode.mjs';
 import { sealArtifactSet, stageArtifactSet } from './lib/artifact-set.mjs';
 import { stageLinuxQaLibraries } from './lib/linux-artifact-runtime.mjs';
 import { probeHooks, missingHooksFor, QA_FAULT_ENV, QA_FAULTS } from './lib/hooks.mjs';
@@ -50,6 +50,8 @@ import * as g5 from './scenarios/q14.mjs';
 import { recoverOwnerAfterException, invalidateOwnerState } from './scenarios/common.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// The checkout this code lives in. A driver checkout may instead point at a separate product
+// checkout whose sealed artifacts it consumes (FERRYX_QA_REUSE_PRODUCT_ROOT, see resolveProductRoot).
 const REPO = path.resolve(HERE, '../../..');
 /**
  * Where evidence lands. Kept separate from HOSTS.mac so the mac lane can target a remote Mac.
@@ -583,6 +585,12 @@ export async function teardownRun({ summary, agent, jobs, host, layout, runDirs,
     summary.teardown.killed = t.killed.map((e) => ({ pid: e.pid, role: e.role }));
     summary.teardown.refused = t.refused;
     summary.teardown.gone = (t.gone ?? []).map((e) => ({ pid: e.pid, role: e.role }));
+    // macOS: a refused kill leaves a process the run may not signal. Record what is still there and
+    // which images it mapped, so the refusal is diagnosable without re-running the scenario.
+    if (host.platform === 'mac') for (const entry of t.refused) {
+      entry.observedAfterRefusal = await agent.call('probe', { pid: entry.pid });
+      entry.textMappings = await agent.call('exec', { command: '/usr/sbin/lsof', args: ['-nP', '-a', '-p', String(entry.pid), '-d', 'txt', '-Fn'], deadlineMs: 5000 });
+    }
   });
   if (locked.length) await step('copy-locked-logs', async () => { for (const name of locked) await copyLog(name); });
   // Windows: a GUI still alive during the first pass re-registers its missing generation task
@@ -724,7 +732,7 @@ async function buildVariants({ opts, host, agent, worktree, runId, runDir, local
   return { artifacts, keys };
 }
 
-async function buildArtifactSet({ opts, host, identity, directory, log }) {
+async function buildArtifactSet({ opts, host, identity, directory, log, repo }) {
   await claimFreshDirectories([directory]);
   const { runId } = identity;
   const localEvidence = path.join(directory, 'receipts');
@@ -738,7 +746,7 @@ async function buildArtifactSet({ opts, host, identity, directory, log }) {
   const cargoTarget = path.join(directory, 'build-target');
   try {
     await agent.call('writeFile', { file: path.join(directory, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId, host.platform)) });
-    const { artifacts } = await buildVariants({ opts, host: { ...host, cargoTarget }, agent, worktree: REPO, runId, runDir: directory, localEvidence, live: {}, summary, writeSummary });
+    const { artifacts } = await buildVariants({ opts, host: { ...host, cargoTarget }, agent, worktree: repo, runId, runDir: directory, localEvidence, live: {}, summary, writeSummary });
     if (artifacts.baseline) {
       const baseline = path.join(directory, 'artifacts', 'baseline');
       mkdirSync(baseline, { mode: 0o700 });
@@ -746,7 +754,7 @@ async function buildArtifactSet({ opts, host, identity, directory, log }) {
       await copyFile(artifacts.baseline.daemonExecutable, executable);
       if (host.platform === 'linux') await stageLinuxQaLibraries({ executable, worktree: opts.baselineWorktree, required: false });
     }
-    const after = await artifactIdentity({ ...opts, repo: REPO, runId });
+    const after = await artifactIdentity({ ...opts, repo, runId });
     if (JSON.stringify(after) !== JSON.stringify(identity)) throw new GuardError('QA_ARTIFACT_REVISION', 'source checkout changed during build');
     const sealed = await sealArtifactSet({ identity, directory });
     summary.manifestSha256 = sealed.sha256;
@@ -771,6 +779,7 @@ async function discardStagedRun(runDirs) {
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
+  const productRoot = resolveProductRoot({ defaultRoot: REPO, overrideRoot: process.env.FERRYX_QA_REUSE_PRODUCT_ROOT, opts });
   const host = hostFor(opts.platform);
   const runId = opts.runId ?? makeRunId();
   const log = (o) => console.log(JSON.stringify({ t: new Date().toISOString(), ...o }));
@@ -786,12 +795,12 @@ async function main() {
   let identity, artifactSource;
   if (opts.buildOnly || opts.reuseArtifacts) {
     requireNativeArtifactHost(host);
-    const protectedPaths = [REPO, opts.v1Worktree, opts.baselineWorktree, host.cargoTarget, `${host.cargoTarget}-baseline`, host.runRoot, host.storageRoot, path.join(os.homedir(), '.ferryx'),
-      ...forbiddenRoots({ platform: host.platform, home: os.homedir(), uid: process.getuid?.() ?? null, localAppData: process.env.LOCALAPPDATA })];
+    const protectedPaths = [...new Set([REPO, productRoot])].concat([opts.v1Worktree, opts.baselineWorktree, host.cargoTarget, `${host.cargoTarget}-baseline`, host.runRoot, host.storageRoot, path.join(os.homedir(), '.ferryx'),
+      ...forbiddenRoots({ platform: host.platform, home: os.homedir(), uid: process.getuid?.() ?? null, localAppData: process.env.LOCALAPPDATA })]);
     artifactSource = path.resolve(opts.buildOnly ?? opts.reuseArtifacts);
     separateArtifactPaths(artifactSource, protectedPaths, host.platform);
-    identity = await artifactIdentity({ ...opts, repo: REPO, runId });
-    if (opts.buildOnly) return buildArtifactSet({ opts, host, identity, directory: artifactSource, log });
+    identity = await artifactIdentity({ ...opts, repo: productRoot, runId });
+    if (opts.buildOnly) return buildArtifactSet({ opts, host, identity, directory: artifactSource, log, repo: productRoot });
     separateArtifactPaths(localEvidence, [artifactSource, ...protectedPaths], host.platform);
     if ((selected.includes('Q08b') && !identity.v1Head) || (selected.includes('Q13') && !identity.baselineHead)) {
       throw new GuardError('QA_ARTIFACT_OPTIONS', 'Q08b needs --v1-rev; Q13 needs --baseline-rev');
@@ -805,11 +814,11 @@ async function main() {
   const summaryPath = path.join(localEvidence, 'summary.json');
   const writeSummary = () => writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
 
-  summary.revisions.head = identity?.head ?? (await run('git', ['-C', REPO, 'rev-parse', 'HEAD'])).stdout.trim();
+  summary.revisions.head = identity?.head ?? (await run('git', ['-C', productRoot, 'rev-parse', 'HEAD'])).stdout.trim();
   summary.commit = summary.revisions.head;
-  summary.revisions.tree = identity?.tree ?? (await run('git', ['-C', REPO, 'rev-parse', 'HEAD^{tree}'])).stdout.trim();
-  summary.revisions.dirty = identity ? [] : (await run('git', ['-C', REPO, 'status', '--porcelain', '--untracked-files=no'])).stdout.trim().split('\n').filter(Boolean);
-  summary.hooks = probeHooks(REPO, host.platform);
+  summary.revisions.tree = identity?.tree ?? (await run('git', ['-C', productRoot, 'rev-parse', 'HEAD^{tree}'])).stdout.trim();
+  summary.revisions.dirty = identity ? [] : (await run('git', ['-C', productRoot, 'status', '--porcelain', '--untracked-files=no'])).stdout.trim().split('\n').filter(Boolean);
+  summary.hooks = probeHooks(productRoot, host.platform);
   writeSummary();
 
   if (host.platform === 'mac') {
@@ -916,7 +925,7 @@ async function main() {
   const work = async () => {
     for (const dir of Object.values(layout)) await agent.call('mkdir', { dir, mode: 0o700 });
     await agent.call('writeFile', { file: joinFor(host.platform, runDir, 'tauri.qa.json'), content: JSON.stringify(tauriQaConfig(runId, host.platform), null, 2) });
-    const worktree = host.transport.kind === 'local' ? REPO : worktreePaths(host, opts.worktreeSlug).worktree;
+    const worktree = host.transport.kind === 'local' ? productRoot : worktreePaths(host, opts.worktreeSlug).worktree;
     const remoteGit = async (dir) => ({ dir, head: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'rev-parse', 'HEAD'] })).stdout.trim(), dirty: (await agent.call('exec', { command: 'git', args: ['-C', dir, 'status', '--porcelain', '--untracked-files=no'] })).stdout.trim().split('\n').filter(Boolean) });
     summary.revisions.buildTree = await remoteGit(worktree);
     if (opts.v1Worktree) summary.revisions.handoverV1Rev = await remoteGit(opts.v1Worktree);

@@ -6,6 +6,19 @@ import { run } from './proc.mjs';
 const bad = (detail) => { throw new GuardError('QA_ARTIFACT_OPTIONS', detail); };
 const oid = /^[0-9a-f]{40}$/;
 
+/**
+ * Product checkout the artifacts were built from. A driver checkout (CI) may point at the separate,
+ * unmodified product checkout, but only while consuming its verified artifacts from an absolute
+ * path: every downstream guard (artifactIdentity, clean tree, overlaps) then applies to that root.
+ */
+export function resolveProductRoot({ defaultRoot, overrideRoot, opts }) {
+  if (!overrideRoot) return defaultRoot;
+  if (!opts?.reuseArtifacts || !path.isAbsolute(overrideRoot)) {
+    bad('FERRYX_QA_REUSE_PRODUCT_ROOT requires --reuse-artifacts and an absolute path');
+  }
+  return overrideRoot;
+}
+
 export function validateArtifactOptions(opts) {
   if (!opts.buildOnly && !opts.reuseArtifacts) {
     if (opts.manifestSha256 || opts.v1Rev || opts.baselineRev) bad('artifact pins require --reuse-artifacts');

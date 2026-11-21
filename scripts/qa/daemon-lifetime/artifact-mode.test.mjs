@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from './run.mjs';
-import { assertIdleArtifactRun, claimFreshDirectories, separateArtifactPaths } from './lib/artifact-mode.mjs';
+import { assertIdleArtifactRun, claimFreshDirectories, resolveProductRoot, separateArtifactPaths } from './lib/artifact-mode.mjs';
 import { createJobs } from './lib/jobs.mjs';
 
 const runId = '20261119t010203z';
@@ -18,6 +18,18 @@ test('build, verify-only and desktop reuse are distinct CLI modes', () => {
   assert.equal(parseArgs([...reuse, '--self-check']).selfCheck, true);
   assert.deepEqual(parseArgs([...reuse, '--only', 'Q10,Q11']).only, ['Q10', 'Q11']);
   assert.equal(parseArgs(['--platform', 'linux', '--only', 'Q01']).reuseArtifacts, null);
+});
+
+test('a reuse consumer may name a separate product checkout, but only with an absolute path in --reuse-artifacts mode', () => {
+  const defaultRoot = '/driver/checkout';
+  const overrideRoot = '/product/checkout';
+  const reuseOpts = parseArgs([...reuse, '--only', 'Q10']);
+  for (const empty of [undefined, '', null]) assert.equal(resolveProductRoot({ defaultRoot, overrideRoot: empty, opts: {} }), defaultRoot);
+  assert.equal(resolveProductRoot({ defaultRoot, overrideRoot, opts: reuseOpts }), overrideRoot);
+  for (const opts of [parseArgs(['--platform', 'linux', '--only', 'Q01']), parseArgs(['--platform', 'linux', '--build-only', '/set'])]) {
+    assert.throws(() => resolveProductRoot({ defaultRoot, overrideRoot, opts }), { code: 'QA_ARTIFACT_OPTIONS' });
+  }
+  assert.throws(() => resolveProductRoot({ defaultRoot, overrideRoot: 'product/checkout', opts: reuseOpts }), { code: 'QA_ARTIFACT_OPTIONS' });
 });
 
 test('ambiguous modes and incomplete or duplicate pins are refused before building', () => {
